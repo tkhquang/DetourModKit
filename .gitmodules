@@ -1,0 +1,6 @@
+[submodule "external/safetyhook"]
+	path = external/safetyhook
+	url = https://github.com/cursey/safetyhook.git
+[submodule "external/simpleini"]
+	path = external/simpleini
+	url = https://github.com/brofield/simpleini.git
