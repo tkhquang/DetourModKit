@@ -1,5 +1,6 @@
 
-#include "hook_manager.hpp"
+#include "DetourModKit/hook_manager.hpp"
+
 #include <sstream>
 #include <algorithm>
 #include <cstddef>

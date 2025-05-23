@@ -7,9 +7,10 @@
  * The cache mechanism is internal to this translation unit.
  */
 
-#include "memory_utils.hpp"
-#include "string_utils.hpp"
-#include "logger.hpp"
+#include "DetourModKit/memory_utils.hpp"
+#include "DetourModKit/string_utils.hpp"
+#include "DetourModKit/logger.hpp"
+
 #include <windows.h>
 #include <vector>
 #include <mutex>

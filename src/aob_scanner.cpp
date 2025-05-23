@@ -3,9 +3,9 @@
  * @brief Implementation of Array-of-Bytes (AOB) parsing and scanning.
  */
 
-#include "aob_scanner.hpp"
-#include "logger.hpp"
-#include "string_utils.hpp"
+#include "DetourModKit/aob_scanner.hpp"
+#include "DetourModKit/logger.hpp"
+#include "DetourModKit/string_utils.hpp"
 
 #include <vector>
 #include <string>

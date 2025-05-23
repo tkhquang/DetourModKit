@@ -1,0 +1,259 @@
+name: DetourModKit - Build and Release
+
+permissions:
+  contents: write
+  actions: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., 1.0.0, 0.2.1-beta)"
+        required: true
+        type: string
+      release_title:
+        description: "Title for the release (e.g., 'Feature Update X')"
+        required: false
+        type: string
+      changelog:
+        description: "Changelog for this release (Markdown format)"
+        required: false
+        type: string
+        default: "- Initial release or bug fixes."
+      prerelease:
+        description: "Mark as a pre-release?"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build-mingw:
+    name: Build for MinGW (g++)
+    runs-on: windows-latest
+    outputs:
+      artifact_name: ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }}
+      artifact_zip_filename: ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Cache MinGW
+        id: cache-mingw
+        uses: actions/cache@v4
+        with:
+          path: C:\ProgramData\chocolatey\lib\mingw
+          key: ${{ runner.os }}-mingw-13.2.0-v2
+
+      - name: Install MinGW (if not cached)
+        if: steps.cache-mingw.outputs.cache-hit != 'true'
+        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        shell: powershell
+
+      - name: Add MinGW to PATH
+        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Install CMake (using Chocolatey)
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
+        shell: powershell
+
+      - name: Verify Tools (MinGW context)
+        run: |
+          echo "--- Verifying g++ (MinGW) ---" && g++ --version
+          echo "--- Verifying make (MinGW) ---" && mingw32-make --version || make --version
+          echo "--- Verifying cmake (MinGW) ---" && cmake --version
+        shell: bash
+
+      - name: Configure DetourModKit with CMake (MinGW)
+        run: |
+          INSTALL_DIR_MINGW_ABS="${{ github.workspace }}/install_package_mingw"
+          echo "Target Install Directory for MinGW: $INSTALL_DIR_MINGW_ABS"
+          cmake -S . -B build_mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR_MINGW_ABS"
+        shell: bash
+
+      - name: Build DetourModKit with CMake (MinGW)
+        run: cmake --build build_mingw --config Release --parallel $(nproc || echo 2)
+        shell: bash
+
+      - name: Install DetourModKit with CMake (MinGW)
+        run: cmake --install build_mingw --config Release
+        shell: bash
+
+      - name: Verify Install Directory (MinGW)
+        run: |
+          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_mingw"
+          if (-not (Test-Path $installDir -PathType Container)) {
+            Write-Error "Install directory '$installDir' does not exist after cmake --install!"
+            exit 1
+          }
+          Write-Output "Contents of '${installDir}':" # Corrected PowerShell variable usage
+          Get-ChildItem -Path $installDir -Recurse | ForEach-Object { Write-Output $_.FullName }
+          if (-not (Get-ChildItem -Path $installDir)) {
+            Write-Warning "Install directory '${installDir}' is empty!"
+          }
+        shell: pwsh
+
+      - name: Determine Artifact Name (MinGW)
+        id: determine-artifact-name-mingw
+        run: |
+          $version_tag_safe = "${{ github.event.inputs.version }}".Replace("+", "_plus_")
+          $artifact_name = "DetourModKit_MinGW_v${version_tag_safe}.zip"
+          echo "ARTIFACT_NAME=$artifact_name" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        shell: pwsh
+
+      - name: Create ZIP archive (MinGW)
+        run: |
+          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_mingw"
+          Compress-Archive -Path $sourcePath\* -DestinationPath ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }} -Force
+        shell: pwsh
+
+      - name: Upload MinGW Artifact for Release
+        uses: actions/upload-artifact@v4
+        with:
+          name: mingw-package
+          path: ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }}
+
+  build-msvc:
+    name: Build for MSVC (Visual Studio)
+    runs-on: windows-latest
+    outputs:
+      artifact_name: ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }}
+      artifact_zip_filename: ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Install CMake (using Chocolatey)
+        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
+        shell: powershell
+
+      - name: Add MSBuild to PATH (Setup MSVC Developer Environment)
+        uses: microsoft/setup-msbuild@v2
+        with:
+          vs-version: "17.0" # Visual Studio 2022
+
+      - name: Verify Tools (MSVC context)
+        run: |
+          echo "--- Verifying MSBuild (MSVC) ---"
+          msbuild -version
+          echo "--- Verifying cmake (MSVC) ---"
+          cmake --version
+        shell: cmd
+
+      - name: Configure DetourModKit with CMake (MSVC)
+        run: |
+          set "INSTALL_DIR_MSVC_ABS=%GITHUB_WORKSPACE%\install_package_msvc"
+          echo Target Install Directory for MSVC: %INSTALL_DIR_MSVC_ABS%
+          cmake -S . -B build_msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR_MSVC_ABS%"
+        shell: cmd
+
+      - name: Build DetourModKit with CMake (MSVC)
+        run: cmake --build build_msvc --config Release --parallel %NUMBER_OF_PROCESSORS%
+        shell: cmd
+
+      - name: Install DetourModKit with CMake (MSVC)
+        run: cmake --install build_msvc --config Release
+        shell: cmd
+
+      - name: Verify Install Directory (MSVC)
+        run: |
+          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_msvc"
+          if (-not (Test-Path $installDir -PathType Container)) {
+            Write-Error "Install directory '$installDir' does not exist after cmake --install!"
+            exit 1
+          }
+          Write-Output "Contents of '${installDir}':" # Corrected PowerShell variable usage
+          Get-ChildItem -Path $installDir -Recurse | ForEach-Object { Write-Output $_.FullName }
+          if (-not (Get-ChildItem -Path $installDir)) {
+            Write-Warning "Install directory '${installDir}' is empty!"
+          }
+        shell: pwsh
+
+      - name: Determine Artifact Name (MSVC)
+        id: determine-artifact-name-msvc
+        run: |
+          $version_tag_safe = "${{ github.event.inputs.version }}".Replace("+", "_plus_")
+          $artifact_name = "DetourModKit_MSVC_v${version_tag_safe}.zip"
+          echo "ARTIFACT_NAME=$artifact_name" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        shell: pwsh
+
+      - name: Create ZIP archive (MSVC)
+        run: |
+          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_msvc"
+          Compress-Archive -Path $sourcePath\* -DestinationPath ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }} -Force
+        shell: pwsh
+
+      - name: Upload MSVC Artifact for Release
+        uses: actions/upload-artifact@v4
+        with:
+          name: msvc-package
+          path: ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }}
+
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-mingw, build-msvc]
+
+    steps:
+      - name: Download MinGW artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mingw-package
+          path: mingw_package_dir
+
+      - name: Download MSVC artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: msvc-package
+          path: msvc_package_dir
+
+      - name: List downloaded artifacts for verification
+        run: |
+          echo "--- MinGW Package Contents ---"
+          ls -R mingw_package_dir
+          echo "--- MSVC Package Contents ---"
+          ls -R msvc_package_dir
+
+      - name: Prepare file list for release
+        id: file_list
+        run: |
+          MINGW_ZIP_NAME="${{ needs.build-mingw.outputs.artifact_zip_filename }}"
+          MSVC_ZIP_NAME="${{ needs.build-msvc.outputs.artifact_zip_filename }}"
+
+          FILES_STRING="mingw_package_dir/$MINGW_ZIP_NAME,msvc_package_dir/$MSVC_ZIP_NAME"
+
+          echo "Files to release: $FILES_STRING"
+          echo "FILES_TO_RELEASE=$FILES_STRING" >> $GITHUB_OUTPUT
+        shell: bash
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.file_list.outputs.FILES_TO_RELEASE }}
+          name: DetourModKit v${{ github.event.inputs.version }}
+          tag_name: v${{ github.event.inputs.version }}
+          body: |
+            **Release Title:** ${{ github.event.inputs.release_title }}
+            **Version:** ${{ github.event.inputs.version }}
+
+            **Changelog:**
+            ${{ github.event.inputs.changelog }}
+
+            **Artifacts:**
+            This release includes packages for different build environments. Both packages ensure library names are prefixed with `lib` for consistency (e.g., `libDetourModKit.a`, `libDetourModKit.lib`).
+
+            *   `${{ needs.build-mingw.outputs.artifact_name }}`: Built with MinGW (g++). Contains `libDetourModKit.a`, `libsafetyhook.a`, headers, CMake config files. (Zydis & Zycore are statically linked into libsafetyhook.a).
+            *   `${{ needs.build-msvc.outputs.artifact_name }}`: Built with MSVC (Visual Studio 2022). Contains `libDetourModKit.lib`, `libsafetyhook.lib` (or `safetyhook.lib` if SafetyHook doesn't get the prefix), headers, CMake config files. (Zydis & Zycore are statically linked into libsafetyhook.lib/safetyhook.lib).
+
+            These packages are ready to be used by other CMake projects via `find_package(DetourModKit)`.
+            See README for detailed usage instructions.
+          draft: false
+          prerelease: ${{ github.event.inputs.prerelease }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

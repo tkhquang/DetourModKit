@@ -3,7 +3,8 @@
  * @brief Implementation of the singleton Logger class.
  */
 
-#include "logger.hpp"
+#include "DetourModKit/logger.hpp"
+
 #include <windows.h>
 #include <filesystem>
 #include <chrono>

@@ -8,10 +8,10 @@
  * assignment.
  */
 
-#include "config.hpp"
-#include "logger.hpp"
-#include "filesystem_utils.hpp"
-#include "string_utils.hpp"
+#include "DetourModKit/config.hpp"
+#include "DetourModKit/logger.hpp"
+#include "DetourModKit/filesystem_utils.hpp"
+#include "DetourModKit/string_utils.hpp"
 #include "SimpleIni.h"
 
 #include <windows.h>
@@ -84,7 +84,7 @@ namespace
 
     // For int
     template <>
-    void ConfigItem<int>::load(CSimpleIniA &ini, Logger &logger)
+    void ConfigItem<int>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         target_variable = ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value);
     }
@@ -96,7 +96,7 @@ namespace
 
     // For float
     template <>
-    void ConfigItem<float>::load(CSimpleIniA &ini, Logger &logger)
+    void ConfigItem<float>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         target_variable = static_cast<float>(ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
     }
@@ -108,7 +108,7 @@ namespace
 
     // For bool
     template <>
-    void ConfigItem<bool>::load(CSimpleIniA &ini, Logger &logger)
+    void ConfigItem<bool>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         target_variable = ini.GetBoolValue(section.c_str(), ini_key.c_str(), default_value);
     }
@@ -120,7 +120,7 @@ namespace
 
     // For std::string
     template <>
-    void ConfigItem<std::string>::load(CSimpleIniA &ini, Logger &logger)
+    void ConfigItem<std::string>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         target_variable = ini.GetValue(section.c_str(), ini_key.c_str(), default_value.c_str());
     }

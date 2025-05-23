@@ -1,26 +1,26 @@
-# DetourModKit (WIP)
+# DetourModKit
 
 DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, and configuration management. It is built with MinGW in mind but aims for general C++ compatibility.
 
 ## Features
 
-*   **AOB Scanner:** Find array-of-bytes (signatures) in memory.
-*   **Hook Manager:** A wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks.
-*   **Configuration Loader:** Simple INI file parsing using X-Macros for easy definition of configuration variables (powered by [SimpleIni](https://github.com/brofield/simpleini)).
-*   **Logger:** A basic singleton logger for outputting messages to a file and/or console.
-*   **Memory Utilities:** Functions for checking memory readability/writability and writing bytes, with an optional memory region cache.
-*   **String Utilities:** Helpers for formatting addresses, hex values, etc.
-*   **Filesystem Utilities:** Basic filesystem operations like getting the module's runtime directory.
-*   **Math Utilities:** Simple Vector3 and Quaternion structures (leveraging DirectXMath).
+*   **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support.
+*   **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
+*   **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
+*   **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes.
+*   **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
+*   **String Utilities:** Helper functions for formatting addresses, hexadecimal values, virtual key codes, etc.
+*   **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
+*   **Math Utilities:** Provides basic mathematical utility functions.
 
 ## Prerequisites
 
-*   A C++ compiler supporting C++23 (e.g., MinGW g++).
-*   `make` (e.g., mingw32-make).
-*   CMake (required to build the SafetyHook dependency).
+*   A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer, MSVC latest). The Makefile defaults to g++.
+*   `make` (e.g., `mingw32-make` for MinGW environments).
+*   CMake (version 3.15 or newer recommended, required to build the SafetyHook dependency).
 *   Git (for cloning and managing submodules).
 
-## Building DetourModKit
+## Building DetourModKit (Static Library)
 
 1.  **Clone the repository (with submodules):**
     ```bash
@@ -32,89 +32,148 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
     git submodule update --init --recursive
     ```
 
-2.  **Build the kit (creates `libDetourModKit.a` and installs headers):**
+2.  **Build the Kit & Install:**
+    The primary way to build DetourModKit is using the `install` target, which prepares it for consumption by other projects.
     ```bash
     make install
     ```
-    This will build the static library and place it along with public headers into the `build/install/` directory.
+    This command will:
+    *   Attempt to build the **SafetyHook** dependency (and its own dependencies like Zydis/Zycore) using CMake if its main library (`libsafetyhook.a`) is not found in `external/safetyhook/build/`. This typically creates Release builds of these libraries.
+    *   Compile DetourModKit source files from the `src/` directory.
+    *   Create the static library `libDetourModKit.a`.
+    *   Copy `libDetourModKit.a` and the dependency libraries (`libsafetyhook.a`, `libZydis.a`, `libZycore.a`) to `build/install/lib/`.
+    *   Copy public DetourModKit header files (from `include/DetourModKit/`) to `build/install/include/DetourModKit/`.
+
+    After `make install`, the `build/install/` directory will contain:
+    ```
+    build/install/
+    ├── include/
+    │   └── DetourModKit/
+    │       ├── aob_scanner.hpp
+    │       ├── config.hpp
+    │       ├── filesystem_utils.hpp
+    │       ├── hook_manager.hpp
+    │       ├── logger.hpp
+    │       ├── math_utils.hpp
+    │       ├── memory_utils.hpp
+    │       └── string_utils.hpp
+    └── lib/
+        ├── libDetourModKit.a
+        ├── libsafetyhook.a
+        ├── libZydis.a
+        └── libZycore.a
+    ```
+
+    *   **Note on SafetyHook Build:** The paths to SafetyHook's built libraries (`BUILT_SAFETYHOOK_LIB`, etc. in the Makefile) are based on a common CMake output structure. If SafetyHook (or its dependencies Zydis/Zycore) builds its libraries to different subdirectories within `external/safetyhook/build/`, you might need to adjust these paths in the Makefile.
 
 ## Using DetourModKit in Your Mod Project
 
-1.  **Include DetourModKit:**
-    *   Copy the `build/install/` directory (or its contents) from DetourModKit into your mod project (e.g., into an `external/DetourModKit_Installed/` directory).
-    *   Alternatively, if using DetourModKit as a submodule, you can point your build system to its `build/install/` path after building it.
+1.  **Integrate DetourModKit:**
+    *   After running `make install` in the DetourModKit project, copy the entire `build/install/` directory into your mod project (e.g., into an `external/DetourModKit_Installed/` subdirectory).
+    *   Alternatively, configure your mod's build system to find headers and libraries directly from DetourModKit's `build/install/` path.
 
-2.  **Configure Your Mod's Build System (Makefile/CMake):**
-    *   **Include Paths:** Add `path/to/your/DetourModKit_Installed/include` to your compiler's include paths.
-    *   **Link Libraries:** Link your mod against:
-        *   `path/to/your/DetourModKit_Installed/lib/libDetourModKit.a`
-        *   The SafetyHook, Zydis, and Zycore static libraries (these should ideally also be copied to `DetourModKit_Installed/lib/` by the kit's `make install` for convenience, or you'll need to locate them in DetourModKit's `external/safetyhook/build/` structure).
-        *   Necessary system libraries (e.g., `-lpsapi`, `-lkernel32`).
+2.  **Configure Your Mod's Build System (Example using g++):**
+    *   **Include Paths:** Add `-Ipath/to/your/DetourModKit_Installed/include` to your compiler flags.
+    *   **Library Paths:** Add `-Lpath/to/your/DetourModKit_Installed/lib` to your linker flags.
+    *   **Link Libraries:** Link your mod against the following (order can matter for static libs):
+        *   `-lDetourModKit`
+        *   `-lsafetyhook`
+        *   `-lZydis`
+        *   `-lZycore`
+        *   Necessary system libraries (e.g., on MinGW: `-lpsapi`, `-luser32`, `-lkernel32`, `-lshell32`, `-lole32`, `-lshlwapi`). `-static-libgcc -static-libstdc++` are also common if distributing standalone.
 
-3.  **Define Your Configuration (`config_entries.h`):**
-    *   Create a `config_entries.h` file in your mod's source directory. This file will define your mod-specific configuration variables using the macros provided by DetourModKit.
-    *   Example `config_entries.h`:
-        ```c++
-        // MyMod/src/config_entries.h
-        #ifndef MY_MOD_CONFIG_ENTRIES_H
-        #define MY_MOD_CONFIG_ENTRIES_H
-
-        //      SECTION         INI_KEY             VAR_NAME                DEFAULT_VALUE
-        CONFIG_BOOL("Main",     "EnableFeatureX",   enable_feature_x,       true)
-        CONFIG_INT("Settings",  "UpdateInterval",   update_interval_ms,     100)
-        CONFIG_STRING("General", "Greeting",        greeting_message,       "Hello from MyMod!")
-        CONFIG_KEY_LIST("Hotkeys","ToggleKey",      toggle_keys,            "0x70") // F1
-
-        // This indicates to the kit's config.cpp that log_level is a defined member.
-        // Make sure the actual std::string log_level; is also defined via CONFIG_STRING.
-        // This line could be replaced by more advanced C++ techniques (SFINAE, concepts) in the kit if desired.
-        #define CONFIG_HAS_LOG_LEVEL_MEMBER true
-        CONFIG_STRING("Debug",   "LogLevel",        log_level,              "INFO")
-
-
-        #endif // MY_MOD_CONFIG_ENTRIES_H
-        ```
-
-4.  **Using Kit Components:**
-    ```c++
-    #include <DetourModKit/logger.h>
-    #include <DetourModKit/config.h> // This will include your mod's config_entries.h
-    // ... other kit headers
-
-    // In your mod's main.cpp or dllmain.cpp
-    // Assuming 'Config' struct comes from DetourModKit/config.h
-    Config g_modConfig;
-
-    void InitializeMod() {
-        DetourModKit::Logger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S");
-        DetourModKit::Logger& logger = DetourModKit::Logger::getInstance();
-
-        // If DetourModKit's config.cpp is compiled by your mod:
-        g_modConfig = DetourModKit::loadConfig("MyMod.ini");
-        DetourModKit::logConfig(g_modConfig);
-
-        // If g_modConfig.log_level string exists (due to your config_entries.h):
-        // DetourModKit::LogLevel level = ... convert g_modConfig.log_level to enum ...;
-        // logger.setLogLevel(level);
-
-        logger.log(DetourModKit::LOG_INFO, "MyMod Initialized using DetourModKit!");
-        logger.log(DetourModKit::LOG_INFO, g_modConfig.greeting_message); // Accessing your specific config
-    }
+    Example linker command fragment for a g++ MinGW project:
+    ```bash
+    g++ your_mod_objects.o -o YourMod.asi -shared \
+        -Lpath/to/DetourModKit_Installed/lib \
+        -lDetourModKit -lsafetyhook -lZydis -lZycore \
+        -lpsapi -luser32 -lkernel32 -lshlwapi \
+        -static-libgcc -static-libstdc++
     ```
-    *Remember to compile `DetourModKit/src/config.cpp` as part of your mod's build process if using the X-Macro approach for configuration where `config.cpp` needs to see your mod's `config_entries.h`.*
+
+3.  **Using Kit Components (Conceptual Example):**
+
+    ```c++
+    // MyMod/src/main.cpp
+    #include <DetourModKit/logger.hpp>
+    #include <DetourModKit/config.hpp>
+    #include <DetourModKit/hook_manager.hpp>
+    #include <DetourModKit/aob_scanner.hpp>
+    #include <DetourModKit/memory_utils.hpp>
+    #include <DetourModKit/string_utils.hpp>
+
+    // Your mod's configuration structure
+    struct ModConfig {
+        bool feature_enabled = true;
+        float some_float_value = 1.23f;
+        std::string log_level_str = "INFO";
+        std::vector<int> hotkeys; // e.g. for VK_F1, VK_CONTROL
+    } g_my_config;
+
+    void InitializeMyMod() {
+        // 1. Configure logger (optional, call before first getInstance() for custom defaults)
+        Logger::configure("MyCoolMod", "MyCoolMod.log", "%Y-%m-%d %H:%M:%S.%f"); // Example with ms
+        Logger& logger = Logger::getInstance();
+
+        // 2. Register your mod's configuration variables
+        //    Provide: INI section, INI key, logging name, your variable, default value
+        DetourModKit::Config::registerBool("Main", "EnableCoolFeature", "Cool Feature Enabled", g_my_config.feature_enabled, true);
+        DetourModKit::Config::registerFloat("Values", "MyFloat", "My Float Value", g_my_config.some_float_value, 1.23f);
+        DetourModKit::Config::registerString("Debug", "LogLevel", "Log Level", g_my_config.log_level_str, "INFO");
+        DetourModKit::Config::registerKeyList("Hotkeys", "ToggleView", "Toggle View Hotkeys", g_my_config.hotkeys, "0x71,0x11"); // Default: F2 + Ctrl
+
+        // 3. Load config from INI file (e.g., MyCoolMod.ini)
+        DetourModKit::Config::load("MyCoolMod.ini"); // Assumes INI is next to the mod DLL
+
+        // 4. Apply loaded settings (e.g., log level)
+        logger.setLogLevel(Logger::stringToLogLevel(g_my_config.log_level_str));
+
+        // 5. Log loaded config for verification
+        logger.log(LOG_INFO, "MyCoolMod configuration loaded and applied.");
+        DetourModKit::Config::logAll(); // Logs all registered values
+
+        // Example usage:
+        if (g_my_config.feature_enabled) {
+            logger.log(LOG_INFO, "Cool feature is active! Float value: " + std::to_string(g_my_config.some_float_value));
+            logger.log(LOG_INFO, "Hotkeys to toggle view: " + format_vkcode_list(g_my_config.hotkeys));
+        }
+
+        // 6. Use other DetourModKit features...
+        // HookManager& hm = HookManager::getInstance();
+        // ...
+    }
+
+    // Optional shutdown logic
+    void ShutdownMyMod() {
+        Logger::getInstance().log(LOG_INFO, "MyCoolMod shutting down.");
+        HookManager::getInstance().remove_all_hooks();
+        DetourModKit::Config::clearRegisteredItems(); // Good practice if re-initialization is possible
+    }
+
+    // Example DllMain for an ASI mod
+    // #include <windows.h>
+    // BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    //     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+    //         DisableThreadLibraryCalls(hModule); // Optional: For ASI plugins to prevent DllMain calls on thread attach/detach
+    //         InitializeMyMod();
+    //     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+    //         ShutdownMyMod();
+    //     }
+    //     return TRUE;
+    // }
+    ```
 
 ## License
 
-DetourModKit is licensed under the **MIT License**. See `LICENSE` file for details.
+DetourModKit is licensed under the **MIT License**. See the `LICENSE` file in the repository for full details.
 
-This project utilizes several third-party libraries. Their respective licenses can be found in the `DetourModKit_Acknowledgements.txt`:
+This project incorporates components from other open-source projects. Please refer to the [DetourModKit_Acknowledgements.txt](/docs/DetourModKit_Acknowledgements.txt) file for a list of these components and their respective licenses:
 *   **SafetyHook:** Boost Software License 1.0
 *   **SimpleIni:** MIT License
-*   **DirectXMath:** MIT License
-*   **Zydis & Zycore (via SafetyHook):** MIT License
+*   **Zydis & Zycore (dependencies of SafetyHook):** MIT License
 
-Please ensure compliance with all included licenses when using DetourModKit.
+Users of DetourModKit are responsible for ensuring compliance with all included licenses.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit pull requests or open issues.
+Contributions to DetourModKit are welcome! If you have bug fixes, feature enhancements, or other improvements, please feel free to open an issue to discuss or submit a pull request.

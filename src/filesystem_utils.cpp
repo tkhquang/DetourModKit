@@ -6,8 +6,9 @@
  * of the currently executing module.
  */
 
-#include "filesystem_utils.hpp"
-#include "logger.hpp"
+#include "DetourModKit/filesystem_utils.hpp"
+#include "DetourModKit/logger.hpp"
+
 #include <windows.h>
 #include <filesystem>
 #include <stdexcept>
