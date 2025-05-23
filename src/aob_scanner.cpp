@@ -4,40 +4,41 @@
  */
 
 #include "aob_scanner.hpp"
-#include "logger.hpp"       // For logging parse errors and scan details
-#include "string_utils.hpp" // For trim() and format_address()
+#include "logger.hpp"
+#include "string_utils.hpp"
 
 #include <vector>
 #include <string>
-#include <sstream>   // For std::istringstream
-#include <iomanip>   // For std::setw, std::setfill
-#include <cctype>    // For std::isxdigit
-#include <stdexcept> // For std::stoul exceptions
-#include <limits>    // Required by some compilers for std::stoul
+#include <sstream>
+#include <iomanip>
+#include <cctype>
+#include <stdexcept>
+#include <limits>
+#include <cstddef>
 
 /**
- * @struct PatternByte
- * @brief Internal helper struct representing a parsed AOB element clearly.
+ * @struct ParsedPatternByte
+ * @brief Internal helper struct representing a parsed AOB element clearly for std::byte.
  * @details Used temporarily during parsing before converting to the final
- *          BYTE vector with 0xCC wildcards.
+ *          std::vector<std::byte> with std::byte{0xCC} wildcards.
  */
-struct PatternByte
+struct ParsedPatternByte
 {
-    BYTE value;       /**< Byte value (used if not a wildcard). */
+    std::byte value;  /**< Byte value (used if not a wildcard). */
     bool is_wildcard; /**< True if this element represents '??' or '?'. */
 };
 
 /**
- * @brief Internal parser: Converts AOB string to a structured vector.
+ * @brief Internal parser: Converts AOB string to a structured vector of ParsedPatternByte.
  * @details Parses the input string token by token (space-separated).
  *          Validates each token for format ('??', '?', or two hex digits).
  *          Uses the Logger for detailed debug/error messages.
  * @param aob_str Raw AOB string (e.g., "48 ?? 8B").
- * @return std::vector<PatternByte> Vector of parsed structs, or empty on error.
+ * @return std::vector<ParsedPatternByte> Vector of parsed structs, or empty on error.
  */
-static std::vector<PatternByte> parseAOBInternal(const std::string &aob_str)
+static std::vector<ParsedPatternByte> parseAOBInternal(const std::string &aob_str)
 {
-    std::vector<PatternByte> pattern_elements;
+    std::vector<ParsedPatternByte> pattern_elements;
     std::string trimmed_aob = trim(aob_str);
     std::istringstream iss(trimmed_aob);
     std::string token;
@@ -48,7 +49,7 @@ static std::vector<PatternByte> parseAOBInternal(const std::string &aob_str)
     {
         if (!aob_str.empty())
         {
-            logger.log(LOG_WARNING, "AOB Parser: Input empty after trim.");
+            logger.log(LOG_WARNING, "AOB Parser: Input string became empty after trimming.");
         }
         return pattern_elements;
     }
@@ -60,7 +61,7 @@ static std::vector<PatternByte> parseAOBInternal(const std::string &aob_str)
         token_idx++;
         if (token == "??" || token == "?")
         {
-            pattern_elements.push_back({0x00, true});
+            pattern_elements.push_back({std::byte{0x00}, true}); // Wildcard value can be anything, 0xCC is conventional for final vector
         }
         else if (token.length() == 2 && std::isxdigit(static_cast<unsigned char>(token[0])) && std::isxdigit(static_cast<unsigned char>(token[1])))
         {
@@ -69,30 +70,34 @@ static std::vector<PatternByte> parseAOBInternal(const std::string &aob_str)
                 unsigned long ulong_val = std::stoul(token, nullptr, 16);
                 if (ulong_val > 0xFF)
                 {
-                    throw std::out_of_range("Value exceeds BYTE range");
+                    throw std::out_of_range("Value parsed exceeds byte range (0xFF).");
                 }
-                pattern_elements.push_back({static_cast<BYTE>(ulong_val), false});
+                pattern_elements.push_back({static_cast<std::byte>(ulong_val), false});
             }
-            catch (const std::exception &e)
+            catch (const std::out_of_range &oor)
             {
-                logger.log(LOG_ERROR, "AOB Parser: Hex conversion error for '" + token + "' (Pos " + std::to_string(token_idx) + "): " + e.what());
-                return {}; // Return empty on error
+                logger.log(LOG_ERROR, "AOB Parser: Hex conversion out of range for '" + token + "' (Pos " + std::to_string(token_idx) + "): " + oor.what());
+                return {};
+            }
+            catch (const std::invalid_argument &ia)
+            {
+                logger.log(LOG_ERROR, "AOB Parser: Invalid argument for hex conversion '" + token + "' (Pos " + std::to_string(token_idx) + "): " + ia.what());
+                return {};
             }
         }
         else
         {
             std::ostringstream oss_err;
-            // *** CORRECTED LINE TO AVOID TRIGRAPH WARNING ***
             oss_err << "AOB Parser: Invalid token '" << token << "' at position " << token_idx
                     << ". Expected hex byte (e.g., FF), '?', or '" << '?' << "?'.";
             logger.log(LOG_ERROR, oss_err.str());
-            return {}; // Return empty on error
+            return {};
         }
     }
 
     if (pattern_elements.empty() && token_idx > 0)
     {
-        logger.log(LOG_ERROR, "AOB Parser: Processed tokens but found no valid elements.");
+        logger.log(LOG_ERROR, "AOB Parser: Processed tokens but resulting pattern is empty.");
     }
     else if (!pattern_elements.empty())
     {
@@ -102,25 +107,19 @@ static std::vector<PatternByte> parseAOBInternal(const std::string &aob_str)
     return pattern_elements;
 }
 
-/**
- * @brief Public interface to parse an AOB string into a byte vector suitable
- *        for the FindPattern function (using 0xCC for wildcards).
- * @param aob_str The AOB pattern string (e.g., "48 8B ?? C1").
- * @return std::vector<BYTE> Vector of bytes (0xCC represents wildcards).
- *         Returns an empty vector if parsing fails or input is empty.
- */
-std::vector<BYTE> parseAOB(const std::string &aob_str)
+std::vector<std::byte> parseAOB(const std::string &aob_str)
 {
     Logger &logger = Logger::getInstance();
+    const std::byte WILDCARD_BYTE_VALUE{0xCC}; // Define the wildcard representation
 
-    std::vector<PatternByte> internal_pattern = parseAOBInternal(aob_str);
-    std::vector<BYTE> byte_vector;
+    std::vector<ParsedPatternByte> internal_pattern = parseAOBInternal(aob_str);
+    std::vector<std::byte> byte_vector;
 
     if (internal_pattern.empty())
     {
         if (!trim(aob_str).empty())
         {
-            logger.log(LOG_ERROR, "AOB: Parsing resulted in empty pattern.");
+            logger.log(LOG_WARNING, "AOB: Parsing AOB string '" + aob_str + "' resulted in an empty pattern.");
         }
         return byte_vector;
     }
@@ -128,88 +127,86 @@ std::vector<BYTE> parseAOB(const std::string &aob_str)
     byte_vector.reserve(internal_pattern.size());
     for (const auto &element : internal_pattern)
     {
-        byte_vector.push_back(element.is_wildcard ? 0xCC : element.value);
+        byte_vector.push_back(element.is_wildcard ? WILDCARD_BYTE_VALUE : element.value);
     }
 
-    logger.log(LOG_DEBUG, "AOB: Converted pattern for scanning (0xCC = wildcard).");
+    logger.log(LOG_DEBUG, "AOB: Converted pattern for scanning (" +
+                              format_hex(static_cast<int>(WILDCARD_BYTE_VALUE)) +
+                              " = wildcard). Size: " + std::to_string(byte_vector.size()));
     return byte_vector;
 }
 
-/**
- * @brief Scans a memory region for a specific sequence of bytes, supporting
- *        wildcards represented by the byte 0xCC.
- * @param start_address Start address of the memory region.
- * @param region_size Size (in bytes) of the memory region.
- * @param pattern_with_placeholders The pattern vector (0xCC = wildcard).
- * @return Pointer (BYTE*) to the first byte of the found pattern occurrence,
- *         or nullptr if not found or if inputs are invalid.
- */
-BYTE *FindPattern(BYTE *start_address, size_t region_size,
-                  const std::vector<BYTE> &pattern_with_placeholders)
+std::byte *FindPattern(std::byte *start_address, size_t region_size,
+                       const std::vector<std::byte> &pattern_with_placeholders)
 {
     Logger &logger = Logger::getInstance();
     const size_t pattern_size = pattern_with_placeholders.size();
+    const std::byte WILDCARD_BYTE_VALUE{0xCC};
 
-    // Input Validation
     if (pattern_size == 0)
     {
-        logger.log(LOG_ERROR, "FindPattern: Empty pattern.");
+        logger.log(LOG_ERROR, "FindPattern: Pattern is empty. Cannot scan.");
         return nullptr;
     }
     if (!start_address)
     {
-        logger.log(LOG_ERROR, "FindPattern: Null start address.");
+        logger.log(LOG_ERROR, "FindPattern: Start address is null. Cannot scan.");
         return nullptr;
     }
     if (region_size < pattern_size)
     {
-        logger.log(LOG_WARNING, "FindPattern: Region smaller than pattern.");
+        logger.log(LOG_WARNING, "FindPattern: Search region (" + std::to_string(region_size) +
+                                    " bytes) is smaller than pattern (" + std::to_string(pattern_size) + " bytes).");
         return nullptr;
     }
 
     logger.log(LOG_DEBUG, "FindPattern: Scanning " + std::to_string(region_size) + " bytes from " +
-                              format_address(reinterpret_cast<uintptr_t>(start_address)) + " for " + std::to_string(pattern_size) + " byte pattern.");
+                              format_address(reinterpret_cast<uintptr_t>(start_address)) + " for a " + std::to_string(pattern_size) + " byte pattern.");
 
-    // Prepare Wildcard Mask
-    std::vector<bool> is_wildcard(pattern_size);
+    std::vector<bool> is_wildcard_mask(pattern_size);
     int wildcard_count = 0;
     for (size_t i = 0; i < pattern_size; ++i)
     {
-        if ((is_wildcard[i] = (pattern_with_placeholders[i] == 0xCC)))
+        if (pattern_with_placeholders[i] == WILDCARD_BYTE_VALUE)
         {
+            is_wildcard_mask[i] = true;
             wildcard_count++;
         }
-    }
-    if (wildcard_count > 0)
-    {
-        logger.log(LOG_DEBUG, "FindPattern: Pattern has " + std::to_string(wildcard_count) + " wildcards.");
+        else
+        {
+            is_wildcard_mask[i] = false;
+        }
     }
 
-    // Scanning Loop
-    BYTE *const scan_end_addr = start_address + (region_size - pattern_size);
-    for (BYTE *current_pos = start_address; current_pos <= scan_end_addr; ++current_pos)
+    if (wildcard_count > 0)
     {
-        bool match_found = true;
+        logger.log(LOG_DEBUG, "FindPattern: Pattern contains " + std::to_string(wildcard_count) + " wildcard(s).");
+    }
+
+    std::byte *const scan_boundary = start_address + (region_size - pattern_size);
+    for (std::byte *current_scan_ptr = start_address; current_scan_ptr <= scan_boundary; ++current_scan_ptr)
+    {
+        bool match_found_at_current_ptr = true;
         for (size_t j = 0; j < pattern_size; ++j)
         {
-            if (!is_wildcard[j] && current_pos[j] != pattern_with_placeholders[j])
+            if (!is_wildcard_mask[j] && current_scan_ptr[j] != pattern_with_placeholders[j])
             {
-                match_found = false;
+                match_found_at_current_ptr = false;
                 break;
             }
         }
 
-        if (match_found)
+        if (match_found_at_current_ptr)
         {
-            uintptr_t absolute_match_address = reinterpret_cast<uintptr_t>(current_pos);
-            uintptr_t rva = absolute_match_address - reinterpret_cast<uintptr_t>(start_address);
-            logger.log(LOG_INFO, "FindPattern: Match found at address: " +
+            uintptr_t absolute_match_address = reinterpret_cast<uintptr_t>(current_scan_ptr);
+            uintptr_t rva_offset = absolute_match_address - reinterpret_cast<uintptr_t>(start_address);
+            logger.log(LOG_INFO, "FindPattern: Pattern match found at address: " +
                                      format_address(absolute_match_address) +
-                                     " (RVA: " + format_address(rva) + ")");
-            return current_pos;
+                                     " (RVA: " + format_address(rva_offset) + ")");
+            return current_scan_ptr;
         }
     }
 
-    logger.log(LOG_WARNING, "FindPattern: Pattern not found.");
+    logger.log(LOG_WARNING, "FindPattern: Pattern not found in the specified memory region.");
     return nullptr;
 }

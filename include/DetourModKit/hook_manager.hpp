@@ -1,5 +1,5 @@
-#ifndef HOOK_MANAGER_H
-#define HOOK_MANAGER_H
+#ifndef HOOK_MANAGER_HPP
+#define HOOK_MANAGER_HPP
 
 #include <string>
 #include <vector>
@@ -8,6 +8,8 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
+
 #include "safetyhook.hpp"
 #include "logger.hpp"
 #include "aob_scanner.hpp"
@@ -15,167 +17,201 @@
 
 /**
  * @enum HookType
- * @brief Enumeration of supported hook types.
+ * @brief Enumeration of supported hook types, corresponding to SafetyHook capabilities.
  */
 enum class HookType
 {
-    Inline, // For inline hooks (function entry point)
-    Mid     // For mid-function hooks
+    Inline, /**< Represents a standard inline hook placed at the beginning of a function. */
+    Mid     /**< Represents a mid-function hook, allowing redirection from within a function's body. */
 };
 
 /**
  * @enum HookStatus
- * @brief Represents the current status of a hook.
+ * @brief Represents the current operational status of a managed hook.
  */
 enum class HookStatus
 {
-    Active,   // Hook is enabled and functioning
-    Disabled, // Hook is installed but currently disabled
-    Failed,   // Hook creation failed
-    Removed   // Hook has been removed
+    Active,   /**< Hook is currently installed and enabled; the detour is active. */
+    Disabled, /**< Hook is installed but currently disabled; execution flows through original code. */
+    Failed,   /**< Hook creation or a critical operation failed. This status is less common for active hooks
+                   as failed creations typically prevent them from being added to manager. */
+    Removed   /**< Hook has been removed or was never successfully created/found. */
 };
 
 /**
  * @struct HookConfig
- * @brief Configuration options for hook creation.
+ * @brief Configuration options used during the creation of a new hook.
  */
 struct HookConfig
 {
-    bool autoEnable = true; // Whether to enable the hook immediately after creation
-    uint32_t flags = 0;     // SafetyHook flags
+    bool autoEnable = true; /**< If true, the hook will be enabled immediately after successful creation.
+                                 If false, it will be created in a disabled state. Defaults to true. */
+    uint32_t flags = 0;     /**< Additional flags to pass to the underlying SafetyHook creation functions.
+                                 Allows fine-grained control over hook behavior (e.g., safetyhook::InlineHook::StartDisabled). */
 };
 
 /**
  * @class Hook
- * @brief Base class for all hook types.
+ * @brief Abstract base class for managed hooks.
  *
- * Provides a common interface for different hook implementations.
+ * Defines a common interface for interacting with different types of hooks
+ * (e.g., InlineHook, MidHook) managed by the HookManager. It standardizes
+ * operations like enabling, disabling, and querying status.
  */
 class Hook
 {
 public:
     /**
-     * @brief Virtual destructor for proper cleanup.
+     * @brief Virtual destructor. Ensures proper cleanup of derived hook types.
      */
     virtual ~Hook() = default;
 
     /**
-     * @brief Gets the name of the hook.
-     * @return The hook's name.
+     * @brief Retrieves the user-defined name of the hook.
+     * @return const std::string& The name of the hook.
      */
-    std::string getName() const { return m_name; }
+    const std::string &getName() const { return m_name; }
 
     /**
-     * @brief Gets the type of the hook.
-     * @return The hook type enum.
+     * @brief Retrieves the type of the hook (e.g., Inline or Mid).
+     * @return HookType The type of this hook.
      */
     HookType getType() const { return m_type; }
 
     /**
-     * @brief Gets the address that was hooked.
-     * @return The target address.
+     * @brief Retrieves the memory address that this hook targets.
+     * @return uintptr_t The target memory address.
      */
     uintptr_t getTargetAddress() const { return m_target_address; }
 
     /**
-     * @brief Gets the current status of the hook.
-     * @return The hook status enum.
+     * @brief Retrieves the current operational status of the hook.
+     * @return HookStatus The current status (e.g., Active, Disabled).
      */
     HookStatus getStatus() const { return m_status; }
 
     /**
-     * @brief Enables the hook if it was previously disabled.
-     * @return true if the hook was successfully enabled, false otherwise.
+     * @brief Pure virtual function to enable the hook.
+     * @details Derived classes must implement this to activate their specific hook type.
+     * @return true if the hook was successfully enabled, false otherwise (e.g., if already active or an error occurs).
      */
     virtual bool enable() = 0;
 
     /**
-     * @brief Disables the hook temporarily without removing it.
-     * @return true if the hook was successfully disabled, false otherwise.
+     * @brief Pure virtual function to disable the hook.
+     * @details Derived classes must implement this to deactivate their specific hook type temporarily.
+     * @return true if the hook was successfully disabled, false otherwise (e.g., if already disabled or an error occurs).
      */
     virtual bool disable() = 0;
 
     /**
-     * @brief Checks if the hook is currently enabled.
-     * @return true if the hook is enabled, false otherwise.
+     * @brief Checks if the hook is currently active (enabled).
+     * @return true if the hook's status is Active, false otherwise.
      */
     bool isEnabled() const { return m_status == HookStatus::Active; }
 
+    /**
+     * @brief Converts HookStatus enum to its string representation.
+     * @param status The HookStatus enum value.
+     * @return std::string String representation of the status.
+     */
+    static std::string statusToString(HookStatus status)
+    {
+        switch (status)
+        {
+        case HookStatus::Active:
+            return "Active";
+        case HookStatus::Disabled:
+            return "Disabled";
+        case HookStatus::Failed:
+            return "Failed";
+        case HookStatus::Removed:
+            return "Removed";
+        default:
+            return "Unknown";
+        }
+    }
+
 protected:
-    std::string m_name;         // User-friendly name for logging
-    HookType m_type;            // Type of hook
-    uintptr_t m_target_address; // The address that was hooked
-    HookStatus m_status;        // Current status of the hook
+    std::string m_name;         /**< User-friendly name for identification and logging. */
+    HookType m_type;            /**< The type of this hook (Inline or Mid). */
+    uintptr_t m_target_address; /**< The memory address targeted by this hook. */
+    HookStatus m_status;        /**< The current operational status of this hook. */
 
     /**
-     * @brief Protected constructor for base class.
-     * @param name Name of the hook.
-     * @param type Type of the hook.
-     * @param target_address The address that was hooked.
-     * @param initial_status Initial status of the hook.
+     * @brief Protected constructor for derived hook classes.
+     * @param name User-defined name for the hook.
+     * @param type The type of hook being created.
+     * @param target_address The memory address to be hooked.
+     * @param initial_status The initial status for the hook upon creation.
      */
     Hook(std::string name, HookType type, uintptr_t target_address, HookStatus initial_status)
         : m_name(std::move(name)), m_type(type), m_target_address(target_address), m_status(initial_status) {}
 
-    // Prevent copying and allow moving
+    // Prevent copying of Hook objects, allow moving.
     Hook(const Hook &) = delete;
     Hook &operator=(const Hook &) = delete;
-    Hook(Hook &&) noexcept = default;
-    Hook &operator=(Hook &&) noexcept = default;
+    Hook(Hook &&) noexcept = default;            // Default move constructor
+    Hook &operator=(Hook &&) noexcept = default; // Default move assignment
 };
 
 /**
  * @class InlineHook
- * @brief Implementation of Hook for SafetyHook InlineHook.
+ * @brief Represents a managed inline hook, wrapping a SafetyHook::InlineHook object.
  */
 class InlineHook : public Hook
 {
 public:
     /**
-     * @brief Constructor for InlineHook.
-     * @param name Name of the hook.
-     * @param target_address The address that was hooked.
-     * @param hook_obj The SafetyHook InlineHook object.
-     * @param initial_status Initial status of the hook.
+     * @brief Constructs an InlineHook object.
+     * @param name User-defined name for the hook.
+     * @param target_address The memory address to hook.
+     * @param hook_obj A std::unique_ptr to a SafetyHook::InlineHook object that implements the low-level hook.
+     * @param initial_status The initial operational status of this hook.
      */
     InlineHook(std::string name, uintptr_t target_address,
                std::unique_ptr<safetyhook::InlineHook> hook_obj,
                HookStatus initial_status)
         : Hook(std::move(name), HookType::Inline, target_address, initial_status),
-          m_hook_obj(std::move(hook_obj)) {}
+          m_safetyhook_impl(std::move(hook_obj)) {}
 
     /**
-     * @brief Enables the hook.
-     * @return true if successful, false otherwise.
+     * @brief Enables this inline hook.
+     * @return true if successfully enabled or already active, false on failure or if hook object is invalid.
      */
     bool enable() override
     {
-        if (m_status != HookStatus::Disabled || !m_hook_obj)
-        {
-            return false;
-        }
+        if (!m_safetyhook_impl)
+            return false; // Hook object is not valid
+        if (m_status == HookStatus::Active)
+            return true; // Already active
+        if (m_status != HookStatus::Disabled)
+            return false; // Can only enable if currently disabled
 
-        auto result = m_hook_obj->enable();
-        if (result)
+        auto result = m_safetyhook_impl->enable();
+        if (result) // SafetyHook's enable returns an expected<void, Error> or similar
         {
             m_status = HookStatus::Active;
             return true;
         }
+        // Log error from result.error() if needed by HookManager
         return false;
     }
 
     /**
-     * @brief Disables the hook.
-     * @return true if successful, false otherwise.
+     * @brief Disables this inline hook.
+     * @return true if successfully disabled or already disabled, false on failure or if hook object is invalid.
      */
     bool disable() override
     {
-        if (m_status != HookStatus::Active || !m_hook_obj)
-        {
-            return false;
-        }
+        if (!m_safetyhook_impl)
+            return false; // Hook object is not valid
+        if (m_status == HookStatus::Disabled)
+            return true; // Already disabled
+        if (m_status != HookStatus::Active)
+            return false; // Can only disable if currently active
 
-        auto result = m_hook_obj->disable();
+        auto result = m_safetyhook_impl->disable();
         if (result)
         {
             m_status = HookStatus::Disabled;
@@ -185,52 +221,51 @@ public:
     }
 
     /**
-     * @brief Gets the original function trampoline.
-     * @tparam T Type of the function pointer.
-     * @return The original function trampoline.
+     * @brief Retrieves the trampoline to call the original function.
+     * @tparam T The function pointer type of the original function.
+     * @return A function pointer of type T to the original function's trampoline.
+     *         Returns nullptr if the underlying SafetyHook object is invalid.
      */
     template <typename T>
     T getOriginal() const
     {
-        return m_hook_obj ? m_hook_obj->original<T>() : nullptr;
+        return m_safetyhook_impl ? m_safetyhook_impl->original<T>() : nullptr;
     }
 
 private:
-    std::unique_ptr<safetyhook::InlineHook> m_hook_obj; // The SafetyHook InlineHook object
+    std::unique_ptr<safetyhook::InlineHook> m_safetyhook_impl; /**< Pointer to the SafetyHook implementation. */
 };
 
 /**
  * @class MidHook
- * @brief Implementation of Hook for SafetyHook MidHook.
+ * @brief Represents a managed mid-function hook, wrapping a SafetyHook::MidHook object.
  */
 class MidHook : public Hook
 {
 public:
     /**
-     * @brief Constructor for MidHook.
-     * @param name Name of the hook.
-     * @param target_address The address that was hooked.
-     * @param hook_obj The SafetyHook MidHook object.
-     * @param initial_status Initial status of the hook.
+     * @brief Constructs a MidHook object.
+     * @param name User-defined name for the hook.
+     * @param target_address The memory address within a function to hook.
+     * @param hook_obj A std::unique_ptr to a SafetyHook::MidHook object.
+     * @param initial_status The initial operational status of this hook.
      */
     MidHook(std::string name, uintptr_t target_address,
             std::unique_ptr<safetyhook::MidHook> hook_obj,
             HookStatus initial_status)
         : Hook(std::move(name), HookType::Mid, target_address, initial_status),
-          m_hook_obj(std::move(hook_obj)) {}
+          m_safetyhook_impl(std::move(hook_obj)) {}
 
-    /**
-     * @brief Enables the hook.
-     * @return true if successful, false otherwise.
-     */
     bool enable() override
     {
-        if (m_status != HookStatus::Disabled || !m_hook_obj)
-        {
+        if (!m_safetyhook_impl)
             return false;
-        }
+        if (m_status == HookStatus::Active)
+            return true;
+        if (m_status != HookStatus::Disabled)
+            return false;
 
-        auto result = m_hook_obj->enable();
+        auto result = m_safetyhook_impl->enable();
         if (result)
         {
             m_status = HookStatus::Active;
@@ -239,18 +274,16 @@ public:
         return false;
     }
 
-    /**
-     * @brief Disables the hook.
-     * @return true if successful, false otherwise.
-     */
     bool disable() override
     {
-        if (m_status != HookStatus::Active || !m_hook_obj)
-        {
+        if (!m_safetyhook_impl)
             return false;
-        }
+        if (m_status == HookStatus::Disabled)
+            return true;
+        if (m_status != HookStatus::Active)
+            return false;
 
-        auto result = m_hook_obj->disable();
+        auto result = m_safetyhook_impl->disable();
         if (result)
         {
             m_status = HookStatus::Disabled;
@@ -260,54 +293,60 @@ public:
     }
 
     /**
-     * @brief Gets the destination function.
-     * @return The destination function.
+     * @brief Gets the destination function of this mid-hook.
+     * @details This is the function that SafetyHook calls when the mid-hook is triggered.
+     * @return safetyhook::MidHookFn The function pointer to the detour.
+     *         Returns nullptr if the underlying SafetyHook object is invalid.
      */
     safetyhook::MidHookFn getDestination() const
     {
-        return m_hook_obj ? m_hook_obj->destination() : nullptr;
+        return m_safetyhook_impl ? m_safetyhook_impl->destination() : nullptr;
     }
 
 private:
-    std::unique_ptr<safetyhook::MidHook> m_hook_obj; // The SafetyHook MidHook object
+    std::unique_ptr<safetyhook::MidHook> m_safetyhook_impl; /**< Pointer to the SafetyHook implementation. */
 };
 
 /**
  * @class HookManager
- * @brief Manages the lifecycle of all SafetyHook hooks.
+ * @brief Manages the lifecycle of all hooks (Inline and Mid) using SafetyHook.
  *
- * Provides a centralized way to create, enable, disable, and remove hooks.
- * Can be used as a singleton or instantiated directly.
+ * Provides a centralized API for creating, removing, enabling, and disabling hooks.
+ * It can be used as a singleton via `getInstance()` or instantiated directly if multiple
+ * independent hook managers are needed (though singleton usage is more common).
+ * This class is thread-safe for its public methods.
  */
 class HookManager
 {
 public:
     /**
-     * @brief Singleton access pattern.
-     * @return Reference to the global HookManager instance.
+     * @brief Provides access to the singleton instance of the HookManager.
+     * @return HookManager& Reference to the global HookManager instance.
      */
     static HookManager &getInstance();
 
     /**
-     * @brief Constructor for HookManager.
-     * @param logger Optional pointer to logger. If null, uses Logger singleton.
+     * @brief Constructs a HookManager.
+     * @param logger Optional. A pointer to a Logger instance to use. If nullptr,
+     *               `Logger::getInstance()` will be used.
      */
     explicit HookManager(Logger *logger = nullptr);
 
     /**
-     * @brief Destructor. Cleans up all hooks.
+     * @brief Destructor. Ensures all managed hooks are removed and resources are cleaned up.
      */
     ~HookManager();
 
-    // --- Inline Hook Creation ---
+    // --- Inline Hook Creation Methods ---
     /**
-     * @brief Creates an inline hook at the specified address.
-     * @param name A descriptive name for the hook (for logging).
-     * @param target_address The address to hook.
-     * @param detour_function The function to call instead of the original.
-     * @param original_trampoline Pointer to store the trampoline for calling the original function.
-     * @param config Optional configuration for the hook.
-     * @return A unique ID for the hook if successful, or an empty string on failure.
+     * @brief Creates an inline hook at a specific target memory address.
+     * @param name A unique, descriptive name for the hook (used as its ID).
+     * @param target_address The memory address of the function to hook.
+     * @param detour_function Pointer to the detour function that will replace the original.
+     * @param original_trampoline Output. Pointer to a `void*` that will receive the address
+     *                            of the trampoline function (to call the original function).
+     * @param config Optional. Configuration settings for the hook (e.g., auto-enable, flags).
+     * @return std::string The `name` of the hook if creation was successful, otherwise an empty string.
      */
     std::string create_inline_hook(
         const std::string &name,
@@ -317,16 +356,16 @@ public:
         const HookConfig &config = HookConfig());
 
     /**
-     * @brief Creates an inline hook by first finding the target address using AOB scanning.
-     * @param name A descriptive name for the hook.
-     * @param module_base Base address of the module to scan.
-     * @param module_size Size of the module to scan.
-     * @param aob_pattern The AOB pattern string to find the target.
-     * @param aob_offset An optional offset to add to the AOB match to get the final target_address.
-     * @param detour_function The function to call instead of the original.
-     * @param original_trampoline Pointer to store the trampoline for calling the original function.
-     * @param config Optional configuration for the hook.
-     * @return A unique ID for the hook if successful, or an empty string on failure.
+     * @brief Creates an inline hook by first finding the target address via an AOB (Array-of-Bytes) scan.
+     * @param name A unique, descriptive name for the hook (used as its ID).
+     * @param module_base Base address of the memory module/region to scan.
+     * @param module_size Size of the memory module/region to scan.
+     * @param aob_pattern_str The AOB pattern string (e.g., "48 8B ?? C1").
+     * @param aob_offset Offset to add to the found pattern's address to get the final hook target.
+     * @param detour_function Pointer to the detour function.
+     * @param original_trampoline Output. Pointer to store the trampoline address.
+     * @param config Optional. Configuration settings for the hook.
+     * @return std::string The `name` of the hook if successful, otherwise an empty string.
      */
     std::string create_inline_hook_aob(
         const std::string &name,
@@ -338,14 +377,14 @@ public:
         void **original_trampoline,
         const HookConfig &config = HookConfig());
 
-    // --- Mid Hook Creation ---
+    // --- Mid Hook Creation Methods ---
     /**
-     * @brief Creates a mid-function hook at the specified address.
-     * @param name A descriptive name for the hook (for logging).
-     * @param target_address The address to hook.
-     * @param detour_function The function to call at the hook point.
-     * @param config Optional configuration for the hook.
-     * @return A unique ID for the hook if successful, or an empty string on failure.
+     * @brief Creates a mid-function hook at a specific target memory address.
+     * @param name A unique, descriptive name for the hook (used as its ID).
+     * @param target_address The memory address within a function to hook.
+     * @param detour_function The function to be called when the mid-hook is executed (must match `safetyhook::MidHookFn` signature).
+     * @param config Optional. Configuration settings for the hook.
+     * @return std::string The `name` of the hook if successful, otherwise an empty string.
      */
     std::string create_mid_hook(
         const std::string &name,
@@ -354,15 +393,15 @@ public:
         const HookConfig &config = HookConfig());
 
     /**
-     * @brief Creates a mid-function hook by first finding the target address using AOB scanning.
-     * @param name A descriptive name for the hook.
-     * @param module_base Base address of the module to scan.
-     * @param module_size Size of the module to scan.
-     * @param aob_pattern The AOB pattern string to find the target.
-     * @param aob_offset An optional offset to add to the AOB match to get the final target_address.
-     * @param detour_function The function to call at the hook point.
-     * @param config Optional configuration for the hook.
-     * @return A unique ID for the hook if successful, or an empty string on failure.
+     * @brief Creates a mid-function hook by first finding the target address via an AOB scan.
+     * @param name A unique, descriptive name for the hook (used as its ID).
+     * @param module_base Base address of the memory module/region to scan.
+     * @param module_size Size of the memory module/region to scan.
+     * @param aob_pattern_str The AOB pattern string.
+     * @param aob_offset Offset to add to the found pattern's address.
+     * @param detour_function The mid-hook detour function.
+     * @param config Optional. Configuration settings for the hook.
+     * @return std::string The `name` of the hook if successful, otherwise an empty string.
      */
     std::string create_mid_hook_aob(
         const std::string &name,
@@ -373,113 +412,102 @@ public:
         safetyhook::MidHookFn detour_function,
         const HookConfig &config = HookConfig());
 
-    // --- Hook Management ---
+    // --- Hook Management Methods ---
     /**
-     * @brief Removes a hook by its ID.
-     * @param hook_id The ID of the hook to remove.
-     * @return true if the hook was found and removed, false otherwise.
+     * @brief Removes a hook identified by its name (ID).
+     * @details This also unhooks the function, restoring original behavior.
+     * @param hook_id The name (ID) of the hook to remove.
+     * @return true if the hook was found and successfully removed, false otherwise.
      */
     bool remove_hook(const std::string &hook_id);
 
     /**
-     * @brief Removes all managed hooks.
+     * @brief Removes all hooks currently managed by this HookManager instance.
      */
     void remove_all_hooks();
 
     /**
-     * @brief Enables a hook by its ID.
-     * @param hook_id The ID of the hook to enable.
-     * @return true if the hook was found and enabled, false otherwise.
+     * @brief Enables a previously disabled hook.
+     * @param hook_id The name (ID) of the hook to enable.
+     * @return true if the hook was found and successfully enabled, false otherwise.
      */
     bool enable_hook(const std::string &hook_id);
 
     /**
-     * @brief Disables a hook by its ID.
-     * @param hook_id The ID of the hook to disable.
-     * @return true if the hook was found and disabled, false otherwise.
+     * @brief Disables an active hook temporarily without removing it.
+     * @param hook_id The name (ID) of the hook to disable.
+     * @return true if the hook was found and successfully disabled, false otherwise.
      */
     bool disable_hook(const std::string &hook_id);
 
     /**
-     * @brief Gets the status of a hook by its ID.
-     * @param hook_id The ID of the hook to check.
-     * @return The status of the hook, or HookStatus::Removed if not found.
+     * @brief Retrieves the current status of a hook.
+     * @param hook_id The name (ID) of the hook.
+     * @return HookStatus The current status. Returns `HookStatus::Removed` if the ID is not found.
      */
     HookStatus get_hook_status(const std::string &hook_id) const;
 
     /**
-     * @brief Gets a count of hooks by status.
-     * @return A map of HookStatus to count.
+     * @brief Gets a summary of hook counts categorized by their status.
+     * @return std::unordered_map<HookStatus, size_t> A map where keys are statuses and values are counts.
      */
     std::unordered_map<HookStatus, size_t> get_hook_counts() const;
 
     /**
-     * @brief Gets a list of hook IDs.
-     * @param status_filter Optional filter for specific hook status.
-     * @return A vector of hook IDs.
+     * @brief Retrieves a list of hook names (IDs).
+     * @param status_filter Optional. If provided, only hooks matching this status will be returned.
+     *                      If not provided (std::nullopt), all hook IDs are returned.
+     * @return std::vector<std::string> A vector containing the names of the hooks.
      */
-    std::vector<std::string> get_hook_ids(HookStatus status_filter = HookStatus::Active) const;
+    std::vector<std::string> get_hook_ids(std::optional<HookStatus> status_filter = std::nullopt) const;
 
     /**
-     * @brief Gets a hook by its ID.
-     * @param hook_id The ID of the hook to retrieve.
-     * @return A pointer to the hook or nullptr if not found.
-     */
-    Hook *get_hook(const std::string &hook_id);
-
-    /**
-     * @brief Gets an inline hook by its ID.
-     * @param hook_id The ID of the hook to retrieve.
-     * @return A pointer to the inline hook or nullptr if not found or wrong type.
+     * @brief Retrieves a pointer to an InlineHook object by its ID.
+     * @param hook_id The name (ID) of the inline hook.
+     * @return InlineHook* Pointer to the InlineHook object if found and is of type Inline, nullptr otherwise.
+     *         The lifetime of the returned pointer is managed by the HookManager.
      */
     InlineHook *get_inline_hook(const std::string &hook_id);
 
     /**
-     * @brief Gets a mid hook by its ID.
-     * @param hook_id The ID of the hook to retrieve.
-     * @return A pointer to the mid hook or nullptr if not found or wrong type.
+     * @brief Retrieves a pointer to a MidHook object by its ID.
+     * @param hook_id The name (ID) of the mid hook.
+     * @return MidHook* Pointer to the MidHook object if found and is of type Mid, nullptr otherwise.
+     *         The lifetime of the returned pointer is managed by the HookManager.
      */
     MidHook *get_mid_hook(const std::string &hook_id);
 
 private:
-    // Delete copy/assignment
+    // Prevent copying and assignment of HookManager instances.
     HookManager(const HookManager &) = delete;
     HookManager &operator=(const HookManager &) = delete;
 
-    // Allow moving
+    // Allow moving (though singleton pattern makes this less common for the main instance).
     HookManager(HookManager &&) noexcept = default;
     HookManager &operator=(HookManager &&) noexcept = default;
 
     // Member variables
-    mutable std::recursive_mutex m_hooks_mutex;
-    std::vector<std::unique_ptr<Hook>> m_hooks;         // Stores all active hooks
-    Logger *m_logger;                                   // Pointer to the logger
-    std::shared_ptr<safetyhook::Allocator> m_allocator; // Allocator for SafetyHook
+    mutable std::recursive_mutex m_hooks_mutex;         /**< Mutex for thread-safe access to hook storage and operations. */
+    std::vector<std::unique_ptr<Hook>> m_hooks;         /**< Primary storage for all managed Hook objects. */
+    Logger *m_logger;                                   /**< Pointer to the Logger instance for internal logging. */
+    std::shared_ptr<safetyhook::Allocator> m_allocator; /**< SafetyHook allocator for managing hook memory. */
 
-    // Helper methods
+    // --- Internal Helper Methods ---
+    /** @brief Converts a SafetyHook InlineHook::Error to a descriptive string. */
     std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
+    /** @brief Converts a SafetyHook MidHook::Error to a descriptive string. */
     std::string error_to_string(const safetyhook::MidHook::Error &err) const;
 
-    /**
-     * @brief Finds a hook by its ID.
-     * @param hook_id The ID of the hook to find.
-     * @return Iterator to the hook or m_hooks.end() if not found.
-     */
-    auto find_hook(const std::string &hook_id) -> decltype(m_hooks.begin());
+    /** @brief Internal: Finds a hook by ID and returns an iterator (non-const). */
+    auto find_hook_iterator(const std::string &hook_id) -> decltype(m_hooks.begin());
+    /** @brief Internal: Finds a hook by ID and returns a const_iterator (const). */
+    auto find_hook_iterator(const std::string &hook_id) const -> decltype(m_hooks.cbegin());
 
-    /**
-     * @brief Finds a hook by its ID (const version).
-     * @param hook_id The ID of the hook to find.
-     * @return Const iterator to the hook or m_hooks.end() if not found.
-     */
-    auto find_hook(const std::string &hook_id) const -> decltype(m_hooks.cbegin());
-
-    /**
-     * @brief Checks if a hook ID already exists.
-     * @param hook_id The ID to check.
-     * @return true if the ID exists, false otherwise.
-     */
+    /** @brief Internal: Checks if a hook with the given name (ID) already exists. */
     bool hook_id_exists(const std::string &hook_id) const;
+
+    /** @brief Internal: Retrieves a raw pointer to a Hook object. Lock should be held by caller. */
+    Hook *get_hook_raw_ptr(const std::string &hook_id);
 };
 
-#endif // HOOK_MANAGER_H
+#endif // HOOK_MANAGER_HPP
