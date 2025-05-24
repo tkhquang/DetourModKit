@@ -164,20 +164,31 @@ install(TARGETS DetourModKit
 )
 
 # Install public header files.
-# This expects your public headers to be in YourProjectRoot/include/DetourModKit/
-file(GLOB _dmk_public_headers_for_install
+# Install individual module headers from include/DetourModKit/
+file(GLOB _dmk_module_headers_for_install
   LIST_DIRECTORIES false
   CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit/*.hpp"
 )
 
-if(_dmk_public_headers_for_install)
-  install(FILES ${_dmk_public_headers_for_install}
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit" # Installs to <prefix>/include/DetourModKit
+if(_dmk_module_headers_for_install)
+  install(FILES ${_dmk_module_headers_for_install}
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit"
     COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
   )
 else()
-  message(WARNING "No public headers found in 'include/DetourModKit/*.hpp' to install.")
+  message(WARNING "No module headers found in 'include/DetourModKit/*.hpp' to install.")
+endif()
+
+# Install the centralized DetourModKit.hpp header
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp")
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+  )
+  message(STATUS "Centralized DetourModKit.hpp header will be installed.")
+else()
+  message(WARNING "Centralized header 'include/DetourModKit.hpp' not found.")
 endif()
 
 # --- CMake Package Configuration for Consumers ---
