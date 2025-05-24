@@ -6,7 +6,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 *   **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support.
 *   **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
-*   **Configuration System:** Load settings from INI files. Mods register their configuration variables and the kit handles parsing and value assignment. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
+*   **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
 *   **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes.
 *   **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
 *   **String Utilities:** Helper functions for formatting addresses, hexadecimal values, virtual key codes, etc.
@@ -15,231 +15,287 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 ## Prerequisites
 
-*   A C++ compiler supporting C++23:
-    *   MinGW g++ 12+ (recommended for cross-platform compatibility)
-    *   Microsoft Visual Studio 2022 (MSVC v143)
-*   CMake 3.16 or newer
-*   Git (for cloning and managing submodules)
+*   A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer). The Makefile defaults to g++.
+*   `make` (e.g., `mingw32-make` for MinGW environments).
+*   CMake (version 3.16 or newer recommended, required to build the SafetyHook dependency).
+*   Git (for cloning and managing submodules).
 
-## Building DetourModKit
+## Building DetourModKit (Static Library via CMake)
 
-This project uses CMake as the primary build system to ensure cross-compiler compatibility and proper dependency management.
+This project uses CMake to orchestrate its build and the build of its SafetyHook dependency.
 
-### 1. Clone the Repository
+1.  **Clone the repository (with submodules):**
+    ```bash
+    git clone --recursive https://github.com/tkhquang/DetourModKit.git
+    cd DetourModKit
+    ```
+    If you've already cloned without `--recursive`:
+    ```bash
+    git submodule update --init --recursive
+    ```
 
-```bash
-git clone --recursive https://github.com/tkhquang/DetourModKit.git
-cd DetourModKit
-```
+2.  **Build & Package for Distribution:**
 
-If you've already cloned without `--recursive`:
-```bash
-git submodule update --init --recursive
-```
+    ### MinGW (Recommended)
+    ```bash
+    # Configure
+    cmake -S . -B build_mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="./install_package_mingw"
 
-### 2. Build with CMake
+    # Build
+    cmake --build build_mingw --config Release --parallel
 
-#### Option A: MinGW (Recommended)
+    # Install
+    cmake --install build_mingw --config Release
+    ```
 
-```bash
-# Configure
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release
+    ### Visual Studio (MSVC)
+    ```bash
+    # Configure
+    cmake -S . -B build_msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="./install_package_msvc"
 
-# Build
-cmake --build build --config Release --parallel
+    # Build
+    cmake --build build_msvc --config Release --parallel
 
-# Install to build/install directory
-cmake --install build --config Release
-```
+    # Install
+    cmake --install build_msvc --config Release
+    ```
 
-#### Option B: Visual Studio (MSVC)
+    After running the install command, the `install_package_mingw/` or `install_package_msvc/` directory will contain a structure ready for consumption:
+    ```
+    install_package_mingw/
+    ├── include/
+    │   ├── DetourModKit/             <-- DetourModKit public headers
+    │   │   ├── aob_scanner.hpp
+    │   │   ├── config.hpp
+    │   │   ├── ...
+    │   │   └── string_utils.hpp
+    │   ├── safetyhook/               <-- SafetyHook detail headers
+    │   │   ├── common.hpp
+    │   │   ├── inline_hook.hpp
+    │   │   └── ...
+    │   ├── safetyhook.hpp            <-- Main SafetyHook include
+    │   └── SimpleIni.h               <-- SimpleIni header
+    ├── lib/
+    │   ├── libDetourModKit.a         <-- MinGW: .a files
+    │   ├── libsafetyhook.a           <-- MSVC: .lib files
+    │   ├── libZydis.a
+    │   └── libZycore.a
+    └── lib/cmake/DetourModKit/       <-- CMake config files
+        ├── DetourModKitConfig.cmake
+        ├── DetourModKitConfigVersion.cmake
+        └── DetourModKitTargets.cmake
+    ```
 
-```bash
-# Configure
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+## Using DetourModKit in Your Mod Project
 
-# Build
-cmake --build build --config Release --parallel
+1.  **Integrate DetourModKit:**
+    *   After building DetourModKit, copy the entire `install_package_mingw/` or `install_package_msvc/` directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
+    *   Alternatively, adjust your mod's build system to point to DetourModKit's install directory directly.
 
-# Install to build/install directory
-cmake --install build --config Release
-```
+2.  **Configure Your Mod's Build System:**
 
-#### Option C: Custom Install Location
+    ### CMake (Recommended)
+    ```cmake
+    # In your mod's CMakeLists.txt
+    cmake_minimum_required(VERSION 3.16)
+    project(MyMod)
 
-```bash
-# Configure with custom install prefix
-cmake -S . -B build -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="C:/MyLibraries/DetourModKit"
+    set(CMAKE_CXX_STANDARD 23)
 
-# Build and install
-cmake --build build --config Release --parallel
-cmake --install build --config Release
-```
+    # Find DetourModKit
+    set(DetourModKit_DIR "external/DetourModKit/lib/cmake/DetourModKit")
+    find_package(DetourModKit REQUIRED)
 
-### 3. Build Output
+    # Create your mod target
+    add_library(MyMod SHARED src/main.cpp)
 
-After running `cmake --install`, you'll find the following structure in your install directory:
+    # Link against DetourModKit
+    target_link_libraries(MyMod PRIVATE DetourModKit::DetourModKit)
 
-```
-install/
-├── include/
-│   ├── DetourModKit/             # DetourModKit public headers
-│   │   ├── aob_scanner.hpp
-│   │   ├── config.hpp
-│   │   ├── hook_manager.hpp
-│   │   ├── logger.hpp
-│   │   ├── memory_utils.hpp
-│   │   ├── string_utils.hpp
-│   │   ├── filesystem_utils.hpp
-│   │   └── math_utils.hpp
-│   ├── safetyhook/               # SafetyHook headers
-│   ├── safetyhook.hpp
-│   └── SimpleIni.h
-├── lib/
-│   ├── libDetourModKit.a/.lib    # Main library
-│   ├── libsafetyhook.a/.lib      # SafetyHook library
-│   ├── libZydis.a/.lib           # Zydis disassembler
-│   └── libZycore.a/.lib          # Zycore utilities
-├── lib/cmake/DetourModKit/       # CMake package config
-└── share/doc/DetourModKit/       # Documentation
-```
+    # Add system libraries (Windows)
+    if(WIN32)
+        target_link_libraries(MyMod PRIVATE psapi user32 kernel32)
+    endif()
+    ```
 
-## Using DetourModKit in Your Project
+    ### Makefile (Example for g++ MinGW)
+    ```makefile
+    # In your mod's Makefile
+    DETOURMODKIT_DIR := external/DetourModKit
 
-### CMake Integration (Recommended)
+    CXXFLAGS += -I$(DETOURMODKIT_DIR)/include
+    LDFLAGS += -L$(DETOURMODKIT_DIR)/lib
+    LIBS += -lDetourModKit -lsafetyhook -lZydis -lZycore
+    # Add system libs like: -lpsapi -luser32 -lkernel32 -lshlwapi -static-libgcc -static-libstdc++
 
-1. **Using find_package (after installation):**
+    # Example link command:
+    # $(CXX) $(YOUR_OBJECTS) -o YourMod.asi -shared $(LDFLAGS) $(LIBS)
+    ```
 
-```cmake
-# In your CMakeLists.txt
-cmake_minimum_required(VERSION 3.16)
-project(MyMod)
+3.  **Using Kit Components in Your Mod:**
 
-set(CMAKE_CXX_STANDARD 23)
+    ```c++
+    // MyMod/src/main.cpp
+    #include <windows.h>
 
-# Find DetourModKit
-find_package(DetourModKit REQUIRED)
+    #include <DetourModKit/logger.hpp>
+    #include <DetourModKit/config.hpp>
+    #include <DetourModKit/hook_manager.hpp>
+    #include <DetourModKit/aob_scanner.hpp>
+    #include <DetourModKit/string_utils.hpp>
+    #include <DetourModKit/filesystem_utils.hpp>
 
-# Create your mod target
-add_library(MyMod SHARED src/main.cpp)
+    #include <safetyhook.hpp>
+    #include <SimpleIni.h>
 
-# Link against DetourModKit
-target_link_libraries(MyMod PRIVATE DetourModKit::DetourModKit)
+    // Using convenience aliases for DetourModKit namespaces if desired
+    namespace DMK = DetourModKit;
+    namespace DMKConfig = DetourModKit::Config;
+    namespace DMKAOB = DetourModKit::AOB;
+    namespace DMKString = DetourModKit::String;
 
-# Add system libraries (Windows)
-if(WIN32)
-    target_link_libraries(MyMod PRIVATE psapi user32 kernel32)
-endif()
-```
+    // --- Global variables for your mod's configuration ---
+    struct ModConfiguration {
+        bool enable_greeting_hook = true;
+        std::string log_level_setting = "INFO";
+    } g_mod_config;
 
-2. **Using as a subdirectory:**
+    // --- Example Hook: Target function signature ---
+    typedef void (__stdcall *OriginalGameFunction_PrintMessage_t)(const char* message, int type);
+    OriginalGameFunction_PrintMessage_t original_GameFunction_PrintMessage = nullptr;
 
-```cmake
-# Add DetourModKit as a subdirectory
-add_subdirectory(external/DetourModKit)
+    // Detour function
+    void __stdcall Detour_GameFunction_PrintMessage(const char* message, int type) {
+        DMK::Logger& logger = DMK::Logger::getInstance();
+        logger.log(DMK::LOG_INFO, "Detour_GameFunction_PrintMessage CALLED! Original message: \"" + std::string(message) + "\", type: " + std::to_string(type));
 
-# Link against it
-target_link_libraries(MyMod PRIVATE DetourModKit)
-```
+        if (g_mod_config.enable_greeting_hook) {
+            logger.log(DMK::LOG_DEBUG, "Modifying message because greeting hook is enabled.");
+            if (original_GameFunction_PrintMessage) {
+                original_GameFunction_PrintMessage("Hello from DetourModKit! Hooked!", type + 100);
+            }
+            return;
+        }
 
-### Manual Integration
-
-If not using CMake, copy the installed files to your project and configure your build system:
-
-```makefile
-# Example Makefile
-CXX = g++
-CXXFLAGS = -std=c++23 -I./external/DetourModKit/include
-LDFLAGS = -L./external/DetourModKit/lib
-LIBS = -lDetourModKit -lsafetyhook -lZydis -lZycore -lpsapi -luser32 -lkernel32
-
-MyMod.asi: src/main.cpp
-	$(CXX) $(CXXFLAGS) $< -o $@ -shared $(LDFLAGS) $(LIBS)
-```
-
-## Usage Example
-
-```cpp
-#include <windows.h>
-#include <DetourModKit/logger.hpp>
-#include <DetourModKit/config.hpp>
-#include <DetourModKit/hook_manager.hpp>
-#include <DetourModKit/aob_scanner.hpp>
-#include <DetourModKit/filesystem_utils.hpp>
-
-namespace DMK = DetourModKit;
-
-struct ModConfig {
-    bool enable_hook = true;
-    std::string log_level = "INFO";
-} g_config;
-
-// Example hook target
-typedef void (__stdcall *OriginalFunction_t)(const char* message);
-OriginalFunction_t original_function = nullptr;
-
-void __stdcall DetourFunction(const char* message) {
-    DMK::Logger::getInstance().log(DMK::LOG_INFO, "Hook called with: " + std::string(message));
-
-    if (original_function) {
-        original_function("Modified by DetourModKit!");
-    }
-}
-
-void InitializeMod() {
-    // Configure logger
-    DMK::Logger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S");
-    auto& logger = DMK::Logger::getInstance();
-
-    // Register configuration
-    DMK::Config::registerBool("General", "EnableHook", "Enable Hook", g_config.enable_hook, true);
-    DMK::Config::registerString("Debug", "LogLevel", "Log Level", g_config.log_level, "INFO");
-
-    // Load configuration
-    DMK::Config::load("MyMod.ini");
-    logger.setLogLevel(DMK::Logger::stringToLogLevel(g_config.log_level));
-
-    // Create hooks
-    auto& hook_manager = DMK::HookManager::getInstance();
-
-    // Example: Hook via AOB scan
-    HMODULE module = GetModuleHandleA(nullptr);
-    MODULEINFO module_info;
-    GetModuleInformation(GetCurrentProcess(), module, &module_info, sizeof(module_info));
-
-    std::string hook_id = hook_manager.create_inline_hook_aob(
-        "ExampleHook",
-        reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll),
-        module_info.SizeOfImage,
-        "48 89 5C 24 ?? 57 48 83 EC 20",  // Assume unique
-        0,  // Pattern offset
-        reinterpret_cast<void*>(DetourFunction),
-        reinterpret_cast<void**>(&original_function)
-    );
-
-    if (!hook_id.empty()) {
-        logger.log(DMK::LOG_INFO, "Successfully created hook: " + hook_id);
+        if (original_GameFunction_PrintMessage) {
+            original_GameFunction_PrintMessage(message, type);
+        }
     }
 
-    logger.log(DMK::LOG_INFO, "Mod initialization complete!");
-}
+    // --- Mod Initialization Function ---
+    void InitializeMyMod() {
+        // 1. Configure the Logger
+        DMK::Logger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S.%f");
+        DMK::Logger& logger = DMK::Logger::getInstance();
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
-        DisableThreadLibraryCalls(hModule);
-        InitializeMod();
+        // 2. Register your configuration variables
+        DMKConfig::registerBool("Hooks", "EnableGreetingHook", "Enable Greeting Hook", g_mod_config.enable_greeting_hook, true);
+        DMKConfig::registerString("Debug", "LogLevel", "Log Level", g_mod_config.log_level_setting, "INFO");
+
+        // 3. Load configuration from INI file
+        DMKConfig::load("MyMod.ini");
+
+        // 4. Apply LogLevel from loaded configuration
+        logger.setLogLevel(DMK::Logger::stringToLogLevel(g_mod_config.log_level_setting));
+
+        // 5. Log the loaded configuration
+        logger.log(DMK::LOG_INFO, "MyMod configuration loaded and applied.");
+        DMKConfig::logAll();
+
+        // 6. Initialize Hooks
+        DMK::HookManager& hook_manager = DMK::HookManager::getInstance();
+
+        uintptr_t target_function_address = 0;
+
+        // Example: AOB Scan
+        HMODULE game_module = GetModuleHandleA(NULL); // Base executable
+        if (game_module) {
+            MODULEINFO module_info = {0};
+            if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info))) {
+                logger.log(DMK::LOG_DEBUG, "Scanning module at " + DMKString::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)) +
+                                          " size " + std::to_string(module_info.SizeOfImage));
+
+                // Replace with actual AOB pattern from your target game
+                std::string aob_sig_str = "48 89 ?? ?? 57";
+                ptrdiff_t pattern_offset = 0; // Offset from pattern start to function start
+
+                std::vector<std::byte> pattern_bytes = DMKAOB::parseAOB(aob_sig_str);
+                if (!pattern_bytes.empty()) {
+                    std::byte* found_pattern = DMKAOB::FindPattern(
+                        reinterpret_cast<std::byte*>(module_info.lpBaseOfDll),
+                        module_info.SizeOfImage,
+                        pattern_bytes
+                    );
+                    if (found_pattern) {
+                        target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
+                        logger.log(DMK::LOG_INFO, "Pattern for GameFunction_PrintMessage found at: " +
+                                                  DMKString::format_address(reinterpret_cast<uintptr_t>(found_pattern)) +
+                                                  ", target address: " + DMKString::format_address(target_function_address));
+                    } else {
+                        logger.log(DMK::LOG_ERROR, "AOB pattern for GameFunction_PrintMessage not found in target module.");
+                    }
+                } else {
+                     logger.log(DMK::LOG_ERROR, "Failed to parse AOB pattern: " + aob_sig_str);
+                }
+            } else {
+                logger.log(DMK::LOG_ERROR, "GetModuleInformation failed: " + std::to_string(GetLastError()));
+            }
+        } else {
+             logger.log(DMK::LOG_ERROR, "Failed to get game module handle.");
+        }
+
+        if (target_function_address != 0) {
+            DMK::HookConfig hook_cfg; // Use default config (autoEnable = true)
+            std::string hook_id = hook_manager.create_inline_hook(
+                "GameFunction_PrintMessage_Hook",
+                target_function_address,
+                reinterpret_cast<void*>(Detour_GameFunction_PrintMessage),
+                reinterpret_cast<void**>(&original_GameFunction_PrintMessage),
+                hook_cfg
+            );
+
+            if (!hook_id.empty()) {
+                logger.log(DMK::LOG_INFO, "Successfully created hook: " + hook_id);
+            } else {
+                logger.log(DMK::LOG_ERROR, "Failed to create hook for GameFunction_PrintMessage.");
+            }
+        } else {
+            logger.log(DMK::LOG_WARNING, "Target address for GameFunction_PrintMessage is 0 or not found. Hook not created.");
+        }
+
+        logger.log(DMK::LOG_INFO, "MyMod Initialized using DetourModKit!");
     }
-    return TRUE;
-}
-```
+
+    // --- Mod Shutdown Function (optional) ---
+    void ShutdownMyMod() {
+        DMK::Logger& logger = DMK::Logger::getInstance();
+        logger.log(DMK::LOG_INFO, "MyMod Shutting Down...");
+
+        DMK::HookManager::getInstance().remove_all_hooks();
+        DMKConfig::clearRegisteredItems();
+
+        logger.log(DMK::LOG_INFO, "MyMod Shutdown Complete.");
+    }
+
+    // --- DLL Main or equivalent entry point ---
+    BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+        if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+            DisableThreadLibraryCalls(hModule);
+            InitializeMyMod();
+        } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+            ShutdownMyMod();
+        }
+        return TRUE;
+    }
+    ```
 
 ## Configuration File Example
 
 Create a `MyMod.ini` file alongside your DLL:
 
 ```ini
-[General]
-EnableHook=true
+[Hooks]
+EnableGreetingHook=true
 
 [Debug]
 LogLevel=INFO
@@ -248,36 +304,17 @@ LogLevel=INFO
 ToggleKey=0x72,0x70  # F3, F1 (hex VK codes)
 ```
 
-## Development and Releases
-
-This project uses GitHub Actions for automated building and releasing:
-
-- **Pull Requests:** Automatically build and test on both MinGW and MSVC
-- **Releases:** Manual workflow dispatch creates releases for both compiler environments
-- **Artifacts:** Each release includes packages for MinGW and MSVC with all necessary libraries and headers
-
 ## License
 
-DetourModKit is licensed under the **MIT License**. See the `LICENSE` file for full details.
+DetourModKit is licensed under the **MIT License**. See the `LICENSE` file in the repository for full details.
 
-This project incorporates components from other open-source projects. Please refer to `DetourModKit_Acknowledgements.txt` for a list of these components and their respective licenses:
-
+This project incorporates components from other open-source projects. Please refer to the [DetourModKit_Acknowledgements.txt](/DetourModKit_Acknowledgements.txt) file for a list of these components and their respective licenses:
 *   **SafetyHook:** Boost Software License 1.0
 *   **SimpleIni:** MIT License
-*   **Zydis & Zycore:** MIT License
+*   **Zydis & Zycore (dependencies of SafetyHook):** MIT License
+
+Users of DetourModKit are responsible for ensuring compliance with all included licenses.
 
 ## Contributing
 
-Contributions to DetourModKit are welcome! Please feel free to open issues for bug reports or feature requests, and submit pull requests for improvements.
-
-### Building for Development
-
-For development, you can use the same CMake commands but with debug configuration:
-
-```bash
-# Debug build
-cmake -S . -B build_debug -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Debug
-cmake --build build_debug --config Debug
-```
-
-This enables additional debugging features like memory cache statistics and verbose logging.
+Contributions to DetourModKit are welcome! If you have bug fixes, feature enhancements, or other improvements, please feel free to open an issue to discuss or submit a pull request.
