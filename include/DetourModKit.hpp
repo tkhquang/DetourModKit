@@ -27,7 +27,7 @@
  */
 namespace DMK = DetourModKit;
 namespace DMKConfig = DetourModKit::Config;
-namespace DMKAOB = DetourModKit::AOB;
+namespace DMKScanner = DetourModKit::Scanner;
 namespace DMKString = DetourModKit::String;
 namespace DMKFilesystem = DetourModKit::Filesystem;
 namespace DMKMemory = DetourModKit::Memory;

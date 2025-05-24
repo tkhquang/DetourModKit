@@ -114,7 +114,7 @@ namespace
     }
 } // anonymous namespace
 
-std::vector<std::byte> DetourModKit::AOB::parseAOB(const std::string &aob_str)
+std::vector<std::byte> DetourModKit::Scanner::parseAOB(const std::string &aob_str)
 {
     Logger &logger = Logger::getInstance();
     const std::byte WILDCARD_BYTE_VALUE{0xCC}; // Define the wildcard representation
@@ -143,8 +143,8 @@ std::vector<std::byte> DetourModKit::AOB::parseAOB(const std::string &aob_str)
     return byte_vector;
 }
 
-std::byte *DetourModKit::AOB::FindPattern(std::byte *start_address, size_t region_size,
-                                          const std::vector<std::byte> &pattern_with_placeholders)
+std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t region_size,
+                                              const std::vector<std::byte> &pattern_with_placeholders)
 {
     Logger &logger = Logger::getInstance();
     const size_t pattern_size = pattern_with_placeholders.size();

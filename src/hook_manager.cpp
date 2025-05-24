@@ -6,7 +6,7 @@
 #include <cstddef>
 
 using namespace DetourModKit;
-using namespace DetourModKit::AOB;
+using namespace DetourModKit::Scanner;
 using namespace DetourModKit::String;
 
 // --- Singleton implementation ---

@@ -7,7 +7,7 @@
 
 namespace DetourModKit
 {
-    namespace AOB
+    namespace Scanner
     {
         /**
          * @brief Parses a space-separated AOB string into a byte vector for scanning.
@@ -32,7 +32,7 @@ namespace DetourModKit
          */
         std::byte *FindPattern(std::byte *start_address, size_t region_size,
                                const std::vector<std::byte> &pattern_with_placeholders);
-    } // namespace AOB
+    } // namespace Scanner
 } // namespace DetourModKit
 
 #endif // AOB_SCANNER_HPP
