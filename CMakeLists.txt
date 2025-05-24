@@ -133,7 +133,7 @@ target_include_directories(DetourModKit
 if(TARGET ${SAFETYHOOK_LIBRARY_TARGET_NAME})
   # Link SafetyHook. Zydis and Zycore should be linked transitively if SafetyHook
   # specifies them as PUBLIC or INTERFACE dependencies.
-  target_link_libraries(DetourModKit PRIVATE ${SAFETYHOOK_LIBRARY_TARGET_NAME})
+  target_link_libraries(DetourModKit PUBLIC ${SAFETYHOOK_LIBRARY_TARGET_NAME})
   message(STATUS "DetourModKit linked against target: ${SAFETYHOOK_LIBRARY_TARGET_NAME}")
 else()
   message(WARNING "SafetyHook library target '${SAFETYHOOK_LIBRARY_TARGET_NAME}' was not found. "
