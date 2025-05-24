@@ -36,7 +36,7 @@ SAFETYHOOK_BUILD_DIR := $(SAFETYHOOK_SUBMODULE_DIR)/build
 # This is based on your sanity check. Adjust if SafetyHook structures its includes differently.
 SAFETYHOOK_HEADERS_SOURCE_DIR := $(SAFETYHOOK_SUBMODULE_DIR)/include
 # Also consider the main safetyhook.hpp if it's at the root of the submodule
-SAFETYHOOK_MAIN_HEADER_SOURCE := $(SAFETYHOOK_HEADERS_SOURCE_DIR)/safetyhook.hpp
+SAFETYHOOK_MAIN_HEADER_SOURCE := $(SAFETYHOOK_SUBMODULE_DIR)/safetyhook.hpp
 
 
 SIMPLEINI_SUBMODULE_DIR := $(EXTERNAL_DIR)/simpleini
