@@ -14,6 +14,8 @@
 #include <array>
 #include <map>
 
+using namespace DetourModKit;
+
 // Static member initialization
 std::string Logger::s_log_prefix = "DetourModKit";            // Default prefix
 std::string Logger::s_log_file_name = "DetourModKit_Log.txt"; // Default log file name

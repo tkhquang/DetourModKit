@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <cstddef>
 
+using namespace DetourModKit;
+using namespace DetourModKit::AOB;
+using namespace DetourModKit::String;
+
 // --- Singleton implementation ---
 HookManager &HookManager::getInstance()
 {

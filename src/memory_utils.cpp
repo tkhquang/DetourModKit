@@ -22,25 +22,32 @@
 #include <stdexcept>
 #include <cstddef>
 
-/**
- * @struct CachedMemoryRegionInfo
- * @brief Structure to hold cached memory region information.
- * @details Internal structure for the memory_utils cache implementation.
- */
-struct CachedMemoryRegionInfo
-{
-    uintptr_t baseAddress;                           /**< Base address of the memory region. */
-    size_t regionSize;                               /**< Size of the memory region. */
-    DWORD protection;                                /**< Protection flags of the region (e.g., PAGE_READWRITE). */
-    std::chrono::steady_clock::time_point timestamp; /**< Timestamp of when this entry was last validated/updated. */
-    bool valid;                                      /**< True if this cache entry is currently valid. */
+using namespace DetourModKit;
+using namespace DetourModKit::String;
 
+// Anonymous namespace for internal helpers and storage
+namespace
+{
     /**
-     * @brief Default constructor initializing an invalid entry.
+     * @struct CachedMemoryRegionInfo
+     * @brief Structure to hold cached memory region information.
+     * @details Internal structure for the memory_utils cache implementation.
      */
-    CachedMemoryRegionInfo()
-        : baseAddress(0), regionSize(0), protection(0), valid(false) {}
-};
+    struct CachedMemoryRegionInfo
+    {
+        uintptr_t baseAddress;                           /**< Base address of the memory region. */
+        size_t regionSize;                               /**< Size of the memory region. */
+        DWORD protection;                                /**< Protection flags of the region (e.g., PAGE_READWRITE). */
+        std::chrono::steady_clock::time_point timestamp; /**< Timestamp of when this entry was last validated/updated. */
+        bool valid;                                      /**< True if this cache entry is currently valid. */
+
+        /**
+         * @brief Default constructor initializing an invalid entry.
+         */
+        CachedMemoryRegionInfo()
+            : baseAddress(0), regionSize(0), protection(0), valid(false) {}
+    };
+}
 
 /**
  * @namespace Anonymous_MemoryUtils
@@ -209,7 +216,7 @@ namespace MemoryUtilsCacheInternal
 
 // --- Public API functions for Memory Utilities ---
 
-void initMemoryCache(size_t cache_size, unsigned int expiry_ms)
+void DetourModKit::Memory::initMemoryCache(size_t cache_size, unsigned int expiry_ms)
 {
     // Use std::call_once to ensure performCacheInitialization is called exactly once
     // across all threads, even if initMemoryCache is called multiple times.
@@ -218,7 +225,7 @@ void initMemoryCache(size_t cache_size, unsigned int expiry_ms)
                    cache_size, expiry_ms);
 }
 
-void clearMemoryCache()
+void DetourModKit::Memory::clearMemoryCache()
 {
     std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
     for (auto &entry : MemoryUtilsCacheInternal::s_memoryCache)
@@ -236,7 +243,7 @@ void clearMemoryCache()
 #endif
 }
 
-std::string getMemoryCacheStats()
+std::string DetourModKit::Memory::getMemoryCacheStats()
 {
 #ifdef _DEBUG
     uint64_t hits = MemoryUtilsCacheInternal::s_cacheHits.load(std::memory_order_relaxed);
@@ -272,7 +279,7 @@ std::string getMemoryCacheStats()
 #endif
 }
 
-bool isMemoryReadable(const volatile void *address, size_t size)
+bool DetourModKit::Memory::isMemoryReadable(const volatile void *address, size_t size)
 {
     if (!address || size == 0) // Reading zero bytes is trivially true but often indicates an error in calling code.
     {                          // For consistency with how VirtualQuery might treat it, or if size=0 indicates no check needed.
@@ -281,7 +288,7 @@ bool isMemoryReadable(const volatile void *address, size_t size)
     }
 
     // Ensure cache is initialized (does nothing if already initialized)
-    initMemoryCache(); // Uses default parameters if not called explicitly by user
+    DetourModKit::Memory::initMemoryCache(); // Uses default parameters if not called explicitly by user
 
     uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     bool is_region_readable_from_cache = false;
@@ -370,13 +377,13 @@ bool isMemoryReadable(const volatile void *address, size_t size)
     return is_fully_contained;
 }
 
-bool isMemoryWritable(volatile void *address, size_t size)
+bool DetourModKit::Memory::isMemoryWritable(volatile void *address, size_t size)
 {
     if (!address || size == 0)
     {
         return false;
     }
-    initMemoryCache(); // Ensure cache is initialized
+    DetourModKit::Memory::initMemoryCache(); // Ensure cache is initialized
 
     uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     bool is_region_writable_from_cache = false;
@@ -443,7 +450,7 @@ bool isMemoryWritable(volatile void *address, size_t size)
     return is_fully_contained;
 }
 
-bool WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
+bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
 {
     if (!targetAddress)
     {

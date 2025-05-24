@@ -13,7 +13,9 @@
 #include <filesystem>
 #include <stdexcept>
 
-std::string getRuntimeDirectory()
+using namespace DetourModKit;
+
+std::string DetourModKit::Filesystem::getRuntimeDirectory()
 {
     HMODULE h_self_module = NULL;
     char module_path_buffer[MAX_PATH] = {0}; // Initialize buffer

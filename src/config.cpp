@@ -26,6 +26,10 @@
 #include <variant>
 #include <typeinfo>
 
+using namespace DetourModKit;
+using namespace DetourModKit::Filesystem;
+using namespace DetourModKit::String;
+
 // Anonymous namespace for internal helpers and storage
 namespace
 {

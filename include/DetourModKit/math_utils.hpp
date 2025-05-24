@@ -1,11 +1,9 @@
 #pragma once // Ensures this header is included only once per compilation unit
-
-#include <DirectXMath.h>
-
 /**
  * @file math_utils.hpp
  * @brief Provides basic mathematical utility functions.
  */
+#include <DirectXMath.h>
 
 namespace DetourModKit
 {

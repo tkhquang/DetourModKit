@@ -16,98 +16,105 @@
 #include <limits>
 #include <cstddef>
 
-/**
- * @struct ParsedPatternByte
- * @brief Internal helper struct representing a parsed AOB element clearly for std::byte.
- * @details Used temporarily during parsing before converting to the final
- *          std::vector<std::byte> with std::byte{0xCC} wildcards.
- */
-struct ParsedPatternByte
-{
-    std::byte value;  /**< Byte value (used if not a wildcard). */
-    bool is_wildcard; /**< True if this element represents '??' or '?'. */
-};
+using namespace DetourModKit;
+using namespace DetourModKit::String;
 
-/**
- * @brief Internal parser: Converts AOB string to a structured vector of ParsedPatternByte.
- * @details Parses the input string token by token (space-separated).
- *          Validates each token for format ('??', '?', or two hex digits).
- *          Uses the Logger for detailed debug/error messages.
- * @param aob_str Raw AOB string (e.g., "48 ?? 8B").
- * @return std::vector<ParsedPatternByte> Vector of parsed structs, or empty on error.
- */
-static std::vector<ParsedPatternByte> parseAOBInternal(const std::string &aob_str)
+// Anonymous namespace for internal helpers and storage
+namespace
 {
-    std::vector<ParsedPatternByte> pattern_elements;
-    std::string trimmed_aob = trim(aob_str);
-    std::istringstream iss(trimmed_aob);
-    std::string token;
-    Logger &logger = Logger::getInstance();
-    int token_idx = 0;
-
-    if (trimmed_aob.empty())
+    /**
+     * @struct ParsedPatternByte
+     * @brief Internal helper struct representing a parsed AOB element clearly for std::byte.
+     * @details Used temporarily during parsing before converting to the final
+     *          std::vector<std::byte> with std::byte{0xCC} wildcards.
+     */
+    struct ParsedPatternByte
     {
-        if (!aob_str.empty())
+        std::byte value;  /**< Byte value (used if not a wildcard). */
+        bool is_wildcard; /**< True if this element represents '??' or '?'. */
+    };
+
+    /**
+     * @brief Internal parser: Converts AOB string to a structured vector of ParsedPatternByte.
+     * @details Parses the input string token by token (space-separated).
+     *          Validates each token for format ('??', '?', or two hex digits).
+     *          Uses the Logger for detailed debug/error messages.
+     * @param aob_str Raw AOB string (e.g., "48 ?? 8B").
+     * @return std::vector<ParsedPatternByte> Vector of parsed structs, or empty on error.
+     */
+    static std::vector<ParsedPatternByte> parseAOBInternal(const std::string &aob_str)
+    {
+        std::vector<ParsedPatternByte> pattern_elements;
+        std::string trimmed_aob = trim(aob_str);
+        std::istringstream iss(trimmed_aob);
+        std::string token;
+        Logger &logger = Logger::getInstance();
+        int token_idx = 0;
+
+        if (trimmed_aob.empty())
         {
-            logger.log(LOG_WARNING, "AOB Parser: Input string became empty after trimming.");
+            if (!aob_str.empty())
+            {
+                logger.log(LOG_WARNING, "AOB Parser: Input string became empty after trimming.");
+            }
+            return pattern_elements;
         }
+
+        logger.log(LOG_DEBUG, "AOB Parser: Parsing string: '" + trimmed_aob + "'");
+
+        while (iss >> token)
+        {
+            token_idx++;
+            if (token == "??" || token == "?")
+            {
+                pattern_elements.push_back({std::byte{0x00}, true}); // Wildcard value can be anything, 0xCC is conventional for final vector
+            }
+            else if (token.length() == 2 && std::isxdigit(static_cast<unsigned char>(token[0])) && std::isxdigit(static_cast<unsigned char>(token[1])))
+            {
+                try
+                {
+                    unsigned long ulong_val = std::stoul(token, nullptr, 16);
+                    if (ulong_val > 0xFF)
+                    {
+                        throw std::out_of_range("Value parsed exceeds byte range (0xFF).");
+                    }
+                    pattern_elements.push_back({static_cast<std::byte>(ulong_val), false});
+                }
+                catch (const std::out_of_range &oor)
+                {
+                    logger.log(LOG_ERROR, "AOB Parser: Hex conversion out of range for '" + token + "' (Pos " + std::to_string(token_idx) + "): " + oor.what());
+                    return {};
+                }
+                catch (const std::invalid_argument &ia)
+                {
+                    logger.log(LOG_ERROR, "AOB Parser: Invalid argument for hex conversion '" + token + "' (Pos " + std::to_string(token_idx) + "): " + ia.what());
+                    return {};
+                }
+            }
+            else
+            {
+                std::ostringstream oss_err;
+                oss_err << "AOB Parser: Invalid token '" << token << "' at position " << token_idx
+                        << ". Expected hex byte (e.g., FF), '?', or '" << '?' << "?'.";
+                logger.log(LOG_ERROR, oss_err.str());
+                return {};
+            }
+        }
+
+        if (pattern_elements.empty() && token_idx > 0)
+        {
+            logger.log(LOG_ERROR, "AOB Parser: Processed tokens but resulting pattern is empty.");
+        }
+        else if (!pattern_elements.empty())
+        {
+            logger.log(LOG_DEBUG, "AOB Parser: Parsed " + std::to_string(pattern_elements.size()) + " elements.");
+        }
+
         return pattern_elements;
     }
+} // anonymous namespace
 
-    logger.log(LOG_DEBUG, "AOB Parser: Parsing string: '" + trimmed_aob + "'");
-
-    while (iss >> token)
-    {
-        token_idx++;
-        if (token == "??" || token == "?")
-        {
-            pattern_elements.push_back({std::byte{0x00}, true}); // Wildcard value can be anything, 0xCC is conventional for final vector
-        }
-        else if (token.length() == 2 && std::isxdigit(static_cast<unsigned char>(token[0])) && std::isxdigit(static_cast<unsigned char>(token[1])))
-        {
-            try
-            {
-                unsigned long ulong_val = std::stoul(token, nullptr, 16);
-                if (ulong_val > 0xFF)
-                {
-                    throw std::out_of_range("Value parsed exceeds byte range (0xFF).");
-                }
-                pattern_elements.push_back({static_cast<std::byte>(ulong_val), false});
-            }
-            catch (const std::out_of_range &oor)
-            {
-                logger.log(LOG_ERROR, "AOB Parser: Hex conversion out of range for '" + token + "' (Pos " + std::to_string(token_idx) + "): " + oor.what());
-                return {};
-            }
-            catch (const std::invalid_argument &ia)
-            {
-                logger.log(LOG_ERROR, "AOB Parser: Invalid argument for hex conversion '" + token + "' (Pos " + std::to_string(token_idx) + "): " + ia.what());
-                return {};
-            }
-        }
-        else
-        {
-            std::ostringstream oss_err;
-            oss_err << "AOB Parser: Invalid token '" << token << "' at position " << token_idx
-                    << ". Expected hex byte (e.g., FF), '?', or '" << '?' << "?'.";
-            logger.log(LOG_ERROR, oss_err.str());
-            return {};
-        }
-    }
-
-    if (pattern_elements.empty() && token_idx > 0)
-    {
-        logger.log(LOG_ERROR, "AOB Parser: Processed tokens but resulting pattern is empty.");
-    }
-    else if (!pattern_elements.empty())
-    {
-        logger.log(LOG_DEBUG, "AOB Parser: Parsed " + std::to_string(pattern_elements.size()) + " elements.");
-    }
-
-    return pattern_elements;
-}
-
-std::vector<std::byte> parseAOB(const std::string &aob_str)
+std::vector<std::byte> DetourModKit::AOB::parseAOB(const std::string &aob_str)
 {
     Logger &logger = Logger::getInstance();
     const std::byte WILDCARD_BYTE_VALUE{0xCC}; // Define the wildcard representation
@@ -136,8 +143,8 @@ std::vector<std::byte> parseAOB(const std::string &aob_str)
     return byte_vector;
 }
 
-std::byte *FindPattern(std::byte *start_address, size_t region_size,
-                       const std::vector<std::byte> &pattern_with_placeholders)
+std::byte *DetourModKit::AOB::FindPattern(std::byte *start_address, size_t region_size,
+                                          const std::vector<std::byte> &pattern_with_placeholders)
 {
     Logger &logger = Logger::getInstance();
     const size_t pattern_size = pattern_with_placeholders.size();
