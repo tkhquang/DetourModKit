@@ -51,6 +51,18 @@ else()
     "'git submodule update --init --recursive'")
 endif()
 
+# DirectXMath (header-only library from submodule)
+set(DIRECTXMATH_INCLUDE_DIR "")
+
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/DirectXMath/Inc/DirectXMath.h")
+  set(DIRECTXMATH_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/DirectXMath/Inc")
+  message(STATUS "DirectXMath found at: ${DIRECTXMATH_INCLUDE_DIR}")
+else()
+  message(FATAL_ERROR "DirectXMath submodule not found at 'external/DirectXMath'. "
+    "Please ensure submodules are initialized and updated: "
+    "'git submodule update --init --recursive'")
+endif()
+
 # --- Compile Definitions for DetourModKit and potentially for headers it includes ---
 if(WIN32)
   add_compile_definitions(
@@ -116,6 +128,10 @@ target_include_directories(DetourModKit
   # For consumers using DetourModKit as a subdirectory (BUILD_INTERFACE):
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 
+  # DirectXMath headers for both build and install interfaces
+  $<BUILD_INTERFACE:${DIRECTXMATH_INCLUDE_DIR}>
+  $<INSTALL_INTERFACE:include/DirectXMath>
+
   PRIVATE
 
   # For DetourModKit's *own sources* (in src/) to find its *public headers*
@@ -123,6 +139,9 @@ target_include_directories(DetourModKit
 
   # For DetourModKit's own sources to find SimpleIni.h
   "${CMAKE_CURRENT_SOURCE_DIR}/external/simpleini"
+
+  # DirectXMath for DetourModKit's internal usage
+  "${DIRECTXMATH_INCLUDE_DIR}"
 
   # SafetyHook's public include directories should be propagated transitively
   # by linking with the 'safetyhook' target if SafetyHook's CMakeLists.txt
@@ -189,6 +208,28 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp")
   message(STATUS "Centralized DetourModKit.hpp header will be installed.")
 else()
   message(WARNING "Centralized header 'include/DetourModKit.hpp' not found.")
+endif()
+
+# Install DirectXMath headers
+if(DIRECTXMATH_INCLUDE_DIR AND EXISTS "${DIRECTXMATH_INCLUDE_DIR}")
+  file(GLOB _directxmath_headers_for_install
+    LIST_DIRECTORIES false
+    "${DIRECTXMATH_INCLUDE_DIR}/*.h"
+    "${DIRECTXMATH_INCLUDE_DIR}/*.hpp"
+    "${DIRECTXMATH_INCLUDE_DIR}/*.inl"
+  )
+
+  if(_directxmath_headers_for_install)
+    install(FILES ${_directxmath_headers_for_install}
+      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath"
+      COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+    )
+    message(STATUS "DirectXMath headers will be installed from: ${DIRECTXMATH_INCLUDE_DIR}")
+  else()
+    message(WARNING "No DirectXMath headers found in '${DIRECTXMATH_INCLUDE_DIR}' to install.")
+  endif()
+else()
+  message(WARNING "DirectXMath include directory not found or empty: ${DIRECTXMATH_INCLUDE_DIR}")
 endif()
 
 # --- CMake Package Configuration for Consumers ---
@@ -263,4 +304,5 @@ message(STATUS "  Install Library Dir:         ${CMAKE_INSTALL_LIBDIR} (relative
 message(STATUS "  Install Include Dir:         ${CMAKE_INSTALL_INCLUDEDIR} (relative to prefix)")
 message(STATUS "  Install CMake Config Dir:    ${DETOURMODKIT_CMAKE_CONFIG_INSTALL_DIR} (potentially relative to prefix)")
 message(STATUS "  Install Docs Dir:            ${CMAKE_INSTALL_DOCDIR} (standard path)")
+message(STATUS "  DirectXMath Include Dir:     ${DIRECTXMATH_INCLUDE_DIR}")
 message(STATUS "---------------------------------------------------------------------")

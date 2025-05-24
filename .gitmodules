@@ -4,3 +4,6 @@
 [submodule "external/simpleini"]
 	path = external/simpleini
 	url = https://github.com/brofield/simpleini.git
+[submodule "external/DirectXMath"]
+	path = external/DirectXMath
+	url = https://github.com/microsoft/DirectXMath.git

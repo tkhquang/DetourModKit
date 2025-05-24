@@ -371,6 +371,7 @@ DetourModKit is licensed under the **MIT License**. See the `LICENSE` file in th
 This project incorporates components from other open-source projects. Please refer to the [DetourModKit_Acknowledgements.txt](/DetourModKit_Acknowledgements.txt) file for a list of these components and their respective licenses:
 *   **SafetyHook:** Boost Software License 1.0
 *   **SimpleIni:** MIT License
+*   **DirectXMath:** MIT License
 *   **Zydis & Zycore (dependencies of SafetyHook):** MIT License
 
 Users of DetourModKit are responsible for ensuring compliance with all included licenses.
