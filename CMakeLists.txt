@@ -111,15 +111,14 @@ target_include_directories(DetourModKit
   PUBLIC
 
   # For consumers using find_package(DetourModKit) AFTER installation:
-  # Their include path will be <CMAKE_INSTALL_PREFIX>/include, and they will
-  # use #include <DetourModKit/header.hpp>.
-  # This adds <CMAKE_INSTALL_PREFIX>/include to the interface for installed targets.
   $<INSTALL_INTERFACE:include>
+
+  # For consumers using DetourModKit as a subdirectory (BUILD_INTERFACE):
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+
   PRIVATE
 
   # For DetourModKit's *own sources* (in src/) to find its *public headers*
-  # which are located in YourProjectRoot/include/. This allows src/logger.cpp
-  # to successfully #include <DetourModKit/logger.hpp> (assuming -I<project_root>/include is set).
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
 
   # For DetourModKit's own sources to find SimpleIni.h
