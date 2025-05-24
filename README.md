@@ -67,9 +67,14 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
     │   ├── DetourModKit/             <-- DetourModKit public headers
     │   │   ├── aob_scanner.hpp
     │   │   ├── config.hpp
+    │   │   ├── math_utils.hpp        <-- DirectXMath-powered math utilities
     │   │   ├── ...
     │   │   └── string_utils.hpp
-    │   ├── DetourModKit.hpp          <-- Main DetourModKit include (NEW)
+    │   ├── DetourModKit.hpp          <-- Main DetourModKit include
+    │   ├── DirectXMath/              <-- DirectXMath headers
+    │   │   ├── DirectXMath.h
+    │   │   ├── DirectXMathVector.inl
+    │   │   └── ...
     │   ├── safetyhook/               <-- SafetyHook detail headers
     │   │   ├── common.hpp
     │   │   ├── inline_hook.hpp
