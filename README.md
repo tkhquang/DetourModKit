@@ -88,13 +88,75 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
 
 ## Using DetourModKit in Your Mod Project
 
+There are two main approaches to integrate DetourModKit into your project:
+
+### Method 1: Using DetourModKit as a Submodule (Recommended)
+
+This method is ideal for active development and ensures you always have the latest compatible version.
+
+1.  **Add DetourModKit as a submodule:**
+    ```bash
+    # In your project root
+    git submodule add https://github.com/tkhquang/DetourModKit.git external/DetourModKit
+    git submodule update --init --recursive
+    ```
+
+2.  **Configure your CMakeLists.txt:**
+    ```cmake
+    cmake_minimum_required(VERSION 3.16)
+    project(MyMod VERSION 1.0.0 LANGUAGES CXX)
+
+    set(CMAKE_CXX_STANDARD 23)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+    # Add DetourModKit as subdirectory
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/DetourModKit/CMakeLists.txt")
+      message(STATUS "Configuring DetourModKit from: external/DetourModKit")
+      add_subdirectory(external/DetourModKit)
+
+      if(TARGET DetourModKit)
+        set(DETOURMODKIT_TARGET DetourModKit)
+        message(STATUS "DetourModKit target found: ${DETOURMODKIT_TARGET}")
+      else()
+        message(FATAL_ERROR "DetourModKit target not created by subdirectory")
+      endif()
+    else()
+      message(FATAL_ERROR "DetourModKit not found at 'external/DetourModKit'. "
+        "Please ensure the submodule is initialized: "
+        "'git submodule update --init --recursive'")
+    endif()
+
+    # Create your mod target
+    add_library(MyMod SHARED src/main.cpp)
+
+    # Link against DetourModKit (all dependencies are transitively linked)
+    target_link_libraries(MyMod PRIVATE DetourModKit)
+
+    # Add system libraries (Windows)
+    if(WIN32)
+        target_link_libraries(MyMod PRIVATE psapi user32 kernel32)
+    endif()
+    ```
+
+3.  **In your GitHub Actions workflow (if using CI):**
+    ```yaml
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: "recursive"  # This ensures DetourModKit is pulled
+    ```
+
+### Method 2: Using Pre-built DetourModKit Package
+
+This method uses a pre-built and installed version of DetourModKit.
+
 1.  **Integrate DetourModKit:**
     *   After building DetourModKit, copy the entire `install_package_mingw/` or `install_package_msvc/` directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
     *   Alternatively, adjust your mod's build system to point to DetourModKit's install directory directly.
 
 2.  **Configure Your Mod's Build System:**
 
-    ### CMake (Recommended)
+    #### CMake
     ```cmake
     # In your mod's CMakeLists.txt
     cmake_minimum_required(VERSION 3.16)
@@ -118,7 +180,7 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
     endif()
     ```
 
-    ### Makefile (Example for g++ MinGW)
+    #### Makefile (Example for g++ MinGW)
     ```makefile
     # In your mod's Makefile
     DETOURMODKIT_DIR := external/DetourModKit
@@ -132,162 +194,162 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
     # $(CXX) $(YOUR_OBJECTS) -o YourMod.asi -shared $(LDFLAGS) $(LIBS)
     ```
 
-3.  **Using Kit Components in Your Mod:**
+## Code Example
 
-    ```c++
-    // MyMod/src/main.cpp
-    #include <windows.h>
+```c++
+// MyMod/src/main.cpp
+#include <windows.h>
 
-    #include <DetourModKit/logger.hpp>
-    #include <DetourModKit/config.hpp>
-    #include <DetourModKit/hook_manager.hpp>
-    #include <DetourModKit/aob_scanner.hpp>
-    #include <DetourModKit/string_utils.hpp>
-    #include <DetourModKit/filesystem_utils.hpp>
+#include <DetourModKit/logger.hpp>
+#include <DetourModKit/config.hpp>
+#include <DetourModKit/hook_manager.hpp>
+#include <DetourModKit/aob_scanner.hpp>
+#include <DetourModKit/string_utils.hpp>
+#include <DetourModKit/filesystem_utils.hpp>
 
-    #include <safetyhook.hpp>
-    #include <SimpleIni.h>
+#include <safetyhook.hpp>
+#include <SimpleIni.h>
 
-    // Using convenience aliases for DetourModKit namespaces if desired
-    namespace DMK = DetourModKit;
-    namespace DMKConfig = DetourModKit::Config;
-    namespace DMKAOB = DetourModKit::AOB;
-    namespace DMKString = DetourModKit::String;
+// Using convenience aliases for DetourModKit namespaces if desired
+namespace DMK = DetourModKit;
+namespace DMKConfig = DetourModKit::Config;
+namespace DMKAOB = DetourModKit::AOB;
+namespace DMKString = DetourModKit::String;
 
-    // --- Global variables for your mod's configuration ---
-    struct ModConfiguration {
-        bool enable_greeting_hook = true;
-        std::string log_level_setting = "INFO";
-    } g_mod_config;
+// --- Global variables for your mod's configuration ---
+struct ModConfiguration {
+    bool enable_greeting_hook = true;
+    std::string log_level_setting = "INFO";
+} g_mod_config;
 
-    // --- Example Hook: Target function signature ---
-    typedef void (__stdcall *OriginalGameFunction_PrintMessage_t)(const char* message, int type);
-    OriginalGameFunction_PrintMessage_t original_GameFunction_PrintMessage = nullptr;
+// --- Example Hook: Target function signature ---
+typedef void (__stdcall *OriginalGameFunction_PrintMessage_t)(const char* message, int type);
+OriginalGameFunction_PrintMessage_t original_GameFunction_PrintMessage = nullptr;
 
-    // Detour function
-    void __stdcall Detour_GameFunction_PrintMessage(const char* message, int type) {
-        DMK::Logger& logger = DMK::Logger::getInstance();
-        logger.log(DMK::LOG_INFO, "Detour_GameFunction_PrintMessage CALLED! Original message: \"" + std::string(message) + "\", type: " + std::to_string(type));
+// Detour function
+void __stdcall Detour_GameFunction_PrintMessage(const char* message, int type) {
+    DMK::Logger& logger = DMK::Logger::getInstance();
+    logger.log(DMK::LOG_INFO, "Detour_GameFunction_PrintMessage CALLED! Original message: \"" + std::string(message) + "\", type: " + std::to_string(type));
 
-        if (g_mod_config.enable_greeting_hook) {
-            logger.log(DMK::LOG_DEBUG, "Modifying message because greeting hook is enabled.");
-            if (original_GameFunction_PrintMessage) {
-                original_GameFunction_PrintMessage("Hello from DetourModKit! Hooked!", type + 100);
-            }
-            return;
-        }
-
+    if (g_mod_config.enable_greeting_hook) {
+        logger.log(DMK::LOG_DEBUG, "Modifying message because greeting hook is enabled.");
         if (original_GameFunction_PrintMessage) {
-            original_GameFunction_PrintMessage(message, type);
+            original_GameFunction_PrintMessage("Hello from DetourModKit! Hooked!", type + 100);
         }
+        return;
     }
 
-    // --- Mod Initialization Function ---
-    void InitializeMyMod() {
-        // 1. Configure the Logger
-        DMK::Logger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S.%f");
-        DMK::Logger& logger = DMK::Logger::getInstance();
+    if (original_GameFunction_PrintMessage) {
+        original_GameFunction_PrintMessage(message, type);
+    }
+}
 
-        // 2. Register your configuration variables
-        DMKConfig::registerBool("Hooks", "EnableGreetingHook", "Enable Greeting Hook", g_mod_config.enable_greeting_hook, true);
-        DMKConfig::registerString("Debug", "LogLevel", "Log Level", g_mod_config.log_level_setting, "INFO");
+// --- Mod Initialization Function ---
+void InitializeMyMod() {
+    // 1. Configure the Logger
+    DMK::Logger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S.%f");
+    DMK::Logger& logger = DMK::Logger::getInstance();
 
-        // 3. Load configuration from INI file
-        DMKConfig::load("MyMod.ini");
+    // 2. Register your configuration variables
+    DMKConfig::registerBool("Hooks", "EnableGreetingHook", "Enable Greeting Hook", g_mod_config.enable_greeting_hook, true);
+    DMKConfig::registerString("Debug", "LogLevel", "Log Level", g_mod_config.log_level_setting, "INFO");
 
-        // 4. Apply LogLevel from loaded configuration
-        logger.setLogLevel(DMK::Logger::stringToLogLevel(g_mod_config.log_level_setting));
+    // 3. Load configuration from INI file
+    DMKConfig::load("MyMod.ini");
 
-        // 5. Log the loaded configuration
-        logger.log(DMK::LOG_INFO, "MyMod configuration loaded and applied.");
-        DMKConfig::logAll();
+    // 4. Apply LogLevel from loaded configuration
+    logger.setLogLevel(DMK::Logger::stringToLogLevel(g_mod_config.log_level_setting));
 
-        // 6. Initialize Hooks
-        DMK::HookManager& hook_manager = DMK::HookManager::getInstance();
+    // 5. Log the loaded configuration
+    logger.log(DMK::LOG_INFO, "MyMod configuration loaded and applied.");
+    DMKConfig::logAll();
 
-        uintptr_t target_function_address = 0;
+    // 6. Initialize Hooks
+    DMK::HookManager& hook_manager = DMK::HookManager::getInstance();
 
-        // Example: AOB Scan
-        HMODULE game_module = GetModuleHandleA(NULL); // Base executable
-        if (game_module) {
-            MODULEINFO module_info = {0};
-            if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info))) {
-                logger.log(DMK::LOG_DEBUG, "Scanning module at " + DMKString::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)) +
-                                          " size " + std::to_string(module_info.SizeOfImage));
+    uintptr_t target_function_address = 0;
 
-                // Replace with actual AOB pattern from your target game
-                std::string aob_sig_str = "48 89 ?? ?? 57";
-                ptrdiff_t pattern_offset = 0; // Offset from pattern start to function start
+    // Example: AOB Scan
+    HMODULE game_module = GetModuleHandleA(NULL); // Base executable
+    if (game_module) {
+        MODULEINFO module_info = {0};
+        if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info))) {
+            logger.log(DMK::LOG_DEBUG, "Scanning module at " + DMKString::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)) +
+                                      " size " + std::to_string(module_info.SizeOfImage));
 
-                std::vector<std::byte> pattern_bytes = DMKAOB::parseAOB(aob_sig_str);
-                if (!pattern_bytes.empty()) {
-                    std::byte* found_pattern = DMKAOB::FindPattern(
-                        reinterpret_cast<std::byte*>(module_info.lpBaseOfDll),
-                        module_info.SizeOfImage,
-                        pattern_bytes
-                    );
-                    if (found_pattern) {
-                        target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
-                        logger.log(DMK::LOG_INFO, "Pattern for GameFunction_PrintMessage found at: " +
-                                                  DMKString::format_address(reinterpret_cast<uintptr_t>(found_pattern)) +
-                                                  ", target address: " + DMKString::format_address(target_function_address));
-                    } else {
-                        logger.log(DMK::LOG_ERROR, "AOB pattern for GameFunction_PrintMessage not found in target module.");
-                    }
+            // Replace with actual AOB pattern from your target game
+            std::string aob_sig_str = "48 89 ?? ?? 57";
+            ptrdiff_t pattern_offset = 0; // Offset from pattern start to function start
+
+            std::vector<std::byte> pattern_bytes = DMKAOB::parseAOB(aob_sig_str);
+            if (!pattern_bytes.empty()) {
+                std::byte* found_pattern = DMKAOB::FindPattern(
+                    reinterpret_cast<std::byte*>(module_info.lpBaseOfDll),
+                    module_info.SizeOfImage,
+                    pattern_bytes
+                );
+                if (found_pattern) {
+                    target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
+                    logger.log(DMK::LOG_INFO, "Pattern for GameFunction_PrintMessage found at: " +
+                                              DMKString::format_address(reinterpret_cast<uintptr_t>(found_pattern)) +
+                                              ", target address: " + DMKString::format_address(target_function_address));
                 } else {
-                     logger.log(DMK::LOG_ERROR, "Failed to parse AOB pattern: " + aob_sig_str);
+                    logger.log(DMK::LOG_ERROR, "AOB pattern for GameFunction_PrintMessage not found in target module.");
                 }
             } else {
-                logger.log(DMK::LOG_ERROR, "GetModuleInformation failed: " + std::to_string(GetLastError()));
+                 logger.log(DMK::LOG_ERROR, "Failed to parse AOB pattern: " + aob_sig_str);
             }
         } else {
-             logger.log(DMK::LOG_ERROR, "Failed to get game module handle.");
+            logger.log(DMK::LOG_ERROR, "GetModuleInformation failed: " + std::to_string(GetLastError()));
         }
+    } else {
+         logger.log(DMK::LOG_ERROR, "Failed to get game module handle.");
+    }
 
-        if (target_function_address != 0) {
-            DMK::HookConfig hook_cfg; // Use default config (autoEnable = true)
-            std::string hook_id = hook_manager.create_inline_hook(
-                "GameFunction_PrintMessage_Hook",
-                target_function_address,
-                reinterpret_cast<void*>(Detour_GameFunction_PrintMessage),
-                reinterpret_cast<void**>(&original_GameFunction_PrintMessage),
-                hook_cfg
-            );
+    if (target_function_address != 0) {
+        DMK::HookConfig hook_cfg; // Use default config (autoEnable = true)
+        std::string hook_id = hook_manager.create_inline_hook(
+            "GameFunction_PrintMessage_Hook",
+            target_function_address,
+            reinterpret_cast<void*>(Detour_GameFunction_PrintMessage),
+            reinterpret_cast<void**>(&original_GameFunction_PrintMessage),
+            hook_cfg
+        );
 
-            if (!hook_id.empty()) {
-                logger.log(DMK::LOG_INFO, "Successfully created hook: " + hook_id);
-            } else {
-                logger.log(DMK::LOG_ERROR, "Failed to create hook for GameFunction_PrintMessage.");
-            }
+        if (!hook_id.empty()) {
+            logger.log(DMK::LOG_INFO, "Successfully created hook: " + hook_id);
         } else {
-            logger.log(DMK::LOG_WARNING, "Target address for GameFunction_PrintMessage is 0 or not found. Hook not created.");
+            logger.log(DMK::LOG_ERROR, "Failed to create hook for GameFunction_PrintMessage.");
         }
-
-        logger.log(DMK::LOG_INFO, "MyMod Initialized using DetourModKit!");
+    } else {
+        logger.log(DMK::LOG_WARNING, "Target address for GameFunction_PrintMessage is 0 or not found. Hook not created.");
     }
 
-    // --- Mod Shutdown Function (optional) ---
-    void ShutdownMyMod() {
-        DMK::Logger& logger = DMK::Logger::getInstance();
-        logger.log(DMK::LOG_INFO, "MyMod Shutting Down...");
+    logger.log(DMK::LOG_INFO, "MyMod Initialized using DetourModKit!");
+}
 
-        DMK::HookManager::getInstance().remove_all_hooks();
-        DMKConfig::clearRegisteredItems();
+// --- Mod Shutdown Function (optional) ---
+void ShutdownMyMod() {
+    DMK::Logger& logger = DMK::Logger::getInstance();
+    logger.log(DMK::LOG_INFO, "MyMod Shutting Down...");
 
-        logger.log(DMK::LOG_INFO, "MyMod Shutdown Complete.");
+    DMK::HookManager::getInstance().remove_all_hooks();
+    DMKConfig::clearRegisteredItems();
+
+    logger.log(DMK::LOG_INFO, "MyMod Shutdown Complete.");
+}
+
+// --- DLL Main or equivalent entry point ---
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        DisableThreadLibraryCalls(hModule);
+        InitializeMyMod();
+    } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+        ShutdownMyMod();
     }
-
-    // --- DLL Main or equivalent entry point ---
-    BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-        if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
-            DisableThreadLibraryCalls(hModule);
-            InitializeMyMod();
-        } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
-            ShutdownMyMod();
-        }
-        return TRUE;
-    }
-    ```
+    return TRUE;
+}
+```
 
 ## Configuration File Example
 
@@ -303,6 +365,12 @@ LogLevel=INFO
 [Hotkeys]
 ToggleKey=0x72,0x70  # F3, F1 (hex VK codes)
 ```
+
+## Projects Using DetourModKit
+
+For practical reference and real-world usage examples:
+
+* **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
 
 ## License
 
