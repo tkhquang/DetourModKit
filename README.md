@@ -278,9 +278,9 @@ void InitializeMyMod() {
             std::string aob_sig_str = "48 89 ?? ?? 57";
             ptrdiff_t pattern_offset = 0;
 
-            std::vector<std::byte> pattern_bytes = DMKAOB::parseAOB(aob_sig_str);
+            std::vector<std::byte> pattern_bytes = DMKScanner::parseAOB(aob_sig_str);
             if (!pattern_bytes.empty()) {
-                std::byte* found_pattern = DMKAOB::FindPattern(
+                std::byte* found_pattern = DMKScanner::FindPattern(
                     reinterpret_cast<std::byte*>(module_info.lpBaseOfDll),
                     module_info.SizeOfImage,
                     pattern_bytes
@@ -368,6 +368,7 @@ ToggleKey=0x72,0x70  # F3, F1 (hex VK codes)
 For practical reference and real-world usage examples:
 
 * **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
+* **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
 
 ## License
 
