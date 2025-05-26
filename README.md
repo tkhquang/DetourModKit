@@ -244,7 +244,7 @@ void __stdcall Detour_GameFunction_PrintMessage(const char* message, int type) {
 // Mod Initialization Function
 void InitializeMyMod() {
     // Configure the Logger
-    DMKLogger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S.%f");
+    DMKLogger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S");
     DMKLogger& logger = DMKLogger::getInstance();
 
     // Register your configuration variables
