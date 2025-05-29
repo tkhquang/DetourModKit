@@ -12,7 +12,7 @@ using namespace DetourModKit::String;
 // --- Singleton implementation ---
 HookManager &HookManager::getInstance()
 {
-    static HookManager instance; // Logger will be default Logger::getInstance()
+    static HookManager instance;
     return instance;
 }
 
@@ -223,7 +223,7 @@ std::string HookManager::create_inline_hook_aob(
 {
     m_logger->log(LOG_DEBUG, "HookManager: Attempting AOB scan for inline hook '" + name + "' with pattern: \"" + aob_pattern_str + "\", offset: " + format_hex(static_cast<int>(aob_offset), 0) + ".");
 
-    std::vector<std::byte> pattern_bytes = parseAOB(aob_pattern_str); // Use std::byte version
+    std::vector<std::byte> pattern_bytes = parseAOB(aob_pattern_str);
     if (pattern_bytes.empty())
     {
         m_logger->log(LOG_ERROR, "HookManager: AOB pattern parsing failed for inline hook '" + name + "'. Pattern: \"" + aob_pattern_str + "\".");
@@ -347,7 +347,7 @@ std::string HookManager::create_mid_hook_aob(
 {
     m_logger->log(LOG_DEBUG, "HookManager: Attempting AOB scan for mid hook '" + name + "' with pattern: \"" + aob_pattern_str + "\", offset: " + format_hex(static_cast<int>(aob_offset), 0) + ".");
 
-    std::vector<std::byte> pattern_bytes = parseAOB(aob_pattern_str); // Use std::byte version
+    std::vector<std::byte> pattern_bytes = parseAOB(aob_pattern_str);
     if (pattern_bytes.empty())
     {
         m_logger->log(LOG_ERROR, "HookManager: AOB pattern parsing failed for mid hook '" + name + "'. Pattern: \"" + aob_pattern_str + "\".");

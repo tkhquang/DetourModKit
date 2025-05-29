@@ -328,7 +328,7 @@ void DetourModKit::Config::registerKeyList(const std::string &section, const std
 void DetourModKit::Config::load(const std::string &ini_filename)
 {
     Logger &logger = Logger::getInstance();
-    std::string ini_path = getIniFilePath(ini_filename, logger); // Pass logger to helper
+    std::string ini_path = getIniFilePath(ini_filename, logger);
     logger.log(LOG_INFO, "Config: Attempting to load configuration from: " + ini_path);
 
     CSimpleIniA ini;

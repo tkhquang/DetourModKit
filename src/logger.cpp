@@ -267,7 +267,7 @@ std::string Logger::generateLogFilePath() const
         std::filesystem::path final_log_path = std::filesystem::path(determined_module_dir) / log_file_name_instance;
         return final_log_path.lexically_normal().string();
     }
-    catch (const std::exception &e) // Includes std::filesystem::filesystem_error
+    catch (const std::exception &e)
     {
         // Fallback strategy if determining module path fails.
         std::cerr << "[" << log_prefix_instance << " Logger PATH_WARNING] Failed to determine module directory for log file: "
