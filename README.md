@@ -7,9 +7,11 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 *   **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support.
 *   **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
 *   **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
-*   **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes.
+*   **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
+*   **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread.
 *   **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
 *   **String Utilities:** Helper functions for formatting addresses, hexadecimal values, virtual key codes, etc.
+*   **Format Utilities:** Custom formatters for game modding types (memory addresses, byte values, VK codes) with C++20 `std::format` support.
 *   **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 *   **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
 
@@ -66,7 +68,9 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
     ├── include/
     │   ├── DetourModKit/             <-- DetourModKit public headers
     │   │   ├── aob_scanner.hpp
+    │   │   ├── async_logger.hpp      <-- Async logging system
     │   │   ├── config.hpp
+    │   │   ├── format_utils.hpp      <-- Format string utilities
     │   │   ├── math_utils.hpp        <-- DirectXMath-powered math utilities
     │   │   ├── ...
     │   │   └── string_utils.hpp
@@ -226,10 +230,11 @@ OriginalGameFunction_PrintMessage_t original_GameFunction_PrintMessage = nullptr
 // Detour function
 void __stdcall Detour_GameFunction_PrintMessage(const char* message, int type) {
     DMKLogger& logger = DMKLogger::getInstance();
-    logger.log(DMK::LOG_INFO, "Detour_GameFunction_PrintMessage CALLED! Original message: \"" + std::string(message) + "\", type: " + std::to_string(type));
+    // Using format string placeholders for concise logging
+    logger.info("Detour_GameFunction_PrintMessage CALLED! Original message: \"{}\", type: {}", message, type);
 
     if (g_mod_config.enable_greeting_hook) {
-        logger.log(DMK::LOG_DEBUG, "Modifying message because greeting hook is enabled.");
+        logger.debug("Modifying message because greeting hook is enabled.");
         if (original_GameFunction_PrintMessage) {
             original_GameFunction_PrintMessage("Hello from DetourModKit! Hooked!", type + 100);
         }
@@ -247,6 +252,12 @@ void InitializeMyMod() {
     DMKLogger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S");
     DMKLogger& logger = DMKLogger::getInstance();
 
+    // Optional: Enable async logging for high-throughput scenarios
+    // DMKAsyncLoggerConfig async_config;
+    // async_config.queue_capacity = 8192;
+    // async_config.batch_size = 64;
+    // logger.enableAsyncMode(async_config);
+
     // Register your configuration variables
     DMKConfig::registerBool("Hooks", "EnableGreetingHook", "Enable Greeting Hook", g_mod_config.enable_greeting_hook, true);
     DMKConfig::registerString("Debug", "LogLevel", "Log Level", g_mod_config.log_level_setting, "INFO");
@@ -257,8 +268,8 @@ void InitializeMyMod() {
     // Apply LogLevel from loaded configuration
     logger.setLogLevel(DMKLogger::stringToLogLevel(g_mod_config.log_level_setting));
 
-    // Log the loaded configuration
-    logger.log(DMK::LOG_INFO, "MyMod configuration loaded and applied.");
+    // Log the loaded configuration using format string placeholders
+    logger.info("MyMod configuration loaded and applied.");
     DMKConfig::logAll();
 
     // Initialize Hooks
@@ -271,8 +282,10 @@ void InitializeMyMod() {
     if (game_module) {
         MODULEINFO module_info = {0};
         if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info))) {
-            logger.log(DMK::LOG_DEBUG, "Scanning module at " + DMKString::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)) +
-                                      " size " + std::to_string(module_info.SizeOfImage));
+            // Using format string placeholders with custom formatters
+            logger.debug("Scanning module at {} size {}",
+                         DMKString::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)),
+                         module_info.SizeOfImage);
 
             // Replace with actual AOB pattern from your target game
             std::string aob_sig_str = "48 89 ?? ?? 57";
@@ -287,20 +300,20 @@ void InitializeMyMod() {
                 );
                 if (found_pattern) {
                     target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
-                    logger.log(DMK::LOG_INFO, "Pattern for GameFunction_PrintMessage found at: " +
-                                              DMKString::format_address(reinterpret_cast<uintptr_t>(found_pattern)) +
-                                              ", target address: " + DMKString::format_address(target_function_address));
+                    logger.info("Pattern for GameFunction_PrintMessage found at: {}, target address: {}",
+                                DMKString::format_address(reinterpret_cast<uintptr_t>(found_pattern)),
+                                DMKString::format_address(target_function_address));
                 } else {
-                    logger.log(DMK::LOG_ERROR, "AOB pattern for GameFunction_PrintMessage not found in target module.");
+                    logger.error("AOB pattern for GameFunction_PrintMessage not found in target module.");
                 }
             } else {
-                 logger.log(DMK::LOG_ERROR, "Failed to parse AOB pattern: " + aob_sig_str);
+                 logger.error("Failed to parse AOB pattern: {}", aob_sig_str);
             }
         } else {
-            logger.log(DMK::LOG_ERROR, "GetModuleInformation failed: " + std::to_string(GetLastError()));
+            logger.error("GetModuleInformation failed: {}", GetLastError());
         }
     } else {
-         logger.log(DMK::LOG_ERROR, "Failed to get game module handle.");
+         logger.error("Failed to get game module handle.");
     }
 
     if (target_function_address != 0) {
@@ -314,26 +327,29 @@ void InitializeMyMod() {
         );
 
         if (!hook_id.empty()) {
-            logger.log(DMK::LOG_INFO, "Successfully created hook: " + hook_id);
+            logger.info("Successfully created hook: {}", hook_id);
         } else {
-            logger.log(DMK::LOG_ERROR, "Failed to create hook for GameFunction_PrintMessage.");
+            logger.error("Failed to create hook for GameFunction_PrintMessage.");
         }
     } else {
-        logger.log(DMK::LOG_WARNING, "Target address for GameFunction_PrintMessage is 0 or not found. Hook not created.");
+        logger.warning("Target address for GameFunction_PrintMessage is 0 or not found. Hook not created.");
     }
 
-    logger.log(DMK::LOG_INFO, "MyMod Initialized using DetourModKit!");
+    logger.info("MyMod Initialized using DetourModKit!");
 }
 
 // Mod Shutdown Function (optional)
 void ShutdownMyMod() {
     DMKLogger& logger = DMKLogger::getInstance();
-    logger.log(DMK::LOG_INFO, "MyMod Shutting Down...");
+    logger.info("MyMod Shutting Down...");
 
     DMKHookManager::getInstance().remove_all_hooks();
     DMKConfig::clearRegisteredItems();
 
-    logger.log(DMK::LOG_INFO, "MyMod Shutdown Complete.");
+    // Flush any pending async log messages
+    logger.flush();
+
+    logger.info("MyMod Shutdown Complete.");
 }
 
 // DLL Main or equivalent entry point
