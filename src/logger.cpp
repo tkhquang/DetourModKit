@@ -4,6 +4,8 @@
  */
 
 #include "DetourModKit/logger.hpp"
+#include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/format_utils.hpp"
 
 #include <windows.h>
 #include <filesystem>
@@ -180,6 +182,13 @@ Logger::Logger() : current_log_level(LOG_INFO) // Default to INFO level
 
 Logger::~Logger()
 {
+    // Shutdown async logger first if enabled
+    if (async_mode_enabled_ && async_logger_)
+    {
+        async_logger_->shutdown();
+        async_logger_.reset();
+    }
+
     if (log_file_stream.is_open())
     {
         // Ensure thread safety for this final log message.
@@ -216,6 +225,14 @@ void Logger::log(LogLevel level, const std::string &message)
     // Check if the message's level is sufficient to be logged.
     if (level >= current_log_level) // Read of current_log_level
     {
+        // Use async logger if enabled
+        if (async_mode_enabled_ && async_logger_)
+        {
+            async_logger_->enqueue(level, message);
+            return;
+        }
+
+        // Synchronous logging (original behavior)
         std::string level_str = logLevelToString(level);
         std::lock_guard<std::mutex> lock(log_access_mutex); // Protect file stream access
 
@@ -331,6 +348,81 @@ std::string Logger::generateLogFilePath() const
                   << " Using relative path: " << log_file_name_instance << std::endl;
         return log_file_name_instance;
     }
+}
+
+void Logger::enableAsyncMode(const AsyncLoggerConfig &config)
+{
+    std::lock_guard<std::mutex> lock(log_access_mutex);
+
+    if (async_mode_enabled_)
+    {
+        log(LOG_WARNING, "Async mode is already enabled.");
+        return;
+    }
+
+    if (!log_file_stream.is_open())
+    {
+        log(LOG_ERROR, "Cannot enable async mode: log file is not open.");
+        return;
+    }
+
+    try
+    {
+        async_logger_ = std::make_unique<AsyncLogger>(config, log_file_stream, log_access_mutex);
+        async_mode_enabled_ = true;
+        log(LOG_INFO, "Async logging mode enabled. Queue capacity: " +
+                          std::to_string(config.queue_capacity) +
+                          ", Batch size: " + std::to_string(config.batch_size));
+    }
+    catch (const std::exception &e)
+    {
+        log(LOG_ERROR, std::string("Failed to enable async mode: ") + e.what());
+    }
+}
+
+void Logger::disableAsyncMode()
+{
+    std::lock_guard<std::mutex> lock(log_access_mutex);
+
+    if (!async_mode_enabled_)
+    {
+        return;
+    }
+
+    if (async_logger_)
+    {
+        async_logger_->shutdown();
+        async_logger_.reset();
+    }
+
+    async_mode_enabled_ = false;
+    log(LOG_INFO, "Async logging mode disabled. Switched to synchronous mode.");
+}
+
+bool Logger::isAsyncModeEnabled() const
+{
+    return async_mode_enabled_;
+}
+
+void Logger::flush()
+{
+    if (async_mode_enabled_ && async_logger_)
+    {
+        async_logger_->flush();
+    }
+    else
+    {
+        std::lock_guard<std::mutex> lock(log_access_mutex);
+        if (log_file_stream.is_open())
+        {
+            log_file_stream.flush();
+        }
+    }
+}
+
+LogLevel Logger::getLogLevel() const
+{
+    return current_log_level;
 }
 
 // Definition for the static mutex

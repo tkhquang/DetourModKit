@@ -50,20 +50,18 @@ std::string DetourModKit::Filesystem::getRuntimeDirectory()
         std::filesystem::path module_full_path(module_path_buffer);
         result_directory_path = module_full_path.parent_path().string();
 
-        logger.log(LOG_DEBUG, "getRuntimeDirectory: Successfully determined module directory: " + result_directory_path);
+        logger.debug("getRuntimeDirectory: Successfully determined module directory: {}", result_directory_path);
     }
     catch (const std::filesystem::filesystem_error &fs_err)
     {
         // Log filesystem specific errors during path manipulation
-        logger.log(LOG_WARNING, "getRuntimeDirectory: Filesystem error: " + std::string(fs_err.what()) +
-                                    ". Attempting to fall back to current working directory.");
+        logger.warning("getRuntimeDirectory: Filesystem error: {}. Attempting to fall back to current working directory.", fs_err.what());
         // Fallback implemented below the catch block
     }
     catch (const std::exception &e)
     {
         // Log other runtime errors (e.g., from GetModuleHandleExA or GetModuleFileNameA).
-        logger.log(LOG_WARNING, "getRuntimeDirectory: Failed to determine module directory: " +
-                                    std::string(e.what()) + ". Attempting to fall back to current working directory.");
+        logger.warning("getRuntimeDirectory: Failed to determine module directory: {}. Attempting to fall back to current working directory.", e.what());
         // Fallback implemented below the catch block
     }
 
@@ -74,13 +72,13 @@ std::string DetourModKit::Filesystem::getRuntimeDirectory()
         if (GetCurrentDirectoryA(MAX_PATH, current_dir_buffer) > 0)
         {
             result_directory_path = current_dir_buffer;
-            logger.log(LOG_WARNING, "getRuntimeDirectory: Using current working directory as fallback: " + result_directory_path);
+            logger.warning("getRuntimeDirectory: Using current working directory as fallback: {}", result_directory_path);
         }
         else
         {
             // If even GetCurrentDirectoryA fails, use "." as a last resort.
             result_directory_path = ".";
-            logger.log(LOG_ERROR, "getRuntimeDirectory: Failed to get current working directory. Using relative path anchor '.'. Error: " + std::to_string(GetLastError()));
+            logger.error("getRuntimeDirectory: Failed to get current working directory. Using relative path anchor '.'. Error: {}", GetLastError());
         }
     }
     return result_directory_path;

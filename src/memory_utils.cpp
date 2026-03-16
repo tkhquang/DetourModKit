@@ -92,7 +92,7 @@ namespace MemoryUtilsCacheInternal
         // Check for overflow if size is very large
         if (endAddress < address && size != 0) // size != 0 to allow address + 0 for a zero-size check if ever needed
         {
-            Logger::getInstance().log(LOG_WARNING, "MemoryCache: Address + size caused overflow in findCacheEntry.");
+            Logger::getInstance().warning("MemoryCache: Address + size caused overflow in findCacheEntry.");
             return nullptr;
         }
 
@@ -180,9 +180,8 @@ namespace MemoryUtilsCacheInternal
         }
         catch (const std::bad_alloc &e)
         {
-            Logger::getInstance().log(LOG_ERROR, "MemoryCache: Failed to allocate memory for cache (size: " +
-                                                     std::to_string(s_configuredCacheSize) + "). Error: " + e.what() +
-                                                     ". Attempting minimal cache.");
+            Logger::getInstance().error("MemoryCache: Failed to allocate memory for cache (size: {}). Error: {}. Attempting minimal cache.",
+                                        s_configuredCacheSize, e.what());
             try
             {
                 s_configuredCacheSize = 1; // Try with a minimal size
@@ -190,8 +189,8 @@ namespace MemoryUtilsCacheInternal
             }
             catch (const std::bad_alloc &e_min)
             {
-                Logger::getInstance().log(LOG_ERROR, "MemoryCache: Minimal cache allocation also failed. Error: " +
-                                                         std::string(e_min.what()) + ". Cache will be disabled.");
+                Logger::getInstance().error("MemoryCache: Minimal cache allocation also failed. Error: {}. Cache will be disabled.",
+                                            e_min.what());
                 s_configuredCacheSize = 0; // Mark cache as unusable
                 s_memoryCache.clear();     // Ensure vector is empty
                 return;                    // Exit: cache setup failed
@@ -206,9 +205,8 @@ namespace MemoryUtilsCacheInternal
 
         if (s_configuredCacheSize > 0)
         {
-            Logger::getInstance().log(LOG_DEBUG, "MemoryCache: Initialized with " +
-                                                     std::to_string(s_configuredCacheSize) + " entries and " +
-                                                     std::to_string(s_configuredCacheExpiryMs) + "ms expiry.");
+            Logger::getInstance().debug("MemoryCache: Initialized with {} entries and {}ms expiry.",
+                                        s_configuredCacheSize, s_configuredCacheExpiryMs);
         }
     }
 
@@ -235,7 +233,7 @@ void DetourModKit::Memory::clearMemoryCache()
 
     if (MemoryUtilsCacheInternal::s_configuredCacheSize > 0)
     {
-        Logger::getInstance().log(LOG_DEBUG, "MemoryCache: All entries cleared.");
+        Logger::getInstance().debug("MemoryCache: All entries cleared.");
     }
 #ifdef _DEBUG // Reset stats if compiled in debug
     MemoryUtilsCacheInternal::s_cacheHits.store(0, std::memory_order_relaxed);
@@ -454,26 +452,25 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
 {
     if (!targetAddress)
     {
-        logger.log(LOG_ERROR, "WriteBytes: Target address is null.");
+        logger.error("WriteBytes: Target address is null.");
         return false;
     }
     if (!sourceBytes && numBytes > 0) // Allow null source if numBytes is 0
     {
-        logger.log(LOG_ERROR, "WriteBytes: Source bytes pointer is null for non-zero numBytes.");
+        logger.error("WriteBytes: Source bytes pointer is null for non-zero numBytes.");
         return false;
     }
     if (numBytes == 0)
     {
-        logger.log(LOG_WARNING, "WriteBytes: Number of bytes to write is zero. Operation has no effect.");
+        logger.warning("WriteBytes: Number of bytes to write is zero. Operation has no effect.");
         return true;
     }
 
     DWORD old_protection_flags;
     if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, PAGE_EXECUTE_READWRITE, &old_protection_flags))
     {
-        logger.log(LOG_ERROR, "WriteBytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address " +
-                                  format_address(reinterpret_cast<uintptr_t>(targetAddress)) +
-                                  ". Windows Error: " + std::to_string(GetLastError()));
+        logger.error("WriteBytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
+                     format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
         return false;
     }
 
@@ -483,7 +480,7 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
     }
     catch (const std::exception &e)
     {
-        logger.log(LOG_ERROR, "WriteBytes: memcpy threw an unexpected C++ exception: " + std::string(e.what()));
+        logger.error("WriteBytes: memcpy threw an unexpected C++ exception: {}", e.what());
         DWORD temp_protect_holder;
         VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_protect_holder);
         return false;
@@ -492,20 +489,18 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
     DWORD temp_holder_for_old_protect_after_restore;
     if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_holder_for_old_protect_after_restore))
     {
-        logger.log(LOG_WARNING, "WriteBytes: VirtualProtect failed to restore original protection (" +
-                                    format_hex(static_cast<int>(old_protection_flags)) + ") at address " +
-                                    format_address(reinterpret_cast<uintptr_t>(targetAddress)) +
-                                    ". Windows Error: " + std::to_string(GetLastError()));
+        logger.warning("WriteBytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}",
+                       format_hex(static_cast<int>(old_protection_flags)),
+                       format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
     }
 
     if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(targetAddress), numBytes))
     {
-        logger.log(LOG_WARNING, "WriteBytes: FlushInstructionCache failed for address " +
-                                    format_address(reinterpret_cast<uintptr_t>(targetAddress)) +
-                                    ". Windows Error: " + std::to_string(GetLastError()));
+        logger.warning("WriteBytes: FlushInstructionCache failed for address {}. Windows Error: {}",
+                       format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
     }
 
-    logger.log(LOG_DEBUG, "WriteBytes: Successfully wrote " + std::to_string(numBytes) +
-                              " bytes to address " + format_address(reinterpret_cast<uintptr_t>(targetAddress)) + ".");
+    logger.debug("WriteBytes: Successfully wrote {} bytes to address {}.",
+                 numBytes, format_address(reinterpret_cast<uintptr_t>(targetAddress)));
     return true;
 }

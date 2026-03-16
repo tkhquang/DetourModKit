@@ -55,12 +55,12 @@ namespace
         {
             if (!aob_str.empty())
             {
-                logger.log(LOG_WARNING, "AOB Parser: Input string became empty after trimming.");
+                logger.warning("AOB Parser: Input string became empty after trimming.");
             }
             return pattern_elements;
         }
 
-        logger.log(LOG_DEBUG, "AOB Parser: Parsing string: '" + trimmed_aob + "'");
+        logger.debug("AOB Parser: Parsing string: '{}'", trimmed_aob);
 
         while (iss >> token)
         {
@@ -82,12 +82,12 @@ namespace
                 }
                 catch (const std::out_of_range &oor)
                 {
-                    logger.log(LOG_ERROR, "AOB Parser: Hex conversion out of range for '" + token + "' (Pos " + std::to_string(token_idx) + "): " + oor.what());
+                    logger.error("AOB Parser: Hex conversion out of range for '{}' (Pos {}): {}", token, token_idx, oor.what());
                     return {};
                 }
                 catch (const std::invalid_argument &ia)
                 {
-                    logger.log(LOG_ERROR, "AOB Parser: Invalid argument for hex conversion '" + token + "' (Pos " + std::to_string(token_idx) + "): " + ia.what());
+                    logger.error("AOB Parser: Invalid argument for hex conversion '{}' (Pos {}): {}", token, token_idx, ia.what());
                     return {};
                 }
             }
@@ -103,11 +103,11 @@ namespace
 
         if (pattern_elements.empty() && token_idx > 0)
         {
-            logger.log(LOG_ERROR, "AOB Parser: Processed tokens but resulting pattern is empty.");
+            logger.error("AOB Parser: Processed tokens but resulting pattern is empty.");
         }
         else if (!pattern_elements.empty())
         {
-            logger.log(LOG_DEBUG, "AOB Parser: Parsed " + std::to_string(pattern_elements.size()) + " elements.");
+            logger.debug("AOB Parser: Parsed {} elements.", pattern_elements.size());
         }
 
         return pattern_elements;
@@ -126,7 +126,7 @@ std::vector<std::byte> DetourModKit::Scanner::parseAOB(const std::string &aob_st
     {
         if (!trim(aob_str).empty())
         {
-            logger.log(LOG_WARNING, "AOB: Parsing AOB string '" + aob_str + "' resulted in an empty pattern.");
+            logger.warning("AOB: Parsing AOB string '{}' resulted in an empty pattern.", aob_str);
         }
         return byte_vector;
     }
@@ -137,9 +137,8 @@ std::vector<std::byte> DetourModKit::Scanner::parseAOB(const std::string &aob_st
         byte_vector.push_back(element.is_wildcard ? WILDCARD_BYTE_VALUE : element.value);
     }
 
-    logger.log(LOG_DEBUG, "AOB: Converted pattern for scanning (" +
-                              format_hex(static_cast<int>(WILDCARD_BYTE_VALUE)) +
-                              " = wildcard). Size: " + std::to_string(byte_vector.size()));
+    logger.debug("AOB: Converted pattern for scanning ({} = wildcard). Size: {}",
+                 format_hex(static_cast<int>(WILDCARD_BYTE_VALUE)), byte_vector.size());
     return byte_vector;
 }
 
@@ -152,23 +151,22 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
 
     if (pattern_size == 0)
     {
-        logger.log(LOG_ERROR, "FindPattern: Pattern is empty. Cannot scan.");
+        logger.error("FindPattern: Pattern is empty. Cannot scan.");
         return nullptr;
     }
     if (!start_address)
     {
-        logger.log(LOG_ERROR, "FindPattern: Start address is null. Cannot scan.");
+        logger.error("FindPattern: Start address is null. Cannot scan.");
         return nullptr;
     }
     if (region_size < pattern_size)
     {
-        logger.log(LOG_WARNING, "FindPattern: Search region (" + std::to_string(region_size) +
-                                    " bytes) is smaller than pattern (" + std::to_string(pattern_size) + " bytes).");
+        logger.warning("FindPattern: Search region ({} bytes) is smaller than pattern ({} bytes).", region_size, pattern_size);
         return nullptr;
     }
 
-    logger.log(LOG_DEBUG, "FindPattern: Scanning " + std::to_string(region_size) + " bytes from " +
-                              format_address(reinterpret_cast<uintptr_t>(start_address)) + " for a " + std::to_string(pattern_size) + " byte pattern.");
+    logger.debug("FindPattern: Scanning {} bytes from {} for a {} byte pattern.",
+                 region_size, format_address(reinterpret_cast<uintptr_t>(start_address)), pattern_size);
 
     std::vector<bool> is_wildcard_mask(pattern_size);
     int wildcard_count = 0;
@@ -187,7 +185,7 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
 
     if (wildcard_count > 0)
     {
-        logger.log(LOG_DEBUG, "FindPattern: Pattern contains " + std::to_string(wildcard_count) + " wildcard(s).");
+        logger.debug("FindPattern: Pattern contains {} wildcard(s).", wildcard_count);
     }
 
     std::byte *const scan_boundary = start_address + (region_size - pattern_size);
@@ -207,13 +205,12 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
         {
             uintptr_t absolute_match_address = reinterpret_cast<uintptr_t>(current_scan_ptr);
             uintptr_t rva_offset = absolute_match_address - reinterpret_cast<uintptr_t>(start_address);
-            logger.log(LOG_INFO, "FindPattern: Pattern match found at address: " +
-                                     format_address(absolute_match_address) +
-                                     " (RVA: " + format_address(rva_offset) + ")");
+            logger.info("FindPattern: Pattern match found at address: {} (RVA: {})",
+                        format_address(absolute_match_address), format_address(rva_offset));
             return current_scan_ptr;
         }
     }
 
-    logger.log(LOG_WARNING, "FindPattern: Pattern not found in the specified memory region.");
+    logger.warning("FindPattern: Pattern not found in the specified memory region.");
     return nullptr;
 }

@@ -95,7 +95,7 @@ namespace
     template <>
     void ConfigItem<int>::log_current_value(Logger &logger) const
     {
-        logger.log(LOG_INFO, "Config: " + log_key_name + " (" + section + "." + ini_key + ") = " + std::to_string(target_variable));
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, target_variable);
     }
 
     // For float
@@ -107,7 +107,7 @@ namespace
     template <>
     void ConfigItem<float>::log_current_value(Logger &logger) const
     {
-        logger.log(LOG_INFO, "Config: " + log_key_name + " (" + section + "." + ini_key + ") = " + std::to_string(target_variable));
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, target_variable);
     }
 
     // For bool
@@ -119,7 +119,7 @@ namespace
     template <>
     void ConfigItem<bool>::log_current_value(Logger &logger) const
     {
-        logger.log(LOG_INFO, "Config: " + log_key_name + " (" + section + "." + ini_key + ") = " + (target_variable ? "true" : "false"));
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, target_variable ? "true" : "false");
     }
 
     // For std::string
@@ -131,7 +131,7 @@ namespace
     template <>
     void ConfigItem<std::string>::log_current_value(Logger &logger) const
     {
-        logger.log(LOG_INFO, "Config: " + log_key_name + " (" + section + "." + ini_key + ") = " + "\"" + target_variable + "\""); // Quote strings
+        logger.info("Config: {} ({}.{}) = \"{}\"", log_key_name, section, ini_key, target_variable);
     }
 
     // --- Helper: Parses a comma-separated string of hexadecimal VK codes ---
@@ -154,7 +154,7 @@ namespace
 
         std::istringstream iss(trimmed_val);
         std::string token;
-        logger.log(LOG_DEBUG, "Config: Parsing KeyList for '" + section_key_for_log + "': \"" + trimmed_val + "\"");
+        logger.debug("Config: Parsing KeyList for '{}': \"{}\"", section_key_for_log, trimmed_val);
         int token_idx = 0;
 
         while (std::getline(iss, token, ','))
@@ -177,19 +177,19 @@ namespace
                 hex_part = hex_part.substr(2);
                 if (hex_part.empty()) // e.g., "0x,"
                 {
-                    logger.log(LOG_WARNING, "Config: Invalid key token '" + token + "' (prefix only) in '" + section_key_for_log + "' at token " + std::to_string(token_idx));
+                    logger.warning("Config: Invalid key token '{}' (prefix only) in '{}' at token {}", token, section_key_for_log, token_idx);
                     continue;
                 }
             }
 
             if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
             {
-                logger.log(LOG_WARNING, "Config: Invalid non-hex character in key token '" + token + "' for '" + section_key_for_log + "' at token " + std::to_string(token_idx));
+                logger.warning("Config: Invalid non-hex character in key token '{}' for '{}' at token {}", token, section_key_for_log, token_idx);
                 continue;
             }
             if (hex_part.empty())
             { // case where token was just "0x" and substring made it empty, or original token was empty (already handled by trim)
-                logger.log(LOG_WARNING, "Config: Empty hex part after processing token '" + token + "' for '" + section_key_for_log + "' at token " + std::to_string(token_idx));
+                logger.warning("Config: Empty hex part after processing token '{}' for '{}' at token {}", token, section_key_for_log, token_idx);
                 continue;
             }
 
@@ -198,21 +198,21 @@ namespace
                 unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
                 if (code_ul > 0xFF) // VK codes are typically 1 byte (0x00-0xFF)
                 {
-                    logger.log(LOG_WARNING, "Config: Key code " + format_hex(static_cast<int>(code_ul), 2) +
-                                                " from token '" + token + "' for '" + section_key_for_log + "' exceeds 0xFF. It might be invalid or unintended.");
+                    logger.warning("Config: Key code {} from token '{}' for '{}' exceeds 0xFF. It might be invalid or unintended.",
+                                   format_hex(static_cast<int>(code_ul), 2), token, section_key_for_log);
                 }
                 keys.push_back(static_cast<int>(code_ul));
-                logger.log(LOG_DEBUG, "Config: Added key for '" + section_key_for_log + "': " + format_vkcode(static_cast<int>(code_ul)));
+                logger.debug("Config: Added key for '{}': {}", section_key_for_log, format_vkcode(static_cast<int>(code_ul)));
             }
             catch (const std::exception &e) // Catches std::invalid_argument or std::out_of_range
             {
-                logger.log(LOG_WARNING, "Config: Error converting hex token '" + token + "' (from original '" + trimmed_token + "') for '" + section_key_for_log + "': " + e.what());
+                logger.warning("Config: Error converting hex token '{}' (from original '{}') for '{}': {}", token, trimmed_token, section_key_for_log, e.what());
             }
         }
 
         if (keys.empty() && !trimmed_val.empty())
         {
-            logger.log(LOG_WARNING, "Config: Processed value for '" + section_key_for_log + "' (\"" + trimmed_val + "\") but found no valid key codes.");
+            logger.warning("Config: Processed value for '{}' (\"{}\") but found no valid key codes.", section_key_for_log, trimmed_val);
         }
         return keys;
     }
@@ -242,7 +242,7 @@ namespace
     template <>
     void ConfigItem<std::vector<int>>::log_current_value(Logger &logger) const
     {
-        logger.log(LOG_INFO, "Config: " + log_key_name + " (" + section + "." + ini_key + ") = " + format_vkcode_list(target_variable));
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_vkcode_list(target_variable));
     }
 
     // --- Global storage for registered configuration items ---
@@ -263,7 +263,7 @@ namespace
 
         if (module_dir.empty() || module_dir == ".")
         {
-            logger.log(LOG_WARNING, "Config: Could not reliably determine module directory or it's current working directory. Using relative path for INI: " + ini_filename);
+            logger.warning("Config: Could not reliably determine module directory or it's current working directory. Using relative path for INI: {}", ini_filename);
             return ini_filename; // Fallback to relative path
         }
 
@@ -271,16 +271,16 @@ namespace
         {
             std::filesystem::path ini_path_obj = std::filesystem::path(module_dir) / ini_filename;
             std::string full_path = ini_path_obj.lexically_normal().string(); // Normalize (e.g., C:/path/./file -> C:/path/file)
-            logger.log(LOG_DEBUG, "Config: Determined INI file path: " + full_path);
+            logger.debug("Config: Determined INI file path: {}", full_path);
             return full_path;
         }
         catch (const std::filesystem::filesystem_error &fs_err)
         {
-            logger.log(LOG_WARNING, "Config: Filesystem error constructing INI path: " + std::string(fs_err.what()) + ". Using relative path for INI: " + ini_filename);
+            logger.warning("Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}", fs_err.what(), ini_filename);
         }
         catch (const std::exception &e) // Catch other potential exceptions
         {
-            logger.log(LOG_WARNING, "Config: General error constructing INI path: " + std::string(e.what()) + ". Using relative path for INI: " + ini_filename);
+            logger.warning("Config: General error constructing INI path: {}. Using relative path for INI: {}", e.what(), ini_filename);
         }
         return ini_filename; // Fallback
     }
@@ -329,7 +329,7 @@ void DetourModKit::Config::load(const std::string &ini_filename)
 {
     Logger &logger = Logger::getInstance();
     std::string ini_path = getIniFilePath(ini_filename, logger);
-    logger.log(LOG_INFO, "Config: Attempting to load configuration from: " + ini_path);
+    logger.info("Config: Attempting to load configuration from: {}", ini_path);
 
     CSimpleIniA ini;
     ini.SetUnicode(false);  // Assume ASCII/MBCS INI
@@ -338,14 +338,14 @@ void DetourModKit::Config::load(const std::string &ini_filename)
     SI_Error rc = ini.LoadFile(ini_path.c_str());
     if (rc < 0)
     {
-        logger.log(LOG_ERROR, "Config: Failed to open INI file '" + ini_path + "'. Error code: " + std::to_string(rc) + ". Using default values for all registered settings.");
+        logger.error("Config: Failed to open INI file '{}'. Error code: {}. Using default values for all registered settings.", ini_path, rc);
         // Defaults are already set in target_variables upon registration when ConfigItem is constructed.
         // The `load` method of each ConfigItem will use its `default_value` with SimpleIni calls,
         // but effectively, if the file doesn't load, the variables retain their construction-time defaults.
     }
     else
     {
-        logger.log(LOG_INFO, "Config: Successfully opened INI file: " + ini_path);
+        logger.info("Config: Successfully opened INI file: {}", ini_path);
     }
 
     // Load all registered items.
@@ -359,7 +359,7 @@ void DetourModKit::Config::load(const std::string &ini_filename)
         item->load(ini, logger);
     }
 
-    logger.log(LOG_INFO, "Config: Configuration loading complete. " + std::to_string(getRegisteredConfigItems().size()) + " items processed.");
+    logger.info("Config: Configuration loading complete. {} items processed.", getRegisteredConfigItems().size());
 }
 
 void DetourModKit::Config::logAll()
@@ -367,16 +367,16 @@ void DetourModKit::Config::logAll()
     Logger &logger = Logger::getInstance();
     if (getRegisteredConfigItems().empty())
     {
-        logger.log(LOG_INFO, "Config: No configuration items registered to log.");
+        logger.info("Config: No configuration items registered to log.");
         return;
     }
 
-    logger.log(LOG_INFO, "Config: Logging " + std::to_string(getRegisteredConfigItems().size()) + " registered configuration values:");
+    logger.info("Config: Logging {} registered configuration values:", getRegisteredConfigItems().size());
     for (const auto &item : getRegisteredConfigItems())
     {
         item->log_current_value(logger);
     }
-    logger.log(LOG_INFO, "Config: Configuration logging completed.");
+    logger.info("Config: Configuration logging completed.");
 }
 
 void DetourModKit::Config::clearRegisteredItems()
@@ -386,10 +386,10 @@ void DetourModKit::Config::clearRegisteredItems()
     if (count > 0) // Only log if there was something to clear
     {
         getRegisteredConfigItems().clear(); // This will call destructors for all unique_ptrs and ConfigItemBase objects.
-        logger.log(LOG_DEBUG, "Config: Cleared " + std::to_string(count) + " registered configuration items.");
+        logger.debug("Config: Cleared {} registered configuration items.", count);
     }
     else
     {
-        logger.log(LOG_DEBUG, "Config: clearRegisteredItems called, but no items were registered.");
+        logger.debug("Config: clearRegisteredItems called, but no items were registered.");
     }
 }

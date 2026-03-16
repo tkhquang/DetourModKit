@@ -13,9 +13,11 @@
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/logger.hpp"
+#include "DetourModKit/async_logger.hpp"
 
 // Utility headers
 #include "DetourModKit/filesystem_utils.hpp"
+#include "DetourModKit/format_utils.hpp"
 #include "DetourModKit/math_utils.hpp"
 #include "DetourModKit/memory_utils.hpp"
 #include "DetourModKit/string_utils.hpp"
@@ -43,3 +45,6 @@ using DMKLogLevel = DetourModKit::LogLevel;
 using DMKHookStatus = DetourModKit::HookStatus;
 using DMKHookType = DetourModKit::HookType;
 using DMKHookConfig = DetourModKit::HookConfig;
+using DMKAsyncLogger = DetourModKit::AsyncLogger;
+using DMKAsyncLoggerConfig = DetourModKit::AsyncLoggerConfig;
+using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
