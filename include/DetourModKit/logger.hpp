@@ -42,11 +42,23 @@ namespace DetourModKit
 
         /**
          * @brief Configures global static settings for the logger before first instantiation.
+         * @details If the logger instance already exists, this will also reconfigure the instance
+         *          by reopening the log file with the new settings.
          * @param prefix Default log prefix string.
          * @param file_name Default log file name.
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
          */
         static void configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt);
+
+        /**
+         * @brief Reconfigures an existing logger instance with new settings.
+         * @details Closes the current log file (if open) and reopens it with the new settings.
+         *          Thread-safe. Logs a message about the reconfiguration.
+         * @param prefix New log prefix string.
+         * @param file_name New log file name.
+         * @param timestamp_fmt New timestamp format string (strftime compatible).
+         */
+        void reconfigure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt);
 
         /**
          * @brief Sets the minimum log level for messages to be recorded.

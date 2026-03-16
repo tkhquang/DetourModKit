@@ -196,10 +196,10 @@ namespace
             try
             {
                 unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
-                if (code_ul == 0 || code_ul > 0xFF) // VK codes are typically 1 byte. 0 is often not a valid user-assignable VK.
+                if (code_ul > 0xFF) // VK codes are typically 1 byte (0x00-0xFF)
                 {
                     logger.log(LOG_WARNING, "Config: Key code " + format_hex(static_cast<int>(code_ul), 2) +
-                                                " from token '" + token + "' for '" + section_key_for_log + "' is 0x00 or exceeds 0xFF. It might be invalid or unintended.");
+                                                " from token '" + token + "' for '" + section_key_for_log + "' exceeds 0xFF. It might be invalid or unintended.");
                 }
                 keys.push_back(static_cast<int>(code_ul));
                 logger.log(LOG_DEBUG, "Config: Added key for '" + section_key_for_log + "': " + format_vkcode(static_cast<int>(code_ul)));

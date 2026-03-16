@@ -77,21 +77,70 @@ LogLevel Logger::stringToLogLevel(const std::string &level_str)
 
 void Logger::configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
 {
-    // These static members are used by getInstance() if it's called before explicit configuration,
-    // or can be called at the start of the application to override defaults.
-    // Note: This configuration should ideally happen before the first getInstance() call
-    // if the logger is to use these custom settings from its very first message.
-    // If getInstance() has already run, it will have used the old static defaults.
-    // For a singleton, this kind of reconfiguration can be tricky if the instance is already in use.
-    // However, since these statics are used by the constructor, it's more about when the constructor runs.
     std::lock_guard<std::mutex> lock(Logger::getLoggerInitMutex()); // Protect static variable modification
     s_log_prefix = prefix;
     s_log_file_name = file_name;
     s_timestamp_format = timestamp_fmt;
 
-    // If the instance already exists, it won't re-run its constructor with these new static values.
-    // One might need to add a re-init method to the logger if runtime reconfiguration of an existing instance is needed.
-    // For now, assume configure() is called early.
+    // If the instance already exists, apply the new configuration to it
+    // Note: This uses a trick to check if the instance exists without creating it
+    // by catching the potential exception from getInstance() if it's being constructed
+    // However, since getInstance() uses a static local, we can safely call it
+    // and it will return the existing instance if already constructed
+    try
+    {
+        Logger &instance = getInstance();
+        // Only reconfigure if the instance's settings differ from the new static settings
+        // This prevents unnecessary file reopening if settings are the same
+        if (instance.log_prefix_instance != prefix ||
+            instance.log_file_name_instance != file_name ||
+            instance.timestamp_format_instance != timestamp_fmt)
+        {
+            instance.reconfigure(prefix, file_name, timestamp_fmt);
+        }
+    }
+    catch (...)
+    {
+        // Instance doesn't exist yet or is being constructed, which is fine
+        // The new static values will be used when it's constructed
+    }
+}
+
+void Logger::reconfigure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
+{
+    std::lock_guard<std::mutex> lock(log_access_mutex);
+
+    // Log reconfiguration message to current log file before changing settings
+    if (log_file_stream.is_open() && log_file_stream.good())
+    {
+        log_file_stream << "[" << getTimestamp() << "] "
+                        << "[" << std::setw(7) << std::left << "INFO" << "] :: "
+                        << "Logger reconfiguring. New file: " << file_name << std::endl;
+        log_file_stream.flush();
+        log_file_stream.close();
+    }
+
+    // Update instance members
+    log_prefix_instance = prefix;
+    log_file_name_instance = file_name;
+    timestamp_format_instance = timestamp_fmt;
+
+    // Open new log file
+    std::string log_file_full_path = generateLogFilePath();
+    log_file_stream.open(log_file_full_path, std::ios::out | std::ios::trunc);
+
+    if (!log_file_stream.is_open())
+    {
+        std::cerr << "[" << log_prefix_instance << " Logger CRITICAL ERROR] "
+                  << "Failed to open log file at: " << log_file_full_path
+                  << ". Subsequent logs to file will fail." << std::endl;
+    }
+    else
+    {
+        log_file_stream << "[" << getTimestamp() << "] "
+                        << "[" << std::setw(7) << std::left << "INFO" << "] :: "
+                        << "Logger reconfigured. Now logging to: " << log_file_full_path << std::endl;
+    }
 }
 
 Logger::Logger() : current_log_level(LOG_INFO) // Default to INFO level
