@@ -53,7 +53,9 @@ static std::string logLevelToString(LogLevel level)
 LogLevel Logger::stringToLogLevel(const std::string &level_str)
 {
     std::string upper_level_str = level_str;
-    std::transform(upper_level_str.begin(), upper_level_str.end(), upper_level_str.begin(), ::toupper);
+    std::transform(upper_level_str.begin(), upper_level_str.end(), upper_level_str.begin(),
+                   [](unsigned char c)
+                   { return static_cast<char>(std::toupper(c)); });
 
     if (upper_level_str == "TRACE")
         return LOG_TRACE;
