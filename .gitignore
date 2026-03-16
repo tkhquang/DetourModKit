@@ -1,2 +1,7 @@
+.idea/*
 build/*
+build_mingw/*
+build_msvc/*
+install_package_mingw/*
+install_package_msvc/*
 !/**/.gitkeep
