@@ -57,14 +57,19 @@ LogLevel Logger::stringToLogLevel(const std::string &level_str)
 
 void Logger::configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
 {
-    std::lock_guard<std::mutex> lock(Logger::getLoggerInitMutex()); // Protect static variable modification
-    s_log_prefix = prefix;
-    s_log_file_name = file_name;
-    s_timestamp_format = timestamp_fmt;
+    // First, update static variables (need to hold init mutex for this)
+    {
+        std::lock_guard<std::mutex> lock(Logger::getLoggerInitMutex()); // Protect static variable modification
+        s_log_prefix = prefix;
+        s_log_file_name = file_name;
+        s_timestamp_format = timestamp_fmt;
+    }
 
-    // If the instance already exists, apply the new configuration to it
+    // Get the instance AFTER releasing the lock to avoid deadlock
+    // The Logger constructor also tries to lock getLoggerInitMutex()
     // Note: getInstance() uses a static local and cannot throw
     Logger &instance = getInstance();
+
     // Only reconfigure if the instance's settings differ from the new static settings
     // This prevents unnecessary file reopening if settings are the same
     if (instance.log_prefix_instance != prefix ||

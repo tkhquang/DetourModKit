@@ -6,6 +6,7 @@
 #include "DetourModKit/aob_scanner.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/string_utils.hpp"
+#include "DetourModKit/format_utils.hpp"
 
 #include <vector>
 #include <string>
@@ -171,7 +172,7 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
     }
 
     logger.debug("FindPattern: Scanning {} bytes from {} for a {} byte pattern.",
-                 region_size, format_address(reinterpret_cast<uintptr_t>(start_address)), pattern_size);
+                 region_size, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(start_address)), pattern_size);
 
     // Count wildcards for optimization decisions
     int wildcard_count = 0;
@@ -248,7 +249,7 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
             uintptr_t absolute_match_address = reinterpret_cast<uintptr_t>(pattern_start);
             uintptr_t rva_offset = absolute_match_address - reinterpret_cast<uintptr_t>(start_address);
             logger.info("FindPattern: Pattern match found at address: {} (RVA: {})",
-                        format_address(absolute_match_address), format_address(rva_offset));
+                        DetourModKit::Format::format_address(absolute_match_address), DetourModKit::Format::format_address(rva_offset));
             return pattern_start;
         }
 

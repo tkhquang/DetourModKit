@@ -12,6 +12,7 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/filesystem_utils.hpp"
 #include "DetourModKit/string_utils.hpp"
+#include "DetourModKit/format_utils.hpp"
 #include "SimpleIni.h"
 
 #include <windows.h>
@@ -64,7 +65,7 @@ namespace
     };
 
     /**
-     * @brief Configuration item using std::function callback (NEW API).
+     * @brief Configuration item using std::function callback for value setting.
      * @tparam T The data type of the configuration item (e.g., int, bool, std::string).
      */
     template <typename T>
@@ -164,7 +165,7 @@ namespace
 
     // For std::vector<int> (KeyList) with callback
     template <>
-    void CallbackConfigItem<std::vector<int>>::load(CSimpleIniA &ini, Logger &logger)
+    void CallbackConfigItem<std::vector<int>>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
         if (ini_value_str != nullptr)
@@ -234,42 +235,8 @@ namespace
     template <>
     void CallbackConfigItem<std::vector<int>>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_vkcode_list(current_value));
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, DetourModKit::Format::format_vkcode_list(current_value));
     }
-
-    // --- Legacy: Reference-based ConfigItem for backward compatibility ---
-
-    template <typename T>
-    struct RefConfigItem : public ConfigItemBase
-    {
-        T &target_variable; // Reference to the user's variable where the value will be stored
-        T default_value;
-
-        RefConfigItem(std::string sec, std::string key, std::string log_name, T &target, T def_val)
-            : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)),
-              target_variable(target), default_value(std::move(def_val))
-        {
-            // Initialize with default value. If INI loading fails or key is missing, this remains.
-            target_variable = default_value;
-        }
-
-        void load(CSimpleIniA &ini, Logger &logger) override
-        {
-            // Delegate to callback version by creating a temporary setter
-            auto temp_setter = [this](T val)
-            { this->target_variable = val; };
-            CallbackConfigItem<T> temp_item(section, ini_key, log_key_name, temp_setter, default_value);
-            temp_item.load(ini, logger);
-            target_variable = temp_item.current_value;
-        }
-
-        void log_current_value(Logger &logger) const override
-        {
-            CallbackConfigItem<T> temp_item(section, ini_key, log_key_name, nullptr, default_value);
-            temp_item.current_value = target_variable;
-            temp_item.log_current_value(logger);
-        }
-    };
 
     // --- Global storage for registered configuration items ---
     std::mutex &getConfigMutex()
@@ -318,10 +285,6 @@ namespace
     }
 
 } // anonymous namespace
-
-// ============================================================================
-// NEW API: Callback-based registration
-// ============================================================================
 
 void DetourModKit::Config::registerIntCallback(const std::string &section, const std::string &ini_key,
                                                const std::string &log_key_name, std::function<void(int)> setter,
@@ -410,99 +373,6 @@ void DetourModKit::Config::registerKeyListCallback(const std::string &section, c
     getRegisteredConfigItems().push_back(
         std::make_unique<CallbackConfigItem<std::vector<int>>>(section, ini_key, log_key_name, std::move(setter), default_keys_vector));
 }
-
-// ============================================================================
-// LEGACY API: Reference-based registration (deprecated)
-// ============================================================================
-
-void DetourModKit::Config::registerInt(const std::string &section, const std::string &ini_key,
-                                       const std::string &log_key_name, int &target_variable, int default_value)
-{
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<RefConfigItem<int>>(section, ini_key, log_key_name, target_variable, default_value));
-}
-
-void DetourModKit::Config::registerFloat(const std::string &section, const std::string &ini_key,
-                                         const std::string &log_key_name, float &target_variable, float default_value)
-{
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<RefConfigItem<float>>(section, ini_key, log_key_name, target_variable, default_value));
-}
-
-void DetourModKit::Config::registerBool(const std::string &section, const std::string &ini_key,
-                                        const std::string &log_key_name, bool &target_variable, bool default_value)
-{
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<RefConfigItem<bool>>(section, ini_key, log_key_name, target_variable, default_value));
-}
-
-void DetourModKit::Config::registerString(const std::string &section, const std::string &ini_key,
-                                          const std::string &log_key_name, std::string &target_variable,
-                                          const std::string &default_value)
-{
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<RefConfigItem<std::string>>(section, ini_key, log_key_name, target_variable, default_value));
-}
-
-void DetourModKit::Config::registerKeyList(const std::string &section, const std::string &ini_key,
-                                           const std::string &log_key_name, std::vector<int> &target_variable,
-                                           const std::string &default_value_str)
-{
-    // Parse the default_value_str into a vector<int> first
-    std::vector<int> default_keys_vector;
-    std::string str_no_comment = default_value_str;
-    size_t comment_pos = str_no_comment.find(';');
-    if (comment_pos != std::string::npos)
-    {
-        str_no_comment = str_no_comment.substr(0, comment_pos);
-    }
-    std::string trimmed_val = trim(str_no_comment);
-
-    if (!trimmed_val.empty())
-    {
-        std::istringstream iss(trimmed_val);
-        std::string token;
-        while (std::getline(iss, token, ','))
-        {
-            std::string trimmed_token = trim(token);
-            if (trimmed_token.empty())
-                continue;
-
-            std::string hex_part = trimmed_token;
-            if (hex_part.size() >= 2 && hex_part[0] == '0' && (hex_part[1] == 'x' || hex_part[1] == 'X'))
-            {
-                hex_part = hex_part.substr(2);
-                if (hex_part.empty())
-                    continue;
-            }
-
-            if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
-                continue;
-
-            try
-            {
-                unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
-                default_keys_vector.push_back(static_cast<int>(code_ul));
-            }
-            catch (const std::exception &)
-            {
-                // Skip invalid
-            }
-        }
-    }
-
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<RefConfigItem<std::vector<int>>>(section, ini_key, log_key_name, target_variable, default_keys_vector));
-}
-
-// ============================================================================
-// Public API for Loading and Logging Configuration
-// ============================================================================
 
 void DetourModKit::Config::load(const std::string &ini_filename)
 {

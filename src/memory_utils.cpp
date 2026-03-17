@@ -8,7 +8,7 @@
  */
 
 #include "DetourModKit/memory_utils.hpp"
-#include "DetourModKit/string_utils.hpp"
+#include "DetourModKit/format_utils.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>
@@ -23,7 +23,6 @@
 #include <cstddef>
 
 using namespace DetourModKit;
-using namespace DetourModKit::String;
 
 // Anonymous namespace for internal helpers and storage
 namespace
@@ -485,7 +484,7 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
     if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, PAGE_EXECUTE_READWRITE, &old_protection_flags))
     {
         logger.error("WriteBytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
-                     format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+                     DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
         return false;
     }
 
@@ -497,8 +496,8 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
     if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_holder_for_old_protect_after_restore))
     {
         logger.error("WriteBytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
-                     format_hex(static_cast<int>(old_protection_flags)),
-                     format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+                     DetourModKit::Format::format_hex(static_cast<int>(old_protection_flags)),
+                     DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
         // Return false because the memory state is inconsistent
         return false;
     }
@@ -506,11 +505,11 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
     if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(targetAddress), numBytes))
     {
         logger.warning("WriteBytes: FlushInstructionCache failed for address {}. Windows Error: {}",
-                       format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+                       DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
         // This is a warning, not a failure - the write succeeded
     }
 
     logger.debug("WriteBytes: Successfully wrote {} bytes to address {}.",
-                 numBytes, format_address(reinterpret_cast<uintptr_t>(targetAddress)));
+                 numBytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)));
     return true;
 }

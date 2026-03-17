@@ -1,4 +1,5 @@
 #include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/format_utils.hpp"
 
 #include <sstream>
 #include <algorithm>
@@ -6,7 +7,6 @@
 
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
-using namespace DetourModKit::String;
 
 // --- Singleton implementation ---
 HookManager &HookManager::getInstance()
@@ -47,22 +47,22 @@ std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &er
         oss << "Bad allocation (Allocator error: " << static_cast<int>(err.allocator_error) << ")";
         break;
     case safetyhook::InlineHook::Error::FAILED_TO_DECODE_INSTRUCTION:
-        oss << "Failed to decode instruction at address " << format_address(reinterpret_cast<uintptr_t>(err.ip));
+        oss << "Failed to decode instruction at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
         break;
     case safetyhook::InlineHook::Error::SHORT_JUMP_IN_TRAMPOLINE:
-        oss << "Short jump found in trampoline at address " << format_address(reinterpret_cast<uintptr_t>(err.ip));
+        oss << "Short jump found in trampoline at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
         break;
     case safetyhook::InlineHook::Error::IP_RELATIVE_INSTRUCTION_OUT_OF_RANGE:
-        oss << "IP-relative instruction out of range at address " << format_address(reinterpret_cast<uintptr_t>(err.ip));
+        oss << "IP-relative instruction out of range at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
         break;
     case safetyhook::InlineHook::Error::UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE:
-        oss << "Unsupported instruction in trampoline at address " << format_address(reinterpret_cast<uintptr_t>(err.ip));
+        oss << "Unsupported instruction in trampoline at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
         break;
     case safetyhook::InlineHook::Error::FAILED_TO_UNPROTECT:
-        oss << "Failed to unprotect memory at address " << format_address(reinterpret_cast<uintptr_t>(err.ip));
+        oss << "Failed to unprotect memory at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
         break;
     case safetyhook::InlineHook::Error::NOT_ENOUGH_SPACE:
-        oss << "Not enough space for the hook (prologue too short) at address " << format_address(reinterpret_cast<uintptr_t>(err.ip));
+        oss << "Not enough space for the hook (prologue too short) at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
         break;
     default:
         oss << "Unknown SafetyHook::InlineHook::Error type.";
@@ -161,7 +161,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
         if (!hook_creation_result)
         {
             m_logger.error("HookManager: Failed to create SafetyHook::InlineHook for '{}' at {}. Error: {}",
-                           name, format_address(target_address), error_to_string(hook_creation_result.error()));
+                           name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error()));
             return std::unexpected(HookError::SafetyHookError);
         }
 
@@ -187,7 +187,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
 
         std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
         m_logger.info("HookManager: Successfully created {} inline hook '{}' targeting {}.",
-                      status_message, name, format_address(target_address));
+                      status_message, name, DetourModKit::Format::format_address(target_address));
         return name;
     }
     catch (const std::exception &e)
@@ -213,7 +213,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
     const HookConfig &config)
 {
     m_logger.debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.",
-                   name, aob_pattern_str, format_hex(static_cast<int>(aob_offset), 0));
+                   name, aob_pattern_str, DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0));
 
     auto pattern = parseAOB(aob_pattern_str);
     if (!pattern.has_value())
@@ -235,8 +235,8 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
     m_logger.info("HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                  name, format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                  format_hex(static_cast<int>(aob_offset), 0), format_address(target_address));
+                  name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+                  DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0), DetourModKit::Format::format_address(target_address));
 
     return create_inline_hook(name, target_address, detour_function, original_trampoline, config);
 }
@@ -289,7 +289,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
         if (!hook_creation_result)
         {
             m_logger.error("HookManager: Failed to create SafetyHook::MidHook for '{}' at {}. Error: {}",
-                           name, format_address(target_address), error_to_string(hook_creation_result.error()));
+                           name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error()));
             return std::unexpected(HookError::SafetyHookError);
         }
 
@@ -314,7 +314,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
         std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
         m_logger.info("HookManager: Successfully created {} mid hook '{}' targeting {}.",
-                      status_message, name, format_address(target_address));
+                      status_message, name, DetourModKit::Format::format_address(target_address));
         return name;
     }
     catch (const std::exception &e)
@@ -339,7 +339,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     const HookConfig &config)
 {
     m_logger.debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.",
-                   name, aob_pattern_str, format_hex(static_cast<int>(aob_offset), 0));
+                   name, aob_pattern_str, DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0));
 
     auto pattern = parseAOB(aob_pattern_str);
     if (!pattern.has_value())
@@ -357,8 +357,8 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
     m_logger.info("HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                  name, format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                  format_hex(static_cast<int>(aob_offset), 0), format_address(target_address));
+                  name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+                  DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0), DetourModKit::Format::format_address(target_address));
 
     return create_mid_hook(name, target_address, detour_function, config);
 }
