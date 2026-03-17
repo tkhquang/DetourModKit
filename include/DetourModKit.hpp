@@ -9,6 +9,7 @@
  */
 
 // Core functionality headers
+#include "DetourModKit/log_level.hpp"
 #include "DetourModKit/aob_scanner.hpp"
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/hook_manager.hpp"

@@ -90,42 +90,41 @@ namespace DetourModKit
     };
 
     /**
-     * @class BoundedMPMCQueue
-     * @brief A bounded, lock-free Multi-Producer Multi-Consumer queue.
-     * @tparam T The type of elements stored in the queue.
-     * @tparam Capacity The maximum number of elements (must be power of 2).
+     * @class DynamicMPMCQueue
+     * @brief A dynamically-sized, bounded Multi-Producer Multi-Consumer queue.
      * @details Uses a ring buffer with atomic sequence numbers for lock-free
-     *          synchronization. Cache-line padding prevents false sharing.
+     *          synchronization. Capacity is determined at construction time.
      */
-    template <typename T, size_t Capacity>
-    class BoundedMPMCQueue
+    class DynamicMPMCQueue
     {
-        static_assert((Capacity & (Capacity - 1)) == 0, "Capacity must be a power of 2");
-        static_assert(Capacity >= 2, "Capacity must be at least 2");
-
     public:
-        BoundedMPMCQueue();
-        ~BoundedMPMCQueue() = default;
+        /**
+         * @brief Constructs a queue with the specified capacity.
+         * @param capacity The maximum number of elements (must be power of 2).
+         */
+        explicit DynamicMPMCQueue(size_t capacity);
+
+        ~DynamicMPMCQueue() = default;
 
         /** @brief Deleted copy constructor. */
-        BoundedMPMCQueue(const BoundedMPMCQueue &) = delete;
+        DynamicMPMCQueue(const DynamicMPMCQueue &) = delete;
 
         /** @brief Deleted copy assignment operator. */
-        BoundedMPMCQueue &operator=(const BoundedMPMCQueue &) = delete;
+        DynamicMPMCQueue &operator=(const DynamicMPMCQueue &) = delete;
 
         /**
          * @brief Attempts to push an item into the queue.
          * @param item The item to push (moved into the queue).
          * @return true if successful, false if queue is full.
          */
-        bool try_push(T item);
+        bool try_push(LogMessage item);
 
         /**
          * @brief Attempts to pop an item from the queue.
          * @param item Reference to store the popped item.
          * @return true if successful, false if queue is empty.
          */
-        bool try_pop(T &item);
+        bool try_pop(LogMessage &item);
 
         /**
          * @brief Returns the approximate number of items in the queue.
@@ -139,19 +138,46 @@ namespace DetourModKit
          */
         bool empty() const;
 
-    private:
-        static constexpr size_t MASK = Capacity - 1;
+        /**
+         * @brief Returns the capacity of the queue.
+         * @return size_t The maximum number of elements.
+         */
+        size_t capacity() const noexcept { return capacity_; }
 
+    private:
         struct Slot
         {
             std::atomic<size_t> sequence;
-            T data;
+            LogMessage data;
 
-            Slot() : sequence(0), data() {}
+            Slot() : sequence(0) {}
+
+            // Delete copy constructor and copy assignment
+            Slot(const Slot &) = delete;
+            Slot &operator=(const Slot &) = delete;
+
+            // Allow move constructor and move assignment
+            Slot(Slot &&other) noexcept
+                : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data))
+            {
+            }
+
+            Slot &operator=(Slot &&other) noexcept
+            {
+                if (this != &other)
+                {
+                    sequence.store(other.sequence.load(std::memory_order_relaxed), std::memory_order_relaxed);
+                    data = std::move(other.data);
+                }
+                return *this;
+            }
         };
 
+        size_t capacity_;
+        size_t mask_;
+        std::vector<Slot> buffer_;
+
         /** @brief Cache-line aligned to prevent false sharing. */
-        alignas(64) std::array<Slot, Capacity> buffer_;
         alignas(64) std::atomic<size_t> enqueue_pos_{0};
         alignas(64) std::atomic<size_t> dequeue_pos_{0};
     };
@@ -259,10 +285,7 @@ namespace DetourModKit
          */
         bool handle_overflow(LogMessage &&message);
 
-        /** @brief Queue capacity (power of 2). */
-        static constexpr size_t QUEUE_CAPACITY = 8192;
-
-        BoundedMPMCQueue<LogMessage, QUEUE_CAPACITY> queue_;
+        DynamicMPMCQueue queue_;
         AsyncLoggerConfig config_;
 
         std::ofstream &file_stream_;

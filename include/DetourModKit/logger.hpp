@@ -1,6 +1,8 @@
 #ifndef LOGGER_HPP
 #define LOGGER_HPP
 
+#include "DetourModKit/log_level.hpp"
+
 #include <string>
 #include <fstream>
 #include <mutex>
@@ -8,30 +10,19 @@
 #include <memory>
 #include <chrono>
 #include <format>
+#include <atomic>
 
 namespace DetourModKit
 {
-    // Forward declaration for AsyncLogger
-    class AsyncLogger;
+    // Forward declarations to break circular dependency
     struct AsyncLoggerConfig;
-    /**
-     * @enum LogLevel
-     * @brief Defines the severity levels for log messages.
-     */
-    enum LogLevel
-    {
-        LOG_TRACE = 0,
-        LOG_DEBUG = 1,
-        LOG_INFO = 2,
-        LOG_WARNING = 3,
-        LOG_ERROR = 4
-    };
+    class AsyncLogger;
 
     /**
      * @class Logger
      * @brief A singleton class for logging messages to a file.
      * @details Provides thread-safe logging with configurable levels, timestamps,
-     *          and log file location.
+     *          and log file location. Uses atomic LogLevel for thread-safe level changes.
      */
     class Logger
     {
@@ -72,7 +63,8 @@ namespace DetourModKit
          *          writer thread, reducing latency on the calling thread.
          * @param config Optional async logger configuration. Uses defaults if not provided.
          */
-        void enableAsyncMode(const AsyncLoggerConfig &config = AsyncLoggerConfig{});
+        void enableAsyncMode(const AsyncLoggerConfig &config);
+        void enableAsyncMode();
 
         /**
          * @brief Disables asynchronous logging mode and returns to synchronous mode.
@@ -97,7 +89,10 @@ namespace DetourModKit
          * @brief Gets the current log level.
          * @return LogLevel The current minimum log level.
          */
-        LogLevel getLogLevel() const;
+        LogLevel getLogLevel() const
+        {
+            return current_log_level.load(std::memory_order_acquire);
+        }
 
         /**
          * @brief Sets the minimum log level for messages to be recorded.
@@ -124,7 +119,7 @@ namespace DetourModKit
         template <typename... Args>
         void log(LogLevel level, std::format_string<Args...> fmt, Args &&...args)
         {
-            if (level >= current_log_level)
+            if (level >= current_log_level.load(std::memory_order_acquire))
             {
                 log(level, std::format(fmt, std::forward<Args>(args)...));
             }
@@ -139,7 +134,7 @@ namespace DetourModKit
         template <typename... Args>
         void trace(std::format_string<Args...> fmt, Args &&...args)
         {
-            log(LOG_TRACE, fmt, std::forward<Args>(args)...);
+            log(LogLevel::Trace, fmt, std::forward<Args>(args)...);
         }
 
         /**
@@ -151,7 +146,7 @@ namespace DetourModKit
         template <typename... Args>
         void debug(std::format_string<Args...> fmt, Args &&...args)
         {
-            log(LOG_DEBUG, fmt, std::forward<Args>(args)...);
+            log(LogLevel::Debug, fmt, std::forward<Args>(args)...);
         }
 
         /**
@@ -163,7 +158,7 @@ namespace DetourModKit
         template <typename... Args>
         void info(std::format_string<Args...> fmt, Args &&...args)
         {
-            log(LOG_INFO, fmt, std::forward<Args>(args)...);
+            log(LogLevel::Info, fmt, std::forward<Args>(args)...);
         }
 
         /**
@@ -175,7 +170,7 @@ namespace DetourModKit
         template <typename... Args>
         void warning(std::format_string<Args...> fmt, Args &&...args)
         {
-            log(LOG_WARNING, fmt, std::forward<Args>(args)...);
+            log(LogLevel::Warning, fmt, std::forward<Args>(args)...);
         }
 
         /**
@@ -187,13 +182,13 @@ namespace DetourModKit
         template <typename... Args>
         void error(std::format_string<Args...> fmt, Args &&...args)
         {
-            log(LOG_ERROR, fmt, std::forward<Args>(args)...);
+            log(LogLevel::Error, fmt, std::forward<Args>(args)...);
         }
 
         /**
          * @brief Converts a log level string to the LogLevel enum.
          * @param level_str The string to convert (case-insensitive).
-         * @return The corresponding LogLevel enum. Defaults to LOG_INFO if unrecognized.
+         * @return The corresponding LogLevel enum. Defaults to LogLevel::Info if unrecognized.
          */
         static LogLevel stringToLogLevel(const std::string &level_str);
 
@@ -233,12 +228,12 @@ namespace DetourModKit
         std::string timestamp_format_instance;
 
         std::ofstream log_file_stream;
-        LogLevel current_log_level;
+        std::atomic<LogLevel> current_log_level{LogLevel::Info}; // Atomic for thread-safe reads/writes
         std::mutex log_access_mutex;
 
-        // Async logging support
+        // Async logging support (forward declared)
         std::unique_ptr<AsyncLogger> async_logger_;
-        bool async_mode_enabled_{false};
+        std::atomic<bool> async_mode_enabled_{false};
     };
 } // namespace DetourModKit
 

@@ -47,10 +47,16 @@ namespace
         CachedMemoryRegionInfo()
             : baseAddress(0), regionSize(0), protection(0), valid(false) {}
     };
+
+    // Permission flags as constexpr for compile-time constants and single definition
+    constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    constexpr DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
+                                             PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 }
 
 /**
- * @namespace Anonymous_MemoryUtils
+ * @namespace MemoryUtilsCacheInternal
  * @brief Encapsulates internal static variables and helper functions for memory_utils.
  * @details This ensures that cache implementation details do not pollute the global namespace
  *          or other translation units. This replaced the simple file-static approach for clarity.
@@ -58,22 +64,24 @@ namespace
 namespace MemoryUtilsCacheInternal
 {
     /** @brief Vector serving as the memory region cache. Dynamically sized upon initialization. */
-    static std::vector<CachedMemoryRegionInfo> s_memoryCache;
+    std::vector<CachedMemoryRegionInfo> s_memoryCache;
     /** @brief Mutex protecting concurrent access to s_memoryCache and related settings. */
-    static std::mutex s_cacheMutex;
+    std::mutex s_cacheMutex;
     /** @brief Flag ensuring one-time initialization of the cache settings and vector. */
-    static std::once_flag s_memoryCacheInitFlag;
+    std::once_flag s_memoryCacheInitFlag;
+    /** @brief Whether the cache has been successfully initialized. */
+    std::atomic<bool> s_cacheInitialized{false};
     /** @brief Configured maximum number of entries in the cache. */
-    static size_t s_configuredCacheSize = 0;
+    size_t s_configuredCacheSize = 0;
     /** @brief Configured cache entry expiry time in milliseconds. */
-    static unsigned int s_configuredCacheExpiryMs = 0;
+    unsigned int s_configuredCacheExpiryMs = 0;
 
 // Cache statistics are only compiled and tracked in Debug builds.
 #ifdef _DEBUG
     /** @brief Atomic counter for cache hits (Debug builds only). */
-    static std::atomic<uint64_t> s_cacheHits{0};
+    std::atomic<uint64_t> s_cacheHits{0};
     /** @brief Atomic counter for cache misses (Debug builds only). */
-    static std::atomic<uint64_t> s_cacheMisses{0};
+    std::atomic<uint64_t> s_cacheMisses{0};
 #endif
 
     /**
@@ -166,8 +174,9 @@ namespace MemoryUtilsCacheInternal
      * @brief Initializes the cache structures. Called once by initMemoryCache.
      * @param cache_size_param Desired number of cache entries.
      * @param expiry_ms_param Desired expiry time in milliseconds for entries.
+     * @return true if initialization succeeded, false otherwise.
      */
-    void performCacheInitialization(size_t cache_size_param, unsigned int expiry_ms_param)
+    bool performCacheInitialization(size_t cache_size_param, unsigned int expiry_ms_param)
     {
         std::lock_guard<std::mutex> lock(s_cacheMutex); // Protect static cache settings
 
@@ -193,7 +202,8 @@ namespace MemoryUtilsCacheInternal
                                             e_min.what());
                 s_configuredCacheSize = 0; // Mark cache as unusable
                 s_memoryCache.clear();     // Ensure vector is empty
-                return;                    // Exit: cache setup failed
+                s_cacheInitialized.store(false, std::memory_order_relaxed);
+                return false; // Exit: cache setup failed
             }
         }
 
@@ -208,19 +218,28 @@ namespace MemoryUtilsCacheInternal
             Logger::getInstance().debug("MemoryCache: Initialized with {} entries and {}ms expiry.",
                                         s_configuredCacheSize, s_configuredCacheExpiryMs);
         }
+
+        s_cacheInitialized.store(true, std::memory_order_release);
+        return true;
     }
 
 } // namespace MemoryUtilsCacheInternal
 
 // --- Public API functions for Memory Utilities ---
 
-void DetourModKit::Memory::initMemoryCache(size_t cache_size, unsigned int expiry_ms)
+bool DetourModKit::Memory::initMemoryCache(size_t cache_size, unsigned int expiry_ms)
 {
     // Use std::call_once to ensure performCacheInitialization is called exactly once
     // across all threads, even if initMemoryCache is called multiple times.
+    bool initialized = false;
     std::call_once(MemoryUtilsCacheInternal::s_memoryCacheInitFlag,
-                   MemoryUtilsCacheInternal::performCacheInitialization,
-                   cache_size, expiry_ms);
+                   [&]()
+                   {
+                       initialized = MemoryUtilsCacheInternal::performCacheInitialization(cache_size, expiry_ms);
+                   });
+    // Note: if already initialized, initialized remains false
+    // Return whether this call performed the initialization
+    return initialized || !MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire);
 }
 
 void DetourModKit::Memory::clearMemoryCache()
@@ -277,7 +296,7 @@ std::string DetourModKit::Memory::getMemoryCacheStats()
 #endif
 }
 
-bool DetourModKit::Memory::isMemoryReadable(const volatile void *address, size_t size)
+bool DetourModKit::Memory::isMemoryReadable(const void *address, size_t size)
 {
     if (!address || size == 0) // Reading zero bytes is trivially true but often indicates an error in calling code.
     {                          // For consistency with how VirtualQuery might treat it, or if size=0 indicates no check needed.
@@ -300,11 +319,9 @@ bool DetourModKit::Memory::isMemoryReadable(const volatile void *address, size_t
             CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::findCacheEntry(query_addr_val, size);
             if (cached_info) // A valid, non-expired entry covers the requested range
             {
-                const DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                                    PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-                // Check if protection flags allow reading and it's not guarded/no-access
-                is_region_readable_from_cache = ((cached_info->protection & READ_PERMISSION_FLAGS) != 0) &&
-                                                !((cached_info->protection & PAGE_NOACCESS) || (cached_info->protection & PAGE_GUARD));
+                // Simplified: check if protection flags allow reading
+                is_region_readable_from_cache = (cached_info->protection & READ_PERMISSION_FLAGS) != 0 &&
+                                                (cached_info->protection & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
                 cache_hit_occurred = true;
 #ifdef _DEBUG
                 MemoryUtilsCacheInternal::s_cacheHits.fetch_add(1, std::memory_order_relaxed);
@@ -341,10 +358,9 @@ bool DetourModKit::Memory::isMemoryReadable(const volatile void *address, size_t
         return false;
     }
 
-    const DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                        PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    // Check protection flags for readability
-    if (!((mbi.Protect & READ_PERMISSION_FLAGS) != 0) || ((mbi.Protect & PAGE_NOACCESS) || (mbi.Protect & PAGE_GUARD)))
+    // Check protection flags for readability - simplified logic
+    if ((mbi.Protect & READ_PERMISSION_FLAGS) == 0 ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
     {
         return false;
     }
@@ -375,7 +391,7 @@ bool DetourModKit::Memory::isMemoryReadable(const volatile void *address, size_t
     return is_fully_contained;
 }
 
-bool DetourModKit::Memory::isMemoryWritable(volatile void *address, size_t size)
+bool DetourModKit::Memory::isMemoryWritable(void *address, size_t size)
 {
     if (!address || size == 0)
     {
@@ -394,10 +410,9 @@ bool DetourModKit::Memory::isMemoryWritable(volatile void *address, size_t size)
             CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::findCacheEntry(query_addr_val, size);
             if (cached_info)
             {
-                const DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
-                                                     PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-                is_region_writable_from_cache = ((cached_info->protection & WRITE_PERMISSION_FLAGS) != 0) &&
-                                                !((cached_info->protection & PAGE_NOACCESS) || (cached_info->protection & PAGE_GUARD));
+                // Simplified: check if protection flags allow writing
+                is_region_writable_from_cache = (cached_info->protection & WRITE_PERMISSION_FLAGS) != 0 &&
+                                                (cached_info->protection & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
                 cache_hit_occurred = true;
 #ifdef _DEBUG
                 MemoryUtilsCacheInternal::s_cacheHits.fetch_add(1, std::memory_order_relaxed);
@@ -424,9 +439,9 @@ bool DetourModKit::Memory::isMemoryWritable(volatile void *address, size_t size)
     if (mbi.State != MEM_COMMIT)
         return false;
 
-    const DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
-                                         PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    if (!((mbi.Protect & WRITE_PERMISSION_FLAGS) != 0) || ((mbi.Protect & PAGE_NOACCESS) || (mbi.Protect & PAGE_GUARD)))
+    // Simplified: check if protection flags allow writing
+    if ((mbi.Protect & WRITE_PERMISSION_FLAGS) == 0 ||
+        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
         return false;
 
     uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
@@ -474,30 +489,25 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
         return false;
     }
 
-    try
-    {
-        memcpy(reinterpret_cast<void *>(targetAddress), reinterpret_cast<const void *>(sourceBytes), numBytes);
-    }
-    catch (const std::exception &e)
-    {
-        logger.error("WriteBytes: memcpy threw an unexpected C++ exception: {}", e.what());
-        DWORD temp_protect_holder;
-        VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_protect_holder);
-        return false;
-    }
+    // Note: memcpy cannot throw C++ exceptions; it's a C function.
+    // Access violations would be structured exceptions, not catchable here.
+    memcpy(reinterpret_cast<void *>(targetAddress), reinterpret_cast<const void *>(sourceBytes), numBytes);
 
     DWORD temp_holder_for_old_protect_after_restore;
     if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_holder_for_old_protect_after_restore))
     {
-        logger.warning("WriteBytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}",
-                       format_hex(static_cast<int>(old_protection_flags)),
-                       format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+        logger.error("WriteBytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
+                     format_hex(static_cast<int>(old_protection_flags)),
+                     format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+        // Return false because the memory state is inconsistent
+        return false;
     }
 
     if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(targetAddress), numBytes))
     {
         logger.warning("WriteBytes: FlushInstructionCache failed for address {}. Windows Error: {}",
                        format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+        // This is a warning, not a failure - the write succeeded
     }
 
     logger.debug("WriteBytes: Successfully wrote {} bytes to address {}.",

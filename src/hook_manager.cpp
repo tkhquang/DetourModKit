@@ -1,4 +1,3 @@
-
 #include "DetourModKit/hook_manager.hpp"
 
 #include <sstream>
@@ -17,25 +16,25 @@ HookManager &HookManager::getInstance()
 }
 
 // --- HookManager implementation ---
-HookManager::HookManager(Logger *logger) // Explicit constructor
-    : m_logger(logger ? logger : &Logger::getInstance())
+HookManager::HookManager(Logger &logger)
+    : m_logger(logger)
 {
     m_allocator = safetyhook::Allocator::global();
     if (!m_allocator)
     {
-        m_logger->error("HookManager: Failed to get SafetyHook global allocator! Hook creation will fail.");
+        m_logger.error("HookManager: Failed to get SafetyHook global allocator! Hook creation will fail.");
     }
     else
     {
-        m_logger->info("HookManager: SafetyHook global allocator obtained.");
+        m_logger.info("HookManager: SafetyHook global allocator obtained.");
     }
-    m_logger->info("HookManager: Initialized.");
+    m_logger.info("HookManager: Initialized.");
 }
 
 HookManager::~HookManager()
 {
     remove_all_hooks();
-    m_logger->info("HookManager: Shutdown complete. All managed hooks should be removed and unhooked.");
+    m_logger.info("HookManager: Shutdown complete. All managed hooks should be removed and unhooked.");
 }
 
 std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &err) const
@@ -95,66 +94,58 @@ std::string HookManager::error_to_string(const safetyhook::MidHook::Error &err) 
     return oss.str();
 }
 
-auto HookManager::find_hook_iterator(const std::string &hook_id) -> decltype(m_hooks.begin())
+// Non-locking internal helpers - caller must hold m_hooks_mutex
+bool HookManager::hook_id_exists_locked(const std::string &hook_id) const
 {
-    return std::find_if(m_hooks.begin(), m_hooks.end(),
-                        [&](const auto &hook_ptr)
-                        { return hook_ptr->getName() == hook_id; });
+    return m_hooks.find(hook_id) != m_hooks.end();
 }
 
-auto HookManager::find_hook_iterator(const std::string &hook_id) const -> decltype(m_hooks.cbegin())
+Hook *HookManager::get_hook_raw_ptr_locked(const std::string &hook_id)
 {
-    return std::find_if(m_hooks.cbegin(), m_hooks.cend(),
-                        [&](const auto &hook_ptr)
-                        { return hook_ptr->getName() == hook_id; });
+    auto it = m_hooks.find(hook_id);
+    return (it != m_hooks.end()) ? it->second.get() : nullptr;
 }
 
-bool HookManager::hook_id_exists(const std::string &hook_id) const
-{
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
-    return find_hook_iterator(hook_id) != m_hooks.cend();
-}
-
-std::string HookManager::create_inline_hook(
+std::expected<std::string, HookError> HookManager::create_inline_hook(
     const std::string &name,
     uintptr_t target_address,
     void *detour_function,
     void **original_trampoline,
     const HookConfig &config)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
 
     if (!m_allocator)
     {
-        m_logger->error("HookManager: Allocator not available. Cannot create inline hook '{}'.", name);
-        return "";
+        m_logger.error("HookManager: Allocator not available. Cannot create inline hook '{}'.", name);
+        return std::unexpected(HookError::AllocatorNotAvailable);
     }
     if (target_address == 0)
     {
-        m_logger->error("HookManager: Target address is NULL for inline hook '{}'.", name);
-        return "";
+        m_logger.error("HookManager: Target address is NULL for inline hook '{}'.", name);
+        return std::unexpected(HookError::InvalidTargetAddress);
     }
     if (detour_function == nullptr)
     {
-        m_logger->error("HookManager: Detour function is NULL for inline hook '{}'.", name);
-        return "";
+        m_logger.error("HookManager: Detour function is NULL for inline hook '{}'.", name);
+        return std::unexpected(HookError::InvalidDetourFunction);
     }
     if (original_trampoline == nullptr)
     {
-        m_logger->error("HookManager: Original trampoline pointer (output) is NULL for inline hook '{}'.", name);
-        return "";
+        m_logger.error("HookManager: Original trampoline pointer (output) is NULL for inline hook '{}'.", name);
+        return std::unexpected(HookError::InvalidTrampolinePointer);
     }
     *original_trampoline = nullptr;
 
-    if (hook_id_exists(name))
+    if (hook_id_exists_locked(name))
     {
-        m_logger->error("HookManager: A hook with the name '{}' already exists.", name);
-        return "";
+        m_logger.error("HookManager: A hook with the name '{}' already exists.", name);
+        return std::unexpected(HookError::HookAlreadyExists);
     }
 
     try
     {
-        safetyhook::InlineHook::Flags sh_flags = static_cast<safetyhook::InlineHook::Flags>(config.flags);
+        safetyhook::InlineHook::Flags sh_flags = config.inlineFlags;
         if (!config.autoEnable)
         {
             sh_flags = static_cast<safetyhook::InlineHook::Flags>(
@@ -169,9 +160,9 @@ std::string HookManager::create_inline_hook(
 
         if (!hook_creation_result)
         {
-            m_logger->error("HookManager: Failed to create SafetyHook::InlineHook for '{}' at {}. Error: {}",
-                            name, format_address(target_address), error_to_string(hook_creation_result.error()));
-            return "";
+            m_logger.error("HookManager: Failed to create SafetyHook::InlineHook for '{}' at {}. Error: {}",
+                           name, format_address(target_address), error_to_string(hook_creation_result.error()));
+            return std::unexpected(HookError::SafetyHookError);
         }
 
         auto sh_inline_hook_ptr = std::make_unique<safetyhook::InlineHook>(std::move(hook_creation_result.value()));
@@ -187,31 +178,31 @@ std::string HookManager::create_inline_hook(
             initial_status = HookStatus::Disabled;
             if (config.autoEnable)
             {
-                m_logger->warning("HookManager: Inline hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
+                m_logger.warning("HookManager: Inline hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
             }
         }
 
         auto managed_hook = std::make_unique<InlineHook>(name, target_address, std::move(sh_inline_hook_ptr), initial_status);
-        m_hooks.push_back(std::move(managed_hook));
+        m_hooks.emplace(name, std::move(managed_hook));
 
         std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
-        m_logger->info("HookManager: Successfully created {} inline hook '{}' targeting {}.",
-                       status_message, name, format_address(target_address));
+        m_logger.info("HookManager: Successfully created {} inline hook '{}' targeting {}.",
+                      status_message, name, format_address(target_address));
         return name;
     }
     catch (const std::exception &e)
     {
-        m_logger->error("HookManager: An std::exception occurred during inline hook creation for '{}': {}", name, e.what());
-        return "";
+        m_logger.error("HookManager: An std::exception occurred during inline hook creation for '{}': {}", name, e.what());
+        return std::unexpected(HookError::UnknownError);
     }
     catch (...)
     {
-        m_logger->error("HookManager: An unknown exception occurred during inline hook creation for '{}'.", name);
-        return "";
+        m_logger.error("HookManager: An unknown exception occurred during inline hook creation for '{}'.", name);
+        return std::unexpected(HookError::UnknownError);
     }
 }
 
-std::string HookManager::create_inline_hook_aob(
+std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
     const std::string &name,
     uintptr_t module_base,
     size_t module_size,
@@ -221,68 +212,68 @@ std::string HookManager::create_inline_hook_aob(
     void **original_trampoline,
     const HookConfig &config)
 {
-    m_logger->debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.",
-                    name, aob_pattern_str, format_hex(static_cast<int>(aob_offset), 0));
+    m_logger.debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.",
+                   name, aob_pattern_str, format_hex(static_cast<int>(aob_offset), 0));
 
-    std::vector<std::byte> pattern_bytes = parseAOB(aob_pattern_str);
-    if (pattern_bytes.empty())
+    auto pattern = parseAOB(aob_pattern_str);
+    if (!pattern.has_value())
     {
-        m_logger->error("HookManager: AOB pattern parsing failed for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
+        m_logger.error("HookManager: AOB pattern parsing failed for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
         if (original_trampoline)
             *original_trampoline = nullptr;
-        return "";
+        return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    std::byte *found_address_start = FindPattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern_bytes);
+    std::byte *found_address_start = FindPattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
-        m_logger->error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
+        m_logger.error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
         if (original_trampoline)
             *original_trampoline = nullptr;
-        return "";
+        return std::unexpected(HookError::InvalidTargetAddress);
     }
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
-    m_logger->info("HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                   name, format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                   format_hex(static_cast<int>(aob_offset), 0), format_address(target_address));
+    m_logger.info("HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
+                  name, format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+                  format_hex(static_cast<int>(aob_offset), 0), format_address(target_address));
 
     return create_inline_hook(name, target_address, detour_function, original_trampoline, config);
 }
 
-std::string HookManager::create_mid_hook(
+std::expected<std::string, HookError> HookManager::create_mid_hook(
     const std::string &name,
     uintptr_t target_address,
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
 
     if (!m_allocator)
     {
-        m_logger->error("HookManager: Allocator not available. Cannot create mid hook '{}'.", name);
-        return "";
+        m_logger.error("HookManager: Allocator not available. Cannot create mid hook '{}'.", name);
+        return std::unexpected(HookError::AllocatorNotAvailable);
     }
     if (target_address == 0)
     {
-        m_logger->error("HookManager: Target address is NULL for mid hook '{}'.", name);
-        return "";
+        m_logger.error("HookManager: Target address is NULL for mid hook '{}'.", name);
+        return std::unexpected(HookError::InvalidTargetAddress);
     }
     if (detour_function == nullptr)
     {
-        m_logger->error("HookManager: Detour function is NULL for mid hook '{}'.", name);
-        return "";
+        m_logger.error("HookManager: Detour function is NULL for mid hook '{}'.", name);
+        return std::unexpected(HookError::InvalidDetourFunction);
     }
 
-    if (hook_id_exists(name))
+    if (hook_id_exists_locked(name))
     {
-        m_logger->error("HookManager: A hook with the name '{}' already exists.", name);
-        return "";
+        m_logger.error("HookManager: A hook with the name '{}' already exists.", name);
+        return std::unexpected(HookError::HookAlreadyExists);
     }
 
     try
     {
-        safetyhook::MidHook::Flags sh_flags = static_cast<safetyhook::MidHook::Flags>(config.flags);
+        safetyhook::MidHook::Flags sh_flags = config.midFlags;
         if (!config.autoEnable)
         {
             sh_flags = static_cast<safetyhook::MidHook::Flags>(
@@ -297,9 +288,9 @@ std::string HookManager::create_mid_hook(
 
         if (!hook_creation_result)
         {
-            m_logger->error("HookManager: Failed to create SafetyHook::MidHook for '{}' at {}. Error: {}",
-                            name, format_address(target_address), error_to_string(hook_creation_result.error()));
-            return "";
+            m_logger.error("HookManager: Failed to create SafetyHook::MidHook for '{}' at {}. Error: {}",
+                           name, format_address(target_address), error_to_string(hook_creation_result.error()));
+            return std::unexpected(HookError::SafetyHookError);
         }
 
         auto sh_mid_hook_ptr = std::make_unique<safetyhook::MidHook>(std::move(hook_creation_result.value()));
@@ -314,31 +305,31 @@ std::string HookManager::create_mid_hook(
             initial_status = HookStatus::Disabled;
             if (config.autoEnable)
             {
-                m_logger->warning("HookManager: Mid hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
+                m_logger.warning("HookManager: Mid hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
             }
         }
 
         auto managed_hook = std::make_unique<MidHook>(name, target_address, std::move(sh_mid_hook_ptr), initial_status);
-        m_hooks.push_back(std::move(managed_hook));
+        m_hooks.emplace(name, std::move(managed_hook));
 
         std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
-        m_logger->info("HookManager: Successfully created {} mid hook '{}' targeting {}.",
-                       status_message, name, format_address(target_address));
+        m_logger.info("HookManager: Successfully created {} mid hook '{}' targeting {}.",
+                      status_message, name, format_address(target_address));
         return name;
     }
     catch (const std::exception &e)
     {
-        m_logger->error("HookManager: An std::exception occurred during mid hook creation for '{}': {}", name, e.what());
-        return "";
+        m_logger.error("HookManager: An std::exception occurred during mid hook creation for '{}': {}", name, e.what());
+        return std::unexpected(HookError::UnknownError);
     }
     catch (...)
     {
-        m_logger->error("HookManager: An unknown exception occurred during mid hook creation for '{}'.", name);
-        return "";
+        m_logger.error("HookManager: An unknown exception occurred during mid hook creation for '{}'.", name);
+        return std::unexpected(HookError::UnknownError);
     }
 }
 
-std::string HookManager::create_mid_hook_aob(
+std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     const std::string &name,
     uintptr_t module_base,
     size_t module_size,
@@ -347,154 +338,154 @@ std::string HookManager::create_mid_hook_aob(
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
-    m_logger->debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.",
-                    name, aob_pattern_str, format_hex(static_cast<int>(aob_offset), 0));
+    m_logger.debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.",
+                   name, aob_pattern_str, format_hex(static_cast<int>(aob_offset), 0));
 
-    std::vector<std::byte> pattern_bytes = parseAOB(aob_pattern_str);
-    if (pattern_bytes.empty())
+    auto pattern = parseAOB(aob_pattern_str);
+    if (!pattern.has_value())
     {
-        m_logger->error("HookManager: AOB pattern parsing failed for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
-        return "";
+        m_logger.error("HookManager: AOB pattern parsing failed for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
+        return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    std::byte *found_address_start = FindPattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern_bytes);
+    std::byte *found_address_start = FindPattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
-        m_logger->error("HookManager: AOB pattern not found for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
-        return "";
+        m_logger.error("HookManager: AOB pattern not found for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
+        return std::unexpected(HookError::InvalidTargetAddress);
     }
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
-    m_logger->info("HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                   name, format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                   format_hex(static_cast<int>(aob_offset), 0), format_address(target_address));
+    m_logger.info("HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
+                  name, format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+                  format_hex(static_cast<int>(aob_offset), 0), format_address(target_address));
 
     return create_mid_hook(name, target_address, detour_function, config);
 }
 
 bool HookManager::remove_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
-    auto it = find_hook_iterator(hook_id);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
-        std::string name_of_removed_hook = (*it)->getName();
-        HookType type_of_removed_hook = (*it)->getType();
+        std::string name_of_removed_hook = it->second->getName();
+        HookType type_of_removed_hook = it->second->getType();
         m_hooks.erase(it);
-        m_logger->info("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
-                       name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
+        m_logger.info("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
+                      name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
         return true;
     }
-    m_logger->warning("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id);
+    m_logger.warning("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id);
     return false;
 }
 
 void HookManager::remove_all_hooks()
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
     if (!m_hooks.empty())
     {
         size_t num_hooks = m_hooks.size();
-        m_logger->info("HookManager: Removing all {} managed hooks...", num_hooks);
+        m_logger.info("HookManager: Removing all {} managed hooks...", num_hooks);
         m_hooks.clear();
-        m_logger->info("HookManager: All {} managed hooks have been removed and unhooked.", num_hooks);
+        m_logger.info("HookManager: All {} managed hooks have been removed and unhooked.", num_hooks);
     }
     else
     {
-        m_logger->debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
+        m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 }
 
 bool HookManager::enable_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
-    auto it = find_hook_iterator(hook_id);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
-        Hook *hook = it->get();
+        Hook *hook = it->second.get();
         if (hook->getStatus() == HookStatus::Disabled)
         {
             if (hook->enable())
             {
-                m_logger->info("HookManager: Hook '{}' successfully enabled.", hook_id);
+                m_logger.info("HookManager: Hook '{}' successfully enabled.", hook_id);
                 return true;
             }
             else
             {
-                m_logger->error("HookManager: Failed to enable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
+                m_logger.error("HookManager: Failed to enable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
                 return false;
             }
         }
         else if (hook->getStatus() == HookStatus::Active)
         {
-            m_logger->debug("HookManager: Hook '{}' is already active. Enable request ignored.", hook_id);
+            m_logger.debug("HookManager: Hook '{}' is already active. Enable request ignored.", hook_id);
             return true;
         }
         else
         {
-            m_logger->warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::statusToString(hook->getStatus()));
+            m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::statusToString(hook->getStatus()));
             return false;
         }
     }
-    m_logger->warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
+    m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
     return false;
 }
 
 bool HookManager::disable_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
-    auto it = find_hook_iterator(hook_id);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
-        Hook *hook = it->get();
+        Hook *hook = it->second.get();
         if (hook->getStatus() == HookStatus::Active)
         {
             if (hook->disable())
             {
-                m_logger->info("HookManager: Hook '{}' successfully disabled.", hook_id);
+                m_logger.info("HookManager: Hook '{}' successfully disabled.", hook_id);
                 return true;
             }
             else
             {
-                m_logger->error("HookManager: Failed to disable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
+                m_logger.error("HookManager: Failed to disable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
                 return false;
             }
         }
         else if (hook->getStatus() == HookStatus::Disabled)
         {
-            m_logger->debug("HookManager: Hook '{}' is already disabled. Disable request ignored.", hook_id);
+            m_logger.debug("HookManager: Hook '{}' is already disabled. Disable request ignored.", hook_id);
             return true;
         }
         else
         {
-            m_logger->warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::statusToString(hook->getStatus()));
+            m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::statusToString(hook->getStatus()));
             return false;
         }
     }
-    m_logger->warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
+    m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
     return false;
 }
 
-HookStatus HookManager::get_hook_status(const std::string &hook_id) const
+std::optional<HookStatus> HookManager::get_hook_status(const std::string &hook_id) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
-    auto it = find_hook_iterator(hook_id);
-    if (it != m_hooks.cend())
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    auto it = m_hooks.find(hook_id);
+    if (it != m_hooks.end())
     {
-        return (*it)->getStatus();
+        return it->second->getStatus();
     }
-    return HookStatus::Removed;
+    return std::nullopt;
 }
 
 std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
     std::unordered_map<HookStatus, size_t> counts;
     counts[HookStatus::Active] = 0;
     counts[HookStatus::Disabled] = 0;
     counts[HookStatus::Failed] = 0;
     counts[HookStatus::Removed] = 0;
-    for (const auto &hook_ptr : m_hooks)
+    for (const auto &[name, hook_ptr] : m_hooks)
     {
         counts[hook_ptr->getStatus()]++;
     }
@@ -503,43 +494,37 @@ std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
 
 std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> status_filter) const
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
     std::vector<std::string> ids;
     ids.reserve(m_hooks.size());
-    for (const auto &hook_ptr : m_hooks)
+    for (const auto &[name, hook_ptr] : m_hooks)
     {
         if (!status_filter.has_value() || hook_ptr->getStatus() == status_filter.value())
         {
-            ids.push_back(hook_ptr->getName());
+            ids.push_back(name);
         }
     }
     return ids;
 }
 
-Hook *HookManager::get_hook_raw_ptr(const std::string &hook_id)
-{
-    auto it = find_hook_iterator(hook_id);
-    return (it != m_hooks.end()) ? it->get() : nullptr;
-}
-
 InlineHook *HookManager::get_inline_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
-    Hook *base_hook_ptr = get_hook_raw_ptr(hook_id);
-    if (base_hook_ptr && base_hook_ptr->getType() == HookType::Inline)
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    auto it = m_hooks.find(hook_id);
+    if (it != m_hooks.end() && it->second->getType() == HookType::Inline)
     {
-        return static_cast<InlineHook *>(base_hook_ptr);
+        return static_cast<InlineHook *>(it->second.get());
     }
     return nullptr;
 }
 
 MidHook *HookManager::get_mid_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::recursive_mutex> lock(m_hooks_mutex);
-    Hook *base_hook_ptr = get_hook_raw_ptr(hook_id);
-    if (base_hook_ptr && base_hook_ptr->getType() == HookType::Mid)
+    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    auto it = m_hooks.find(hook_id);
+    if (it != m_hooks.end() && it->second->getType() == HookType::Mid)
     {
-        return static_cast<MidHook *>(base_hook_ptr);
+        return static_cast<MidHook *>(it->second.get());
     }
     return nullptr;
 }

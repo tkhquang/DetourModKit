@@ -7,41 +7,14 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
 
-// Helper function to convert LogLevel to string (duplicated from logger.cpp for independence)
-static std::string asyncLogLevelToString(DetourModKit::LogLevel level)
-{
-    switch (level)
-    {
-    case DetourModKit::LOG_TRACE:
-        return "TRACE";
-    case DetourModKit::LOG_DEBUG:
-        return "DEBUG";
-    case DetourModKit::LOG_INFO:
-        return "INFO";
-    case DetourModKit::LOG_WARNING:
-        return "WARNING";
-    case DetourModKit::LOG_ERROR:
-        return "ERROR";
-    default:
-        return "UNKNOWN";
-    }
-}
-
-// Platform-specific localtime
-static void getLocalTime(std::tm &tm_buf, const std::time_t &time_t_val)
-{
-#if defined(_WIN32) || defined(_MSC_VER)
-    localtime_s(&tm_buf, &time_t_val);
-#else
-    localtime_r(&time_t_val, &tm_buf);
-#endif
-}
-
 using namespace DetourModKit;
+
+// Use the shared logLevelToString from logger.hpp - no duplication needed
 
 // ============================================================================
 // LogMessage Implementation
@@ -102,27 +75,34 @@ std::string_view LogMessage::message() const
 }
 
 // ============================================================================
-// BoundedMPMCQueue Implementation
+// DynamicMPMCQueue Implementation
 // ============================================================================
 
-template <typename T, size_t Capacity>
-BoundedMPMCQueue<T, Capacity>::BoundedMPMCQueue()
+DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
+    : capacity_(capacity), mask_(capacity - 1)
 {
+    // Capacity must be a power of 2
+    if ((capacity & (capacity - 1)) != 0 || capacity < 2)
+    {
+        throw std::invalid_argument("DynamicMPMCQueue capacity must be a power of 2 and at least 2");
+    }
+
+    buffer_.resize(capacity);
+
     // Initialize sequence numbers
-    for (size_t i = 0; i < Capacity; ++i)
+    for (size_t i = 0; i < capacity; ++i)
     {
         buffer_[i].sequence.store(i, std::memory_order_relaxed);
     }
 }
 
-template <typename T, size_t Capacity>
-bool BoundedMPMCQueue<T, Capacity>::try_push(T item)
+bool DynamicMPMCQueue::try_push(LogMessage item)
 {
     size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
 
     for (;;)
     {
-        Slot &slot = buffer_[pos & MASK];
+        Slot &slot = buffer_[pos & mask_];
         size_t seq = slot.sequence.load(std::memory_order_acquire);
         intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
 
@@ -150,14 +130,13 @@ bool BoundedMPMCQueue<T, Capacity>::try_push(T item)
     }
 }
 
-template <typename T, size_t Capacity>
-bool BoundedMPMCQueue<T, Capacity>::try_pop(T &item)
+bool DynamicMPMCQueue::try_pop(LogMessage &item)
 {
     size_t pos = dequeue_pos_.load(std::memory_order_relaxed);
 
     for (;;)
     {
-        Slot &slot = buffer_[pos & MASK];
+        Slot &slot = buffer_[pos & mask_];
         size_t seq = slot.sequence.load(std::memory_order_acquire);
         intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
 
@@ -168,7 +147,7 @@ bool BoundedMPMCQueue<T, Capacity>::try_pop(T &item)
                                                    std::memory_order_relaxed))
             {
                 item = std::move(slot.data);
-                slot.sequence.store(pos + Capacity, std::memory_order_release);
+                slot.sequence.store(pos + capacity_, std::memory_order_release);
                 return true;
             }
         }
@@ -185,22 +164,17 @@ bool BoundedMPMCQueue<T, Capacity>::try_pop(T &item)
     }
 }
 
-template <typename T, size_t Capacity>
-size_t BoundedMPMCQueue<T, Capacity>::size() const
+size_t DynamicMPMCQueue::size() const
 {
     size_t enq = enqueue_pos_.load(std::memory_order_relaxed);
     size_t deq = dequeue_pos_.load(std::memory_order_relaxed);
     return (enq >= deq) ? (enq - deq) : 0;
 }
 
-template <typename T, size_t Capacity>
-bool BoundedMPMCQueue<T, Capacity>::empty() const
+bool DynamicMPMCQueue::empty() const
 {
     return size() == 0;
 }
-
-// Explicit template instantiation for LogMessage
-template class BoundedMPMCQueue<LogMessage, 8192>;
 
 // ============================================================================
 // AsyncLogger Implementation
@@ -209,7 +183,8 @@ template class BoundedMPMCQueue<LogMessage, 8192>;
 AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config,
                          std::ofstream &file_stream,
                          std::mutex &log_mutex)
-    : config_(config),
+    : queue_(config.queue_capacity), // Now actually uses the config capacity!
+      config_(config),
       file_stream_(file_stream),
       log_mutex_(log_mutex)
 {
@@ -233,11 +208,18 @@ void AsyncLogger::enqueue(LogLevel level, std::string message)
             auto now = std::chrono::system_clock::now();
             auto time_t = std::chrono::system_clock::to_time_t(now);
             std::tm tm_buf{};
-            getLocalTime(tm_buf, time_t);
 
+#if defined(_WIN32) || defined(_MSC_VER)
+            localtime_s(&tm_buf, &time_t);
+#else
+            localtime_r(&time_t, &tm_buf);
+#endif
+
+            // Use shared logLevelToString from logger.hpp
             file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
-                         << "[" << std::setw(7) << std::left << asyncLogLevelToString(level) << "] :: "
-                         << message << std::endl;
+                         << "[" << std::setw(7) << std::left << logLevelToString(level) << "] :: "
+                         << message << '\n';
+            file_stream_.flush();
         }
         return;
     }
@@ -369,18 +351,23 @@ void AsyncLogger::write_batch(std::span<LogMessage> messages)
         // Convert timestamp to formatted string
         auto time_t = std::chrono::system_clock::to_time_t(msg.timestamp);
         std::tm tm_buf{};
-        getLocalTime(tm_buf, time_t);
+
+#if defined(_WIN32) || defined(_MSC_VER)
+        localtime_s(&tm_buf, &time_t);
+#else
+        localtime_r(&time_t, &tm_buf);
+#endif
 
         // Get milliseconds
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       msg.timestamp.time_since_epoch()) %
                   1000;
 
-        // Write log entry
+        // Write log entry - use shared logLevelToString and '\n' instead of std::endl
         file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
                      << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
-                     << "[" << std::setw(7) << std::left << asyncLogLevelToString(msg.level) << "] :: "
-                     << msg.message() << std::endl;
+                     << "[" << std::setw(7) << std::left << logLevelToString(msg.level) << "] :: "
+                     << msg.message() << '\n';
     }
 
     // Flush after batch write
@@ -430,11 +417,17 @@ bool AsyncLogger::handle_overflow(LogMessage &&message)
         {
             auto time_t = std::chrono::system_clock::to_time_t(message.timestamp);
             std::tm tm_buf{};
-            getLocalTime(tm_buf, time_t);
 
+#if defined(_WIN32) || defined(_MSC_VER)
+            localtime_s(&tm_buf, &time_t);
+#else
+            localtime_r(&time_t, &tm_buf);
+#endif
+
+            // Use shared logLevelToString and '\n' instead of std::endl
             file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
-                         << "[" << std::setw(7) << std::left << asyncLogLevelToString(message.level) << "] :: "
-                         << message.message() << std::endl;
+                         << "[" << std::setw(7) << std::left << logLevelToString(message.level) << "] :: "
+                         << message.message() << '\n';
             file_stream_.flush();
         }
         return true;

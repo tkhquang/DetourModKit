@@ -2,13 +2,14 @@
 #define HOOK_MANAGER_HPP
 
 #include <string>
-#include <vector>
 #include <unordered_map>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <expected>
+#include <string_view>
 
 #include "safetyhook.hpp"
 #include "logger.hpp"
@@ -40,20 +41,37 @@ namespace DetourModKit
     };
 
     /**
+     * @enum HookError
+     * @brief Error codes for hook creation/operation failures.
+     */
+    enum class HookError
+    {
+        AllocatorNotAvailable,
+        InvalidTargetAddress,
+        InvalidDetourFunction,
+        InvalidTrampolinePointer,
+        HookAlreadyExists,
+        SafetyHookError,
+        UnknownError
+    };
+
+    /**
      * @struct HookConfig
      * @brief Configuration options used during the creation of a new hook.
      */
     struct HookConfig
     {
         bool autoEnable = true;
-        uint32_t flags = 0;
+        safetyhook::InlineHook::Flags inlineFlags = static_cast<safetyhook::InlineHook::Flags>(0);
+        safetyhook::MidHook::Flags midFlags = static_cast<safetyhook::MidHook::Flags>(0);
     };
 
     /**
      * @class Hook
      * @brief Abstract base class for managed hooks.
      * @details Defines a common interface for interacting with different types of hooks
-     *          managed by the HookManager.
+     *          managed by the HookManager. Implements the Template Method pattern for
+     *          enable/disable state management.
      */
     class Hook
     {
@@ -66,20 +84,52 @@ namespace DetourModKit
         HookStatus getStatus() const { return m_status; }
 
         /**
-         * @brief Pure virtual function to enable the hook.
+         * @brief Enables the hook.
          * @return true if the hook was successfully enabled, false otherwise.
+         * @note This is a Template Method; derived classes implement do_enable().
          */
-        virtual bool enable() = 0;
+        bool enable()
+        {
+            if (!isImplValid())
+                return false;
+            if (m_status == HookStatus::Active)
+                return true;
+            if (m_status != HookStatus::Disabled)
+                return false;
+
+            if (do_enable())
+            {
+                m_status = HookStatus::Active;
+                return true;
+            }
+            return false;
+        }
 
         /**
-         * @brief Pure virtual function to disable the hook.
+         * @brief Disables the hook.
          * @return true if the hook was successfully disabled, false otherwise.
+         * @note This is a Template Method; derived classes implement do_disable().
          */
-        virtual bool disable() = 0;
+        bool disable()
+        {
+            if (!isImplValid())
+                return false;
+            if (m_status == HookStatus::Disabled)
+                return true;
+            if (m_status != HookStatus::Active)
+                return false;
+
+            if (do_disable())
+            {
+                m_status = HookStatus::Disabled;
+                return true;
+            }
+            return false;
+        }
 
         bool isEnabled() const { return m_status == HookStatus::Active; }
 
-        static std::string statusToString(HookStatus status)
+        static std::string_view statusToString(HookStatus status)
         {
             switch (status)
             {
@@ -96,6 +146,29 @@ namespace DetourModKit
             }
         }
 
+        static std::string_view errorToString(HookError error)
+        {
+            switch (error)
+            {
+            case HookError::AllocatorNotAvailable:
+                return "Allocator not available";
+            case HookError::InvalidTargetAddress:
+                return "Invalid target address";
+            case HookError::InvalidDetourFunction:
+                return "Invalid detour function";
+            case HookError::InvalidTrampolinePointer:
+                return "Invalid trampoline pointer";
+            case HookError::HookAlreadyExists:
+                return "Hook already exists";
+            case HookError::SafetyHookError:
+                return "SafetyHook error";
+            case HookError::UnknownError:
+                return "Unknown error";
+            default:
+                return "Invalid error code";
+            }
+        }
+
     protected:
         std::string m_name;
         HookType m_type;
@@ -105,10 +178,13 @@ namespace DetourModKit
         Hook(std::string name, HookType type, uintptr_t target_address, HookStatus initial_status)
             : m_name(std::move(name)), m_type(type), m_target_address(target_address), m_status(initial_status) {}
 
+        // Derived classes implement these for the Template Method pattern
+        virtual bool isImplValid() const noexcept = 0;
+        virtual bool do_enable() = 0;
+        virtual bool do_disable() = 0;
+
         Hook(const Hook &) = delete;
         Hook &operator=(const Hook &) = delete;
-        Hook(Hook &&) noexcept = default;
-        Hook &operator=(Hook &&) noexcept = default;
     };
 
     /**
@@ -124,42 +200,6 @@ namespace DetourModKit
             : Hook(std::move(name), HookType::Inline, target_address, initial_status),
               m_safetyhook_impl(std::move(hook_obj)) {}
 
-        bool enable() override
-        {
-            if (!m_safetyhook_impl)
-                return false;
-            if (m_status == HookStatus::Active)
-                return true;
-            if (m_status != HookStatus::Disabled)
-                return false;
-
-            auto result = m_safetyhook_impl->enable();
-            if (result)
-            {
-                m_status = HookStatus::Active;
-                return true;
-            }
-            return false;
-        }
-
-        bool disable() override
-        {
-            if (!m_safetyhook_impl)
-                return false;
-            if (m_status == HookStatus::Disabled)
-                return true;
-            if (m_status != HookStatus::Active)
-                return false;
-
-            auto result = m_safetyhook_impl->disable();
-            if (result)
-            {
-                m_status = HookStatus::Disabled;
-                return true;
-            }
-            return false;
-        }
-
         /**
          * @brief Retrieves the trampoline to call the original function.
          * @tparam T The function pointer type of the original function.
@@ -169,6 +209,19 @@ namespace DetourModKit
         T getOriginal() const
         {
             return m_safetyhook_impl ? m_safetyhook_impl->original<T>() : nullptr;
+        }
+
+    protected:
+        bool isImplValid() const noexcept override { return m_safetyhook_impl != nullptr; }
+        bool do_enable() override
+        {
+            auto result = m_safetyhook_impl->enable();
+            return result.has_value();
+        }
+        bool do_disable() override
+        {
+            auto result = m_safetyhook_impl->disable();
+            return result.has_value();
         }
 
     private:
@@ -188,42 +241,6 @@ namespace DetourModKit
             : Hook(std::move(name), HookType::Mid, target_address, initial_status),
               m_safetyhook_impl(std::move(hook_obj)) {}
 
-        bool enable() override
-        {
-            if (!m_safetyhook_impl)
-                return false;
-            if (m_status == HookStatus::Active)
-                return true;
-            if (m_status != HookStatus::Disabled)
-                return false;
-
-            auto result = m_safetyhook_impl->enable();
-            if (result)
-            {
-                m_status = HookStatus::Active;
-                return true;
-            }
-            return false;
-        }
-
-        bool disable() override
-        {
-            if (!m_safetyhook_impl)
-                return false;
-            if (m_status == HookStatus::Disabled)
-                return true;
-            if (m_status != HookStatus::Active)
-                return false;
-
-            auto result = m_safetyhook_impl->disable();
-            if (result)
-            {
-                m_status = HookStatus::Disabled;
-                return true;
-            }
-            return false;
-        }
-
         /**
          * @brief Gets the destination function of this mid-hook.
          * @return safetyhook::MidHookFn The function pointer to the detour.
@@ -231,6 +248,19 @@ namespace DetourModKit
         safetyhook::MidHookFn getDestination() const
         {
             return m_safetyhook_impl ? m_safetyhook_impl->destination() : nullptr;
+        }
+
+    protected:
+        bool isImplValid() const noexcept override { return m_safetyhook_impl != nullptr; }
+        bool do_enable() override
+        {
+            auto result = m_safetyhook_impl->enable();
+            return result.has_value();
+        }
+        bool do_disable() override
+        {
+            auto result = m_safetyhook_impl->disable();
+            return result.has_value();
         }
 
     private:
@@ -241,7 +271,7 @@ namespace DetourModKit
      * @class HookManager
      * @brief Manages the lifecycle of all hooks (Inline and Mid) using SafetyHook.
      * @details Provides a centralized API for creating, removing, enabling, and disabling hooks.
-     *          Thread-safe for all public methods.
+     *          Thread-safe for all public methods. Uses std::expected for explicit error handling.
      */
     class HookManager
     {
@@ -252,8 +282,14 @@ namespace DetourModKit
          */
         static HookManager &getInstance();
 
-        explicit HookManager(Logger *logger = nullptr);
+        explicit HookManager(Logger &logger = Logger::getInstance());
         ~HookManager();
+
+        // Non-copyable, non-movable (mutex member)
+        HookManager(const HookManager &) = delete;
+        HookManager &operator=(const HookManager &) = delete;
+        HookManager(HookManager &&) = delete;
+        HookManager &operator=(HookManager &&) = delete;
 
         /**
          * @brief Creates an inline hook at a specific target memory address.
@@ -262,9 +298,9 @@ namespace DetourModKit
          * @param detour_function Pointer to the detour function.
          * @param original_trampoline Output pointer to receive trampoline address.
          * @param config Optional configuration settings for the hook.
-         * @return std::string The hook name if successful, empty string otherwise.
+         * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
-        std::string create_inline_hook(
+        [[nodiscard]] std::expected<std::string, HookError> create_inline_hook(
             const std::string &name,
             uintptr_t target_address,
             void *detour_function,
@@ -281,9 +317,9 @@ namespace DetourModKit
          * @param detour_function Pointer to the detour function.
          * @param original_trampoline Output pointer to store trampoline address.
          * @param config Optional configuration settings for the hook.
-         * @return std::string The hook name if successful, empty string otherwise.
+         * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
-        std::string create_inline_hook_aob(
+        [[nodiscard]] std::expected<std::string, HookError> create_inline_hook_aob(
             const std::string &name,
             uintptr_t module_base,
             size_t module_size,
@@ -299,9 +335,9 @@ namespace DetourModKit
          * @param target_address The memory address within a function to hook.
          * @param detour_function The function to be called when the mid-hook is executed.
          * @param config Optional configuration settings for the hook.
-         * @return std::string The hook name if successful, empty string otherwise.
+         * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
-        std::string create_mid_hook(
+        [[nodiscard]] std::expected<std::string, HookError> create_mid_hook(
             const std::string &name,
             uintptr_t target_address,
             safetyhook::MidHookFn detour_function,
@@ -316,9 +352,9 @@ namespace DetourModKit
          * @param aob_offset Offset to add to the found pattern's address.
          * @param detour_function The mid-hook detour function.
          * @param config Optional configuration settings for the hook.
-         * @return std::string The hook name if successful, empty string otherwise.
+         * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
-        std::string create_mid_hook_aob(
+        [[nodiscard]] std::expected<std::string, HookError> create_mid_hook_aob(
             const std::string &name,
             uintptr_t module_base,
             size_t module_size,
@@ -356,9 +392,9 @@ namespace DetourModKit
         /**
          * @brief Retrieves the current status of a hook.
          * @param hook_id The name of the hook.
-         * @return HookStatus The current status or HookStatus::Removed if not found.
+         * @return std::optional<HookStatus> The current status, or std::nullopt if not found.
          */
-        HookStatus get_hook_status(const std::string &hook_id) const;
+        std::optional<HookStatus> get_hook_status(const std::string &hook_id) const;
 
         /**
          * @brief Gets a summary of hook counts categorized by their status.
@@ -388,24 +424,17 @@ namespace DetourModKit
         MidHook *get_mid_hook(const std::string &hook_id);
 
     private:
-        HookManager(const HookManager &) = delete;
-        HookManager &operator=(const HookManager &) = delete;
-        HookManager(HookManager &&) noexcept = default;
-        HookManager &operator=(HookManager &&) noexcept = default;
-
-        mutable std::recursive_mutex m_hooks_mutex;
-        std::vector<std::unique_ptr<Hook>> m_hooks;
-        Logger *m_logger;
+        mutable std::mutex m_hooks_mutex;
+        std::unordered_map<std::string, std::unique_ptr<Hook>> m_hooks;
+        Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;
 
-        auto find_hook_iterator(const std::string &hook_id) -> decltype(m_hooks.begin());
-        auto find_hook_iterator(const std::string &hook_id) const -> decltype(m_hooks.cbegin());
-
-        bool hook_id_exists(const std::string &hook_id) const;
-        Hook *get_hook_raw_ptr(const std::string &hook_id);
+        // Non-locking variants - caller must already hold m_hooks_mutex
+        bool hook_id_exists_locked(const std::string &hook_id) const;
+        Hook *get_hook_raw_ptr_locked(const std::string &hook_id);
     };
 } // namespace DetourModKit
 

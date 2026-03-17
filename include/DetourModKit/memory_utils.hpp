@@ -17,8 +17,10 @@ namespace DetourModKit
          *          reducing overhead of frequent VirtualQuery system calls.
          * @param cache_size The desired number of entries in the cache. Defaults to 32.
          * @param expiry_ms Cache entry expiry time in milliseconds. Defaults to 5000ms.
+         * @return true if this call performed initialization, false if already initialized.
+         * @note Only the first call to initMemoryCache has effect; subsequent calls return false.
          */
-        void initMemoryCache(size_t cache_size = 32, unsigned int expiry_ms = 5000);
+        bool initMemoryCache(size_t cache_size = 32, unsigned int expiry_ms = 5000);
 
         /**
          * @brief Clears all entries from the memory region cache.
@@ -41,7 +43,7 @@ namespace DetourModKit
          * @param size Number of bytes in the memory region to check.
          * @return true if the entire region is readable, false otherwise.
          */
-        bool isMemoryReadable(const volatile void *address, size_t size);
+        bool isMemoryReadable(const void *address, size_t size);
 
         /**
          * @brief Checks if a specified memory region is writable.
@@ -50,7 +52,7 @@ namespace DetourModKit
          * @param size Number of bytes in the memory region to check.
          * @return true if the entire region is writable, false otherwise.
          */
-        bool isMemoryWritable(volatile void *address, size_t size);
+        bool isMemoryWritable(void *address, size_t size);
 
         /**
          * @brief Writes a sequence of bytes to a target memory address.
@@ -60,7 +62,7 @@ namespace DetourModKit
          * @param sourceBytes Pointer to the source buffer containing data to write.
          * @param numBytes Number of bytes to write.
          * @param logger Reference to a Logger instance for error reporting.
-         * @return true if the write operation succeeds, false otherwise.
+         * @return true if the write operation and protection restore succeed, false otherwise.
          */
         bool WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger);
     } // namespace Memory

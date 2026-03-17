@@ -7,6 +7,8 @@
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/format_utils.hpp"
 
+using namespace DetourModKit;
+
 #include <windows.h>
 #include <filesystem>
 #include <chrono>
@@ -23,34 +25,10 @@ std::string Logger::s_log_prefix = "DetourModKit";            // Default prefix
 std::string Logger::s_log_file_name = "DetourModKit_Log.txt"; // Default log file name
 std::string Logger::s_timestamp_format = "%Y-%m-%d %H:%M:%S"; // Default timestamp
 
-// Helper to map LogLevel enum to string representations.
-// This map ensures correct string lookup even if enum values change.
-const std::map<LogLevel, std::string> LOG_LEVEL_STRING_MAP = {
-    {LOG_TRACE, "TRACE"},
-    {LOG_DEBUG, "DEBUG"},
-    {LOG_INFO, "INFO"},
-    {LOG_WARNING, "WARNING"},
-    {LOG_ERROR, "ERROR"}};
-
-/**
- * @brief Converts a LogLevel enum to its string representation.
- * @param level The LogLevel enum value.
- * @return String representation of the log level, or "UNKNOWN" if not found.
- */
-static std::string logLevelToString(LogLevel level)
-{
-    auto it = LOG_LEVEL_STRING_MAP.find(level);
-    if (it != LOG_LEVEL_STRING_MAP.end())
-    {
-        return it->second;
-    }
-    return "UNKNOWN";
-}
-
 /**
  * @brief Converts a log level string (case-insensitive) to LogLevel enum.
  * @param level_str The string representation of the log level.
- * @return The corresponding LogLevel enum. Returns LOG_INFO if string is unrecognized.
+ * @return The corresponding LogLevel enum. Returns LogLevel::Info if string is unrecognized.
  */
 LogLevel Logger::stringToLogLevel(const std::string &level_str)
 {
@@ -60,21 +38,21 @@ LogLevel Logger::stringToLogLevel(const std::string &level_str)
                    { return static_cast<char>(std::toupper(c)); });
 
     if (upper_level_str == "TRACE")
-        return LOG_TRACE;
+        return LogLevel::Trace;
     if (upper_level_str == "DEBUG")
-        return LOG_DEBUG;
+        return LogLevel::Debug;
     if (upper_level_str == "INFO")
-        return LOG_INFO;
+        return LogLevel::Info;
     if (upper_level_str == "WARNING")
-        return LOG_WARNING;
+        return LogLevel::Warning;
     if (upper_level_str == "ERROR")
-        return LOG_ERROR;
+        return LogLevel::Error;
 
     // Default to INFO if string is not recognized.
     // getInstance().log() can't be called here as it might recurse during construction
     std::cerr << "[" << s_log_prefix << " Logger WARNING] Unrecognized log level string '" << level_str
               << "'. Defaulting to INFO." << std::endl;
-    return LOG_INFO;
+    return LogLevel::Info;
 }
 
 void Logger::configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
@@ -85,26 +63,15 @@ void Logger::configure(const std::string &prefix, const std::string &file_name, 
     s_timestamp_format = timestamp_fmt;
 
     // If the instance already exists, apply the new configuration to it
-    // Note: This uses a trick to check if the instance exists without creating it
-    // by catching the potential exception from getInstance() if it's being constructed
-    // However, since getInstance() uses a static local, we can safely call it
-    // and it will return the existing instance if already constructed
-    try
+    // Note: getInstance() uses a static local and cannot throw
+    Logger &instance = getInstance();
+    // Only reconfigure if the instance's settings differ from the new static settings
+    // This prevents unnecessary file reopening if settings are the same
+    if (instance.log_prefix_instance != prefix ||
+        instance.log_file_name_instance != file_name ||
+        instance.timestamp_format_instance != timestamp_fmt)
     {
-        Logger &instance = getInstance();
-        // Only reconfigure if the instance's settings differ from the new static settings
-        // This prevents unnecessary file reopening if settings are the same
-        if (instance.log_prefix_instance != prefix ||
-            instance.log_file_name_instance != file_name ||
-            instance.timestamp_format_instance != timestamp_fmt)
-        {
-            instance.reconfigure(prefix, file_name, timestamp_fmt);
-        }
-    }
-    catch (...)
-    {
-        // Instance doesn't exist yet or is being constructed, which is fine
-        // The new static values will be used when it's constructed
+        instance.reconfigure(prefix, file_name, timestamp_fmt);
     }
 }
 
@@ -117,7 +84,7 @@ void Logger::reconfigure(const std::string &prefix, const std::string &file_name
     {
         log_file_stream << "[" << getTimestamp() << "] "
                         << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                        << "Logger reconfiguring. New file: " << file_name << std::endl;
+                        << "Logger reconfiguring. New file: " << file_name << '\n';
         log_file_stream.flush();
         log_file_stream.close();
     }
@@ -141,11 +108,11 @@ void Logger::reconfigure(const std::string &prefix, const std::string &file_name
     {
         log_file_stream << "[" << getTimestamp() << "] "
                         << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                        << "Logger reconfigured. Now logging to: " << log_file_full_path << std::endl;
+                        << "Logger reconfigured. Now logging to: " << log_file_full_path << '\n';
     }
 }
 
-Logger::Logger() : current_log_level(LOG_INFO) // Default to INFO level
+Logger::Logger()
 {
     // Use the static configurations set by ::configure or their defaults.
     // Need to ensure this constructor isn't causing issues if s_log_prefix changes after construction.
@@ -176,14 +143,14 @@ Logger::Logger() : current_log_level(LOG_INFO) // Default to INFO level
         // Manually format this first message as 'log' method might not be fully ready or to avoid recursion.
         log_file_stream << "[" << getTimestamp() << "] ["
                         << std::setw(7) << std::left << "INFO"
-                        << "] :: Logger initialized. Logging to: " << log_file_full_path << std::endl;
+                        << "] :: Logger initialized. Logging to: " << log_file_full_path << '\n';
     }
 }
 
 Logger::~Logger()
 {
     // Shutdown async logger first if enabled
-    if (async_mode_enabled_ && async_logger_)
+    if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
     {
         async_logger_->shutdown();
         async_logger_.reset();
@@ -195,7 +162,7 @@ Logger::~Logger()
         std::lock_guard<std::mutex> lock(log_access_mutex);
         log_file_stream << "[" << getTimestamp() << "] ["
                         << std::setw(7) << std::left << "INFO"
-                        << "] :: Logger shutting down." << std::endl;
+                        << "] :: Logger shutting down." << '\n';
         log_file_stream.flush(); // Ensure all buffered data is written
         log_file_stream.close();
     }
@@ -203,47 +170,45 @@ Logger::~Logger()
 
 void Logger::setLogLevel(LogLevel level)
 {
-    // Validate if the level is one of the known enums for safety, though it's an enum.
-    if (level < LOG_TRACE || level > LOG_ERROR)
+    // Validate if the level is one of the known enums for safety
+    auto level_int = static_cast<std::underlying_type_t<LogLevel>>(level);
+    if (level_int < 0 || level_int > 4)
     {
-        log(LOG_WARNING, "Attempted to set an invalid log level value (" + std::to_string(level) + "). Keeping current level.");
+        log(LogLevel::Warning, "Attempted to set an invalid log level value ({}). Keeping current level.", level_int);
         return;
     }
 
-    std::string old_level_str = logLevelToString(current_log_level);
-    current_log_level = level; // This is an atomic write if LogLevel is std::atomic, but it's not.
-                               // Mutex in log() protects concurrent reads/writes of log_file_stream,
-                               // but current_log_level itself might need protection if setLogLevel can be
-                               // called concurrently with log(). For typical usage (set once or rarely), this is fine.
-                               // Add a lock if setLogLevel is frequently called from multiple threads.
-    std::string new_level_str = logLevelToString(level);
-    log(LOG_INFO, "Log level changed from " + old_level_str + " to " + new_level_str);
+    auto old_level = current_log_level.load(std::memory_order_acquire);
+    current_log_level.store(level, std::memory_order_release);
+
+    log(LogLevel::Info, "Log level changed from {} to {}",
+        logLevelToString(old_level), logLevelToString(level));
 }
 
 void Logger::log(LogLevel level, const std::string &message)
 {
     // Check if the message's level is sufficient to be logged.
-    if (level >= current_log_level) // Read of current_log_level
+    // Atomic load for thread-safe level checking without lock contention
+    if (level >= current_log_level.load(std::memory_order_acquire))
     {
         // Use async logger if enabled
-        if (async_mode_enabled_ && async_logger_)
+        if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
         {
             async_logger_->enqueue(level, message);
             return;
         }
 
         // Synchronous logging (original behavior)
-        std::string level_str = logLevelToString(level);
+        auto level_str = logLevelToString(level);
         std::lock_guard<std::mutex> lock(log_access_mutex); // Protect file stream access
 
         if (log_file_stream.is_open() && log_file_stream.good())
         {
             log_file_stream << "[" << getTimestamp() << "] " // getTimestamp is const, assumed thread-safe in its impl.
                             << "[" << std::setw(7) << std::left << level_str << "] :: "
-                            << message << std::endl; // endl flushes, can be perf intensive.
-                                                     // Consider just '\n' and periodic flushes if high-rate logging.
+                            << message << '\n'; // Use '\n' instead of std::endl to avoid implicit flush
         }
-        else if (level >= LOG_ERROR) // Only if file isn't open, output critical errors to cerr
+        else if (level >= LogLevel::Error) // Only if file isn't open, output critical errors to cerr
         {
             // This indicates the log file itself has an issue.
             std::cerr << "[" << log_prefix_instance << " LOG_FILE_WRITE_ERROR] [" << getTimestamp() << "] ["
@@ -352,39 +317,38 @@ std::string Logger::generateLogFilePath() const
 
 void Logger::enableAsyncMode(const AsyncLoggerConfig &config)
 {
-    std::lock_guard<std::mutex> lock(log_access_mutex);
-
-    if (async_mode_enabled_)
+    if (async_mode_enabled_.load(std::memory_order_acquire))
     {
-        log(LOG_WARNING, "Async mode is already enabled.");
         return;
     }
 
     if (!log_file_stream.is_open())
     {
-        log(LOG_ERROR, "Cannot enable async mode: log file is not open.");
+        log(LogLevel::Error, "Cannot enable async mode: log file is not open.");
         return;
     }
 
     try
     {
         async_logger_ = std::make_unique<AsyncLogger>(config, log_file_stream, log_access_mutex);
-        async_mode_enabled_ = true;
-        log(LOG_INFO, "Async logging mode enabled. Queue capacity: " +
-                          std::to_string(config.queue_capacity) +
-                          ", Batch size: " + std::to_string(config.batch_size));
+        async_mode_enabled_.store(true, std::memory_order_release);
+        log(LogLevel::Info, "Async logging mode enabled. Queue capacity: {}, Batch size: {}",
+            config.queue_capacity, config.batch_size);
     }
     catch (const std::exception &e)
     {
-        log(LOG_ERROR, std::string("Failed to enable async mode: ") + e.what());
+        log(LogLevel::Error, "Failed to enable async mode: {}", e.what());
     }
+}
+
+void Logger::enableAsyncMode()
+{
+    enableAsyncMode(AsyncLoggerConfig{});
 }
 
 void Logger::disableAsyncMode()
 {
-    std::lock_guard<std::mutex> lock(log_access_mutex);
-
-    if (!async_mode_enabled_)
+    if (!async_mode_enabled_.load(std::memory_order_acquire))
     {
         return;
     }
@@ -395,18 +359,18 @@ void Logger::disableAsyncMode()
         async_logger_.reset();
     }
 
-    async_mode_enabled_ = false;
-    log(LOG_INFO, "Async logging mode disabled. Switched to synchronous mode.");
+    async_mode_enabled_.store(false, std::memory_order_release);
+    log(LogLevel::Info, "Async logging mode disabled. Switched to synchronous mode.");
 }
 
 bool Logger::isAsyncModeEnabled() const
 {
-    return async_mode_enabled_;
+    return async_mode_enabled_.load(std::memory_order_acquire);
 }
 
 void Logger::flush()
 {
-    if (async_mode_enabled_ && async_logger_)
+    if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
     {
         async_logger_->flush();
     }
@@ -418,11 +382,6 @@ void Logger::flush()
             log_file_stream.flush();
         }
     }
-}
-
-LogLevel Logger::getLogLevel() const
-{
-    return current_log_level;
 }
 
 // Definition for the static mutex

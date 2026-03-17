@@ -25,6 +25,7 @@
 #include <memory>
 #include <variant>
 #include <typeinfo>
+#include <mutex>
 
 using namespace DetourModKit;
 using namespace DetourModKit::Filesystem;
@@ -63,16 +64,188 @@ namespace
     };
 
     /**
-     * @brief Template class for a specific configuration item type.
+     * @brief Configuration item using std::function callback (NEW API).
      * @tparam T The data type of the configuration item (e.g., int, bool, std::string).
      */
     template <typename T>
-    struct ConfigItem : public ConfigItemBase
+    struct CallbackConfigItem : public ConfigItemBase
+    {
+        std::function<void(T)> setter; // Callback function to set the value
+        T default_value;
+        T current_value;
+
+        CallbackConfigItem(std::string sec, std::string key, std::string log_name,
+                           std::function<void(T)> set_fn, T def_val)
+            : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)),
+              setter(std::move(set_fn)),
+              default_value(std::move(def_val)),
+              current_value(default_value)
+        {
+            // Initialize with default value via callback
+            if (setter)
+            {
+                setter(current_value);
+            }
+        }
+
+        void load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger) override;
+        void log_current_value(Logger &logger) const override;
+    };
+
+    // --- Specializations for CallbackConfigItem<T>::load and ::log_current_value ---
+
+    // For int
+    template <>
+    void CallbackConfigItem<int>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    {
+        current_value = static_cast<int>(ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value));
+        if (setter)
+        {
+            setter(current_value);
+        }
+    }
+
+    template <>
+    void CallbackConfigItem<int>::log_current_value(Logger &logger) const
+    {
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, current_value);
+    }
+
+    // For float
+    template <>
+    void CallbackConfigItem<float>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    {
+        current_value = static_cast<float>(ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
+        if (setter)
+        {
+            setter(current_value);
+        }
+    }
+
+    template <>
+    void CallbackConfigItem<float>::log_current_value(Logger &logger) const
+    {
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, current_value);
+    }
+
+    // For bool
+    template <>
+    void CallbackConfigItem<bool>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    {
+        current_value = ini.GetBoolValue(section.c_str(), ini_key.c_str(), default_value);
+        if (setter)
+        {
+            setter(current_value);
+        }
+    }
+
+    template <>
+    void CallbackConfigItem<bool>::log_current_value(Logger &logger) const
+    {
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, current_value ? "true" : "false");
+    }
+
+    // For std::string
+    template <>
+    void CallbackConfigItem<std::string>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    {
+        current_value = ini.GetValue(section.c_str(), ini_key.c_str(), default_value.c_str());
+        if (setter)
+        {
+            setter(current_value);
+        }
+    }
+
+    template <>
+    void CallbackConfigItem<std::string>::log_current_value(Logger &logger) const
+    {
+        logger.info("Config: {} ({}.{}) = \"{}\"", log_key_name, section, ini_key, current_value);
+    }
+
+    // For std::vector<int> (KeyList) with callback
+    template <>
+    void CallbackConfigItem<std::vector<int>>::load(CSimpleIniA &ini, Logger &logger)
+    {
+        const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
+        if (ini_value_str != nullptr)
+        {
+            // Parse the INI value string into a vector
+            current_value.clear();
+            std::string str_no_comment = ini_value_str;
+            size_t comment_pos = str_no_comment.find(';');
+            if (comment_pos != std::string::npos)
+            {
+                str_no_comment = str_no_comment.substr(0, comment_pos);
+            }
+            std::string trimmed_val = trim(str_no_comment);
+
+            if (!trimmed_val.empty())
+            {
+                std::istringstream iss(trimmed_val);
+                std::string token;
+                while (std::getline(iss, token, ','))
+                {
+                    size_t token_comment_pos = token.find(';');
+                    if (token_comment_pos != std::string::npos)
+                    {
+                        token = token.substr(0, token_comment_pos);
+                    }
+                    std::string trimmed_token = trim(token);
+                    if (trimmed_token.empty())
+                    {
+                        continue;
+                    }
+
+                    std::string hex_part = trimmed_token;
+                    if (hex_part.size() >= 2 && hex_part[0] == '0' && (hex_part[1] == 'x' || hex_part[1] == 'X'))
+                    {
+                        hex_part = hex_part.substr(2);
+                        if (hex_part.empty())
+                        {
+                            continue;
+                        }
+                    }
+
+                    if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
+                        current_value.push_back(static_cast<int>(code_ul));
+                    }
+                    catch (const std::exception &)
+                    {
+                        // Skip invalid tokens
+                    }
+                }
+            }
+        }
+        // else: keep default_value which was set in constructor
+
+        if (setter)
+        {
+            setter(current_value);
+        }
+    }
+
+    template <>
+    void CallbackConfigItem<std::vector<int>>::log_current_value(Logger &logger) const
+    {
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_vkcode_list(current_value));
+    }
+
+    // --- Legacy: Reference-based ConfigItem for backward compatibility ---
+
+    template <typename T>
+    struct RefConfigItem : public ConfigItemBase
     {
         T &target_variable; // Reference to the user's variable where the value will be stored
         T default_value;
 
-        ConfigItem(std::string sec, std::string key, std::string log_name, T &target, T def_val)
+        RefConfigItem(std::string sec, std::string key, std::string log_name, T &target, T def_val)
             : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)),
               target_variable(target), default_value(std::move(def_val))
         {
@@ -80,172 +253,31 @@ namespace
             target_variable = default_value;
         }
 
-        void load(CSimpleIniA &ini, Logger &logger) override;  // Specialized outside
-        void log_current_value(Logger &logger) const override; // Specialized outside
+        void load(CSimpleIniA &ini, Logger &logger) override
+        {
+            // Delegate to callback version by creating a temporary setter
+            auto temp_setter = [this](T val)
+            { this->target_variable = val; };
+            CallbackConfigItem<T> temp_item(section, ini_key, log_key_name, temp_setter, default_value);
+            temp_item.load(ini, logger);
+            target_variable = temp_item.current_value;
+        }
+
+        void log_current_value(Logger &logger) const override
+        {
+            CallbackConfigItem<T> temp_item(section, ini_key, log_key_name, nullptr, default_value);
+            temp_item.current_value = target_variable;
+            temp_item.log_current_value(logger);
+        }
     };
 
-    // --- Specializations for ConfigItem<T>::load and ConfigItem<T>::log_current_value ---
-
-    // For int
-    template <>
-    void ConfigItem<int>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        target_variable = ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value);
-    }
-    template <>
-    void ConfigItem<int>::log_current_value(Logger &logger) const
-    {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, target_variable);
-    }
-
-    // For float
-    template <>
-    void ConfigItem<float>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        target_variable = static_cast<float>(ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
-    }
-    template <>
-    void ConfigItem<float>::log_current_value(Logger &logger) const
-    {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, target_variable);
-    }
-
-    // For bool
-    template <>
-    void ConfigItem<bool>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        target_variable = ini.GetBoolValue(section.c_str(), ini_key.c_str(), default_value);
-    }
-    template <>
-    void ConfigItem<bool>::log_current_value(Logger &logger) const
-    {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, target_variable ? "true" : "false");
-    }
-
-    // For std::string
-    template <>
-    void ConfigItem<std::string>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        target_variable = ini.GetValue(section.c_str(), ini_key.c_str(), default_value.c_str());
-    }
-    template <>
-    void ConfigItem<std::string>::log_current_value(Logger &logger) const
-    {
-        logger.info("Config: {} ({}.{}) = \"{}\"", log_key_name, section, ini_key, target_variable);
-    }
-
-    // --- Helper: Parses a comma-separated string of hexadecimal VK codes ---
-    std::vector<int> parseKeyListInternal(const std::string &value_str, Logger &logger,
-                                          const std::string &section_key_for_log)
-    {
-        std::vector<int> keys;
-        std::string str_no_comment = value_str;
-        size_t comment_pos = str_no_comment.find(';');
-        if (comment_pos != std::string::npos)
-        {
-            str_no_comment = str_no_comment.substr(0, comment_pos);
-        }
-        std::string trimmed_val = trim(str_no_comment);
-
-        if (trimmed_val.empty())
-        {
-            return keys; // Not an error, just no keys defined.
-        }
-
-        std::istringstream iss(trimmed_val);
-        std::string token;
-        logger.debug("Config: Parsing KeyList for '{}': \"{}\"", section_key_for_log, trimmed_val);
-        int token_idx = 0;
-
-        while (std::getline(iss, token, ','))
-        {
-            token_idx++;
-            size_t token_comment_pos = token.find(';');
-            if (token_comment_pos != std::string::npos)
-            {
-                token = token.substr(0, token_comment_pos);
-            }
-            std::string trimmed_token = trim(token);
-            if (trimmed_token.empty())
-            {
-                continue; // Ignore empty tokens resulting from multiple commas or spaces
-            }
-
-            std::string hex_part = trimmed_token;
-            if (hex_part.size() >= 2 && hex_part[0] == '0' && (hex_part[1] == 'x' || hex_part[1] == 'X'))
-            {
-                hex_part = hex_part.substr(2);
-                if (hex_part.empty()) // e.g., "0x,"
-                {
-                    logger.warning("Config: Invalid key token '{}' (prefix only) in '{}' at token {}", token, section_key_for_log, token_idx);
-                    continue;
-                }
-            }
-
-            if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
-            {
-                logger.warning("Config: Invalid non-hex character in key token '{}' for '{}' at token {}", token, section_key_for_log, token_idx);
-                continue;
-            }
-            if (hex_part.empty())
-            { // case where token was just "0x" and substring made it empty, or original token was empty (already handled by trim)
-                logger.warning("Config: Empty hex part after processing token '{}' for '{}' at token {}", token, section_key_for_log, token_idx);
-                continue;
-            }
-
-            try
-            {
-                unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
-                if (code_ul > 0xFF) // VK codes are typically 1 byte (0x00-0xFF)
-                {
-                    logger.warning("Config: Key code {} from token '{}' for '{}' exceeds 0xFF. It might be invalid or unintended.",
-                                   format_hex(static_cast<int>(code_ul), 2), token, section_key_for_log);
-                }
-                keys.push_back(static_cast<int>(code_ul));
-                logger.debug("Config: Added key for '{}': {}", section_key_for_log, format_vkcode(static_cast<int>(code_ul)));
-            }
-            catch (const std::exception &e) // Catches std::invalid_argument or std::out_of_range
-            {
-                logger.warning("Config: Error converting hex token '{}' (from original '{}') for '{}': {}", token, trimmed_token, section_key_for_log, e.what());
-            }
-        }
-
-        if (keys.empty() && !trimmed_val.empty())
-        {
-            logger.warning("Config: Processed value for '{}' (\"{}\") but found no valid key codes.", section_key_for_log, trimmed_val);
-        }
-        return keys;
-    }
-
-    // For std::vector<int> (KeyList)
-    template <>
-    void ConfigItem<std::vector<int>>::load(CSimpleIniA &ini, Logger &logger)
-    {
-        // The `default_value` for ConfigItem<std::vector<int>> is already a std::vector<int>,
-        // parsed from a string at registration time.
-        // SimpleIniA::GetValue's third argument (pDefault) is a const char*. If the key isn't in the INI,
-        // SimpleIni will use *that* default.
-        // Our logic is: target_variable is initialized with ConfigItem's `default_value` (the std::vector<int>).
-        // If the INI key exists, we parse *its* string value and overwrite `target_variable`.
-        // If the INI key does NOT exist, `target_variable` keeps its pre-assigned default vector.
-
-        const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr); // Get nullptr if not found
-        if (ini_value_str != nullptr)
-        {
-            // Key exists in INI, parse its string value.
-            target_variable = parseKeyListInternal(ini_value_str, logger, section + "." + ini_key);
-        }
-        // If ini_value_str is nullptr (key not in INI), target_variable retains its value
-        // which was set to `default_value` (the std::vector<int>) during ConfigItem construction.
-    }
-
-    template <>
-    void ConfigItem<std::vector<int>>::log_current_value(Logger &logger) const
-    {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_vkcode_list(target_variable));
-    }
-
     // --- Global storage for registered configuration items ---
+    std::mutex &getConfigMutex()
+    {
+        static std::mutex mtx;
+        return mtx;
+    }
+
     std::vector<std::unique_ptr<ConfigItemBase>> &getRegisteredConfigItems()
     {
         // This static variable holds all registered config items.
@@ -257,7 +289,7 @@ namespace
     /**
      * @brief Determines the full absolute path for the INI configuration file.
      */
-    static std::string getIniFilePath(const std::string &ini_filename, Logger &logger)
+    std::string getIniFilePath(const std::string &ini_filename, Logger &logger)
     {
         std::string module_dir = getRuntimeDirectory();
 
@@ -287,46 +319,195 @@ namespace
 
 } // anonymous namespace
 
-// --- Public API for Configuration Registration ---
+// ============================================================================
+// NEW API: Callback-based registration
+// ============================================================================
 
-void DetourModKit::Config::registerInt(const std::string &section, const std::string &ini_key, const std::string &log_key_name, int &target_variable, int default_value)
+void DetourModKit::Config::registerIntCallback(const std::string &section, const std::string &ini_key,
+                                               const std::string &log_key_name, std::function<void(int)> setter,
+                                               int default_value)
 {
+    std::lock_guard<std::mutex> lock(getConfigMutex());
     getRegisteredConfigItems().push_back(
-        std::make_unique<ConfigItem<int>>(section, ini_key, log_key_name, target_variable, default_value));
+        std::make_unique<CallbackConfigItem<int>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
-void DetourModKit::Config::registerFloat(const std::string &section, const std::string &ini_key, const std::string &log_key_name, float &target_variable, float default_value)
+void DetourModKit::Config::registerFloatCallback(const std::string &section, const std::string &ini_key,
+                                                 const std::string &log_key_name, std::function<void(float)> setter,
+                                                 float default_value)
 {
+    std::lock_guard<std::mutex> lock(getConfigMutex());
     getRegisteredConfigItems().push_back(
-        std::make_unique<ConfigItem<float>>(section, ini_key, log_key_name, target_variable, default_value));
+        std::make_unique<CallbackConfigItem<float>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
-void DetourModKit::Config::registerBool(const std::string &section, const std::string &ini_key, const std::string &log_key_name, bool &target_variable, bool default_value)
+void DetourModKit::Config::registerBoolCallback(const std::string &section, const std::string &ini_key,
+                                                const std::string &log_key_name, std::function<void(bool)> setter,
+                                                bool default_value)
 {
+    std::lock_guard<std::mutex> lock(getConfigMutex());
     getRegisteredConfigItems().push_back(
-        std::make_unique<ConfigItem<bool>>(section, ini_key, log_key_name, target_variable, default_value));
+        std::make_unique<CallbackConfigItem<bool>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
-void DetourModKit::Config::registerString(const std::string &section, const std::string &ini_key, const std::string &log_key_name, std::string &target_variable, const std::string &default_value)
+void DetourModKit::Config::registerStringCallback(const std::string &section, const std::string &ini_key,
+                                                  const std::string &log_key_name, std::function<void(const std::string &)> setter,
+                                                  std::string default_value)
 {
+    std::lock_guard<std::mutex> lock(getConfigMutex());
     getRegisteredConfigItems().push_back(
-        std::make_unique<ConfigItem<std::string>>(section, ini_key, log_key_name, target_variable, default_value));
+        std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, std::move(setter), std::move(default_value)));
 }
 
-void DetourModKit::Config::registerKeyList(const std::string &section, const std::string &ini_key, const std::string &log_key_name, std::vector<int> &target_variable, const std::string &default_value_str)
+void DetourModKit::Config::registerKeyListCallback(const std::string &section, const std::string &ini_key,
+                                                   const std::string &log_key_name, std::function<void(const std::vector<int> &)> setter,
+                                                   const std::string &default_value_str)
 {
-    // Parse the default_value_str into a vector<int> first for the ConfigItem's default_value field.
-    Logger &logger = Logger::getInstance(); // Needed for parseKeyListInternal
-    std::vector<int> default_keys_vector = parseKeyListInternal(default_value_str, logger, section + "." + ini_key + " [default_value]");
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    // Parse the default_value_str into a vector<int>
+    std::vector<int> default_keys_vector;
+    std::string str_no_comment = default_value_str;
+    size_t comment_pos = str_no_comment.find(';');
+    if (comment_pos != std::string::npos)
+    {
+        str_no_comment = str_no_comment.substr(0, comment_pos);
+    }
+    std::string trimmed_val = trim(str_no_comment);
+
+    if (!trimmed_val.empty())
+    {
+        std::istringstream iss(trimmed_val);
+        std::string token;
+        while (std::getline(iss, token, ','))
+        {
+            std::string trimmed_token = trim(token);
+            if (trimmed_token.empty())
+                continue;
+
+            std::string hex_part = trimmed_token;
+            if (hex_part.size() >= 2 && hex_part[0] == '0' && (hex_part[1] == 'x' || hex_part[1] == 'X'))
+            {
+                hex_part = hex_part.substr(2);
+                if (hex_part.empty())
+                    continue;
+            }
+
+            if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+                continue;
+
+            try
+            {
+                unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
+                default_keys_vector.push_back(static_cast<int>(code_ul));
+            }
+            catch (const std::exception &)
+            {
+                // Skip invalid
+            }
+        }
+    }
 
     getRegisteredConfigItems().push_back(
-        std::make_unique<ConfigItem<std::vector<int>>>(section, ini_key, log_key_name, target_variable, default_keys_vector));
+        std::make_unique<CallbackConfigItem<std::vector<int>>>(section, ini_key, log_key_name, std::move(setter), default_keys_vector));
 }
 
-// --- Public API for Loading and Logging Configuration ---
+// ============================================================================
+// LEGACY API: Reference-based registration (deprecated)
+// ============================================================================
+
+void DetourModKit::Config::registerInt(const std::string &section, const std::string &ini_key,
+                                       const std::string &log_key_name, int &target_variable, int default_value)
+{
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<RefConfigItem<int>>(section, ini_key, log_key_name, target_variable, default_value));
+}
+
+void DetourModKit::Config::registerFloat(const std::string &section, const std::string &ini_key,
+                                         const std::string &log_key_name, float &target_variable, float default_value)
+{
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<RefConfigItem<float>>(section, ini_key, log_key_name, target_variable, default_value));
+}
+
+void DetourModKit::Config::registerBool(const std::string &section, const std::string &ini_key,
+                                        const std::string &log_key_name, bool &target_variable, bool default_value)
+{
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<RefConfigItem<bool>>(section, ini_key, log_key_name, target_variable, default_value));
+}
+
+void DetourModKit::Config::registerString(const std::string &section, const std::string &ini_key,
+                                          const std::string &log_key_name, std::string &target_variable,
+                                          const std::string &default_value)
+{
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<RefConfigItem<std::string>>(section, ini_key, log_key_name, target_variable, default_value));
+}
+
+void DetourModKit::Config::registerKeyList(const std::string &section, const std::string &ini_key,
+                                           const std::string &log_key_name, std::vector<int> &target_variable,
+                                           const std::string &default_value_str)
+{
+    // Parse the default_value_str into a vector<int> first
+    std::vector<int> default_keys_vector;
+    std::string str_no_comment = default_value_str;
+    size_t comment_pos = str_no_comment.find(';');
+    if (comment_pos != std::string::npos)
+    {
+        str_no_comment = str_no_comment.substr(0, comment_pos);
+    }
+    std::string trimmed_val = trim(str_no_comment);
+
+    if (!trimmed_val.empty())
+    {
+        std::istringstream iss(trimmed_val);
+        std::string token;
+        while (std::getline(iss, token, ','))
+        {
+            std::string trimmed_token = trim(token);
+            if (trimmed_token.empty())
+                continue;
+
+            std::string hex_part = trimmed_token;
+            if (hex_part.size() >= 2 && hex_part[0] == '0' && (hex_part[1] == 'x' || hex_part[1] == 'X'))
+            {
+                hex_part = hex_part.substr(2);
+                if (hex_part.empty())
+                    continue;
+            }
+
+            if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+                continue;
+
+            try
+            {
+                unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
+                default_keys_vector.push_back(static_cast<int>(code_ul));
+            }
+            catch (const std::exception &)
+            {
+                // Skip invalid
+            }
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<RefConfigItem<std::vector<int>>>(section, ini_key, log_key_name, target_variable, default_keys_vector));
+}
+
+// ============================================================================
+// Public API for Loading and Logging Configuration
+// ============================================================================
 
 void DetourModKit::Config::load(const std::string &ini_filename)
 {
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+
     Logger &logger = Logger::getInstance();
     std::string ini_path = getIniFilePath(ini_filename, logger);
     logger.info("Config: Attempting to load configuration from: {}", ini_path);
@@ -339,9 +520,6 @@ void DetourModKit::Config::load(const std::string &ini_filename)
     if (rc < 0)
     {
         logger.error("Config: Failed to open INI file '{}'. Error code: {}. Using default values for all registered settings.", ini_path, rc);
-        // Defaults are already set in target_variables upon registration when ConfigItem is constructed.
-        // The `load` method of each ConfigItem will use its `default_value` with SimpleIni calls,
-        // but effectively, if the file doesn't load, the variables retain their construction-time defaults.
     }
     else
     {
@@ -349,13 +527,8 @@ void DetourModKit::Config::load(const std::string &ini_filename)
     }
 
     // Load all registered items.
-    // Each ConfigItem<T>::load specialization will handle calling the appropriate CSimpleIniA::GetXValue method.
-    // If the INI key is missing, CSimpleIniA's methods use the default provided to them,
-    // which is the `item->default_value` member of the ConfigItem.
     for (const auto &item : getRegisteredConfigItems())
     {
-        // This populates the user's variable referenced by 'item->target_variable'
-        // using the item's own 'item->default_value' if the INI key isn't found by SimpleIni.
         item->load(ini, logger);
     }
 
@@ -364,6 +537,8 @@ void DetourModKit::Config::load(const std::string &ini_filename)
 
 void DetourModKit::Config::logAll()
 {
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+
     Logger &logger = Logger::getInstance();
     if (getRegisteredConfigItems().empty())
     {
@@ -381,11 +556,13 @@ void DetourModKit::Config::logAll()
 
 void DetourModKit::Config::clearRegisteredItems()
 {
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+
     Logger &logger = Logger::getInstance();
     size_t count = getRegisteredConfigItems().size();
-    if (count > 0) // Only log if there was something to clear
+    if (count > 0)
     {
-        getRegisteredConfigItems().clear(); // This will call destructors for all unique_ptrs and ConfigItemBase objects.
+        getRegisteredConfigItems().clear();
         logger.debug("Config: Cleared {} registered configuration items.", count);
     }
     else

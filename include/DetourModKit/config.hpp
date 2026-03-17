@@ -3,6 +3,8 @@
 
 #include <vector>
 #include <string>
+#include <functional>
+#include <optional>
 
 namespace DetourModKit
 {
@@ -13,63 +15,149 @@ namespace DetourModKit
      * @brief Provides functions for registering, loading, and logging configuration settings.
      * @details This system allows mods to register their configuration variables with DetourModKit.
      *          The kit then handles loading values from an INI file and provides logging functionality.
+     *
+     *          The new API uses std::function callbacks for type-safe value setting without
+     *          raw reference lifetime issues. Legacy register*() functions are kept for
+     *          backward compatibility but are deprecated.
      */
     namespace Config
     {
+        // ============================================================================
+        // NEW API: Callback-based registration (no raw reference lifetime issues)
+        // ============================================================================
+
+        /**
+         * @brief Registers an integer configuration item with a callback setter.
+         * @param section The INI section name.
+         * @param ini_key The INI key name.
+         * @param log_key_name A user-friendly name for this setting, used in logs.
+         * @param setter A callback function that receives the loaded value.
+         * @param default_value The default integer value to use if the key is not found or invalid.
+         */
+        void registerIntCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                                 std::function<void(int)> setter, int default_value);
+
+        /**
+         * @brief Registers a floating-point configuration item with a callback setter.
+         * @param section The INI section name.
+         * @param ini_key The INI key name.
+         * @param log_key_name A user-friendly name for logging.
+         * @param setter A callback function that receives the loaded value.
+         * @param default_value The default float value.
+         */
+        void registerFloatCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                                   std::function<void(float)> setter, float default_value);
+
+        /**
+         * @brief Registers a boolean configuration item with a callback setter.
+         * @param section The INI section name.
+         * @param ini_key The INI key name.
+         * @param log_key_name A user-friendly name for logging.
+         * @param setter A callback function that receives the loaded value.
+         * @param default_value The default boolean value.
+         */
+        void registerBoolCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                                  std::function<void(bool)> setter, bool default_value);
+
+        /**
+         * @brief Registers a string configuration item with a callback setter.
+         * @param section The INI section name.
+         * @param ini_key The INI key name.
+         * @param log_key_name A user-friendly name for logging.
+         * @param setter A callback function that receives the loaded value.
+         * @param default_value The default string value.
+         */
+        void registerStringCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                                    std::function<void(const std::string &)> setter, std::string default_value);
+
+        /**
+         * @brief Registers a key list configuration item (comma-separated hex VK codes) with a callback setter.
+         * @param section The INI section name.
+         * @param ini_key The INI key name.
+         * @param log_key_name A user-friendly name for logging.
+         * @param setter A callback function that receives the loaded vector of VK codes.
+         * @param default_value_str A string representing the default comma-separated hex VK codes.
+         */
+        void registerKeyListCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                                     std::function<void(const std::vector<int> &)> setter, const std::string &default_value_str);
+
+        // ============================================================================
+        // LEGACY API: Reference-based registration (deprecated due to lifetime issues)
+        // ============================================================================
+
         /**
          * @brief Registers an integer configuration item.
+         * @deprecated Use registerIntCallback() instead to avoid lifetime issues with raw references.
+         * @warning The target_variable reference must remain valid until Config::load() is called.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for this setting, used in logs.
          * @param target_variable A reference to an integer variable where the loaded value will be stored.
          * @param default_value The default integer value to use if the key is not found or invalid.
          */
+        [[deprecated("Use registerIntCallback() instead to avoid lifetime issues with raw references")]]
         void registerInt(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                          int &target_variable, int default_value);
 
         /**
          * @brief Registers a floating-point configuration item.
+         * @deprecated Use registerFloatCallback() instead to avoid lifetime issues with raw references.
+         * @warning The target_variable reference must remain valid until Config::load() is called.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param target_variable A reference to a float variable for storing the loaded value.
          * @param default_value The default float value.
          */
+        [[deprecated("Use registerFloatCallback() instead to avoid lifetime issues with raw references")]]
         void registerFloat(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                            float &target_variable, float default_value);
 
         /**
          * @brief Registers a boolean configuration item.
+         * @deprecated Use registerBoolCallback() instead to avoid lifetime issues with raw references.
+         * @warning The target_variable reference must remain valid until Config::load() is called.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param target_variable A reference to a bool variable for storing the loaded value.
          * @param default_value The default boolean value.
          */
+        [[deprecated("Use registerBoolCallback() instead to avoid lifetime issues with raw references")]]
         void registerBool(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                           bool &target_variable, bool default_value);
 
         /**
          * @brief Registers a string configuration item.
+         * @deprecated Use registerStringCallback() instead to avoid lifetime issues with raw references.
+         * @warning The target_variable reference must remain valid until Config::load() is called.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param target_variable A reference to a std::string variable for storing the loaded value.
          * @param default_value The default string value.
          */
+        [[deprecated("Use registerStringCallback() instead to avoid lifetime issues with raw references")]]
         void registerString(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                             std::string &target_variable, const std::string &default_value);
 
         /**
          * @brief Registers a key list configuration item (comma-separated hex VK codes).
+         * @deprecated Use registerKeyListCallback() instead to avoid lifetime issues with raw references.
+         * @warning The target_variable reference must remain valid until Config::load() is called.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param target_variable A reference to a std::vector<int> for storing the parsed VK codes.
          * @param default_value_str A string representing the default comma-separated hex VK codes.
          */
+        [[deprecated("Use registerKeyListCallback() instead to avoid lifetime issues with raw references")]]
         void registerKeyList(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                              std::vector<int> &target_variable, const std::string &default_value_str);
+
+        // ============================================================================
+        // Common API
+        // ============================================================================
 
         /**
          * @brief Loads all registered configuration settings from the specified INI file.

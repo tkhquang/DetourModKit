@@ -6,8 +6,7 @@
  * @brief Format string utilities and custom formatters for game modding types.
  * @details Provides std::format-style formatting with custom formatters for
  *          common game modding types like memory addresses, byte values, and
- *          virtual key codes. Supports both C++20 std::format and a fallback
- *          implementation for C++17.
+ *          virtual key codes. Uses C++23 std::format for maximum performance.
  */
 
 #include <cstddef>
@@ -17,15 +16,6 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
-#include <type_traits>
-
-// Check for C++20 std::format support
-#if __has_include(<format>) && defined(__cpp_lib_format)
-#include <format>
-#define DMK_HAS_STD_FORMAT 1
-#else
-#define DMK_HAS_STD_FORMAT 0
-#endif
 
 namespace DetourModKit
 {
@@ -39,9 +29,9 @@ namespace DetourModKit
         inline std::string format_address(uintptr_t address)
         {
             std::ostringstream oss;
-            oss << "0x" << std::hex << std::uppercase
-                << std::setw(sizeof(uintptr_t) * 2)
-                << std::setfill('0') << address;
+            oss << "0x"
+                << std::setfill('0') << std::setw(sizeof(uintptr_t) * 2)
+                << std::hex << std::uppercase << address;
             return oss.str();
         }
 
@@ -54,12 +44,12 @@ namespace DetourModKit
         inline std::string format_hex(int value, int width = 0)
         {
             std::ostringstream oss;
-            oss << "0x" << std::uppercase << std::hex;
+            oss << "0x";
             if (width > 0)
             {
-                oss << std::setw(width) << std::setfill('0');
+                oss << std::setfill('0') << std::setw(width);
             }
-            oss << value;
+            oss << std::hex << std::uppercase << value;
             return oss.str();
         }
 
@@ -71,9 +61,9 @@ namespace DetourModKit
         inline std::string format_byte(std::byte b)
         {
             std::ostringstream oss;
-            oss << "0x" << std::uppercase << std::hex
-                << std::setw(2) << std::setfill('0')
-                << static_cast<unsigned int>(b);
+            oss << "0x"
+                << std::setfill('0') << std::setw(2)
+                << std::hex << std::uppercase << static_cast<unsigned int>(b);
             return oss.str();
         }
 
@@ -89,18 +79,17 @@ namespace DetourModKit
                 return "[]";
             }
 
-            std::ostringstream oss;
-            oss << "[";
+            std::string result = "[";
             for (size_t i = 0; i < values.size(); ++i)
             {
                 if (i > 0)
                 {
-                    oss << ", ";
+                    result += ", ";
                 }
-                oss << format_hex(values[i], 2);
+                result += format_hex(values[i], 2);
             }
-            oss << "]";
-            return oss.str();
+            result += "]";
+            return result;
         }
 
         /**
@@ -125,98 +114,5 @@ namespace DetourModKit
 
     } // namespace Format
 } // namespace DetourModKit
-
-// C++20 std::format custom formatters must be in the std namespace
-#if DMK_HAS_STD_FORMAT
-
-/**
- * @brief Custom formatter for uintptr_t (memory addresses).
- */
-template <>
-struct std::formatter<uintptr_t>
-{
-    constexpr auto parse(std::format_parse_context &ctx)
-    {
-        auto it = ctx.begin();
-        auto end = ctx.end();
-
-        // Check for format specifiers
-        if (it != end && *it != '}')
-        {
-            if (*it == 'x' || *it == 'X')
-            {
-                uppercase_ = (*it == 'X');
-                ++it;
-            }
-        }
-        return it;
-    }
-
-    auto format(uintptr_t addr, std::format_context &ctx) const
-    {
-        if (uppercase_)
-        {
-            return std::format_to(ctx.out(), "0x{:0{}X}",
-                                  addr, sizeof(uintptr_t) * 2);
-        }
-        else
-        {
-            return std::format_to(ctx.out(), "0x{:0{}x}",
-                                  addr, sizeof(uintptr_t) * 2);
-        }
-    }
-
-private:
-    bool uppercase_{true};
-};
-
-/**
- * @brief Custom formatter for std::byte.
- */
-template <>
-struct std::formatter<std::byte>
-{
-    constexpr auto parse(std::format_parse_context &ctx)
-    {
-        return ctx.begin();
-    }
-
-    auto format(std::byte b, std::format_context &ctx) const
-    {
-        return std::format_to(ctx.out(), "0x{:02X}",
-                              static_cast<unsigned int>(b));
-    }
-};
-
-/**
- * @brief Custom formatter for std::vector<int> (e.g., VK code lists).
- */
-template <>
-struct std::formatter<std::vector<int>>
-{
-    constexpr auto parse(std::format_parse_context &ctx)
-    {
-        return ctx.begin();
-    }
-
-    auto format(const std::vector<int> &vec, std::format_context &ctx) const
-    {
-        auto out = ctx.out();
-        *out++ = '[';
-        for (size_t i = 0; i < vec.size(); ++i)
-        {
-            if (i > 0)
-            {
-                *out++ = ',';
-                *out++ = ' ';
-            }
-            out = std::format_to(out, "0x{:02X}", vec[i]);
-        }
-        *out++ = ']';
-        return out;
-    }
-};
-
-#endif // DMK_HAS_STD_FORMAT
 
 #endif // FORMAT_UTILS_HPP
