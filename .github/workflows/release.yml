@@ -69,22 +69,22 @@ jobs:
 
       - name: Configure DetourModKit with CMake (MinGW)
         run: |
-          INSTALL_DIR_MINGW_ABS="${{ github.workspace }}/install_package_mingw"
+          INSTALL_DIR_MINGW_ABS="${{ github.workspace }}/install_package/mingw"
           echo "Target Install Directory for MinGW: $INSTALL_DIR_MINGW_ABS"
-          cmake -S . -B build_mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR_MINGW_ABS"
+          cmake -S . -B build/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR_MINGW_ABS"
         shell: bash
 
       - name: Build DetourModKit with CMake (MinGW)
-        run: cmake --build build_mingw --config Release --parallel $(nproc || echo 2)
+        run: cmake --build build/mingw --config Release --parallel $(nproc || echo 2)
         shell: bash
 
       - name: Install DetourModKit with CMake (MinGW)
-        run: cmake --install build_mingw --config Release
+        run: cmake --install build/mingw --config Release
         shell: bash
 
       - name: Verify Install Directory (MinGW)
         run: |
-          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_mingw"
+          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/mingw"
           if (-not (Test-Path $installDir -PathType Container)) {
             Write-Error "Install directory '$installDir' does not exist after cmake --install!"
             exit 1
@@ -106,7 +106,7 @@ jobs:
 
       - name: Create ZIP archive (MinGW)
         run: |
-          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_mingw"
+          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/mingw"
           Compress-Archive -Path $sourcePath\* -DestinationPath ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }} -Force
         shell: pwsh
 
@@ -148,22 +148,22 @@ jobs:
 
       - name: Configure DetourModKit with CMake (MSVC)
         run: |
-          set "INSTALL_DIR_MSVC_ABS=%GITHUB_WORKSPACE%\install_package_msvc"
+          set "INSTALL_DIR_MSVC_ABS=%GITHUB_WORKSPACE%\install_package\msvc"
           echo Target Install Directory for MSVC: %INSTALL_DIR_MSVC_ABS%
-          cmake -S . -B build_msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR_MSVC_ABS%"
+          cmake -S . -B build/msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR_MSVC_ABS%"
         shell: cmd
 
       - name: Build DetourModKit with CMake (MSVC)
-        run: cmake --build build_msvc --config Release --parallel %NUMBER_OF_PROCESSORS%
+        run: cmake --build build/msvc --config Release --parallel %NUMBER_OF_PROCESSORS%
         shell: cmd
 
       - name: Install DetourModKit with CMake (MSVC)
-        run: cmake --install build_msvc --config Release
+        run: cmake --install build/msvc --config Release
         shell: cmd
 
       - name: Verify Install Directory (MSVC)
         run: |
-          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_msvc"
+          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/msvc"
           if (-not (Test-Path $installDir -PathType Container)) {
             Write-Error "Install directory '$installDir' does not exist after cmake --install!"
             exit 1
@@ -185,7 +185,7 @@ jobs:
 
       - name: Create ZIP archive (MSVC)
         run: |
-          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_msvc"
+          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/msvc"
           Compress-Archive -Path $sourcePath\* -DestinationPath ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }} -Force
         shell: pwsh
 

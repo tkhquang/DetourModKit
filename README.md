@@ -41,30 +41,30 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
     ### MinGW (Recommended)
     ```bash
     # Configure
-    cmake -S . -B build_mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="./install_package_mingw"
+    cmake -S . -B build/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="./install_package/mingw"
 
     # Build
-    cmake --build build_mingw --config Release --parallel
+    cmake --build build/mingw --config Release --parallel
 
     # Install
-    cmake --install build_mingw --config Release
+    cmake --install build/mingw --config Release
     ```
 
     ### Visual Studio (MSVC)
     ```bash
     # Configure
-    cmake -S . -B build_msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="./install_package_msvc"
+    cmake -S . -B build/msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="./install_package/msvc"
 
     # Build
-    cmake --build build_msvc --config Release --parallel
+    cmake --build build/msvc --config Release --parallel
 
     # Install
-    cmake --install build_msvc --config Release
+    cmake --install build/msvc --config Release
     ```
 
-    After running the install command, the `install_package_mingw/` or `install_package_msvc/` directory will contain a structure ready for consumption:
+    After running the install command, the `install_package/mingw/` or `install_package/msvc/` directory will contain a structure ready for consumption:
     ```
-    install_package_mingw/
+    install_package/mingw/
     ├── include/
     │   ├── DetourModKit/             <-- DetourModKit public headers
     │   │   ├── aob_scanner.hpp
@@ -95,6 +95,84 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
         ├── DetourModKitConfigVersion.cmake
         └── DetourModKitTargets.cmake
     ```
+
+## Running Unit Tests
+
+DetourModKit includes a comprehensive unit test suite using GoogleTest. To build and run the tests:
+
+### Using Makefile (Recommended for MinGW)
+
+```bash
+# Build and run tests (default MinGW)
+make test
+
+# Or explicitly specify MinGW
+make test_mingw
+
+# Clean test build directory
+make clean_tests
+```
+
+### Using CMake Directly
+
+#### MinGW
+```bash
+# Configure with tests enabled
+cmake -S . -B build/tests/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON
+
+# Build the tests
+cmake --build build/tests/mingw --parallel
+
+# Run the tests
+cd build/tests/mingw
+ctest --output-on-failure
+```
+
+#### Visual Studio (MSVC)
+
+```bash
+# Configure with tests enabled
+cmake -S . -B build/tests/msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON
+
+# Build the tests
+cmake --build build/tests/msvc --parallel
+
+# Run the tests
+cd build/tests/msvc
+ctest --output-on-failure
+```
+
+#### Using Makefile for MSVC
+```bash
+# Build and run tests with MSVC
+make test_msvc
+```
+
+### If the build is failing due to a PDB file locking issue
+
+```bash
+taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
+```
+
+### Enabling Code Coverage
+
+To generate code coverage reports (requires GCC/Clang):
+
+```bash
+cmake -S . -B build/coverage -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON -DDMK_ENABLE_COVERAGE=ON
+cmake --build build/coverage --parallel
+```
+
+The test suite covers all major modules:
+- **Logger**: Singleton pattern, log levels, thread safety, async mode
+- **AsyncLogger**: Queue operations, batching, thread safety
+- **Config**: INI parsing, registration, save/load operations
+- **Format/String Utilities**: Address formatting, hex formatting, string operations
+- **Math Utilities**: Interpolation, clamping, alignment, trigonometry
+- **Memory Utilities**: Memory protection checks, read/write operations, caching
+- **AOB Scanner**: Pattern parsing, wildcard matching, search algorithms
+- **Hook Manager**: Hook lifecycle, status management, thread safety
+- **Filesystem Utils**: File/directory operations, path manipulation
 
 ## Using DetourModKit in Your Mod Project
 
@@ -161,7 +239,7 @@ This method is ideal for active development and ensures you always have the late
 This method uses a pre-built and installed version of DetourModKit.
 
 1.  **Integrate DetourModKit:**
-    *   After building DetourModKit, copy the entire `install_package_mingw/` or `install_package_msvc/` directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
+    *   After building DetourModKit, copy the entire `install_package/mingw/` or `install_package/msvc/` directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
     *   Alternatively, adjust your mod's build system to point to DetourModKit's install directory directly.
 
 2.  **Configure Your Mod's Build System:**

@@ -15,6 +15,10 @@ if(MSVC)
   # Add /WX to treat warnings as errors in CI or for strict builds if desired.
   add_compile_options(/W4)
 
+  # Generate separate PDB files to avoid access conflicts
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded")
+  set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pdb")
+
 # Suppress some common noisy MSVC warnings if necessary:
 # add_compile_options(/wd4251) # class 'type' needs to have dll-interface...
 # add_compile_options(/wd4275) # non dll-interface class 'type' used as base...
@@ -37,6 +41,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   set(SAFETYHOOK_FETCH_ZYDIS ON CACHE BOOL "Let SafetyHook manage fetching and building Zydis" FORCE)
   set(SAFETYHOOK_BUILD_TESTS OFF CACHE BOOL "Disable building SafetyHook's internal tests" FORCE)
   set(SAFETYHOOK_BUILD_EXAMPLES OFF CACHE BOOL "Disable building SafetyHook's examples" FORCE)
+
+  # Define NOMINMAX before including SafetyHook to prevent 'redefined' warning
+  add_compile_definitions(NOMINMAX)
 
   # SafetyHook and its dependencies (Zydis, Zycore) should also be built as static libraries.
   # Setting BUILD_SHARED_LIBS to OFF globally (done above) should influence this for
@@ -68,6 +75,7 @@ if(WIN32)
   add_compile_definitions(
     WINVER=0x0A00 # Target Windows 10 or later
     _WIN32_WINNT=0x0A00 # Target Windows 10 or later
+    NOMINMAX # Prevent Windows.h from defining min/max macros
   )
 endif()
 
@@ -304,5 +312,13 @@ message(STATUS "  Install Library Dir:         ${CMAKE_INSTALL_LIBDIR} (relative
 message(STATUS "  Install Include Dir:         ${CMAKE_INSTALL_INCLUDEDIR} (relative to prefix)")
 message(STATUS "  Install CMake Config Dir:    ${DETOURMODKIT_CMAKE_CONFIG_INSTALL_DIR} (potentially relative to prefix)")
 message(STATUS "  Install Docs Dir:            ${CMAKE_INSTALL_DOCDIR} (standard path)")
-message(STATUS "  DirectXMath Include Dir:     ${DIRECTXMATH_INCLUDE_DIR}")
+message(STATUS "  DirectXMath Include Dir:    ${DIRECTXMATH_INCLUDE_DIR}")
 message(STATUS "---------------------------------------------------------------------")
+
+# --- Unit Tests ---
+option(DMK_BUILD_TESTS "Build unit tests" OFF)
+
+if(DMK_BUILD_TESTS)
+  message(STATUS "Building unit tests...")
+  add_subdirectory(tests)
+endif()

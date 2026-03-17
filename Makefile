@@ -14,6 +14,7 @@ PUBLIC_HEADER_SOURCE_SUBDIR := $(PUBLIC_HEADER_SOURCE_ROOT_DIR)/$(KIT_NAME)
 
 EXTERNAL_DIR := external
 BUILD_DIR := build
+TEST_BUILD_DIR := $(BUILD_DIR)/tests
 
 # --- Output Directories for Installation ---
 INSTALL_DIR := $(BUILD_DIR)/install
@@ -183,6 +184,42 @@ install: $(TARGET_LIB)
 	@echo "------------------------------------------------------------"
 
 
+# --- Test Targets ---
+.PHONY: test
+test: $(SAFETYHOOK_DEPS_LIBS)
+	@echo "---- Building and running unit tests ----"
+	@mkdir -p $(TEST_BUILD_DIR)
+	@cd $(TEST_BUILD_DIR) && \
+	  cmake -S ../.. -B . -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON && \
+	  cmake --build . --parallel $(shell nproc || echo 2)
+	@cd $(TEST_BUILD_DIR)/tests && ctest --output-on-failure
+	@echo "---- Tests complete ----"
+
+.PHONY: test_mingw
+test_mingw: $(SAFETYHOOK_DEPS_LIBS)
+	@echo "---- Building and running unit tests (MinGW) ----"
+	@mkdir -p $(TEST_BUILD_DIR)/mingw
+	@cd $(TEST_BUILD_DIR)/mingw && \
+	  cmake -S ../../.. -B . -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON && \
+	  cmake --build . --parallel $(shell nproc || echo 2)
+	@cd $(TEST_BUILD_DIR)/mingw && ctest --output-on-failure
+	@echo "---- MinGW tests complete ----"
+
+.PHONY: test_msvc
+test_msvc: $(SAFETYHOOK_DEPS_LIBS)
+	@echo "---- Building and running unit tests (MSVC) ----"
+	@mkdir -p $(TEST_BUILD_DIR)/msvc
+	@cd $(TEST_BUILD_DIR)/msvc && \
+	  cmake -S ../../.. -B . -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON && \
+	  cmake --build . --config Debug --parallel
+	@cd $(TEST_BUILD_DIR)/msvc && ctest --output-on-failure -C Debug
+	@echo "---- MSVC tests complete ----"
+
+.PHONY: clean_tests
+clean_tests:
+	@echo "Cleaning test build directory..."
+	rm -rf $(TEST_BUILD_DIR)
+
 # --- Housekeeping Targets ---
 .PHONY: prepare_dirs
 prepare_dirs:
@@ -200,8 +237,8 @@ clean_safetyhook:
 	@cd $(SAFETYHOOK_SUBMODULE_DIR) && rm -rf build
 
 .PHONY: distclean
-distclean: clean clean_safetyhook
-	@echo "Performing full clean (DetourModKit output and SafetyHook build outputs)..."
+distclean: clean clean_tests clean_safetyhook
+	@echo "Performing full clean (DetourModKit output, test outputs, and SafetyHook build outputs)..."
 	rm -rf $(BUILD_DIR)
 
 # --- Help Target ---
@@ -211,7 +248,11 @@ help:
 	@echo "Available targets:"
 	@echo "  make all (or make)    - Build the DetourModKit static library"
 	@echo "  make install          - Build and install the library, all headers, and dependency libs to $(INSTALL_DIR)/"
+	@echo "  make test             - Build and run unit tests (default MinGW)"
+	@echo "  make test_mingw       - Build and run unit tests with MinGW"
+	@echo "  make test_msvc        - Build and run unit tests with MSVC"
 	@echo "  make clean            - Remove DetourModKit object files and the install directory."
+	@echo "  make clean_tests      - Remove test build directory."
 	@echo "  make clean_safetyhook - Remove SafetyHook's build directory."
-	@echo "  make distclean        - Perform 'clean' and 'clean_safetyhook'."
+	@echo "  make distclean        - Perform 'clean', 'clean_tests', and 'clean_safetyhook'."
 	@echo "  make help             - Display this help message."
