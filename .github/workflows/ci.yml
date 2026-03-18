@@ -15,38 +15,26 @@ jobs:
         with:
           submodules: "recursive"
 
-      - name: Cache MinGW
-        id: cache-mingw
-        uses: actions/cache@v4
-        with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
-
-      - name: Install MinGW (if not cached)
-        if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+      - name: Add pre-installed MinGW to PATH
+        run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
 
-      - name: Add MinGW to PATH
-        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-        shell: powershell
-
-      - name: Install Ninja, CMake, and gcovr
+      - name: Install Ninja and gcovr
         run: |
-          choco install ninja cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
+          choco install ninja --yes --force --no-progress
           pip install gcovr
         shell: powershell
 
       - name: Verify Tools
         run: |
-          g++ --version
-          ninja --version
-          cmake --version
-          gcovr --version
+          echo "--- g++ ---" && g++ --version
+          echo "--- ninja ---" && ninja --version
+          echo "--- cmake ---" && cmake --version
+          echo "--- gcovr ---" && gcovr --version
         shell: bash
 
       - name: Configure (Debug + Tests + Coverage)
-        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
+        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
         shell: bash
 
       - name: Build

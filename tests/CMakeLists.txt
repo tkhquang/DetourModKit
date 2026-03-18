@@ -57,7 +57,7 @@ target_include_directories(DetourModKit_tests SYSTEM PRIVATE
 
 # Register tests with CTest
 include(GoogleTest)
-gtest_discover_tests(DetourModKit_tests)
+gtest_discover_tests(DetourModKit_tests DISCOVERY_MODE PRE_TEST)
 
 # Optional: Add code coverage if requested
 option(DMK_ENABLE_COVERAGE "Enable code coverage reporting" OFF)
