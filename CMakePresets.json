@@ -1,0 +1,99 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "23",
+        "BUILD_SHARED_LIBS": "OFF",
+        "CMAKE_POSITION_INDEPENDENT_CODE": "ON"
+      }
+    },
+    {
+      "name": "mingw-debug",
+      "inherits": "base",
+      "displayName": "MinGW Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DMK_BUILD_TESTS": "ON",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "mingw-release",
+      "inherits": "base",
+      "displayName": "MinGW Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DMK_BUILD_TESTS": "OFF",
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "inherits": "base",
+      "displayName": "MSVC Debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DMK_BUILD_TESTS": "ON",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "msvc-release",
+      "inherits": "base",
+      "displayName": "MSVC Release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DMK_BUILD_TESTS": "OFF",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "mingw-debug",
+      "configurePreset": "mingw-debug"
+    },
+    {
+      "name": "mingw-release",
+      "configurePreset": "mingw-release"
+    },
+    {
+      "name": "msvc-debug",
+      "configurePreset": "msvc-debug"
+    },
+    {
+      "name": "msvc-release",
+      "configurePreset": "msvc-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "mingw-debug",
+      "configurePreset": "mingw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "msvc-debug",
+      "configurePreset": "msvc-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

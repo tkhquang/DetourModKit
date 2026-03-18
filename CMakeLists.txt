@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.25)
 
 project(DetourModKit VERSION 1.0.0 LANGUAGES CXX)
 
@@ -42,13 +42,22 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   set(SAFETYHOOK_BUILD_TESTS OFF CACHE BOOL "Disable building SafetyHook's internal tests" FORCE)
   set(SAFETYHOOK_BUILD_EXAMPLES OFF CACHE BOOL "Disable building SafetyHook's examples" FORCE)
 
-  # Define NOMINMAX before including SafetyHook to prevent 'redefined' warning
-  add_compile_definitions(NOMINMAX)
-
   # SafetyHook and its dependencies (Zydis, Zycore) should also be built as static libraries.
   # Setting BUILD_SHARED_LIBS to OFF globally (done above) should influence this for
   # well-behaved CMake subprojects. Explicit definitions below will reinforce this.
-  add_subdirectory(external/safetyhook) # Process SafetyHook's CMakeLists.txt
+  add_subdirectory(external/safetyhook SYSTEM) # SYSTEM suppresses compiler warnings from external headers
+
+  # Suppress all warnings when compiling external dependency sources
+  foreach(_ext_target safetyhook Zydis Zycore)
+    if(TARGET ${_ext_target})
+      target_compile_options(${_ext_target} PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-w>
+        $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>
+        $<$<CXX_COMPILER_ID:MSVC>:/w>
+        $<$<C_COMPILER_ID:MSVC>:/w>
+      )
+    endif()
+  endforeach()
 
   # Define the CMake target name that SafetyHook's build produces for its main library.
   set(SAFETYHOOK_LIBRARY_TARGET_NAME safetyhook) # Common target name, verify if different.
@@ -75,7 +84,6 @@ if(WIN32)
   add_compile_definitions(
     WINVER=0x0A00 # Target Windows 10 or later
     _WIN32_WINNT=0x0A00 # Target Windows 10 or later
-    NOMINMAX # Prevent Windows.h from defining min/max macros
   )
 endif()
 
@@ -106,6 +114,12 @@ endif()
 add_library(DetourModKit STATIC
   ${DETOURMODKIT_SOURCE_FILES}
 )
+
+# NOMINMAX applied only to DetourModKit (not globally) to avoid
+# redefinition warnings in external dependencies like SafetyHook
+if(WIN32)
+  target_compile_definitions(DetourModKit PUBLIC NOMINMAX)
+endif()
 
 # Set output name and prefix properties for consistency
 # For most generators (like MinGW Makefiles), PREFIX is "lib" by default for static/shared libs.
@@ -144,16 +158,16 @@ target_include_directories(DetourModKit
 
   # For DetourModKit's *own sources* (in src/) to find its *public headers*
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
+)
 
-  # For DetourModKit's own sources to find SimpleIni.h
+# External dependency headers marked as SYSTEM to suppress their warnings
+target_include_directories(DetourModKit SYSTEM
+  PUBLIC
+  $<BUILD_INTERFACE:${DIRECTXMATH_INCLUDE_DIR}>
+
+  PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/external/simpleini"
-
-  # DirectXMath for DetourModKit's internal usage
   "${DIRECTXMATH_INCLUDE_DIR}"
-
-  # SafetyHook's public include directories should be propagated transitively
-  # by linking with the 'safetyhook' target if SafetyHook's CMakeLists.txt
-  # correctly specifies its INTERFACE_INCLUDE_DIRECTORIES.
 )
 
 # --- Linking Dependencies for DetourModKit ---
@@ -320,5 +334,6 @@ option(DMK_BUILD_TESTS "Build unit tests" OFF)
 
 if(DMK_BUILD_TESTS)
   message(STATUS "Building unit tests...")
+  enable_testing()
   add_subdirectory(tests)
 endif()

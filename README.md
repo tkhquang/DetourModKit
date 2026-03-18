@@ -17,14 +17,15 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 ## Prerequisites
 
-*   A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer). The Makefile defaults to g++.
-*   `make` (e.g., `mingw32-make` for MinGW environments).
-*   CMake (version 3.16 or newer recommended, required to build the SafetyHook dependency).
+*   A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer, MSVC 2022+).
+*   [CMake](https://cmake.org/) 3.25 or newer.
+*   [Ninja](https://ninja-build.org/) build system (ships with Visual Studio; for MSYS2: `pacman -S ninja`).
+*   `make` (optional, for the Makefile wrapper — e.g., `mingw32-make` for MinGW environments).
 *   Git (for cloning and managing submodules).
 
 ## Building DetourModKit (Static Library via CMake)
 
-This project uses CMake to orchestrate its build and the build of its SafetyHook dependency.
+This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html) and Ninja to orchestrate its build. A thin Makefile wrapper is provided for convenience.
 
 1.  **Clone the repository (with submodules):**
     ```bash
@@ -38,31 +39,46 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
 
 2.  **Build & Package for Distribution:**
 
-    ### MinGW (Recommended)
+    ### Using the Makefile wrapper (Recommended)
+
     ```bash
-    # Configure
-    cmake -S . -B build/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="./install_package/mingw"
+    # Build the library (MinGW Release by default)
+    make
 
-    # Build
-    cmake --build build/mingw --config Release --parallel
+    # Install to build/install/
+    make install
 
-    # Install
-    cmake --install build/mingw --config Release
+    # Build with a different preset
+    make PRESET=msvc-release
+    make install PRESET=msvc-release
     ```
 
-    ### Visual Studio (MSVC)
+    ### Using CMake presets directly
+
     ```bash
-    # Configure
-    cmake -S . -B build/msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="./install_package/msvc"
+    # MinGW
+    cmake --preset mingw-release
+    cmake --build --preset mingw-release --parallel
+    cmake --install build/mingw-release --prefix ./install_package/mingw
 
-    # Build
-    cmake --build build/msvc --config Release --parallel
-
-    # Install
-    cmake --install build/msvc --config Release
+    # MSVC (run from a Visual Studio Developer Command Prompt)
+    cmake --preset msvc-release
+    cmake --build --preset msvc-release --parallel
+    cmake --install build/msvc-release --prefix ./install_package/msvc
     ```
 
-    After running the install command, the `install_package/mingw/` or `install_package/msvc/` directory will contain a structure ready for consumption:
+    ### Available presets
+
+    | Preset | Compiler | Build Type | Tests |
+    | --- | --- | --- | --- |
+    | `mingw-debug` | GCC (MinGW) | Debug | ON |
+    | `mingw-release` | GCC (MinGW) | Release | OFF |
+    | `msvc-debug` | MSVC (cl) | Debug | ON |
+    | `msvc-release` | MSVC (cl) | Release | OFF |
+
+    You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
+
+    After running the install command, the install directory will contain a structure ready for consumption:
     ```
     install_package/mingw/
     ├── include/
@@ -98,54 +114,33 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
 
 ## Running Unit Tests
 
-DetourModKit includes a comprehensive unit test suite using GoogleTest. To build and run the tests:
+DetourModKit includes a comprehensive unit test suite using GoogleTest. The debug presets (`mingw-debug`, `msvc-debug`) have tests enabled by default.
 
-### Using Makefile (Recommended for MinGW)
+### Using the Makefile wrapper
 
 ```bash
-# Build and run tests (default MinGW)
+# Build and run tests (MinGW by default)
 make test
 
-# Or explicitly specify MinGW
-make test_mingw
-
-# Clean test build directory
-make clean_tests
-```
-
-### Using CMake Directly
-
-#### MinGW
-```bash
-# Configure with tests enabled
-cmake -S . -B build/tests/mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON
-
-# Build the tests
-cmake --build build/tests/mingw --parallel
-
-# Run the tests
-cd build/tests/mingw
-ctest --output-on-failure
-```
-
-#### Visual Studio (MSVC)
-
-```bash
-# Configure with tests enabled
-cmake -S . -B build/tests/msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON
-
-# Build the tests
-cmake --build build/tests/msvc --parallel
-
-# Run the tests
-cd build/tests/msvc
-ctest --output-on-failure
-```
-
-#### Using Makefile for MSVC
-```bash
-# Build and run tests with MSVC
+# Run tests with MSVC (requires VS Developer Command Prompt)
 make test_msvc
+
+# Clean all build directories
+make clean
+```
+
+### Using CMake presets for tests
+
+```bash
+# MinGW
+cmake --preset mingw-debug
+cmake --build --preset mingw-debug --parallel
+ctest --preset mingw-debug
+
+# MSVC
+cmake --preset msvc-debug
+cmake --build --preset msvc-debug --parallel
+ctest --preset msvc-debug
 ```
 
 ### If the build is failing due to a PDB file locking issue
@@ -156,11 +151,11 @@ taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
 
 ### Enabling Code Coverage
 
-To generate code coverage reports (requires GCC/Clang):
+To generate code coverage reports (requires GCC/Clang), pass the coverage option when configuring:
 
 ```bash
-cmake -S . -B build/coverage -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON -DDMK_ENABLE_COVERAGE=ON
-cmake --build build/coverage --parallel
+cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
+cmake --build --preset mingw-debug --parallel
 ```
 
 The test suite covers all major modules:
@@ -191,7 +186,7 @@ This method is ideal for active development and ensures you always have the late
 
 2.  **Configure your CMakeLists.txt:**
     ```cmake
-    cmake_minimum_required(VERSION 3.16)
+    cmake_minimum_required(VERSION 3.25)
     project(MyMod VERSION 1.0.0 LANGUAGES CXX)
 
     set(CMAKE_CXX_STANDARD 23)
@@ -247,7 +242,7 @@ This method uses a pre-built and installed version of DetourModKit.
     #### CMake
     ```cmake
     # In your mod's CMakeLists.txt
-    cmake_minimum_required(VERSION 3.16)
+    cmake_minimum_required(VERSION 3.25)
     project(MyMod)
 
     set(CMAKE_CXX_STANDARD 23)

@@ -1,4 +1,5 @@
 .idea/*
 build/*
 install_package/*
+CMakeUserPresets.json
 !/**/.gitkeep

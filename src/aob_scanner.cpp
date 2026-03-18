@@ -95,7 +95,7 @@ namespace
             {
                 std::ostringstream oss_err;
                 oss_err << "AOB Parser: Invalid token '" << token << "' at position " << token_idx
-                        << ". Expected hex byte (e.g., FF), '?', or '??'.";
+                        << ". Expected hex byte (e.g., FF), '?', or '?\?'.";
                 logger.log(LogLevel::Error, oss_err.str());
                 return {};
             }
