@@ -1,5 +1,8 @@
 # DetourModKit
 
+[![CI - Tests & Coverage](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml)
+![Coverage: 90%+](https://img.shields.io/badge/coverage-%E2%89%A590%25-brightgreen)
+
 DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, and configuration management. It is built with MinGW in mind but aims for general C++ compatibility.
 
 ## Features
@@ -158,16 +161,7 @@ cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 cmake --build --preset mingw-debug --parallel
 ```
 
-The test suite covers all major modules:
-- **Logger**: Singleton pattern, log levels, thread safety, async mode
-- **AsyncLogger**: Queue operations, batching, thread safety
-- **Config**: INI parsing, registration, save/load operations
-- **Format/String Utilities**: Address formatting, hex formatting, string operations
-- **Math Utilities**: Interpolation, clamping, alignment, trigonometry
-- **Memory Utilities**: Memory protection checks, read/write operations, caching
-- **AOB Scanner**: Pattern parsing, wildcard matching, search algorithms
-- **Hook Manager**: Hook lifecycle, status management, thread safety
-- **Filesystem Utils**: File/directory operations, path manipulation
+All pull requests to `main` are automatically tested via CI with a **90% minimum line coverage** gate. See the [CI workflow](.github/workflows/ci.yml) for details.
 
 ## Using DetourModKit in Your Mod Project
 
@@ -458,6 +452,7 @@ For practical reference and real-world usage examples:
 
 * **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
 * **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
+* **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
 
 ## License
 
