@@ -1,0 +1,87 @@
+name: CI - Tests & Coverage
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-and-coverage:
+    name: Tests & Coverage (MinGW)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Add pre-installed MinGW to PATH
+        run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Install Ninja and gcovr
+        run: |
+          choco install ninja --yes --force --no-progress
+          pip install gcovr
+        shell: powershell
+
+      - name: Verify Tools
+        run: |
+          echo "--- g++ ---" && g++ --version
+          echo "--- ninja ---" && ninja --version
+          echo "--- cmake ---" && cmake --version
+          echo "--- gcovr ---" && gcovr --version
+        shell: bash
+
+      - name: Configure (Debug + Tests + Coverage)
+        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+        shell: bash
+
+      - name: Build
+        run: cmake --build --preset mingw-debug --parallel
+        shell: bash
+
+      - name: Run Tests
+        run: ctest --preset mingw-debug
+        shell: bash
+
+      - name: Generate Coverage Report
+        run: |
+          gcovr \
+            --root . \
+            --filter "src/" \
+            --filter "include/" \
+            --exclude "external/" \
+            --exclude "build/" \
+            --exclude "tests/" \
+            --print-summary \
+            --xml coverage.xml \
+            build/mingw-debug
+        shell: bash
+
+      - name: Check Coverage Threshold (90%)
+        run: |
+          LINE_RATE=$(python -c "
+          import xml.etree.ElementTree as ET
+          tree = ET.parse('coverage.xml')
+          root = tree.getroot()
+          rate = float(root.attrib.get('line-rate', 0))
+          print(f'{rate * 100:.2f}')
+          ")
+          echo "Line coverage: ${LINE_RATE}%"
+          python -c "
+          rate = float('${LINE_RATE}')
+          if rate < 90.0:
+              print(f'FAIL: Coverage {rate:.2f}% is below 90% threshold')
+              exit(1)
+          else:
+              print(f'PASS: Coverage {rate:.2f}% meets 90% threshold')
+          "
+        shell: bash
+
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml

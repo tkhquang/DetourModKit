@@ -56,40 +56,37 @@ jobs:
         run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
 
-      - name: Install CMake (using Chocolatey)
-        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
+      - name: Install Ninja and CMake
+        run: choco install ninja cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
         shell: powershell
 
       - name: Verify Tools (MinGW context)
         run: |
           echo "--- Verifying g++ (MinGW) ---" && g++ --version
-          echo "--- Verifying make (MinGW) ---" && mingw32-make --version || make --version
-          echo "--- Verifying cmake (MinGW) ---" && cmake --version
+          echo "--- Verifying ninja ---" && ninja --version
+          echo "--- Verifying cmake ---" && cmake --version
         shell: bash
 
-      - name: Configure DetourModKit with CMake (MinGW)
-        run: |
-          INSTALL_DIR_MINGW_ABS="${{ github.workspace }}/install_package_mingw"
-          echo "Target Install Directory for MinGW: $INSTALL_DIR_MINGW_ABS"
-          cmake -S . -B build_mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR_MINGW_ABS"
+      - name: Configure DetourModKit (MinGW Release)
+        run: cmake --preset mingw-release -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/mingw"
         shell: bash
 
-      - name: Build DetourModKit with CMake (MinGW)
-        run: cmake --build build_mingw --config Release --parallel $(nproc || echo 2)
+      - name: Build DetourModKit (MinGW Release)
+        run: cmake --build --preset mingw-release --parallel
         shell: bash
 
-      - name: Install DetourModKit with CMake (MinGW)
-        run: cmake --install build_mingw --config Release
+      - name: Install DetourModKit (MinGW Release)
+        run: cmake --install build/mingw-release
         shell: bash
 
       - name: Verify Install Directory (MinGW)
         run: |
-          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_mingw"
+          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/mingw"
           if (-not (Test-Path $installDir -PathType Container)) {
             Write-Error "Install directory '$installDir' does not exist after cmake --install!"
             exit 1
           }
-          Write-Output "Contents of '${installDir}':" # Corrected PowerShell variable usage
+          Write-Output "Contents of '${installDir}':"
           Get-ChildItem -Path $installDir -Recurse | ForEach-Object { Write-Output $_.FullName }
           if (-not (Get-ChildItem -Path $installDir)) {
             Write-Warning "Install directory '${installDir}' is empty!"
@@ -106,7 +103,7 @@ jobs:
 
       - name: Create ZIP archive (MinGW)
         run: |
-          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_mingw"
+          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/mingw"
           Compress-Archive -Path $sourcePath\* -DestinationPath ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }} -Force
         shell: pwsh
 
@@ -129,46 +126,45 @@ jobs:
         with:
           submodules: "recursive"
 
-      - name: Install CMake (using Chocolatey)
-        run: choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
+      - name: Install Ninja and CMake
+        run: choco install ninja cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
         shell: powershell
 
-      - name: Add MSBuild to PATH (Setup MSVC Developer Environment)
-        uses: microsoft/setup-msbuild@v2
+      - name: Setup MSVC Developer Environment
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          vs-version: "17.0" # Visual Studio 2022
+          arch: x64
 
       - name: Verify Tools (MSVC context)
         run: |
-          echo "--- Verifying MSBuild (MSVC) ---"
-          msbuild -version
-          echo "--- Verifying cmake (MSVC) ---"
+          echo "--- Verifying cl (MSVC) ---"
+          cl 2>&1 | head -1
+          echo "--- Verifying ninja ---"
+          ninja --version
+          echo "--- Verifying cmake ---"
           cmake --version
-        shell: cmd
+        shell: bash
 
-      - name: Configure DetourModKit with CMake (MSVC)
-        run: |
-          set "INSTALL_DIR_MSVC_ABS=%GITHUB_WORKSPACE%\install_package_msvc"
-          echo Target Install Directory for MSVC: %INSTALL_DIR_MSVC_ABS%
-          cmake -S . -B build_msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="%INSTALL_DIR_MSVC_ABS%"
-        shell: cmd
+      - name: Configure DetourModKit (MSVC Release)
+        run: cmake --preset msvc-release -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/msvc"
+        shell: bash
 
-      - name: Build DetourModKit with CMake (MSVC)
-        run: cmake --build build_msvc --config Release --parallel %NUMBER_OF_PROCESSORS%
-        shell: cmd
+      - name: Build DetourModKit (MSVC Release)
+        run: cmake --build --preset msvc-release --parallel
+        shell: bash
 
-      - name: Install DetourModKit with CMake (MSVC)
-        run: cmake --install build_msvc --config Release
-        shell: cmd
+      - name: Install DetourModKit (MSVC Release)
+        run: cmake --install build/msvc-release
+        shell: bash
 
       - name: Verify Install Directory (MSVC)
         run: |
-          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_msvc"
+          $installDir = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/msvc"
           if (-not (Test-Path $installDir -PathType Container)) {
             Write-Error "Install directory '$installDir' does not exist after cmake --install!"
             exit 1
           }
-          Write-Output "Contents of '${installDir}':" # Corrected PowerShell variable usage
+          Write-Output "Contents of '${installDir}':"
           Get-ChildItem -Path $installDir -Recurse | ForEach-Object { Write-Output $_.FullName }
           if (-not (Get-ChildItem -Path $installDir)) {
             Write-Warning "Install directory '${installDir}' is empty!"
@@ -185,7 +181,7 @@ jobs:
 
       - name: Create ZIP archive (MSVC)
         run: |
-          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package_msvc"
+          $sourcePath = Join-Path -Path "${{ github.workspace }}" -ChildPath "install_package/msvc"
           Compress-Archive -Path $sourcePath\* -DestinationPath ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }} -Force
         shell: pwsh
 

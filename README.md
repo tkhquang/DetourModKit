@@ -1,5 +1,8 @@
 # DetourModKit
 
+[![CI - Tests & Coverage](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml)
+![Coverage: 90%+](https://img.shields.io/badge/coverage-%E2%89%A590%25-brightgreen)
+
 DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, and configuration management. It is built with MinGW in mind but aims for general C++ compatibility.
 
 ## Features
@@ -17,14 +20,15 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 ## Prerequisites
 
-*   A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer). The Makefile defaults to g++.
-*   `make` (e.g., `mingw32-make` for MinGW environments).
-*   CMake (version 3.16 or newer recommended, required to build the SafetyHook dependency).
+*   A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer, MSVC 2022+).
+*   [CMake](https://cmake.org/) 3.25 or newer.
+*   [Ninja](https://ninja-build.org/) build system (ships with Visual Studio; for MSYS2: `pacman -S ninja`).
+*   `make` (optional, for the Makefile wrapper — e.g., `mingw32-make` for MinGW environments).
 *   Git (for cloning and managing submodules).
 
 ## Building DetourModKit (Static Library via CMake)
 
-This project uses CMake to orchestrate its build and the build of its SafetyHook dependency.
+This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest/manual/cmake-presets.7.html) and Ninja to orchestrate its build. A thin Makefile wrapper is provided for convenience.
 
 1.  **Clone the repository (with submodules):**
     ```bash
@@ -38,33 +42,48 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
 
 2.  **Build & Package for Distribution:**
 
-    ### MinGW (Recommended)
+    ### Using the Makefile wrapper (Recommended)
+
     ```bash
-    # Configure
-    cmake -S . -B build_mingw -G "MinGW Makefiles" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="./install_package_mingw"
+    # Build the library (MinGW Release by default)
+    make
 
-    # Build
-    cmake --build build_mingw --config Release --parallel
+    # Install to build/install/
+    make install
 
-    # Install
-    cmake --install build_mingw --config Release
+    # Build with a different preset
+    make PRESET=msvc-release
+    make install PRESET=msvc-release
     ```
 
-    ### Visual Studio (MSVC)
+    ### Using CMake presets directly
+
     ```bash
-    # Configure
-    cmake -S . -B build_msvc -G "Visual Studio 17 2022" -A x64 -DCMAKE_INSTALL_PREFIX="./install_package_msvc"
+    # MinGW
+    cmake --preset mingw-release
+    cmake --build --preset mingw-release --parallel
+    cmake --install build/mingw-release --prefix ./install_package/mingw
 
-    # Build
-    cmake --build build_msvc --config Release --parallel
-
-    # Install
-    cmake --install build_msvc --config Release
+    # MSVC (run from a Visual Studio Developer Command Prompt)
+    cmake --preset msvc-release
+    cmake --build --preset msvc-release --parallel
+    cmake --install build/msvc-release --prefix ./install_package/msvc
     ```
 
-    After running the install command, the `install_package_mingw/` or `install_package_msvc/` directory will contain a structure ready for consumption:
+    ### Available presets
+
+    | Preset | Compiler | Build Type | Tests |
+    | --- | --- | --- | --- |
+    | `mingw-debug` | GCC (MinGW) | Debug | ON |
+    | `mingw-release` | GCC (MinGW) | Release | OFF |
+    | `msvc-debug` | MSVC (cl) | Debug | ON |
+    | `msvc-release` | MSVC (cl) | Release | OFF |
+
+    You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
+
+    After running the install command, the install directory will contain a structure ready for consumption:
     ```
-    install_package_mingw/
+    install_package/mingw/
     ├── include/
     │   ├── DetourModKit/             <-- DetourModKit public headers
     │   │   ├── aob_scanner.hpp
@@ -96,6 +115,54 @@ This project uses CMake to orchestrate its build and the build of its SafetyHook
         └── DetourModKitTargets.cmake
     ```
 
+## Running Unit Tests
+
+DetourModKit includes a comprehensive unit test suite using GoogleTest. The debug presets (`mingw-debug`, `msvc-debug`) have tests enabled by default.
+
+### Using the Makefile wrapper
+
+```bash
+# Build and run tests (MinGW by default)
+make test
+
+# Run tests with MSVC (requires VS Developer Command Prompt)
+make test_msvc
+
+# Clean all build directories
+make clean
+```
+
+### Using CMake presets for tests
+
+```bash
+# MinGW
+cmake --preset mingw-debug
+cmake --build --preset mingw-debug --parallel
+ctest --preset mingw-debug
+
+# MSVC
+cmake --preset msvc-debug
+cmake --build --preset msvc-debug --parallel
+ctest --preset msvc-debug
+```
+
+### If the build is failing due to a PDB file locking issue
+
+```bash
+taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
+```
+
+### Enabling Code Coverage
+
+To generate code coverage reports (requires GCC/Clang), pass the coverage option when configuring:
+
+```bash
+cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
+cmake --build --preset mingw-debug --parallel
+```
+
+All pull requests to `main` are automatically tested via CI with a **90% minimum line coverage** gate. See the [CI workflow](.github/workflows/ci.yml) for details.
+
 ## Using DetourModKit in Your Mod Project
 
 There are two main approaches to integrate DetourModKit into your project:
@@ -113,7 +180,7 @@ This method is ideal for active development and ensures you always have the late
 
 2.  **Configure your CMakeLists.txt:**
     ```cmake
-    cmake_minimum_required(VERSION 3.16)
+    cmake_minimum_required(VERSION 3.25)
     project(MyMod VERSION 1.0.0 LANGUAGES CXX)
 
     set(CMAKE_CXX_STANDARD 23)
@@ -161,7 +228,7 @@ This method is ideal for active development and ensures you always have the late
 This method uses a pre-built and installed version of DetourModKit.
 
 1.  **Integrate DetourModKit:**
-    *   After building DetourModKit, copy the entire `install_package_mingw/` or `install_package_msvc/` directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
+    *   After building DetourModKit, copy the entire `install_package/mingw/` or `install_package/msvc/` directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
     *   Alternatively, adjust your mod's build system to point to DetourModKit's install directory directly.
 
 2.  **Configure Your Mod's Build System:**
@@ -169,7 +236,7 @@ This method uses a pre-built and installed version of DetourModKit.
     #### CMake
     ```cmake
     # In your mod's CMakeLists.txt
-    cmake_minimum_required(VERSION 3.16)
+    cmake_minimum_required(VERSION 3.25)
     project(MyMod)
 
     set(CMAKE_CXX_STANDARD 23)
@@ -385,6 +452,7 @@ For practical reference and real-world usage examples:
 
 * **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
 * **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
+* **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
 
 ## License
 
