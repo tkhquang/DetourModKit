@@ -10,9 +10,8 @@
 
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/filesystem_utils.hpp"
-#include "DetourModKit/string_utils.hpp"
-#include "DetourModKit/format_utils.hpp"
+#include "DetourModKit/filesystem.hpp"
+#include "DetourModKit/format.hpp"
 #include "SimpleIni.h"
 
 #include <windows.h>

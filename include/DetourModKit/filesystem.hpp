@@ -1,13 +1,13 @@
 /**
- * @file filesystem_utils.hpp
+ * @file filesystem.hpp
  * @brief Header for file system utilities.
  *
  * Declares functions for file system operations, such as retrieving the directory
  * of the currently executing module.
  */
 
-#ifndef FILESYSTEM_UTILS_HPP
-#define FILESYSTEM_UTILS_HPP
+#ifndef FILESYSTEM_HPP
+#define FILESYSTEM_HPP
 
 #include <string>
 
@@ -31,4 +31,4 @@ namespace DetourModKit
     } // namespace Filesystem
 } // namespace DetourModKit
 
-#endif // FILESYSTEM_UTILS_HPP
+#endif // FILESYSTEM_HPP

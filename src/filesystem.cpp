@@ -1,12 +1,12 @@
 /**
- * @file filesystem_utils.cpp
+ * @file filesystem.cpp
  * @brief Implementation of file system utilities.
  *
  * Provides functions for file system operations, such as retrieving the directory
  * of the currently executing module.
  */
 
-#include "DetourModKit/filesystem_utils.hpp"
+#include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>

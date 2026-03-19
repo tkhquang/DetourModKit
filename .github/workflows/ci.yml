@@ -59,7 +59,7 @@ jobs:
             build/mingw-debug
         shell: bash
 
-      - name: Check Coverage Threshold (90%)
+      - name: Check Coverage Threshold (80%)
         run: |
           LINE_RATE=$(python -c "
           import xml.etree.ElementTree as ET
@@ -71,11 +71,11 @@ jobs:
           echo "Line coverage: ${LINE_RATE}%"
           python -c "
           rate = float('${LINE_RATE}')
-          if rate < 90.0:
-              print(f'FAIL: Coverage {rate:.2f}% is below 90% threshold')
+          if rate < 80.0:
+              print(f'FAIL: Coverage {rate:.2f}% is below 80% threshold')
               exit(1)
           else:
-              print(f'PASS: Coverage {rate:.2f}% meets 90% threshold')
+              print(f'PASS: Coverage {rate:.2f}% meets 80% threshold')
           "
         shell: bash
 

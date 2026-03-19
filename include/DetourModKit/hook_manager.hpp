@@ -6,15 +6,16 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
+#include <shared_mutex>
 #include <optional>
 #include <expected>
 #include <string_view>
+#include <type_traits>
 
 #include "safetyhook.hpp"
-#include "logger.hpp"
-#include "aob_scanner.hpp"
-#include "string_utils.hpp"
+#include "DetourModKit/logger.hpp"
+#include "DetourModKit/scanner.hpp"
+#include "DetourModKit/format.hpp"
 
 namespace DetourModKit
 {
@@ -285,6 +286,14 @@ namespace DetourModKit
         explicit HookManager(Logger &logger = Logger::getInstance());
         ~HookManager();
 
+        /**
+         * @brief Explicitly shuts down the HookManager, removing all hooks without logging.
+         * @details This method is safe to call during shutdown when Logger may be destroyed.
+         *          It removes all hooks without attempting to log, preventing use-after-free.
+         *          After calling shutdown(), the destructor becomes a no-op.
+         */
+        void shutdown();
+
         // Non-copyable, non-movable (mutex member)
         HookManager(const HookManager &) = delete;
         HookManager &operator=(const HookManager &) = delete;
@@ -410,24 +419,57 @@ namespace DetourModKit
         std::vector<std::string> get_hook_ids(std::optional<HookStatus> status_filter = std::nullopt) const;
 
         /**
-         * @brief Retrieves a pointer to an InlineHook object by its ID.
+         * @brief Safely accesses an InlineHook by its ID while holding the internal lock.
+         * @details The callback is invoked with a reference to the InlineHook while the
+         *          shared_mutex is held, preventing concurrent removal. The lock is released
+         *          when the callback returns.
+         * @tparam F Callable type accepting (InlineHook&) and returning a value.
          * @param hook_id The name of the inline hook.
-         * @return InlineHook* Pointer to the InlineHook object if found, nullptr otherwise.
+         * @param fn The callback to invoke with the hook reference.
+         * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
-        InlineHook *get_inline_hook(const std::string &hook_id);
+        template <typename F>
+        auto with_inline_hook(const std::string &hook_id, F &&fn)
+            -> std::optional<std::invoke_result_t<F, InlineHook &>>
+        {
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->getType() == HookType::Inline)
+            {
+                return fn(static_cast<InlineHook &>(*it->second));
+            }
+            return std::nullopt;
+        }
 
         /**
-         * @brief Retrieves a pointer to a MidHook object by its ID.
+         * @brief Safely accesses a MidHook by its ID while holding the internal lock.
+         * @details The callback is invoked with a reference to the MidHook while the
+         *          shared_mutex is held, preventing concurrent removal. The lock is released
+         *          when the callback returns.
+         * @tparam F Callable type accepting (MidHook&) and returning a value.
          * @param hook_id The name of the mid hook.
-         * @return MidHook* Pointer to the MidHook object if found, nullptr otherwise.
+         * @param fn The callback to invoke with the hook reference.
+         * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
-        MidHook *get_mid_hook(const std::string &hook_id);
+        template <typename F>
+        auto with_mid_hook(const std::string &hook_id, F &&fn)
+            -> std::optional<std::invoke_result_t<F, MidHook &>>
+        {
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->getType() == HookType::Mid)
+            {
+                return fn(static_cast<MidHook &>(*it->second));
+            }
+            return std::nullopt;
+        }
 
     private:
-        mutable std::mutex m_hooks_mutex;
+        mutable std::shared_mutex m_hooks_mutex;
         std::unordered_map<std::string, std::unique_ptr<Hook>> m_hooks;
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
+        bool m_shutdown_called{false};
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;

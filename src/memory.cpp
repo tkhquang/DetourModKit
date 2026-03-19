@@ -1,5 +1,5 @@
 /**
- * @file memory_utils.cpp
+ * @file memory.cpp
  * @brief Implementation of memory manipulation and validation utilities.
  *
  * Provides functions for checking memory readability and writability, writing bytes to memory,
@@ -7,8 +7,8 @@
  * The cache mechanism is internal to this translation unit.
  */
 
-#include "DetourModKit/memory_utils.hpp"
-#include "DetourModKit/format_utils.hpp"
+#include "DetourModKit/memory.hpp"
+#include "DetourModKit/format.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>
@@ -236,9 +236,9 @@ bool DetourModKit::Memory::initMemoryCache(size_t cache_size, unsigned int expir
                    {
                        initialized = MemoryUtilsCacheInternal::performCacheInitialization(cache_size, expiry_ms);
                    });
-    // Note: if already initialized, initialized remains false
-    // Return whether this call performed the initialization
-    return initialized || !MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire);
+    // If this call performed initialization, return its result.
+    // If already initialized by a prior call, return true (cache is usable).
+    return initialized || MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire);
 }
 
 void DetourModKit::Memory::clearMemoryCache()
@@ -462,22 +462,22 @@ bool DetourModKit::Memory::isMemoryWritable(void *address, size_t size)
     return is_fully_contained;
 }
 
-bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
+std::expected<void, MemoryError> DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
 {
     if (!targetAddress)
     {
         logger.error("WriteBytes: Target address is null.");
-        return false;
+        return std::unexpected(MemoryError::NullTargetAddress);
     }
-    if (!sourceBytes && numBytes > 0) // Allow null source if numBytes is 0
+    if (!sourceBytes && numBytes > 0)
     {
         logger.error("WriteBytes: Source bytes pointer is null for non-zero numBytes.");
-        return false;
+        return std::unexpected(MemoryError::NullSourceBytes);
     }
     if (numBytes == 0)
     {
         logger.warning("WriteBytes: Number of bytes to write is zero. Operation has no effect.");
-        return true;
+        return {};
     }
 
     DWORD old_protection_flags;
@@ -485,11 +485,9 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
     {
         logger.error("WriteBytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
-        return false;
+        return std::unexpected(MemoryError::ProtectionChangeFailed);
     }
 
-    // Note: memcpy cannot throw C++ exceptions; it's a C function.
-    // Access violations would be structured exceptions, not catchable here.
     memcpy(reinterpret_cast<void *>(targetAddress), reinterpret_cast<const void *>(sourceBytes), numBytes);
 
     DWORD temp_holder_for_old_protect_after_restore;
@@ -498,18 +496,16 @@ bool DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte 
         logger.error("WriteBytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
                      DetourModKit::Format::format_hex(static_cast<int>(old_protection_flags)),
                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
-        // Return false because the memory state is inconsistent
-        return false;
+        return std::unexpected(MemoryError::ProtectionRestoreFailed);
     }
 
     if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(targetAddress), numBytes))
     {
         logger.warning("WriteBytes: FlushInstructionCache failed for address {}. Windows Error: {}",
                        DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
-        // This is a warning, not a failure - the write succeeded
     }
 
     logger.debug("WriteBytes: Successfully wrote {} bytes to address {}.",
                  numBytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)));
-    return true;
+    return {};
 }

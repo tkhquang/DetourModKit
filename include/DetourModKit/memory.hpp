@@ -1,13 +1,54 @@
-#ifndef MEMORY_UTILS_HPP
-#define MEMORY_UTILS_HPP
+#ifndef MEMORY_HPP
+#define MEMORY_HPP
 
-#include <string>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
+#include <expected>
+#include <string>
+#include <string_view>
 
 namespace DetourModKit
 {
     class Logger;
+
+    /**
+     * @enum MemoryError
+     * @brief Error codes for memory operation failures.
+     */
+    enum class MemoryError
+    {
+        NullTargetAddress,
+        NullSourceBytes,
+        ProtectionChangeFailed,
+        ProtectionRestoreFailed
+    };
+
+    /**
+     * @brief Converts a MemoryError to a human-readable string.
+     * @param error The error code.
+     * @return A string view describing the error.
+     */
+    constexpr std::string_view memoryErrorToString(MemoryError error)
+    {
+        switch (error)
+        {
+        case MemoryError::NullTargetAddress:
+            return "Target address is null";
+        case MemoryError::NullSourceBytes:
+            return "Source bytes pointer is null";
+        case MemoryError::ProtectionChangeFailed:
+            return "Failed to change memory protection";
+        case MemoryError::ProtectionRestoreFailed:
+            return "Failed to restore original memory protection";
+        default:
+            return "Unknown memory error";
+        }
+    }
+
+    // Memory cache configuration defaults
+    inline constexpr size_t DEFAULT_CACHE_SIZE = 32;
+    inline constexpr unsigned int DEFAULT_CACHE_EXPIRY_MS = 5000;
+    inline constexpr size_t MIN_CACHE_SIZE = 1;
 
     namespace Memory
     {
@@ -20,7 +61,8 @@ namespace DetourModKit
          * @return true if this call performed initialization, false if already initialized.
          * @note Only the first call to initMemoryCache has effect; subsequent calls return false.
          */
-        bool initMemoryCache(size_t cache_size = 32, unsigned int expiry_ms = 5000);
+        bool initMemoryCache(size_t cache_size = DEFAULT_CACHE_SIZE,
+                             unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS);
 
         /**
          * @brief Clears all entries from the memory region cache.
@@ -62,10 +104,10 @@ namespace DetourModKit
          * @param sourceBytes Pointer to the source buffer containing data to write.
          * @param numBytes Number of bytes to write.
          * @param logger Reference to a Logger instance for error reporting.
-         * @return true if the write operation and protection restore succeed, false otherwise.
+         * @return std::expected<void, MemoryError> on success, or the specific error on failure.
          */
-        bool WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger);
+        [[nodiscard]] std::expected<void, MemoryError> WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger);
     } // namespace Memory
 } // namespace DetourModKit
 
-#endif // MEMORY_UTILS_HPP
+#endif // MEMORY_HPP
