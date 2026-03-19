@@ -22,20 +22,24 @@ foreach(_ext_target gtest gtest_main gmock gmock_main)
   endif()
 endforeach()
 
-# Enable testing for the DetourModKit library
-add_executable(DetourModKit_tests
-  main.cpp
-  test_logger.cpp
-  test_async_logger.cpp
-  test_config.cpp
-  test_format_utils.cpp
-  test_string_utils.cpp
-  test_math_utils.cpp
-  test_memory_utils.cpp
-  test_aob_scanner.cpp
-  test_hook_manager.cpp
-  test_filesystem_utils.cpp
+# Automatically collect all test source files
+# This will include all test_*.cpp files and main.cpp
+file(GLOB TEST_SOURCES
+  "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/test_*.cpp"
 )
+
+# Sort the list for deterministic build order
+list(SORT TEST_SOURCES)
+
+message(STATUS "Discovered test files:")
+
+foreach(test_file ${TEST_SOURCES})
+  message(STATUS "  - ${test_file}")
+endforeach()
+
+# Enable testing for the DetourModKit library
+add_executable(DetourModKit_tests ${TEST_SOURCES})
 
 # Link GoogleTest and DetourModKit
 target_link_libraries(DetourModKit_tests
