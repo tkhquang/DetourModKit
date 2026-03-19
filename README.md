@@ -1,7 +1,7 @@
 # DetourModKit
 
 [![CI - Tests & Coverage](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml)
-![Coverage: 90%+](https://img.shields.io/badge/coverage-%E2%89%A590%25-brightgreen)
+![Coverage: 80%+](https://img.shields.io/badge/coverage-%E2%89%A580%25-brightgreen)
 
 DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, and configuration management. It is built with MinGW in mind but aims for general C++ compatibility.
 
@@ -161,7 +161,7 @@ cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 cmake --build --preset mingw-debug --parallel
 ```
 
-All pull requests to `main` are automatically tested via CI with a **90% minimum line coverage** gate. See the [CI workflow](.github/workflows/ci.yml) for details.
+All pull requests to `main` are automatically tested via CI with a **80% minimum line coverage** gate. See the [CI workflow](.github/workflows/ci.yml) for details.
 
 ## Using DetourModKit in Your Mod Project
 
