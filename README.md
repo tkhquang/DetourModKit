@@ -18,6 +18,12 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 *   **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 *   **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
 
+## Testing
+
+*   **Comprehensive Test Suite:** Full unit test coverage for all modules using GoogleTest.
+*   **Code Coverage:** Automated coverage analysis with 80% minimum line coverage gate in CI.
+*   **Coverage Tools:** Built-in scripts for parsing and analyzing coverage reports.
+
 ## Prerequisites
 
 *   A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer, MSVC 2022+).
@@ -86,13 +92,16 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     install_package/mingw/
     ├── include/
     │   ├── DetourModKit/             <-- DetourModKit public headers
-    │   │   ├── aob_scanner.hpp
+    │   │   ├── scanner.hpp           <-- AOB scanner
     │   │   ├── async_logger.hpp      <-- Async logging system
     │   │   ├── config.hpp
-    │   │   ├── format_utils.hpp      <-- Format string utilities
-    │   │   ├── math_utils.hpp        <-- DirectXMath-powered math utilities
-    │   │   ├── ...
-    │   │   └── string_utils.hpp
+    │   │   ├── format.hpp            <-- Format utilities
+    │   │   ├── math.hpp              <-- DirectXMath-powered math utilities
+    │   │   ├── memory.hpp            <-- Memory utilities
+    │   │   ├── filesystem.hpp        <-- Filesystem utilities
+    │   │   ├── hook_manager.hpp      <-- Hook management
+    │   │   ├── logger.hpp            <-- Synchronous logger
+    │   │   └── ...
     │   ├── DetourModKit.hpp          <-- Main DetourModKit include
     │   ├── DirectXMath/              <-- DirectXMath headers
     │   │   ├── DirectXMath.h
@@ -351,7 +360,7 @@ void InitializeMyMod() {
         if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info))) {
             // Using format string placeholders with custom formatters
             logger.debug("Scanning module at {} size {}",
-                         DMKString::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)),
+                         DMKFormat::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)),
                          module_info.SizeOfImage);
 
             // Replace with actual AOB pattern from your target game
@@ -368,8 +377,8 @@ void InitializeMyMod() {
                 if (found_pattern) {
                     target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
                     logger.info("Pattern for GameFunction_PrintMessage found at: {}, target address: {}",
-                                DMKString::format_address(reinterpret_cast<uintptr_t>(found_pattern)),
-                                DMKString::format_address(target_function_address));
+                                DMKFormat::format_address(reinterpret_cast<uintptr_t>(found_pattern)),
+                                DMKFormat::format_address(target_function_address));
                 } else {
                     logger.error("AOB pattern for GameFunction_PrintMessage not found in target module.");
                 }
