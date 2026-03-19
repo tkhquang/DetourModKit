@@ -1,9 +1,8 @@
 #ifndef LOGGER_HPP
 #define LOGGER_HPP
 
-#include "DetourModKit/log_level.hpp"
-
 #include <string>
+#include <string_view>
 #include <fstream>
 #include <mutex>
 #include <algorithm>
@@ -14,7 +13,50 @@
 
 namespace DetourModKit
 {
-    // Forward declarations to break circular dependency
+    /**
+     * @enum LogLevel
+     * @brief Defines the severity levels for log messages.
+     * @note This is an enum class (C++ Core Guidelines Enum.3) to prevent namespace pollution.
+     */
+    enum class LogLevel
+    {
+        Trace = 0,
+        Debug = 1,
+        Info = 2,
+        Warning = 3,
+        Error = 4
+    };
+
+    /**
+     * @brief Converts a LogLevel enum to its string representation.
+     * @param level The LogLevel enum value.
+     * @return std::string_view String representation of the log level.
+     */
+    constexpr std::string_view logLevelToString(LogLevel level) noexcept
+    {
+        switch (level)
+        {
+        case LogLevel::Trace:
+            return "TRACE";
+        case LogLevel::Debug:
+            return "DEBUG";
+        case LogLevel::Info:
+            return "INFO";
+        case LogLevel::Warning:
+            return "WARNING";
+        case LogLevel::Error:
+            return "ERROR";
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    // Logger configuration defaults
+    inline constexpr const char *DEFAULT_LOG_PREFIX = "DetourModKit";
+    inline constexpr const char *DEFAULT_LOG_FILE_NAME = "DetourModKit_Log.txt";
+    inline constexpr const char *DEFAULT_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S";
+
+    // Forward declarations
     struct AsyncLoggerConfig;
     class AsyncLogger;
 
@@ -84,6 +126,15 @@ namespace DetourModKit
          *          In sync mode, flushes the file stream.
          */
         void flush();
+
+        /**
+         * @brief Explicitly shuts down the Logger, closing files without logging.
+         * @details This method is safe to call during shutdown. It closes the log file
+         *          and shuts down async logger without attempting to log, preventing
+         *          use-after-free if called after other singletons are destroyed.
+         *          After calling shutdown(), the destructor becomes a no-op.
+         */
+        void shutdown();
 
         /**
          * @brief Gets the current log level.
@@ -230,6 +281,7 @@ namespace DetourModKit
         std::ofstream log_file_stream;
         std::atomic<LogLevel> current_log_level{LogLevel::Info}; // Atomic for thread-safe reads/writes
         std::mutex log_access_mutex;
+        bool m_shutdown_called{false};
 
         // Async logging support (forward declared)
         std::unique_ptr<AsyncLogger> async_logger_;

@@ -1,24 +1,51 @@
-#ifndef FORMAT_UTILS_HPP
-#define FORMAT_UTILS_HPP
+#ifndef FORMAT_HPP
+#define FORMAT_HPP
 
 /**
- * @file format_utils.hpp
- * @brief Format string utilities and custom formatters for game modding types.
- * @details Provides std::format-style formatting with custom formatters for
- *          common game modding types like memory addresses, byte values, and
- *          virtual key codes. Uses C++23 std::format for maximum performance.
+ * @file format.hpp
+ * @brief String and format utilities for DetourModKit.
+ * @details Provides string manipulation (trimming) and formatting utilities
+ *          for common game modding types like memory addresses, byte values,
+ *          and virtual key codes.
  */
 
+#include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <sstream>
-#include <iomanip>
 
 namespace DetourModKit
 {
+    namespace String
+    {
+        /**
+         * @brief Trims leading and trailing whitespace characters from a string.
+         * @details Whitespace characters considered are space, tab, newline, carriage return,
+         *          form feed, and vertical tab.
+         * @param s The const reference to the std::string to trim.
+         * @return std::string A new string with leading/trailing whitespace removed.
+         *         Returns an empty string if the input string is empty or contains only whitespace.
+         */
+        inline std::string trim(const std::string &s)
+        {
+            const char *whitespace_chars = " \t\n\r\f\v";
+
+            size_t first_non_whitespace = s.find_first_not_of(whitespace_chars);
+            if (std::string::npos == first_non_whitespace)
+            {
+                return "";
+            }
+
+            size_t last_non_whitespace = s.find_last_not_of(whitespace_chars);
+            return s.substr(first_non_whitespace, (last_non_whitespace - first_non_whitespace + 1));
+        }
+    } // namespace String
+
     namespace Format
     {
         /**
@@ -115,4 +142,4 @@ namespace DetourModKit
     } // namespace Format
 } // namespace DetourModKit
 
-#endif // FORMAT_UTILS_HPP
+#endif // FORMAT_HPP

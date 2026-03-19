@@ -9,19 +9,17 @@
  */
 
 // Core functionality headers
-#include "DetourModKit/log_level.hpp"
-#include "DetourModKit/aob_scanner.hpp"
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
 
-// Utility headers
-#include "DetourModKit/filesystem_utils.hpp"
-#include "DetourModKit/format_utils.hpp"
-#include "DetourModKit/math_utils.hpp"
-#include "DetourModKit/memory_utils.hpp"
-#include "DetourModKit/string_utils.hpp"
+// Module headers
+#include "DetourModKit/filesystem.hpp"
+#include "DetourModKit/format.hpp"
+#include "DetourModKit/math.hpp"
+#include "DetourModKit/memory.hpp"
+#include "DetourModKit/scanner.hpp"
 
 /**
  * @brief Convenient namespace aliases for common DetourModKit usage patterns.
@@ -32,6 +30,7 @@ namespace DMK = DetourModKit;
 namespace DMKConfig = DetourModKit::Config;
 namespace DMKScanner = DetourModKit::Scanner;
 namespace DMKString = DetourModKit::String;
+namespace DMKFormat = DetourModKit::Format;
 namespace DMKFilesystem = DetourModKit::Filesystem;
 namespace DMKMemory = DetourModKit::Memory;
 namespace DMKMath = DetourModKit::Math;
@@ -48,4 +47,26 @@ using DMKHookType = DetourModKit::HookType;
 using DMKHookConfig = DetourModKit::HookConfig;
 using DMKAsyncLogger = DetourModKit::AsyncLogger;
 using DMKAsyncLoggerConfig = DetourModKit::AsyncLoggerConfig;
+
+/**
+ * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
+ * @details This function should be called before process exit or DLL unload to ensure
+ *          proper cleanup without use-after-free errors. It shuts down singletons in
+ *          reverse dependency order: HookManager first (which may log), then Logger.
+ *          After calling this function, the singletons are in a safe state for destruction.
+ *
+ * @note This function is idempotent - calling it multiple times is safe.
+ */
+inline void DMK_Shutdown()
+{
+    // Shutdown in reverse dependency order:
+    // 1. HookManager first (may have been logging via Logger)
+    DetourModKit::HookManager::getInstance().shutdown();
+
+    // 2. Clear registered config items (static vector cleanup)
+    DetourModKit::Config::clearRegisteredItems();
+
+    // 3. Logger last (no more logging after this)
+    DetourModKit::Logger::getInstance().shutdown();
+}
 using DMKOverflowPolicy = DetourModKit::OverflowPolicy;

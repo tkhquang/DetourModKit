@@ -1,5 +1,5 @@
 #include "DetourModKit/hook_manager.hpp"
-#include "DetourModKit/format_utils.hpp"
+#include "DetourModKit/format.hpp"
 
 #include <sstream>
 #include <algorithm>
@@ -33,8 +33,27 @@ HookManager::HookManager(Logger &logger)
 
 HookManager::~HookManager()
 {
-    remove_all_hooks();
-    m_logger.info("HookManager: Shutdown complete. All managed hooks should be removed and unhooked.");
+    if (!m_shutdown_called)
+    {
+        // If shutdown() was not called explicitly, we still need to remove hooks
+        // but we cannot safely log because Logger might be destroyed already.
+        // This is a fallback for cases where DMK_Shutdown() was not called.
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        m_hooks.clear();
+    }
+}
+
+void HookManager::shutdown()
+{
+    if (m_shutdown_called)
+    {
+        return; // Already shut down
+    }
+    m_shutdown_called = true;
+
+    // Remove all hooks without logging to avoid use-after-free if Logger is destroyed
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    m_hooks.clear();
 }
 
 std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &err) const
@@ -113,7 +132,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     void **original_trampoline,
     const HookConfig &config)
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
     if (!m_allocator)
     {
@@ -247,7 +266,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
     if (!m_allocator)
     {
@@ -365,7 +384,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
 
 bool HookManager::remove_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
@@ -382,7 +401,7 @@ bool HookManager::remove_hook(const std::string &hook_id)
 
 void HookManager::remove_all_hooks()
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (!m_hooks.empty())
     {
         size_t num_hooks = m_hooks.size();
@@ -398,7 +417,7 @@ void HookManager::remove_all_hooks()
 
 bool HookManager::enable_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
@@ -433,7 +452,7 @@ bool HookManager::enable_hook(const std::string &hook_id)
 
 bool HookManager::disable_hook(const std::string &hook_id)
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
@@ -468,7 +487,7 @@ bool HookManager::disable_hook(const std::string &hook_id)
 
 std::optional<HookStatus> HookManager::get_hook_status(const std::string &hook_id) const
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
@@ -479,7 +498,7 @@ std::optional<HookStatus> HookManager::get_hook_status(const std::string &hook_i
 
 std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     std::unordered_map<HookStatus, size_t> counts;
     counts[HookStatus::Active] = 0;
     counts[HookStatus::Disabled] = 0;
@@ -494,7 +513,7 @@ std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
 
 std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> status_filter) const
 {
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     std::vector<std::string> ids;
     ids.reserve(m_hooks.size());
     for (const auto &[name, hook_ptr] : m_hooks)
@@ -507,24 +526,5 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
     return ids;
 }
 
-InlineHook *HookManager::get_inline_hook(const std::string &hook_id)
-{
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
-    auto it = m_hooks.find(hook_id);
-    if (it != m_hooks.end() && it->second->getType() == HookType::Inline)
-    {
-        return static_cast<InlineHook *>(it->second.get());
-    }
-    return nullptr;
-}
-
-MidHook *HookManager::get_mid_hook(const std::string &hook_id)
-{
-    std::lock_guard<std::mutex> lock(m_hooks_mutex);
-    auto it = m_hooks.find(hook_id);
-    if (it != m_hooks.end() && it->second->getType() == HookType::Mid)
-    {
-        return static_cast<MidHook *>(it->second.get());
-    }
-    return nullptr;
-}
+// get_inline_hook and get_mid_hook replaced by with_inline_hook / with_mid_hook
+// (template methods defined in hook_manager.hpp)

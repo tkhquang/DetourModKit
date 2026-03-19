@@ -1,6 +1,6 @@
 #pragma once // Ensures this header is included only once per compilation unit
 /**
- * @file math_utils.hpp
+ * @file math.hpp
  * @brief Provides basic mathematical utility functions.
  */
 #include <DirectXMath.h>

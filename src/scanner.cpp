@@ -1,12 +1,11 @@
 /**
- * @file aob_scanner.cpp
+ * @file scanner.cpp
  * @brief Implementation of Array-of-Bytes (AOB) parsing and scanning.
  */
 
-#include "DetourModKit/aob_scanner.hpp"
+#include "DetourModKit/scanner.hpp"
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/string_utils.hpp"
-#include "DetourModKit/format_utils.hpp"
+#include "DetourModKit/format.hpp"
 
 #include <vector>
 #include <string>

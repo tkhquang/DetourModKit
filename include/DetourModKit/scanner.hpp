@@ -1,5 +1,5 @@
-#ifndef AOB_SCANNER_HPP
-#define AOB_SCANNER_HPP
+#ifndef SCANNER_HPP
+#define SCANNER_HPP
 
 #include <vector>
 #include <string>
@@ -61,4 +61,4 @@ namespace DetourModKit
     } // namespace Scanner
 } // namespace DetourModKit
 
-#endif // AOB_SCANNER_HPP
+#endif // SCANNER_HPP

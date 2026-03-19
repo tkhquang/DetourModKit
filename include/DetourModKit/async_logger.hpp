@@ -14,6 +14,7 @@
 
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -28,6 +29,12 @@
 
 namespace DetourModKit
 {
+    // Async logger configuration defaults
+    inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
+    inline constexpr size_t DEFAULT_BATCH_SIZE = 64;
+    inline constexpr auto DEFAULT_FLUSH_INTERVAL = std::chrono::milliseconds(100);
+    inline constexpr size_t MAX_INLINE_MESSAGE_SIZE = 256;
+
     /**
      * @enum OverflowPolicy
      * @brief Defines behavior when the async log queue is full.
@@ -157,15 +164,28 @@ namespace DetourModKit
             Slot &operator=(const Slot &) = delete;
 
             // Allow move constructor and move assignment
+            // WARNING: These are only safe to call during queue initialization
+            // or when the slot is known to be unused (sequence == 0).
+            // Moving a slot while another thread accesses it causes data races.
             Slot(Slot &&other) noexcept
                 : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data))
             {
+                // Safety check: only move if slot is empty (sequence == 0)
+                // This prevents data races during concurrent access
+                assert(sequence.load(std::memory_order_relaxed) == 0 &&
+                       "Slot::move called on non-empty slot - potential data race");
             }
 
             Slot &operator=(Slot &&other) noexcept
             {
                 if (this != &other)
                 {
+                    // Safety check: only move if both slots are empty
+                    assert(sequence.load(std::memory_order_relaxed) == 0 &&
+                           "Slot::move assignment called on non-empty slot - potential data race");
+                    assert(other.sequence.load(std::memory_order_relaxed) == 0 &&
+                           "Slot::move assignment from non-empty slot - potential data race");
+
                     sequence.store(other.sequence.load(std::memory_order_relaxed), std::memory_order_relaxed);
                     data = std::move(other.data);
                 }
@@ -189,17 +209,48 @@ namespace DetourModKit
     struct AsyncLoggerConfig
     {
         /** @brief Queue capacity (must be power of 2). Default: 8192. */
-        size_t queue_capacity = 8192;
+        size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;
 
         /** @brief Number of messages to batch per write. Default: 64. */
-        size_t batch_size = 64;
+        size_t batch_size = DEFAULT_BATCH_SIZE;
 
         /** @brief Interval between forced flushes. Default: 100ms. */
-        std::chrono::milliseconds flush_interval{100};
+        std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
 
         /** @brief Behavior when queue is full. Default: DropOldest. */
         OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
+
+        /**
+         * @brief Validates the configuration parameters.
+         * @return true if configuration is valid, false otherwise.
+         */
+        bool validate() const
+        {
+            // Queue capacity must be power of 2
+            if (queue_capacity == 0 || (queue_capacity & (queue_capacity - 1)) != 0)
+            {
+                return false;
+            }
+
+            // Batch size must be > 0
+            if (batch_size == 0)
+            {
+                return false;
+            }
+
+            // Flush interval must be > 0
+            if (flush_interval.count() <= 0)
+            {
+                return false;
+            }
+
+            return true;
+        }
     };
+
+    // Compile-time validation: Default queue capacity must be power of 2
+    static_assert((DEFAULT_QUEUE_CAPACITY & (DEFAULT_QUEUE_CAPACITY - 1)) == 0,
+                  "DEFAULT_QUEUE_CAPACITY must be a power of 2");
 
     /**
      * @class AsyncLogger

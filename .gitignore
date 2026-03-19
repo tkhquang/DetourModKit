@@ -1,5 +1,11 @@
 .idea/*
 build/*
+build_*/*
 install_package/*
 CMakeUserPresets.json
 !/**/.gitkeep
+
+# Coverage reports (dynamically generated)
+docs/tests/coverage*
+docs/tests/*.css
+docs/tests/*.js

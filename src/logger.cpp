@@ -5,7 +5,7 @@
 
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
-#include "DetourModKit/format_utils.hpp"
+#include "DetourModKit/format.hpp"
 
 using namespace DetourModKit;
 
@@ -57,17 +57,16 @@ LogLevel Logger::stringToLogLevel(const std::string &level_str)
 
 void Logger::configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
 {
-    // First, update static variables (need to hold init mutex for this)
-    {
-        std::lock_guard<std::mutex> lock(Logger::getLoggerInitMutex()); // Protect static variable modification
-        s_log_prefix = prefix;
-        s_log_file_name = file_name;
-        s_timestamp_format = timestamp_fmt;
-    }
+    // Hold the lock for the entire configure operation to prevent race conditions
+    // between modifying static variables and accessing the instance
+    std::lock_guard<std::mutex> lock(Logger::getLoggerInitMutex());
 
-    // Get the instance AFTER releasing the lock to avoid deadlock
-    // The Logger constructor also tries to lock getLoggerInitMutex()
-    // Note: getInstance() uses a static local and cannot throw
+    // Update static variables
+    s_log_prefix = prefix;
+    s_log_file_name = file_name;
+    s_timestamp_format = timestamp_fmt;
+
+    // Get the instance (getInstance() uses a static local and cannot throw)
     Logger &instance = getInstance();
 
     // Only reconfigure if the instance's settings differ from the new static settings
@@ -120,14 +119,15 @@ void Logger::reconfigure(const std::string &prefix, const std::string &file_name
 Logger::Logger()
 {
     // Use the static configurations set by ::configure or their defaults.
-    // Need to ensure this constructor isn't causing issues if s_log_prefix changes after construction.
-    // The 'log_prefix' member takes a snapshot at construction time.
-    {
-        std::lock_guard<std::mutex> lock(Logger::getLoggerInitMutex());
-        log_prefix_instance = s_log_prefix; // Instance specific copy
-        log_file_name_instance = s_log_file_name;
-        timestamp_format_instance = s_timestamp_format;
-    }
+    // NOTE: No lock on getLoggerInitMutex() here. This constructor is only called in two scenarios:
+    // 1. From configure() — which already holds getLoggerInitMutex(), so locking again would deadlock
+    //    (std::mutex is non-recursive).
+    // 2. From getInstance() without prior configure() — the static local initialization is thread-safe
+    //    per C++11, and s_log_prefix/s_log_file_name/s_timestamp_format hold their defaults.
+    // In both cases, the static variables are stable and safe to read without an additional lock.
+    log_prefix_instance = s_log_prefix;
+    log_file_name_instance = s_log_file_name;
+    timestamp_format_instance = s_timestamp_format;
 
     std::string log_file_full_path = generateLogFilePath(); // Uses instance member log_file_name_instance
 
@@ -154,6 +154,36 @@ Logger::Logger()
 
 Logger::~Logger()
 {
+    if (!m_shutdown_called)
+    {
+        // If shutdown() was not called explicitly, we still need to close files
+        // but we cannot safely log because other singletons might be destroyed.
+        // This is a fallback for cases where DMK_Shutdown() was not called.
+
+        // Shutdown async logger first if enabled
+        if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
+        {
+            async_logger_->shutdown();
+            async_logger_.reset();
+        }
+
+        if (log_file_stream.is_open())
+        {
+            std::lock_guard<std::mutex> lock(log_access_mutex);
+            log_file_stream.flush();
+            log_file_stream.close();
+        }
+    }
+}
+
+void Logger::shutdown()
+{
+    if (m_shutdown_called)
+    {
+        return; // Already shut down
+    }
+    m_shutdown_called = true;
+
     // Shutdown async logger first if enabled
     if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
     {
@@ -163,12 +193,8 @@ Logger::~Logger()
 
     if (log_file_stream.is_open())
     {
-        // Ensure thread safety for this final log message.
         std::lock_guard<std::mutex> lock(log_access_mutex);
-        log_file_stream << "[" << getTimestamp() << "] ["
-                        << std::setw(7) << std::left << "INFO"
-                        << "] :: Logger shutting down." << '\n';
-        log_file_stream.flush(); // Ensure all buffered data is written
+        log_file_stream.flush();
         log_file_stream.close();
     }
 }
