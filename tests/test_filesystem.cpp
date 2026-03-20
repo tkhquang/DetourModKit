@@ -59,3 +59,18 @@ TEST(FilesystemTest, GetRuntimeDirectory_NoThrow)
 {
     EXPECT_NO_THROW(Filesystem::get_runtime_directory());
 }
+
+TEST(FilesystemTest, GetRuntimeDirectory_IsDirectory)
+{
+    auto dir = Filesystem::get_runtime_directory();
+    EXPECT_TRUE(std::filesystem::is_directory(dir));
+}
+
+TEST(FilesystemTest, GetRuntimeDirectory_NoTrailingSeparator)
+{
+    auto dir = Filesystem::get_runtime_directory();
+    ASSERT_FALSE(dir.empty());
+    char last = dir.back();
+    EXPECT_NE(last, '/');
+    EXPECT_NE(last, '\\');
+}

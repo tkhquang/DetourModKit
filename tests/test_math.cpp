@@ -78,3 +78,30 @@ TEST(MathTest, RoundTrip_Radians)
     float back = Math::degrees_to_radians(degrees);
     EXPECT_NEAR(back, original, 0.0001f);
 }
+
+TEST(MathTest, degrees_to_radians_NaN)
+{
+    float result = Math::degrees_to_radians(std::numeric_limits<float>::quiet_NaN());
+    EXPECT_TRUE(std::isnan(result));
+}
+
+TEST(MathTest, degrees_to_radians_Infinity)
+{
+    float result = Math::degrees_to_radians(std::numeric_limits<float>::infinity());
+    EXPECT_TRUE(std::isinf(result));
+
+    float neg_result = Math::degrees_to_radians(-std::numeric_limits<float>::infinity());
+    EXPECT_TRUE(std::isinf(neg_result));
+}
+
+TEST(MathTest, radians_to_degrees_NaN)
+{
+    float result = Math::radians_to_degrees(std::numeric_limits<float>::quiet_NaN());
+    EXPECT_TRUE(std::isnan(result));
+}
+
+TEST(MathTest, radians_to_degrees_Infinity)
+{
+    float result = Math::radians_to_degrees(std::numeric_limits<float>::infinity());
+    EXPECT_TRUE(std::isinf(result));
+}

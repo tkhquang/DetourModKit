@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
+#include <thread>
+#include <vector>
 
 #include "DetourModKit/config.hpp"
 
@@ -542,4 +544,130 @@ TEST_F(ConfigTest, RegisterKeyList_DefaultOverflow)
     Config::load(test_ini_file_.string());
     EXPECT_EQ(val.size(), 1u);
     EXPECT_EQ(val[0], 0x43);
+}
+
+TEST_F(ConfigTest, DuplicateKeyRegistration)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestInt=77\n";
+    ini_file.close();
+
+    int first_val = 0;
+    int second_val = 0;
+
+    Config::register_int("TestSection", "TestInt", "first", [&first_val](int v)
+                                { first_val = v; }, 10);
+    Config::register_int("TestSection", "TestInt", "second", [&second_val](int v)
+                                { second_val = v; }, 20);
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    // The implementation appends each registration independently to the item
+    // list. Both callbacks are invoked during load(), so both variables receive
+    // the value read from the INI file.
+    EXPECT_EQ(first_val, 77);
+    EXPECT_EQ(second_val, 77);
+}
+
+TEST_F(ConfigTest, WhitespaceAroundValues)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestInt = 100 \n";
+    ini_file << "TestString =  hello  \n";
+    ini_file.close();
+
+    int int_val = 0;
+    std::string str_val;
+
+    Config::register_int("TestSection", "TestInt", "int_val", [&int_val](int v)
+                                { int_val = v; }, 0);
+    Config::register_string("TestSection", "TestString", "str_val", [&str_val](const std::string &v)
+                                   { str_val = v; }, "");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    EXPECT_EQ(int_val, 100);
+    EXPECT_EQ(str_val, "hello");
+}
+
+TEST_F(ConfigTest, NegativeIntValue)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestInt=-50\n";
+    ini_file.close();
+
+    int val = 0;
+
+    Config::register_int("TestSection", "TestInt", "val", [&val](int v)
+                                { val = v; }, 0);
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_EQ(val, -50);
+}
+
+TEST_F(ConfigTest, MissingSectionInFile)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Other]\n";
+    ini_file << "SomeKey=123\n";
+    ini_file.close();
+
+    int val = 999;
+
+    Config::register_int("Missing", "TestInt", "val", [&val](int v)
+                                { val = v; }, 999);
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_EQ(val, 999);
+}
+
+TEST_F(ConfigTest, ThreadSafety)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestInt=42\n";
+    ini_file.close();
+
+    int val = 0;
+
+    Config::register_int("TestSection", "TestInt", "val", [&val](int v)
+                                { val = v; }, 0);
+
+    constexpr int kThreadCount = 8;
+    std::vector<std::thread> threads;
+    threads.reserve(kThreadCount);
+
+    for (int i = 0; i < kThreadCount; ++i)
+    {
+        threads.emplace_back([this]()
+        {
+            EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+        });
+    }
+
+    for (auto &t : threads)
+    {
+        t.join();
+    }
+
+    EXPECT_EQ(val, 42);
+}
+
+TEST_F(ConfigTest, EmptyStringValue)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestString=\n";
+    ini_file.close();
+
+    std::string val = "non_empty";
+
+    Config::register_string("TestSection", "TestString", "val", [&val](const std::string &v)
+                                   { val = v; }, "non_empty");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_TRUE(val.empty());
 }

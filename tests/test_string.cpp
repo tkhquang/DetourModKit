@@ -65,3 +65,17 @@ TEST(StringTest, TrimNewlines)
     std::string result = String::trim("\n\rhello\n\r");
     EXPECT_EQ(result, "hello");
 }
+
+TEST(StringTest, TrimFormFeedAndVerticalTab)
+{
+    EXPECT_EQ(String::trim("\fhello\f"), "hello");
+    EXPECT_EQ(String::trim("\vhello\v"), "hello");
+    EXPECT_EQ(String::trim("\f\v\t hello \t\v\f"), "hello");
+}
+
+TEST(StringTest, TrimOnlyWhitespaceChars)
+{
+    EXPECT_EQ(String::trim("\f"), "");
+    EXPECT_EQ(String::trim("\v"), "");
+    EXPECT_EQ(String::trim("\f\v\t\n\r "), "");
+}

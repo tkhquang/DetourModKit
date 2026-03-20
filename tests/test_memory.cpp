@@ -512,3 +512,71 @@ TEST_F(MemoryTest, IsMemoryWritable_ValidWritable)
     VirtualFree(mem, 0, MEM_RELEASE);
     Memory::clear_cache();
 }
+
+TEST_F(MemoryTest, write_bytes_PageReadOnly)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem, nullptr);
+
+    std::byte *target = reinterpret_cast<std::byte *>(mem);
+    std::byte source[] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
+    Logger &logger = Logger::get_instance();
+
+    auto result = Memory::write_bytes(target, source, sizeof(source), logger);
+    EXPECT_TRUE(result.has_value());
+
+    if (result.has_value())
+    {
+        EXPECT_EQ(target[0], std::byte{0xDE});
+        EXPECT_EQ(target[1], std::byte{0xAD});
+        EXPECT_EQ(target[2], std::byte{0xBE});
+        EXPECT_EQ(target[3], std::byte{0xEF});
+    }
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsMemoryReadable_PageGuard)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    DWORD old_protect;
+    BOOL ok = VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
+    ASSERT_TRUE(ok);
+
+    Memory::clear_cache();
+    EXPECT_FALSE(Memory::is_readable(mem, 1));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsMemoryWritable_PageGuard)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    DWORD old_protect;
+    BOOL ok = VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
+    ASSERT_TRUE(ok);
+
+    Memory::clear_cache();
+    EXPECT_FALSE(Memory::is_writable(mem, 1));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsMemoryReadable_CrossRegionBoundary)
+{
+    void *region1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void *region2 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(region1, nullptr);
+    ASSERT_NE(region2, nullptr);
+
+    Memory::clear_cache();
+    size_t oversized = 4096 + 1;
+    EXPECT_FALSE(Memory::is_readable(region1, oversized));
+
+    VirtualFree(region1, 0, MEM_RELEASE);
+    VirtualFree(region2, 0, MEM_RELEASE);
+}

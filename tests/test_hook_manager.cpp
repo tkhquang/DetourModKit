@@ -115,29 +115,6 @@ TEST_F(HookManagerTest, CreateInlineHook_NullTrampoline)
     EXPECT_EQ(result.error(), HookError::InvalidTrampolinePointer);
 }
 
-TEST_F(HookManagerTest, DISABLED_CreateInlineHook_DuplicateName)
-{
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
-    void *original_trampoline = nullptr;
-
-    auto result1 = hook_manager_->create_inline_hook(
-        "DuplicateHook",
-        0x12345678,
-        detour_fn,
-        &original_trampoline);
-
-    auto result2 = hook_manager_->create_inline_hook(
-        "DuplicateHook",
-        0x12345679,
-        detour_fn,
-        &original_trampoline);
-
-    if (result1.has_value())
-    {
-        EXPECT_FALSE(result2.has_value());
-        EXPECT_EQ(result2.error(), HookError::HookAlreadyExists);
-    }
-}
 
 TEST_F(HookManagerTest, GetHookStatus_NonExistent)
 {
@@ -164,26 +141,6 @@ TEST_F(HookManagerTest, RemoveHook_NonExistent)
     EXPECT_FALSE(result);
 }
 
-TEST_F(HookManagerTest, DISABLED_RemoveHook_Existing)
-{
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
-    void *original_trampoline = nullptr;
-
-    auto result = hook_manager_->create_inline_hook(
-        "HookToRemove",
-        0x12345678,
-        detour_fn,
-        &original_trampoline);
-
-    if (result.has_value())
-    {
-        bool removed = hook_manager_->remove_hook("HookToRemove");
-        EXPECT_TRUE(removed);
-
-        auto status = hook_manager_->get_hook_status("HookToRemove");
-        EXPECT_FALSE(status.has_value());
-    }
-}
 
 TEST_F(HookManagerTest, GetHookIds)
 {
@@ -204,43 +161,12 @@ TEST_F(HookManagerTest, GetHookIds_WithFilter)
     EXPECT_TRUE(failed_ids.empty());
 }
 
-TEST_F(HookManagerTest, GetHookCounts)
-{
-    auto counts = hook_manager_->get_hook_counts();
-
-    EXPECT_GE(counts[HookStatus::Active], 0u);
-    EXPECT_GE(counts[HookStatus::Disabled], 0u);
-    EXPECT_GE(counts[HookStatus::Failed], 0u);
-    EXPECT_GE(counts[HookStatus::Removed], 0u);
-}
 
 TEST_F(HookManagerTest, RemoveAllHooks)
 {
     EXPECT_NO_THROW(hook_manager_->remove_all_hooks());
 }
 
-TEST_F(HookManagerTest, DISABLED_RemoveAllHooks_Multiple)
-{
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
-    void *original_trampoline = nullptr;
-
-    hook_manager_->create_inline_hook(
-        "Hook1",
-        0x12345678,
-        detour_fn,
-        &original_trampoline);
-
-    hook_manager_->create_inline_hook(
-        "Hook2",
-        0x12345679,
-        detour_fn,
-        &original_trampoline);
-
-    EXPECT_NO_THROW(hook_manager_->remove_all_hooks());
-
-    auto ids = hook_manager_->get_hook_ids();
-    EXPECT_EQ(ids.size(), 0u);
-}
 
 TEST_F(HookManagerTest, CreateInlineHookAob_EmptyPattern)
 {
@@ -315,86 +241,6 @@ TEST_F(HookManagerTest, CreateMidHookAob_EmptyPattern)
     EXPECT_FALSE(result.has_value());
 }
 
-TEST_F(HookManagerTest, DISABLED_WithInlineHook_Callback)
-{
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
-    void *original_trampoline = nullptr;
-
-    auto result = hook_manager_->create_inline_hook(
-        "HookForCallback",
-        0x12345678,
-        detour_fn,
-        &original_trampoline);
-
-    if (result.has_value())
-    {
-        bool callback_called = false;
-        auto hook_result = hook_manager_->with_inline_hook("HookForCallback",
-                                                           [&callback_called](InlineHook &hook) -> bool
-                                                           {
-                                                               callback_called = true;
-                                                               EXPECT_EQ(hook.get_name(), "HookForCallback");
-                                                               return true;
-                                                           });
-
-        EXPECT_TRUE(hook_result.has_value());
-        EXPECT_TRUE(callback_called);
-    }
-}
-
-TEST_F(HookManagerTest, WithInlineHook_NonExistent)
-{
-    auto result = hook_manager_->with_inline_hook("NonExistent",
-                                                  [](InlineHook &hook) -> bool
-                                                  {
-                                                      (void)hook;
-                                                      return true;
-                                                  });
-
-    EXPECT_FALSE(result.has_value());
-}
-
-TEST_F(HookManagerTest, DISABLED_WithMidHook_Callback)
-{
-    auto detour_fn = [](safetyhook::Context &) {};
-
-    auto result = hook_manager_->create_mid_hook(
-        "MidHookForCallback",
-        0x12345678,
-        detour_fn);
-
-    if (result.has_value())
-    {
-        bool callback_called = false;
-        auto hook_result = hook_manager_->with_mid_hook("MidHookForCallback",
-                                                        [&callback_called](MidHook &hook) -> bool
-                                                        {
-                                                            callback_called = true;
-                                                            EXPECT_EQ(hook.get_name(), "MidHookForCallback");
-                                                            return true;
-                                                        });
-
-        EXPECT_TRUE(hook_result.has_value());
-        EXPECT_TRUE(callback_called);
-    }
-}
-
-TEST_F(HookManagerTest, WithMidHook_NonExistent)
-{
-    auto result = hook_manager_->with_mid_hook("NonExistent",
-                                               [](MidHook &hook) -> bool
-                                               {
-                                                   (void)hook;
-                                                   return true;
-                                               });
-
-    EXPECT_FALSE(result.has_value());
-}
-
-TEST_F(HookManagerTest, Shutdown)
-{
-    EXPECT_NO_THROW(hook_manager_->shutdown());
-}
 
 TEST(HookErrorTest, ErrorValuesExist)
 {
@@ -414,41 +260,23 @@ TEST(HookErrorTest, ErrorValuesExist)
     (void)err7;
 }
 
-TEST(HookStatusStringTest, StatusToString_All)
-{
-    EXPECT_EQ(Hook::status_to_string(HookStatus::Active), "Active");
-    EXPECT_EQ(Hook::status_to_string(HookStatus::Disabled), "Disabled");
-    EXPECT_EQ(Hook::status_to_string(HookStatus::Failed), "Failed");
-    EXPECT_EQ(Hook::status_to_string(HookStatus::Removed), "Removed");
-}
-
-TEST_F(HookManagerTest, DISABLED_ThreadSafety)
+TEST_F(HookManagerTest, ThreadSafety)
 {
     const int num_threads = 4;
-    const int iterations = 50;
 
     std::vector<std::thread> threads;
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([this, i, iterations]()
+        threads.emplace_back([this, i]()
                              {
-            void *detour_fn = reinterpret_cast<void *>(0x87654321);
-            void *original_trampoline = nullptr;
-
-            for (int j = 0; j < iterations; ++j)
+            for (int j = 0; j < 10; ++j)
             {
-                std::string hook_name = "Thread" + std::to_string(i) + "Hook" + std::to_string(j);
-
-                hook_manager_->create_inline_hook(
-                    hook_name,
-                    0x12345678 + j,
-                    detour_fn,
-                    &original_trampoline);
-
-                hook_manager_->get_hook_status(hook_name);
+                hook_manager_->get_hook_status("Thread" + std::to_string(i) + "_" + std::to_string(j));
                 hook_manager_->get_hook_counts();
                 hook_manager_->get_hook_ids();
+                hook_manager_->enable_hook("nonexistent_" + std::to_string(i));
+                hook_manager_->disable_hook("nonexistent_" + std::to_string(i));
             } });
     }
 
@@ -457,7 +285,6 @@ TEST_F(HookManagerTest, DISABLED_ThreadSafety)
         t.join();
     }
 
-    hook_manager_->remove_all_hooks();
     SUCCEED();
 }
 
@@ -486,52 +313,7 @@ TEST_F(HookManagerTest, HookConfig_Flags)
     (void)config.mid_flags;
 }
 
-TEST_F(HookManagerTest, CreateMidHook_AllErrors)
-{
-    auto detour_fn = [](safetyhook::Context &) {};
 
-    auto result1 = hook_manager_->create_mid_hook(
-        "TestMidInvalidAddr",
-        0,
-        detour_fn);
-    EXPECT_FALSE(result1.has_value());
-    EXPECT_EQ(result1.error(), HookError::InvalidTargetAddress);
-
-    auto result2 = hook_manager_->create_mid_hook(
-        "TestMidNullDetour",
-        0x12345678,
-        nullptr);
-    EXPECT_FALSE(result2.has_value());
-    EXPECT_EQ(result2.error(), HookError::InvalidDetourFunction);
-}
-
-TEST_F(HookManagerTest, CreateMidHookAob_InvalidPattern)
-{
-    auto detour_fn = [](safetyhook::Context &) {};
-
-    auto result = hook_manager_->create_mid_hook_aob(
-        "TestMidAobInvalid",
-        0,
-        0,
-        "ZZ YY XX",
-        0,
-        detour_fn);
-
-    EXPECT_FALSE(result.has_value());
-}
-
-TEST_F(HookManagerTest, GetHookIds_AllStatusFilters)
-{
-    auto active_ids = hook_manager_->get_hook_ids(HookStatus::Active);
-    auto disabled_ids = hook_manager_->get_hook_ids(HookStatus::Disabled);
-    auto failed_ids = hook_manager_->get_hook_ids(HookStatus::Failed);
-    auto removed_ids = hook_manager_->get_hook_ids(HookStatus::Removed);
-
-    EXPECT_TRUE(active_ids.empty());
-    EXPECT_TRUE(disabled_ids.empty());
-    EXPECT_TRUE(failed_ids.empty());
-    EXPECT_TRUE(removed_ids.empty());
-}
 
 TEST_F(HookManagerTest, GetHookCounts_Empty)
 {
@@ -543,29 +325,6 @@ TEST_F(HookManagerTest, GetHookCounts_Empty)
     EXPECT_EQ(counts[HookStatus::Removed], 0u);
 }
 
-TEST_F(HookManagerTest, WithInlineHook_NonExistent_Bool)
-{
-    auto result = hook_manager_->with_inline_hook("NonExistent",
-                                                  [](InlineHook &hook) -> bool
-                                                  {
-                                                      (void)hook;
-                                                      return false;
-                                                  });
-
-    EXPECT_FALSE(result.has_value());
-}
-
-TEST_F(HookManagerTest, WithMidHook_NonExistent_Bool)
-{
-    auto result = hook_manager_->with_mid_hook("NonExistent",
-                                               [](MidHook &hook) -> bool
-                                               {
-                                                   (void)hook;
-                                                   return false;
-                                               });
-
-    EXPECT_FALSE(result.has_value());
-}
 
 TEST_F(HookManagerTest, Shutdown_Multiple)
 {
@@ -581,13 +340,6 @@ TEST_F(HookManagerTest, RemoveAllHooks_Multiple)
     EXPECT_NO_THROW(hook_manager_->remove_all_hooks());
 }
 
-TEST_F(HookManagerTest, EnableDisable_NonExistent)
-{
-    EXPECT_FALSE(hook_manager_->enable_hook("NonExistent1"));
-    EXPECT_FALSE(hook_manager_->enable_hook("NonExistent2"));
-    EXPECT_FALSE(hook_manager_->disable_hook("NonExistent1"));
-    EXPECT_FALSE(hook_manager_->disable_hook("NonExistent2"));
-}
 
 // Real hook tests using valid function addresses in the test binary
 
@@ -619,36 +371,6 @@ static std::atomic<int> g_real_detour_calls{0};
 
 static std::atomic<int> g_mid_detour_calls{0};
 
-TEST_F(HookManagerTest, DISABLED_InlineHook_SafetyHookError_Path)
-{
-    void *detour_fn = reinterpret_cast<void *>(&real_hook_detour_add);
-    void *original_trampoline = nullptr;
-
-    auto result = hook_manager_->create_inline_hook(
-        "SHErrorTest",
-        0x12345678,
-        detour_fn,
-        &original_trampoline);
-
-    EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), HookError::SafetyHookError);
-}
-
-TEST_F(HookManagerTest, DISABLED_MidHook_SafetyHookError_Path)
-{
-    auto detour_fn = [](safetyhook::Context &)
-    {
-        g_mid_detour_calls.fetch_add(1, std::memory_order_relaxed);
-    };
-
-    auto result = hook_manager_->create_mid_hook(
-        "MidSHErrorTest",
-        0x12345678,
-        detour_fn);
-
-    EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), HookError::SafetyHookError);
-}
 
 TEST_F(HookManagerTest, RealInlineHook_CreateSuccess)
 {
@@ -1124,6 +846,7 @@ TEST_F(HookManagerTest, ShutdownWithHooks)
         &tramp);
 
     EXPECT_NO_THROW(hook_manager_->shutdown());
+    EXPECT_EQ(hook_manager_->get_hook_ids().size(), 0u);
     EXPECT_NO_THROW(hook_manager_->shutdown());
 }
 

@@ -392,3 +392,70 @@ TEST(ScannerTest, aob_pattern_empty)
     EXPECT_FALSE(result->empty());
     EXPECT_EQ(result->size(), 3u);
 }
+
+TEST(ScannerTest, find_pattern_overlapping_matches)
+{
+    std::vector<std::byte> data = {
+        std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
+
+    auto pattern = Scanner::parse_aob("90 90");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 0);
+}
+
+TEST(ScannerTest, find_pattern_wildcard_middle_multiple_candidates)
+{
+    std::vector<std::byte> data = {
+        std::byte{0x48}, std::byte{0xAA}, std::byte{0x05},
+        std::byte{0x00},
+        std::byte{0x48}, std::byte{0xBB}, std::byte{0x05}};
+
+    auto pattern = Scanner::parse_aob("48 ?? 05");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 0);
+}
+
+TEST(ScannerTest, find_pattern_memchr_boundary)
+{
+    std::vector<std::byte> data(64, std::byte{0x00});
+    data[63] = std::byte{0xCC};
+
+    auto pattern = Scanner::parse_aob("CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 63);
+}
+
+TEST(ScannerTest, find_pattern_long_wildcard_prefix)
+{
+    std::vector<std::byte> data = {
+        std::byte{0x11}, std::byte{0x22}, std::byte{0x33},
+        std::byte{0x44}, std::byte{0x55},
+        std::byte{0x48}, std::byte{0x8B},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto pattern = Scanner::parse_aob("?? ?? ?? ?? ?? 48 8B");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 0);
+
+    std::vector<std::byte> small = {
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x48}};
+
+    auto result2 = Scanner::find_pattern(small.data(), small.size(), *pattern);
+    EXPECT_EQ(result2, nullptr);
+}

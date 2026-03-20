@@ -138,3 +138,23 @@ TEST(FormatTest, FormatVkcode_Large)
     std::string result = Format::format_vkcode(0xFF);
     EXPECT_EQ(result, "0xFF");
 }
+
+TEST(FormatTest, FormatHex_Negative)
+{
+    std::string result = Format::format_hex(-1);
+    EXPECT_FALSE(result.empty());
+    EXPECT_NE(result.find("0x"), std::string::npos);
+    std::string result2 = Format::format_hex(-256);
+    EXPECT_FALSE(result2.empty());
+    EXPECT_NE(result2.find("0x"), std::string::npos);
+}
+
+TEST(FormatTest, FormatAddress_Width)
+{
+    std::string result = Format::format_address(0);
+    EXPECT_EQ(result.size(), sizeof(uintptr_t) * 2 + 2);
+    EXPECT_EQ(result.substr(0, 2), "0x");
+
+    std::string result_max = Format::format_address(UINTPTR_MAX);
+    EXPECT_EQ(result_max.size(), sizeof(uintptr_t) * 2 + 2);
+}

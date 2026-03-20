@@ -743,3 +743,90 @@ TEST_F(LoggerTest, Flush_AsyncMode)
     EXPECT_NO_THROW(logger.flush());
     logger.disable_async_mode();
 }
+
+TEST_F(LoggerTest, LogFileContentVerification)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.info("UNIQUE_VERIFY_MSG_7a3b");
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("UNIQUE_VERIFY_MSG_7a3b"), std::string::npos);
+}
+
+TEST_F(LoggerTest, LogLevelFiltering_OutputVerification)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Warning);
+
+    logger.debug("FILTERED_DEBUG_MSG_9x2k");
+    logger.warning("VISIBLE_WARNING_MSG_4m8p");
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("VISIBLE_WARNING_MSG_4m8p"), std::string::npos);
+    EXPECT_EQ(content.find("FILTERED_DEBUG_MSG_9x2k"), std::string::npos);
+}
+
+TEST_F(LoggerTest, Reconfigure_SwitchesFile)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.info("MSG_IN_FILE_A_5t1w");
+    logger.flush();
+
+    auto file_b = std::filesystem::temp_directory_path() /
+                  ("test_logger_reconfig_b_" + std::to_string(GetCurrentProcessId()) + ".log");
+
+    logger.reconfigure("TEST_B", file_b.string(), "%Y-%m-%d %H:%M:%S");
+    logger.info("MSG_IN_FILE_B_8q3r");
+    logger.flush();
+
+    std::ifstream ifs(file_b);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("MSG_IN_FILE_B_8q3r"), std::string::npos);
+    EXPECT_EQ(content.find("MSG_IN_FILE_A_5t1w"), std::string::npos);
+
+    try
+    {
+        if (std::filesystem::exists(file_b))
+            std::filesystem::remove(file_b);
+    }
+    catch (const std::filesystem::filesystem_error &)
+    {
+    }
+}
+
+TEST_F(LoggerTest, ErrorOnInvalidLogPath)
+{
+    Logger &logger = Logger::get_instance();
+    EXPECT_NO_THROW(logger.reconfigure("TEST", "/nonexistent_dir_12345/foo.log", "%Y-%m-%d %H:%M:%S"));
+    EXPECT_NO_THROW(logger.info("Message after bad path"));
+}
+
+TEST_F(LoggerTest, AsyncMode_OutputVerification)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+
+    logger.info("ASYNC_VERIFY_MSG_6j9n");
+
+    logger.disable_async_mode();
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("ASYNC_VERIFY_MSG_6j9n"), std::string::npos);
+}

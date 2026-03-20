@@ -490,3 +490,184 @@ TEST(AsyncLoggerConfigTest, Validate_AllReturnValues)
     zero_interval.flush_interval = std::chrono::milliseconds{0};
     EXPECT_FALSE(zero_interval.validate());
 }
+
+TEST_F(AsyncLoggerTest, MessageContentVerification)
+{
+    AsyncLoggerConfig config;
+    config.batch_size = 10;
+    config.flush_interval = std::chrono::milliseconds{50};
+
+    std::ofstream file_stream(test_log_file_);
+    std::mutex log_mutex;
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+    logger->enqueue(LogLevel::Info, "UNIQUE_MARKER_abc123");
+    logger->shutdown();
+    file_stream.close();
+
+    std::ifstream in(test_log_file_);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("UNIQUE_MARKER_abc123"), std::string::npos);
+}
+
+TEST_F(AsyncLoggerTest, DestructorFlushGuarantee)
+{
+    {
+        std::ofstream file_stream(test_log_file_);
+        std::mutex log_mutex;
+        AsyncLoggerConfig config;
+        config.batch_size = 10;
+        config.flush_interval = std::chrono::milliseconds{50};
+
+        AsyncLogger logger(config, file_stream, log_mutex);
+        logger.enqueue(LogLevel::Warning, "DESTRUCTOR_FLUSH_MSG_1");
+        logger.enqueue(LogLevel::Error, "DESTRUCTOR_FLUSH_MSG_2");
+    }
+
+    std::ifstream in(test_log_file_);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("DESTRUCTOR_FLUSH_MSG_1"), std::string::npos);
+    EXPECT_NE(content.find("DESTRUCTOR_FLUSH_MSG_2"), std::string::npos);
+}
+
+TEST_F(AsyncLoggerTest, BatchBoundaryBehavior)
+{
+    constexpr size_t kBatchSize = 4;
+    AsyncLoggerConfig config;
+    config.batch_size = kBatchSize;
+    config.flush_interval = std::chrono::milliseconds{50};
+
+    std::ofstream file_stream(test_log_file_);
+    std::mutex log_mutex;
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+    for (size_t i = 0; i < kBatchSize; ++i)
+    {
+        logger->enqueue(LogLevel::Info, "BATCH_MSG_" + std::to_string(i));
+    }
+    logger->shutdown();
+    file_stream.close();
+
+    std::ifstream in(test_log_file_);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    for (size_t i = 0; i < kBatchSize; ++i)
+    {
+        EXPECT_NE(content.find("BATCH_MSG_" + std::to_string(i)), std::string::npos);
+    }
+}
+
+TEST_F(AsyncLoggerTest, ConcurrentFlushAndEnqueue)
+{
+    AsyncLoggerConfig config;
+    config.batch_size = 16;
+    config.flush_interval = std::chrono::milliseconds{20};
+
+    std::ofstream file_stream(test_log_file_);
+    std::mutex log_mutex;
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    std::atomic<bool> done{false};
+
+    std::thread producer([&]()
+                         {
+        for (int i = 0; i < 100; ++i)
+        {
+            logger->enqueue(LogLevel::Info, "CONCURRENT_MSG_" + std::to_string(i));
+        }
+        done.store(true, std::memory_order_release); });
+
+    std::thread flusher([&]()
+                        {
+        while (!done.load(std::memory_order_acquire))
+        {
+            logger->flush();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } });
+
+    producer.join();
+    flusher.join();
+    logger->shutdown();
+    file_stream.close();
+
+    std::ifstream in(test_log_file_);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_FALSE(content.empty());
+}
+
+TEST(DynamicMPMCQueueTest, MultiThreaded)
+{
+    constexpr size_t kCapacity = 64;
+    constexpr int kProducers = 4;
+    constexpr int kConsumers = 4;
+    constexpr int kItemsPerProducer = 500;
+
+    DynamicMPMCQueue queue(kCapacity);
+    std::atomic<int> total_produced{0};
+    std::atomic<int> total_consumed{0};
+    std::atomic<bool> producers_done{false};
+
+    std::vector<std::thread> producers;
+    for (int p = 0; p < kProducers; ++p)
+    {
+        producers.emplace_back([&, p]()
+                               {
+            for (int i = 0; i < kItemsPerProducer; ++i)
+            {
+                LogMessage msg(LogLevel::Info, "P" + std::to_string(p) + "_" + std::to_string(i));
+                while (!queue.try_push(std::move(msg)))
+                {
+                    std::this_thread::yield();
+                    msg = LogMessage(LogLevel::Info, "P" + std::to_string(p) + "_" + std::to_string(i));
+                }
+                total_produced.fetch_add(1, std::memory_order_relaxed);
+            } });
+    }
+
+    std::vector<std::thread> consumers;
+    for (int c = 0; c < kConsumers; ++c)
+    {
+        consumers.emplace_back([&]()
+                               {
+            LogMessage msg;
+            while (!producers_done.load(std::memory_order_acquire) || !queue.empty())
+            {
+                if (queue.try_pop(msg))
+                {
+                    total_consumed.fetch_add(1, std::memory_order_relaxed);
+                }
+                else
+                {
+                    std::this_thread::yield();
+                }
+            } });
+    }
+
+    for (auto &t : producers)
+    {
+        t.join();
+    }
+    producers_done.store(true, std::memory_order_release);
+
+    for (auto &t : consumers)
+    {
+        t.join();
+    }
+
+    EXPECT_EQ(total_produced.load(), kProducers * kItemsPerProducer);
+    EXPECT_EQ(total_consumed.load(), total_produced.load());
+}
+
+TEST(LogMessageTest, SelfMoveAssign)
+{
+    LogMessage msg(LogLevel::Info, "self-move test");
+    ASSERT_EQ(msg.message(), "self-move test");
+
+    msg = std::move(msg);
+
+    EXPECT_EQ(msg.message(), "self-move test");
+}
