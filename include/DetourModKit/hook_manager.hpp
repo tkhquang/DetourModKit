@@ -436,14 +436,13 @@ namespace DetourModKit
         [[nodiscard]] auto with_inline_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within with_inline_hook() callback. Use try_with_inline_hook() instead.");
+            assert(!t_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within with_inline_hook() callback. Use try_with_inline_hook() instead.");
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-            ++m_callback_reentrancy_guard;
+            ++t_callback_reentrancy_guard;
             struct Guard
             {
-                HookManager *mgr;
-                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
-            } guard{this};
+                ~Guard() noexcept { --t_callback_reentrancy_guard; }
+            } guard{};
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
@@ -455,9 +454,13 @@ namespace DetourModKit
         /**
          * @brief Try-safe access to an InlineHook by its ID using a non-blocking lock.
          * @details Provides a non-blocking alternative to with_inline_hook(). The callback
-         *          is invoked only if the lock is immediately acquired. This prevents
-         *          deadlocks when the callback must call HookManager methods that require
-         *          a unique_lock.
+         *          is invoked only if the lock is immediately acquired via std::try_to_lock.
+         *          Note: try_to_lock only avoids blocking on initial acquisition - it does NOT
+         *          make callbacks safe to re-enter HookManager methods that also acquire the
+         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback
+         *          needs to call those methods, it must release the lock first or perform those
+         *          calls asynchronously to avoid deadlock. See with_inline_hook for the blocking
+         *          analogue.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value. Returns std::nullopt if either
@@ -467,18 +470,17 @@ namespace DetourModKit
         [[nodiscard]] auto try_with_inline_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within try_with_inline_hook() callback.");
+            assert(!t_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within try_with_inline_hook() callback.");
             std::unique_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;
             }
-            ++m_callback_reentrancy_guard;
+            ++t_callback_reentrancy_guard;
             struct Guard
             {
-                HookManager *mgr;
-                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
-            } guard{this};
+                ~Guard() noexcept { --t_callback_reentrancy_guard; }
+            } guard{};
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
@@ -504,14 +506,13 @@ namespace DetourModKit
         [[nodiscard]] auto with_mid_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within with_mid_hook() callback. Use try_with_mid_hook() instead.");
+            assert(!t_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within with_mid_hook() callback. Use try_with_mid_hook() instead.");
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-            ++m_callback_reentrancy_guard;
+            ++t_callback_reentrancy_guard;
             struct Guard
             {
-                HookManager *mgr;
-                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
-            } guard{this};
+                ~Guard() noexcept { --t_callback_reentrancy_guard; }
+            } guard{};
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
@@ -523,9 +524,13 @@ namespace DetourModKit
         /**
          * @brief Try-safe access to a MidHook by its ID using a non-blocking lock.
          * @details Provides a non-blocking alternative to with_mid_hook(). The callback
-         *          is invoked only if the lock is immediately acquired. This prevents
-         *          deadlocks when the callback must call HookManager methods that require
-         *          a unique_lock.
+         *          is invoked only if the lock is immediately acquired via std::try_to_lock.
+         *          Note: try_to_lock only avoids blocking on initial acquisition - it does NOT
+         *          make callbacks safe to re-enter HookManager methods that also acquire the
+         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback
+         *          needs to call those methods, it must release the lock first or perform those
+         *          calls asynchronously to avoid deadlock. See with_mid_hook for the blocking
+         *          analogue.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value. Returns std::nullopt if either
@@ -535,18 +540,17 @@ namespace DetourModKit
         [[nodiscard]] auto try_with_mid_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within try_with_mid_hook() callback.");
+            assert(!t_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within try_with_mid_hook() callback.");
             std::unique_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;
             }
-            ++m_callback_reentrancy_guard;
+            ++t_callback_reentrancy_guard;
             struct Guard
             {
-                HookManager *mgr;
-                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
-            } guard{this};
+                ~Guard() noexcept { --t_callback_reentrancy_guard; }
+            } guard{};
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
@@ -561,7 +565,7 @@ namespace DetourModKit
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
-        std::atomic<int> m_callback_reentrancy_guard{0};
+        thread_local inline static int t_callback_reentrancy_guard{0};
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;
