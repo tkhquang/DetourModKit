@@ -395,7 +395,6 @@ bool HookManager::remove_hook(const std::string &hook_id)
 
 void HookManager::remove_all_hooks()
 {
-    m_shutdown_called.store(false, std::memory_order_release);
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (!m_hooks.empty())
     {
@@ -520,4 +519,3 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
     }
     return ids;
 }
-
