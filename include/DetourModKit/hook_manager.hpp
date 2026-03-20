@@ -12,6 +12,7 @@
 #include <string_view>
 #include <type_traits>
 #include <cassert>
+#include <utility>
 
 #include "safetyhook.hpp"
 #include "DetourModKit/logger.hpp"
@@ -438,17 +439,17 @@ namespace DetourModKit
             assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within with_inline_hook() callback. Use try_with_inline_hook() instead.");
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             ++m_callback_reentrancy_guard;
-            auto result = [this, &hook_id, &fn]() -> std::optional<std::invoke_result_t<F, InlineHook &>>
+            struct Guard
             {
-                auto it = m_hooks.find(hook_id);
-                if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
-                {
-                    return fn(static_cast<InlineHook &>(*it->second));
-                }
-                return std::nullopt;
-            }();
-            --m_callback_reentrancy_guard;
-            return result;
+                HookManager *mgr;
+                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
+            } guard{this};
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
+            {
+                return fn(static_cast<InlineHook &>(*it->second));
+            }
+            return std::nullopt;
         }
 
         /**
@@ -459,8 +460,8 @@ namespace DetourModKit
          *          a unique_lock.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
-         * @return std::optional<R> The callback's return value, std::nullopt if hook not
-         *         found, or std::nullopt with error tag if lock could not be acquired.
+         * @return std::optional<R> The callback's return value. Returns std::nullopt if either
+         *         the lock could not be acquired or the hook was not found.
          */
         template <typename F>
         [[nodiscard]] auto try_with_inline_hook(const std::string &hook_id, F &&fn)
@@ -473,17 +474,17 @@ namespace DetourModKit
                 return std::nullopt;
             }
             ++m_callback_reentrancy_guard;
-            auto result = [this, &hook_id, &fn]() -> std::optional<std::invoke_result_t<F, InlineHook &>>
+            struct Guard
             {
-                auto it = m_hooks.find(hook_id);
-                if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
-                {
-                    return fn(static_cast<InlineHook &>(*it->second));
-                }
-                return std::nullopt;
-            }();
-            --m_callback_reentrancy_guard;
-            return result;
+                HookManager *mgr;
+                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
+            } guard{this};
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
+            {
+                return fn(static_cast<InlineHook &>(*it->second));
+            }
+            return std::nullopt;
         }
 
         /**
@@ -506,17 +507,17 @@ namespace DetourModKit
             assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within with_mid_hook() callback. Use try_with_mid_hook() instead.");
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             ++m_callback_reentrancy_guard;
-            auto result = [this, &hook_id, &fn]() -> std::optional<std::invoke_result_t<F, MidHook &>>
+            struct Guard
             {
-                auto it = m_hooks.find(hook_id);
-                if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
-                {
-                    return fn(static_cast<MidHook &>(*it->second));
-                }
-                return std::nullopt;
-            }();
-            --m_callback_reentrancy_guard;
-            return result;
+                HookManager *mgr;
+                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
+            } guard{this};
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
+            {
+                return fn(static_cast<MidHook &>(*it->second));
+            }
+            return std::nullopt;
         }
 
         /**
@@ -527,8 +528,8 @@ namespace DetourModKit
          *          a unique_lock.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
-         * @return std::optional<R> The callback's return value, std::nullopt if hook not
-         *         found, or std::nullopt with error tag if lock could not be acquired.
+         * @return std::optional<R> The callback's return value. Returns std::nullopt if either
+         *         the lock could not be acquired or the hook was not found.
          */
         template <typename F>
         [[nodiscard]] auto try_with_mid_hook(const std::string &hook_id, F &&fn)
@@ -541,17 +542,17 @@ namespace DetourModKit
                 return std::nullopt;
             }
             ++m_callback_reentrancy_guard;
-            auto result = [this, &hook_id, &fn]() -> std::optional<std::invoke_result_t<F, MidHook &>>
+            struct Guard
             {
-                auto it = m_hooks.find(hook_id);
-                if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
-                {
-                    return fn(static_cast<MidHook &>(*it->second));
-                }
-                return std::nullopt;
-            }();
-            --m_callback_reentrancy_guard;
-            return result;
+                HookManager *mgr;
+                ~Guard() noexcept { --mgr->m_callback_reentrancy_guard; }
+            } guard{this};
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
+            {
+                return fn(static_cast<MidHook &>(*it->second));
+            }
+            return std::nullopt;
         }
 
     private:
