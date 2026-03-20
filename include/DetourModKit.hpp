@@ -61,12 +61,12 @@ inline void DMK_Shutdown()
 {
     // Shutdown in reverse dependency order:
     // 1. HookManager first (may have been logging via Logger)
-    DetourModKit::HookManager::getInstance().shutdown();
+    DetourModKit::HookManager::get_instance().shutdown();
 
     // 2. Clear registered config items (static vector cleanup)
-    DetourModKit::Config::clearRegisteredItems();
+    DetourModKit::Config::clear_registered_items();
 
     // 3. Logger last (no more logging after this)
-    DetourModKit::Logger::getInstance().shutdown();
+    DetourModKit::Logger::get_instance().shutdown();
 }
 using DMKOverflowPolicy = DetourModKit::OverflowPolicy;

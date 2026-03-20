@@ -1,4 +1,3 @@
-// Unit tests for String utilities module
 #include <gtest/gtest.h>
 #include <string>
 #include <vector>
@@ -7,72 +6,76 @@
 
 using namespace DetourModKit;
 
-// Test trim with leading spaces
-TEST(StringUtilsTest, TrimLeading)
+TEST(StringTest, TrimLeading)
 {
     std::string result = String::trim("  hello");
     EXPECT_EQ(result, "hello");
 }
 
-// Test trim with trailing spaces
-TEST(StringUtilsTest, TrimTrailing)
+TEST(StringTest, TrimTrailing)
 {
     std::string result = String::trim("hello  ");
     EXPECT_EQ(result, "hello");
 }
 
-// Test trim with both leading and trailing spaces
-TEST(StringUtilsTest, TrimBoth)
+TEST(StringTest, TrimBoth)
 {
     std::string result = String::trim("  hello  ");
     EXPECT_EQ(result, "hello");
 }
 
-// Test trim with no spaces
-TEST(StringUtilsTest, TrimNoSpaces)
+TEST(StringTest, TrimNoSpaces)
 {
     std::string result = String::trim("hello");
     EXPECT_EQ(result, "hello");
 }
 
-// Test trim with empty string
-TEST(StringUtilsTest, TrimEmpty)
+TEST(StringTest, TrimEmpty)
 {
     std::string result = String::trim("");
     EXPECT_EQ(result, "");
 }
 
-// Test trim with only spaces
-TEST(StringUtilsTest, TrimOnlySpaces)
+TEST(StringTest, TrimOnlySpaces)
 {
     std::string result = String::trim("   ");
     EXPECT_EQ(result, "");
 }
 
-// Test trim with tabs
-TEST(StringUtilsTest, TrimTabs)
+TEST(StringTest, TrimTabs)
 {
     std::string result = String::trim("\thello\t");
     EXPECT_EQ(result, "hello");
 }
 
-// Test trim with mixed whitespace
-TEST(StringUtilsTest, TrimMixedWhitespace)
+TEST(StringTest, TrimMixedWhitespace)
 {
     std::string result = String::trim(" \t hello \t ");
     EXPECT_EQ(result, "hello");
 }
 
-// Test trim preserves internal spaces
-TEST(StringUtilsTest, TrimPreservesInternal)
+TEST(StringTest, TrimPreservesInternal)
 {
     std::string result = String::trim("  hello world  ");
     EXPECT_EQ(result, "hello world");
 }
 
-// Test trim with newlines
-TEST(StringUtilsTest, TrimNewlines)
+TEST(StringTest, TrimNewlines)
 {
     std::string result = String::trim("\n\rhello\n\r");
     EXPECT_EQ(result, "hello");
+}
+
+TEST(StringTest, TrimFormFeedAndVerticalTab)
+{
+    EXPECT_EQ(String::trim("\fhello\f"), "hello");
+    EXPECT_EQ(String::trim("\vhello\v"), "hello");
+    EXPECT_EQ(String::trim("\f\v\t hello \t\v\f"), "hello");
+}
+
+TEST(StringTest, TrimOnlyWhitespaceChars)
+{
+    EXPECT_EQ(String::trim("\f"), "");
+    EXPECT_EQ(String::trim("\v"), "");
+    EXPECT_EQ(String::trim("\f\v\t\n\r "), "");
 }

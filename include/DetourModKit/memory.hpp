@@ -28,7 +28,7 @@ namespace DetourModKit
      * @param error The error code.
      * @return A string view describing the error.
      */
-    constexpr std::string_view memoryErrorToString(MemoryError error)
+    constexpr std::string_view memory_error_to_string(MemoryError error)
     {
         switch (error)
         {
@@ -59,16 +59,16 @@ namespace DetourModKit
          * @param cache_size The desired number of entries in the cache. Defaults to 32.
          * @param expiry_ms Cache entry expiry time in milliseconds. Defaults to 5000ms.
          * @return true if this call performed initialization, false if already initialized.
-         * @note Only the first call to initMemoryCache has effect; subsequent calls return false.
+         * @note Only the first call to init_cache has effect; subsequent calls return false.
          */
-        bool initMemoryCache(size_t cache_size = DEFAULT_CACHE_SIZE,
-                             unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS);
+        bool init_cache(size_t cache_size = DEFAULT_CACHE_SIZE,
+                        unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS);
 
         /**
          * @brief Clears all entries from the memory region cache.
          * @details Invalidates all currently cached memory region information.
          */
-        void clearMemoryCache();
+        void clear_cache();
 
         /**
          * @brief Retrieves statistics about the memory cache usage.
@@ -76,7 +76,7 @@ namespace DetourModKit
          *          Statistics are only available in debug builds.
          * @return std::string A human-readable string of cache statistics.
          */
-        std::string getMemoryCacheStats();
+        std::string get_cache_stats();
 
         /**
          * @brief Checks if a specified memory region is readable.
@@ -85,7 +85,7 @@ namespace DetourModKit
          * @param size Number of bytes in the memory region to check.
          * @return true if the entire region is readable, false otherwise.
          */
-        bool isMemoryReadable(const void *address, size_t size);
+        bool is_readable(const void *address, size_t size);
 
         /**
          * @brief Checks if a specified memory region is writable.
@@ -94,7 +94,7 @@ namespace DetourModKit
          * @param size Number of bytes in the memory region to check.
          * @return true if the entire region is writable, false otherwise.
          */
-        bool isMemoryWritable(void *address, size_t size);
+        bool is_writable(void *address, size_t size);
 
         /**
          * @brief Writes a sequence of bytes to a target memory address.
@@ -106,7 +106,7 @@ namespace DetourModKit
          * @param logger Reference to a Logger instance for error reporting.
          * @return std::expected<void, MemoryError> on success, or the specific error on failure.
          */
-        [[nodiscard]] std::expected<void, MemoryError> WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger);
+        [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger);
     } // namespace Memory
 } // namespace DetourModKit
 

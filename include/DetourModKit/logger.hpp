@@ -32,7 +32,7 @@ namespace DetourModKit
      * @param level The LogLevel enum value.
      * @return std::string_view String representation of the log level.
      */
-    constexpr std::string_view logLevelToString(LogLevel level) noexcept
+    constexpr std::string_view log_level_to_string(LogLevel level) noexcept
     {
         switch (level)
         {
@@ -73,7 +73,7 @@ namespace DetourModKit
          * @brief Retrieves the singleton instance of the Logger.
          * @return Logger& Reference to the single Logger instance.
          */
-        static Logger &getInstance()
+        static Logger &get_instance()
         {
             static Logger instance;
             return instance;
@@ -105,20 +105,20 @@ namespace DetourModKit
          *          writer thread, reducing latency on the calling thread.
          * @param config Optional async logger configuration. Uses defaults if not provided.
          */
-        void enableAsyncMode(const AsyncLoggerConfig &config);
-        void enableAsyncMode();
+        void enable_async_mode(const AsyncLoggerConfig &config);
+        void enable_async_mode();
 
         /**
          * @brief Disables asynchronous logging mode and returns to synchronous mode.
          * @details Flushes all pending async messages before switching.
          */
-        void disableAsyncMode();
+        void disable_async_mode();
 
         /**
          * @brief Checks if async logging mode is enabled.
          * @return true if async mode is enabled, false otherwise.
          */
-        bool isAsyncModeEnabled() const;
+        bool is_async_mode_enabled() const;
 
         /**
          * @brief Flushes all pending log messages.
@@ -140,16 +140,16 @@ namespace DetourModKit
          * @brief Gets the current log level.
          * @return LogLevel The current minimum log level.
          */
-        LogLevel getLogLevel() const
+        LogLevel get_log_level() const
         {
-            return current_log_level.load(std::memory_order_acquire);
+            return current_log_level_.load(std::memory_order_acquire);
         }
 
         /**
          * @brief Sets the minimum log level for messages to be recorded.
          * @param level The minimum LogLevel to record.
          */
-        void setLogLevel(LogLevel level);
+        void set_log_level(LogLevel level);
 
         /**
          * @brief Logs a message if its level is at or above the current log level.
@@ -170,7 +170,7 @@ namespace DetourModKit
         template <typename... Args>
         void log(LogLevel level, std::format_string<Args...> fmt, Args &&...args)
         {
-            if (level >= current_log_level.load(std::memory_order_acquire))
+            if (level >= current_log_level_.load(std::memory_order_acquire))
             {
                 log(level, std::format(fmt, std::forward<Args>(args)...));
             }
@@ -241,7 +241,7 @@ namespace DetourModKit
          * @param level_str The string to convert (case-insensitive).
          * @return The corresponding LogLevel enum. Defaults to LogLevel::Info if unrecognized.
          */
-        static LogLevel stringToLogLevel(const std::string &level_str);
+        static LogLevel string_to_log_level(const std::string &level_str);
 
     private:
         Logger();
@@ -256,32 +256,32 @@ namespace DetourModKit
          * @brief Generates the current timestamp formatted according to timestamp_format_instance.
          * @return std::string The formatted timestamp string.
          */
-        std::string getTimestamp() const;
+        std::string get_timestamp() const;
 
         /**
          * @brief Determines the full path for the log file.
          * @return std::string The absolute path to the log file.
          */
-        std::string generateLogFilePath() const;
+        std::string generate_log_file_path() const;
 
         /**
          * @brief Provides a mutex for initializing/configuring static logger members.
          * @return A reference to a static mutex.
          */
-        static std::mutex &getLoggerInitMutex();
+        static std::mutex &get_init_mutex();
 
-        static std::string s_log_prefix;
-        static std::string s_log_file_name;
-        static std::string s_timestamp_format;
+        static std::string s_log_prefix_;
+        static std::string s_log_file_name_;
+        static std::string s_timestamp_format_;
 
-        std::string log_prefix_instance;
-        std::string log_file_name_instance;
-        std::string timestamp_format_instance;
+        std::string log_prefix_;
+        std::string log_file_name_;
+        std::string timestamp_format_;
 
-        std::ofstream log_file_stream;
-        std::atomic<LogLevel> current_log_level{LogLevel::Info}; // Atomic for thread-safe reads/writes
-        std::mutex log_access_mutex;
-        bool m_shutdown_called{false};
+        std::ofstream log_file_stream_;
+        std::atomic<LogLevel> current_log_level_{LogLevel::Info};
+        std::mutex log_access_mutex_;
+        bool shutdown_called_{false};
 
         // Async logging support (forward declared)
         std::unique_ptr<AsyncLogger> async_logger_;

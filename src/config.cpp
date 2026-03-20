@@ -257,7 +257,7 @@ namespace
      */
     std::string getIniFilePath(const std::string &ini_filename, Logger &logger)
     {
-        std::string module_dir = getRuntimeDirectory();
+        std::string module_dir = get_runtime_directory();
 
         if (module_dir.empty() || module_dir == ".")
         {
@@ -285,7 +285,7 @@ namespace
 
 } // anonymous namespace
 
-void DetourModKit::Config::registerIntCallback(const std::string &section, const std::string &ini_key,
+void DetourModKit::Config::register_int(const std::string &section, const std::string &ini_key,
                                                const std::string &log_key_name, std::function<void(int)> setter,
                                                int default_value)
 {
@@ -294,7 +294,7 @@ void DetourModKit::Config::registerIntCallback(const std::string &section, const
         std::make_unique<CallbackConfigItem<int>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
-void DetourModKit::Config::registerFloatCallback(const std::string &section, const std::string &ini_key,
+void DetourModKit::Config::register_float(const std::string &section, const std::string &ini_key,
                                                  const std::string &log_key_name, std::function<void(float)> setter,
                                                  float default_value)
 {
@@ -303,7 +303,7 @@ void DetourModKit::Config::registerFloatCallback(const std::string &section, con
         std::make_unique<CallbackConfigItem<float>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
-void DetourModKit::Config::registerBoolCallback(const std::string &section, const std::string &ini_key,
+void DetourModKit::Config::register_bool(const std::string &section, const std::string &ini_key,
                                                 const std::string &log_key_name, std::function<void(bool)> setter,
                                                 bool default_value)
 {
@@ -312,7 +312,7 @@ void DetourModKit::Config::registerBoolCallback(const std::string &section, cons
         std::make_unique<CallbackConfigItem<bool>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
-void DetourModKit::Config::registerStringCallback(const std::string &section, const std::string &ini_key,
+void DetourModKit::Config::register_string(const std::string &section, const std::string &ini_key,
                                                   const std::string &log_key_name, std::function<void(const std::string &)> setter,
                                                   std::string default_value)
 {
@@ -321,7 +321,7 @@ void DetourModKit::Config::registerStringCallback(const std::string &section, co
         std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, std::move(setter), std::move(default_value)));
 }
 
-void DetourModKit::Config::registerKeyListCallback(const std::string &section, const std::string &ini_key,
+void DetourModKit::Config::register_key_list(const std::string &section, const std::string &ini_key,
                                                    const std::string &log_key_name, std::function<void(const std::vector<int> &)> setter,
                                                    const std::string &default_value_str)
 {
@@ -377,7 +377,7 @@ void DetourModKit::Config::load(const std::string &ini_filename)
 {
     std::lock_guard<std::mutex> lock(getConfigMutex());
 
-    Logger &logger = Logger::getInstance();
+    Logger &logger = Logger::get_instance();
     std::string ini_path = getIniFilePath(ini_filename, logger);
     logger.info("Config: Attempting to load configuration from: {}", ini_path);
 
@@ -404,11 +404,11 @@ void DetourModKit::Config::load(const std::string &ini_filename)
     logger.info("Config: Configuration loading complete. {} items processed.", getRegisteredConfigItems().size());
 }
 
-void DetourModKit::Config::logAll()
+void DetourModKit::Config::log_all()
 {
     std::lock_guard<std::mutex> lock(getConfigMutex());
 
-    Logger &logger = Logger::getInstance();
+    Logger &logger = Logger::get_instance();
     if (getRegisteredConfigItems().empty())
     {
         logger.info("Config: No configuration items registered to log.");
@@ -423,11 +423,11 @@ void DetourModKit::Config::logAll()
     logger.info("Config: Configuration logging completed.");
 }
 
-void DetourModKit::Config::clearRegisteredItems()
+void DetourModKit::Config::clear_registered_items()
 {
     std::lock_guard<std::mutex> lock(getConfigMutex());
 
-    Logger &logger = Logger::getInstance();
+    Logger &logger = Logger::get_instance();
     size_t count = getRegisteredConfigItems().size();
     if (count > 0)
     {
@@ -436,6 +436,6 @@ void DetourModKit::Config::clearRegisteredItems()
     }
     else
     {
-        logger.debug("Config: clearRegisteredItems called, but no items were registered.");
+        logger.debug("Config: clear_registered_items called, but no items were registered.");
     }
 }

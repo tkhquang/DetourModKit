@@ -41,13 +41,13 @@ namespace
      * @param aob_str Raw AOB string (e.g., "48 ?? 8B").
      * @return std::vector<ParsedPatternByte> Vector of parsed structs, or empty on error.
      */
-    std::vector<ParsedPatternByte> parseAOBInternal(std::string_view aob_str)
+    std::vector<ParsedPatternByte> parse_aobInternal(std::string_view aob_str)
     {
         std::vector<ParsedPatternByte> pattern_elements;
         std::string trimmed_aob = trim(std::string(aob_str));
         std::istringstream iss(trimmed_aob);
         std::string token;
-        Logger &logger = Logger::getInstance();
+        Logger &logger = Logger::get_instance();
         int token_idx = 0;
 
         if (trimmed_aob.empty())
@@ -114,14 +114,14 @@ namespace
 } // anonymous namespace
 
 // ============================================================================
-// AOB Scanner API: parseAOB and FindPattern with CompiledPattern
+// AOB Scanner API: parse_aob and find_pattern with CompiledPattern
 // ============================================================================
 
-std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parseAOB(std::string_view aob_str)
+std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::string_view aob_str)
 {
-    Logger &logger = Logger::getInstance();
+    Logger &logger = Logger::get_instance();
 
-    std::vector<ParsedPatternByte> internal_pattern = parseAOBInternal(aob_str);
+    std::vector<ParsedPatternByte> internal_pattern = parse_aobInternal(aob_str);
 
     if (internal_pattern.empty())
     {
@@ -148,29 +148,29 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parseAOB(std::str
     return result;
 }
 
-std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t region_size,
+std::byte *DetourModKit::Scanner::find_pattern(std::byte *start_address, size_t region_size,
                                               const CompiledPattern &pattern)
 {
-    Logger &logger = Logger::getInstance();
+    Logger &logger = Logger::get_instance();
     const size_t pattern_size = pattern.size();
 
     if (pattern_size == 0)
     {
-        logger.error("FindPattern: Pattern is empty. Cannot scan.");
+        logger.error("find_pattern: Pattern is empty. Cannot scan.");
         return nullptr;
     }
     if (!start_address)
     {
-        logger.error("FindPattern: Start address is null. Cannot scan.");
+        logger.error("find_pattern: Start address is null. Cannot scan.");
         return nullptr;
     }
     if (region_size < pattern_size)
     {
-        logger.warning("FindPattern: Search region ({} bytes) is smaller than pattern ({} bytes).", region_size, pattern_size);
+        logger.warning("find_pattern: Search region ({} bytes) is smaller than pattern ({} bytes).", region_size, pattern_size);
         return nullptr;
     }
 
-    logger.debug("FindPattern: Scanning {} bytes from {} for a {} byte pattern.",
+    logger.debug("find_pattern: Scanning {} bytes from {} for a {} byte pattern.",
                  region_size, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(start_address)), pattern_size);
 
     // Count wildcards for optimization decisions
@@ -190,13 +190,13 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
 
     if (wildcard_count > 0)
     {
-        logger.debug("FindPattern: Pattern contains {} wildcard(s).", wildcard_count);
+        logger.debug("find_pattern: Pattern contains {} wildcard(s).", wildcard_count);
     }
 
     // Optimization: If pattern is ALL wildcards, return start_address (matches immediately)
     if (first_non_wildcard == pattern_size)
     {
-        logger.warning("FindPattern: Pattern is all wildcards. Returning start address.");
+        logger.warning("find_pattern: Pattern is all wildcards. Returning start address.");
         return start_address;
     }
 
@@ -205,30 +205,24 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
     const std::byte target_byte = pattern.bytes[first_non_wildcard];
     const unsigned char target_val = static_cast<unsigned char>(target_byte);
 
-    std::byte *search_start = start_address;
-    const std::byte *const search_end = start_address + (region_size - pattern_size);
+    // memchr searches for the anchor byte at its actual position within candidates.
+    // Valid pattern start positions: [start_address, start_address + (region_size - pattern_size)]
+    // The anchor byte is at offset first_non_wildcard within the pattern, so we search
+    // for it in [start_address + first_non_wildcard, start_address + (region_size - pattern_size) + first_non_wildcard]
+    std::byte *search_start = start_address + first_non_wildcard;
+    const std::byte *const search_end = start_address + (region_size - pattern_size) + first_non_wildcard;
 
     while (search_start <= search_end)
     {
-        // Use memchr to find the next occurrence of the first non-wildcard byte
         void *found = memchr(search_start, static_cast<int>(target_val),
                              static_cast<size_t>(search_end - search_start + 1));
 
         if (!found)
         {
-            // First non-wildcard byte not found in remaining region
             break;
         }
 
         std::byte *current_scan_ptr = static_cast<std::byte *>(found);
-
-        // Adjust back by first_non_wildcard to get the pattern start position
-        if (current_scan_ptr < start_address + first_non_wildcard)
-        {
-            // Would go before start, skip to next
-            search_start = current_scan_ptr + 1;
-            continue;
-        }
 
         std::byte *pattern_start = current_scan_ptr - first_non_wildcard;
 
@@ -247,7 +241,7 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
         {
             uintptr_t absolute_match_address = reinterpret_cast<uintptr_t>(pattern_start);
             uintptr_t rva_offset = absolute_match_address - reinterpret_cast<uintptr_t>(start_address);
-            logger.info("FindPattern: Pattern match found at address: {} (RVA: {})",
+            logger.info("find_pattern: Pattern match found at address: {} (RVA: {})",
                         DetourModKit::Format::format_address(absolute_match_address), DetourModKit::Format::format_address(rva_offset));
             return pattern_start;
         }
@@ -256,6 +250,6 @@ std::byte *DetourModKit::Scanner::FindPattern(std::byte *start_address, size_t r
         search_start = current_scan_ptr + 1;
     }
 
-    logger.warning("FindPattern: Pattern not found in the specified memory region.");
+    logger.warning("find_pattern: Pattern not found in the specified memory region.");
     return nullptr;
 }

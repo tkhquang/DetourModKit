@@ -14,7 +14,7 @@ namespace DetourModKit
          * @param degrees The angle in degrees.
          * @return float The angle converted to radians.
          */
-        inline float DegreesToRadians(float degrees)
+        inline float degrees_to_radians(float degrees)
         {
             // DirectX::XM_PI is a high-precision constant for PI.
             return degrees * (DirectX::XM_PI / 180.0f);
@@ -25,7 +25,7 @@ namespace DetourModKit
          * @param radians The angle in radians.
          * @return float The angle converted to degrees.
          */
-        inline float RadiansToDegrees(float radians)
+        inline float radians_to_degrees(float radians)
         {
             return radians * (180.0f / DirectX::XM_PI);
         }

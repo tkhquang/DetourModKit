@@ -27,7 +27,7 @@ namespace DetourModKit
          *         it returns the current working directory. In case of further failure, it might
          *         return ".", representing the current directory in a relative sense.
          */
-        std::string getRuntimeDirectory();
+        std::string get_runtime_directory();
     } // namespace Filesystem
 } // namespace DetourModKit
 

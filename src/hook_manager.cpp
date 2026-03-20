@@ -9,7 +9,7 @@ using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
 
 // --- Singleton implementation ---
-HookManager &HookManager::getInstance()
+HookManager &HookManager::get_instance()
 {
     static HookManager instance;
     return instance;
@@ -164,8 +164,8 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
 
     try
     {
-        safetyhook::InlineHook::Flags sh_flags = config.inlineFlags;
-        if (!config.autoEnable)
+        safetyhook::InlineHook::Flags sh_flags = config.inline_flags;
+        if (!config.auto_enable)
         {
             sh_flags = static_cast<safetyhook::InlineHook::Flags>(
                 static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::InlineHook::StartDisabled));
@@ -195,7 +195,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
         else
         {
             initial_status = HookStatus::Disabled;
-            if (config.autoEnable)
+            if (config.auto_enable)
             {
                 m_logger.warning("HookManager: Inline hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
             }
@@ -234,7 +234,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
     m_logger.debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.",
                    name, aob_pattern_str, DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0));
 
-    auto pattern = parseAOB(aob_pattern_str);
+    auto pattern = parse_aob(aob_pattern_str);
     if (!pattern.has_value())
     {
         m_logger.error("HookManager: AOB pattern parsing failed for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
@@ -243,7 +243,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
         return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    std::byte *found_address_start = FindPattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
+    std::byte *found_address_start = find_pattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
         m_logger.error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
@@ -292,8 +292,8 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
     try
     {
-        safetyhook::MidHook::Flags sh_flags = config.midFlags;
-        if (!config.autoEnable)
+        safetyhook::MidHook::Flags sh_flags = config.mid_flags;
+        if (!config.auto_enable)
         {
             sh_flags = static_cast<safetyhook::MidHook::Flags>(
                 static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::MidHook::StartDisabled));
@@ -322,7 +322,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
         else
         {
             initial_status = HookStatus::Disabled;
-            if (config.autoEnable)
+            if (config.auto_enable)
             {
                 m_logger.warning("HookManager: Mid hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
             }
@@ -360,14 +360,14 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     m_logger.debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.",
                    name, aob_pattern_str, DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0));
 
-    auto pattern = parseAOB(aob_pattern_str);
+    auto pattern = parse_aob(aob_pattern_str);
     if (!pattern.has_value())
     {
         m_logger.error("HookManager: AOB pattern parsing failed for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
         return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    std::byte *found_address_start = FindPattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
+    std::byte *found_address_start = find_pattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
         m_logger.error("HookManager: AOB pattern not found for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
@@ -388,8 +388,8 @@ bool HookManager::remove_hook(const std::string &hook_id)
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
-        std::string name_of_removed_hook = it->second->getName();
-        HookType type_of_removed_hook = it->second->getType();
+        std::string name_of_removed_hook = it->second->get_name();
+        HookType type_of_removed_hook = it->second->get_type();
         m_hooks.erase(it);
         m_logger.info("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
                       name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
@@ -401,6 +401,7 @@ bool HookManager::remove_hook(const std::string &hook_id)
 
 void HookManager::remove_all_hooks()
 {
+    m_shutdown_called = false;
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (!m_hooks.empty())
     {
@@ -422,7 +423,7 @@ bool HookManager::enable_hook(const std::string &hook_id)
     if (it != m_hooks.end())
     {
         Hook *hook = it->second.get();
-        if (hook->getStatus() == HookStatus::Disabled)
+        if (hook->get_status() == HookStatus::Disabled)
         {
             if (hook->enable())
             {
@@ -435,14 +436,14 @@ bool HookManager::enable_hook(const std::string &hook_id)
                 return false;
             }
         }
-        else if (hook->getStatus() == HookStatus::Active)
+        else if (hook->get_status() == HookStatus::Active)
         {
             m_logger.debug("HookManager: Hook '{}' is already active. Enable request ignored.", hook_id);
             return true;
         }
         else
         {
-            m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::statusToString(hook->getStatus()));
+            m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
             return false;
         }
     }
@@ -457,7 +458,7 @@ bool HookManager::disable_hook(const std::string &hook_id)
     if (it != m_hooks.end())
     {
         Hook *hook = it->second.get();
-        if (hook->getStatus() == HookStatus::Active)
+        if (hook->get_status() == HookStatus::Active)
         {
             if (hook->disable())
             {
@@ -470,14 +471,14 @@ bool HookManager::disable_hook(const std::string &hook_id)
                 return false;
             }
         }
-        else if (hook->getStatus() == HookStatus::Disabled)
+        else if (hook->get_status() == HookStatus::Disabled)
         {
             m_logger.debug("HookManager: Hook '{}' is already disabled. Disable request ignored.", hook_id);
             return true;
         }
         else
         {
-            m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::statusToString(hook->getStatus()));
+            m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
             return false;
         }
     }
@@ -491,7 +492,7 @@ std::optional<HookStatus> HookManager::get_hook_status(const std::string &hook_i
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
-        return it->second->getStatus();
+        return it->second->get_status();
     }
     return std::nullopt;
 }
@@ -506,7 +507,7 @@ std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
     counts[HookStatus::Removed] = 0;
     for (const auto &[name, hook_ptr] : m_hooks)
     {
-        counts[hook_ptr->getStatus()]++;
+        counts[hook_ptr->get_status()]++;
     }
     return counts;
 }
@@ -518,7 +519,7 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
     ids.reserve(m_hooks.size());
     for (const auto &[name, hook_ptr] : m_hooks)
     {
-        if (!status_filter.has_value() || hook_ptr->getStatus() == status_filter.value())
+        if (!status_filter.has_value() || hook_ptr->get_status() == status_filter.value())
         {
             ids.push_back(name);
         }
