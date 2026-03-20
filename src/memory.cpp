@@ -752,20 +752,44 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
 
 void DetourModKit::Memory::clear_cache()
 {
+    // Hold state mutex to prevent concurrent shutdown and serialize with cleanup thread
+    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
+
+    // Check if cache is still valid (not shutdown during lock acquisition)
+    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+        return;
+
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
         return;
 
+    // Signal cleanup thread to pause and prevent interference during clear
+    // This ensures no concurrent access to shard mutexes while we clear
+    MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(false, std::memory_order_relaxed);
+
     for (size_t i = 0; i < shard_count; ++i)
     {
-        if (MemoryUtilsCacheInternal::s_shardMutexes[i])
+        auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
+        if (mutex_ptr)
         {
-            std::unique_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
-            MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
-            MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
-            MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
+            // Use try_lock to avoid blocking if mutex is in bad state (MinGW compatibility)
+            std::unique_lock<std::shared_mutex> lock(*mutex_ptr, std::try_to_lock);
+            if (lock.owns_lock())
+            {
+                MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
+                MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
+                MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
+            }
+            else
+            {
+                // Could not acquire lock - reset in-flight flag to unblock any waiters
+                MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
+            }
         }
     }
+
+    // Restart cleanup thread
+    MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(true, std::memory_order_release);
 
     MemoryUtilsCacheInternal::s_stats.cacheHits.store(0, std::memory_order_relaxed);
     MemoryUtilsCacheInternal::s_stats.cacheMisses.store(0, std::memory_order_relaxed);

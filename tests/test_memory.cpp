@@ -280,6 +280,8 @@ TEST_F(MemoryTest, CacheClearStressTest)
     {
         EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
         Memory::clear_cache();
+        // Small yield to allow any background threads to process
+        std::this_thread::yield();
     }
 }
 
