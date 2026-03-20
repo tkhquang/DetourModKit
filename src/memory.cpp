@@ -381,13 +381,19 @@ namespace MemoryUtilsCacheInternal
      * @details Called by the background cleanup thread or on-demand timer.
      * @param force Force cleanup regardless of timing.
      */
-    void cleanup_expired_entries(bool) noexcept
+    void cleanup_expired_entries(bool force) noexcept
     {
         if (s_cacheShards.empty())
             return;
 
-        if (!s_cleanupThreadRunning.load(std::memory_order_acquire))
-            return;
+        // Background cleanup thread passes force=true and must hold state mutex
+        // to prevent racing with shutdown_cache() which clears vectors.
+        // On-demand cleanup passes force=false and is protected by cache initialization.
+        std::unique_lock<std::mutex> lock;
+        if (force)
+        {
+            lock = std::unique_lock<std::mutex>(s_cacheStateMutex);
+        }
 
         const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
         if (shard_count == 0)
@@ -452,7 +458,7 @@ namespace MemoryUtilsCacheInternal
             if (!s_cleanupThreadRunning.load(std::memory_order_acquire))
                 break;
 
-            cleanup_expired_entries(false);
+            cleanup_expired_entries(true); // force=true to hold state mutex during vector iteration
             s_cleanupRequested.store(false, std::memory_order_relaxed);
         }
     }
@@ -746,8 +752,6 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
 
 void DetourModKit::Memory::clear_cache()
 {
-    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
-
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
         return;
