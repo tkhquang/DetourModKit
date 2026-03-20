@@ -19,11 +19,36 @@ jobs:
         run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
 
+      - name: Cache Chocolatey packages
+        uses: actions/cache@v4
+        with:
+          path: C:\ProgramData\chocolatey\lib
+          key: choco-ninja-${{ runner.os }}-v1
+          restore-keys: |
+            choco-ninja-${{ runner.os }}-
+
       - name: Install Ninja and gcovr
         run: |
           choco install ninja --yes --force --no-progress
           pip install gcovr
         shell: powershell
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-gcovr-${{ runner.os }}-v1
+          restore-keys: |
+            pip-gcovr-${{ runner.os }}-
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build/mingw-debug
+          key: cmake-build-${{ runner.os }}-v1-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'src/**', 'include/**') }}
+          restore-keys: |
+            cmake-build-${{ runner.os }}-v1-
+            cmake-build-${{ runner.os }}-
 
       - name: Verify Tools
         run: |
