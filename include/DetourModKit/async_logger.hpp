@@ -27,7 +27,7 @@ namespace DetourModKit
     inline constexpr size_t DEFAULT_SPIN_BACKOFF_ITERATIONS = 32;
     inline constexpr auto DEFAULT_FLUSH_TIMEOUT = std::chrono::milliseconds(500);
     inline constexpr size_t MEMORY_POOL_BLOCK_SIZE = 4096;
-    inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 16;
+    inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 64;
     inline constexpr size_t POOL_SLOTS_PER_BLOCK = 16;
 
     enum class OverflowPolicy
@@ -193,6 +193,10 @@ namespace DetourModKit
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
 
+            // Move operations are safe because:
+            // 1. Only the single writer thread calls try_pop (consumer)
+            // 2. try_push only moves INTO empty slots (enqueue_pos slots)
+            // 3. No concurrent moves can occur on the same slot
             Slot(Slot &&other) noexcept
                 : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data))
             {

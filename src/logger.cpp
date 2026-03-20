@@ -139,12 +139,11 @@ namespace DetourModKit
                 local_logger = std::move(async_logger_);
                 async_logger_.reset();
                 async_mode_enabled_.store(false, std::memory_order_release);
+                if (local_logger)
+                {
+                    local_logger->shutdown();
+                }
             }
-        }
-
-        if (local_logger)
-        {
-            local_logger->shutdown();
         }
 
         {
@@ -175,12 +174,11 @@ namespace DetourModKit
                 local_logger = std::move(async_logger_);
                 async_logger_.reset();
                 async_mode_enabled_.store(false, std::memory_order_release);
+                if (local_logger)
+                {
+                    local_logger->shutdown();
+                }
             }
-        }
-
-        if (local_logger)
-        {
-            local_logger->shutdown();
         }
 
         {

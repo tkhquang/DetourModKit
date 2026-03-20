@@ -120,17 +120,18 @@ namespace DetourModKit
             return;
         }
 
+        std::unique_lock<std::mutex> lock(pool_mutex_);
+
         Block *block = head_.load(std::memory_order_acquire);
         for (Block *b = block; b; b = b->next)
         {
             PoolSlot *slots = reinterpret_cast<PoolSlot *>(b->data);
-            PoolSlot *slot = slots;
 
-            for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i, ++slot)
+            for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
             {
+                PoolSlot *slot = &slots[i];
                 if (&slot->str == ptr)
                 {
-                    std::lock_guard<std::mutex> lock(pool_mutex_);
                     slot->str.~basic_string();
                     slot->next_free = b->free_list;
                     b->free_list = slot;
@@ -140,6 +141,7 @@ namespace DetourModKit
             }
         }
 
+        lock.unlock();
         delete ptr;
     }
 
