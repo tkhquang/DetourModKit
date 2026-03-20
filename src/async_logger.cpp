@@ -9,10 +9,142 @@
 
 namespace DetourModKit
 {
+    StringPool::StringPool() noexcept
+    {
+        grow_pool();
+    }
 
-    // ============================================================================
-    // LogMessage Implementation
-    // ============================================================================
+    StringPool::~StringPool() noexcept
+    {
+        Block *current = head_.load(std::memory_order_relaxed);
+        while (current)
+        {
+            Block *next = current->next;
+            ::operator delete(current);
+            current = next;
+        }
+    }
+
+    void StringPool::grow_pool()
+    {
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+
+        Block *existing = head_.load(std::memory_order_relaxed);
+        size_t count = 0;
+        for (Block *b = existing; b; b = b->next)
+        {
+            if (++count >= MEMORY_POOL_BLOCK_COUNT)
+            {
+                return;
+            }
+        }
+
+        Block *new_block = new (::operator new(sizeof(Block))) Block();
+        if (!new_block)
+        {
+            return;
+        }
+
+        new_block->next = existing;
+        new_block->free_list = nullptr;
+        new_block->slot_count = POOL_SLOTS_PER_BLOCK;
+
+        PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
+        for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
+        {
+            slots[i].next_free = (i + 1 < POOL_SLOTS_PER_BLOCK) ? &slots[i + 1] : nullptr;
+        }
+        new_block->free_list = &slots[0];
+
+        head_.store(new_block, std::memory_order_release);
+        pool_size_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    StringPool &StringPool::instance() noexcept
+    {
+        static StringPool pool;
+        return pool;
+    }
+
+    std::string *StringPool::allocate(size_t size)
+    {
+        if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
+        {
+            return new std::string();
+        }
+
+        PoolSlot *slot = nullptr;
+
+        {
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            Block *block = head_.load(std::memory_order_acquire);
+            for (Block *b = block; b; b = b->next)
+            {
+                if (b->free_list)
+                {
+                    slot = b->free_list;
+                    b->free_list = slot->next_free;
+                    --b->slot_count;
+                    break;
+                }
+            }
+        }
+
+        if (!slot)
+        {
+            grow_pool();
+
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            Block *block = head_.load(std::memory_order_acquire);
+            for (Block *b = block; b; b = b->next)
+            {
+                if (b->free_list)
+                {
+                    slot = b->free_list;
+                    b->free_list = slot->next_free;
+                    --b->slot_count;
+                    break;
+                }
+            }
+        }
+
+        if (slot)
+        {
+            new (&slot->str) std::string();
+            return &slot->str;
+        }
+
+        return new std::string();
+    }
+
+    void StringPool::deallocate(std::string *ptr) noexcept
+    {
+        if (!ptr)
+        {
+            return;
+        }
+
+        Block *block = head_.load(std::memory_order_acquire);
+        for (Block *b = block; b; b = b->next)
+        {
+            PoolSlot *slots = reinterpret_cast<PoolSlot *>(b->data);
+            PoolSlot *slot = slots;
+
+            for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i, ++slot)
+            {
+                if (&slot->str == ptr)
+                {
+                    slot->str.~basic_string();
+                    slot->next_free = b->free_list;
+                    b->free_list = slot;
+                    ++b->slot_count;
+                    return;
+                }
+            }
+        }
+
+        delete ptr;
+    }
 
     LogMessage::LogMessage(LogLevel lvl, std::string msg)
         : level(lvl),
@@ -33,9 +165,10 @@ namespace DetourModKit
         }
         else
         {
-            overflow = std::make_unique<std::string>(std::move(msg));
+            overflow = StringPool::instance().allocate(msg_size);
             if (overflow)
             {
+                overflow->assign(std::move(msg));
                 length = overflow->size();
             }
             else
@@ -43,6 +176,38 @@ namespace DetourModKit
                 length = 0;
             }
         }
+    }
+
+    LogMessage::~LogMessage()
+    {
+        reset();
+    }
+
+    LogMessage::LogMessage(LogMessage &&other) noexcept
+        : level(other.level),
+          timestamp(other.timestamp),
+          thread_id(other.thread_id),
+          buffer(other.buffer),
+          length(other.length),
+          overflow(other.overflow)
+    {
+        other.overflow = nullptr;
+    }
+
+    LogMessage &LogMessage::operator=(LogMessage &&other) noexcept
+    {
+        if (this != &other)
+        {
+            reset();
+            level = other.level;
+            timestamp = other.timestamp;
+            thread_id = other.thread_id;
+            buffer = other.buffer;
+            length = other.length;
+            overflow = other.overflow;
+            other.overflow = nullptr;
+        }
+        return *this;
     }
 
     std::string_view LogMessage::message() const noexcept
@@ -63,9 +228,16 @@ namespace DetourModKit
         return length <= MAX_INLINE_SIZE;
     }
 
-    // ============================================================================
-    // DynamicMPMCQueue Implementation
-    // ============================================================================
+    void LogMessage::reset() noexcept
+    {
+        if (overflow)
+        {
+            StringPool::instance().deallocate(overflow);
+            overflow = nullptr;
+        }
+        length = 0;
+        buffer.fill(0);
+    }
 
     DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
         : capacity_(capacity), mask_(capacity - 1)
@@ -152,8 +324,6 @@ namespace DetourModKit
             return 0;
         }
 
-        items.reserve(items.size() + max_count);
-
         size_t count = 0;
         LogMessage msg;
 
@@ -178,10 +348,6 @@ namespace DetourModKit
         return size() == 0;
     }
 
-    // ============================================================================
-    // AsyncLogger Implementation
-    // ============================================================================
-
     AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config,
                              std::shared_ptr<std::ofstream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex)
@@ -192,7 +358,7 @@ namespace DetourModKit
     {
         if (!config_.validate())
         {
-            throw std::invalid_argument("Invalid AsyncLoggerConfig: queue_capacity must be power of 2, batch_size > 0, flush_interval > 0, spin_backoff_iterations > 0");
+            throw std::invalid_argument("Invalid AsyncLoggerConfig");
         }
 
         if (!file_stream_)
@@ -253,17 +419,24 @@ namespace DetourModKit
         }
     }
 
-    void AsyncLogger::flush() noexcept
+    bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
     {
         if (!running_.load(std::memory_order_acquire))
         {
-            return;
+            return true;
         }
 
         std::unique_lock<std::mutex> lock(flush_mutex_);
 
-        flush_cv_.wait(lock, [this]() noexcept
-                       { return pending_messages_.load(std::memory_order_acquire) == 0; });
+        const bool flushed = flush_cv_.wait_for(lock, timeout, [this]() noexcept
+                                                { return pending_messages_.load(std::memory_order_acquire) == 0; });
+
+        return flushed;
+    }
+
+    void AsyncLogger::flush() noexcept
+    {
+        static_cast<void>(flush_with_timeout(DEFAULT_FLUSH_TIMEOUT));
     }
 
     void AsyncLogger::shutdown() noexcept
@@ -282,6 +455,12 @@ namespace DetourModKit
         {
             writer_thread_.join();
         }
+
+        {
+            std::lock_guard<std::mutex> lock(flush_mutex_);
+            pending_messages_.store(0, std::memory_order_release);
+            flush_cv_.notify_all();
+        }
     }
 
     bool AsyncLogger::is_running() const noexcept
@@ -292,6 +471,16 @@ namespace DetourModKit
     size_t AsyncLogger::queue_size() const noexcept
     {
         return queue_.size();
+    }
+
+    size_t AsyncLogger::dropped_count() const noexcept
+    {
+        return dropped_messages_.load(std::memory_order_relaxed);
+    }
+
+    void AsyncLogger::reset_dropped_count() noexcept
+    {
+        dropped_messages_.store(0, std::memory_order_release);
     }
 
     void AsyncLogger::writer_thread_func() noexcept
@@ -334,10 +523,18 @@ namespace DetourModKit
             }
         }
 
-        std::lock_guard<std::mutex> lock(*log_mutex_);
-        if (file_stream_->is_open())
         {
-            file_stream_->flush();
+            std::lock_guard<std::mutex> lock(*log_mutex_);
+            if (file_stream_->is_open())
+            {
+                file_stream_->flush();
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(flush_mutex_);
+            pending_messages_.store(0, std::memory_order_release);
+            flush_cv_.notify_all();
         }
     }
 
@@ -379,6 +576,7 @@ namespace DetourModKit
         switch (config_.overflow_policy)
         {
         case OverflowPolicy::DropNewest:
+            dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
 
         case OverflowPolicy::DropOldest:
@@ -387,6 +585,7 @@ namespace DetourModKit
             if (queue_.try_pop(oldest))
             {
                 pending_messages_.fetch_sub(1, std::memory_order_relaxed);
+                dropped_messages_.fetch_add(1, std::memory_order_relaxed);
                 if (queue_.try_push(message))
                 {
                     pending_messages_.fetch_add(1, std::memory_order_relaxed);
@@ -394,16 +593,13 @@ namespace DetourModKit
                     return true;
                 }
             }
+            dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
 
         case OverflowPolicy::Block:
         {
-            constexpr size_t max_spin_iterations = 1000;
-            constexpr int max_backoff_us = 1024;
-            constexpr auto block_timeout = std::chrono::milliseconds(100);
-
-            const auto deadline = std::chrono::steady_clock::now() + block_timeout;
+            const auto deadline = std::chrono::steady_clock::now() + config_.block_timeout_ms;
             size_t spin_count = 0;
 
             while (std::chrono::steady_clock::now() < deadline)
@@ -419,17 +615,17 @@ namespace DetourModKit
                 {
                     ++spin_count;
                 }
+                else if (spin_count < config_.block_max_spin_iterations)
+                {
+                    std::this_thread::yield();
+                    ++spin_count;
+                }
                 else
                 {
-                    const int backoff_us = std::min(1 << (spin_count % 8), max_backoff_us);
-                    std::this_thread::sleep_for(std::chrono::microseconds(backoff_us));
-                    ++spin_count;
-                    if (spin_count >= max_spin_iterations)
-                    {
-                        spin_count = config_.spin_backoff_iterations;
-                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
+            dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
 
@@ -456,6 +652,7 @@ namespace DetourModKit
         }
 
         default:
+            dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
     }

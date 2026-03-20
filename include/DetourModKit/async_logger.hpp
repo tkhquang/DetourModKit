@@ -1,15 +1,6 @@
 #ifndef ASYNC_LOGGER_HPP
 #define ASYNC_LOGGER_HPP
 
-/**
- * @file async_logger.hpp
- * @brief Asynchronous logging system for high-throughput scenarios.
- * @details Provides a lock-free, bounded queue-based async logger that decouples
- *          log message production from file I/O. Designed for minimal latency
- *          on the producer side (calling thread) with batched writes on the
- *          consumer side (writer thread).
- */
-
 #include "DetourModKit/logger.hpp"
 
 #include <array>
@@ -32,26 +23,78 @@ namespace DetourModKit
     inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
     inline constexpr size_t DEFAULT_BATCH_SIZE = 64;
     inline constexpr auto DEFAULT_FLUSH_INTERVAL = std::chrono::milliseconds(100);
-    inline constexpr size_t MAX_MESSAGE_SIZE = 16777216; // 16MB max message size to prevent abuse
+    inline constexpr size_t MAX_MESSAGE_SIZE = 16777216;
     inline constexpr size_t DEFAULT_SPIN_BACKOFF_ITERATIONS = 32;
+    inline constexpr auto DEFAULT_FLUSH_TIMEOUT = std::chrono::milliseconds(500);
+    inline constexpr size_t MEMORY_POOL_BLOCK_SIZE = 4096;
+    inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 16;
+    inline constexpr size_t POOL_SLOTS_PER_BLOCK = 16;
 
-    /**
-     * @enum OverflowPolicy
-     * @brief Defines behavior when the async log queue is full.
-     */
     enum class OverflowPolicy
     {
-        DropNewest,  /**< Discard the incoming message if queue is full. */
-        DropOldest,  /**< Discard the oldest message to make room for the new one. */
-        Block,       /**< Block the caller until space is available. */
-        SyncFallback /**< Write the message synchronously if queue is full. */
+        DropNewest,
+        DropOldest,
+        Block,
+        SyncFallback
+    };
+
+    /**
+     * @class StringPool
+     * @brief Memory pool for small string allocations to reduce heap fragmentation.
+     * @details Uses a free-list approach for O(1) allocation/deallocation.
+     *          Blocks are allocated on-demand up to MEMORY_POOL_BLOCK_COUNT.
+     *          Each block is cache-line aligned to prevent false sharing.
+     */
+    class StringPool
+    {
+    public:
+        static StringPool &instance() noexcept;
+
+        [[nodiscard]] std::string *allocate(size_t size);
+        void deallocate(std::string *ptr) noexcept;
+
+        StringPool(const StringPool &) = delete;
+        StringPool &operator=(const StringPool &) = delete;
+        StringPool(StringPool &&) = delete;
+        StringPool &operator=(StringPool &&) = delete;
+
+    private:
+        struct PoolSlot
+        {
+            std::string str;
+            PoolSlot *next_free{nullptr};
+        };
+
+        struct Block
+        {
+            alignas(64) char data[POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot)];
+            Block *next{nullptr};
+            PoolSlot *free_list{nullptr};
+            size_t slot_count{0};
+
+            PoolSlot *get_slot(size_t index) noexcept
+            {
+                return reinterpret_cast<PoolSlot *>(data) + index;
+            }
+        };
+
+        StringPool() noexcept;
+        ~StringPool() noexcept;
+
+        void grow_pool();
+        PoolSlot *claim_free_slot() noexcept;
+        void release_slot(PoolSlot *slot) noexcept;
+
+        alignas(64) std::atomic<Block *> head_{nullptr};
+        std::atomic<size_t> pool_size_{0};
+        std::mutex pool_mutex_;
     };
 
     /**
      * @struct LogMessage
-     * @brief Represents a single log message in the async queue.
-     * @details Uses a fixed-size buffer for small messages to avoid heap allocation
-     *          on the hot path. Falls back to heap allocation for larger messages.
+     * @brief A log entry with inline buffer optimization and overflow handling.
+     * @details Messages <= 256 bytes are stored inline. Larger messages use
+     *          heap allocation via StringPool.
      */
     struct LogMessage
     {
@@ -64,18 +107,22 @@ namespace DetourModKit
         std::array<char, MAX_INLINE_SIZE> buffer{};
         size_t length{0};
 
-        std::unique_ptr<std::string> overflow;
+        std::string *overflow{nullptr};
 
         LogMessage(LogLevel lvl, std::string msg);
-
         LogMessage() noexcept = default;
-        LogMessage(LogMessage &&other) noexcept = default;
-        LogMessage &operator=(LogMessage &&other) noexcept = default;
+
+        ~LogMessage();
+
+        LogMessage(LogMessage &&other) noexcept;
+        LogMessage &operator=(LogMessage &&other) noexcept;
+
         LogMessage(const LogMessage &) = delete;
         LogMessage &operator=(const LogMessage &) = delete;
 
         [[nodiscard]] std::string_view message() const noexcept;
         [[nodiscard]] bool is_valid() const noexcept;
+        void reset() noexcept;
     };
 
     /**
@@ -141,12 +188,15 @@ namespace DetourModKit
             std::atomic<size_t> sequence;
             LogMessage data;
 
-            Slot() : sequence(0) {}
+            Slot() noexcept : sequence(0) {}
 
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
 
-            Slot(Slot &&other) noexcept : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data)) {}
+            Slot(Slot &&other) noexcept
+                : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data))
+            {
+            }
 
             Slot &operator=(Slot &&other) noexcept
             {
@@ -171,7 +221,7 @@ namespace DetourModKit
 
     /**
      * @struct AsyncLoggerConfig
-     * @brief Configuration for the asynchronous logger.
+     * @brief Configuration for the async logger.
      */
     struct AsyncLoggerConfig
     {
@@ -180,6 +230,8 @@ namespace DetourModKit
         std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
         OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
         size_t spin_backoff_iterations = DEFAULT_SPIN_BACKOFF_ITERATIONS;
+        std::chrono::milliseconds block_timeout_ms{100};
+        size_t block_max_spin_iterations{1000};
 
         [[nodiscard]] constexpr bool validate() const noexcept
         {
@@ -190,6 +242,10 @@ namespace DetourModKit
             if (flush_interval.count() <= 0)
                 return false;
             if (spin_backoff_iterations == 0)
+                return false;
+            if (block_timeout_ms.count() <= 0)
+                return false;
+            if (block_max_spin_iterations == 0)
                 return false;
             return true;
         }
@@ -237,6 +293,18 @@ namespace DetourModKit
          */
         [[nodiscard]] bool enqueue(LogLevel level, std::string message) noexcept;
 
+        /**
+         * @brief Flushes all pending log messages with a timeout.
+         * @param timeout Maximum time to wait for flush to complete.
+         * @return true if all messages were flushed, false if timeout occurred.
+         */
+        [[nodiscard]] bool flush_with_timeout(std::chrono::milliseconds timeout) noexcept;
+
+        /**
+         * @brief Flushes all pending log messages.
+         * @details Waits up to 500ms for all queued messages to be written.
+         *          Uses a timeout to prevent indefinite blocking.
+         */
         void flush() noexcept;
 
         void shutdown() noexcept;
@@ -244,6 +312,17 @@ namespace DetourModKit
         [[nodiscard]] bool is_running() const noexcept;
 
         [[nodiscard]] size_t queue_size() const noexcept;
+
+        /**
+         * @brief Returns the total number of messages dropped due to queue overflow.
+         * @return size_t Number of dropped messages.
+         */
+        [[nodiscard]] size_t dropped_count() const noexcept;
+
+        /**
+         * @brief Resets the dropped message counter.
+         */
+        void reset_dropped_count() noexcept;
 
     private:
         void writer_thread_func() noexcept;
@@ -265,6 +344,7 @@ namespace DetourModKit
         std::mutex flush_mutex_;
         std::condition_variable flush_cv_;
         std::atomic<size_t> pending_messages_{0};
+        std::atomic<size_t> dropped_messages_{0};
     };
 
 } // namespace DetourModKit

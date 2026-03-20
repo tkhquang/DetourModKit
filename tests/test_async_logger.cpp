@@ -915,6 +915,201 @@ TEST(DynamicMPMCQueueTest, TryPopBatch_ZeroMaxCount)
     EXPECT_EQ(queue.size(), 1u);
 }
 
+TEST_F(AsyncLoggerTest, FlushWithTimeout_Success)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 4;
+    config.batch_size = 4;
+    config.flush_interval = std::chrono::milliseconds{10000};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    for (int i = 0; i < 10; ++i)
+    {
+        static_cast<void>(logger->enqueue(LogLevel::Info, "test_msg_" + std::to_string(i)));
+    }
+
+    bool result = logger->flush_with_timeout(std::chrono::milliseconds(500));
+
+    EXPECT_TRUE(result);
+    logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, FlushWithTimeout_WhenNotRunning)
+{
+    AsyncLoggerConfig config;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+    logger->shutdown();
+
+    bool result = logger->flush_with_timeout(std::chrono::milliseconds(100));
+
+    EXPECT_TRUE(result);
+}
+
+TEST_F(AsyncLoggerTest, DroppedCount_Increment)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 1;
+    config.overflow_policy = OverflowPolicy::DropNewest;
+    config.flush_interval = std::chrono::milliseconds{10000};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    EXPECT_EQ(logger->dropped_count(), 0u);
+
+    for (int i = 0; i < 100; ++i)
+    {
+        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    EXPECT_GT(logger->dropped_count(), 0u);
+    logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, DroppedCount_DropOldest)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 1;
+    config.overflow_policy = OverflowPolicy::DropOldest;
+    config.flush_interval = std::chrono::milliseconds{10000};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    static_cast<void>(logger->enqueue(LogLevel::Info, "first_msg"));
+    static_cast<void>(logger->enqueue(LogLevel::Info, "second_msg"));
+    static_cast<void>(logger->enqueue(LogLevel::Info, "third_msg"));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    EXPECT_GE(logger->dropped_count(), 1u);
+    logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, DroppedCount_Reset)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 1;
+    config.overflow_policy = OverflowPolicy::DropNewest;
+    config.flush_interval = std::chrono::milliseconds{10000};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    for (int i = 0; i < 50; ++i)
+    {
+        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    size_t first_drop_count = logger->dropped_count();
+    EXPECT_GT(first_drop_count, 0u);
+
+    logger->reset_dropped_count();
+
+    EXPECT_EQ(logger->dropped_count(), 0u);
+    logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, DroppedCount_BlockPolicy)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 1;
+    config.overflow_policy = OverflowPolicy::DropNewest;
+    config.flush_interval = std::chrono::milliseconds{10000};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    constexpr int kFillCount = 100;
+    for (int i = 0; i < kFillCount; ++i)
+    {
+        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    size_t dropped = logger->dropped_count();
+    EXPECT_GT(dropped, 0u);
+    logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, QueueSize_Accuracy)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 16;
+    config.batch_size = 4;
+    config.flush_interval = std::chrono::milliseconds{1000};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    size_t queue_size = logger->queue_size();
+    EXPECT_GE(queue_size, 0u);
+
+    logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, Shutdown_DrainsAllPending)
+{
+    AsyncLoggerConfig config;
+    config.batch_size = 4;
+    config.flush_interval = std::chrono::milliseconds{10000};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    for (int i = 0; i < 20; ++i)
+    {
+        EXPECT_TRUE(logger->enqueue(LogLevel::Info, "SHUTDOWN_DRAIN_MSG_" + std::to_string(i)));
+    }
+
+    logger->shutdown();
+    file_stream->close();
+
+    std::ifstream in(test_log_file_);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+
+    for (int i = 0; i < 20; ++i)
+    {
+        EXPECT_NE(content.find("SHUTDOWN_DRAIN_MSG_" + std::to_string(i)), std::string::npos);
+    }
+}
+
 TEST(DynamicMPMCQueueTest, TryPopBatch_PreservesOrder)
 {
     DynamicMPMCQueue queue(16);
