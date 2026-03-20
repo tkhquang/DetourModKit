@@ -166,12 +166,13 @@ TEST_F(AsyncLoggerTest, Enqueue_ReturnsFalse_WhenDropped)
     logger->shutdown();
 }
 
-TEST_F(AsyncLoggerTest, Enqueue_ReturnsFalse_OnBlockTimeout)
+TEST_F(AsyncLoggerTest, Enqueue_BlockPolicy_WaitsForSpace)
 {
     AsyncLoggerConfig config;
     config.queue_capacity = 2;
     config.batch_size = 1;
     config.overflow_policy = OverflowPolicy::Block;
+    config.block_timeout_ms = std::chrono::milliseconds{10};
     config.flush_interval = std::chrono::milliseconds{10000};
 
     auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
@@ -181,7 +182,7 @@ TEST_F(AsyncLoggerTest, Enqueue_ReturnsFalse_OnBlockTimeout)
 
     EXPECT_TRUE(logger->enqueue(LogLevel::Info, "msg1"));
     EXPECT_TRUE(logger->enqueue(LogLevel::Info, "msg2"));
-    EXPECT_TRUE(logger->enqueue(LogLevel::Info, "msg3"));
+    EXPECT_FALSE(logger->enqueue(LogLevel::Info, "msg3"));
 
     logger->shutdown();
 }
@@ -1030,7 +1031,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_Reset)
     logger->shutdown();
 }
 
-TEST_F(AsyncLoggerTest, DroppedCount_BlockPolicy)
+TEST_F(AsyncLoggerTest, DroppedCount_DropNewest)
 {
     AsyncLoggerConfig config;
     config.queue_capacity = 2;

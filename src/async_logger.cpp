@@ -9,7 +9,7 @@
 
 namespace DetourModKit
 {
-    StringPool::StringPool() noexcept
+    StringPool::StringPool()
     {
         grow_pool();
     }
@@ -40,10 +40,6 @@ namespace DetourModKit
         }
 
         Block *new_block = new (::operator new(sizeof(Block))) Block();
-        if (!new_block)
-        {
-            return;
-        }
 
         new_block->next = existing;
         new_block->free_list = nullptr;
@@ -134,6 +130,7 @@ namespace DetourModKit
             {
                 if (&slot->str == ptr)
                 {
+                    std::lock_guard<std::mutex> lock(pool_mutex_);
                     slot->str.~basic_string();
                     slot->next_free = b->free_list;
                     b->free_list = slot;
@@ -632,21 +629,28 @@ namespace DetourModKit
         case OverflowPolicy::SyncFallback:
         {
             std::lock_guard<std::mutex> lock(*log_mutex_);
-            if (file_stream_->is_open() && file_stream_->good())
+            if (!file_stream_->is_open() || !file_stream_->good())
             {
-                const auto time_t = std::chrono::system_clock::to_time_t(message.timestamp);
-                std::tm tm_buf{};
+                return false;
+            }
+
+            const auto time_t = std::chrono::system_clock::to_time_t(message.timestamp);
+            std::tm tm_buf{};
 
 #if defined(_WIN32) || defined(_MSC_VER)
-                localtime_s(&tm_buf, &time_t);
+            localtime_s(&tm_buf, &time_t);
 #else
-                localtime_r(&time_t, &tm_buf);
+            localtime_r(&time_t, &tm_buf);
 #endif
 
-                *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
-                              << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
-                              << message.message() << '\n';
-                file_stream_->flush();
+            *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
+                          << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
+                          << message.message() << '\n';
+            file_stream_->flush();
+
+            if (file_stream_->fail())
+            {
+                return false;
             }
             return true;
         }

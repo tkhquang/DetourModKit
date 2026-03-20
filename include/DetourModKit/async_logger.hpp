@@ -78,7 +78,7 @@ namespace DetourModKit
             }
         };
 
-        StringPool() noexcept;
+        StringPool();
         ~StringPool() noexcept;
 
         void grow_pool();
