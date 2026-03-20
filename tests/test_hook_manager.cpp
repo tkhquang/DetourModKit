@@ -115,7 +115,6 @@ TEST_F(HookManagerTest, CreateInlineHook_NullTrampoline)
     EXPECT_EQ(result.error(), HookError::InvalidTrampolinePointer);
 }
 
-
 TEST_F(HookManagerTest, GetHookStatus_NonExistent)
 {
     auto status = hook_manager_->get_hook_status("NonExistentHook");
@@ -141,7 +140,6 @@ TEST_F(HookManagerTest, RemoveHook_NonExistent)
     EXPECT_FALSE(result);
 }
 
-
 TEST_F(HookManagerTest, GetHookIds)
 {
     auto ids = hook_manager_->get_hook_ids();
@@ -161,12 +159,10 @@ TEST_F(HookManagerTest, GetHookIds_WithFilter)
     EXPECT_TRUE(failed_ids.empty());
 }
 
-
 TEST_F(HookManagerTest, RemoveAllHooks)
 {
     EXPECT_NO_THROW(hook_manager_->remove_all_hooks());
 }
-
 
 TEST_F(HookManagerTest, CreateInlineHookAob_EmptyPattern)
 {
@@ -241,7 +237,6 @@ TEST_F(HookManagerTest, CreateMidHookAob_EmptyPattern)
     EXPECT_FALSE(result.has_value());
 }
 
-
 TEST(HookErrorTest, ErrorValuesExist)
 {
     HookError err1 = HookError::AllocatorNotAvailable;
@@ -313,8 +308,6 @@ TEST_F(HookManagerTest, HookConfig_Flags)
     (void)config.mid_flags;
 }
 
-
-
 TEST_F(HookManagerTest, GetHookCounts_Empty)
 {
     auto counts = hook_manager_->get_hook_counts();
@@ -324,7 +317,6 @@ TEST_F(HookManagerTest, GetHookCounts_Empty)
     EXPECT_EQ(counts[HookStatus::Failed], 0u);
     EXPECT_EQ(counts[HookStatus::Removed], 0u);
 }
-
 
 TEST_F(HookManagerTest, Shutdown_Multiple)
 {
@@ -339,7 +331,6 @@ TEST_F(HookManagerTest, RemoveAllHooks_Multiple)
     EXPECT_NO_THROW(hook_manager_->remove_all_hooks());
     EXPECT_NO_THROW(hook_manager_->remove_all_hooks());
 }
-
 
 // Real hook tests using valid function addresses in the test binary
 
@@ -370,7 +361,6 @@ static std::atomic<int> g_real_detour_calls{0};
 }
 
 static std::atomic<int> g_mid_detour_calls{0};
-
 
 TEST_F(HookManagerTest, RealInlineHook_CreateSuccess)
 {
@@ -511,17 +501,19 @@ TEST_F(HookManagerTest, RealInlineHook_RemoveAll)
 {
     void *tramp1 = nullptr, *tramp2 = nullptr;
 
-    hook_manager_->create_inline_hook(
+    auto result1 = hook_manager_->create_inline_hook(
         "RemAll1",
         reinterpret_cast<uintptr_t>(&real_hook_target_add),
         reinterpret_cast<void *>(&real_hook_detour_add),
         &tramp1);
+    EXPECT_TRUE(result1.has_value());
 
-    hook_manager_->create_inline_hook(
+    auto result2 = hook_manager_->create_inline_hook(
         "RemAll2",
         reinterpret_cast<uintptr_t>(&real_hook_target_mul),
         reinterpret_cast<void *>(&real_hook_detour_mul),
         &tramp2);
+    EXPECT_TRUE(result2.has_value());
 
     hook_manager_->remove_all_hooks();
     EXPECT_EQ(hook_manager_->get_hook_ids().size(), 0u);
@@ -934,9 +926,10 @@ TEST_F(HookManagerTest, WithInlineHook_SuccessCallback)
     ASSERT_TRUE(result.has_value());
 
     auto name_opt = hook_manager_->with_inline_hook("WithInlineCB",
-        [](InlineHook &hook) -> std::string {
-            return std::string(hook.get_name());
-        });
+                                                    [](InlineHook &hook) -> std::string
+                                                    {
+                                                        return std::string(hook.get_name());
+                                                    });
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithInlineCB");
 
@@ -954,9 +947,10 @@ TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
     ASSERT_TRUE(result.has_value());
 
     auto name_opt = hook_manager_->with_mid_hook("WithMidCB",
-        [](MidHook &hook) -> std::string {
-            return std::string(hook.get_name());
-        });
+                                                 [](MidHook &hook) -> std::string
+                                                 {
+                                                     return std::string(hook.get_name());
+                                                 });
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithMidCB");
 

@@ -46,9 +46,11 @@ namespace DetourModKit
     }
 
     // Memory cache configuration defaults
-    inline constexpr size_t DEFAULT_CACHE_SIZE = 32;
-    inline constexpr unsigned int DEFAULT_CACHE_EXPIRY_MS = 5000;
+    inline constexpr size_t DEFAULT_CACHE_SIZE = 256;
+    inline constexpr unsigned int DEFAULT_CACHE_EXPIRY_MS = 50;
     inline constexpr size_t MIN_CACHE_SIZE = 1;
+    inline constexpr size_t DEFAULT_CACHE_SHARD_COUNT = 16;
+    inline constexpr size_t DEFAULT_MAX_CACHE_SIZE_MULTIPLIER = 2;
 
     namespace Memory
     {
@@ -56,19 +58,30 @@ namespace DetourModKit
          * @brief Initializes the memory region cache with specified parameters.
          * @details Sets up an internal cache to store information about memory regions,
          *          reducing overhead of frequent VirtualQuery system calls.
-         * @param cache_size The desired number of entries in the cache. Defaults to 32.
-         * @param expiry_ms Cache entry expiry time in milliseconds. Defaults to 5000ms.
+         * @param cache_size The desired number of entries in the cache. Defaults to 256.
+         * @param expiry_ms Cache entry expiry time in milliseconds. Defaults to 50ms.
+         * @param shard_count Number of cache shards for concurrent access. Defaults to 16.
          * @return true if this call performed initialization, false if already initialized.
          * @note Only the first call to init_cache has effect; subsequent calls return false.
+         * @note Starts a background cleanup thread that runs periodically.
          */
         bool init_cache(size_t cache_size = DEFAULT_CACHE_SIZE,
-                        unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS);
+                        unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS,
+                        size_t shard_count = DEFAULT_CACHE_SHARD_COUNT);
 
         /**
          * @brief Clears all entries from the memory region cache.
          * @details Invalidates all currently cached memory region information.
+         *         The background cleanup thread continues running.
          */
         void clear_cache();
+
+        /**
+         * @brief Shuts down the memory cache and stops the background cleanup thread.
+         * @details Call this before program exit to cleanly terminate the cleanup thread.
+         *         After calling shutdown, the cache cannot be reused without re-initialization.
+         */
+        void shutdown_cache();
 
         /**
          * @brief Retrieves statistics about the memory cache usage.
@@ -77,6 +90,15 @@ namespace DetourModKit
          * @return std::string A human-readable string of cache statistics.
          */
         std::string get_cache_stats();
+
+        /**
+         * @brief Invalidates cache entries that overlap with the specified address range.
+         * @details Used to force re-query of memory region info after external changes
+         *          such as VirtualProtect calls by other code.
+         * @param address Starting address of the range to invalidate.
+         * @param size Size of the range to invalidate.
+         */
+        void invalidate_range(const void *address, size_t size);
 
         /**
          * @brief Checks if a specified memory region is readable.
@@ -100,6 +122,7 @@ namespace DetourModKit
          * @brief Writes a sequence of bytes to a target memory address.
          * @details Handles changing memory protection, performs the write operation,
          *          and restores original protection. Also flushes instruction cache.
+         *          Automatically invalidates the affected cache range.
          * @param targetAddress Destination memory address.
          * @param sourceBytes Pointer to the source buffer containing data to write.
          * @param numBytes Number of bytes to write.
