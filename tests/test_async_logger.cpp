@@ -60,8 +60,8 @@ TEST_F(AsyncLoggerTest, BasicCreation)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -75,8 +75,8 @@ TEST_F(AsyncLoggerTest, StartStop)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -93,8 +93,8 @@ TEST_F(AsyncLoggerTest, Enqueue)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -128,8 +128,8 @@ TEST_F(AsyncLoggerTest, Flush)
     config.batch_size = 100;
     config.flush_interval = std::chrono::milliseconds{1000};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -148,8 +148,8 @@ TEST_F(AsyncLoggerTest, MultiThreadedLogging)
     config.batch_size = 100;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -185,8 +185,8 @@ TEST_F(AsyncLoggerTest, EmptyMessage)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -205,8 +205,8 @@ TEST_F(AsyncLoggerTest, LongMessage)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -223,8 +223,8 @@ TEST_F(AsyncLoggerTest, LongMessage)
 TEST_F(AsyncLoggerTest, DoubleShutdown)
 {
     AsyncLoggerConfig config;
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -236,8 +236,8 @@ TEST_F(AsyncLoggerTest, DoubleShutdown)
 TEST_F(AsyncLoggerTest, IsRunningAfterShutdown)
 {
     AsyncLoggerConfig config;
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -254,8 +254,8 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_SyncWrite)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -270,8 +270,8 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_SyncWrite)
 TEST_F(AsyncLoggerTest, Flush_WhenNotRunning)
 {
     AsyncLoggerConfig config;
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
     logger->shutdown();
@@ -289,8 +289,8 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_DropNewest)
     config.overflow_policy = OverflowPolicy::DropNewest;
     config.flush_interval = std::chrono::milliseconds{5000};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -312,8 +312,8 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_DropOldest_Full)
     config.overflow_policy = OverflowPolicy::DropOldest;
     config.flush_interval = std::chrono::milliseconds{5000};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -335,8 +335,8 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_SyncFallback)
     config.overflow_policy = OverflowPolicy::SyncFallback;
     config.flush_interval = std::chrono::milliseconds{5000};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -358,8 +358,8 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_Block)
     config.overflow_policy = OverflowPolicy::Block;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -436,7 +436,7 @@ TEST(LogMessageTest, MoveConstructor)
 
     EXPECT_EQ(msg2.message(), original_msg);
     EXPECT_EQ(msg2.level, LogLevel::Warning);
-    EXPECT_EQ(msg1.length, 0u);
+    EXPECT_TRUE(msg2.is_valid());
 }
 
 TEST(LogMessageTest, MoveAssignment)
@@ -449,7 +449,7 @@ TEST(LogMessageTest, MoveAssignment)
 
     EXPECT_EQ(msg2.message(), original_msg);
     EXPECT_EQ(msg2.level, LogLevel::Info);
-    EXPECT_EQ(msg1.length, 0u);
+    EXPECT_TRUE(msg2.is_valid());
 }
 
 TEST(LogMessageTest, InlineMessage_ExactSize)
@@ -492,6 +492,17 @@ TEST(AsyncLoggerConfigTest, Validate_AllReturnValues)
     AsyncLoggerConfig zero_interval;
     zero_interval.flush_interval = std::chrono::milliseconds{0};
     EXPECT_FALSE(zero_interval.validate());
+
+    AsyncLoggerConfig zero_spin;
+    zero_spin.spin_backoff_iterations = 0;
+    EXPECT_FALSE(zero_spin.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_ValidSpinBackoff)
+{
+    AsyncLoggerConfig config;
+    config.spin_backoff_iterations = 100;
+    EXPECT_TRUE(config.validate());
 }
 
 TEST_F(AsyncLoggerTest, MessageContentVerification)
@@ -500,13 +511,13 @@ TEST_F(AsyncLoggerTest, MessageContentVerification)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
     logger->enqueue(LogLevel::Info, "UNIQUE_MARKER_abc123");
     logger->shutdown();
-    file_stream.close();
+    file_stream->close();
 
     std::ifstream in(test_log_file_);
     std::string content((std::istreambuf_iterator<char>(in)),
@@ -517,8 +528,8 @@ TEST_F(AsyncLoggerTest, MessageContentVerification)
 TEST_F(AsyncLoggerTest, DestructorFlushGuarantee)
 {
     {
-        std::ofstream file_stream(test_log_file_);
-        std::mutex log_mutex;
+        auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+        auto log_mutex = std::make_shared<std::mutex>();
         AsyncLoggerConfig config;
         config.batch_size = 10;
         config.flush_interval = std::chrono::milliseconds{50};
@@ -542,8 +553,8 @@ TEST_F(AsyncLoggerTest, BatchBoundaryBehavior)
     config.batch_size = kBatchSize;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
     for (size_t i = 0; i < kBatchSize; ++i)
@@ -551,7 +562,7 @@ TEST_F(AsyncLoggerTest, BatchBoundaryBehavior)
         logger->enqueue(LogLevel::Info, "BATCH_MSG_" + std::to_string(i));
     }
     logger->shutdown();
-    file_stream.close();
+    file_stream->close();
 
     std::ifstream in(test_log_file_);
     std::string content((std::istreambuf_iterator<char>(in)),
@@ -568,8 +579,8 @@ TEST_F(AsyncLoggerTest, ConcurrentFlushAndEnqueue)
     config.batch_size = 16;
     config.flush_interval = std::chrono::milliseconds{20};
 
-    std::ofstream file_stream(test_log_file_);
-    std::mutex log_mutex;
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
@@ -594,7 +605,7 @@ TEST_F(AsyncLoggerTest, ConcurrentFlushAndEnqueue)
     producer.join();
     flusher.join();
     logger->shutdown();
-    file_stream.close();
+    file_stream->close();
 
     std::ifstream in(test_log_file_);
     std::string content((std::istreambuf_iterator<char>(in)),
@@ -673,4 +684,52 @@ TEST(LogMessageTest, SelfMoveAssign)
     msg = std::move(moved);
 
     EXPECT_EQ(msg.message(), "self-move test");
+}
+
+TEST(LogMessageTest, IsValid_InlineMessage)
+{
+    std::string short_msg("short message");
+    LogMessage msg(LogLevel::Info, short_msg);
+    EXPECT_TRUE(msg.is_valid());
+}
+
+TEST(LogMessageTest, IsValid_OverflowMessage)
+{
+    std::string long_msg(LogMessage::MAX_INLINE_SIZE + 100, 'X');
+    LogMessage msg(LogLevel::Info, long_msg);
+    EXPECT_TRUE(msg.is_valid());
+}
+
+TEST(LogMessageTest, MaxMessageSizeTruncation)
+{
+    std::string huge_msg(DetourModKit::MAX_MESSAGE_SIZE + 1000, 'Y');
+    LogMessage msg(LogLevel::Info, huge_msg);
+    EXPECT_EQ(msg.message().size(), DetourModKit::MAX_MESSAGE_SIZE);
+    EXPECT_TRUE(msg.is_valid());
+}
+
+TEST(LogMessageTest, DefaultConstructed_IsValid)
+{
+    LogMessage msg;
+    EXPECT_TRUE(msg.is_valid());
+    EXPECT_EQ(msg.message().size(), 0u);
+}
+
+TEST(LogMessageTest, MovePreservesValidity)
+{
+    LogMessage msg1(LogLevel::Warning, "warning message");
+    ASSERT_TRUE(msg1.is_valid());
+
+    LogMessage msg2(std::move(msg1));
+    EXPECT_TRUE(msg2.is_valid());
+}
+
+TEST(LogMessageTest, MoveAssignmentPreservesValidity)
+{
+    LogMessage msg1(LogLevel::Info, "info message");
+    LogMessage msg2(LogLevel::Debug, "debug message");
+    ASSERT_TRUE(msg1.is_valid());
+
+    msg2 = std::move(msg1);
+    EXPECT_TRUE(msg2.is_valid());
 }
