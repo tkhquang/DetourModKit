@@ -1,4 +1,3 @@
-// Unit tests for Config module
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
@@ -7,14 +6,12 @@
 
 using namespace DetourModKit;
 
-// Test fixture for Config tests
 class ConfigTest : public ::testing::Test
 {
 protected:
     void SetUp() override
     {
         test_ini_file_ = std::filesystem::temp_directory_path() / "test_config.ini";
-        // Clear any previously registered items
         Config::clear_registered_items();
     }
 
@@ -30,7 +27,6 @@ protected:
     std::filesystem::path test_ini_file_;
 };
 
-// Test config item registration with int
 TEST_F(ConfigTest, RegisterInt)
 {
     int test_value = 0;
@@ -38,14 +34,10 @@ TEST_F(ConfigTest, RegisterInt)
     Config::register_int("TestSection", "TestKey", "test_int", [&test_value](int v)
                                 { test_value = v; }, 42);
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    // Check the value was loaded (should be default since file doesn't exist)
     EXPECT_EQ(test_value, 42);
 }
 
-// Test config item registration with float
 TEST_F(ConfigTest, RegisterFloat)
 {
     float test_value = 0.0f;
@@ -53,14 +45,10 @@ TEST_F(ConfigTest, RegisterFloat)
     Config::register_float("TestSection", "TestKeyFloat", "test_float", [&test_value](float v)
                                   { test_value = v; }, 3.14f);
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    // Check the value was loaded (approximate comparison)
     EXPECT_NEAR(test_value, 3.14f, 0.01f);
 }
 
-// Test config item registration with bool
 TEST_F(ConfigTest, RegisterBool)
 {
     bool test_value = false;
@@ -68,14 +56,10 @@ TEST_F(ConfigTest, RegisterBool)
     Config::register_bool("TestSection", "TestKeyBool", "test_bool", [&test_value](bool v)
                                  { test_value = v; }, true);
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    // Check the value was loaded
     EXPECT_TRUE(test_value);
 }
 
-// Test config item registration with string
 TEST_F(ConfigTest, RegisterString)
 {
     std::string test_value;
@@ -83,17 +67,12 @@ TEST_F(ConfigTest, RegisterString)
     Config::register_string("TestSection", "TestKeyString", "test_string", [&test_value](const std::string &v)
                                    { test_value = v; }, "default_value");
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    // Check the value was loaded
     EXPECT_EQ(test_value, "default_value");
 }
 
-// Test loading config from file with values
 TEST_F(ConfigTest, LoadFromFile)
 {
-    // Create a config file with values
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "TestInt=100\n";
@@ -116,17 +95,14 @@ TEST_F(ConfigTest, LoadFromFile)
     Config::register_string("TestSection", "TestString", "test_string", [&test_string](const std::string &v)
                                    { test_string = v; }, "");
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Check the values were loaded
     EXPECT_EQ(test_int, 100);
     EXPECT_NEAR(test_float, 2.5f, 0.01f);
     EXPECT_TRUE(test_bool);
     EXPECT_EQ(test_string, "loaded_value");
 }
 
-// Test log_all doesn't throw
 TEST_F(ConfigTest, LogAll)
 {
     Config::register_int("TestSection", "TestKey", "test_int", [](int) {}, 42);
@@ -134,7 +110,6 @@ TEST_F(ConfigTest, LogAll)
     EXPECT_NO_THROW(Config::log_all());
 }
 
-// Test register_key_list with default values
 TEST_F(ConfigTest, RegisterKeyList_Default)
 {
     std::vector<int> test_value;
@@ -142,20 +117,16 @@ TEST_F(ConfigTest, RegisterKeyList_Default)
     Config::register_key_list("TestSection", "TestKeys", "test_keys", [&test_value](const std::vector<int> &v)
                                     { test_value = v; }, "0x41, 0x42, 0x43");
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Check default values were loaded
     EXPECT_EQ(test_value.size(), 3u);
     EXPECT_EQ(test_value[0], 0x41);
     EXPECT_EQ(test_value[1], 0x42);
     EXPECT_EQ(test_value[2], 0x43);
 }
 
-// Test register_key_list loading from file
 TEST_F(ConfigTest, RegisterKeyList_FromFile)
 {
-    // Create a config file with key list
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "TestKeys=0x10, 0x20, 0x30 ; comment\n";
@@ -166,20 +137,16 @@ TEST_F(ConfigTest, RegisterKeyList_FromFile)
     Config::register_key_list("TestSection", "TestKeys", "test_keys", [&test_value](const std::vector<int> &v)
                                     { test_value = v; }, "0x00");
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Check values were loaded
     EXPECT_EQ(test_value.size(), 3u);
     EXPECT_EQ(test_value[0], 0x10);
     EXPECT_EQ(test_value[1], 0x20);
     EXPECT_EQ(test_value[2], 0x30);
 }
 
-// Test register_key_list with hex format 0x prefix
 TEST_F(ConfigTest, RegisterKeyList_HexFormats)
 {
-    // Create a config file with various hex formats
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "TestKeys=0x01, 0X02, 03, 4\n";
@@ -192,7 +159,6 @@ TEST_F(ConfigTest, RegisterKeyList_HexFormats)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Should parse all hex values
     EXPECT_EQ(test_value.size(), 4u);
     EXPECT_EQ(test_value[0], 0x01);
     EXPECT_EQ(test_value[1], 0x02);
@@ -200,10 +166,8 @@ TEST_F(ConfigTest, RegisterKeyList_HexFormats)
     EXPECT_EQ(test_value[3], 0x04);
 }
 
-// Test register_key_list with invalid hex values (should skip them)
 TEST_F(ConfigTest, RegisterKeyList_InvalidHex)
 {
-    // Create a config file with some invalid hex values
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "TestKeys=0x10, INVALID, 0xGG, 0x20\n";
@@ -216,16 +180,13 @@ TEST_F(ConfigTest, RegisterKeyList_InvalidHex)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Should only have valid hex values
     EXPECT_EQ(test_value.size(), 2u);
     EXPECT_EQ(test_value[0], 0x10);
     EXPECT_EQ(test_value[1], 0x20);
 }
 
-// Test register_key_list with empty string
 TEST_F(ConfigTest, RegisterKeyList_Empty)
 {
-    // Create a config file with empty key list
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "TestKeys=\n";
@@ -238,11 +199,9 @@ TEST_F(ConfigTest, RegisterKeyList_Empty)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Both default and INI are empty, so result should be empty
     EXPECT_TRUE(test_value.empty());
 }
 
-// Test clear_registered_items
 TEST_F(ConfigTest, ClearRegisteredItems)
 {
     int test_value = 0;
@@ -250,35 +209,25 @@ TEST_F(ConfigTest, ClearRegisteredItems)
     Config::register_int("TestSection", "TestKey", "test_int", [&test_value](int v)
                                 { test_value = v; }, 42);
 
-    // Load the config
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     EXPECT_EQ(test_value, 42);
 
-    // Clear all registered items
     EXPECT_NO_THROW(Config::clear_registered_items());
 
-    // Load again - should have no items to process
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    // log_all with no items should not throw
     EXPECT_NO_THROW(Config::log_all());
 }
 
-// Test clear_registered_items with no items
 TEST_F(ConfigTest, ClearRegisteredItems_Empty)
 {
-    // Should not throw when no items are registered
     EXPECT_NO_THROW(Config::clear_registered_items());
 }
 
-// Test log_all with no items
 TEST_F(ConfigTest, LogAll_Empty)
 {
-    // Should not throw when no items are registered
     EXPECT_NO_THROW(Config::log_all());
 }
 
-// Test loading from non-existent file (uses defaults)
 TEST_F(ConfigTest, LoadNonExistentFile)
 {
     int test_value = 0;
@@ -287,17 +236,12 @@ TEST_F(ConfigTest, LoadNonExistentFile)
     Config::register_int("TestSection", "TestKey", "test_int", [&test_value](int v)
                                 { test_value = v; }, 999);
 
-    // Load should not throw even if file doesn't exist
     EXPECT_NO_THROW(Config::load(non_existent_path));
-
-    // Should have default value
     EXPECT_EQ(test_value, 999);
 }
 
-// Test multiple loads (should reload values)
 TEST_F(ConfigTest, MultipleLoads)
 {
-    // Create initial config file
     {
         std::ofstream ini_file(test_ini_file_);
         ini_file << "[TestSection]\n";
@@ -310,11 +254,9 @@ TEST_F(ConfigTest, MultipleLoads)
     Config::register_int("TestSection", "TestInt", "test_int", [&test_value](int v)
                                 { test_value = v; }, 0);
 
-    // First load
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     EXPECT_EQ(test_value, 100);
 
-    // Modify config file
     {
         std::ofstream ini_file(test_ini_file_);
         ini_file << "[TestSection]\n";
@@ -322,12 +264,10 @@ TEST_F(ConfigTest, MultipleLoads)
         ini_file.close();
     }
 
-    // Second load should update the value
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     EXPECT_EQ(test_value, 200);
 }
 
-// Test multiple different config types together
 TEST_F(ConfigTest, MixedConfigTypes)
 {
     std::ofstream ini_file(test_ini_file_);
@@ -366,7 +306,6 @@ TEST_F(ConfigTest, MixedConfigTypes)
     EXPECT_EQ(keys_val.size(), 2u);
 }
 
-// Test bool parsing variations
 TEST_F(ConfigTest, BoolVariations)
 {
     std::ofstream ini_file(test_ini_file_);
@@ -392,10 +331,10 @@ TEST_F(ConfigTest, BoolVariations)
 
     EXPECT_TRUE(bool1);
     EXPECT_FALSE(bool2);
-    // Note: SimpleIni may handle 1/0 differently than true/false
+    EXPECT_TRUE(bool3);
+    EXPECT_FALSE(bool4);
 }
 
-// Test float with various formats
 TEST_F(ConfigTest, FloatFormats)
 {
     std::ofstream ini_file(test_ini_file_);
@@ -421,7 +360,6 @@ TEST_F(ConfigTest, FloatFormats)
     EXPECT_NEAR(float3, 0.0f, 0.01f);
 }
 
-// Test key list with spaces and comments
 TEST_F(ConfigTest, KeyListWithCommentsAndSpaces)
 {
     std::ofstream ini_file(test_ini_file_);
@@ -441,21 +379,18 @@ TEST_F(ConfigTest, KeyListWithCommentsAndSpaces)
     EXPECT_EQ(test_value[1], 0x20);
 }
 
-// Test empty default for key list
 TEST_F(ConfigTest, KeyListEmptyDefault)
 {
-    std::vector<int> test_value = {0x99}; // Non-empty to verify it gets cleared
+    std::vector<int> test_value = {0x99};
 
     Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
                                     { test_value = v; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Should have empty vector since default is empty and no INI value
     EXPECT_TRUE(test_value.empty());
 }
 
-// Test key list with just 0x prefix (should be skipped)
 TEST_F(ConfigTest, KeyListJustPrefix)
 {
     std::ofstream ini_file(test_ini_file_);
@@ -470,12 +405,10 @@ TEST_F(ConfigTest, KeyListJustPrefix)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Should only have the valid 0x10
     EXPECT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0], 0x10);
 }
 
-// Test multiple registrations of same type
 TEST_F(ConfigTest, MultipleRegistrationsSameType)
 {
     int val1 = 0, val2 = 0;
@@ -497,7 +430,6 @@ TEST_F(ConfigTest, MultipleRegistrationsSameType)
     EXPECT_EQ(val2, 200);
 }
 
-// Covers log_current_value for float, bool, string, and vector<int>
 TEST_F(ConfigTest, LogAll_AllTypes)
 {
     float f_val = 0.0f;
@@ -516,7 +448,6 @@ TEST_F(ConfigTest, LogAll_AllTypes)
 
     Config::load(test_ini_file_.string());
 
-    // log_all calls log_current_value for each type
     EXPECT_NO_THROW(Config::log_all());
 
     EXPECT_NEAR(f_val, 1.5f, 0.01f);
@@ -525,7 +456,7 @@ TEST_F(ConfigTest, LogAll_AllTypes)
     EXPECT_EQ(k_val.size(), 1u);
 }
 
-// Covers inline token comment in keylist load (L191 in config.cpp)
+// Tests inline comment stripping in key list values
 TEST_F(ConfigTest, KeyList_InlineTokenComment)
 {
     std::ofstream ini_file(test_ini_file_);
@@ -539,13 +470,12 @@ TEST_F(ConfigTest, KeyList_InlineTokenComment)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // "0x10, 0x20 ; inline comment" → after strip: "0x10, 0x20 " → 2 valid values
     EXPECT_EQ(test_value.size(), 2u);
     EXPECT_EQ(test_value[0], 0x10);
     EXPECT_EQ(test_value[1], 0x20);
 }
 
-// Covers empty token (consecutive commas) in keylist load (L196 in config.cpp)
+// Tests that consecutive commas produce empty tokens which are skipped
 TEST_F(ConfigTest, KeyList_EmptyTokenFromConsecutiveCommas)
 {
     std::ofstream ini_file(test_ini_file_);
@@ -559,18 +489,16 @@ TEST_F(ConfigTest, KeyList_EmptyTokenFromConsecutiveCommas)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Middle empty token is skipped
     EXPECT_EQ(test_value.size(), 2u);
     EXPECT_EQ(test_value[0], 0x10);
     EXPECT_EQ(test_value[1], 0x20);
 }
 
-// Covers stoul overflow exception in keylist load (L219/222 catch block in config.cpp)
+// Tests that hex values exceeding stoul range are gracefully skipped
 TEST_F(ConfigTest, KeyList_OverflowValue)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
-    // Value that passes hex char check but overflows stoul
     ini_file << "Keys=FFFFFFFFFFFFFFFFFFFFFFFF, 0x41\n";
     ini_file.close();
 
@@ -580,38 +508,38 @@ TEST_F(ConfigTest, KeyList_OverflowValue)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Overflow value is skipped, valid 0x41 is kept
     EXPECT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0], 0x41);
 }
 
-// Covers register_key_list default value edge cases (L335, L347, L354, L365/368 in config.cpp)
-TEST_F(ConfigTest, RegisterKeyList_DefaultEdgeCases)
+// Tests that consecutive commas in default string are skipped
+TEST_F(ConfigTest, RegisterKeyList_DefaultEmptyToken)
 {
-    // Empty token in default string (consecutive commas) → covers L347 continue
-    std::vector<int> val1;
-    Config::register_key_list("S", "K1", "k1", [&val1](const std::vector<int> &v)
-                                    { val1 = v; }, "0x41,,0x42");
+    std::vector<int> val;
+    Config::register_key_list("S", "K1", "k1", [&val](const std::vector<int> &v)
+                                    { val = v; }, "0x41,,0x42");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val1.size(), 2u);
+    EXPECT_EQ(val.size(), 2u);
+}
 
-    Config::clear_registered_items();
-
-    // Bare "0x" in default → covers L354 empty hex_part continue
-    std::vector<int> val2;
-    Config::register_key_list("S", "K2", "k2", [&val2](const std::vector<int> &v)
-                                    { val2 = v; }, "0x, 0x42");
+// Tests that bare "0x" prefix in default string is skipped
+TEST_F(ConfigTest, RegisterKeyList_DefaultBarePrefix)
+{
+    std::vector<int> val;
+    Config::register_key_list("S", "K2", "k2", [&val](const std::vector<int> &v)
+                                    { val = v; }, "0x, 0x42");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val2.size(), 1u);
-    EXPECT_EQ(val2[0], 0x42);
+    EXPECT_EQ(val.size(), 1u);
+    EXPECT_EQ(val[0], 0x42);
+}
 
-    Config::clear_registered_items();
-
-    // Overflow in default → covers L365/368 catch block
-    std::vector<int> val3;
-    Config::register_key_list("S", "K3", "k3", [&val3](const std::vector<int> &v)
-                                    { val3 = v; }, "FFFFFFFFFFFFFFFFFFFFFFFF, 0x43");
+// Tests that overflow values in default string are gracefully skipped
+TEST_F(ConfigTest, RegisterKeyList_DefaultOverflow)
+{
+    std::vector<int> val;
+    Config::register_key_list("S", "K3", "k3", [&val](const std::vector<int> &v)
+                                    { val = v; }, "FFFFFFFFFFFFFFFFFFFFFFFF, 0x43");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val3.size(), 1u);
-    EXPECT_EQ(val3[0], 0x43);
+    EXPECT_EQ(val.size(), 1u);
+    EXPECT_EQ(val[0], 0x43);
 }
