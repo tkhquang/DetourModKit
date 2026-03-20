@@ -669,7 +669,8 @@ TEST(LogMessageTest, SelfMoveAssign)
     LogMessage msg(LogLevel::Info, "self-move test");
     ASSERT_EQ(msg.message(), "self-move test");
 
-    msg = std::move(msg);
+    LogMessage moved = std::move(msg);
+    msg = std::move(moved);
 
     EXPECT_EQ(msg.message(), "self-move test");
 }
