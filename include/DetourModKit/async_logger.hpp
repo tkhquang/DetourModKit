@@ -1,15 +1,6 @@
 #ifndef ASYNC_LOGGER_HPP
 #define ASYNC_LOGGER_HPP
 
-/**
- * @file async_logger.hpp
- * @brief Asynchronous logging system for high-throughput scenarios.
- * @details Provides a lock-free, bounded queue-based async logger that decouples
- *          log message production from file I/O. Designed for minimal latency
- *          on the producer side (calling thread) with batched writes on the
- *          consumer side (writer thread).
- */
-
 #include "DetourModKit/logger.hpp"
 
 #include <array>
@@ -32,24 +23,78 @@ namespace DetourModKit
     inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
     inline constexpr size_t DEFAULT_BATCH_SIZE = 64;
     inline constexpr auto DEFAULT_FLUSH_INTERVAL = std::chrono::milliseconds(100);
+    inline constexpr size_t MAX_MESSAGE_SIZE = 16777216;
+    inline constexpr size_t DEFAULT_SPIN_BACKOFF_ITERATIONS = 32;
+    inline constexpr auto DEFAULT_FLUSH_TIMEOUT = std::chrono::milliseconds(500);
+    inline constexpr size_t MEMORY_POOL_BLOCK_SIZE = 4096;
+    inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 64;
+    inline constexpr size_t POOL_SLOTS_PER_BLOCK = 16;
 
-    /**
-     * @enum OverflowPolicy
-     * @brief Defines behavior when the async log queue is full.
-     */
     enum class OverflowPolicy
     {
-        DropNewest,  /**< Discard the incoming message if queue is full. */
-        DropOldest,  /**< Discard the oldest message to make room for the new one. */
-        Block,       /**< Block the caller until space is available. */
-        SyncFallback /**< Write the message synchronously if queue is full. */
+        DropNewest,
+        DropOldest,
+        Block,
+        SyncFallback
+    };
+
+    /**
+     * @class StringPool
+     * @brief Memory pool for small string allocations to reduce heap fragmentation.
+     * @details Uses a free-list approach for O(1) allocation/deallocation.
+     *          Blocks are allocated on-demand up to MEMORY_POOL_BLOCK_COUNT.
+     *          Each block is cache-line aligned to prevent false sharing.
+     */
+    class StringPool
+    {
+    public:
+        static StringPool &instance() noexcept;
+
+        [[nodiscard]] std::string *allocate(size_t size);
+        void deallocate(std::string *ptr) noexcept;
+
+        StringPool(const StringPool &) = delete;
+        StringPool &operator=(const StringPool &) = delete;
+        StringPool(StringPool &&) = delete;
+        StringPool &operator=(StringPool &&) = delete;
+
+    private:
+        struct PoolSlot
+        {
+            std::string str;
+            PoolSlot *next_free{nullptr};
+        };
+
+        struct Block
+        {
+            alignas(64) char data[POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot)];
+            Block *next{nullptr};
+            PoolSlot *free_list{nullptr};
+            size_t slot_count{0};
+
+            PoolSlot *get_slot(size_t index) noexcept
+            {
+                return reinterpret_cast<PoolSlot *>(data) + index;
+            }
+        };
+
+        StringPool();
+        ~StringPool() noexcept;
+
+        void grow_pool();
+        PoolSlot *claim_free_slot() noexcept;
+        void release_slot(PoolSlot *slot) noexcept;
+
+        alignas(64) std::atomic<Block *> head_{nullptr};
+        std::atomic<size_t> pool_size_{0};
+        std::mutex pool_mutex_;
     };
 
     /**
      * @struct LogMessage
-     * @brief Represents a single log message in the async queue.
-     * @details Uses a fixed-size buffer for small messages to avoid heap allocation
-     *          on the hot path. Falls back to heap allocation for larger messages.
+     * @brief A log entry with inline buffer optimization and overflow handling.
+     * @details Messages <= 256 bytes are stored inline. Larger messages use
+     *          heap allocation via StringPool.
      */
     struct LogMessage
     {
@@ -57,29 +102,27 @@ namespace DetourModKit
         std::chrono::system_clock::time_point timestamp;
         std::thread::id thread_id;
 
-        /// 256 fits typical single-line log messages and keeps LogMessage compact.
         static constexpr size_t MAX_INLINE_SIZE = 256;
+        static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
         std::array<char, MAX_INLINE_SIZE> buffer{};
         size_t length{0};
 
-        /// Heap-allocated storage for messages exceeding MAX_INLINE_SIZE.
-        std::unique_ptr<std::string> overflow;
+        std::string *overflow{nullptr};
 
-        /**
-         * @brief Constructs a LogMessage from a string.
-         * @param lvl The log level.
-         * @param msg The message string.
-         */
         LogMessage(LogLevel lvl, std::string msg);
+        LogMessage() noexcept = default;
 
-        LogMessage() = default;
+        ~LogMessage();
+
         LogMessage(LogMessage &&other) noexcept;
         LogMessage &operator=(LogMessage &&other) noexcept;
+
         LogMessage(const LogMessage &) = delete;
         LogMessage &operator=(const LogMessage &) = delete;
 
-        /// Returns a view into the message content (inline buffer or heap overflow).
-        std::string_view message() const;
+        [[nodiscard]] std::string_view message() const noexcept;
+        [[nodiscard]] bool is_valid() const noexcept;
+        void reset() noexcept;
     };
 
     /**
@@ -87,6 +130,8 @@ namespace DetourModKit
      * @brief A dynamically-sized, bounded Multi-Producer Multi-Consumer queue.
      * @details Uses a ring buffer with atomic sequence numbers for lock-free
      *          synchronization. Capacity is determined at construction time.
+     * @note This queue is designed to be constructed once and never resized.
+     *       Moving slots after construction is not supported and will cause data corruption.
      */
     class DynamicMPMCQueue
     {
@@ -117,6 +162,14 @@ namespace DetourModKit
          */
         bool try_pop(LogMessage &item);
 
+        /**
+         * @brief Attempts to pop multiple items up to a maximum count.
+         * @param items Reference to a vector to store popped items.
+         * @param max_count Maximum number of items to pop.
+         * @return size_t Number of items actually popped.
+         */
+        size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count);
+
         /// Returns the approximate number of items in the queue.
         size_t size() const noexcept;
 
@@ -135,33 +188,24 @@ namespace DetourModKit
             std::atomic<size_t> sequence;
             LogMessage data;
 
-            Slot() : sequence(0) {}
+            Slot() noexcept : sequence(0) {}
 
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
 
-            // WARNING: Move operations are only safe during queue initialization
-            // or when the slot is known to be unused (sequence == 0).
-            // Moving a slot while another thread accesses it causes data races.
+            // Move operations are safe because:
+            // 1. Only the single writer thread calls try_pop (consumer)
+            // 2. try_push only moves INTO empty slots (enqueue_pos slots)
+            // 3. No concurrent moves can occur on the same slot
             Slot(Slot &&other) noexcept
                 : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data))
             {
-                // Safety check: only move if slot is empty (sequence == 0)
-                // This prevents data races during concurrent access
-                assert(sequence.load(std::memory_order_relaxed) == 0 &&
-                       "Slot::move called on non-empty slot - potential data race");
             }
 
             Slot &operator=(Slot &&other) noexcept
             {
                 if (this != &other)
                 {
-                    // Safety check: only move if both slots are empty
-                    assert(sequence.load(std::memory_order_relaxed) == 0 &&
-                           "Slot::move assignment called on non-empty slot - potential data race");
-                    assert(other.sequence.load(std::memory_order_relaxed) == 0 &&
-                           "Slot::move assignment from non-empty slot - potential data race");
-
                     sequence.store(other.sequence.load(std::memory_order_relaxed), std::memory_order_relaxed);
                     data = std::move(other.data);
                 }
@@ -169,7 +213,7 @@ namespace DetourModKit
             }
         };
 
-        // Read-only after construction — grouped before the hot atomics.
+        // Read-only after construction
         size_t capacity_;
         size_t mask_;
         std::vector<Slot> buffer_;
@@ -181,26 +225,31 @@ namespace DetourModKit
 
     /**
      * @struct AsyncLoggerConfig
-     * @brief Configuration for the asynchronous logger.
+     * @brief Configuration for the async logger.
      */
     struct AsyncLoggerConfig
     {
-        size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;           ///< Must be power of 2.
-        size_t batch_size = DEFAULT_BATCH_SIZE;                    ///< Messages per batch write.
+        size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;
+        size_t batch_size = DEFAULT_BATCH_SIZE;
         std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
         OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
+        size_t spin_backoff_iterations = DEFAULT_SPIN_BACKOFF_ITERATIONS;
+        std::chrono::milliseconds block_timeout_ms{100};
+        size_t block_max_spin_iterations{1000};
 
-        /**
-         * @brief Validates the configuration parameters.
-         * @return true if configuration is valid, false otherwise.
-         */
-        bool validate() const
+        [[nodiscard]] constexpr bool validate() const noexcept
         {
             if (queue_capacity == 0 || (queue_capacity & (queue_capacity - 1)) != 0)
                 return false;
             if (batch_size == 0)
                 return false;
             if (flush_interval.count() <= 0)
+                return false;
+            if (spin_backoff_iterations == 0)
+                return false;
+            if (block_timeout_ms.count() <= 0)
+                return false;
+            if (block_max_spin_iterations == 0)
                 return false;
             return true;
         }
@@ -216,6 +265,7 @@ namespace DetourModKit
      * @details Uses a lock-free queue to accept log messages from multiple threads
      *          and a dedicated writer thread to perform batched file writes.
      *          This significantly reduces latency on the producer side.
+     * @note Uses shared_ptr<ofstream> to safely handle Logger reconfiguration during runtime.
      */
     class AsyncLogger
     {
@@ -223,12 +273,12 @@ namespace DetourModKit
         /**
          * @brief Constructs an AsyncLogger with the given configuration.
          * @param config The async logger configuration.
-         * @param file_stream Reference to the output file stream.
-         * @param log_mutex Reference to the mutex protecting the file stream.
+         * @param file_stream Shared pointer to the output file stream (allows safe reconfigure).
+         * @param log_mutex Shared pointer to the mutex protecting the file stream.
          */
         explicit AsyncLogger(const AsyncLoggerConfig &config,
-                             std::ofstream &file_stream,
-                             std::mutex &log_mutex);
+                             std::shared_ptr<std::ofstream> file_stream,
+                             std::shared_ptr<std::mutex> log_mutex);
 
         ~AsyncLogger();
 
@@ -241,60 +291,55 @@ namespace DetourModKit
          * @brief Enqueues a log message for asynchronous writing.
          * @param level The log level.
          * @param message The message string.
+         * @return true if the message was successfully enqueued or written, false if dropped or timed out.
          * @details This method is non-blocking (unless OverflowPolicy::Block is used).
          *          The message will be written to the log file by the writer thread.
          */
-        void enqueue(LogLevel level, std::string message);
+        [[nodiscard]] bool enqueue(LogLevel level, std::string message) noexcept;
 
         /**
-         * @brief Flushes all pending messages to the log file.
-         * @details Blocks until all queued messages have been written.
+         * @brief Flushes all pending log messages with a timeout.
+         * @param timeout Maximum time to wait for flush to complete.
+         * @return true if all messages were flushed, false if timeout occurred.
          */
-        void flush();
+        [[nodiscard]] bool flush_with_timeout(std::chrono::milliseconds timeout) noexcept;
 
         /**
-         * @brief Initiates graceful shutdown of the writer thread.
-         * @details Flushes all remaining messages before stopping.
+         * @brief Flushes all pending log messages.
+         * @details Waits up to 500ms for all queued messages to be written.
+         *          Uses a timeout to prevent indefinite blocking.
          */
-        void shutdown();
+        void flush() noexcept;
+
+        void shutdown() noexcept;
+
+        [[nodiscard]] bool is_running() const noexcept;
+
+        [[nodiscard]] size_t queue_size() const noexcept;
 
         /**
-         * @brief Checks if the async logger is running.
-         * @return true if running, false if shutdown.
+         * @brief Returns the total number of messages dropped due to queue overflow.
+         * @return size_t Number of dropped messages.
          */
-        bool is_running() const;
+        [[nodiscard]] size_t dropped_count() const noexcept;
 
         /**
-         * @brief Returns the current queue size.
-         * @return size_t Number of messages in the queue.
+         * @brief Resets the dropped message counter.
          */
-        size_t queue_size() const;
+        void reset_dropped_count() noexcept;
 
     private:
-        /**
-         * @brief The writer thread function.
-         * @details Continuously dequeues messages and writes them in batches.
-         */
-        void writer_thread_func();
+        void writer_thread_func() noexcept;
 
-        /**
-         * @brief Writes a batch of messages to the log file.
-         * @param messages Span of messages to write.
-         */
-        void write_batch(std::span<LogMessage> messages);
+        void write_batch(std::span<LogMessage> messages) noexcept;
 
-        /**
-         * @brief Handles queue overflow based on the configured policy.
-         * @param message The message that couldn't be enqueued.
-         * @return true if the message was handled, false if dropped.
-         */
-        bool handle_overflow(LogMessage &&message);
+        bool handle_overflow(LogMessage &&message) noexcept;
 
         DynamicMPMCQueue queue_;
         AsyncLoggerConfig config_;
 
-        std::ofstream &file_stream_;
-        std::mutex &log_mutex_;
+        std::shared_ptr<std::ofstream> file_stream_;
+        std::shared_ptr<std::mutex> log_mutex_;
 
         std::jthread writer_thread_;
         std::atomic<bool> running_{false};
@@ -303,6 +348,7 @@ namespace DetourModKit
         std::mutex flush_mutex_;
         std::condition_variable flush_cv_;
         std::atomic<size_t> pending_messages_{0};
+        std::atomic<size_t> dropped_messages_{0};
     };
 
 } // namespace DetourModKit

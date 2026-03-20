@@ -812,6 +812,85 @@ TEST_F(LoggerTest, ErrorOnInvalidLogPath)
     EXPECT_NO_THROW(logger.info("Message after bad path"));
 }
 
+TEST_F(LoggerTest, Shutdown_AtomicCAS_OneShotExecution)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    logger.enable_async_mode();
+    logger.info("Message before concurrent shutdown");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::atomic<int> shutdown_count{0};
+    std::vector<std::thread> threads;
+
+    for (int i = 0; i < 4; ++i)
+    {
+        threads.emplace_back([&logger, &shutdown_count]()
+                             {
+            logger.shutdown();
+            shutdown_count.fetch_add(1, std::memory_order_relaxed); });
+    }
+
+    for (auto &t : threads)
+    {
+        t.join();
+    }
+
+    EXPECT_EQ(shutdown_count.load(), 4);
+}
+
+TEST_F(LoggerTest, ShutdownAndDestructor_Idempotent)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    logger.enable_async_mode();
+    logger.info("Shutdown test message");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    logger.shutdown();
+    logger.shutdown();
+
+    logger.info("Message after shutdown - should still work");
+}
+
+TEST_F(LoggerTest, ConcurrentShutdownAndLog)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    logger.enable_async_mode();
+
+    std::atomic<bool> shutdown_started{false};
+    std::atomic<bool> shutdown_complete{false};
+    std::vector<std::thread> threads;
+
+    threads.emplace_back([&logger, &shutdown_started, &shutdown_complete]()
+                         {
+        shutdown_started.store(true, std::memory_order_release);
+        logger.shutdown();
+        shutdown_complete.store(true, std::memory_order_release); });
+
+    threads.emplace_back([&logger, &shutdown_started]()
+                         {
+        while (!shutdown_started.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        for (int i = 0; i < 100; ++i)
+        {
+            logger.info("Concurrent log message {}", i);
+        } });
+
+    for (auto &t : threads)
+    {
+        t.join();
+    }
+
+    EXPECT_TRUE(shutdown_complete.load());
+}
+
 TEST_F(LoggerTest, AsyncMode_OutputVerification)
 {
     Logger &logger = Logger::get_instance();

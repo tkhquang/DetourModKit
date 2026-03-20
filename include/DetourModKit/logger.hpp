@@ -251,14 +251,15 @@ namespace DetourModKit
         std::string log_file_name_;
         std::string timestamp_format_;
 
-        std::ofstream log_file_stream_;
+        std::shared_ptr<std::ofstream> log_file_stream_ptr_;
+        std::shared_ptr<std::mutex> log_mutex_ptr_;
         std::atomic<LogLevel> current_log_level_{LogLevel::Info};
-        std::mutex log_access_mutex_;
-        bool shutdown_called_{false};
+        std::atomic<bool> shutdown_called_{false};
 
         // Async logging support (forward declared)
         std::unique_ptr<AsyncLogger> async_logger_;
         std::atomic<bool> async_mode_enabled_{false};
+        std::mutex async_mutex_;
     };
 } // namespace DetourModKit
 

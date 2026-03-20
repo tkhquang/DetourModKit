@@ -126,6 +126,10 @@ namespace MemoryUtilsCacheInternal
     std::atomic<unsigned int> s_configuredExpiryMs{0};
     std::atomic<bool> s_cacheInitialized{false};
 
+    // Global cache state mutex to serialize init/clear/shutdown transitions
+    // Protects against concurrent state changes that could leave vectors in invalid state
+    std::mutex s_cacheStateMutex;
+
     // Background cleanup thread
     std::atomic<bool> s_cleanupThreadRunning{false};
     std::thread s_cleanupThread;
@@ -377,10 +381,19 @@ namespace MemoryUtilsCacheInternal
      * @details Called by the background cleanup thread or on-demand timer.
      * @param force Force cleanup regardless of timing.
      */
-    void cleanup_expired_entries(bool) noexcept
+    void cleanup_expired_entries(bool force) noexcept
     {
         if (s_cacheShards.empty())
             return;
+
+        // Background cleanup thread passes force=true and must hold state mutex
+        // to prevent racing with shutdown_cache() which clears vectors.
+        // On-demand cleanup passes force=false and is protected by cache initialization.
+        std::unique_lock<std::mutex> lock;
+        if (force)
+        {
+            lock = std::unique_lock<std::mutex>(s_cacheStateMutex);
+        }
 
         const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
         if (shard_count == 0)
@@ -445,7 +458,7 @@ namespace MemoryUtilsCacheInternal
             if (!s_cleanupThreadRunning.load(std::memory_order_acquire))
                 break;
 
-            cleanup_expired_entries(false);
+            cleanup_expired_entries(true); // force=true to hold state mutex during vector iteration
             s_cleanupRequested.store(false, std::memory_order_relaxed);
         }
     }
@@ -698,6 +711,10 @@ namespace MemoryUtilsCacheInternal
 
 bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
 {
+    // Hold state mutex to prevent concurrent clear_cache or shutdown_cache
+    // This serializes init/clear/shutdown transitions to ensure vectors are not accessed while being resized or cleared
+    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
+
     // Fast path: already initialized
     if (MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
         return true;
@@ -735,14 +752,44 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
 
 void DetourModKit::Memory::clear_cache()
 {
+    // Hold state mutex to prevent concurrent shutdown and serialize with cleanup thread
+    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
+
+    // Check if cache is still valid (not shutdown during lock acquisition)
+    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+        return;
+
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    if (shard_count == 0)
+        return;
+
+    // Signal cleanup thread to pause and prevent interference during clear
+    // This ensures no concurrent access to shard mutexes while we clear
+    MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(false, std::memory_order_relaxed);
+
     for (size_t i = 0; i < shard_count; ++i)
     {
-        std::unique_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
-        MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
-        MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
-        MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
+        auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
+        if (mutex_ptr)
+        {
+            // Use try_lock to avoid blocking if mutex is in bad state (MinGW compatibility)
+            std::unique_lock<std::shared_mutex> lock(*mutex_ptr, std::try_to_lock);
+            if (lock.owns_lock())
+            {
+                MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
+                MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
+                MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
+            }
+            else
+            {
+                // Could not acquire lock - reset in-flight flag to unblock any waiters
+                MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
+            }
+        }
     }
+
+    // Restart cleanup thread
+    MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(true, std::memory_order_release);
 
     MemoryUtilsCacheInternal::s_stats.cacheHits.store(0, std::memory_order_relaxed);
     MemoryUtilsCacheInternal::s_stats.cacheMisses.store(0, std::memory_order_relaxed);
@@ -757,6 +804,9 @@ void DetourModKit::Memory::clear_cache()
 
 void DetourModKit::Memory::shutdown_cache()
 {
+    // Acquire state lock first to prevent concurrent clear_cache
+    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
+
     // Signal cleanup thread to stop first
     MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(false, std::memory_order_release);
     MemoryUtilsCacheInternal::s_cleanupCv.notify_one();
