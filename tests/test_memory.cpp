@@ -272,6 +272,27 @@ TEST_F(MemoryTest, CacheAfterClear)
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 }
 
+TEST_F(MemoryTest, CacheClearStressTest)
+{
+    char buffer[100] = {0};
+
+    for (int i = 0; i < 10; ++i)
+    {
+        EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+        Memory::clear_cache();
+    }
+}
+
+TEST_F(MemoryTest, CacheInitClearCycle)
+{
+    for (int i = 0; i < 5; ++i)
+    {
+        Memory::shutdown_cache();
+        EXPECT_TRUE(Memory::init_cache());
+        Memory::clear_cache();
+    }
+}
+
 TEST_F(MemoryTest, write_bytes_DataIntegrity)
 {
     std::vector<std::byte> target(64);
