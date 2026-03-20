@@ -125,10 +125,23 @@ namespace DetourModKit
     {
         if (!shutdown_called_)
         {
-            if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
+            bool async_enabled = false;
+            std::unique_ptr<AsyncLogger> local_logger;
+
             {
-                async_logger_->shutdown();
-                async_logger_.reset();
+                std::lock_guard<std::mutex> lock(async_mutex_);
+                async_enabled = async_mode_enabled_.load(std::memory_order_acquire);
+                if (async_enabled && async_logger_)
+                {
+                    local_logger = std::move(async_logger_);
+                    async_logger_.reset();
+                    async_mode_enabled_.store(false, std::memory_order_release);
+                }
+            }
+
+            if (local_logger)
+            {
+                local_logger->shutdown();
             }
 
             if (log_file_stream_ptr_->is_open())
@@ -146,10 +159,21 @@ namespace DetourModKit
             return;
         shutdown_called_ = true;
 
-        if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
+        std::unique_ptr<AsyncLogger> local_logger;
+
         {
-            async_logger_->shutdown();
-            async_logger_.reset();
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
+            {
+                local_logger = std::move(async_logger_);
+                async_logger_.reset();
+                async_mode_enabled_.store(false, std::memory_order_release);
+            }
+        }
+
+        if (local_logger)
+        {
+            local_logger->shutdown();
         }
 
         if (log_file_stream_ptr_->is_open())
@@ -180,9 +204,21 @@ namespace DetourModKit
     {
         if (level >= current_log_level_.load(std::memory_order_acquire))
         {
-            if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
+            bool async_enabled = false;
+            AsyncLogger *local_logger = nullptr;
+
             {
-                async_logger_->enqueue(level, message);
+                std::lock_guard<std::mutex> lock(async_mutex_);
+                async_enabled = async_mode_enabled_.load(std::memory_order_acquire);
+                if (async_enabled)
+                {
+                    local_logger = async_logger_.get();
+                }
+            }
+
+            if (local_logger)
+            {
+                static_cast<void>(local_logger->enqueue(level, message));
                 return;
             }
 
@@ -270,7 +306,7 @@ namespace DetourModKit
             }
             if (path_len == MAX_PATH && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
             {
-                throw std::runtime_error("GetModuleFileNameA buffer too small for logger's module path.");
+                throw std::runtime_error("GetModuleHandleEx buffer too small for logger's module path.");
             }
 
             std::filesystem::path actual_module_path(module_full_path_buffer);
@@ -294,27 +330,51 @@ namespace DetourModKit
 
     void Logger::enable_async_mode(const AsyncLoggerConfig &config)
     {
-        if (async_mode_enabled_.load(std::memory_order_acquire))
+        bool should_log_error = false;
+        bool should_log_success = false;
+        std::string error_msg;
+        size_t queue_cap = 0;
+        size_t batch_sz = 0;
+
         {
-            return;
+            std::lock_guard<std::mutex> lock(async_mutex_);
+
+            if (async_mode_enabled_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+
+            if (!log_file_stream_ptr_->is_open())
+            {
+                should_log_error = true;
+                error_msg = "Cannot enable async mode: log file is not open.";
+            }
+            else
+            {
+                try
+                {
+                    async_logger_ = std::make_unique<AsyncLogger>(config, log_file_stream_ptr_, log_mutex_ptr_);
+                    async_mode_enabled_.store(true, std::memory_order_release);
+                    should_log_success = true;
+                    queue_cap = config.queue_capacity;
+                    batch_sz = config.batch_size;
+                }
+                catch (const std::exception &e)
+                {
+                    should_log_error = true;
+                    error_msg = std::string("Failed to enable async mode: ") + e.what();
+                }
+            }
         }
 
-        if (!log_file_stream_ptr_->is_open())
+        if (should_log_error)
         {
-            log(LogLevel::Error, "Cannot enable async mode: log file is not open.");
-            return;
+            log(LogLevel::Error, "{}", error_msg);
         }
-
-        try
+        else if (should_log_success)
         {
-            async_logger_ = std::make_unique<AsyncLogger>(config, log_file_stream_ptr_, log_mutex_ptr_);
-            async_mode_enabled_.store(true, std::memory_order_release);
             log(LogLevel::Info, "Async logging mode enabled. Queue capacity: {}, Batch size: {}",
-                config.queue_capacity, config.batch_size);
-        }
-        catch (const std::exception &e)
-        {
-            log(LogLevel::Error, "Failed to enable async mode: {}", e.what());
+                queue_cap, batch_sz);
         }
     }
 
@@ -325,19 +385,30 @@ namespace DetourModKit
 
     void Logger::disable_async_mode()
     {
-        if (!async_mode_enabled_.load(std::memory_order_acquire))
+        bool should_log = false;
+
         {
-            return;
+            std::lock_guard<std::mutex> lock(async_mutex_);
+
+            if (!async_mode_enabled_.load(std::memory_order_acquire))
+            {
+                return;
+            }
+
+            if (async_logger_)
+            {
+                async_logger_->shutdown();
+                async_logger_.reset();
+            }
+
+            async_mode_enabled_.store(false, std::memory_order_release);
+            should_log = true;
         }
 
-        if (async_logger_)
+        if (should_log)
         {
-            async_logger_->shutdown();
-            async_logger_.reset();
+            log(LogLevel::Info, "Async logging mode disabled. Switched to synchronous mode.");
         }
-
-        async_mode_enabled_.store(false, std::memory_order_release);
-        log(LogLevel::Info, "Async logging mode disabled. Switched to synchronous mode.");
     }
 
     bool Logger::is_async_mode_enabled() const
@@ -347,9 +418,19 @@ namespace DetourModKit
 
     void Logger::flush()
     {
-        if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
+        AsyncLogger *local_logger = nullptr;
+
         {
-            async_logger_->flush();
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            if (async_mode_enabled_.load(std::memory_order_acquire))
+            {
+                local_logger = async_logger_.get();
+            }
+        }
+
+        if (local_logger)
+        {
+            local_logger->flush();
         }
         else
         {

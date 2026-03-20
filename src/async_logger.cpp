@@ -14,7 +14,7 @@ namespace DetourModKit
     // LogMessage Implementation
     // ============================================================================
 
-    LogMessage::LogMessage(LogLevel lvl, std::string msg) noexcept
+    LogMessage::LogMessage(LogLevel lvl, std::string msg)
         : level(lvl),
           timestamp(std::chrono::system_clock::now()),
           thread_id(std::this_thread::get_id())
@@ -34,7 +34,14 @@ namespace DetourModKit
         else
         {
             overflow = std::make_unique<std::string>(std::move(msg));
-            length = overflow->size();
+            if (overflow)
+            {
+                length = overflow->size();
+            }
+            else
+            {
+                length = 0;
+            }
         }
     }
 
@@ -176,6 +183,21 @@ namespace DetourModKit
           file_stream_(std::move(file_stream)),
           log_mutex_(std::move(log_mutex))
     {
+        if (!config_.validate())
+        {
+            throw std::invalid_argument("Invalid AsyncLoggerConfig: queue_capacity must be power of 2, batch_size > 0, flush_interval > 0, spin_backoff_iterations > 0");
+        }
+
+        if (!file_stream_)
+        {
+            throw std::invalid_argument("file_stream cannot be null");
+        }
+
+        if (!log_mutex_)
+        {
+            throw std::invalid_argument("log_mutex cannot be null");
+        }
+
         running_.store(true, std::memory_order_release);
         writer_thread_ = std::jthread(&AsyncLogger::writer_thread_func, this);
     }
@@ -185,7 +207,7 @@ namespace DetourModKit
         shutdown();
     }
 
-    void AsyncLogger::enqueue(LogLevel level, std::string message) noexcept
+    bool AsyncLogger::enqueue(LogLevel level, std::string message) noexcept
     {
         if (shutdown_requested_.load(std::memory_order_acquire))
         {
@@ -207,7 +229,7 @@ namespace DetourModKit
                               << message << '\n';
                 file_stream_->flush();
             }
-            return;
+            return true;
         }
 
         LogMessage msg(level, std::move(message));
@@ -215,10 +237,12 @@ namespace DetourModKit
         if (queue_.try_push(msg))
         {
             pending_messages_.fetch_add(1, std::memory_order_relaxed);
+            flush_cv_.notify_one();
+            return true;
         }
         else
         {
-            handle_overflow(std::move(msg));
+            return handle_overflow(std::move(msg));
         }
     }
 
@@ -278,8 +302,9 @@ namespace DetourModKit
 
             if (!batch.empty())
             {
-                pending_messages_.fetch_sub(batch.size(), std::memory_order_relaxed);
                 write_batch(batch);
+                const size_t batch_size = batch.size();
+                pending_messages_.fetch_sub(batch_size, std::memory_order_relaxed);
                 flush_cv_.notify_all();
                 last_flush = std::chrono::steady_clock::now();
             }
@@ -358,6 +383,7 @@ namespace DetourModKit
                 if (queue_.try_push(message))
                 {
                     pending_messages_.fetch_add(1, std::memory_order_relaxed);
+                    flush_cv_.notify_one();
                     return true;
                 }
             }
@@ -378,6 +404,7 @@ namespace DetourModKit
                 if (queue_.try_push(message))
                 {
                     pending_messages_.fetch_add(1, std::memory_order_relaxed);
+                    flush_cv_.notify_one();
                     return true;
                 }
 

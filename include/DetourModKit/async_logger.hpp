@@ -66,7 +66,7 @@ namespace DetourModKit
 
         std::unique_ptr<std::string> overflow;
 
-        LogMessage(LogLevel lvl, std::string msg) noexcept;
+        LogMessage(LogLevel lvl, std::string msg);
 
         LogMessage() noexcept = default;
         LogMessage(LogMessage &&other) noexcept = default;
@@ -231,10 +231,11 @@ namespace DetourModKit
          * @brief Enqueues a log message for asynchronous writing.
          * @param level The log level.
          * @param message The message string.
+         * @return true if the message was successfully enqueued or written, false if dropped or timed out.
          * @details This method is non-blocking (unless OverflowPolicy::Block is used).
          *          The message will be written to the log file by the writer thread.
          */
-        void enqueue(LogLevel level, std::string message) noexcept;
+        [[nodiscard]] bool enqueue(LogLevel level, std::string message) noexcept;
 
         void flush() noexcept;
 
