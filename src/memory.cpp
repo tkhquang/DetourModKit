@@ -4,7 +4,10 @@
  *
  * Provides functions for checking memory readability and writability, writing bytes to memory,
  * and managing a memory region cache for performance optimization.
- * The cache mechanism is internal to this translation unit.
+ * The cache uses sharded locks with shared_mutex for high-concurrency read-heavy access.
+ * Uses timestamp-keyed map for O(log n) LRU eviction instead of O(n) scan.
+ * In-flight query coalescing prevents cache stampede under high concurrency.
+ * On-demand cleanup handles expired entry removal to avoid polluting the miss path.
  */
 
 #include "DetourModKit/memory.hpp"
@@ -12,8 +15,10 @@
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>
+#include <shared_mutex>
+#include <unordered_map>
+#include <map>
 #include <vector>
-#include <mutex>
 #include <chrono>
 #include <atomic>
 #include <sstream>
@@ -21,8 +26,20 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cstddef>
+#include <thread>
+#include <condition_variable>
 
 using namespace DetourModKit;
+
+// Permission flags as constexpr for compile-time constants
+namespace CachePermissions
+{
+    constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    constexpr DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
+                                             PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
+}
 
 // Anonymous namespace for internal helpers and storage
 namespace
@@ -30,257 +47,784 @@ namespace
     /**
      * @struct CachedMemoryRegionInfo
      * @brief Structure to hold cached memory region information.
-     * @details Internal structure for the memory_utils cache implementation.
+     * @details Uses timestamp for thread-safe updates and reduced memory footprint.
      */
     struct CachedMemoryRegionInfo
     {
-        uintptr_t baseAddress;                           /**< Base address of the memory region. */
-        size_t regionSize;                               /**< Size of the memory region. */
-        DWORD protection;                                /**< Protection flags of the region (e.g., PAGE_READWRITE). */
-        std::chrono::steady_clock::time_point timestamp; /**< Timestamp of when this entry was last validated/updated. */
-        bool valid;                                      /**< True if this cache entry is currently valid. */
+        uintptr_t baseAddress;
+        size_t regionSize;
+        DWORD protection;
+        uint64_t timestamp_ns;
+        uint64_t lru_key;
+        bool valid;
 
-        /**
-         * @brief Default constructor initializing an invalid entry.
-         */
         CachedMemoryRegionInfo()
-            : baseAddress(0), regionSize(0), protection(0), valid(false) {}
+            : baseAddress(0), regionSize(0), protection(0), timestamp_ns(0), lru_key(0), valid(false)
+        {
+        }
     };
 
-    // Permission flags as constexpr for compile-time constants and single definition
-    constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    constexpr DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
-                                             PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    /**
+     * @struct CacheShard
+     * @brief Individual cache shard with O(log n) lookup via timestamp-keyed map and O(1) LRU.
+     * @details Uses std::map keyed by timestamp for efficient oldest-entry eviction.
+     *          shared_mutex allows multiple concurrent readers.
+     *          in_flight flag prevents cache stampede by coalescing concurrent VirtualQuery calls.
+     *          Mutex is stored separately to allow vector resize operations.
+     */
+    struct CacheShard
+    {
+        // Map from baseAddress -> CachedMemoryRegionInfo for O(log n) lookup by address
+        std::unordered_map<uintptr_t, CachedMemoryRegionInfo> entries;
+        // Map from composite_key -> baseAddress for O(log n) oldest-entry lookup (LRU)
+        // composite_key = (timestamp_ns << 32) | entry_counter to guarantee uniqueness
+        std::map<uint64_t, uintptr_t> lru_index;
+        uint64_t entry_counter{0};
+        size_t capacity;
+        size_t max_capacity;
+
+        CacheShard() : capacity(0), max_capacity(0)
+        {
+            entries.reserve(64);
+        }
+    };
+
+    /**
+     * @brief Returns current time in nanoseconds.
+     */
+    constexpr inline uint64_t current_time_ns() noexcept
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+
+    /**
+     * @brief Computes the shard index for a given address.
+     * @param address The address to hash.
+     * @param shard_count Total number of shards.
+     * @return The shard index.
+     * @note Uses golden ratio bit-mixing to spread adjacent addresses across shards.
+     */
+    constexpr inline size_t compute_shard_index(uintptr_t address, size_t shard_count) noexcept
+    {
+        return (static_cast<size_t>((address * 0x9E3779B97F4A7C15ULL) >> 58)) % shard_count;
+    }
 }
 
 /**
  * @namespace MemoryUtilsCacheInternal
- * @brief Encapsulates internal static variables and helper functions for memory_utils.
- * @details This ensures that cache implementation details do not pollute the global namespace
- *          or other translation units. This replaced the simple file-static approach for clarity.
+ * @brief Encapsulates internal static variables and helper functions for memory cache.
  */
 namespace MemoryUtilsCacheInternal
 {
-    /** @brief Vector serving as the memory region cache. Dynamically sized upon initialization. */
-    std::vector<CachedMemoryRegionInfo> s_memoryCache;
-    /** @brief Mutex protecting concurrent access to s_memoryCache and related settings. */
-    std::mutex s_cacheMutex;
-    /** @brief Flag ensuring one-time initialization of the cache settings and vector. */
-    std::once_flag s_memoryCacheInitFlag;
-    /** @brief Whether the cache has been successfully initialized. */
+    std::vector<CacheShard> s_cacheShards;
+    std::vector<std::unique_ptr<std::shared_mutex>> s_shardMutexes;
+    std::unique_ptr<std::atomic<char>[]> s_inFlight;
+    std::atomic<size_t> s_shardCount{0};
+    std::atomic<size_t> s_maxEntriesPerShard{0};
+    std::atomic<unsigned int> s_configuredExpiryMs{0};
     std::atomic<bool> s_cacheInitialized{false};
-    size_t s_configuredCacheSize = 0;
-    unsigned int s_configuredCacheExpiryMs = 0;
 
-// Cache statistics are only compiled and tracked in Debug builds.
-#ifdef _DEBUG
-    /** @brief Atomic counter for cache hits (Debug builds only). */
-    std::atomic<uint64_t> s_cacheHits{0};
-    /** @brief Atomic counter for cache misses (Debug builds only). */
-    std::atomic<uint64_t> s_cacheMisses{0};
-#endif
+    // Background cleanup thread
+    std::atomic<bool> s_cleanupThreadRunning{false};
+    std::thread s_cleanupThread;
+    std::mutex s_cleanupMutex;
+    std::condition_variable s_cleanupCv;
+    std::atomic<bool> s_cleanupRequested{false};
+
+    // On-demand cleanup fallback timer (used when background thread is disabled)
+    std::atomic<uint64_t> s_lastCleanupTimeNs{0};
+    constexpr uint64_t CLEANUP_INTERVAL_NS = 1'000'000'000ULL; // 1 second in nanoseconds
+
+    // Always-available cache statistics
+    struct CacheStats
+    {
+        std::atomic<uint64_t> cacheHits{0};
+        std::atomic<uint64_t> cacheMisses{0};
+        std::atomic<uint64_t> invalidations{0};
+        std::atomic<uint64_t> coalescedQueries{0};
+        std::atomic<uint64_t> onDemandCleanups{0};
+    };
+    CacheStats s_stats;
 
     /**
-     * @brief Internal helper: Finds a cache entry containing the given memory range.
-     * @details Iterates through the cache, checks for entry validity (not expired),
-     *          and if the requested address range is within a cached region.
-     *          Updates the timestamp of a found entry (part of LRU strategy).
-     * @param address Start address of the memory range to find.
-     * @param size Size of the memory range.
-     * @return Pointer to the CachedMemoryRegionInfo entry if found and valid, nullptr otherwise.
-     * @note This function assumes s_cacheMutex is ALREADY HELD by the caller.
+     * @brief Checks if a cache entry covers the requested address range and is valid.
+     * @param entry The cache entry to check.
+     * @param address Start address of the query.
+     * @param size Size of the query range.
+     * @param current_time_ns Current timestamp in nanoseconds.
+     * @param expiry_ns Expiry time in nanoseconds.
+     * @return true if the entry is valid and covers the range.
      */
-    CachedMemoryRegionInfo *findCacheEntry(uintptr_t address, size_t size)
+    constexpr inline bool is_entry_valid_and_covers(const CachedMemoryRegionInfo &entry,
+                                                    uintptr_t address,
+                                                    size_t size,
+                                                    uint64_t current_time_ns,
+                                                    uint64_t expiry_ns) noexcept
     {
-        uintptr_t endAddress = address + size;
-        // Check for overflow if size is very large
-        if (endAddress < address && size != 0) // size != 0 to allow address + 0 for a zero-size check if ever needed
-        {
-            Logger::get_instance().warning("MemoryCache: Address + size caused overflow in findCacheEntry.");
-            return nullptr;
-        }
+        if (!entry.valid)
+            return false;
 
-        auto current_time = std::chrono::steady_clock::now();
-        for (auto &entry : s_memoryCache)
-        {
-            if (!entry.valid)
-            {
-                continue; // Skip invalid entries
-            }
+        const uint64_t entry_age = current_time_ns - entry.timestamp_ns;
+        if (entry_age > expiry_ns)
+            return false;
 
-            // Check for expiry
-            auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - entry.timestamp).count();
-            if (age_ms > static_cast<long long>(s_configuredCacheExpiryMs))
-            {
-                entry.valid = false; // Mark as expired
-                continue;
-            }
-
-            // Check if the requested range [address, address + size) is within the cached entry's range
-            uintptr_t entryEndAddress = entry.baseAddress + entry.regionSize;
-            if (address >= entry.baseAddress && endAddress <= entryEndAddress)
-            {
-                entry.timestamp = current_time; // Update timestamp (Least Recently Used)
-                return &entry;                  // Found a covering, valid, non-expired entry
-            }
-        }
-        return nullptr; // Not found or not fully covered by any valid entry
+        const uintptr_t endAddress = address + size;
+        const uintptr_t entryEndAddress = entry.baseAddress + entry.regionSize;
+        return address >= entry.baseAddress && endAddress <= entryEndAddress;
     }
 
     /**
-     * @brief Internal helper: Adds or updates a cache entry with new region info.
-     * @details Finds an invalid entry to overwrite, or if all are valid,
-     *          it replaces the oldest entry (Least Recently Used eviction strategy).
-     * @param mbi MEMORY_BASIC_INFORMATION structure containing the region data to cache.
-     * @note This function assumes s_cacheMutex is ALREADY HELD by the caller.
+     * @brief Checks protection flags for read permission.
      */
-    void updateCacheWithNewRegion(const MEMORY_BASIC_INFORMATION &mbi)
+    constexpr inline bool check_read_permission(DWORD protection) noexcept
     {
-        if (s_memoryCache.empty()) // Cache not initialized or failed to allocate
+        return (protection & CachePermissions::READ_PERMISSION_FLAGS) != 0 &&
+               (protection & CachePermissions::NOACCESS_GUARD_FLAGS) == 0;
+    }
+
+    /**
+     * @brief Checks protection flags for write permission.
+     */
+    constexpr inline bool check_write_permission(DWORD protection) noexcept
+    {
+        return (protection & CachePermissions::WRITE_PERMISSION_FLAGS) != 0 &&
+               (protection & CachePermissions::NOACCESS_GUARD_FLAGS) == 0;
+    }
+
+    /**
+     * @brief Finds, validates, and optionally refreshes a cache entry in a shard.
+     * @param shard The cache shard to search.
+     * @param address Address to look up (page-aligned for lookup).
+     * @param size Size of the query range.
+     * @param current_time_ns Current timestamp in nanoseconds.
+     * @param expiry_ns Expiry time in nanoseconds.
+     * @param touch If true, refresh the entry timestamp on hit (LRU update).
+     * @return Pointer to the matching entry, or nullptr if not found or expired.
+     * @note Must be called with shard mutex held (shared or exclusive).
+     */
+    CachedMemoryRegionInfo *find_in_shard(CacheShard &shard,
+                                          uintptr_t address,
+                                          size_t size,
+                                          uint64_t current_time_ns,
+                                          uint64_t expiry_ns) noexcept
+    {
+        const uintptr_t base_addr = address & ~static_cast<uintptr_t>(0xFFF);
+        auto it = shard.entries.find(base_addr);
+        if (it != shard.entries.end())
+        {
+            CachedMemoryRegionInfo &entry = it->second;
+            if (is_entry_valid_and_covers(entry, address, size, current_time_ns, expiry_ns))
+            {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    /**
+     * @brief Evicts the oldest entry from the shard using O(log n) LRU lookup.
+     * @note Must be called with shard mutex held (exclusive).
+     * @return true if an entry was evicted, false if shard is empty.
+     */
+    bool evict_oldest_entry(CacheShard &shard) noexcept
+    {
+        if (shard.lru_index.empty())
+            return false;
+
+        const auto lru_it = shard.lru_index.begin();
+        const uintptr_t oldest_base = lru_it->second;
+
+        shard.lru_index.erase(lru_it);
+
+        const auto entry_it = shard.entries.find(oldest_base);
+        if (entry_it != shard.entries.end())
+        {
+            shard.entries.erase(entry_it);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * @brief Force-evicts entries until shard is at or below max_capacity.
+     * @note Must be called with shard mutex held (exclusive).
+     * @param shard The cache shard to trim.
+     */
+    void trim_to_max_capacity(CacheShard &shard) noexcept
+    {
+        while (shard.entries.size() > shard.max_capacity && !shard.lru_index.empty())
+        {
+            evict_oldest_entry(shard);
+        }
+    }
+
+    /**
+     * @brief Generates a unique composite LRU key from timestamp and counter.
+     * @param shard The cache shard to generate key for.
+     * @param current_time_ns Current timestamp in nanoseconds.
+     * @return A unique 64-bit key: (timestamp << 32) | counter
+     * @note The counter ensures uniqueness even if multiple entries have the same timestamp.
+     */
+    constexpr inline uint64_t generate_lru_key(uint64_t current_time_ns, uint64_t counter) noexcept
+    {
+        return (current_time_ns << 32) | (counter & 0xFFFFFFFFULL);
+    }
+
+    /**
+     * @brief Updates or inserts a cache entry in a specific shard.
+     * @param shard The cache shard to update.
+     * @param mbi Memory basic information from VirtualQuery.
+     * @param current_time_ns Current timestamp in nanoseconds.
+     * @note Must be called with shard mutex held (exclusive).
+     */
+    void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi, uint64_t current_time_ns) noexcept
+    {
+        const uintptr_t base_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+
+        auto it = shard.entries.find(base_addr);
+        if (it != shard.entries.end())
+        {
+            // Remove old entry from LRU index using stored lru_key
+            CachedMemoryRegionInfo &old_entry = it->second;
+            const auto lru_it = shard.lru_index.find(old_entry.lru_key);
+            if (lru_it != shard.lru_index.end() && lru_it->second == base_addr)
+            {
+                shard.lru_index.erase(lru_it);
+            }
+
+            // Update existing entry with new composite LRU key
+            const uint64_t new_lru_key = generate_lru_key(current_time_ns, shard.entry_counter++);
+            old_entry.baseAddress = base_addr;
+            old_entry.regionSize = mbi.RegionSize;
+            old_entry.protection = mbi.Protect;
+            old_entry.timestamp_ns = current_time_ns;
+            old_entry.lru_key = new_lru_key;
+            old_entry.valid = true;
+
+            // Insert new composite key into LRU index
+            shard.lru_index.emplace(new_lru_key, base_addr);
+        }
+        else
+        {
+            // Evict oldest if at capacity - O(log n) via map
+            if (shard.entries.size() >= shard.capacity)
+            {
+                evict_oldest_entry(shard);
+            }
+
+            // Hard upper bound: trim if exceeding max_capacity
+            if (shard.entries.size() >= shard.max_capacity)
+            {
+                trim_to_max_capacity(shard);
+            }
+
+            // Generate unique composite LRU key
+            const uint64_t new_lru_key = generate_lru_key(current_time_ns, shard.entry_counter++);
+
+            CachedMemoryRegionInfo new_entry;
+            new_entry.baseAddress = base_addr;
+            new_entry.regionSize = mbi.RegionSize;
+            new_entry.protection = mbi.Protect;
+            new_entry.timestamp_ns = current_time_ns;
+            new_entry.lru_key = new_lru_key;
+            new_entry.valid = true;
+
+            shard.entries.insert_or_assign(base_addr, std::move(new_entry));
+            shard.lru_index.emplace(new_lru_key, base_addr);
+        }
+    }
+
+    /**
+     * @brief Removes expired entries from a shard.
+     * @note Must be called with shard mutex held (exclusive).
+     * @return Number of entries removed from this shard.
+     */
+    size_t cleanup_expired_entries_in_shard(CacheShard &shard,
+                                            uint64_t current_time_ns,
+                                            uint64_t expiry_ns) noexcept
+    {
+        size_t removed = 0;
+        auto it = shard.entries.begin();
+        while (it != shard.entries.end())
+        {
+            const CachedMemoryRegionInfo &entry = it->second;
+            const uint64_t entry_age = current_time_ns - entry.timestamp_ns;
+
+            if (!entry.valid || entry_age > expiry_ns)
+            {
+                // Remove from LRU index using stored lru_key
+                const auto lru_it = shard.lru_index.find(entry.lru_key);
+                if (lru_it != shard.lru_index.end() && lru_it->second == it->first)
+                {
+                    shard.lru_index.erase(lru_it);
+                }
+
+                it = shard.entries.erase(it);
+                ++removed;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        return removed;
+    }
+
+    /**
+     * @brief Performs cleanup of expired cache entries across all shards.
+     * @details Called by the background cleanup thread or on-demand timer.
+     * @param force Force cleanup regardless of timing.
+     */
+    void cleanup_expired_entries(bool) noexcept
+    {
+        if (s_cacheShards.empty())
             return;
 
-        auto current_time = std::chrono::steady_clock::now();
+        const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
+        if (shard_count == 0)
+            return;
 
-        // Try to find an invalid (empty or expired) slot first
-        auto available_slot_it = std::find_if(s_memoryCache.begin(), s_memoryCache.end(),
-                                              [](const CachedMemoryRegionInfo &entry) -> bool
-                                              {
-                                                  return !entry.valid;
-                                              });
+        const uint64_t current_ts = current_time_ns();
+        const uint64_t expiry_ns = static_cast<uint64_t>(s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
 
-        if (available_slot_it == s_memoryCache.end())
+        for (size_t i = 0; i < shard_count; ++i)
         {
-            // No invalid slots, find the least recently used (oldest timestamp)
-            available_slot_it = std::min_element(s_memoryCache.begin(), s_memoryCache.end(),
-                                                 [](const CachedMemoryRegionInfo &a, const CachedMemoryRegionInfo &b)
-                                                 {
-                                                     return a.timestamp < b.timestamp;
-                                                 });
+            std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[i], std::try_to_lock);
+            if (lock.owns_lock())
+            {
+                cleanup_expired_entries_in_shard(s_cacheShards[i], current_ts, expiry_ns);
+                // Also trim to hard upper bound
+                trim_to_max_capacity(s_cacheShards[i]);
+            }
         }
-
-        // Update the chosen slot with the new region information
-        available_slot_it->baseAddress = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-        available_slot_it->regionSize = mbi.RegionSize;
-        available_slot_it->protection = mbi.Protect;
-        available_slot_it->timestamp = current_time;
-        available_slot_it->valid = true;
     }
 
     /**
-     * @brief Initializes the cache structures. Called once by init_cache.
-     * @param cache_size_param Desired number of cache entries.
-     * @param expiry_ms_param Desired expiry time in milliseconds for entries.
-     * @return true if initialization succeeded, false otherwise.
+     * @brief Checks if on-demand cleanup should run based on elapsed time.
+     * @return true if cleanup was performed, false otherwise.
      */
-    bool performCacheInitialization(size_t cache_size_param, unsigned int expiry_ms_param)
+    bool try_trigger_on_demand_cleanup() noexcept
     {
-        std::lock_guard<std::mutex> lock(s_cacheMutex); // Protect static cache settings
+        if (!s_cacheInitialized.load(std::memory_order_acquire))
+            return false;
 
-        s_configuredCacheSize = (cache_size_param == 0) ? 1 : cache_size_param; // Min 1 entry if 0 specified
-        s_configuredCacheExpiryMs = expiry_ms_param;
+        const uint64_t now_ns = current_time_ns();
+        const uint64_t last_cleanup = s_lastCleanupTimeNs.load(std::memory_order_acquire);
+        const uint64_t elapsed_ns = now_ns - last_cleanup;
+
+        if (elapsed_ns >= CLEANUP_INTERVAL_NS)
+        {
+            // Atomically update last cleanup time to prevent multiple threads triggering
+            uint64_t expected = last_cleanup;
+            if (s_lastCleanupTimeNs.compare_exchange_strong(expected, now_ns, std::memory_order_acq_rel))
+            {
+                cleanup_expired_entries(false);
+                s_stats.onDemandCleanups.fetch_add(1, std::memory_order_relaxed);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @brief Background cleanup thread function.
+     * @details Runs periodically to clean up expired entries without impacting the miss path.
+     */
+    void cleanup_thread_func() noexcept
+    {
+        while (s_cleanupThreadRunning.load(std::memory_order_acquire))
+        {
+            {
+                std::unique_lock<std::mutex> lock(s_cleanupMutex);
+                s_cleanupCv.wait_for(lock, std::chrono::seconds(1), [&]()
+                                     { return s_cleanupRequested.load(std::memory_order_acquire) || !s_cleanupThreadRunning.load(std::memory_order_acquire); });
+            }
+
+            if (!s_cleanupThreadRunning.load(std::memory_order_acquire))
+                break;
+
+            cleanup_expired_entries(false);
+            s_cleanupRequested.store(false, std::memory_order_relaxed);
+        }
+    }
+
+    /**
+     * @brief Signals the cleanup thread to run or triggers on-demand cleanup.
+     */
+    void request_cleanup() noexcept
+    {
+        if (s_cleanupThreadRunning.load(std::memory_order_acquire))
+        {
+            s_cleanupRequested.store(true, std::memory_order_relaxed);
+            s_cleanupCv.notify_one();
+        }
+        else
+        {
+            // Background thread disabled (MinGW) - use on-demand timer-based cleanup
+            try_trigger_on_demand_cleanup();
+        }
+    }
+
+    /**
+     * @brief Invalidates cache entries in shards that overlap with the given range.
+     * @details Only invalidates specific entries that overlap, not entire shards.
+     *          Uses retry loop to handle locked shards gracefully.
+     */
+    void invalidate_range_internal(uintptr_t address, size_t size) noexcept
+    {
+        if (s_cacheShards.empty() || size == 0)
+            return;
+
+        const uintptr_t endAddress = address + size;
+        const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
+
+        const uintptr_t start_page = address >> 12;
+        const uintptr_t end_page = (endAddress == 0 ? address : endAddress - 1) >> 12;
+
+        constexpr size_t MAX_INVALIDATION_RETRIES = 3;
+
+        for (uintptr_t page = start_page; page <= end_page; ++page)
+        {
+            const size_t shard_idx = compute_shard_index(page << 12, shard_count);
+
+            bool invalidated = false;
+            for (size_t retry = 0; retry < MAX_INVALIDATION_RETRIES && !invalidated; ++retry)
+            {
+                std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx], std::try_to_lock);
+                if (!lock.owns_lock())
+                {
+                    // Shard is locked by another writer - yield and retry
+                    if (retry < MAX_INVALIDATION_RETRIES - 1)
+                    {
+                        std::this_thread::yield();
+                    }
+                    continue;
+                }
+
+                CacheShard &shard = s_cacheShards[shard_idx];
+                const uintptr_t page_base = page << 12;
+
+                auto it = shard.entries.find(page_base);
+                if (it != shard.entries.end())
+                {
+                    CachedMemoryRegionInfo &entry = it->second;
+                    if (!entry.valid)
+                    {
+                        invalidated = true;
+                        continue;
+                    }
+
+                    const uintptr_t entryEndAddress = entry.baseAddress + entry.regionSize;
+                    const bool overlaps = address < entryEndAddress && endAddress > entry.baseAddress;
+                    if (overlaps)
+                    {
+                        // Remove from LRU index using stored lru_key to avoid tombstone accumulation
+                        const auto lru_it = shard.lru_index.find(entry.lru_key);
+                        if (lru_it != shard.lru_index.end() && lru_it->second == page_base)
+                        {
+                            shard.lru_index.erase(lru_it);
+                        }
+                        // Erase entry immediately instead of leaving tombstone
+                        shard.entries.erase(it);
+                        s_stats.invalidations.fetch_add(1, std::memory_order_relaxed);
+                        invalidated = true;
+                    }
+                }
+                else
+                {
+                    invalidated = true;
+                }
+            }
+
+            if (start_page == end_page)
+                break;
+        }
+    }
+
+    /**
+     * @brief Performs one-time cache initialization.
+     */
+    bool perform_cache_initialization(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
+    {
+        if (cache_size == 0)
+            cache_size = 1;
+        if (shard_count == 0)
+            shard_count = 1;
+
+        const size_t entries_per_shard = (cache_size + shard_count - 1) / shard_count;
+        const size_t hard_max_per_shard = entries_per_shard * 2; // Hard upper bound: 2x capacity
 
         try
         {
-            s_memoryCache.resize(s_configuredCacheSize); // Pre-allocate cache entries
-        }
-        catch (const std::bad_alloc &e)
-        {
-            Logger::get_instance().error("MemoryCache: Failed to allocate memory for cache (size: {}). Error: {}. Attempting minimal cache.",
-                                        s_configuredCacheSize, e.what());
-            try
+            s_cacheShards.resize(shard_count);
+            s_shardMutexes.resize(shard_count);
+            s_inFlight = std::make_unique<std::atomic<char>[]>(shard_count);
+            for (size_t i = 0; i < shard_count; ++i)
             {
-                s_configuredCacheSize = 1; // Try with a minimal size
-                s_memoryCache.resize(s_configuredCacheSize);
-            }
-            catch (const std::bad_alloc &e_min)
-            {
-                Logger::get_instance().error("MemoryCache: Minimal cache allocation also failed. Error: {}. Cache will be disabled.",
-                                            e_min.what());
-                s_configuredCacheSize = 0; // Mark cache as unusable
-                s_memoryCache.clear();     // Ensure vector is empty
-                s_cacheInitialized.store(false, std::memory_order_relaxed);
-                return false; // Exit: cache setup failed
+                s_cacheShards[i].entries.reserve(entries_per_shard * 2);
+                s_cacheShards[i].capacity = entries_per_shard;
+                s_cacheShards[i].max_capacity = hard_max_per_shard;
+                s_shardMutexes[i] = std::make_unique<std::shared_mutex>();
+                s_inFlight[i].store(0, std::memory_order_relaxed);
             }
         }
-
-        // Initialize all entries as invalid
-        for (auto &entry : s_memoryCache)
+        catch (const std::bad_alloc &)
         {
-            entry.valid = false;
+            Logger::get_instance().error("MemoryCache: Failed to allocate memory for cache shards.");
+            s_cacheShards.clear();
+            s_shardMutexes.clear();
+            s_inFlight.reset();
+            // Reset initialization flag so retry can work
+            s_cacheInitialized.store(false, std::memory_order_relaxed);
+            return false;
         }
 
-        if (s_configuredCacheSize > 0)
-        {
-            Logger::get_instance().debug("MemoryCache: Initialized with {} entries and {}ms expiry.",
-                                        s_configuredCacheSize, s_configuredCacheExpiryMs);
-        }
+        s_shardCount.store(shard_count, std::memory_order_release);
+        s_maxEntriesPerShard.store(entries_per_shard, std::memory_order_release);
+        s_configuredExpiryMs.store(expiry_ms, std::memory_order_release);
+        s_lastCleanupTimeNs.store(current_time_ns(), std::memory_order_release);
 
-        s_cacheInitialized.store(true, std::memory_order_release);
+        Logger::get_instance().debug("MemoryCache: Initialized with {} shards ({} entries/shard, {}ms expiry, {} max).",
+                                     shard_count, entries_per_shard, expiry_ms, hard_max_per_shard);
+
         return true;
+    }
+
+    /**
+     * @brief Performs VirtualQuery and updates cache with coalescing support.
+     * @param shard_idx Index of the shard to update.
+     * @param address Address to query.
+     * @param mbi_out Output buffer for VirtualQuery result.
+     * @return true if VirtualQuery succeeded.
+     */
+    bool query_and_update_cache(size_t shard_idx, LPCVOID address, MEMORY_BASIC_INFORMATION &mbi_out) noexcept
+    {
+        CacheShard &shard = s_cacheShards[shard_idx];
+
+        // Try to claim in-flight status (stampede coalescing)
+        char expected = 0;
+        if (s_inFlight[shard_idx].compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+        {
+            // We are the leader - perform VirtualQuery
+            const bool result = VirtualQuery(address, &mbi_out, sizeof(mbi_out)) != 0;
+            const uint64_t now_ns = current_time_ns();
+
+            if (result)
+            {
+                std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx]);
+                update_shard_with_region(shard, mbi_out, now_ns);
+            }
+
+            // Release in-flight status
+            s_inFlight[shard_idx].store(0, std::memory_order_release);
+            return result;
+        }
+        else
+        {
+            // We are a follower - VirtualQuery already in progress by another thread
+            // Use yield-based waiting to avoid OS scheduler issues with short sleeps
+            const uint64_t expiry_ns = static_cast<uint64_t>(s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+
+            // Retry count with yield instead of sleep to avoid scheduler latency
+            constexpr size_t MAX_FOLLOWER_YIELDS = 1000;
+
+            for (size_t yield_count = 0; yield_count < MAX_FOLLOWER_YIELDS; ++yield_count)
+            {
+                if (s_inFlight[shard_idx].load(std::memory_order_acquire) == 0)
+                {
+                    // Query completed, check cache
+                    const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
+                    std::shared_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx]);
+                    CachedMemoryRegionInfo *cached = find_in_shard(shard, addr_val, 1, current_time_ns(), expiry_ns);
+                    if (cached)
+                    {
+                        s_stats.coalescedQueries.fetch_add(1, std::memory_order_relaxed);
+                        // Copy cached info to output for consistency
+                        mbi_out.BaseAddress = reinterpret_cast<PVOID>(cached->baseAddress);
+                        mbi_out.RegionSize = cached->regionSize;
+                        mbi_out.Protect = cached->protection;
+                        mbi_out.State = MEM_COMMIT;
+                        return true;
+                    }
+                    // Cache not populated, break to retry as leader
+                    break;
+                }
+
+                // Yield to allow the leader thread to complete
+                std::this_thread::yield();
+            }
+
+            // Retry as leader if follower wait timed out
+            expected = 0;
+            if (s_inFlight[shard_idx].compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+            {
+                const bool result = VirtualQuery(address, &mbi_out, sizeof(mbi_out)) != 0;
+                if (result)
+                {
+                    std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx]);
+                    const uint64_t now_ns = current_time_ns();
+                    update_shard_with_region(shard, mbi_out, now_ns);
+                }
+                s_inFlight[shard_idx].store(0, std::memory_order_release);
+                return result;
+            }
+
+            // Last resort: just do VirtualQuery without cache update
+            return VirtualQuery(address, &mbi_out, sizeof(mbi_out)) != 0;
+        }
+    }
+
+    /**
+     * @brief Shuts down the cleanup thread.
+     * @note Background cleanup thread is disabled on mingw due to pthreads compatibility issues.
+     *       On-demand cleanup timer handles expiration in this case.
+     */
+    void shutdown_cleanup_thread() noexcept
+    {
+        // Signal cleanup thread to stop
+        s_cleanupThreadRunning.store(false, std::memory_order_release);
+        s_cleanupCv.notify_one();
+
+        // Wait for cleanup thread to finish if it was started
+        if (s_cleanupThread.joinable())
+        {
+            s_cleanupThread.join();
+        }
     }
 
 } // namespace MemoryUtilsCacheInternal
 
-// --- Public API functions for Memory Utilities ---
-
-bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms)
+bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
 {
-    // Use std::call_once to ensure performCacheInitialization is called exactly once
-    // across all threads, even if init_cache is called multiple times.
-    bool initialized = false;
-    std::call_once(MemoryUtilsCacheInternal::s_memoryCacheInitFlag,
-                   [&]()
-                   {
-                       initialized = MemoryUtilsCacheInternal::performCacheInitialization(cache_size, expiry_ms);
-                   });
-    // If this call performed initialization, return its result.
-    // If already initialized by a prior call, return true (cache is usable).
-    return initialized || MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire);
+    // Fast path: already initialized
+    if (MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+        return true;
+
+    // Try to initialize
+    bool expected = false;
+    if (MemoryUtilsCacheInternal::s_cacheInitialized.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    {
+        if (!MemoryUtilsCacheInternal::perform_cache_initialization(cache_size, expiry_ms, shard_count))
+        {
+            // Initialization failed - s_cacheInitialized already reset to false in perform_cache_initialization
+            return false;
+        }
+
+        // Try to start background cleanup thread (may fail silently on MinGW)
+        MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(true, std::memory_order_release);
+        try
+        {
+            MemoryUtilsCacheInternal::s_cleanupThread = std::thread(MemoryUtilsCacheInternal::cleanup_thread_func);
+        }
+        catch (const std::system_error &)
+        {
+            // Background thread creation failed (MinGW pthreads issue) - use on-demand cleanup
+            MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(false, std::memory_order_release);
+            Logger::get_instance().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
+        }
+
+        MemoryUtilsCacheInternal::s_cacheInitialized.store(true, std::memory_order_release);
+        return true;
+    }
+
+    // Another thread initialized while we were waiting
+    return true;
 }
 
 void DetourModKit::Memory::clear_cache()
 {
-    std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
-    for (auto &entry : MemoryUtilsCacheInternal::s_memoryCache)
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    for (size_t i = 0; i < shard_count; ++i)
     {
-        entry.valid = false; // Mark all entries as invalid
+        std::unique_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
+        MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
+        MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
+        MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
     }
 
-    if (MemoryUtilsCacheInternal::s_configuredCacheSize > 0)
+    MemoryUtilsCacheInternal::s_stats.cacheHits.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.cacheMisses.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.invalidations.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
+
+    MemoryUtilsCacheInternal::s_lastCleanupTimeNs.store(current_time_ns(), std::memory_order_relaxed);
+
+    Logger::get_instance().debug("MemoryCache: All entries cleared.");
+}
+
+void DetourModKit::Memory::shutdown_cache()
+{
+    // Signal cleanup thread to stop first
+    MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(false, std::memory_order_release);
+    MemoryUtilsCacheInternal::s_cleanupCv.notify_one();
+
+    // Wait for cleanup thread to finish
+    if (MemoryUtilsCacheInternal::s_cleanupThread.joinable())
     {
-        Logger::get_instance().debug("MemoryCache: All entries cleared.");
+        MemoryUtilsCacheInternal::s_cleanupThread.join();
     }
-#ifdef _DEBUG // Reset stats if compiled in debug
-    MemoryUtilsCacheInternal::s_cacheHits.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_cacheMisses.store(0, std::memory_order_relaxed);
-#endif
+
+    // Now safe to clear data structures
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    for (size_t i = 0; i < shard_count; ++i)
+    {
+        if (MemoryUtilsCacheInternal::s_shardMutexes[i])
+        {
+            std::unique_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
+            MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
+            MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
+        }
+    }
+
+    MemoryUtilsCacheInternal::s_cacheShards.clear();
+    MemoryUtilsCacheInternal::s_shardMutexes.clear();
+    MemoryUtilsCacheInternal::s_inFlight.reset();
+
+    MemoryUtilsCacheInternal::s_cacheInitialized.store(false, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_shardCount.store(0, std::memory_order_relaxed);
+
+    Logger::get_instance().debug("MemoryCache: Shutdown complete.");
 }
 
 std::string DetourModKit::Memory::get_cache_stats()
 {
-#ifdef _DEBUG
-    uint64_t hits = MemoryUtilsCacheInternal::s_cacheHits.load(std::memory_order_relaxed);
-    uint64_t misses = MemoryUtilsCacheInternal::s_cacheMisses.load(std::memory_order_relaxed);
-    uint64_t total_queries = hits + misses;
+    const uint64_t hits = MemoryUtilsCacheInternal::s_stats.cacheHits.load(std::memory_order_relaxed);
+    const uint64_t misses = MemoryUtilsCacheInternal::s_stats.cacheMisses.load(std::memory_order_relaxed);
+    const uint64_t invalidations = MemoryUtilsCacheInternal::s_stats.invalidations.load(std::memory_order_relaxed);
+    const uint64_t coalesced = MemoryUtilsCacheInternal::s_stats.coalescedQueries.load(std::memory_order_relaxed);
+    const uint64_t on_demand_cleanups = MemoryUtilsCacheInternal::s_stats.onDemandCleanups.load(std::memory_order_relaxed);
+    const uint64_t total_queries = hits + misses;
 
-    size_t current_cache_capacity = 0;
-    unsigned int current_expiry_setting_ms = 0;
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    const size_t max_entries_per_shard = MemoryUtilsCacheInternal::s_maxEntriesPerShard.load(std::memory_order_acquire);
+    const unsigned int expiry_ms = MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire);
+
+    // Calculate total entries and hard max
+    size_t total_entries = 0;
+    size_t total_hard_max = 0;
+    for (size_t i = 0; i < shard_count; ++i)
     {
-        // Briefly lock to read configuration settings safely
-        std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
-        current_cache_capacity = MemoryUtilsCacheInternal::s_configuredCacheSize;
-        current_expiry_setting_ms = MemoryUtilsCacheInternal::s_configuredCacheExpiryMs;
+        total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
+        total_hard_max += MemoryUtilsCacheInternal::s_cacheShards[i].max_capacity;
     }
 
     std::ostringstream oss;
-    oss << "MemoryCache Stats (Capacity: " << current_cache_capacity
-        << ", Expiry: " << current_expiry_setting_ms << "ms) - "
-        << "Hits: " << hits << ", Misses: " << misses;
+    oss << "MemoryCache Stats (Shards: " << shard_count
+        << ", Entries/Shard: " << max_entries_per_shard
+        << ", HardMax/Shard: " << (shard_count > 0 ? total_hard_max / shard_count : 0)
+        << ", Expiry: " << expiry_ms << "ms) - "
+        << "Hits: " << hits << ", Misses: " << misses
+        << ", Invalidations: " << invalidations
+        << ", Coalesced: " << coalesced
+        << ", OnDemandCleanups: " << on_demand_cleanups
+        << ", TotalEntries: " << total_entries;
 
     if (total_queries > 0)
     {
-        double hit_rate_percent = (static_cast<double>(hits) / static_cast<double>(total_queries)) * 100.0;
+        const double hit_rate_percent = (static_cast<double>(hits) / static_cast<double>(total_queries)) * 100.0;
         oss << ", Hit Rate: " << std::fixed << std::setprecision(2) << hit_rate_percent << "%";
     }
     else
@@ -288,176 +832,145 @@ std::string DetourModKit::Memory::get_cache_stats()
         oss << ", Hit Rate: N/A (no queries tracked)";
     }
     return oss.str();
-#else
-    return "MemoryCache statistics are only available in Debug builds.";
-#endif
+}
+
+void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
+{
+    if (!address || size == 0)
+        return;
+
+    const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
+    MemoryUtilsCacheInternal::invalidate_range_internal(addr_val, size);
+    MemoryUtilsCacheInternal::request_cleanup();
 }
 
 bool DetourModKit::Memory::is_readable(const void *address, size_t size)
 {
-    if (!address || size == 0) // Reading zero bytes is trivially true but often indicates an error in calling code.
-    {                          // For consistency with how VirtualQuery might treat it, or if size=0 indicates no check needed.
-                               // Let's consider size=0 invalid for a "readable check".
+    if (!address || size == 0)
         return false;
-    }
 
-    // Ensure cache is initialized (does nothing if already initialized)
-    DetourModKit::Memory::init_cache(); // Uses default parameters if not called explicitly by user
+    DetourModKit::Memory::init_cache();
 
-    uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
-    bool is_region_readable_from_cache = false;
-    bool cache_hit_occurred = false;
+    const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
 
-    // Scope for cache lock
+    if (shard_count == 0)
+        return false;
+
+    const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
+    const uint64_t now_ns = current_time_ns();
+    const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+
+    // Fast path: shared lock for concurrent read access (multiple readers allowed)
+    // Also touch=true to refresh LRU timestamp on hit for frequently-accessed addresses
     {
-        std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
-        if (!MemoryUtilsCacheInternal::s_memoryCache.empty()) // Check if cache is active
+        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
+        if (lock.owns_lock())
         {
-            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::findCacheEntry(query_addr_val, size);
-            if (cached_info) // A valid, non-expired entry covers the requested range
+            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
+                MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+                query_addr_val, size, now_ns, expiry_ns);
+            if (cached_info)
             {
-                // Simplified: check if protection flags allow reading
-                is_region_readable_from_cache = (cached_info->protection & READ_PERMISSION_FLAGS) != 0 &&
-                                                (cached_info->protection & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-                cache_hit_occurred = true;
-#ifdef _DEBUG
-                MemoryUtilsCacheInternal::s_cacheHits.fetch_add(1, std::memory_order_relaxed);
-#endif
+                const bool result = MemoryUtilsCacheInternal::check_read_permission(cached_info->protection);
+                MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+                return result;
             }
         }
-    } // Cache lock released
-
-    if (cache_hit_occurred)
-    {
-        return is_region_readable_from_cache;
     }
 
-// Cache miss or cache inactive, proceed with VirtualQuery
-#ifdef _DEBUG
-    // Only increment misses if the cache was actually active and consulted
-    if (!MemoryUtilsCacheInternal::s_memoryCache.empty())
-    {
-        MemoryUtilsCacheInternal::s_cacheMisses.fetch_add(1, std::memory_order_relaxed);
-    }
-#endif
+    MemoryUtilsCacheInternal::s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
 
+    // Cache miss: call VirtualQuery with stampede coalescing
     MEMORY_BASIC_INFORMATION mbi;
-    // VirtualQuery expects a non-const LPCVOID for the address
-    if (VirtualQuery(const_cast<LPCVOID>(address), &mbi, sizeof(mbi)) == 0)
-    {
-        // VirtualQuery failed (e.g., address is invalid or outside user address space)
+    if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
         return false;
-    }
 
-    // Region must be committed memory
     if (mbi.State != MEM_COMMIT)
-    {
         return false;
-    }
 
-    // Check protection flags for readability - simplified logic
-    if ((mbi.Protect & READ_PERMISSION_FLAGS) == 0 ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
-    {
+    if (!MemoryUtilsCacheInternal::check_read_permission(mbi.Protect))
         return false;
-    }
 
-    // Final check: ensure the entire requested range [address, address+size)
-    // is within the single region returned by VirtualQuery.
-    uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
-    uintptr_t query_end_addr = query_addr_val + size;
+    const uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+    const uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
+    const uintptr_t query_end_addr = query_addr_val + size;
 
-    // Overflow check for query_end_addr already implicitly handled by checking query_addr_val >= region_start_addr
-    // and query_end_addr <= region_end_addr, IF query_end_addr calculation itself didn't overflow.
-    // More robustly:
-    if (query_end_addr < query_addr_val && size != 0)
-        return false; // Overflow
+    if (query_end_addr < query_addr_val)
+        return false;
 
-    bool is_fully_contained = (query_addr_val >= region_start_addr && query_end_addr <= region_end_addr);
+    const bool is_fully_contained = query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
+    if (!is_fully_contained)
+        return false;
 
-    if (is_fully_contained)
-    {
-        // Add/update this region in the cache if cache is active
-        std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
-        if (!MemoryUtilsCacheInternal::s_memoryCache.empty())
-        {
-            MemoryUtilsCacheInternal::updateCacheWithNewRegion(mbi);
-        }
-    }
-    return is_fully_contained;
+    // Signal background cleanup thread or trigger on-demand cleanup
+    MemoryUtilsCacheInternal::request_cleanup();
+
+    return true;
 }
 
 bool DetourModKit::Memory::is_writable(void *address, size_t size)
 {
     if (!address || size == 0)
-    {
         return false;
-    }
-    DetourModKit::Memory::init_cache(); // Ensure cache is initialized
 
-    uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
-    bool is_region_writable_from_cache = false;
-    bool cache_hit_occurred = false;
+    DetourModKit::Memory::init_cache();
 
+    const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+
+    if (shard_count == 0)
+        return false;
+
+    const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
+    const uint64_t now_ns = current_time_ns();
+    const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+
+    // Fast path: shared lock for concurrent read access
+    // Also touch=true to refresh LRU timestamp on hit for frequently-accessed addresses
     {
-        std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
-        if (!MemoryUtilsCacheInternal::s_memoryCache.empty())
+        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
+        if (lock.owns_lock())
         {
-            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::findCacheEntry(query_addr_val, size);
+            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
+                MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+                query_addr_val, size, now_ns, expiry_ns);
             if (cached_info)
             {
-                // Simplified: check if protection flags allow writing
-                is_region_writable_from_cache = (cached_info->protection & WRITE_PERMISSION_FLAGS) != 0 &&
-                                                (cached_info->protection & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
-                cache_hit_occurred = true;
-#ifdef _DEBUG
-                MemoryUtilsCacheInternal::s_cacheHits.fetch_add(1, std::memory_order_relaxed);
-#endif
+                const bool result = MemoryUtilsCacheInternal::check_write_permission(cached_info->protection);
+                MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+                return result;
             }
         }
     }
 
-    if (cache_hit_occurred)
-    {
-        return is_region_writable_from_cache;
-    }
-
-#ifdef _DEBUG
-    if (!MemoryUtilsCacheInternal::s_memoryCache.empty())
-    {
-        MemoryUtilsCacheInternal::s_cacheMisses.fetch_add(1, std::memory_order_relaxed);
-    }
-#endif
+    MemoryUtilsCacheInternal::s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
 
     MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery(const_cast<LPCVOID>(address), &mbi, sizeof(mbi)) == 0)
+    if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
         return false;
+
     if (mbi.State != MEM_COMMIT)
         return false;
 
-    // Simplified: check if protection flags allow writing
-    if ((mbi.Protect & WRITE_PERMISSION_FLAGS) == 0 ||
-        (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
+    if (!MemoryUtilsCacheInternal::check_write_permission(mbi.Protect))
         return false;
 
-    uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
-    uintptr_t query_end_addr = query_addr_val + size;
-    if (query_end_addr < query_addr_val && size != 0)
+    const uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+    const uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
+    const uintptr_t query_end_addr = query_addr_val + size;
+
+    if (query_end_addr < query_addr_val)
         return false;
 
-    bool is_fully_contained = (query_addr_val >= region_start_addr && query_end_addr <= region_end_addr);
+    const bool is_fully_contained = query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
+    if (!is_fully_contained)
+        return false;
 
-    if (is_fully_contained)
-    {
-        std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
-        if (!MemoryUtilsCacheInternal::s_memoryCache.empty())
-        {
-            MemoryUtilsCacheInternal::updateCacheWithNewRegion(mbi);
-        }
-    }
-    return is_fully_contained;
+    // Signal background cleanup thread or trigger on-demand cleanup
+    MemoryUtilsCacheInternal::request_cleanup();
+
+    return true;
 }
 
 std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
@@ -488,8 +1001,8 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
 
     memcpy(reinterpret_cast<void *>(targetAddress), reinterpret_cast<const void *>(sourceBytes), numBytes);
 
-    DWORD temp_holder_for_old_protect_after_restore;
-    if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_holder_for_old_protect_after_restore))
+    DWORD temp_old_protect;
+    if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_old_protect))
     {
         logger.error("write_bytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
                      DetourModKit::Format::format_hex(static_cast<int>(old_protection_flags)),
@@ -502,6 +1015,8 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
         logger.warning("write_bytes: FlushInstructionCache failed for address {}. Windows Error: {}",
                        DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
     }
+
+    Memory::invalidate_range(targetAddress, numBytes);
 
     logger.debug("write_bytes: Successfully wrote {} bytes to address {}.",
                  numBytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)));
