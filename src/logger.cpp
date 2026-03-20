@@ -123,41 +123,12 @@ namespace DetourModKit
 
     Logger::~Logger()
     {
-        if (!shutdown_called_)
+        bool expected = false;
+        if (!shutdown_called_.compare_exchange_strong(expected, true,
+                                                      std::memory_order_acq_rel))
         {
-            bool async_enabled = false;
-            std::unique_ptr<AsyncLogger> local_logger;
-
-            {
-                std::lock_guard<std::mutex> lock(async_mutex_);
-                async_enabled = async_mode_enabled_.load(std::memory_order_acquire);
-                if (async_enabled && async_logger_)
-                {
-                    local_logger = std::move(async_logger_);
-                    async_logger_.reset();
-                    async_mode_enabled_.store(false, std::memory_order_release);
-                }
-            }
-
-            if (local_logger)
-            {
-                local_logger->shutdown();
-            }
-
-            if (log_file_stream_ptr_->is_open())
-            {
-                std::lock_guard<std::mutex> lock(*log_mutex_ptr_);
-                log_file_stream_ptr_->flush();
-                log_file_stream_ptr_->close();
-            }
-        }
-    }
-
-    void Logger::shutdown()
-    {
-        if (shutdown_called_)
             return;
-        shutdown_called_ = true;
+        }
 
         std::unique_ptr<AsyncLogger> local_logger;
 
@@ -176,11 +147,49 @@ namespace DetourModKit
             local_logger->shutdown();
         }
 
-        if (log_file_stream_ptr_->is_open())
         {
             std::lock_guard<std::mutex> lock(*log_mutex_ptr_);
-            log_file_stream_ptr_->flush();
-            log_file_stream_ptr_->close();
+            if (log_file_stream_ptr_ && log_file_stream_ptr_->is_open())
+            {
+                log_file_stream_ptr_->flush();
+                log_file_stream_ptr_->close();
+            }
+        }
+    }
+
+    void Logger::shutdown()
+    {
+        bool expected = false;
+        if (!shutdown_called_.compare_exchange_strong(expected, true,
+                                                      std::memory_order_acq_rel))
+        {
+            return;
+        }
+
+        std::unique_ptr<AsyncLogger> local_logger;
+
+        {
+            std::lock_guard<std::mutex> lock(async_mutex_);
+            if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
+            {
+                local_logger = std::move(async_logger_);
+                async_logger_.reset();
+                async_mode_enabled_.store(false, std::memory_order_release);
+            }
+        }
+
+        if (local_logger)
+        {
+            local_logger->shutdown();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(*log_mutex_ptr_);
+            if (log_file_stream_ptr_ && log_file_stream_ptr_->is_open())
+            {
+                log_file_stream_ptr_->flush();
+                log_file_stream_ptr_->close();
+            }
         }
     }
 

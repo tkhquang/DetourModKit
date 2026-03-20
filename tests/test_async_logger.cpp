@@ -854,3 +854,84 @@ TEST_F(AsyncLoggerTest, FlushGuarantee_AllMessagesWritten)
         EXPECT_NE(content.find("FLUSH_TEST_MSG_" + std::to_string(i)), std::string::npos);
     }
 }
+
+TEST(DynamicMPMCQueueTest, TryPopBatch_BulkDequeue)
+{
+    DynamicMPMCQueue queue(16);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        LogMessage msg(LogLevel::Info, "batch_msg_" + std::to_string(i));
+        EXPECT_TRUE(queue.try_push(msg));
+    }
+
+    std::vector<LogMessage> items;
+    size_t count = queue.try_pop_batch(items, 4);
+
+    EXPECT_EQ(count, 4u);
+    EXPECT_EQ(items.size(), 4u);
+    EXPECT_EQ(queue.size(), 4u);
+}
+
+TEST(DynamicMPMCQueueTest, TryPopBatch_LessThanRequested)
+{
+    DynamicMPMCQueue queue(16);
+
+    for (int i = 0; i < 3; ++i)
+    {
+        LogMessage msg(LogLevel::Info, "partial_batch_" + std::to_string(i));
+        EXPECT_TRUE(queue.try_push(msg));
+    }
+
+    std::vector<LogMessage> items;
+    size_t count = queue.try_pop_batch(items, 10);
+
+    EXPECT_EQ(count, 3u);
+    EXPECT_EQ(items.size(), 3u);
+    EXPECT_TRUE(queue.empty());
+}
+
+TEST(DynamicMPMCQueueTest, TryPopBatch_EmptyQueue)
+{
+    DynamicMPMCQueue queue(16);
+    std::vector<LogMessage> items;
+    size_t count = queue.try_pop_batch(items, 10);
+
+    EXPECT_EQ(count, 0u);
+    EXPECT_TRUE(items.empty());
+}
+
+TEST(DynamicMPMCQueueTest, TryPopBatch_ZeroMaxCount)
+{
+    DynamicMPMCQueue queue(16);
+    LogMessage msg(LogLevel::Info, "should_not_be_popped");
+    EXPECT_TRUE(queue.try_push(msg));
+
+    std::vector<LogMessage> items;
+    size_t count = queue.try_pop_batch(items, 0);
+
+    EXPECT_EQ(count, 0u);
+    EXPECT_TRUE(items.empty());
+    EXPECT_EQ(queue.size(), 1u);
+}
+
+TEST(DynamicMPMCQueueTest, TryPopBatch_PreservesOrder)
+{
+    DynamicMPMCQueue queue(16);
+
+    for (int i = 0; i < 8; ++i)
+    {
+        LogMessage msg(LogLevel::Info, "ordered_msg_" + std::to_string(i));
+        EXPECT_TRUE(queue.try_push(msg));
+    }
+
+    std::vector<LogMessage> items;
+    queue.try_pop_batch(items, 8);
+
+    EXPECT_EQ(items.size(), 8u);
+    for (size_t i = 0; i < items.size(); ++i)
+    {
+        std::string expected = "ordered_msg_" + std::to_string(i);
+        EXPECT_EQ(items[i].message(), expected);
+    }
+}

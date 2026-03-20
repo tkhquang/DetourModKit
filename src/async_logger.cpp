@@ -147,6 +147,13 @@ namespace DetourModKit
 
     size_t DynamicMPMCQueue::try_pop_batch(std::vector<LogMessage> &items, size_t max_count)
     {
+        if (max_count == 0)
+        {
+            return 0;
+        }
+
+        items.reserve(items.size() + max_count);
+
         size_t count = 0;
         LogMessage msg;
 
