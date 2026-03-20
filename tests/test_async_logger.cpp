@@ -408,13 +408,16 @@ TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)
     EXPECT_TRUE(queue.empty());
     EXPECT_EQ(queue.size(), 0u);
 
-    EXPECT_TRUE(queue.try_push(LogMessage(LogLevel::Info, "msg1")));
-    EXPECT_TRUE(queue.try_push(LogMessage(LogLevel::Info, "msg2")));
+    LogMessage msg1(LogLevel::Info, "msg1");
+    LogMessage msg2(LogLevel::Info, "msg2");
+    EXPECT_TRUE(queue.try_push(msg1));
+    EXPECT_TRUE(queue.try_push(msg2));
 
     EXPECT_EQ(queue.size(), 2u);
     EXPECT_FALSE(queue.empty());
 
-    EXPECT_FALSE(queue.try_push(LogMessage(LogLevel::Info, "overflow_msg")));
+    LogMessage overflow_msg(LogLevel::Info, "overflow_msg");
+    EXPECT_FALSE(queue.try_push(overflow_msg));
 
     LogMessage popped;
     EXPECT_TRUE(queue.try_pop(popped));
@@ -619,10 +622,9 @@ TEST(DynamicMPMCQueueTest, MultiThreaded)
             for (int i = 0; i < kItemsPerProducer; ++i)
             {
                 LogMessage msg(LogLevel::Info, "P" + std::to_string(p) + "_" + std::to_string(i));
-                while (!queue.try_push(std::move(msg)))
+                while (!queue.try_push(msg))
                 {
                     std::this_thread::yield();
-                    msg = LogMessage(LogLevel::Info, "P" + std::to_string(p) + "_" + std::to_string(i));
                 }
                 total_produced.fetch_add(1, std::memory_order_relaxed);
             } });

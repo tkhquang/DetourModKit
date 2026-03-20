@@ -47,6 +47,7 @@ using DMKHookType = DetourModKit::HookType;
 using DMKHookConfig = DetourModKit::HookConfig;
 using DMKAsyncLogger = DetourModKit::AsyncLogger;
 using DMKAsyncLoggerConfig = DetourModKit::AsyncLoggerConfig;
+using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
 
 /**
  * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
@@ -69,4 +70,3 @@ inline void DMK_Shutdown()
     // 3. Logger last (no more logging after this)
     DetourModKit::Logger::get_instance().shutdown();
 }
-using DMKOverflowPolicy = DetourModKit::OverflowPolicy;

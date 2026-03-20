@@ -5,7 +5,6 @@
 #include <string_view>
 #include <fstream>
 #include <mutex>
-#include <algorithm>
 #include <memory>
 #include <chrono>
 #include <format>
@@ -176,65 +175,39 @@ namespace DetourModKit
             }
         }
 
-        /**
-         * @brief Logs a TRACE level message with format string.
-         * @tparam Args Types of the format arguments.
-         * @param fmt The format string.
-         * @param args The arguments.
-         */
+        /// @name Convenience log methods
+        /// Shorthand for `log(LogLevel::X, fmt, args...)`. See log() for parameter docs.
+        /// @{
         template <typename... Args>
         void trace(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Trace, fmt, std::forward<Args>(args)...);
         }
 
-        /**
-         * @brief Logs a DEBUG level message with format string.
-         * @tparam Args Types of the format arguments.
-         * @param fmt The format string.
-         * @param args The arguments.
-         */
         template <typename... Args>
         void debug(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Debug, fmt, std::forward<Args>(args)...);
         }
 
-        /**
-         * @brief Logs an INFO level message with format string.
-         * @tparam Args Types of the format arguments.
-         * @param fmt The format string.
-         * @param args The arguments.
-         */
         template <typename... Args>
         void info(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Info, fmt, std::forward<Args>(args)...);
         }
 
-        /**
-         * @brief Logs a WARNING level message with format string.
-         * @tparam Args Types of the format arguments.
-         * @param fmt The format string.
-         * @param args The arguments.
-         */
         template <typename... Args>
         void warning(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Warning, fmt, std::forward<Args>(args)...);
         }
 
-        /**
-         * @brief Logs an ERROR level message with format string.
-         * @tparam Args Types of the format arguments.
-         * @param fmt The format string.
-         * @param args The arguments.
-         */
         template <typename... Args>
         void error(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Error, fmt, std::forward<Args>(args)...);
         }
+        /// @}
 
         /**
          * @brief Converts a log level string to the LogLevel enum.

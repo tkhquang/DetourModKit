@@ -14,8 +14,6 @@
 
 using namespace DetourModKit;
 
-// Use the shared log_level_to_string from logger.hpp - no duplication needed
-
 // ============================================================================
 // LogMessage Implementation
 // ============================================================================
@@ -27,13 +25,11 @@ LogMessage::LogMessage(LogLevel lvl, std::string msg)
 {
     if (msg.size() <= MAX_INLINE_SIZE)
     {
-        // Message fits in inline buffer - no heap allocation
         std::memcpy(buffer.data(), msg.data(), msg.size());
         length = msg.size();
     }
     else
     {
-        // Message too large - use heap allocation
         overflow = std::make_unique<std::string>(std::move(msg));
         length = overflow->size();
     }
@@ -96,7 +92,7 @@ DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
     }
 }
 
-bool DynamicMPMCQueue::try_push(LogMessage item)
+bool DynamicMPMCQueue::try_push(LogMessage &item)
 {
     size_t pos = enqueue_pos_.load(std::memory_order_relaxed);
 
@@ -108,10 +104,10 @@ bool DynamicMPMCQueue::try_push(LogMessage item)
 
         if (diff == 0)
         {
-            // Slot is ready for writing
             if (enqueue_pos_.compare_exchange_weak(pos, pos + 1,
                                                    std::memory_order_relaxed))
             {
+                // Only move after successfully claiming the slot
                 slot.data = std::move(item);
                 slot.sequence.store(pos + 1, std::memory_order_release);
                 return true;
@@ -119,12 +115,10 @@ bool DynamicMPMCQueue::try_push(LogMessage item)
         }
         else if (diff < 0)
         {
-            // Queue is full
-            return false;
+            return false; // Queue is full; item is left unchanged for caller
         }
         else
         {
-            // Another thread is ahead, reload position
             pos = enqueue_pos_.load(std::memory_order_relaxed);
         }
     }
@@ -142,7 +136,6 @@ bool DynamicMPMCQueue::try_pop(LogMessage &item)
 
         if (diff == 0)
         {
-            // Slot is ready for reading
             if (dequeue_pos_.compare_exchange_weak(pos, pos + 1,
                                                    std::memory_order_relaxed))
             {
@@ -153,25 +146,23 @@ bool DynamicMPMCQueue::try_pop(LogMessage &item)
         }
         else if (diff < 0)
         {
-            // Queue is empty
             return false;
         }
         else
         {
-            // Another thread is ahead, reload position
             pos = dequeue_pos_.load(std::memory_order_relaxed);
         }
     }
 }
 
-size_t DynamicMPMCQueue::size() const
+size_t DynamicMPMCQueue::size() const noexcept
 {
     size_t enq = enqueue_pos_.load(std::memory_order_relaxed);
     size_t deq = dequeue_pos_.load(std::memory_order_relaxed);
     return (enq >= deq) ? (enq - deq) : 0;
 }
 
-bool DynamicMPMCQueue::empty() const
+bool DynamicMPMCQueue::empty() const noexcept
 {
     return size() == 0;
 }
@@ -183,7 +174,7 @@ bool DynamicMPMCQueue::empty() const
 AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config,
                          std::ofstream &file_stream,
                          std::mutex &log_mutex)
-    : queue_(config.queue_capacity), // Now actually uses the config capacity!
+    : queue_(config.queue_capacity),
       config_(config),
       file_stream_(file_stream),
       log_mutex_(log_mutex)
@@ -201,7 +192,6 @@ void AsyncLogger::enqueue(LogLevel level, std::string message)
 {
     if (shutdown_requested_.load(std::memory_order_acquire))
     {
-        // Logger is shutting down, write synchronously
         std::lock_guard<std::mutex> lock(log_mutex_);
         if (file_stream_.is_open() && file_stream_.good())
         {
@@ -215,7 +205,6 @@ void AsyncLogger::enqueue(LogLevel level, std::string message)
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            // Use shared log_level_to_string from logger.hpp
             file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
                          << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
                          << message << '\n';
@@ -226,14 +215,14 @@ void AsyncLogger::enqueue(LogLevel level, std::string message)
 
     LogMessage msg(level, std::move(message));
 
-    if (!queue_.try_push(std::move(msg)))
+    if (queue_.try_push(msg))
     {
-        // Queue is full, handle based on overflow policy
-        handle_overflow(std::move(msg));
+        pending_messages_.fetch_add(1, std::memory_order_relaxed);
     }
     else
     {
-        pending_messages_.fetch_add(1, std::memory_order_relaxed);
+        // Queue is full — msg is still valid (try_push only moves on success)
+        handle_overflow(std::move(msg));
     }
 }
 
@@ -246,7 +235,6 @@ void AsyncLogger::flush()
 
     std::unique_lock<std::mutex> lock(flush_mutex_);
 
-    // Wait until all pending messages are written
     flush_cv_.wait(lock, [this]()
                    { return pending_messages_.load(std::memory_order_acquire) == 0; });
 }
@@ -261,10 +249,8 @@ void AsyncLogger::shutdown()
         return;
     }
 
-    // Signal writer thread to stop
     running_.store(false, std::memory_order_release);
 
-    // Wait for writer thread to finish
     if (writer_thread_.joinable())
     {
         writer_thread_.join();
@@ -290,7 +276,6 @@ void AsyncLogger::writer_thread_func()
 
     while (running_.load(std::memory_order_acquire) || !queue_.empty())
     {
-        // Collect batch of messages
         LogMessage msg;
         while (batch.size() < config_.batch_size && queue_.try_pop(msg))
         {
@@ -300,17 +285,14 @@ void AsyncLogger::writer_thread_func()
 
         if (!batch.empty())
         {
-            // Write batch to file
             write_batch(batch);
             batch.clear();
 
-            // Notify flush waiters
             flush_cv_.notify_all();
             last_flush = std::chrono::steady_clock::now();
         }
         else
         {
-            // No messages, check if we need to flush
             auto now = std::chrono::steady_clock::now();
             if (now - last_flush >= config_.flush_interval)
             {
@@ -322,12 +304,12 @@ void AsyncLogger::writer_thread_func()
                 last_flush = now;
             }
 
-            // Sleep briefly to avoid busy-waiting
+            // TODO: Replace polling with condition_variable for lower latency
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
 
-    // Final flush on shutdown
+    // Final flush
     {
         std::lock_guard<std::mutex> lock(log_mutex_);
         if (file_stream_.is_open())
@@ -348,7 +330,6 @@ void AsyncLogger::write_batch(std::span<LogMessage> messages)
 
     for (const auto &msg : messages)
     {
-        // Convert timestamp to formatted string
         auto time_t = std::chrono::system_clock::to_time_t(msg.timestamp);
         std::tm tm_buf{};
 
@@ -358,19 +339,16 @@ void AsyncLogger::write_batch(std::span<LogMessage> messages)
         localtime_r(&time_t, &tm_buf);
 #endif
 
-        // Get milliseconds
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       msg.timestamp.time_since_epoch()) %
                   1000;
 
-        // Write log entry - use shared log_level_to_string and '\n' instead of std::endl
         file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
                      << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
                      << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
                      << msg.message() << '\n';
     }
 
-    // Flush after batch write
     file_stream_.flush();
 }
 
@@ -379,17 +357,15 @@ bool AsyncLogger::handle_overflow(LogMessage &&message)
     switch (config_.overflow_policy)
     {
     case OverflowPolicy::DropNewest:
-        // Discard the new message
         return false;
 
     case OverflowPolicy::DropOldest:
     {
-        // Try to pop oldest and push new
         LogMessage oldest;
         if (queue_.try_pop(oldest))
         {
             pending_messages_.fetch_sub(1, std::memory_order_relaxed);
-            if (queue_.try_push(std::move(message)))
+            if (queue_.try_push(message))
             {
                 pending_messages_.fetch_add(1, std::memory_order_relaxed);
                 return true;
@@ -400,8 +376,7 @@ bool AsyncLogger::handle_overflow(LogMessage &&message)
 
     case OverflowPolicy::Block:
     {
-        // Spin until space is available
-        while (!queue_.try_push(LogMessage(message.level, std::string(message.message()))))
+        while (!queue_.try_push(message))
         {
             std::this_thread::yield();
         }
@@ -411,7 +386,6 @@ bool AsyncLogger::handle_overflow(LogMessage &&message)
 
     case OverflowPolicy::SyncFallback:
     {
-        // Write synchronously
         std::lock_guard<std::mutex> lock(log_mutex_);
         if (file_stream_.is_open() && file_stream_.good())
         {
@@ -424,7 +398,6 @@ bool AsyncLogger::handle_overflow(LogMessage &&message)
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            // Use shared log_level_to_string and '\n' instead of std::endl
             file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
                          << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
                          << message.message() << '\n';
