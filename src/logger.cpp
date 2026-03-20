@@ -83,6 +83,8 @@ void Logger::reconfigure(const std::string &prefix, const std::string &file_name
 {
     std::lock_guard<std::mutex> lock(log_access_mutex_);
 
+    shutdown_called_ = false;
+
     // Log reconfiguration message to current log file before changing settings
     if (log_file_stream_.is_open() && log_file_stream_.good())
     {

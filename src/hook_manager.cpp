@@ -401,6 +401,7 @@ bool HookManager::remove_hook(const std::string &hook_id)
 
 void HookManager::remove_all_hooks()
 {
+    m_shutdown_called = false;
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (!m_hooks.empty())
     {

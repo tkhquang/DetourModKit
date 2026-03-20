@@ -205,30 +205,24 @@ std::byte *DetourModKit::Scanner::find_pattern(std::byte *start_address, size_t 
     const std::byte target_byte = pattern.bytes[first_non_wildcard];
     const unsigned char target_val = static_cast<unsigned char>(target_byte);
 
-    std::byte *search_start = start_address;
-    const std::byte *const search_end = start_address + (region_size - pattern_size);
+    // memchr searches for the anchor byte at its actual position within candidates.
+    // Valid pattern start positions: [start_address, start_address + (region_size - pattern_size)]
+    // The anchor byte is at offset first_non_wildcard within the pattern, so we search
+    // for it in [start_address + first_non_wildcard, start_address + (region_size - pattern_size) + first_non_wildcard]
+    std::byte *search_start = start_address + first_non_wildcard;
+    const std::byte *const search_end = start_address + (region_size - pattern_size) + first_non_wildcard;
 
     while (search_start <= search_end)
     {
-        // Use memchr to find the next occurrence of the first non-wildcard byte
         void *found = memchr(search_start, static_cast<int>(target_val),
                              static_cast<size_t>(search_end - search_start + 1));
 
         if (!found)
         {
-            // First non-wildcard byte not found in remaining region
             break;
         }
 
         std::byte *current_scan_ptr = static_cast<std::byte *>(found);
-
-        // Adjust back by first_non_wildcard to get the pattern start position
-        if (current_scan_ptr < start_address + first_non_wildcard)
-        {
-            // Would go before start, skip to next
-            search_start = current_scan_ptr + 1;
-            continue;
-        }
 
         std::byte *pattern_start = current_scan_ptr - first_non_wildcard;
 
