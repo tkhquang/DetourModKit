@@ -1,11 +1,13 @@
 # Test Coverage Improvement Guide
 
 ## Overview
+
 This guide documents lessons learned from improving code coverage for DetourModKit, including how to create tests, run coverage analysis, identify uncovered areas, and address common obstacles.
 
 ## Quick Commands
 
 ### Build with Coverage
+
 ```bash
 # Clean rebuild with coverage flags
 set "PATH=C:\msys64\mingw64\bin;%PATH%"
@@ -16,15 +18,17 @@ cmake -S . -B build/mingw-debug -G "Ninja" ^
     -DCMAKE_C_FLAGS="-fprofile-arcs -ftest-coverage" ^
     -DCMAKE_CXX_FLAGS="-fprofile-arcs -ftest-coverage"
 cmake --build build/mingw-debug --parallel
-```
+```bash
 
 ### Run Tests
+
 ```bash
 cd build/mingw-debug
 ctest --output-on-failure
-```
+```bash
 
 ### Generate Coverage Report
+
 ```bash
 # Full report
 python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" ^
@@ -36,50 +40,57 @@ python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" ^
 python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" ^
     --exclude "external/" --exclude "build/" --exclude "tests/" ^
     --html-details docs/tests/coverage_details.html
-```
+```bash
 
 ## Coverage Analysis Workflow
 
 ### 1. Identify Low-Coverage Files
+
 Run the full coverage report and look for files with <90% coverage:
-```
+
+```bash
 TOTAL                                       1935     1585    81%
-```
+```bash
 
 ### 2. Check Specific File Coverage
+
 ```bash
 python -m gcovr --root . --filter "src/hook_manager.cpp" --txt
-```
+```text
 
 ### 3. Identify Uncovered Lines
+
 Look at the "Missing" column for specific line numbers that aren't covered.
 
 ### 4. Analyze Why Lines Are Uncovered
 
-#### Common Reasons for Uncovered Code:
+#### Common Reasons for Uncovered Code
 
-| Reason | Examples | Solution |
+|Reason|Examples|Solution|
 |--------|----------|----------|
-| **Invalid memory addresses** | Hook functions requiring valid function pointers | Use real function addresses (see below) |
-| **Error paths** | Exception handlers, error returns | Test with invalid inputs that trigger errors |
-| **Windows API errors** | GetModuleHandleExA, VirtualQuery failures | Mock or accept limitation |
-| **Template instantiation** | Template methods only instantiated with specific types | Add tests using those types |
-| **Threading race conditions** | Lock-free CAS retry loops | Extremely difficult to cover in unit tests |
-| **SEGFAULT risks** | Invalid addresses causing crashes | Use valid addresses, not 0x12345678 |
+|**Invalid memory addresses**|Hook functions requiring valid function pointers|Use real function addresses (see below)|
+|**Error paths**|Exception handlers, error returns|Test with invalid inputs that trigger errors|
+|**Windows API errors**|GetModuleHandleExA, VirtualQuery failures|Mock or accept limitation|
+|**Template instantiation**|Template methods only instantiated with specific types|Add tests using those types|
+|**Threading race conditions**|Lock-free CAS retry loops|Extremely difficult to cover in unit tests|
+|**SEGFAULT risks**|Invalid addresses causing crashes|Use valid addresses, not 0x12345678|
 
 ## Hook Manager Testing
 
 ### The SEGFAULT Problem
+
 Early tests used invalid addresses like `0x12345678` which cause SEGFAULT:
+
 ```cpp
 // BAD - causes SEGFAULT
 auto result = hook_manager_->create_inline_hook("Test", 0x12345678, detour, &tramp);
 // GOOD - use real function address
 auto result = hook_manager_->create_inline_hook("Test",
     reinterpret_cast<uintptr_t>(&real_hook_target_add), detour, &tramp);
-```
+```cpp
 
 ### Using Real Function Addresses
+
 ```cpp
 #include <windows.h>
 
@@ -91,14 +102,16 @@ void *detour_fn = reinterpret_cast<void *>(&real_hook_detour_add);
 [[gnu::noinline]] static int real_hook_target_add(int a, int b) {
     return a + b;
 }
-```
+```cpp
 
 ### What Can Be Tested
+
 - **Pre-flight checks**: Invalid addresses, null pointers, duplicate names
 - **Hook existence**: Create hooks, check status, remove hooks
-- **Template methods**: getOriginal<T>(), with_inline_hook<T>()
+- **Template methods**: getOriginal&lt;T&gt;(), with_inline_hook&lt;T&gt;()
 
 ### What Cannot Be Tested (Without Integration)
+
 - Actual hook installation success paths (requires valid memory)
 - safetyhook library internals
 - Runtime memory protection behaviors
@@ -110,11 +123,12 @@ void *detour_fn = reinterpret_cast<void *>(&real_hook_detour_add);
 TEST_F(ClassName, Method_ExpectedBehavior)
 TEST_F(HookManagerTest, CreateInlineHook_InvalidAddress)
 TEST_F(HookManagerTest, DISABLED_SafetyHookError_Path)  // Prefix disabled tests with DISABLED_
-```
+```cpp
 
 ## Adding New Tests
 
 ### 1. For Error Paths
+
 ```cpp
 TEST_F(SomeTest, Method_ErrorCondition)
 {
@@ -124,84 +138,100 @@ TEST_F(SomeTest, Method_ErrorCondition)
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ExpectedError::Value);
 }
-```
+```text
 
 ### 2. For Template Methods
+
 ```cpp
 // Template methods only get coverage when instantiated
 // Make sure to call them with the right types
 auto hook_result = hook_manager_->with_inline_hook("Name",
     [](auto &orig) -> decltype(orig) { return orig(); });
-```
+```text
 
 ### 3. For Config Parsing
+
 ```cpp
 // Test INI file contents carefully
 ini_file << "Keys=0x10, 0x20 ; comment at end\n";
 // Note: Comment stripping happens per-token, not per-line
-```
+```text
 
 ## Common Issues and Fixes
 
 ### Issue: Duplicate Test Name
-```
+
+```text
 error: 'TestName' is defined twice
-```
+```cpp
+
 **Fix**: Rename one of the tests:
+
 ```cpp
 TEST_F(MemoryUtilsTest, CacheBehavior)      // Original
 TEST_F(MemoryUtilsTest, CacheBehavior2)     // Rename duplicate
-```
+```cpp
 
 ### Issue: std::byte Array Initialization
-```
+
+```cpp
 error: cannot initialize 'std::byte' with 'int'
-```
+```cpp
+
 **Fix**: Use explicit casts:
+
 ```cpp
 std::byte data[] = {static_cast<std::byte>(0x48), static_cast<std::byte>(0x8B)};
-```
+```text
 
 ### Issue: g++ Coverage Tool Bug
-```
+
+```text
 Got negative hit value in: ...
-```
+```cpp
+
 **Fix**: Add `--gcov-ignore-parse-errors negative_hits.warn` to gcovr command
 
 ### Issue: Test Causes SEGFAULT
+
 **Fix**: Disable the test and document why:
+
 ```cpp
 TEST_F(HookManagerTest, DISABLED_SafetyHookError_Path)
 // Reason: safetyhook::create() with invalid address causes SEGFAULT
 // Would require mocking safetyhook or valid memory address
-```
+```text
 
 ## Coverage Targets
 
 ### Achievable Targets
-| Target | Difficulty | Notes |
+
+|Target|Difficulty|Notes|
 |--------|------------|-------|
-| 80% | Easy | Basic error path testing |
-| 85% | Medium | Template instantiation, more error paths |
-| 90% | Hard | Requires integration tests or mocking |
-| 95%+ | Very Hard | Requires refactoring for testability |
+|80%|Easy|Basic error path testing|
+|85%|Medium|Template instantiation, more error paths|
+|90%|Hard|Requires integration tests or mocking|
+|95%+|Very Hard|Requires refactoring for testability|
 
 ### When 90% Is Not Achievable
+
 If coverage is stuck below 90% due to:
+
 - **External library calls** (safetyhook): Mock or accept limitation
 - **Windows API errors**: Mock or accept limitation
 - **SEGFAULT risks**: Keep tests disabled, document reason
 
 Document the limitation:
+
 ```cpp
 // Coverage limitation: This code path requires valid hook installation
 // which cannot be tested in unit tests without mocking safetyhook.
 // Integration tests with real game modules would be needed.
-```
+```text
 
 ## Project Structure
 
-```
+```text
 DetourModKit/
 ├── src/                    # Source code (libDetourModKit.a)
 ├── include/DetourModKit/    # Public headers
@@ -225,19 +255,22 @@ DetourModKit/
 │   ├── coverage_details.css    # HTML styles
 │   └── coverage_details.js     # HTML scripts
 └── build/                  # Build output (gitignored)
-```
+```bash
 
 ## Coverage Report Interpretation
 
 ### Line Coverage
+
 - **Percentage**: Lines executed / Total lines
 - **Uncovered lines**: Listed in "Missing" column
 
 ### Function Coverage
+
 - **Percentage**: Functions called / Total functions
 - **Lower than line coverage**: Indicates some functions never called at all
 
 ### Branch Coverage
+
 - **Percentage**: Branches taken / Total branches
 - **Low branch coverage**: Indicates many if/else paths not exercised
 
@@ -255,50 +288,54 @@ DetourModKit/
 For coverage >90%, consider:
 
 1. **Game Module Integration Tests**
-   - Load actual game DLLs
-   - Hook real game functions
-   - Test in actual game environment
+    - Load actual game DLLs
+    - Hook real game functions
+    - Test in actual game environment
 
 2. **Mocking Framework**
-   - Mock safetyhook library
-   - Mock Windows API calls
-   - Use GMock for expectations
+    - Mock safetyhook library
+    - Mock Windows API calls
+    - Use GMock for expectations
 
 3. **Code Refactoring**
-   - Extract hard-to-test code into interfaces
-   - Use dependency injection
-   - Add test seams for mocking
+    - Extract hard-to-test code into interfaces
+    - Use dependency injection
+    - Add test seams for mocking
 
 ## Helper Scripts and Tools
 
 ### parse_coverage.py
+
 A lightweight Python script for parsing `coverage.json` to display per-file coverage statistics.
 
 **Usage:**
+
 ```bash
 # First generate coverage.json
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" \
-    --exclude "external/" --exclude "build/" --exclude "tests/" \
+python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" ^
+    --exclude "external/" --exclude "build/" --exclude "tests/" ^
     --json coverage.json
 
 # Run the parser
 python docs/tests/parse_coverage.py
-```
+```text
 
 **Output:**
-```
+
+```text
 src/hook_manager.cpp
-  Lines: 150/200 (75.0%)
-  Funcs: 10/12 (83.3%)
+   Lines: 150/200 (75.0%)
+   Funcs: 10/12 (83.3%)
 src/logger.cpp
-  Lines: 300/350 (85.7%)
-  Funcs: 25/25 (100.0%)
+   Lines: 300/350 (85.7%)
+   Funcs: 25/25 (100.0%)
 
 Total Lines: 450/550 (81.8%)
 Total Funcs: 35/37 (94.6%)
-```
+```bash
 
 ### test_compile.cpp
+
 A minimal stub file (`int main() { return 0; }`) used for basic compilation testing. Can be compiled standalone to verify the toolchain works:
 
 ```bash
@@ -306,4 +343,5 @@ g++ -o test_compile.exe docs/tests/test_compile.cpp
 ```
 
 ## Contact
+
 For questions about testing strategy, refer to the project maintainers.

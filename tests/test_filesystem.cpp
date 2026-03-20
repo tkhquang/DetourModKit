@@ -10,7 +10,7 @@
 using namespace DetourModKit;
 
 // Test fixture for Filesystem tests
-class FilesystemUtilsTest : public ::testing::Test
+class FilesystemTest : public ::testing::Test
 {
 protected:
     void SetUp() override
@@ -31,10 +31,10 @@ protected:
     std::filesystem::path test_dir_;
 };
 
-// Test getRuntimeDirectory returns a valid directory
-TEST_F(FilesystemUtilsTest, GetRuntimeDirectory)
+// Test get_runtime_directory returns a valid directory
+TEST_F(FilesystemTest, GetRuntimeDirectory)
 {
-    auto dir = Filesystem::getRuntimeDirectory();
+    auto dir = Filesystem::get_runtime_directory();
 
     // Should return a non-empty string
     EXPECT_FALSE(dir.empty());
@@ -43,20 +43,20 @@ TEST_F(FilesystemUtilsTest, GetRuntimeDirectory)
     // On success, the directory should exist (though it might be just ".")
 }
 
-// Test getRuntimeDirectory returns consistent results
-TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_Consistent)
+// Test get_runtime_directory returns consistent results
+TEST_F(FilesystemTest, GetRuntimeDirectory_Consistent)
 {
-    auto dir1 = Filesystem::getRuntimeDirectory();
-    auto dir2 = Filesystem::getRuntimeDirectory();
+    auto dir1 = Filesystem::get_runtime_directory();
+    auto dir2 = Filesystem::get_runtime_directory();
 
     // Multiple calls should return the same result
     EXPECT_EQ(dir1, dir2);
 }
 
-// Test getRuntimeDirectory returns absolute or relative path
-TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_PathFormat)
+// Test get_runtime_directory returns absolute or relative path
+TEST_F(FilesystemTest, GetRuntimeDirectory_PathFormat)
 {
-    auto dir = Filesystem::getRuntimeDirectory();
+    auto dir = Filesystem::get_runtime_directory();
 
     // Should not be empty
     EXPECT_FALSE(dir.empty());
@@ -65,10 +65,10 @@ TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_PathFormat)
     EXPECT_NE(dir.find_first_of("\\/"), std::string::npos);
 }
 
-// Test getRuntimeDirectory with path operations
-TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_PathOperations)
+// Test get_runtime_directory with path operations
+TEST_F(FilesystemTest, GetRuntimeDirectory_PathOperations)
 {
-    auto dir = Filesystem::getRuntimeDirectory();
+    auto dir = Filesystem::get_runtime_directory();
 
     // Create a path object from the result
     std::filesystem::path fs_path(dir);
@@ -77,10 +77,10 @@ TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_PathOperations)
     EXPECT_FALSE(fs_path.empty());
 }
 
-// Test getRuntimeDirectory returns usable path
-TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_UsablePath)
+// Test get_runtime_directory returns usable path
+TEST_F(FilesystemTest, GetRuntimeDirectory_UsablePath)
 {
-    auto dir = Filesystem::getRuntimeDirectory();
+    auto dir = Filesystem::get_runtime_directory();
 
     // Should be able to append paths
     std::filesystem::path full_path = std::filesystem::path(dir) / "test_file.txt";
@@ -89,8 +89,8 @@ TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_UsablePath)
     EXPECT_FALSE(full_path.empty());
 }
 
-// Test getRuntimeDirectory thread safety
-TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_ThreadSafety)
+// Test get_runtime_directory thread safety
+TEST_F(FilesystemTest, GetRuntimeDirectory_ThreadSafety)
 {
     const int num_threads = 4;
     std::vector<std::string> results(num_threads);
@@ -99,7 +99,7 @@ TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_ThreadSafety)
     for (int i = 0; i < num_threads; ++i)
     {
         threads.emplace_back([&results, i]()
-                             { results[i] = Filesystem::getRuntimeDirectory(); });
+                             { results[i] = Filesystem::get_runtime_directory(); });
     }
 
     for (auto &t : threads)
@@ -114,8 +114,8 @@ TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_ThreadSafety)
     }
 }
 
-// Test that getRuntimeDirectory doesn't throw
-TEST_F(FilesystemUtilsTest, GetRuntimeDirectory_NoThrow)
+// Test that get_runtime_directory doesn't throw
+TEST_F(FilesystemTest, GetRuntimeDirectory_NoThrow)
 {
-    EXPECT_NO_THROW(Filesystem::getRuntimeDirectory());
+    EXPECT_NO_THROW(Filesystem::get_runtime_directory());
 }

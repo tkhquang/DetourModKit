@@ -14,7 +14,7 @@
 
 using namespace DetourModKit;
 
-// Use the shared logLevelToString from logger.hpp - no duplication needed
+// Use the shared log_level_to_string from logger.hpp - no duplication needed
 
 // ============================================================================
 // LogMessage Implementation
@@ -215,9 +215,9 @@ void AsyncLogger::enqueue(LogLevel level, std::string message)
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            // Use shared logLevelToString from logger.hpp
+            // Use shared log_level_to_string from logger.hpp
             file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
-                         << "[" << std::setw(7) << std::left << logLevelToString(level) << "] :: "
+                         << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
                          << message << '\n';
             file_stream_.flush();
         }
@@ -363,10 +363,10 @@ void AsyncLogger::write_batch(std::span<LogMessage> messages)
                       msg.timestamp.time_since_epoch()) %
                   1000;
 
-        // Write log entry - use shared logLevelToString and '\n' instead of std::endl
+        // Write log entry - use shared log_level_to_string and '\n' instead of std::endl
         file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
                      << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
-                     << "[" << std::setw(7) << std::left << logLevelToString(msg.level) << "] :: "
+                     << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
                      << msg.message() << '\n';
     }
 
@@ -424,9 +424,9 @@ bool AsyncLogger::handle_overflow(LogMessage &&message)
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            // Use shared logLevelToString and '\n' instead of std::endl
+            // Use shared log_level_to_string and '\n' instead of std::endl
             file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
-                         << "[" << std::setw(7) << std::left << logLevelToString(message.level) << "] :: "
+                         << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
                          << message.message() << '\n';
             file_stream_.flush();
         }

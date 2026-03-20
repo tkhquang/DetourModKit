@@ -44,7 +44,7 @@ namespace DetourModKit
          * @param aob_str The AOB pattern string.
          * @return std::optional<CompiledPattern> The compiled pattern, or std::nullopt on parse failure.
          */
-        std::optional<CompiledPattern> parseAOB(std::string_view aob_str);
+        std::optional<CompiledPattern> parse_aob(std::string_view aob_str);
 
         /**
          * @brief Scans a specified memory region for a given byte pattern.
@@ -56,7 +56,7 @@ namespace DetourModKit
          * @return std::byte* Pointer to the first occurrence of the pattern within
          *         the specified region. Returns nullptr if pattern not found.
          */
-        std::byte *FindPattern(std::byte *start_address, size_t region_size,
+        std::byte *find_pattern(std::byte *start_address, size_t region_size,
                                const CompiledPattern &pattern);
     } // namespace Scanner
 } // namespace DetourModKit

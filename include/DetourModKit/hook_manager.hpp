@@ -62,9 +62,9 @@ namespace DetourModKit
      */
     struct HookConfig
     {
-        bool autoEnable = true;
-        safetyhook::InlineHook::Flags inlineFlags = static_cast<safetyhook::InlineHook::Flags>(0);
-        safetyhook::MidHook::Flags midFlags = static_cast<safetyhook::MidHook::Flags>(0);
+        bool auto_enable = true;
+        safetyhook::InlineHook::Flags inline_flags = static_cast<safetyhook::InlineHook::Flags>(0);
+        safetyhook::MidHook::Flags mid_flags = static_cast<safetyhook::MidHook::Flags>(0);
     };
 
     /**
@@ -79,10 +79,10 @@ namespace DetourModKit
     public:
         virtual ~Hook() = default;
 
-        const std::string &getName() const { return m_name; }
-        HookType getType() const { return m_type; }
-        uintptr_t getTargetAddress() const { return m_target_address; }
-        HookStatus getStatus() const { return m_status; }
+        const std::string &get_name() const { return m_name; }
+        HookType get_type() const { return m_type; }
+        uintptr_t get_target_address() const { return m_target_address; }
+        HookStatus get_status() const { return m_status; }
 
         /**
          * @brief Enables the hook.
@@ -91,7 +91,7 @@ namespace DetourModKit
          */
         bool enable()
         {
-            if (!isImplValid())
+            if (!is_impl_valid())
                 return false;
             if (m_status == HookStatus::Active)
                 return true;
@@ -113,7 +113,7 @@ namespace DetourModKit
          */
         bool disable()
         {
-            if (!isImplValid())
+            if (!is_impl_valid())
                 return false;
             if (m_status == HookStatus::Disabled)
                 return true;
@@ -128,9 +128,9 @@ namespace DetourModKit
             return false;
         }
 
-        bool isEnabled() const { return m_status == HookStatus::Active; }
+        bool is_enabled() const { return m_status == HookStatus::Active; }
 
-        static std::string_view statusToString(HookStatus status)
+        static std::string_view status_to_string(HookStatus status)
         {
             switch (status)
             {
@@ -147,7 +147,7 @@ namespace DetourModKit
             }
         }
 
-        static std::string_view errorToString(HookError error)
+        static std::string_view error_to_string(HookError error)
         {
             switch (error)
             {
@@ -180,7 +180,7 @@ namespace DetourModKit
             : m_name(std::move(name)), m_type(type), m_target_address(target_address), m_status(initial_status) {}
 
         // Derived classes implement these for the Template Method pattern
-        virtual bool isImplValid() const noexcept = 0;
+        virtual bool is_impl_valid() const noexcept = 0;
         virtual bool do_enable() = 0;
         virtual bool do_disable() = 0;
 
@@ -207,13 +207,13 @@ namespace DetourModKit
          * @return A function pointer of type T to the original function's trampoline.
          */
         template <typename T>
-        T getOriginal() const
+        T get_original() const
         {
             return m_safetyhook_impl ? m_safetyhook_impl->original<T>() : nullptr;
         }
 
     protected:
-        bool isImplValid() const noexcept override { return m_safetyhook_impl != nullptr; }
+        bool is_impl_valid() const noexcept override { return m_safetyhook_impl != nullptr; }
         bool do_enable() override
         {
             auto result = m_safetyhook_impl->enable();
@@ -246,13 +246,13 @@ namespace DetourModKit
          * @brief Gets the destination function of this mid-hook.
          * @return safetyhook::MidHookFn The function pointer to the detour.
          */
-        safetyhook::MidHookFn getDestination() const
+        safetyhook::MidHookFn get_destination() const
         {
             return m_safetyhook_impl ? m_safetyhook_impl->destination() : nullptr;
         }
 
     protected:
-        bool isImplValid() const noexcept override { return m_safetyhook_impl != nullptr; }
+        bool is_impl_valid() const noexcept override { return m_safetyhook_impl != nullptr; }
         bool do_enable() override
         {
             auto result = m_safetyhook_impl->enable();
@@ -281,9 +281,9 @@ namespace DetourModKit
          * @brief Provides access to the singleton instance of the HookManager.
          * @return HookManager& Reference to the global HookManager instance.
          */
-        static HookManager &getInstance();
+        static HookManager &get_instance();
 
-        explicit HookManager(Logger &logger = Logger::getInstance());
+        explicit HookManager(Logger &logger = Logger::get_instance());
         ~HookManager();
 
         /**
@@ -434,7 +434,7 @@ namespace DetourModKit
         {
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             auto it = m_hooks.find(hook_id);
-            if (it != m_hooks.end() && it->second->getType() == HookType::Inline)
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
                 return fn(static_cast<InlineHook &>(*it->second));
             }
@@ -457,7 +457,7 @@ namespace DetourModKit
         {
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             auto it = m_hooks.find(hook_id);
-            if (it != m_hooks.end() && it->second->getType() == HookType::Mid)
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
                 return fn(static_cast<MidHook &>(*it->second));
             }

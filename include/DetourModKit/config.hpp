@@ -22,59 +22,59 @@ namespace DetourModKit
     {
 
         /**
-         * @brief Registers an integer configuration item with a callback setter.
+         * @brief Registers an integer configuration item.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for this setting, used in logs.
          * @param setter A callback function that receives the loaded value.
          * @param default_value The default integer value to use if the key is not found or invalid.
          */
-        void registerIntCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                                 std::function<void(int)> setter, int default_value);
+        void register_int(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                         std::function<void(int)> setter, int default_value);
 
         /**
-         * @brief Registers a floating-point configuration item with a callback setter.
+         * @brief Registers a floating-point configuration item.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param setter A callback function that receives the loaded value.
          * @param default_value The default float value.
          */
-        void registerFloatCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                                   std::function<void(float)> setter, float default_value);
+        void register_float(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                           std::function<void(float)> setter, float default_value);
 
         /**
-         * @brief Registers a boolean configuration item with a callback setter.
+         * @brief Registers a boolean configuration item.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param setter A callback function that receives the loaded value.
          * @param default_value The default boolean value.
          */
-        void registerBoolCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                                  std::function<void(bool)> setter, bool default_value);
+        void register_bool(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                          std::function<void(bool)> setter, bool default_value);
 
         /**
-         * @brief Registers a string configuration item with a callback setter.
+         * @brief Registers a string configuration item.
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param setter A callback function that receives the loaded value.
          * @param default_value The default string value.
          */
-        void registerStringCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                                    std::function<void(const std::string &)> setter, std::string default_value);
+        void register_string(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                            std::function<void(const std::string &)> setter, std::string default_value);
 
         /**
-         * @brief Registers a key list configuration item (comma-separated hex VK codes) with a callback setter.
+         * @brief Registers a key list configuration item (comma-separated hex VK codes).
          * @param section The INI section name.
          * @param ini_key The INI key name.
          * @param log_key_name A user-friendly name for logging.
          * @param setter A callback function that receives the loaded vector of VK codes.
          * @param default_value_str A string representing the default comma-separated hex VK codes.
          */
-        void registerKeyListCallback(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                                     std::function<void(const std::vector<int> &)> setter, const std::string &default_value_str);
+        void register_key_list(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                             std::function<void(const std::vector<int> &)> setter, const std::string &default_value_str);
 
         /**
          * @brief Loads all registered configuration settings from the specified INI file.
@@ -91,14 +91,14 @@ namespace DetourModKit
          * @details Iterates through all items registered with the config system and
          *          outputs their current values to the Logger.
          */
-        void logAll();
+        void log_all();
 
         /**
          * @brief Clears all currently registered configuration items.
          * @details Useful if the configuration system needs to be reset without
          *          restarting the application.
          */
-        void clearRegisteredItems();
+        void clear_registered_items();
 
     } // namespace Config
 } // namespace DetourModKit

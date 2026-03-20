@@ -99,7 +99,7 @@ namespace MemoryUtilsCacheInternal
         // Check for overflow if size is very large
         if (endAddress < address && size != 0) // size != 0 to allow address + 0 for a zero-size check if ever needed
         {
-            Logger::getInstance().warning("MemoryCache: Address + size caused overflow in findCacheEntry.");
+            Logger::get_instance().warning("MemoryCache: Address + size caused overflow in findCacheEntry.");
             return nullptr;
         }
 
@@ -170,7 +170,7 @@ namespace MemoryUtilsCacheInternal
     }
 
     /**
-     * @brief Initializes the cache structures. Called once by initMemoryCache.
+     * @brief Initializes the cache structures. Called once by init_cache.
      * @param cache_size_param Desired number of cache entries.
      * @param expiry_ms_param Desired expiry time in milliseconds for entries.
      * @return true if initialization succeeded, false otherwise.
@@ -188,7 +188,7 @@ namespace MemoryUtilsCacheInternal
         }
         catch (const std::bad_alloc &e)
         {
-            Logger::getInstance().error("MemoryCache: Failed to allocate memory for cache (size: {}). Error: {}. Attempting minimal cache.",
+            Logger::get_instance().error("MemoryCache: Failed to allocate memory for cache (size: {}). Error: {}. Attempting minimal cache.",
                                         s_configuredCacheSize, e.what());
             try
             {
@@ -197,7 +197,7 @@ namespace MemoryUtilsCacheInternal
             }
             catch (const std::bad_alloc &e_min)
             {
-                Logger::getInstance().error("MemoryCache: Minimal cache allocation also failed. Error: {}. Cache will be disabled.",
+                Logger::get_instance().error("MemoryCache: Minimal cache allocation also failed. Error: {}. Cache will be disabled.",
                                             e_min.what());
                 s_configuredCacheSize = 0; // Mark cache as unusable
                 s_memoryCache.clear();     // Ensure vector is empty
@@ -214,7 +214,7 @@ namespace MemoryUtilsCacheInternal
 
         if (s_configuredCacheSize > 0)
         {
-            Logger::getInstance().debug("MemoryCache: Initialized with {} entries and {}ms expiry.",
+            Logger::get_instance().debug("MemoryCache: Initialized with {} entries and {}ms expiry.",
                                         s_configuredCacheSize, s_configuredCacheExpiryMs);
         }
 
@@ -226,10 +226,10 @@ namespace MemoryUtilsCacheInternal
 
 // --- Public API functions for Memory Utilities ---
 
-bool DetourModKit::Memory::initMemoryCache(size_t cache_size, unsigned int expiry_ms)
+bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms)
 {
     // Use std::call_once to ensure performCacheInitialization is called exactly once
-    // across all threads, even if initMemoryCache is called multiple times.
+    // across all threads, even if init_cache is called multiple times.
     bool initialized = false;
     std::call_once(MemoryUtilsCacheInternal::s_memoryCacheInitFlag,
                    [&]()
@@ -241,7 +241,7 @@ bool DetourModKit::Memory::initMemoryCache(size_t cache_size, unsigned int expir
     return initialized || MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire);
 }
 
-void DetourModKit::Memory::clearMemoryCache()
+void DetourModKit::Memory::clear_cache()
 {
     std::lock_guard<std::mutex> lock(MemoryUtilsCacheInternal::s_cacheMutex);
     for (auto &entry : MemoryUtilsCacheInternal::s_memoryCache)
@@ -251,7 +251,7 @@ void DetourModKit::Memory::clearMemoryCache()
 
     if (MemoryUtilsCacheInternal::s_configuredCacheSize > 0)
     {
-        Logger::getInstance().debug("MemoryCache: All entries cleared.");
+        Logger::get_instance().debug("MemoryCache: All entries cleared.");
     }
 #ifdef _DEBUG // Reset stats if compiled in debug
     MemoryUtilsCacheInternal::s_cacheHits.store(0, std::memory_order_relaxed);
@@ -259,7 +259,7 @@ void DetourModKit::Memory::clearMemoryCache()
 #endif
 }
 
-std::string DetourModKit::Memory::getMemoryCacheStats()
+std::string DetourModKit::Memory::get_cache_stats()
 {
 #ifdef _DEBUG
     uint64_t hits = MemoryUtilsCacheInternal::s_cacheHits.load(std::memory_order_relaxed);
@@ -295,7 +295,7 @@ std::string DetourModKit::Memory::getMemoryCacheStats()
 #endif
 }
 
-bool DetourModKit::Memory::isMemoryReadable(const void *address, size_t size)
+bool DetourModKit::Memory::is_readable(const void *address, size_t size)
 {
     if (!address || size == 0) // Reading zero bytes is trivially true but often indicates an error in calling code.
     {                          // For consistency with how VirtualQuery might treat it, or if size=0 indicates no check needed.
@@ -304,7 +304,7 @@ bool DetourModKit::Memory::isMemoryReadable(const void *address, size_t size)
     }
 
     // Ensure cache is initialized (does nothing if already initialized)
-    DetourModKit::Memory::initMemoryCache(); // Uses default parameters if not called explicitly by user
+    DetourModKit::Memory::init_cache(); // Uses default parameters if not called explicitly by user
 
     uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     bool is_region_readable_from_cache = false;
@@ -390,13 +390,13 @@ bool DetourModKit::Memory::isMemoryReadable(const void *address, size_t size)
     return is_fully_contained;
 }
 
-bool DetourModKit::Memory::isMemoryWritable(void *address, size_t size)
+bool DetourModKit::Memory::is_writable(void *address, size_t size)
 {
     if (!address || size == 0)
     {
         return false;
     }
-    DetourModKit::Memory::initMemoryCache(); // Ensure cache is initialized
+    DetourModKit::Memory::init_cache(); // Ensure cache is initialized
 
     uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     bool is_region_writable_from_cache = false;
@@ -462,28 +462,28 @@ bool DetourModKit::Memory::isMemoryWritable(void *address, size_t size)
     return is_fully_contained;
 }
 
-std::expected<void, MemoryError> DetourModKit::Memory::WriteBytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
+std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
 {
     if (!targetAddress)
     {
-        logger.error("WriteBytes: Target address is null.");
+        logger.error("write_bytes: Target address is null.");
         return std::unexpected(MemoryError::NullTargetAddress);
     }
     if (!sourceBytes && numBytes > 0)
     {
-        logger.error("WriteBytes: Source bytes pointer is null for non-zero numBytes.");
+        logger.error("write_bytes: Source bytes pointer is null for non-zero numBytes.");
         return std::unexpected(MemoryError::NullSourceBytes);
     }
     if (numBytes == 0)
     {
-        logger.warning("WriteBytes: Number of bytes to write is zero. Operation has no effect.");
+        logger.warning("write_bytes: Number of bytes to write is zero. Operation has no effect.");
         return {};
     }
 
     DWORD old_protection_flags;
     if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, PAGE_EXECUTE_READWRITE, &old_protection_flags))
     {
-        logger.error("WriteBytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
+        logger.error("write_bytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
         return std::unexpected(MemoryError::ProtectionChangeFailed);
     }
@@ -493,7 +493,7 @@ std::expected<void, MemoryError> DetourModKit::Memory::WriteBytes(std::byte *tar
     DWORD temp_holder_for_old_protect_after_restore;
     if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_holder_for_old_protect_after_restore))
     {
-        logger.error("WriteBytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
+        logger.error("write_bytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
                      DetourModKit::Format::format_hex(static_cast<int>(old_protection_flags)),
                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
         return std::unexpected(MemoryError::ProtectionRestoreFailed);
@@ -501,11 +501,11 @@ std::expected<void, MemoryError> DetourModKit::Memory::WriteBytes(std::byte *tar
 
     if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(targetAddress), numBytes))
     {
-        logger.warning("WriteBytes: FlushInstructionCache failed for address {}. Windows Error: {}",
+        logger.warning("write_bytes: FlushInstructionCache failed for address {}. Windows Error: {}",
                        DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
     }
 
-    logger.debug("WriteBytes: Successfully wrote {} bytes to address {}.",
+    logger.debug("write_bytes: Successfully wrote {} bytes to address {}.",
                  numBytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)));
     return {};
 }

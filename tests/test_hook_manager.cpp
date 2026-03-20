@@ -17,7 +17,7 @@ protected:
     void SetUp() override
     {
         // Get the hook manager instance
-        hook_manager_ = &HookManager::getInstance();
+        hook_manager_ = &HookManager::get_instance();
         // Clean up any hooks from previous tests
         hook_manager_->remove_all_hooks();
     }
@@ -37,8 +37,8 @@ protected:
 // Test HookManager singleton
 TEST(HookManagerSingletonTest, GetInstance)
 {
-    HookManager &instance1 = HookManager::getInstance();
-    HookManager &instance2 = HookManager::getInstance();
+    HookManager &instance1 = HookManager::get_instance();
+    HookManager &instance2 = HookManager::get_instance();
 
     EXPECT_EQ(&instance1, &instance2);
 }
@@ -73,17 +73,17 @@ TEST_F(HookManagerTest, HookConfig)
     HookConfig config;
 
     // Default values
-    EXPECT_TRUE(config.autoEnable);
-    // inlineFlags and midFlags are safetyhook types, just check they exist
+    EXPECT_TRUE(config.auto_enable);
+    // inline_flags and mid_flags are safetyhook types, just check they exist
 }
 
 // Test HookConfig with custom values
 TEST_F(HookManagerTest, HookConfig_Custom)
 {
     HookConfig config;
-    config.autoEnable = false;
+    config.auto_enable = false;
 
-    EXPECT_FALSE(config.autoEnable);
+    EXPECT_FALSE(config.auto_enable);
 }
 
 // Test create_inline_hook with invalid address
@@ -397,7 +397,7 @@ TEST_F(HookManagerTest, DISABLED_WithInlineHook_Callback)
                                                            [&callback_called](InlineHook &hook) -> bool
                                                            {
                                                                callback_called = true;
-                                                               EXPECT_EQ(hook.getName(), "HookForCallback");
+                                                               EXPECT_EQ(hook.get_name(), "HookForCallback");
                                                                return true;
                                                            });
 
@@ -437,7 +437,7 @@ TEST_F(HookManagerTest, DISABLED_WithMidHook_Callback)
                                                         [&callback_called](MidHook &hook) -> bool
                                                         {
                                                             callback_called = true;
-                                                            EXPECT_EQ(hook.getName(), "MidHookForCallback");
+                                                            EXPECT_EQ(hook.get_name(), "MidHookForCallback");
                                                             return true;
                                                         });
 
@@ -487,13 +487,13 @@ TEST(HookErrorTest, ErrorValuesExist)
     (void)err7;
 }
 
-// Test Hook::statusToString
+// Test Hook::status_to_string
 TEST(HookStatusStringTest, StatusToString)
 {
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Active).empty());
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Disabled).empty());
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Failed).empty());
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Removed).empty());
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Active).empty());
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Disabled).empty());
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Failed).empty());
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Removed).empty());
 }
 
 // Test thread safety
@@ -544,23 +544,23 @@ TEST_F(HookManagerTest, DISABLED_ThreadSafety)
     SUCCEED();
 }
 
-// Test Hook::errorToString for all error types
+// Test Hook::error_to_string for all error types
 TEST(HookErrorStringTest, ErrorToString)
 {
-    EXPECT_FALSE(Hook::errorToString(HookError::AllocatorNotAvailable).empty());
-    EXPECT_FALSE(Hook::errorToString(HookError::InvalidTargetAddress).empty());
-    EXPECT_FALSE(Hook::errorToString(HookError::InvalidDetourFunction).empty());
-    EXPECT_FALSE(Hook::errorToString(HookError::InvalidTrampolinePointer).empty());
-    EXPECT_FALSE(Hook::errorToString(HookError::HookAlreadyExists).empty());
-    EXPECT_FALSE(Hook::errorToString(HookError::SafetyHookError).empty());
-    EXPECT_FALSE(Hook::errorToString(HookError::UnknownError).empty());
+    EXPECT_FALSE(Hook::error_to_string(HookError::AllocatorNotAvailable).empty());
+    EXPECT_FALSE(Hook::error_to_string(HookError::InvalidTargetAddress).empty());
+    EXPECT_FALSE(Hook::error_to_string(HookError::InvalidDetourFunction).empty());
+    EXPECT_FALSE(Hook::error_to_string(HookError::InvalidTrampolinePointer).empty());
+    EXPECT_FALSE(Hook::error_to_string(HookError::HookAlreadyExists).empty());
+    EXPECT_FALSE(Hook::error_to_string(HookError::SafetyHookError).empty());
+    EXPECT_FALSE(Hook::error_to_string(HookError::UnknownError).empty());
 }
 
-// Test Hook::isEnabled method
+// Test Hook::is_enabled method
 TEST(HookIsEnabledTest, IsEnabled)
 {
-    // Test that isEnabled returns correct status
-    // This tests the isEnabled() method in hook_manager.hpp
+    // Test that is_enabled returns correct status
+    // This tests the is_enabled() method in hook_manager.hpp
     HookStatus active = HookStatus::Active;
     HookStatus disabled = HookStatus::Disabled;
 
@@ -572,17 +572,17 @@ TEST(HookIsEnabledTest, IsEnabled)
 TEST_F(HookManagerTest, HookConfig_Flags)
 {
     HookConfig config;
-    config.autoEnable = false;
+    config.auto_enable = false;
 
-    EXPECT_FALSE(config.autoEnable);
+    EXPECT_FALSE(config.auto_enable);
 
     // Test that flags can be set
-    config.inlineFlags = static_cast<safetyhook::InlineHook::Flags>(0);
-    config.midFlags = static_cast<safetyhook::MidHook::Flags>(0);
+    config.inline_flags = static_cast<safetyhook::InlineHook::Flags>(0);
+    config.mid_flags = static_cast<safetyhook::MidHook::Flags>(0);
 
     // Just verify they compile
-    (void)config.inlineFlags;
-    (void)config.midFlags;
+    (void)config.inline_flags;
+    (void)config.mid_flags;
 }
 
 // Test create_inline_hook with all error conditions
@@ -811,31 +811,31 @@ TEST_F(HookManagerTest, HookError_AllValues)
     EXPECT_NE(err6, err7);
 }
 
-// Test Hook::statusToString for all statuses
+// Test Hook::status_to_string for all statuses
 TEST(HookStatusStringTest, StatusToString_All)
 {
-    EXPECT_EQ(Hook::statusToString(HookStatus::Active), "Active");
-    EXPECT_EQ(Hook::statusToString(HookStatus::Disabled), "Disabled");
-    EXPECT_EQ(Hook::statusToString(HookStatus::Failed), "Failed");
-    EXPECT_EQ(Hook::statusToString(HookStatus::Removed), "Removed");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Active), "Active");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Disabled), "Disabled");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Failed), "Failed");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Removed), "Removed");
 }
 
-// Test Hook::errorToString for all errors
+// Test Hook::error_to_string for all errors
 TEST(HookErrorStringTest, ErrorToString_All)
 {
-    EXPECT_EQ(Hook::errorToString(HookError::AllocatorNotAvailable), "Allocator not available");
-    EXPECT_EQ(Hook::errorToString(HookError::InvalidTargetAddress), "Invalid target address");
-    EXPECT_EQ(Hook::errorToString(HookError::InvalidDetourFunction), "Invalid detour function");
-    EXPECT_EQ(Hook::errorToString(HookError::InvalidTrampolinePointer), "Invalid trampoline pointer");
-    EXPECT_EQ(Hook::errorToString(HookError::HookAlreadyExists), "Hook already exists");
-    EXPECT_EQ(Hook::errorToString(HookError::SafetyHookError), "SafetyHook error");
-    EXPECT_EQ(Hook::errorToString(HookError::UnknownError), "Unknown error");
+    EXPECT_EQ(Hook::error_to_string(HookError::AllocatorNotAvailable), "Allocator not available");
+    EXPECT_EQ(Hook::error_to_string(HookError::InvalidTargetAddress), "Invalid target address");
+    EXPECT_EQ(Hook::error_to_string(HookError::InvalidDetourFunction), "Invalid detour function");
+    EXPECT_EQ(Hook::error_to_string(HookError::InvalidTrampolinePointer), "Invalid trampoline pointer");
+    EXPECT_EQ(Hook::error_to_string(HookError::HookAlreadyExists), "Hook already exists");
+    EXPECT_EQ(Hook::error_to_string(HookError::SafetyHookError), "SafetyHook error");
+    EXPECT_EQ(Hook::error_to_string(HookError::UnknownError), "Unknown error");
 }
 
 // Test Hook base class methods
 TEST(HookTest, GetName)
 {
-    // Create a mock-like test by verifying Hook::getName exists and works
+    // Create a mock-like test by verifying Hook::get_name exists and works
     HookStatus status = HookStatus::Active;
     HookType type = HookType::Inline;
 
@@ -843,13 +843,13 @@ TEST(HookTest, GetName)
     EXPECT_EQ(status, HookStatus::Active);
     EXPECT_EQ(type, HookType::Inline);
 
-    // Test statusToString for all statuses
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Active).empty());
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Disabled).empty());
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Failed).empty());
-    EXPECT_FALSE(Hook::statusToString(HookStatus::Removed).empty());
+    // Test status_to_string for all statuses
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Active).empty());
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Disabled).empty());
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Failed).empty());
+    EXPECT_FALSE(Hook::status_to_string(HookStatus::Removed).empty());
 
-    // Test isEnabled - just verifies the status comparison works
+    // Test is_enabled - just verifies the status comparison works
     EXPECT_TRUE(HookStatus::Active == HookStatus::Active);
     EXPECT_FALSE(HookStatus::Active == HookStatus::Disabled);
 }
@@ -858,30 +858,30 @@ TEST(HookTest, GetName)
 TEST_F(HookManagerTest, HookConfig_Assignment)
 {
     HookConfig config1;
-    config1.autoEnable = false;
+    config1.auto_enable = false;
 
     HookConfig config2;
     config2 = config1;
 
-    EXPECT_FALSE(config2.autoEnable);
+    EXPECT_FALSE(config2.auto_enable);
 }
 
 // Test HookConfig copy constructor
 TEST_F(HookManagerTest, HookConfig_CopyConstructor)
 {
     HookConfig config1;
-    config1.autoEnable = false;
+    config1.auto_enable = false;
 
     HookConfig config2(config1);
 
-    EXPECT_FALSE(config2.autoEnable);
+    EXPECT_FALSE(config2.auto_enable);
 }
 
-// Test HookManager getInstance returns same instance
+// Test HookManager get_instance returns same instance
 TEST(HookManagerInstanceTest, SameInstance)
 {
-    HookManager &inst1 = HookManager::getInstance();
-    HookManager &inst2 = HookManager::getInstance();
+    HookManager &inst1 = HookManager::get_instance();
+    HookManager &inst2 = HookManager::get_instance();
 
     EXPECT_EQ(&inst1, &inst2);
 }
@@ -890,14 +890,14 @@ TEST(HookManagerInstanceTest, SameInstance)
 TEST_F(HookManagerTest, Construction)
 {
     // Just ensure we can get an instance
-    HookManager &mgr = HookManager::getInstance();
+    HookManager &mgr = HookManager::get_instance();
     EXPECT_NE(&mgr, nullptr);
 }
 
-// Test InlineHook getOriginal template
+// Test InlineHook get_original template
 TEST_F(HookManagerTest, DISABLED_InlineHook_GetOriginalTemplate)
 {
-    // Test that getOriginal template compiles with different types
+    // Test that get_original template compiles with different types
     void *detour_fn = reinterpret_cast<void *>(0x87654321);
     void *original_trampoline = nullptr;
 
@@ -1174,12 +1174,12 @@ TEST_F(HookManagerTest, RealInlineHook_CreateSuccess)
     EXPECT_GE(counts[HookStatus::Active], 1u);
 }
 
-// autoEnable=false — covers the StartDisabled flags path
+// auto_enable=false — covers the StartDisabled flags path
 TEST_F(HookManagerTest, RealInlineHook_CreateDisabled)
 {
     void *original_trampoline = nullptr;
     HookConfig config;
-    config.autoEnable = false;
+    config.auto_enable = false;
 
     auto result = hook_manager_->create_inline_hook(
         "RealDisabledHook",
@@ -1258,7 +1258,7 @@ TEST_F(HookManagerTest, RealInlineHook_Remove)
     EXPECT_FALSE(hook_manager_->get_hook_status("RealRemoveHook").has_value());
 }
 
-// with_inline_hook callback — covers template body, getOriginal, getType, getStatus, getTargetAddress
+// with_inline_hook callback — covers template body, get_original, get_type, get_status, get_target_address
 TEST_F(HookManagerTest, RealInlineHook_WithCallback)
 {
     void *original_trampoline = nullptr;
@@ -1276,12 +1276,12 @@ TEST_F(HookManagerTest, RealInlineHook_WithCallback)
         [&callback_called](InlineHook &hook) -> bool
         {
             callback_called = true;
-            EXPECT_EQ(hook.getName(), "RealCallbackHook");
-            EXPECT_EQ(hook.getType(), HookType::Inline);
-            EXPECT_EQ(hook.getStatus(), HookStatus::Active);
-            EXPECT_NE(hook.getTargetAddress(), 0u);
-            // Covers getOriginal<T>() template method
-            auto orig = hook.getOriginal<int (*)(int, int)>();
+            EXPECT_EQ(hook.get_name(), "RealCallbackHook");
+            EXPECT_EQ(hook.get_type(), HookType::Inline);
+            EXPECT_EQ(hook.get_status(), HookStatus::Active);
+            EXPECT_NE(hook.get_target_address(), 0u);
+            // Covers get_original<T>() template method
+            auto orig = hook.get_original<int (*)(int, int)>();
             EXPECT_NE(orig, nullptr);
             return true;
         });
@@ -1355,9 +1355,9 @@ TEST_F(HookManagerTest, RealMidHook_WithCallback)
         [&callback_called](MidHook &hook) -> bool
         {
             callback_called = true;
-            EXPECT_EQ(hook.getName(), "RealMidCallbackHook");
-            EXPECT_EQ(hook.getType(), HookType::Mid);
-            EXPECT_EQ(hook.getStatus(), HookStatus::Active);
+            EXPECT_EQ(hook.get_name(), "RealMidCallbackHook");
+            EXPECT_EQ(hook.get_type(), HookType::Mid);
+            EXPECT_EQ(hook.get_status(), HookStatus::Active);
             return true;
         });
 
@@ -1528,13 +1528,13 @@ TEST_F(HookManagerTest, CreateMidHookAOB_PatternNotFound)
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
 }
 
-// --- Mid hook autoEnable=false (covers StartDisabled flags for mid hooks) ---
+// --- Mid hook auto_enable=false (covers StartDisabled flags for mid hooks) ---
 
 TEST_F(HookManagerTest, RealMidHook_CreateDisabled)
 {
     auto detour_fn = [](safetyhook::Context &) {};
     HookConfig config;
-    config.autoEnable = false;
+    config.auto_enable = false;
 
     auto result = hook_manager_->create_mid_hook(
         "RealMidDisabled",
@@ -1607,16 +1607,16 @@ TEST_F(HookManagerTest, WithMidHook_WrongType)
     EXPECT_FALSE(cb_result.has_value());
 }
 
-// --- Hook::statusToString edge cases ---
+// --- Hook::status_to_string edge cases ---
 
 TEST_F(HookManagerTest, StatusToString_AllValues)
 {
-    EXPECT_EQ(Hook::statusToString(HookStatus::Active), "Active");
-    EXPECT_EQ(Hook::statusToString(HookStatus::Disabled), "Disabled");
-    EXPECT_EQ(Hook::statusToString(HookStatus::Failed), "Failed");
-    EXPECT_EQ(Hook::statusToString(HookStatus::Removed), "Removed");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Active), "Active");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Disabled), "Disabled");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Failed), "Failed");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Removed), "Removed");
     // Unknown status value
-    EXPECT_EQ(Hook::statusToString(static_cast<HookStatus>(999)), "Unknown");
+    EXPECT_EQ(Hook::status_to_string(static_cast<HookStatus>(999)), "Unknown");
 }
 
 // --- enable/disable on non-existent hook ---
@@ -1779,7 +1779,7 @@ TEST_F(HookManagerTest, WithInlineHook_SuccessCallback)
     // Call with_inline_hook with a callback that returns the hook name
     auto name_opt = hook_manager_->with_inline_hook("WithInlineCB",
         [](InlineHook &hook) -> std::string {
-            return std::string(hook.getName());
+            return std::string(hook.get_name());
         });
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithInlineCB");
@@ -1800,7 +1800,7 @@ TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
 
     auto name_opt = hook_manager_->with_mid_hook("WithMidCB",
         [](MidHook &hook) -> std::string {
-            return std::string(hook.getName());
+            return std::string(hook.get_name());
         });
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithMidCB");
@@ -1814,7 +1814,7 @@ TEST_F(HookManagerTest, RealMidHook_CreateDisabledAutoEnable)
 {
     auto detour_fn = [](safetyhook::Context &) {};
     HookConfig config;
-    config.autoEnable = false;
+    config.auto_enable = false;
 
     auto result = hook_manager_->create_mid_hook(
         "MidDisabledAE",
@@ -1870,7 +1870,7 @@ TEST_F(HookManagerTest, RealInlineHook_DisabledEnableDisableCycle)
 {
     void *tramp = nullptr;
     HookConfig config;
-    config.autoEnable = false;
+    config.auto_enable = false;
 
     auto result = hook_manager_->create_inline_hook(
         "InlineDisabled",

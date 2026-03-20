@@ -8,7 +8,7 @@
 using namespace DetourModKit;
 
 // Test format_address
-TEST(FormatUtilsTest, FormatAddress)
+TEST(FormatTest, FormatAddress)
 {
     std::string result = Format::format_address(0x12345678);
     EXPECT_EQ(result, "0x0000000012345678");
@@ -18,7 +18,7 @@ TEST(FormatUtilsTest, FormatAddress)
 }
 
 // Test format_hex
-TEST(FormatUtilsTest, FormatHex)
+TEST(FormatTest, FormatHex)
 {
     std::string result = Format::format_hex(255);
     EXPECT_EQ(result, "0xFF");
@@ -28,7 +28,7 @@ TEST(FormatUtilsTest, FormatHex)
 }
 
 // Test format_byte
-TEST(FormatUtilsTest, FormatByte)
+TEST(FormatTest, FormatByte)
 {
     std::byte b = std::byte{0xCC};
     std::string result = Format::format_byte(b);
@@ -36,7 +36,7 @@ TEST(FormatUtilsTest, FormatByte)
 }
 
 // Test format_int_vector
-TEST(FormatUtilsTest, FormatIntVector)
+TEST(FormatTest, FormatIntVector)
 {
     std::vector<int> values = {0x72, 0xA0, 0x20};
     std::string result = Format::format_int_vector(values);
@@ -49,14 +49,14 @@ TEST(FormatUtilsTest, FormatIntVector)
 }
 
 // Test format_vkcode
-TEST(FormatUtilsTest, FormatVkcode)
+TEST(FormatTest, FormatVkcode)
 {
     std::string result = Format::format_vkcode(0x72);
     EXPECT_EQ(result, "0x72");
 }
 
 // Test format_vkcode_list
-TEST(FormatUtilsTest, FormatVkcodeList)
+TEST(FormatTest, FormatVkcodeList)
 {
     std::vector<int> keys = {0x41, 0x42, 0x43};
     std::string result = Format::format_vkcode_list(keys);
@@ -64,7 +64,7 @@ TEST(FormatUtilsTest, FormatVkcodeList)
 }
 
 // Test format_vkcode_list with empty vector
-TEST(FormatUtilsTest, FormatVkcodeList_Empty)
+TEST(FormatTest, FormatVkcodeList_Empty)
 {
     std::vector<int> keys;
     std::string result = Format::format_vkcode_list(keys);
@@ -72,7 +72,7 @@ TEST(FormatUtilsTest, FormatVkcodeList_Empty)
 }
 
 // Test format_vkcode_list with single element
-TEST(FormatUtilsTest, FormatVkcodeList_Single)
+TEST(FormatTest, FormatVkcodeList_Single)
 {
     std::vector<int> keys = {0x41};
     std::string result = Format::format_vkcode_list(keys);
@@ -80,42 +80,42 @@ TEST(FormatUtilsTest, FormatVkcodeList_Single)
 }
 
 // Test format_address with zero
-TEST(FormatUtilsTest, FormatAddress_Zero)
+TEST(FormatTest, FormatAddress_Zero)
 {
     std::string result = Format::format_address(0);
     EXPECT_EQ(result, "0x0000000000000000");
 }
 
 // Test format_address with max value
-TEST(FormatUtilsTest, FormatAddress_Max)
+TEST(FormatTest, FormatAddress_Max)
 {
     std::string result = Format::format_address(0xFFFFFFFFFFFFFFFF);
     EXPECT_EQ(result, "0xFFFFFFFFFFFFFFFF");
 }
 
 // Test format_hex with zero
-TEST(FormatUtilsTest, FormatHex_Zero)
+TEST(FormatTest, FormatHex_Zero)
 {
     std::string result = Format::format_hex(0);
     EXPECT_EQ(result, "0x0");
 }
 
 // Test format_hex with zero width
-TEST(FormatUtilsTest, FormatHex_ZeroWidth)
+TEST(FormatTest, FormatHex_ZeroWidth)
 {
     std::string result = Format::format_hex(255, 0);
     EXPECT_EQ(result, "0xFF");
 }
 
 // Test format_hex with large width
-TEST(FormatUtilsTest, FormatHex_LargeWidth)
+TEST(FormatTest, FormatHex_LargeWidth)
 {
     std::string result = Format::format_hex(255, 8);
     EXPECT_EQ(result, "0x000000FF");
 }
 
 // Test format_byte with zero
-TEST(FormatUtilsTest, FormatByte_Zero)
+TEST(FormatTest, FormatByte_Zero)
 {
     std::byte b = std::byte{0x00};
     std::string result = Format::format_byte(b);
@@ -123,7 +123,7 @@ TEST(FormatUtilsTest, FormatByte_Zero)
 }
 
 // Test format_byte with max value
-TEST(FormatUtilsTest, FormatByte_Max)
+TEST(FormatTest, FormatByte_Max)
 {
     std::byte b = std::byte{0xFF};
     std::string result = Format::format_byte(b);
@@ -131,7 +131,7 @@ TEST(FormatUtilsTest, FormatByte_Max)
 }
 
 // Test format_int_vector with large values
-TEST(FormatUtilsTest, FormatIntVector_LargeValues)
+TEST(FormatTest, FormatIntVector_LargeValues)
 {
     std::vector<int> values = {static_cast<int>(0x7FFFFFFF), static_cast<int>(0x80000000)};
     std::string result = Format::format_int_vector(values);
@@ -140,7 +140,7 @@ TEST(FormatUtilsTest, FormatIntVector_LargeValues)
 }
 
 // Test format_int_vector with negative values
-TEST(FormatUtilsTest, FormatIntVector_Negative)
+TEST(FormatTest, FormatIntVector_Negative)
 {
     std::vector<int> values = {-1, -2, -3};
     std::string result = Format::format_int_vector(values);
@@ -148,7 +148,7 @@ TEST(FormatUtilsTest, FormatIntVector_Negative)
 }
 
 // Test format_vkcode with zero
-TEST(FormatUtilsTest, FormatVkcode_Zero)
+TEST(FormatTest, FormatVkcode_Zero)
 {
     std::string result = Format::format_vkcode(0);
     // Format may vary, just check it contains 0x
@@ -156,14 +156,14 @@ TEST(FormatUtilsTest, FormatVkcode_Zero)
 }
 
 // Test format_vkcode with large value
-TEST(FormatUtilsTest, FormatVkcode_Large)
+TEST(FormatTest, FormatVkcode_Large)
 {
     std::string result = Format::format_vkcode(0xFF);
     EXPECT_EQ(result, "0xFF");
 }
 
 // Test String::trim (via format.hpp)
-TEST(FormatUtilsTest, StringTrim)
+TEST(FormatTest, StringTrim)
 {
     using namespace DetourModKit::String;
 
