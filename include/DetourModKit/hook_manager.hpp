@@ -471,7 +471,7 @@ namespace DetourModKit
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
             assert(!t_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within try_with_inline_hook() callback.");
-            std::unique_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;
@@ -541,7 +541,7 @@ namespace DetourModKit
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
             assert(!t_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Cannot call HookManager methods from within try_with_mid_hook() callback.");
-            std::unique_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;

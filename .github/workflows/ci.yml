@@ -5,8 +5,8 @@ on:
     branches: [main]
 
 jobs:
-  test-and-coverage:
-    name: Tests & Coverage (MinGW)
+  build:
+    name: Build (MinGW)
     runs-on: windows-latest
 
     steps:
@@ -27,12 +27,6 @@ jobs:
           restore-keys: |
             choco-ninja-${{ runner.os }}-
 
-      - name: Install Ninja and gcovr
-        run: |
-          choco install ninja --yes --force --no-progress
-          pip install gcovr
-        shell: powershell
-
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
@@ -41,11 +35,17 @@ jobs:
           restore-keys: |
             pip-gcovr-${{ runner.os }}-
 
+      - name: Install Ninja and gcovr
+        run: |
+          choco install ninja --yes --force --no-progress
+          pip install gcovr
+        shell: powershell
+
       - name: Cache CMake build
         uses: actions/cache@v4
         with:
           path: build/mingw-debug
-          key: cmake-build-${{ runner.os }}-v1-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'src/**', 'include/**') }}
+          key: cmake-build-${{ runner.os }}-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**', 'src/**', 'include/**') }}
           restore-keys: |
             cmake-build-${{ runner.os }}-v1-
             cmake-build-${{ runner.os }}-
@@ -66,9 +66,69 @@ jobs:
         run: cmake --build --preset mingw-debug --parallel
         shell: bash
 
+  test:
+    name: Tests (MinGW)
+    runs-on: windows-latest
+    needs: build
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Add pre-installed MinGW to PATH
+        run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build/mingw-debug
+          key: cmake-build-${{ runner.os }}-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**', 'src/**', 'include/**') }}
+          restore-keys: |
+            cmake-build-${{ runner.os }}-v1-
+            cmake-build-${{ runner.os }}-
+
       - name: Run Tests
         run: ctest --preset mingw-debug
         shell: bash
+
+  coverage:
+    name: Coverage Report (MinGW)
+    runs-on: windows-latest
+    needs: test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Add pre-installed MinGW to PATH
+        run: echo "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: pip-gcovr-${{ runner.os }}-v1
+          restore-keys: |
+            pip-gcovr-${{ runner.os }}-
+
+      - name: Install gcovr
+        run: pip install gcovr
+        shell: powershell
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build/mingw-debug
+          key: cmake-build-${{ runner.os }}-v1-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'cmake/**', 'src/**', 'include/**') }}
+          restore-keys: |
+            cmake-build-${{ runner.os }}-v1-
+            cmake-build-${{ runner.os }}-
 
       - name: Generate Coverage Report
         run: |
