@@ -29,11 +29,9 @@
 
 namespace DetourModKit
 {
-    // Async logger configuration defaults
     inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
     inline constexpr size_t DEFAULT_BATCH_SIZE = 64;
     inline constexpr auto DEFAULT_FLUSH_INTERVAL = std::chrono::milliseconds(100);
-    inline constexpr size_t MAX_INLINE_MESSAGE_SIZE = 256;
 
     /**
      * @enum OverflowPolicy
@@ -59,12 +57,12 @@ namespace DetourModKit
         std::chrono::system_clock::time_point timestamp;
         std::thread::id thread_id;
 
-        /** @brief Fixed-size buffer for small messages (avoids heap allocation). */
+        /// 256 fits typical single-line log messages and keeps LogMessage compact.
         static constexpr size_t MAX_INLINE_SIZE = 256;
         std::array<char, MAX_INLINE_SIZE> buffer{};
         size_t length{0};
 
-        /** @brief Heap-allocated string for messages exceeding MAX_INLINE_SIZE. */
+        /// Heap-allocated storage for messages exceeding MAX_INLINE_SIZE.
         std::unique_ptr<std::string> overflow;
 
         /**
@@ -74,25 +72,13 @@ namespace DetourModKit
          */
         LogMessage(LogLevel lvl, std::string msg);
 
-        /** @brief Default constructor. */
         LogMessage() = default;
-
-        /** @brief Move constructor. */
         LogMessage(LogMessage &&other) noexcept;
-
-        /** @brief Move assignment operator. */
         LogMessage &operator=(LogMessage &&other) noexcept;
-
-        /** @brief Deleted copy constructor (non-copyable). */
         LogMessage(const LogMessage &) = delete;
-
-        /** @brief Deleted copy assignment operator (non-copyable). */
         LogMessage &operator=(const LogMessage &) = delete;
 
-        /**
-         * @brief Retrieves the message content.
-         * @return std::string_view The message content.
-         */
+        /// Returns a view into the message content (inline buffer or heap overflow).
         std::string_view message() const;
     };
 
@@ -113,18 +99,16 @@ namespace DetourModKit
 
         ~DynamicMPMCQueue() = default;
 
-        /** @brief Deleted copy constructor. */
         DynamicMPMCQueue(const DynamicMPMCQueue &) = delete;
-
-        /** @brief Deleted copy assignment operator. */
         DynamicMPMCQueue &operator=(const DynamicMPMCQueue &) = delete;
 
         /**
          * @brief Attempts to push an item into the queue.
-         * @param item The item to push (moved into the queue).
+         * @param item The item to push. Moved into the queue on success only;
+         *             left unchanged on failure so the caller can retry or handle overflow.
          * @return true if successful, false if queue is full.
          */
-        bool try_push(LogMessage item);
+        bool try_push(LogMessage &item);
 
         /**
          * @brief Attempts to pop an item from the queue.
@@ -133,17 +117,11 @@ namespace DetourModKit
          */
         bool try_pop(LogMessage &item);
 
-        /**
-         * @brief Returns the approximate number of items in the queue.
-         * @return size_t Approximate size.
-         */
-        size_t size() const;
+        /// Returns the approximate number of items in the queue.
+        size_t size() const noexcept;
 
-        /**
-         * @brief Checks if the queue is empty.
-         * @return true if empty, false otherwise.
-         */
-        bool empty() const;
+        /// Checks if the queue is approximately empty.
+        bool empty() const noexcept;
 
         /**
          * @brief Returns the capacity of the queue.
@@ -159,12 +137,10 @@ namespace DetourModKit
 
             Slot() : sequence(0) {}
 
-            // Delete copy constructor and copy assignment
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
 
-            // Allow move constructor and move assignment
-            // WARNING: These are only safe to call during queue initialization
+            // WARNING: Move operations are only safe during queue initialization
             // or when the slot is known to be unused (sequence == 0).
             // Moving a slot while another thread accesses it causes data races.
             Slot(Slot &&other) noexcept
@@ -193,11 +169,12 @@ namespace DetourModKit
             }
         };
 
+        // Read-only after construction — grouped before the hot atomics.
         size_t capacity_;
         size_t mask_;
         std::vector<Slot> buffer_;
 
-        /** @brief Cache-line aligned to prevent false sharing. */
+        // Cache-line aligned to prevent false sharing between producers and consumers.
         alignas(64) std::atomic<size_t> enqueue_pos_{0};
         alignas(64) std::atomic<size_t> dequeue_pos_{0};
     };
@@ -208,16 +185,9 @@ namespace DetourModKit
      */
     struct AsyncLoggerConfig
     {
-        /** @brief Queue capacity (must be power of 2). Default: 8192. */
-        size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;
-
-        /** @brief Number of messages to batch per write. Default: 64. */
-        size_t batch_size = DEFAULT_BATCH_SIZE;
-
-        /** @brief Interval between forced flushes. Default: 100ms. */
+        size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;           ///< Must be power of 2.
+        size_t batch_size = DEFAULT_BATCH_SIZE;                    ///< Messages per batch write.
         std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
-
-        /** @brief Behavior when queue is full. Default: DropOldest. */
         OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
 
         /**
@@ -226,24 +196,12 @@ namespace DetourModKit
          */
         bool validate() const
         {
-            // Queue capacity must be power of 2
             if (queue_capacity == 0 || (queue_capacity & (queue_capacity - 1)) != 0)
-            {
                 return false;
-            }
-
-            // Batch size must be > 0
             if (batch_size == 0)
-            {
                 return false;
-            }
-
-            // Flush interval must be > 0
             if (flush_interval.count() <= 0)
-            {
                 return false;
-            }
-
             return true;
         }
     };
@@ -272,16 +230,12 @@ namespace DetourModKit
                              std::ofstream &file_stream,
                              std::mutex &log_mutex);
 
-        /**
-         * @brief Destructor. Ensures graceful shutdown and flush.
-         */
         ~AsyncLogger();
 
-        /** @brief Deleted copy constructor. */
         AsyncLogger(const AsyncLogger &) = delete;
-
-        /** @brief Deleted copy assignment operator. */
         AsyncLogger &operator=(const AsyncLogger &) = delete;
+        AsyncLogger(AsyncLogger &&) = delete;
+        AsyncLogger &operator=(AsyncLogger &&) = delete;
 
         /**
          * @brief Enqueues a log message for asynchronous writing.

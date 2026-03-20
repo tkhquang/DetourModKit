@@ -70,9 +70,7 @@ namespace MemoryUtilsCacheInternal
     std::once_flag s_memoryCacheInitFlag;
     /** @brief Whether the cache has been successfully initialized. */
     std::atomic<bool> s_cacheInitialized{false};
-    /** @brief Configured maximum number of entries in the cache. */
     size_t s_configuredCacheSize = 0;
-    /** @brief Configured cache entry expiry time in milliseconds. */
     unsigned int s_configuredCacheExpiryMs = 0;
 
 // Cache statistics are only compiled and tracked in Debug builds.

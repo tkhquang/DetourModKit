@@ -14,65 +14,35 @@ namespace DetourModKit
      * @namespace Config
      * @brief Provides functions for registering, loading, and logging configuration settings.
      * @details This system allows mods to register their configuration variables with DetourModKit.
-     *          The kit then handles loading values from an INI file and provides logging functionality.
-     *          The API uses std::function callbacks for type-safe value setting without
-     *          raw reference lifetime issues.
+     *          The kit handles loading values from an INI file and provides logging functionality.
+     *          Uses std::function callbacks for type-safe value setting.
+     *
+     * All `register_*` functions share these common parameters:
+     *   - @p section     INI section name.
+     *   - @p ini_key     INI key name.
+     *   - @p log_key_name  Human-readable name shown in log output.
+     *   - @p setter      Callback invoked with the loaded (or default) value.
      */
     namespace Config
     {
 
-        /**
-         * @brief Registers an integer configuration item.
-         * @param section The INI section name.
-         * @param ini_key The INI key name.
-         * @param log_key_name A user-friendly name for this setting, used in logs.
-         * @param setter A callback function that receives the loaded value.
-         * @param default_value The default integer value to use if the key is not found or invalid.
-         */
+        /// Registers an integer configuration item.
         void register_int(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                          std::function<void(int)> setter, int default_value);
 
-        /**
-         * @brief Registers a floating-point configuration item.
-         * @param section The INI section name.
-         * @param ini_key The INI key name.
-         * @param log_key_name A user-friendly name for logging.
-         * @param setter A callback function that receives the loaded value.
-         * @param default_value The default float value.
-         */
+        /// Registers a floating-point configuration item.
         void register_float(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                            std::function<void(float)> setter, float default_value);
 
-        /**
-         * @brief Registers a boolean configuration item.
-         * @param section The INI section name.
-         * @param ini_key The INI key name.
-         * @param log_key_name A user-friendly name for logging.
-         * @param setter A callback function that receives the loaded value.
-         * @param default_value The default boolean value.
-         */
+        /// Registers a boolean configuration item.
         void register_bool(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                           std::function<void(bool)> setter, bool default_value);
 
-        /**
-         * @brief Registers a string configuration item.
-         * @param section The INI section name.
-         * @param ini_key The INI key name.
-         * @param log_key_name A user-friendly name for logging.
-         * @param setter A callback function that receives the loaded value.
-         * @param default_value The default string value.
-         */
+        /// Registers a string configuration item.
         void register_string(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                             std::function<void(const std::string &)> setter, std::string default_value);
 
-        /**
-         * @brief Registers a key list configuration item (comma-separated hex VK codes).
-         * @param section The INI section name.
-         * @param ini_key The INI key name.
-         * @param log_key_name A user-friendly name for logging.
-         * @param setter A callback function that receives the loaded vector of VK codes.
-         * @param default_value_str A string representing the default comma-separated hex VK codes.
-         */
+        /// Registers a key list configuration item (comma-separated hex VK codes).
         void register_key_list(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                              std::function<void(const std::vector<int> &)> setter, const std::string &default_value_str);
 

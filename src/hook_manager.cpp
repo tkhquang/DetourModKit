@@ -8,14 +8,12 @@
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
 
-// --- Singleton implementation ---
 HookManager &HookManager::get_instance()
 {
     static HookManager instance;
     return instance;
 }
 
-// --- HookManager implementation ---
 HookManager::HookManager(Logger &logger)
     : m_logger(logger)
 {
@@ -33,11 +31,10 @@ HookManager::HookManager(Logger &logger)
 
 HookManager::~HookManager()
 {
-    if (!m_shutdown_called)
+    if (!m_shutdown_called.load(std::memory_order_acquire))
     {
-        // If shutdown() was not called explicitly, we still need to remove hooks
-        // but we cannot safely log because Logger might be destroyed already.
-        // This is a fallback for cases where DMK_Shutdown() was not called.
+        // Fallback if DMK_Shutdown() was not called — cannot safely log
+        // because Logger might already be destroyed.
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
         m_hooks.clear();
     }
@@ -45,13 +42,10 @@ HookManager::~HookManager()
 
 void HookManager::shutdown()
 {
-    if (m_shutdown_called)
-    {
-        return; // Already shut down
-    }
-    m_shutdown_called = true;
+    bool expected = false;
+    if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
 
-    // Remove all hooks without logging to avoid use-after-free if Logger is destroyed
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     m_hooks.clear();
 }
@@ -232,7 +226,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
     const HookConfig &config)
 {
     m_logger.debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.",
-                   name, aob_pattern_str, DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0));
+                   name, aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
 
     auto pattern = parse_aob(aob_pattern_str);
     if (!pattern.has_value())
@@ -255,7 +249,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
     m_logger.info("HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
                   name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                  DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0), DetourModKit::Format::format_address(target_address));
+                  DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
 
     return create_inline_hook(name, target_address, detour_function, original_trampoline, config);
 }
@@ -358,7 +352,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     const HookConfig &config)
 {
     m_logger.debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.",
-                   name, aob_pattern_str, DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0));
+                   name, aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
 
     auto pattern = parse_aob(aob_pattern_str);
     if (!pattern.has_value())
@@ -377,7 +371,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
     m_logger.info("HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
                   name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                  DetourModKit::Format::format_hex(static_cast<int>(aob_offset), 0), DetourModKit::Format::format_address(target_address));
+                  DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
 
     return create_mid_hook(name, target_address, detour_function, config);
 }
@@ -401,7 +395,7 @@ bool HookManager::remove_hook(const std::string &hook_id)
 
 void HookManager::remove_all_hooks()
 {
-    m_shutdown_called = false;
+    m_shutdown_called.store(false, std::memory_order_release);
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (!m_hooks.empty())
     {
@@ -527,5 +521,3 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
     return ids;
 }
 
-// get_inline_hook and get_mid_hook replaced by with_inline_hook / with_mid_hook
-// (template methods defined in hook_manager.hpp)

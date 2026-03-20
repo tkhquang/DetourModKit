@@ -246,8 +246,7 @@ namespace
 
     std::vector<std::unique_ptr<ConfigItemBase>> &getRegisteredConfigItems()
     {
-        // This static variable holds all registered config items.
-        // It's function-local static to ensure controlled initialization order.
+        // Function-local static to ensure controlled initialization order.
         static std::vector<std::unique_ptr<ConfigItemBase>> s_registered_items;
         return s_registered_items;
     }

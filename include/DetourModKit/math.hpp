@@ -1,4 +1,4 @@
-#pragma once // Ensures this header is included only once per compilation unit
+#pragma once
 /**
  * @file math.hpp
  * @brief Provides basic mathematical utility functions.
@@ -9,23 +9,14 @@ namespace DetourModKit
 {
     namespace Math
     {
-        /**
-         * @brief Converts an angle from degrees to radians.
-         * @param degrees The angle in degrees.
-         * @return float The angle converted to radians.
-         */
-        inline float degrees_to_radians(float degrees)
+        /// Converts an angle from degrees to radians.
+        constexpr float degrees_to_radians(float degrees) noexcept
         {
-            // DirectX::XM_PI is a high-precision constant for PI.
             return degrees * (DirectX::XM_PI / 180.0f);
         }
 
-        /**
-         * @brief Converts an angle from radians to degrees.
-         * @param radians The angle in radians.
-         * @return float The angle converted to degrees.
-         */
-        inline float radians_to_degrees(float radians)
+        /// Converts an angle from radians to degrees.
+        constexpr float radians_to_degrees(float radians) noexcept
         {
             return radians * (180.0f / DirectX::XM_PI);
         }

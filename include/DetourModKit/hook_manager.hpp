@@ -79,10 +79,10 @@ namespace DetourModKit
     public:
         virtual ~Hook() = default;
 
-        const std::string &get_name() const { return m_name; }
-        HookType get_type() const { return m_type; }
-        uintptr_t get_target_address() const { return m_target_address; }
-        HookStatus get_status() const { return m_status; }
+        const std::string &get_name() const noexcept { return m_name; }
+        HookType get_type() const noexcept { return m_type; }
+        uintptr_t get_target_address() const noexcept { return m_target_address; }
+        HookStatus get_status() const noexcept { return m_status; }
 
         /**
          * @brief Enables the hook.
@@ -128,7 +128,7 @@ namespace DetourModKit
             return false;
         }
 
-        bool is_enabled() const { return m_status == HookStatus::Active; }
+        bool is_enabled() const noexcept { return m_status == HookStatus::Active; }
 
         static std::string_view status_to_string(HookStatus status)
         {
@@ -179,7 +179,6 @@ namespace DetourModKit
         Hook(std::string name, HookType type, uintptr_t target_address, HookStatus initial_status)
             : m_name(std::move(name)), m_type(type), m_target_address(target_address), m_status(initial_status) {}
 
-        // Derived classes implement these for the Template Method pattern
         virtual bool is_impl_valid() const noexcept = 0;
         virtual bool do_enable() = 0;
         virtual bool do_disable() = 0;
@@ -421,8 +420,9 @@ namespace DetourModKit
         /**
          * @brief Safely accesses an InlineHook by its ID while holding the internal lock.
          * @details The callback is invoked with a reference to the InlineHook while the
-         *          shared_mutex is held, preventing concurrent removal. The lock is released
-         *          when the callback returns.
+         *          shared_mutex is held, preventing concurrent removal.
+         * @warning Do not call HookManager methods that acquire a unique_lock from
+         *          within the callback — this will deadlock.
          * @tparam F Callable type accepting (InlineHook&) and returning a value.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
@@ -444,8 +444,9 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a MidHook by its ID while holding the internal lock.
          * @details The callback is invoked with a reference to the MidHook while the
-         *          shared_mutex is held, preventing concurrent removal. The lock is released
-         *          when the callback returns.
+         *          shared_mutex is held, preventing concurrent removal.
+         * @warning Do not call HookManager methods that acquire a unique_lock from
+         *          within the callback — this will deadlock.
          * @tparam F Callable type accepting (MidHook&) and returning a value.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
@@ -469,7 +470,7 @@ namespace DetourModKit
         std::unordered_map<std::string, std::unique_ptr<Hook>> m_hooks;
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
-        bool m_shutdown_called{false};
+        std::atomic<bool> m_shutdown_called{false};
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;

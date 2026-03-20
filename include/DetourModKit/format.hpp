@@ -9,12 +9,10 @@
  *          and virtual key codes.
  */
 
-#include <algorithm>
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <iomanip>
-#include <sstream>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -55,11 +53,7 @@ namespace DetourModKit
          */
         inline std::string format_address(uintptr_t address)
         {
-            std::ostringstream oss;
-            oss << "0x"
-                << std::setfill('0') << std::setw(sizeof(uintptr_t) * 2)
-                << std::hex << std::uppercase << address;
-            return oss.str();
+            return std::format("0x{:0{}X}", address, sizeof(uintptr_t) * 2);
         }
 
         /**
@@ -70,14 +64,21 @@ namespace DetourModKit
          */
         inline std::string format_hex(int value, int width = 0)
         {
-            std::ostringstream oss;
-            oss << "0x";
             if (width > 0)
-            {
-                oss << std::setfill('0') << std::setw(width);
-            }
-            oss << std::hex << std::uppercase << value;
-            return oss.str();
+                return std::format("0x{:0{}X}", static_cast<unsigned int>(value), width);
+            return std::format("0x{:X}", static_cast<unsigned int>(value));
+        }
+
+        /**
+         * @brief Formats a ptrdiff_t as a signed hexadecimal string.
+         * @param value The value to format.
+         * @return std::string Formatted hex string (e.g., "0xFF" or "-0x10").
+         */
+        inline std::string format_hex(ptrdiff_t value)
+        {
+            if (value < 0)
+                return std::format("-0x{:X}", static_cast<size_t>(-value));
+            return std::format("0x{:X}", static_cast<size_t>(value));
         }
 
         /**
@@ -87,11 +88,7 @@ namespace DetourModKit
          */
         inline std::string format_byte(std::byte b)
         {
-            std::ostringstream oss;
-            oss << "0x"
-                << std::setfill('0') << std::setw(2)
-                << std::hex << std::uppercase << static_cast<unsigned int>(b);
-            return oss.str();
+            return std::format("0x{:02X}", static_cast<unsigned int>(b));
         }
 
         /**

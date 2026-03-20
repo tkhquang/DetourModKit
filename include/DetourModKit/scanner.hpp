@@ -38,9 +38,8 @@ namespace DetourModKit
 
         /**
          * @brief Parses a space-separated AOB string into a compiled pattern.
-         * @details Converts hexadecimal strings to their corresponding byte values.
-         *          Converts wildcard tokens ('??' or '?') into mask=false entries.
-         *          This design avoids sentinel byte conflicts (e.g., 0xCC is a valid byte).
+         * @details Converts hexadecimal strings to byte values and wildcard tokens
+         *          ('??' or '?') into mask=false entries.
          * @param aob_str The AOB pattern string.
          * @return std::optional<CompiledPattern> The compiled pattern, or std::nullopt on parse failure.
          */
