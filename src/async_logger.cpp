@@ -20,6 +20,17 @@ namespace DetourModKit
         while (current)
         {
             Block *next = current->next;
+
+            // Destroy any PoolSlot objects that were constructed via placement-new
+            PoolSlot *slots = reinterpret_cast<PoolSlot *>(current->data);
+            for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
+            {
+                if (current->constructed_mask & (1u << i))
+                {
+                    slots[i].~PoolSlot();
+                }
+            }
+
             ::operator delete(current);
             current = next;
         }
@@ -46,10 +57,15 @@ namespace DetourModKit
         new_block->slot_count = POOL_SLOTS_PER_BLOCK;
 
         PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
+        static_assert(POOL_SLOTS_PER_BLOCK <= 32, "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
+        uint32_t constructed = 0;
         for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
         {
+            new (&slots[i]) PoolSlot();
+            constructed |= (1u << i);
             slots[i].next_free = (i + 1 < POOL_SLOTS_PER_BLOCK) ? &slots[i + 1] : nullptr;
         }
+        new_block->constructed_mask = constructed;
         new_block->free_list = &slots[0];
 
         head_.store(new_block, std::memory_order_release);
@@ -102,7 +118,7 @@ namespace DetourModKit
 
         if (slot)
         {
-            new (&slot->str) std::string();
+            slot->str.clear();
             return &slot->str;
         }
 
@@ -129,7 +145,8 @@ namespace DetourModKit
             {
                 auto offset = static_cast<size_t>(raw_ptr - block_begin);
                 PoolSlot *slot = reinterpret_cast<PoolSlot *>(b->data) + (offset / sizeof(PoolSlot));
-                slot->str.~basic_string();
+                slot->str.clear();
+                slot->str.shrink_to_fit();
                 slot->next_free = b->free_list;
                 b->free_list = slot;
                 ++b->slot_count;
@@ -146,17 +163,17 @@ namespace DetourModKit
           timestamp(std::chrono::system_clock::now()),
           thread_id(std::this_thread::get_id())
     {
-        const size_t msg_size = msg.size();
-
-        if (msg_size > MAX_VALID_LENGTH)
+        if (msg.size() > MAX_VALID_LENGTH)
         {
             msg.resize(MAX_VALID_LENGTH);
         }
 
+        const size_t msg_size = msg.size();
+
         if (msg_size <= MAX_INLINE_SIZE)
         {
-            std::memcpy(buffer.data(), msg.data(), msg.size());
-            length = msg.size();
+            std::memcpy(buffer.data(), msg.data(), msg_size);
+            length = msg_size;
         }
         else
         {
@@ -401,16 +418,17 @@ namespace DetourModKit
 
         LogMessage msg(level, std::move(message));
 
+        // Increment before push so flush cannot observe zero while a message
+        // is already in the queue but not yet counted.
+        pending_messages_.fetch_add(1, std::memory_order_acq_rel);
         if (queue_.try_push(msg))
         {
-            pending_messages_.fetch_add(1, std::memory_order_relaxed);
             flush_cv_.notify_one();
             return true;
         }
-        else
-        {
-            return handle_overflow(std::move(msg));
-        }
+        // Push failed — undo the pre-increment before entering overflow handling
+        pending_messages_.fetch_sub(1, std::memory_order_acq_rel);
+        return handle_overflow(std::move(msg));
     }
 
     bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
@@ -494,7 +512,7 @@ namespace DetourModKit
             {
                 write_batch(batch);
                 const size_t batch_size = batch.size();
-                pending_messages_.fetch_sub(batch_size, std::memory_order_relaxed);
+                pending_messages_.fetch_sub(batch_size, std::memory_order_acq_rel);
                 flush_cv_.notify_all();
                 last_flush = std::chrono::steady_clock::now();
             }
@@ -578,14 +596,15 @@ namespace DetourModKit
             LogMessage oldest;
             if (queue_.try_pop(oldest))
             {
-                pending_messages_.fetch_sub(1, std::memory_order_relaxed);
                 dropped_messages_.fetch_add(1, std::memory_order_relaxed);
                 if (queue_.try_push(message))
                 {
-                    pending_messages_.fetch_add(1, std::memory_order_relaxed);
+                    // Net effect on pending_messages_: pop(-1) + push(+1) = 0
                     flush_cv_.notify_one();
                     return true;
                 }
+                // Pop succeeded but push failed: net -1
+                pending_messages_.fetch_sub(1, std::memory_order_acq_rel);
             }
             dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
@@ -596,11 +615,13 @@ namespace DetourModKit
             const auto deadline = std::chrono::steady_clock::now() + config_.block_timeout_ms;
             size_t spin_count = 0;
 
+            // Pre-increment so flush sees the in-flight message throughout the retry loop
+            pending_messages_.fetch_add(1, std::memory_order_acq_rel);
+
             while (std::chrono::steady_clock::now() < deadline)
             {
                 if (queue_.try_push(message))
                 {
-                    pending_messages_.fetch_add(1, std::memory_order_relaxed);
                     flush_cv_.notify_one();
                     return true;
                 }
@@ -619,6 +640,8 @@ namespace DetourModKit
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
+            // Timed out — undo the pre-increment
+            pending_messages_.fetch_sub(1, std::memory_order_acq_rel);
             dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }

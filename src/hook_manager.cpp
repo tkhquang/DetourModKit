@@ -402,8 +402,8 @@ void HookManager::remove_all_hooks()
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 
-    // Allow shutdown() to be called again after a full reset.
-    // Safe because the manager is now in a clean state with no hooks to double-free.
+    // Reset shutdown flag to allow reuse after a full reset.
+    // Safe because all hooks have been cleared — no double-free risk.
     m_shutdown_called.store(false, std::memory_order_release);
 }
 

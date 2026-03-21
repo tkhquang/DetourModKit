@@ -25,8 +25,6 @@ protected:
     }
 };
 
-
-
 TEST_F(MemoryTest, InitMemoryCache)
 {
     bool result = Memory::init_cache();
@@ -769,7 +767,6 @@ TEST_F(MemoryTest, CacheStatsAvailableInRelease)
     EXPECT_NE(stats.find("Misses:"), std::string::npos);
     EXPECT_NE(stats.find("Coalesced:"), std::string::npos);
     EXPECT_NE(stats.find("Hit Rate:"), std::string::npos);
-
 }
 
 TEST_F(MemoryTest, ClearCacheResetsAllStats)
@@ -1176,4 +1173,88 @@ TEST_F(MemoryTest, CacheHitRate_RepeatedAccess)
     EXPECT_LE(misses, 5u);
 
     VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadable_AddressOverflow)
+{
+    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches
+    // the address+size overflow guard in the cache/query path.
+    void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(buf, nullptr);
+
+    // Prime the cache so the overflow check in is_entry_valid_and_covers is exercised
+    EXPECT_TRUE(Memory::is_readable(buf, 1));
+
+    // size chosen so that (address + size) wraps around
+    const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
+    EXPECT_FALSE(Memory::is_readable(buf, wrapping_size));
+
+    VirtualFree(buf, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsWritable_AddressOverflow)
+{
+    void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(buf, nullptr);
+
+    EXPECT_TRUE(Memory::is_writable(buf, 1));
+
+    const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
+    EXPECT_FALSE(Memory::is_writable(buf, wrapping_size));
+
+    VirtualFree(buf, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
+{
+    // Ensure shutdown waits for active readers to finish
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    std::atomic<bool> reader_started{false};
+    std::atomic<bool> reader_done{false};
+
+    // Start a reader thread that will be in-flight during shutdown
+    std::thread reader([&]()
+                       {
+        reader_started.store(true);
+        for (int i = 0; i < 100; ++i)
+        {
+            Memory::is_readable(mem, 4);
+        }
+        reader_done.store(true); });
+
+    // Wait for reader to start
+    while (!reader_started.load())
+    {
+        std::this_thread::yield();
+    }
+
+    // Shutdown should wait for readers to finish without crash
+    Memory::shutdown_cache();
+    reader.join();
+
+    EXPECT_TRUE(reader_done.load());
+
+    // Re-init for TearDown
+    Memory::init_cache();
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
+{
+    Memory::shutdown_cache();
+
+    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches
+    // the overflow guard in the direct (no-cache) path.
+    void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(buf, nullptr);
+
+    const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
+    EXPECT_FALSE(Memory::is_readable(buf, wrapping_size));
+
+    VirtualFree(buf, 0, MEM_RELEASE);
+
+    // Re-init for TearDown
+    Memory::init_cache();
 }
