@@ -85,11 +85,11 @@ namespace
             }
 
             // Convert via strtoul — no exception overhead on invalid input
+            errno = 0;
             char *end_ptr = nullptr;
             const unsigned long value = std::strtoul(token.c_str() + hex_start, &end_ptr, 16);
             if (end_ptr == token.c_str() + hex_start || errno == ERANGE)
             {
-                errno = 0;
                 continue;
             }
             if (value > static_cast<unsigned long>(std::numeric_limits<int>::max()))
@@ -240,7 +240,10 @@ namespace
         {
             current_value = parse_hex_key_list(ini_value_str);
         }
-        // else: keep default_value which was set in constructor
+        else
+        {
+            current_value = default_value;
+        }
 
         if (setter)
         {
