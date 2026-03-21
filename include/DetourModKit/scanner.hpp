@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <optional>
 #include <cstdint>
+#include <span>
 
 namespace DetourModKit
 {
@@ -21,7 +22,7 @@ namespace DetourModKit
         struct CompiledPattern
         {
             std::vector<std::byte> bytes; ///< Pattern bytes (wildcard positions contain arbitrary values)
-            std::vector<std::byte> mask;   ///< 0xFF = match this byte, 0x00 = wildcard (skip)
+            std::vector<std::byte> mask;  ///< 0xFF = match this byte, 0x00 = wildcard (skip)
 
             /**
              * @brief Returns the size of the pattern.
@@ -57,6 +58,46 @@ namespace DetourModKit
          */
         const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
                                       const CompiledPattern &pattern);
+        // Common x86-64 RIP-relative opcode prefixes (bytes preceding the disp32 field)
+        inline constexpr std::byte PREFIX_MOV_RAX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
+        inline constexpr std::byte PREFIX_MOV_RCX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}};
+        inline constexpr std::byte PREFIX_MOV_RDX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x15}};
+        inline constexpr std::byte PREFIX_MOV_RBX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x1D}};
+        inline constexpr std::byte PREFIX_LEA_RAX_RIP[] = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x05}};
+        inline constexpr std::byte PREFIX_LEA_RCX_RIP[] = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x0D}};
+        inline constexpr std::byte PREFIX_LEA_RDX_RIP[] = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x15}};
+        inline constexpr std::byte PREFIX_CALL_REL32[] = {std::byte{0xE8}};
+        inline constexpr std::byte PREFIX_JMP_REL32[] = {std::byte{0xE9}};
+
+        /**
+         * @brief Resolves an absolute address from an x86-64 RIP-relative instruction.
+         * @details Extracts the int32 displacement at the given offset within the instruction
+         *          and computes the absolute target: instruction_address + instruction_length + displacement.
+         * @param instruction_address Pointer to the first byte of the instruction.
+         * @param displacement_offset Byte offset from instruction_address to the disp32 field.
+         * @param instruction_length Total length of the instruction in bytes.
+         * @return The resolved absolute address, or std::nullopt on null input or unreadable displacement.
+         */
+        std::optional<uintptr_t> resolve_rip_relative(const std::byte *instruction_address,
+                                                      size_t displacement_offset,
+                                                      size_t instruction_length);
+
+        /**
+         * @brief Scans forward from a starting address for an opcode prefix, then resolves the RIP-relative target.
+         * @details Searches up to search_length bytes for the given opcode prefix. Once found,
+         *          the displacement is assumed to immediately follow the prefix. The absolute address
+         *          is computed as: found_address + instruction_length + displacement.
+         * @param search_start Pointer to the beginning of the search region.
+         * @param search_length Maximum number of bytes to search forward.
+         * @param opcode_prefix The opcode byte sequence to search for (disp32 must follow immediately).
+         * @param instruction_length Total length of the instruction in bytes.
+         * @return The resolved absolute address, or std::nullopt if prefix not found or displacement unreadable.
+         */
+        std::optional<uintptr_t> find_and_resolve_rip_relative(const std::byte *search_start,
+                                                               size_t search_length,
+                                                               std::span<const std::byte> opcode_prefix,
+                                                               size_t instruction_length);
+
     } // namespace Scanner
 } // namespace DetourModKit
 

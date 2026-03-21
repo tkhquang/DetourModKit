@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 #include <vector>
 #include <cstring>
+#include <span>
 
 #include "DetourModKit/scanner.hpp"
+#include "DetourModKit/memory.hpp"
 
 using namespace DetourModKit;
 
@@ -506,4 +508,273 @@ TEST(ScannerTest, find_pattern_const_correctness)
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 2);
+}
+
+class ScannerRipTest : public ::testing::Test
+{
+protected:
+    void SetUp() override
+    {
+        Memory::init_cache();
+    }
+
+    void TearDown() override
+    {
+        Memory::shutdown_cache();
+    }
+};
+
+TEST_F(ScannerRipTest, resolve_rip_relative_positive_displacement)
+{
+    // MOV RAX, [RIP+0x12345678]  =>  48 8B 05 78 56 34 12
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
+        std::byte{0x78}, std::byte{0x56}, std::byte{0x34}, std::byte{0x12}};
+
+    auto result = Scanner::resolve_rip_relative(code.data(), 3, 7);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x12345678;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST_F(ScannerRipTest, resolve_rip_relative_negative_displacement)
+{
+    // MOV RAX, [RIP-0x10]  =>  48 8B 05 F0 FF FF FF
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
+        std::byte{0xF0}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+
+    auto result = Scanner::resolve_rip_relative(code.data(), 3, 7);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + static_cast<uintptr_t>(static_cast<intptr_t>(-16));
+    EXPECT_EQ(*result, expected);
+}
+
+TEST_F(ScannerRipTest, resolve_rip_relative_zero_displacement)
+{
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
+        std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::resolve_rip_relative(code.data(), 3, 7);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, reinterpret_cast<uintptr_t>(code.data()) + 7);
+}
+
+TEST_F(ScannerRipTest, resolve_rip_relative_call_rel32)
+{
+    // CALL rel32  =>  E8 10 00 00 00
+    std::vector<std::byte> code = {
+        std::byte{0xE8},
+        std::byte{0x10}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::resolve_rip_relative(code.data(), 1, 5);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 5 + 0x10;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST_F(ScannerRipTest, resolve_rip_relative_null_address)
+{
+    auto result = Scanner::resolve_rip_relative(nullptr, 3, 7);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_mov_rax_rip)
+{
+    // Padding + MOV RAX, [RIP+0x00000020]
+    std::vector<std::byte> code = {
+        std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, // NOP padding
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, // MOV RAX, [RIP+disp32]
+        std::byte{0x20}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x90}, std::byte{0x90}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_MOV_RAX_RIP, 7);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[3]);
+    EXPECT_EQ(*result, instr_addr + 7 + 0x20);
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_lea_rax_rip)
+{
+    // LEA RAX, [RIP+0x100]
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8D}, std::byte{0x05},
+        std::byte{0x00}, std::byte{0x01}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_LEA_RAX_RIP, 7);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x100;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_call_rel32)
+{
+    std::vector<std::byte> code = {
+        std::byte{0x55}, // PUSH RBP
+        std::byte{0xE8}, // CALL rel32
+        std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x90}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[1]);
+    EXPECT_EQ(*result, instr_addr + 5 + 0xFF);
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_jmp_rel32)
+{
+    std::vector<std::byte> code = {
+        std::byte{0xE9},
+        std::byte{0x05}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_JMP_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 5 + 0x05;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_prefix_not_found)
+{
+    std::vector<std::byte> code = {
+        std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+        std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_MOV_RAX_RIP, 7);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_null_start)
+{
+    auto result = Scanner::find_and_resolve_rip_relative(
+        nullptr, 100,
+        Scanner::PREFIX_MOV_RAX_RIP, 7);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_region_too_small)
+{
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
+
+    // Region is smaller than prefix + disp32
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_MOV_RAX_RIP, 7);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
+{
+    // Two MOV RAX, [RIP+disp32] with different displacements
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
+        std::byte{0x10}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
+        std::byte{0x20}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_MOV_RAX_RIP, 7);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x10;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_partial_prefix_no_false_match)
+{
+    // 48 8B followed by wrong third byte, then the real prefix
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}, // MOV RCX, not RAX
+        std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, // MOV RAX
+        std::byte{0x30}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_MOV_RAX_RIP, 7);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[7]);
+    EXPECT_EQ(*result, instr_addr + 7 + 0x30);
+}
+
+TEST_F(ScannerRipTest, resolve_rip_relative_custom_instruction_form)
+{
+    // MOVSS XMM0, [RIP+disp32] => F3 0F 10 05 <disp32>  (prefix_len=4, instr_len=8)
+    std::vector<std::byte> code = {
+        std::byte{0xF3}, std::byte{0x0F}, std::byte{0x10}, std::byte{0x05},
+        std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::resolve_rip_relative(code.data(), 4, 8);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 8 + 0x40;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_empty_prefix)
+{
+    std::vector<std::byte> code = {std::byte{0x90}};
+    std::span<const std::byte> empty;
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(), empty, 5);
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
+{
+    // Prefix starts at the last valid position
+    std::vector<std::byte> code = {
+        std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+        std::byte{0xE8},
+        std::byte{0x0A}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[3]);
+    EXPECT_EQ(*result, instr_addr + 5 + 0x0A);
+}
+
+TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
+{
+    std::vector<std::byte> code = {
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D},
+        std::byte{0x50}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    auto result = Scanner::find_and_resolve_rip_relative(
+        code.data(), code.size(),
+        Scanner::PREFIX_MOV_RCX_RIP, 7);
+
+    ASSERT_TRUE(result.has_value());
+    uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x50;
+    EXPECT_EQ(*result, expected);
 }
