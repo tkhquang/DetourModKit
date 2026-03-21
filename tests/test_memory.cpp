@@ -1177,15 +1177,32 @@ TEST_F(MemoryTest, CacheHitRate_RepeatedAccess)
 
 TEST_F(MemoryTest, IsReadable_AddressOverflow)
 {
-    // Address near the top of address space: address + size would overflow
-    const void *near_end = reinterpret_cast<const void *>(UINTPTR_MAX - 4);
-    EXPECT_FALSE(Memory::is_readable(near_end, 16));
+    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches
+    // the address+size overflow guard in the cache/query path.
+    void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(buf, nullptr);
+
+    // Prime the cache so the overflow check in is_entry_valid_and_covers is exercised
+    EXPECT_TRUE(Memory::is_readable(buf, 1));
+
+    // size chosen so that (address + size) wraps around
+    const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
+    EXPECT_FALSE(Memory::is_readable(buf, wrapping_size));
+
+    VirtualFree(buf, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, IsWritable_AddressOverflow)
 {
-    void *near_end = reinterpret_cast<void *>(UINTPTR_MAX - 4);
-    EXPECT_FALSE(Memory::is_writable(near_end, 16));
+    void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(buf, nullptr);
+
+    EXPECT_TRUE(Memory::is_writable(buf, 1));
+
+    const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
+    EXPECT_FALSE(Memory::is_writable(buf, wrapping_size));
+
+    VirtualFree(buf, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
@@ -1228,9 +1245,15 @@ TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
 {
     Memory::shutdown_cache();
 
-    // Without cache, direct VirtualQuery path also has overflow guard
-    const void *near_end = reinterpret_cast<const void *>(UINTPTR_MAX - 4);
-    EXPECT_FALSE(Memory::is_readable(near_end, 16));
+    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches
+    // the overflow guard in the direct (no-cache) path.
+    void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(buf, nullptr);
+
+    const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
+    EXPECT_FALSE(Memory::is_readable(buf, wrapping_size));
+
+    VirtualFree(buf, 0, MEM_RELEASE);
 
     // Re-init for TearDown
     Memory::init_cache();
