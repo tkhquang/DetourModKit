@@ -47,12 +47,10 @@ TEST_F(MemoryTest, InitMemoryCache)
 
 TEST_F(MemoryTest, InitMemoryCache_CustomParams)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
 
     bool result = Memory::init_cache(64, 10000);
     EXPECT_TRUE(result);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, ClearMemoryCache)
@@ -345,7 +343,7 @@ TEST(MemoryErrorTest, ErrorToString)
 
 TEST_F(MemoryTest, CacheExpiry)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(64, 10);
 
     char buffer[100] = {0};
@@ -354,13 +352,11 @@ TEST_F(MemoryTest, CacheExpiry)
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, CacheBehavior_Overlapping)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(64, 10000);
 
     char buffer[100] = {0};
@@ -368,8 +364,6 @@ TEST_F(MemoryTest, CacheBehavior_Overlapping)
     EXPECT_TRUE(Memory::is_readable(buffer, 50));
     EXPECT_TRUE(Memory::is_readable(buffer, 100));
     EXPECT_TRUE(Memory::is_readable(buffer + 10, 40));
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, IsMemoryReadable_ReservedMemory)
@@ -454,7 +448,7 @@ TEST_F(MemoryTest, IsMemoryReadable_ExecuteReadWrite)
 
 TEST_F(MemoryTest, CacheLRUEviction)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(2, 60000);
 
     void *mem1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -473,8 +467,6 @@ TEST_F(MemoryTest, CacheLRUEviction)
     VirtualFree(mem1, 0, MEM_RELEASE);
     VirtualFree(mem2, 0, MEM_RELEASE);
     VirtualFree(mem3, 0, MEM_RELEASE);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, IsMemoryReadable_SizeOverflow)
@@ -538,7 +530,7 @@ TEST_F(MemoryTest, write_bytes_Success)
 
 TEST_F(MemoryTest, IsMemoryWritable_ValidWritable)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(4, 60000);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -549,7 +541,6 @@ TEST_F(MemoryTest, IsMemoryWritable_ValidWritable)
     EXPECT_TRUE(Memory::is_writable(mem, 1));
 
     VirtualFree(mem, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, write_bytes_PageReadOnly)
@@ -622,19 +613,18 @@ TEST_F(MemoryTest, IsMemoryReadable_CrossRegionBoundary)
 
 TEST_F(MemoryTest, InitCacheWithShards)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     bool result = Memory::init_cache(32, 5000, 4);
     EXPECT_TRUE(result);
 
+    // Subsequent init with different params returns true but does not reconfigure
     result = Memory::init_cache(64, 10000, 8);
     EXPECT_TRUE(result);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, InvalidateRangeBasic)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 4);
 
     char buffer[100] = {0};
@@ -654,7 +644,7 @@ TEST_F(MemoryTest, InvalidateRangeNull)
 
 TEST_F(MemoryTest, WriteBytesInvalidatesCache)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -674,12 +664,11 @@ TEST_F(MemoryTest, WriteBytesInvalidatesCache)
     EXPECT_TRUE(Memory::is_writable(target, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, InvalidateRangeDoesNotAffectOtherRegions)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 4);
 
     char buffer1[100] = {0};
@@ -698,19 +687,23 @@ TEST_F(MemoryTest, ThreadSafetyHighConcurrency)
 {
     const int num_threads = 8;
     const int iterations = 500;
+    std::atomic<int> success_count{0};
 
     std::vector<std::thread> threads;
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([iterations, i]()
+        threads.emplace_back([iterations, i, &success_count]()
                              {
-            char buffers[4][100];
+            char buffers[4][100] = {};
             for (int j = 0; j < iterations; ++j)
             {
-                int buf_idx = (i + j) % 4;
-                Memory::is_readable(buffers[buf_idx], sizeof(buffers[buf_idx]));
-                Memory::is_writable(buffers[buf_idx], sizeof(buffers[buf_idx]));
+                const int buf_idx = (i + j) % 4;
+                if (Memory::is_readable(buffers[buf_idx], sizeof(buffers[buf_idx])) &&
+                    Memory::is_writable(buffers[buf_idx], sizeof(buffers[buf_idx])))
+                {
+                    success_count.fetch_add(1, std::memory_order_relaxed);
+                }
             } });
     }
 
@@ -719,12 +712,12 @@ TEST_F(MemoryTest, ThreadSafetyHighConcurrency)
         t.join();
     }
 
-    SUCCEED();
+    EXPECT_EQ(success_count.load(), num_threads * iterations);
 }
 
 TEST_F(MemoryTest, CacheStatsWithShards)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 5000, 4);
 
     char buffer[100] = {0};
@@ -739,7 +732,7 @@ TEST_F(MemoryTest, CacheStatsWithShards)
 
 TEST_F(MemoryTest, InvalidateRangeAcrossShards)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(8, 60000, 4);
 
     void *mem1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -758,12 +751,11 @@ TEST_F(MemoryTest, InvalidateRangeAcrossShards)
 
     VirtualFree(mem1, 0, MEM_RELEASE);
     VirtualFree(mem2, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, CacheStampedeCoalescing)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -798,12 +790,11 @@ TEST_F(MemoryTest, CacheStampedeCoalescing)
     EXPECT_NE(stats.find("Coalesced:"), std::string::npos);
 
     VirtualFree(mem, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, CacheStatsAvailableInRelease)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 5000, 4);
 
     char buffer[100] = {0};
@@ -818,12 +809,11 @@ TEST_F(MemoryTest, CacheStatsAvailableInRelease)
     EXPECT_NE(stats.find("Coalesced:"), std::string::npos);
     EXPECT_NE(stats.find("Hit Rate:"), std::string::npos);
 
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, ClearCacheResetsAllStats)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 5000, 4);
 
     char buffer[100] = {0};
@@ -837,13 +827,11 @@ TEST_F(MemoryTest, ClearCacheResetsAllStats)
     std::string stats = Memory::get_cache_stats();
     EXPECT_NE(stats.find("Hits: 0"), std::string::npos);
     EXPECT_NE(stats.find("Misses: 0"), std::string::npos);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, InvalidateRangeIncrementsCounter)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 60000, 4);
 
     char buffer[100] = {0};
@@ -853,13 +841,11 @@ TEST_F(MemoryTest, InvalidateRangeIncrementsCounter)
 
     std::string stats = Memory::get_cache_stats();
     EXPECT_NE(stats.find("Invalidations:"), std::string::npos);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, HardUpperBoundEnforced)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     // Initialize with 2 entries capacity per shard (with 2x hard max = 4)
     Memory::init_cache(2, 60000, 1);
 
@@ -882,7 +868,6 @@ TEST_F(MemoryTest, HardUpperBoundEnforced)
     {
         VirtualFree(mem, 0, MEM_RELEASE);
     }
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTestWithShutdown, BackgroundCleanupThreadRuns)
@@ -909,7 +894,7 @@ TEST_F(MemoryTestWithShutdown, ShutdownCacheTerminatesCleanupThread)
 
 TEST_F(MemoryTest, InvalidateRangeTriggersBackgroundCleanup)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 60000, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -924,12 +909,11 @@ TEST_F(MemoryTest, InvalidateRangeTriggersBackgroundCleanup)
     EXPECT_TRUE(Memory::is_readable(mem, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, CoalescedQueriesAccumulated)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 1);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -960,24 +944,21 @@ TEST_F(MemoryTest, CoalescedQueriesAccumulated)
     EXPECT_NE(stats.find("Coalesced:"), std::string::npos);
 
     VirtualFree(mem, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, DefaultExpiryIs50ms)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     // Use default parameters (50ms expiry)
     Memory::init_cache(16, DEFAULT_CACHE_EXPIRY_MS, 4);
 
     std::string stats = Memory::get_cache_stats();
     EXPECT_NE(stats.find("Expiry: 50ms"), std::string::npos);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, OnDemandCleanupStatExists)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 100, 4);
 
     char buffer[100] = {0};
@@ -985,13 +966,11 @@ TEST_F(MemoryTest, OnDemandCleanupStatExists)
 
     std::string stats = Memory::get_cache_stats();
     EXPECT_NE(stats.find("OnDemandCleanups:"), std::string::npos);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, ClearCacheResetsOnDemandCleanupStat)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 100, 4);
 
     char buffer[100] = {0};
@@ -1004,13 +983,11 @@ TEST_F(MemoryTest, ClearCacheResetsOnDemandCleanupStat)
 
     std::string stats = Memory::get_cache_stats();
     EXPECT_NE(stats.find("OnDemandCleanups: 0"), std::string::npos);
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, OnDemandCleanupFiresOnInterval)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 10, 4);
 
     char buffer[100] = {0};
@@ -1024,13 +1001,11 @@ TEST_F(MemoryTest, OnDemandCleanupFiresOnInterval)
 
     std::string stats = Memory::get_cache_stats();
     EXPECT_FALSE(stats.empty());
-
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, CacheStampedeFollowerYields)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 1);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -1049,12 +1024,11 @@ TEST_F(MemoryTest, CacheStampedeFollowerYields)
     EXPECT_LT(duration, 1000);
 
     VirtualFree(mem, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, OnDemandCleanupAfterLongDelay)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 20, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -1069,16 +1043,13 @@ TEST_F(MemoryTest, OnDemandCleanupAfterLongDelay)
     EXPECT_TRUE(Memory::is_readable(mem, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
-    Memory::clear_cache();
 }
 
 TEST_F(MemoryTest, CacheStatsIncludeHardMax)
 {
-    Memory::clear_cache();
+    Memory::shutdown_cache();
     Memory::init_cache(16, 5000, 4);
 
     std::string stats = Memory::get_cache_stats();
     EXPECT_NE(stats.find("HardMax/Shard:"), std::string::npos);
-
-    Memory::clear_cache();
 }
