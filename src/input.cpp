@@ -24,8 +24,6 @@ namespace DetourModKit
           poll_interval_(std::clamp(poll_interval, MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)),
           prev_states_(bindings_.size(), 0)
     {
-        running_.store(true, std::memory_order_release);
-        poll_thread_ = std::jthread(&InputPoller::poll_loop, this);
     }
 
     InputPoller::~InputPoller()
@@ -33,9 +31,20 @@ namespace DetourModKit
         shutdown();
     }
 
+    void InputPoller::start()
+    {
+        if (poll_thread_.joinable())
+        {
+            return;
+        }
+
+        poll_thread_ = std::jthread([this](std::stop_token token)
+                                    { poll_loop(std::move(token)); });
+    }
+
     bool InputPoller::is_running() const noexcept
     {
-        return running_.load(std::memory_order_acquire);
+        return poll_thread_.joinable() && !poll_thread_.get_stop_token().stop_requested();
     }
 
     size_t InputPoller::binding_count() const noexcept
@@ -50,23 +59,18 @@ namespace DetourModKit
 
     void InputPoller::shutdown() noexcept
     {
-        const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
-        if (!was_running)
+        if (!poll_thread_.joinable())
         {
             return;
         }
 
-        if (poll_thread_.joinable())
-        {
-            poll_thread_.request_stop();
-            cv_.notify_all();
-            poll_thread_.join();
-        }
+        poll_thread_.request_stop();
+        cv_.notify_all();
+        poll_thread_.join();
     }
 
-    void InputPoller::poll_loop()
+    void InputPoller::poll_loop(std::stop_token stop_token)
     {
-        const auto stop_token = poll_thread_.get_stop_token();
         const size_t count = bindings_.size();
 
         while (!stop_token.stop_requested())
@@ -151,7 +155,7 @@ namespace DetourModKit
             }
 
             std::unique_lock lock(cv_mutex_);
-            cv_.wait_for(lock, poll_interval_, [&stop_token]()
+            cv_.wait_for(lock, stop_token, poll_interval_, [&stop_token]()
                          { return stop_token.stop_requested(); });
         }
     }
@@ -224,6 +228,7 @@ namespace DetourModKit
 
         poller_ = std::make_unique<InputPoller>(std::move(pending_bindings_), poll_interval);
         pending_bindings_.clear();
+        poller_->start();
     }
 
     bool InputManager::is_running() const noexcept

@@ -17,7 +17,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **Format Utilities:** Custom formatters for game modding types (memory addresses, byte values, VK codes) with C++20 `std::format` support.
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 * **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
-* **Input System:** Hotkey monitoring with a background polling thread. Supports press (edge-triggered) and hold (level-triggered) input modes. Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Features condition-variable-based shutdown for responsive teardown, exception-safe callback invocation, and integration with the configuration system for loading VK codes from INI files.
+* **Input System:** Hotkey monitoring with a background polling thread. Supports press (edge-triggered) and hold (level-triggered) input modes. Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Features two-phase initialization (construct then start) for safe thread launching, `condition_variable_any` with `stop_token` for responsive cooperative shutdown, exception-safe callback invocation, and integration with the configuration system for loading VK codes from INI files. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
 
 ## Testing
 

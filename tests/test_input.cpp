@@ -37,8 +37,11 @@ TEST_F(InputPollerTest, ConstructWithEmptyBindings)
     std::vector<InputBinding> bindings;
     InputPoller poller(std::move(bindings));
 
-    EXPECT_TRUE(poller.is_running());
+    EXPECT_FALSE(poller.is_running());
     EXPECT_EQ(poller.binding_count(), 0u);
+
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
 
     poller.shutdown();
     EXPECT_FALSE(poller.is_running());
@@ -64,8 +67,11 @@ TEST_F(InputPollerTest, ConstructWithBindings)
 
     InputPoller poller(std::move(bindings));
 
-    EXPECT_TRUE(poller.is_running());
+    EXPECT_FALSE(poller.is_running());
     EXPECT_EQ(poller.binding_count(), 2u);
+
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
 
     poller.shutdown();
     EXPECT_FALSE(poller.is_running());
@@ -77,8 +83,6 @@ TEST_F(InputPollerTest, DefaultPollInterval)
     InputPoller poller(std::move(bindings));
 
     EXPECT_EQ(poller.poll_interval(), DEFAULT_POLL_INTERVAL);
-
-    poller.shutdown();
 }
 
 TEST_F(InputPollerTest, CustomPollInterval)
@@ -87,8 +91,6 @@ TEST_F(InputPollerTest, CustomPollInterval)
     InputPoller poller(std::move(bindings), std::chrono::milliseconds{50});
 
     EXPECT_EQ(poller.poll_interval(), std::chrono::milliseconds{50});
-
-    poller.shutdown();
 }
 
 TEST_F(InputPollerTest, PollIntervalClampedToMin)
@@ -97,8 +99,6 @@ TEST_F(InputPollerTest, PollIntervalClampedToMin)
     InputPoller poller(std::move(bindings), std::chrono::milliseconds{0});
 
     EXPECT_EQ(poller.poll_interval(), MIN_POLL_INTERVAL);
-
-    poller.shutdown();
 }
 
 TEST_F(InputPollerTest, PollIntervalClampedToMax)
@@ -107,6 +107,38 @@ TEST_F(InputPollerTest, PollIntervalClampedToMax)
     InputPoller poller(std::move(bindings), std::chrono::milliseconds{5000});
 
     EXPECT_EQ(poller.poll_interval(), MAX_POLL_INTERVAL);
+}
+
+TEST_F(InputPollerTest, NotRunningBeforeStart)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings));
+
+    EXPECT_FALSE(poller.is_running());
+}
+
+TEST_F(InputPollerTest, StartThenRunning)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings));
+
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, DoubleStartIgnored)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings));
+
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
+
+    // Second start should be a no-op
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
 
     poller.shutdown();
 }
@@ -116,12 +148,23 @@ TEST_F(InputPollerTest, ShutdownIdempotent)
     std::vector<InputBinding> bindings;
     InputPoller poller(std::move(bindings));
 
+    poller.start();
     EXPECT_TRUE(poller.is_running());
 
     poller.shutdown();
     EXPECT_FALSE(poller.is_running());
 
     // Second shutdown should be safe
+    EXPECT_NO_THROW(poller.shutdown());
+    EXPECT_FALSE(poller.is_running());
+}
+
+TEST_F(InputPollerTest, ShutdownWithoutStart)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings));
+
+    // Shutdown before start should be safe
     EXPECT_NO_THROW(poller.shutdown());
     EXPECT_FALSE(poller.is_running());
 }
@@ -133,6 +176,7 @@ TEST_F(InputPollerTest, DestructorStopsThread)
     {
         std::vector<InputBinding> bindings;
         InputPoller poller(std::move(bindings));
+        poller.start();
         thread_was_running = poller.is_running();
     }
     // Destructor should have joined the thread without hanging
@@ -160,6 +204,7 @@ TEST_F(InputPollerTest, EmptyKeysSkipped)
     bindings.push_back(std::move(binding));
 
     InputPoller poller(std::move(bindings));
+    poller.start();
 
     // Should run without issues even with empty keys
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
@@ -180,6 +225,7 @@ TEST_F(InputPollerTest, ZeroVkCodeSkipped)
     bindings.push_back(std::move(binding));
 
     InputPoller poller(std::move(bindings));
+    poller.start();
 
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
     EXPECT_TRUE(poller.is_running());
@@ -209,6 +255,7 @@ TEST_F(InputPollerTest, MultipleBindingsMixed)
     }
 
     InputPoller poller(std::move(bindings));
+    poller.start();
 
     EXPECT_TRUE(poller.is_running());
     EXPECT_EQ(poller.binding_count(), 10u);
@@ -228,6 +275,7 @@ TEST_F(InputPollerTest, NullCallbackHandled)
     bindings.push_back(std::move(binding));
 
     InputPoller poller(std::move(bindings));
+    poller.start();
 
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
     EXPECT_TRUE(poller.is_running());
@@ -240,6 +288,7 @@ TEST_F(InputPollerTest, ShutdownResponsiveness)
     std::vector<InputBinding> bindings;
     InputPoller poller(std::move(bindings), std::chrono::milliseconds{500});
 
+    poller.start();
     EXPECT_TRUE(poller.is_running());
 
     const auto start = std::chrono::steady_clock::now();
@@ -248,6 +297,20 @@ TEST_F(InputPollerTest, ShutdownResponsiveness)
 
     // Shutdown should complete well under the poll interval due to CV wake-up
     EXPECT_LT(elapsed, std::chrono::milliseconds{200});
+    EXPECT_FALSE(poller.is_running());
+}
+
+TEST_F(InputPollerTest, IsRunningFalseAfterShutdownCompletes)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings));
+
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+
+    // is_running() must return false only after the thread has fully joined
     EXPECT_FALSE(poller.is_running());
 }
 

@@ -53,6 +53,10 @@ namespace DetourModKit
      * @details Holds the action name, virtual key codes, input mode, and callbacks.
      *          For Press mode, the press callback fires on key-down edge.
      *          For Hold mode, the state callback fires with true on press and false on release.
+     *
+     * @warning Callbacks are invoked on the polling thread. They must not capture references
+     *          or pointers to objects whose lifetime may end before shutdown() completes.
+     *          Callbacks should execute quickly to avoid degrading the effective poll rate.
      */
     struct InputBinding
     {
@@ -68,11 +72,15 @@ namespace DetourModKit
      * @brief RAII input polling engine that monitors key states on a background thread.
      * @details Manages a dedicated polling thread that checks virtual key states via
      *          GetAsyncKeyState. Supports both press (edge-triggered) and hold
-     *          (level-triggered) input modes. The polling thread is started on
-     *          construction and stopped on destruction.
+     *          (level-triggered) input modes. The polling thread is started explicitly
+     *          via start() after construction.
      *
      * @note Non-copyable, non-movable. Callbacks are invoked on the polling thread.
      * @note This class is the building block for the InputManager singleton.
+     *
+     * @warning When used inside a DLL, shutdown() must be called before DLL_PROCESS_DETACH.
+     *          Calling join() on a thread during DllMain can deadlock due to the loader lock.
+     *          Use DMK_Shutdown() to ensure proper teardown ordering.
      */
     class InputPoller
     {
@@ -81,7 +89,7 @@ namespace DetourModKit
          * @brief Constructs an InputPoller with the given bindings and poll interval.
          * @param bindings Vector of input bindings to monitor.
          * @param poll_interval Time between polling cycles.
-         * @note The polling thread starts immediately after construction.
+         * @note The polling thread does not start until start() is called.
          */
         explicit InputPoller(std::vector<InputBinding> bindings,
                              std::chrono::milliseconds poll_interval = DEFAULT_POLL_INTERVAL);
@@ -92,6 +100,12 @@ namespace DetourModKit
         InputPoller &operator=(const InputPoller &) = delete;
         InputPoller(InputPoller &&) = delete;
         InputPoller &operator=(InputPoller &&) = delete;
+
+        /**
+         * @brief Starts the polling thread.
+         * @details Safe to call only once. Subsequent calls are ignored.
+         */
+        void start();
 
         /**
          * @brief Checks if the polling thread is currently running.
@@ -114,19 +128,19 @@ namespace DetourModKit
         /**
          * @brief Stops the polling thread.
          * @details Signals the thread to stop and waits for it to join.
-         *          Safe to call multiple times.
+         *          Safe to call multiple times. After shutdown, is_running() returns
+         *          false only once the thread has fully joined.
          */
         void shutdown() noexcept;
 
     private:
-        void poll_loop();
+        void poll_loop(std::stop_token stop_token);
 
         std::vector<InputBinding> bindings_;
         std::chrono::milliseconds poll_interval_;
-        std::atomic<bool> running_{false};
         std::jthread poll_thread_;
         std::mutex cv_mutex_;
-        std::condition_variable cv_;
+        std::condition_variable_any cv_;
 
         // Per-key state tracking for edge detection, indexed parallel to bindings_.
         // For Press mode: tracks whether any key in the binding was down last cycle.
@@ -139,11 +153,14 @@ namespace DetourModKit
      * @brief Singleton that provides a convenient interface for registering and
      *        monitoring hotkey bindings.
      * @details Wraps an InputPoller internally. Bindings are registered before
-     *          calling start(), which constructs the poller. Integrates with
-     *          DMK_Shutdown() for automatic cleanup.
+     *          calling start(), which constructs and starts the poller. Integrates
+     *          with DMK_Shutdown() for automatic cleanup.
      *
      * @note Thread-safe. For advanced use cases requiring multiple independent
      *       pollers or custom lifetime management, use InputPoller directly.
+     *
+     * @warning When used inside a DLL, shutdown() must be called before DLL_PROCESS_DETACH.
+     *          Calling join() on a thread during DllMain can deadlock due to the loader lock.
      */
     class InputManager
     {
