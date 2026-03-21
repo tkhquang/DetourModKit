@@ -42,12 +42,16 @@ TEST_F(HookManagerTest, HookStatus)
 {
     HookStatus status1 = HookStatus::Active;
     HookStatus status2 = HookStatus::Disabled;
-    HookStatus status3 = HookStatus::Failed;
-    HookStatus status4 = HookStatus::Removed;
+    HookStatus status3 = HookStatus::Enabling;
+    HookStatus status4 = HookStatus::Disabling;
+    HookStatus status5 = HookStatus::Failed;
+    HookStatus status6 = HookStatus::Removed;
 
     EXPECT_NE(status1, status2);
     EXPECT_NE(status2, status3);
     EXPECT_NE(status3, status4);
+    EXPECT_NE(status4, status5);
+    EXPECT_NE(status5, status6);
 }
 
 TEST_F(HookManagerTest, HookType)
@@ -790,6 +794,8 @@ TEST_F(HookManagerTest, StatusToString_AllValues)
 {
     EXPECT_EQ(Hook::status_to_string(HookStatus::Active), "Active");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Disabled), "Disabled");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Enabling), "Enabling");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Disabling), "Disabling");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Failed), "Failed");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Removed), "Removed");
     EXPECT_EQ(Hook::status_to_string(static_cast<HookStatus>(999)), "Unknown");

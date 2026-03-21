@@ -41,6 +41,8 @@ namespace DetourModKit
     {
         Active,
         Disabled,
+        Enabling,
+        Disabling,
         Failed,
         Removed
     };
@@ -92,19 +94,24 @@ namespace DetourModKit
          * @brief Enables the hook.
          * @return true if the hook was successfully enabled or already active, false otherwise.
          * @note Uses atomic CAS for lock-free status transitions. Thread-safe without
-         *       requiring external synchronization.
+         *       requiring external synchronization. Uses an intermediate Enabling state
+         *       to prevent other threads from observing a speculative terminal state
+         *       while the SafetyHook enable call is in progress.
          */
         bool enable()
         {
             if (!is_impl_valid())
                 return false;
 
-            auto expected = HookStatus::Disabled;
-            if (!m_status.compare_exchange_strong(expected, HookStatus::Active, std::memory_order_acq_rel))
+            HookStatus expected = HookStatus::Disabled;
+            if (!m_status.compare_exchange_strong(expected, HookStatus::Enabling, std::memory_order_acq_rel))
                 return expected == HookStatus::Active;
 
             if (do_enable())
+            {
+                m_status.store(HookStatus::Active, std::memory_order_release);
                 return true;
+            }
 
             m_status.store(HookStatus::Disabled, std::memory_order_release);
             return false;
@@ -114,19 +121,24 @@ namespace DetourModKit
          * @brief Disables the hook.
          * @return true if the hook was successfully disabled or already disabled, false otherwise.
          * @note Uses atomic CAS for lock-free status transitions. Thread-safe without
-         *       requiring external synchronization.
+         *       requiring external synchronization. Uses an intermediate Disabling state
+         *       to prevent other threads from observing a speculative terminal state
+         *       while the SafetyHook disable call is in progress.
          */
         bool disable()
         {
             if (!is_impl_valid())
                 return false;
 
-            auto expected = HookStatus::Active;
-            if (!m_status.compare_exchange_strong(expected, HookStatus::Disabled, std::memory_order_acq_rel))
+            HookStatus expected = HookStatus::Active;
+            if (!m_status.compare_exchange_strong(expected, HookStatus::Disabling, std::memory_order_acq_rel))
                 return expected == HookStatus::Disabled;
 
             if (do_disable())
+            {
+                m_status.store(HookStatus::Disabled, std::memory_order_release);
                 return true;
+            }
 
             m_status.store(HookStatus::Active, std::memory_order_release);
             return false;
@@ -142,6 +154,10 @@ namespace DetourModKit
                 return "Active";
             case HookStatus::Disabled:
                 return "Disabled";
+            case HookStatus::Enabling:
+                return "Enabling";
+            case HookStatus::Disabling:
+                return "Disabling";
             case HookStatus::Failed:
                 return "Failed";
             case HookStatus::Removed:
@@ -434,7 +450,9 @@ namespace DetourModKit
          * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
         template <typename F>
-            requires std::invocable<F, InlineHook &>
+            requires std::invocable<F, InlineHook &> &&
+                     (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
+                     (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
         [[nodiscard]] auto with_inline_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
@@ -448,7 +466,7 @@ namespace DetourModKit
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
-                return fn(static_cast<InlineHook &>(*it->second));
+                return std::invoke(std::forward<F>(fn), static_cast<InlineHook &>(*it->second));
             }
             return std::nullopt;
         }
@@ -469,7 +487,9 @@ namespace DetourModKit
          *         the lock could not be acquired or the hook was not found.
          */
         template <typename F>
-            requires std::invocable<F, InlineHook &>
+            requires std::invocable<F, InlineHook &> &&
+                     (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
+                     (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
         [[nodiscard]] auto try_with_inline_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
@@ -487,7 +507,7 @@ namespace DetourModKit
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
-                return fn(static_cast<InlineHook &>(*it->second));
+                return std::invoke(std::forward<F>(fn), static_cast<InlineHook &>(*it->second));
             }
             return std::nullopt;
         }
@@ -506,7 +526,9 @@ namespace DetourModKit
          * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
         template <typename F>
-            requires std::invocable<F, MidHook &>
+            requires std::invocable<F, MidHook &> &&
+                     (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
+                     (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
         [[nodiscard]] auto with_mid_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
@@ -520,7 +542,7 @@ namespace DetourModKit
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
-                return fn(static_cast<MidHook &>(*it->second));
+                return std::invoke(std::forward<F>(fn), static_cast<MidHook &>(*it->second));
             }
             return std::nullopt;
         }
@@ -541,7 +563,9 @@ namespace DetourModKit
          *         the lock could not be acquired or the hook was not found.
          */
         template <typename F>
-            requires std::invocable<F, MidHook &>
+            requires std::invocable<F, MidHook &> &&
+                     (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
+                     (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
         [[nodiscard]] auto try_with_mid_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
@@ -559,7 +583,7 @@ namespace DetourModKit
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
-                return fn(static_cast<MidHook &>(*it->second));
+                return std::invoke(std::forward<F>(fn), static_cast<MidHook &>(*it->second));
             }
             return std::nullopt;
         }
