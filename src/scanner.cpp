@@ -1,9 +1,10 @@
 /**
  * @file scanner.cpp
- * @brief Implementation of Array-of-Bytes (AOB) parsing and scanning.
+ * @brief Implementation of Array-of-Bytes (AOB) parsing, scanning, and RIP-relative resolution.
  */
 
 #include "DetourModKit/scanner.hpp"
+#include "DetourModKit/memory.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/format.hpp"
 
@@ -13,6 +14,7 @@
 #include <cctype>
 #include <stdexcept>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 
 using namespace DetourModKit;
@@ -29,26 +31,35 @@ namespace
     {
         switch (b)
         {
-        case 0x00: return 10; // null padding, very common
-        case 0xCC: return 9;  // INT3, debug padding
-        case 0x90: return 9;  // NOP
-        case 0xFF: return 8;  // call/jmp indirect, common
-        case 0x48: return 8;  // REX.W prefix, ubiquitous in x64
-        case 0x8B: return 7;  // MOV reg, r/m
-        case 0x89: return 7;  // MOV r/m, reg
-        case 0x0F: return 7;  // two-byte opcode escape
-        case 0xE8: return 6;  // CALL rel32
-        case 0xE9: return 6;  // JMP rel32
-        case 0x83: return 6;  // arithmetic imm8
-        case 0xC3: return 5;  // RET
-        default:   return 0;  // uncommon, ideal anchor
+        case 0x00:
+            return 10; // null padding, very common
+        case 0xCC:
+            return 9; // INT3, debug padding
+        case 0x90:
+            return 9; // NOP
+        case 0xFF:
+            return 8; // call/jmp indirect, common
+        case 0x48:
+            return 8; // REX.W prefix, ubiquitous in x64
+        case 0x8B:
+            return 7; // MOV reg, r/m
+        case 0x89:
+            return 7; // MOV r/m, reg
+        case 0x0F:
+            return 7; // two-byte opcode escape
+        case 0xE8:
+            return 6; // CALL rel32
+        case 0xE9:
+            return 6; // JMP rel32
+        case 0x83:
+            return 6; // arithmetic imm8
+        case 0xC3:
+            return 5; // RET
+        default:
+            return 0; // uncommon, ideal anchor
         }
     }
 } // anonymous namespace
-
-// ============================================================================
-// AOB Scanner API: parse_aob and find_pattern with CompiledPattern
-// ============================================================================
 
 std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::string_view aob_str)
 {
@@ -214,4 +225,64 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
     }
 
     return nullptr;
+}
+
+std::optional<uintptr_t> DetourModKit::Scanner::resolve_rip_relative(const std::byte *instruction_address,
+                                                                     size_t displacement_offset,
+                                                                     size_t instruction_length)
+{
+    if (!instruction_address)
+    {
+        return std::nullopt;
+    }
+
+    const std::byte *disp_ptr = instruction_address + displacement_offset;
+    if (!Memory::is_readable(disp_ptr, sizeof(int32_t)))
+    {
+        return std::nullopt;
+    }
+
+    int32_t displacement;
+    std::memcpy(&displacement, disp_ptr, sizeof(int32_t));
+
+    auto base = reinterpret_cast<uintptr_t>(instruction_address);
+    return base + instruction_length + static_cast<uintptr_t>(static_cast<intptr_t>(displacement));
+}
+
+std::optional<uintptr_t> DetourModKit::Scanner::find_and_resolve_rip_relative(const std::byte *search_start,
+                                                                              size_t search_length,
+                                                                              std::span<const std::byte> opcode_prefix,
+                                                                              size_t instruction_length)
+{
+    if (!search_start || opcode_prefix.empty())
+    {
+        return std::nullopt;
+    }
+
+    const size_t prefix_len = opcode_prefix.size();
+    const size_t min_bytes = prefix_len + sizeof(int32_t);
+    if (search_length < min_bytes)
+    {
+        return std::nullopt;
+    }
+
+    const size_t scan_limit = search_length - min_bytes;
+    const std::byte first = opcode_prefix[0];
+
+    for (size_t i = 0; i <= scan_limit; ++i)
+    {
+        if (search_start[i] != first)
+        {
+            continue;
+        }
+
+        if (prefix_len > 1 && std::memcmp(&search_start[i + 1], opcode_prefix.data() + 1, prefix_len - 1) != 0)
+        {
+            continue;
+        }
+
+        return resolve_rip_relative(&search_start[i], prefix_len, instruction_length);
+    }
+
+    return std::nullopt;
 }
