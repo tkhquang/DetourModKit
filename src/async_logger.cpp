@@ -57,6 +57,7 @@ namespace DetourModKit
         new_block->slot_count = POOL_SLOTS_PER_BLOCK;
 
         PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
+        static_assert(POOL_SLOTS_PER_BLOCK <= 32, "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
         uint32_t constructed = 0;
         for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
         {
