@@ -112,96 +112,44 @@ TEST_F(ConfigTest, LogAll)
     EXPECT_NO_THROW(Config::log_all());
 }
 
-TEST_F(ConfigTest, RegisterKeyList_Default)
-{
-    std::vector<int> test_value;
-
-    Config::register_key_list("TestSection", "TestKeys", "test_keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "0x41, 0x42, 0x43");
-
-    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    EXPECT_EQ(test_value.size(), 3u);
-    EXPECT_EQ(test_value[0], 0x41);
-    EXPECT_EQ(test_value[1], 0x42);
-    EXPECT_EQ(test_value[2], 0x43);
-}
-
-TEST_F(ConfigTest, RegisterKeyList_FromFile)
-{
-    std::ofstream ini_file(test_ini_file_);
-    ini_file << "[TestSection]\n";
-    ini_file << "TestKeys=0x10, 0x20, 0x30 ; comment\n";
-    ini_file.close();
-
-    std::vector<int> test_value;
-
-    Config::register_key_list("TestSection", "TestKeys", "test_keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "0x00");
-
-    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    EXPECT_EQ(test_value.size(), 3u);
-    EXPECT_EQ(test_value[0], 0x10);
-    EXPECT_EQ(test_value[1], 0x20);
-    EXPECT_EQ(test_value[2], 0x30);
-}
-
-TEST_F(ConfigTest, RegisterKeyList_HexFormats)
+TEST_F(ConfigTest, KeyCombo_HexFormats)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "TestKeys=0x01, 0X02, 03, 4\n";
     ini_file.close();
 
-    std::vector<int> test_value;
+    Config::KeyCombo test_value;
 
-    Config::register_key_list("TestSection", "TestKeys", "test_keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.size(), 4u);
-    EXPECT_EQ(test_value[0], 0x01);
-    EXPECT_EQ(test_value[1], 0x02);
-    EXPECT_EQ(test_value[2], 0x03);
-    EXPECT_EQ(test_value[3], 0x04);
+    EXPECT_EQ(test_value.keys.size(), 4u);
+    EXPECT_EQ(test_value.keys[0], 0x01);
+    EXPECT_EQ(test_value.keys[1], 0x02);
+    EXPECT_EQ(test_value.keys[2], 0x03);
+    EXPECT_EQ(test_value.keys[3], 0x04);
 }
 
-TEST_F(ConfigTest, RegisterKeyList_InvalidHex)
+TEST_F(ConfigTest, KeyCombo_InvalidHex)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "TestKeys=0x10, INVALID, 0xGG, 0x20\n";
     ini_file.close();
 
-    std::vector<int> test_value;
+    Config::KeyCombo test_value;
 
-    Config::register_key_list("TestSection", "TestKeys", "test_keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
-
-    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    EXPECT_EQ(test_value.size(), 2u);
-    EXPECT_EQ(test_value[0], 0x10);
-    EXPECT_EQ(test_value[1], 0x20);
-}
-
-TEST_F(ConfigTest, RegisterKeyList_Empty)
-{
-    std::ofstream ini_file(test_ini_file_);
-    ini_file << "[TestSection]\n";
-    ini_file << "TestKeys=\n";
-    ini_file.close();
-
-    std::vector<int> test_value;
-
-    Config::register_key_list("TestSection", "TestKeys", "test_keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_TRUE(test_value.empty());
+    EXPECT_EQ(test_value.keys.size(), 2u);
+    EXPECT_EQ(test_value.keys[0], 0x10);
+    EXPECT_EQ(test_value.keys[1], 0x20);
 }
 
 TEST_F(ConfigTest, ClearRegisteredItems)
@@ -286,7 +234,7 @@ TEST_F(ConfigTest, MixedConfigTypes)
     float float_val = 0.0f;
     bool bool_val = false;
     std::string string_val;
-    std::vector<int> keys_val;
+    Config::KeyCombo keys_val;
 
     Config::register_int("Section1", "IntVal", "int_val", [&int_val](int v)
                          { int_val = v; }, 0);
@@ -296,8 +244,8 @@ TEST_F(ConfigTest, MixedConfigTypes)
                           { bool_val = v; }, false);
     Config::register_string("Section2", "StringVal", "string_val", [&string_val](const std::string &v)
                             { string_val = v; }, "");
-    Config::register_key_list("Section2", "Keys", "keys_val", [&keys_val](const std::vector<int> &v)
-                              { keys_val = v; }, "");
+    Config::register_key_combo("Section2", "Keys", "keys_val", [&keys_val](const Config::KeyCombo &c)
+                               { keys_val = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
@@ -305,7 +253,7 @@ TEST_F(ConfigTest, MixedConfigTypes)
     EXPECT_NEAR(float_val, 3.14f, 0.01f);
     EXPECT_TRUE(bool_val);
     EXPECT_EQ(string_val, "hello");
-    EXPECT_EQ(keys_val.size(), 2u);
+    EXPECT_EQ(keys_val.keys.size(), 2u);
 }
 
 TEST_F(ConfigTest, BoolVariations)
@@ -362,53 +310,41 @@ TEST_F(ConfigTest, FloatFormats)
     EXPECT_NEAR(float3, 0.0f, 0.01f);
 }
 
-TEST_F(ConfigTest, KeyListWithCommentsAndSpaces)
+TEST_F(ConfigTest, KeyCombo_CommentsAndSpaces)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "Keys=  0x10  ,  0x20  ; this is a comment\n";
     ini_file.close();
 
-    std::vector<int> test_value;
+    Config::KeyCombo test_value;
 
-    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
-
-    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
-
-    EXPECT_EQ(test_value.size(), 2u);
-    EXPECT_EQ(test_value[0], 0x10);
-    EXPECT_EQ(test_value[1], 0x20);
-}
-
-TEST_F(ConfigTest, KeyListEmptyDefault)
-{
-    std::vector<int> test_value = {0x99};
-
-    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_TRUE(test_value.empty());
+    EXPECT_EQ(test_value.keys.size(), 2u);
+    EXPECT_EQ(test_value.keys[0], 0x10);
+    EXPECT_EQ(test_value.keys[1], 0x20);
 }
 
-TEST_F(ConfigTest, KeyListJustPrefix)
+TEST_F(ConfigTest, KeyCombo_JustPrefix)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "Keys=0x, 0x10\n";
     ini_file.close();
 
-    std::vector<int> test_value;
+    Config::KeyCombo test_value;
 
-    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.size(), 1u);
-    EXPECT_EQ(test_value[0], 0x10);
+    EXPECT_EQ(test_value.keys.size(), 1u);
+    EXPECT_EQ(test_value.keys[0], 0x10);
 }
 
 TEST_F(ConfigTest, MultipleRegistrationsSameType)
@@ -437,7 +373,7 @@ TEST_F(ConfigTest, LogAll_AllTypes)
     float f_val = 0.0f;
     bool b_val = false;
     std::string s_val;
-    std::vector<int> k_val;
+    Config::KeyCombo k_val;
 
     Config::register_float("Sec", "F", "f_val", [&f_val](float v)
                            { f_val = v; }, 1.5f);
@@ -445,8 +381,8 @@ TEST_F(ConfigTest, LogAll_AllTypes)
                           { b_val = v; }, true);
     Config::register_string("Sec", "S", "s_val", [&s_val](const std::string &v)
                             { s_val = v; }, "hello");
-    Config::register_key_list("Sec", "K", "k_val", [&k_val](const std::vector<int> &v)
-                              { k_val = v; }, "0x41");
+    Config::register_key_combo("Sec", "K", "k_val", [&k_val](const Config::KeyCombo &c)
+                               { k_val = c; }, "0x41");
 
     Config::load(test_ini_file_.string());
 
@@ -455,126 +391,116 @@ TEST_F(ConfigTest, LogAll_AllTypes)
     EXPECT_NEAR(f_val, 1.5f, 0.01f);
     EXPECT_TRUE(b_val);
     EXPECT_EQ(s_val, "hello");
-    EXPECT_EQ(k_val.size(), 1u);
+    EXPECT_EQ(k_val.keys.size(), 1u);
 }
 
-// Tests inline comment stripping in key list values
-TEST_F(ConfigTest, KeyList_InlineTokenComment)
+TEST_F(ConfigTest, KeyCombo_InlineTokenComment)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "Keys=0x10, 0x20 ; inline comment at end of line\n";
     ini_file.close();
 
-    std::vector<int> test_value;
-    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::KeyCombo test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.size(), 2u);
-    EXPECT_EQ(test_value[0], 0x10);
-    EXPECT_EQ(test_value[1], 0x20);
+    EXPECT_EQ(test_value.keys.size(), 2u);
+    EXPECT_EQ(test_value.keys[0], 0x10);
+    EXPECT_EQ(test_value.keys[1], 0x20);
 }
 
-// Tests that consecutive commas produce empty tokens which are skipped
-TEST_F(ConfigTest, KeyList_EmptyTokenFromConsecutiveCommas)
+TEST_F(ConfigTest, KeyCombo_EmptyTokenFromConsecutiveCommas)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "Keys=0x10,,0x20\n";
     ini_file.close();
 
-    std::vector<int> test_value;
-    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::KeyCombo test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.size(), 2u);
-    EXPECT_EQ(test_value[0], 0x10);
-    EXPECT_EQ(test_value[1], 0x20);
+    EXPECT_EQ(test_value.keys.size(), 2u);
+    EXPECT_EQ(test_value.keys[0], 0x10);
+    EXPECT_EQ(test_value.keys[1], 0x20);
 }
 
-// Tests that hex values exceeding stoul range are gracefully skipped
-TEST_F(ConfigTest, KeyList_OverflowValue)
+TEST_F(ConfigTest, KeyCombo_OverflowValue)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
     ini_file << "Keys=FFFFFFFFFFFFFFFFFFFFFFFF, 0x41\n";
     ini_file.close();
 
-    std::vector<int> test_value;
-    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::KeyCombo test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.size(), 1u);
-    EXPECT_EQ(test_value[0], 0x41);
+    EXPECT_EQ(test_value.keys.size(), 1u);
+    EXPECT_EQ(test_value.keys[0], 0x41);
 }
 
-// Tests that consecutive commas in default string are skipped
-TEST_F(ConfigTest, RegisterKeyList_DefaultEmptyToken)
+TEST_F(ConfigTest, KeyCombo_DefaultEmptyToken)
 {
-    std::vector<int> val;
-    Config::register_key_list("S", "K1", "k1", [&val](const std::vector<int> &v)
-                              { val = v; }, "0x41,,0x42");
+    Config::KeyCombo val;
+    Config::register_key_combo("S", "K1", "k1", [&val](const Config::KeyCombo &c)
+                               { val = c; }, "0x41,,0x42");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.size(), 2u);
+    EXPECT_EQ(val.keys.size(), 2u);
 }
 
-// Tests that bare "0x" prefix in default string is skipped
-TEST_F(ConfigTest, RegisterKeyList_DefaultBarePrefix)
+TEST_F(ConfigTest, KeyCombo_DefaultBarePrefix)
 {
-    std::vector<int> val;
-    Config::register_key_list("S", "K2", "k2", [&val](const std::vector<int> &v)
-                              { val = v; }, "0x, 0x42");
+    Config::KeyCombo val;
+    Config::register_key_combo("S", "K2", "k2", [&val](const Config::KeyCombo &c)
+                               { val = c; }, "0x, 0x42");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.size(), 1u);
-    EXPECT_EQ(val[0], 0x42);
+    EXPECT_EQ(val.keys.size(), 1u);
+    EXPECT_EQ(val.keys[0], 0x42);
 }
 
-// Tests that overflow values in default string are gracefully skipped
-TEST_F(ConfigTest, RegisterKeyList_DefaultOverflow)
+TEST_F(ConfigTest, KeyCombo_DefaultOverflow)
 {
-    std::vector<int> val;
-    Config::register_key_list("S", "K3", "k3", [&val](const std::vector<int> &v)
-                              { val = v; }, "FFFFFFFFFFFFFFFFFFFFFFFF, 0x43");
+    Config::KeyCombo val;
+    Config::register_key_combo("S", "K3", "k3", [&val](const Config::KeyCombo &c)
+                               { val = c; }, "FFFFFFFFFFFFFFFFFFFFFFFF, 0x43");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.size(), 1u);
-    EXPECT_EQ(val[0], 0x43);
+    EXPECT_EQ(val.keys.size(), 1u);
+    EXPECT_EQ(val.keys[0], 0x43);
 }
 
-// Tests that hex values exceeding INT_MAX are skipped by the range check
-TEST_F(ConfigTest, KeyList_ValueExceedingIntMax)
+TEST_F(ConfigTest, KeyCombo_ValueExceedingIntMax)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
-    // 0x80000000 = 2147483648 which exceeds INT_MAX (2147483647) on 32-bit int
     ini_file << "Keys=0x80000000, 0x41\n";
     ini_file.close();
 
-    std::vector<int> test_value;
-    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
-                              { test_value = v; }, "");
+    Config::KeyCombo test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+                               { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.size(), 1u);
-    EXPECT_EQ(test_value[0], 0x41);
+    EXPECT_EQ(test_value.keys.size(), 1u);
+    EXPECT_EQ(test_value.keys[0], 0x41);
 }
 
-// Tests that hex values exceeding INT_MAX in default string are skipped
-TEST_F(ConfigTest, RegisterKeyList_DefaultValueExceedingIntMax)
+TEST_F(ConfigTest, KeyCombo_DefaultValueExceedingIntMax)
 {
-    std::vector<int> val;
-    // 0x80000000 exceeds INT_MAX, should be skipped
-    Config::register_key_list("S", "K4", "k4", [&val](const std::vector<int> &v)
-                              { val = v; }, "0x80000000, 0x44");
+    Config::KeyCombo val;
+    Config::register_key_combo("S", "K4", "k4", [&val](const Config::KeyCombo &c)
+                               { val = c; }, "0x80000000, 0x44");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.size(), 1u);
-    EXPECT_EQ(val[0], 0x44);
+    EXPECT_EQ(val.keys.size(), 1u);
+    EXPECT_EQ(val.keys[0], 0x44);
 }
 
 TEST_F(ConfigTest, DuplicateKeyRegistration)
@@ -713,16 +639,196 @@ TEST_F(ConfigTest, RegisterString_DefaultValueNotMovedFrom)
     EXPECT_EQ(val, "my_default");
 }
 
-TEST_F(ConfigTest, RegisterKeyList_DefaultValueNotMovedFrom)
+
+TEST_F(ConfigTest, RegisterKeyCombo_SingleKey)
 {
-    std::vector<int> keys;
+    Config::KeyCombo combo;
 
-    Config::register_key_list("Defaults", "Keys", "keys", [&keys](const std::vector<int> &v)
-                              { keys = v; }, "0x41,0x42,0x43");
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0x72");
 
-    // Before load(), the setter should have been called with the parsed default value
-    ASSERT_EQ(keys.size(), 3u);
-    EXPECT_EQ(keys[0], 0x41);
-    EXPECT_EQ(keys[1], 0x42);
-    EXPECT_EQ(keys[2], 0x43);
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    EXPECT_TRUE(combo.modifiers.empty());
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_SingleModifier)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0x11+0x72");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    ASSERT_EQ(combo.modifiers.size(), 1u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_MultipleModifiers)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0x11+0x10+0x72");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    ASSERT_EQ(combo.modifiers.size(), 2u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+    EXPECT_EQ(combo.modifiers[1], 0x10);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_MultipleTriggerKeys)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0x11+0x72,0x73");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 2u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    EXPECT_EQ(combo.keys[1], 0x73);
+    ASSERT_EQ(combo.modifiers.size(), 1u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_Empty)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    EXPECT_TRUE(combo.keys.empty());
+    EXPECT_TRUE(combo.modifiers.empty());
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_FromFile)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Hotkeys]\n";
+    ini_file << "Toggle=0x11+0x10+0x72 ; Ctrl+Shift+F3\n";
+    ini_file.close();
+
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0x41");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    ASSERT_EQ(combo.modifiers.size(), 2u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+    EXPECT_EQ(combo.modifiers[1], 0x10);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_FromFileNoModifiers)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Hotkeys]\n";
+    ini_file << "Toggle=0x72\n";
+    ini_file.close();
+
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    EXPECT_TRUE(combo.modifiers.empty());
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_FromFileMultipleTriggers)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Hotkeys]\n";
+    ini_file << "Toggle=0x11+0x72,0x73,0x74\n";
+    ini_file.close();
+
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 3u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    EXPECT_EQ(combo.keys[1], 0x73);
+    EXPECT_EQ(combo.keys[2], 0x74);
+    ASSERT_EQ(combo.modifiers.size(), 1u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_InvalidModifierSkipped)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0xGG+0x11+0x72");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    ASSERT_EQ(combo.modifiers.size(), 1u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_WhitespaceAroundPlus)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "  0x11  +  0x10  +  0x72  ");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    ASSERT_EQ(combo.modifiers.size(), 2u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+    EXPECT_EQ(combo.modifiers[1], 0x10);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_DefaultValueApplied)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0x11+0x72");
+
+    // Before load(), the setter should have been called with the parsed default
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], 0x72);
+    ASSERT_EQ(combo.modifiers.size(), 1u);
+    EXPECT_EQ(combo.modifiers[0], 0x11);
+}
+
+TEST_F(ConfigTest, RegisterKeyCombo_LogAll)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "0x11+0x72");
+
+    Config::load(test_ini_file_.string());
+
+    EXPECT_NO_THROW(Config::log_all());
 }

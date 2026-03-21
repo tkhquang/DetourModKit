@@ -104,6 +104,77 @@ namespace
     }
 
     /**
+     * @brief Parses a key combo string into a KeyCombo struct.
+     * @details Format: "modifier1+modifier2+trigger1,trigger2" where all values
+     *          are hex VK codes. The last '+'-delimited segment contains trigger
+     *          key(s) (comma-separated for OR logic). All preceding segments are
+     *          individual modifier keys (AND logic).
+     * @param input The raw string to parse.
+     * @return Config::KeyCombo Parsed key combination.
+     */
+    Config::KeyCombo parse_key_combo(const std::string &input)
+    {
+        Config::KeyCombo result;
+
+        // Strip trailing comment from the full line
+        const size_t comment_pos = input.find(';');
+        const std::string effective = trim(
+            (comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
+        if (effective.empty())
+        {
+            return result;
+        }
+
+        // Split by '+' to get segments
+        std::vector<std::string> segments;
+        size_t pos = 0;
+        while (pos < effective.size())
+        {
+            const size_t plus = effective.find('+', pos);
+            const size_t end = (plus != std::string::npos) ? plus : effective.size();
+            const std::string segment = trim(effective.substr(pos, end - pos));
+            pos = end + 1;
+            if (!segment.empty())
+            {
+                segments.push_back(segment);
+            }
+        }
+
+        if (segments.empty())
+        {
+            return result;
+        }
+
+        // Last segment contains trigger key(s) (comma-separated for OR logic)
+        result.keys = parse_hex_key_list(segments.back());
+
+        // All preceding segments are individual modifier keys
+        for (size_t i = 0; i + 1 < segments.size(); ++i)
+        {
+            auto mod_keys = parse_hex_key_list(segments[i]);
+            result.modifiers.insert(result.modifiers.end(), mod_keys.begin(), mod_keys.end());
+        }
+
+        return result;
+    }
+
+    /**
+     * @brief Formats a KeyCombo back to its INI-style string representation.
+     * @param combo The key combination to format.
+     * @return std::string Formatted string (e.g., "0x11+0x10+0x72,0x73").
+     */
+    std::string format_key_combo(const Config::KeyCombo &combo)
+    {
+        std::string result;
+        for (const int mod : combo.modifiers)
+        {
+            result += DetourModKit::Format::format_vkcode(mod) + "+";
+        }
+        result += DetourModKit::Format::format_vkcode_list(combo.keys);
+        return result;
+    }
+
+    /**
      * @brief Base class for typed configuration items.
      * @details This allows storing different types of configuration items
      *          polymorphically in a collection.
@@ -231,14 +302,14 @@ namespace
         logger.info("Config: {} ({}.{}) = \"{}\"", log_key_name, section, ini_key, current_value);
     }
 
-    // For std::vector<int> (KeyList) with callback
+    // For Config::KeyCombo (key combination with modifiers)
     template <>
-    void CallbackConfigItem<std::vector<int>>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    void CallbackConfigItem<Config::KeyCombo>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
         if (ini_value_str != nullptr)
         {
-            current_value = parse_hex_key_list(ini_value_str);
+            current_value = parse_key_combo(ini_value_str);
         }
         else
         {
@@ -252,9 +323,9 @@ namespace
     }
 
     template <>
-    void CallbackConfigItem<std::vector<int>>::log_current_value(Logger &logger) const
+    void CallbackConfigItem<Config::KeyCombo>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, DetourModKit::Format::format_vkcode_list(current_value));
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_key_combo(current_value));
     }
 
     // --- Global storage for registered configuration items ---
@@ -340,15 +411,15 @@ void DetourModKit::Config::register_string(const std::string &section, const std
         std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, std::move(setter), std::move(default_value)));
 }
 
-void DetourModKit::Config::register_key_list(const std::string &section, const std::string &ini_key,
-                                                   const std::string &log_key_name, std::function<void(const std::vector<int> &)> setter,
-                                                   const std::string &default_value_str)
+void DetourModKit::Config::register_key_combo(const std::string &section, const std::string &ini_key,
+                                                      const std::string &log_key_name, std::function<void(const KeyCombo &)> setter,
+                                                      const std::string &default_value_str)
 {
     std::lock_guard<std::mutex> lock(getConfigMutex());
-    std::vector<int> default_keys_vector = parse_hex_key_list(default_value_str);
+    Config::KeyCombo default_combo = parse_key_combo(default_value_str);
 
     getRegisteredConfigItems().push_back(
-        std::make_unique<CallbackConfigItem<std::vector<int>>>(section, ini_key, log_key_name, std::move(setter), default_keys_vector));
+        std::make_unique<CallbackConfigItem<Config::KeyCombo>>(section, ini_key, log_key_name, std::move(setter), default_combo));
 }
 
 void DetourModKit::Config::load(const std::string &ini_filename)

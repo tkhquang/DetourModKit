@@ -9,7 +9,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 * **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code.
 * **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
-* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
+* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `0x11+0x10+0x72` for Ctrl+Shift+F3). (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
 * **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
 * **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16ms default timeout (one frame at 60fps) to prevent thread starvation, inline buffer optimization for messages of size <=256 bytes (inclusive), and message size validation with truncation for messages larger than 16MB (messages >16MB are truncated to 16MB rather than rejected).
 * **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
@@ -308,8 +308,8 @@ This method uses a pre-built and installed version of DetourModKit.
 struct ModConfiguration {
     bool enable_greeting_hook = true;
     std::string log_level_setting = "INFO";
-    std::vector<int> toggle_keys;
-    std::vector<int> hold_scroll_keys;
+    DMKKeyCombo toggle_combo;
+    DMKKeyCombo hold_scroll_combo;
 } g_mod_config;
 
 // Example Hook: Target function signature
@@ -354,11 +354,13 @@ void InitializeMyMod() {
     DMKConfig::register_string("Debug", "LogLevel", "Log Level",
         [](const std::string& v) { g_mod_config.log_level_setting = v; }, "INFO");
 
-    // Register hotkey bindings from INI (comma-separated hex VK codes)
-    DMKConfig::register_key_list("Hotkeys", "ToggleKey", "Toggle Keys",
-        [](const std::vector<int>& v) { g_mod_config.toggle_keys = v; }, "0x72");
-    DMKConfig::register_key_list("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
-        [](const std::vector<int>& v) { g_mod_config.hold_scroll_keys = v; }, "");
+    // Register hotkey bindings from INI (modifier+trigger format)
+    // No modifiers: "0x72" or "0x72,0x70" (comma = OR for multiple trigger keys)
+    // With modifiers: "0x11+0x10+0x72" (plus = AND for modifiers, last segment = triggers)
+    DMKConfig::register_key_combo("Hotkeys", "ToggleKey", "Toggle Keys",
+        [](const DMKKeyCombo& c) { g_mod_config.toggle_combo = c; }, "0x72");
+    DMKConfig::register_key_combo("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
+        [](const DMKKeyCombo& c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file
     DMKConfig::load("MyMod.ini");
@@ -436,22 +438,19 @@ void InitializeMyMod() {
     // Register hotkey bindings with the InputManager (after hooks are ready)
     DMKInputManager& input_mgr = DMKInputManager::get_instance();
 
-    if (!g_mod_config.toggle_keys.empty()) {
-        input_mgr.register_press("toggle_view", g_mod_config.toggle_keys, []() {
-            DMKLogger::get_instance().info("Toggle key pressed!");
-        });
+    if (!g_mod_config.toggle_combo.keys.empty()) {
+        input_mgr.register_press("toggle_view", g_mod_config.toggle_combo.keys,
+            g_mod_config.toggle_combo.modifiers, []() {
+                DMKLogger::get_instance().info("Toggle key pressed!");
+            });
     }
 
-    if (!g_mod_config.hold_scroll_keys.empty()) {
-        input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_keys, [](bool held) {
-            DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
-        });
+    if (!g_mod_config.hold_scroll_combo.keys.empty()) {
+        input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_combo.keys,
+            g_mod_config.hold_scroll_combo.modifiers, [](bool held) {
+                DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
+            });
     }
-
-    // Register with modifier keys (Ctrl+Shift+D triggers only when both modifiers held)
-    input_mgr.register_press("debug_menu", {0x44}, {VK_CONTROL, VK_SHIFT}, []() {
-        DMKLogger::get_instance().info("Debug menu toggled!");
-    });
 
     // Start the input polling thread (focus-aware by default)
     input_mgr.start();
@@ -492,8 +491,9 @@ EnableGreetingHook=true
 LogLevel=INFO
 
 [Hotkeys]
-ToggleKey=0x72,0x70    # F3, F1 (hex VK codes)
+ToggleKey=0x72,0x70    # F3, F1 (hex VK codes, comma = OR)
 HoldScrollKey=0xA0     # Left Shift
+DebugCombo=0x11+0x10+0x44  # Ctrl+Shift+D (plus = AND for modifiers, last = trigger)
 ```
 
 ## Projects Using DetourModKit

@@ -25,6 +25,26 @@ namespace DetourModKit
     namespace Config
     {
 
+        /**
+         * @struct KeyCombo
+         * @brief Represents a key combination parsed from an INI value.
+         * @details Contains trigger keys (OR logic) and modifier keys (AND logic).
+         *          Designed for direct use with InputManager::register_press/register_hold.
+         *
+         *          INI format: modifier hex codes separated by '+', with the last
+         *          '+'-delimited segment containing trigger key(s) (comma-separated for
+         *          multiple triggers). Examples:
+         *            - "0x72"              → keys=[F3], modifiers=[]
+         *            - "0x11+0x72"         → keys=[F3], modifiers=[Ctrl]
+         *            - "0x11+0x10+0x72"    → keys=[F3], modifiers=[Ctrl, Shift]
+         *            - "0x11+0x72,0x73"    → keys=[F3, F4], modifiers=[Ctrl]
+         */
+        struct KeyCombo
+        {
+            std::vector<int> keys;
+            std::vector<int> modifiers;
+        };
+
         /// Registers an integer configuration item.
         void register_int(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                          std::function<void(int)> setter, int default_value);
@@ -41,9 +61,21 @@ namespace DetourModKit
         void register_string(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
                             std::function<void(const std::string &)> setter, std::string default_value);
 
-        /// Registers a key list configuration item (comma-separated hex VK codes).
-        void register_key_list(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                             std::function<void(const std::vector<int> &)> setter, const std::string &default_value_str);
+        /**
+         * @brief Registers a key combo configuration item.
+         * @details Parses an INI value as a key combination with optional modifier keys.
+         *          Format: "modifier1+modifier2+trigger_key1,trigger_key2" where all
+         *          values are hex VK codes. The '+' separator delimits modifier keys from
+         *          trigger keys, with the last segment being trigger key(s). Commas within
+         *          the last segment provide OR logic for multiple trigger keys.
+         * @param section INI section name.
+         * @param ini_key INI key name.
+         * @param log_key_name Human-readable name shown in log output.
+         * @param setter Callback invoked with the parsed KeyCombo.
+         * @param default_value_str Default value string in the same format.
+         */
+        void register_key_combo(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+                               std::function<void(const KeyCombo &)> setter, const std::string &default_value_str);
 
         /**
          * @brief Loads all registered configuration settings from the specified INI file.

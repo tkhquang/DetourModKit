@@ -52,6 +52,7 @@ using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
 using DMKInputManager = DetourModKit::InputManager;
 using DMKInputPoller = DetourModKit::InputPoller;
 using DMKInputMode = DetourModKit::InputMode;
+using DMKKeyCombo = DetourModKit::Config::KeyCombo;
 using DMKInputBinding = DetourModKit::InputBinding;
 
 /**
