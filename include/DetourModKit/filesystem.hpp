@@ -24,7 +24,8 @@ namespace DetourModKit
          *          making subsequent calls zero-cost. Falls back to the current working directory
          *          if module path detection fails for any reason. Logs details of its operation
          *          and any fallbacks using the Logger.
-         * @return std::string The absolute directory path of the current module (UTF-8). If
+         * @return std::string The absolute directory path of the current module, encoded in the
+         *         system's active code page (ACP). If
          *         detection fails, it returns the current working directory. In case of further
          *         failure, it might return ".", representing the current directory in a relative
          *         sense.
