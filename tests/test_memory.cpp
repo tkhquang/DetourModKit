@@ -841,10 +841,10 @@ TEST_F(MemoryTest, BackgroundCleanupThreadRuns)
     char buffer[100] = {0};
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
-    // Wait long enough for background cleanup to process expired entries (10ms expiry + interval)
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    // Background cleanup thread runs every 1 second; sleep long enough for at least one pass
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
-    // Cache should still work after background cleanup
+    // Cache should still work after background cleanup has run
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
     std::string stats = Memory::get_cache_stats();
@@ -917,18 +917,23 @@ TEST_F(MemoryTest, ExpiredEntryTriggersReFetch)
     char buffer[100] = {0};
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
+    // Capture miss count after warm-up
+    std::string stats_before = Memory::get_cache_stats();
+    auto pos_before = stats_before.find("Misses: ");
+    ASSERT_NE(pos_before, std::string::npos);
+    const uint64_t prev_misses = std::stoull(stats_before.substr(pos_before + 8));
+
     // Wait for cache entry to expire (10ms expiry)
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
-    // Re-query should succeed (re-fetch from OS) and register as a miss
+    // Re-query should succeed (re-fetch from OS) and register as a new miss
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
-    std::string stats = Memory::get_cache_stats();
-    // At least 1 miss from the expired-entry re-fetch
-    auto pos = stats.find("Misses: ");
-    ASSERT_NE(pos, std::string::npos);
-    uint64_t misses = std::stoull(stats.substr(pos + 8));
-    EXPECT_GE(misses, 1u);
+    std::string stats_after = Memory::get_cache_stats();
+    auto pos_after = stats_after.find("Misses: ");
+    ASSERT_NE(pos_after, std::string::npos);
+    const uint64_t misses = std::stoull(stats_after.substr(pos_after + 8));
+    EXPECT_GE(misses, prev_misses + 1u);
 }
 
 TEST_F(MemoryTest, CacheHitPerformance_SingleThread)
@@ -962,7 +967,7 @@ TEST_F(MemoryTest, CacheStatsIncludeHardMax)
     EXPECT_NE(stats.find("HardMax/Shard:"), std::string::npos);
 }
 
-TEST_F(MemoryTest, ShutdownAfterConcurrentWorkload)
+TEST_F(MemoryTest, ShutdownWhileReadersActive)
 {
     Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 4);
@@ -970,8 +975,11 @@ TEST_F(MemoryTest, ShutdownAfterConcurrentWorkload)
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
+    // Warm up cache so readers hit the fast path
+    EXPECT_TRUE(Memory::is_readable(mem, 64));
+
     std::atomic<bool> keep_reading{true};
-    std::atomic<int> reads_completed{0};
+    std::atomic<int> readers_entered{0};
 
     const int num_threads = 4;
     std::vector<std::thread> readers;
@@ -979,18 +987,30 @@ TEST_F(MemoryTest, ShutdownAfterConcurrentWorkload)
     {
         readers.emplace_back([&]()
                              {
+            readers_entered.fetch_add(1, std::memory_order_release);
             while (keep_reading.load(std::memory_order_acquire))
             {
                 Memory::is_readable(mem, 64);
-                reads_completed.fetch_add(1, std::memory_order_relaxed);
             } });
     }
 
-    while (reads_completed.load(std::memory_order_relaxed) < 1000)
+    // Wait until all readers are actively reading
+    while (readers_entered.load(std::memory_order_acquire) < num_threads)
     {
         std::this_thread::yield();
     }
 
+    // Shutdown on a separate thread while readers are still active.
+    // shutdown_cache waits for s_activeReaders == 0 before destroying data.
+    // Readers that re-enter is_readable after shutdown will call init_cache,
+    // which blocks on s_cacheStateMutex until shutdown completes.
+    std::thread shutdown_thread([&]()
+                                { Memory::shutdown_cache(); });
+
+    // Let shutdown and readers race briefly
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    // Signal readers to stop, then join them
     keep_reading.store(false, std::memory_order_release);
 
     for (auto &t : readers)
@@ -998,10 +1018,9 @@ TEST_F(MemoryTest, ShutdownAfterConcurrentWorkload)
         t.join();
     }
 
-    // Shutdown after heavy concurrent usage must complete cleanly
-    Memory::shutdown_cache();
+    shutdown_thread.join();
 
-    // Re-init and verify cache still works after teardown
+    // Re-init and verify cache still works after concurrent shutdown
     EXPECT_TRUE(Memory::init_cache());
     EXPECT_TRUE(Memory::is_readable(mem, 64));
 

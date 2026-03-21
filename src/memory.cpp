@@ -842,6 +842,17 @@ void DetourModKit::Memory::shutdown_cache()
     MemoryUtilsCacheInternal::s_shardMutexes.clear();
     MemoryUtilsCacheInternal::s_inFlight.reset();
 
+    // Reset all stats and config so a subsequent init_cache starts from a clean state
+    MemoryUtilsCacheInternal::s_stats.cacheHits.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.cacheMisses.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.invalidations.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_lastCleanupTimeNs.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_configuredExpiryMs.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_activeReaders.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_cleanupRequested.store(false, std::memory_order_relaxed);
+
     Logger::get_instance().debug("MemoryCache: Shutdown complete.");
 }
 
@@ -866,8 +877,13 @@ std::string DetourModKit::Memory::get_cache_stats()
     const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
     for (size_t i = 0; i < active_shard_count; ++i)
     {
-        total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
-        total_hard_max += MemoryUtilsCacheInternal::s_cacheShards[i].max_capacity;
+        auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
+        if (mutex_ptr)
+        {
+            std::shared_lock<std::shared_mutex> shard_lock(*mutex_ptr);
+            total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
+            total_hard_max += MemoryUtilsCacheInternal::s_cacheShards[i].max_capacity;
+        }
     }
     MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
 
@@ -914,9 +930,12 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
     MemoryUtilsCacheInternal::invalidate_range_internal(addr_val, size);
 
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
-
+    // request_cleanup may trigger on-demand cleanup_expired_entries(force=false)
+    // which iterates shards without s_cacheStateMutex. Keep s_activeReaders > 0
+    // so shutdown_cache cannot destroy shards during the cleanup pass.
     MemoryUtilsCacheInternal::request_cleanup();
+
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
 }
 
 bool DetourModKit::Memory::is_readable(const void *address, size_t size)
