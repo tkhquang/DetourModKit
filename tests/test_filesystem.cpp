@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <chrono>
 #include <filesystem>
 #include <thread>
 #include <vector>
@@ -73,4 +74,29 @@ TEST(FilesystemTest, GetRuntimeDirectory_NoTrailingSeparator)
     char last = dir.back();
     EXPECT_NE(last, '/');
     EXPECT_NE(last, '\\');
+}
+
+TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
+{
+    // Verify that repeated calls return identical values, consistent with
+    // the internal caching of the resolved module directory.
+    const auto dir1 = Filesystem::get_runtime_directory();
+    const auto dir2 = Filesystem::get_runtime_directory();
+
+    EXPECT_EQ(dir1, dir2);
+
+    // Verify caching makes repeated calls effectively free by timing a burst.
+    const int iterations = 10000;
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < iterations; ++i)
+    {
+        auto dir = Filesystem::get_runtime_directory();
+        (void)dir;
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+
+    // 10000 cached calls should complete well under 1 second.
+    EXPECT_LT(elapsed_ms, 1000)
+        << "Cached get_runtime_directory should be near-zero cost per call";
 }
