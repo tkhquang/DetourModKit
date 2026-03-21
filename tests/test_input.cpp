@@ -21,6 +21,14 @@ TEST(InputModeTest, HoldToString)
     EXPECT_EQ(input_mode_to_string(InputMode::Hold), "Hold");
 }
 
+// --- InputBinding ---
+
+TEST(InputBindingTest, DefaultModeIsPress)
+{
+    InputBinding binding;
+    EXPECT_EQ(binding.mode, InputMode::Press);
+}
+
 // --- InputPoller ---
 
 class InputPollerTest : public ::testing::Test

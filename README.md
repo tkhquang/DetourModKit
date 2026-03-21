@@ -458,7 +458,7 @@ void InitializeMyMod() {
     logger.info("MyMod Initialized using DetourModKit!");
 }
 
-// Mod Shutdown Function (optional)
+// Mod Shutdown Function
 void ShutdownMyMod() {
     DMKLogger::get_instance().info("MyMod Shutting Down...");
 
@@ -467,13 +467,20 @@ void ShutdownMyMod() {
     DMK_Shutdown();
 }
 
-// DLL Main or equivalent entry point
+// WARNING: Calling join() on a thread inside DllMain can deadlock due to the
+// loader lock. Offload initialization to a worker thread so start() runs
+// outside DllMain, and call DMK_Shutdown() before DLL_PROCESS_DETACH
+// (e.g., from a game shutdown hook or an explicit trigger).
+
+static DWORD WINAPI InitThread(LPVOID) {
+    InitializeMyMod();
+    return 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        InitializeMyMod();
-    } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
-        ShutdownMyMod();
+        CloseHandle(CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr));
     }
     return TRUE;
 }
@@ -491,9 +498,9 @@ EnableGreetingHook=true
 LogLevel=INFO
 
 [Hotkeys]
-ToggleKey=0x72,0x70    # F3, F1 (hex VK codes, comma = OR)
-HoldScrollKey=0xA0     # Left Shift
-DebugCombo=0x11+0x10+0x44  # Ctrl+Shift+D (plus = AND for modifiers, last = trigger)
+ToggleKey=0x72,0x70    ; F3, F1 (hex VK codes, comma = OR)
+HoldScrollKey=0xA0     ; Left Shift
+DebugCombo=0x11+0x10+0x44  ; Ctrl+Shift+D (plus = AND for modifiers, last = trigger)
 ```
 
 ## Projects Using DetourModKit

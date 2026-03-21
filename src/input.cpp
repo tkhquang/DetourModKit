@@ -96,7 +96,15 @@ namespace DetourModKit
 
         poll_thread_.request_stop();
         cv_.notify_all();
-        poll_thread_.join();
+
+        if (std::this_thread::get_id() != poll_thread_.get_id())
+        {
+            poll_thread_.join();
+        }
+        else
+        {
+            poll_thread_.detach();
+        }
 
         release_active_holds();
     }
@@ -384,14 +392,17 @@ namespace DetourModKit
 
     void InputManager::shutdown() noexcept
     {
-        std::lock_guard lock(mutex_);
+        std::unique_ptr<InputPoller> local_poller;
 
-        if (poller_)
         {
-            poller_->shutdown();
-            poller_.reset();
+            std::lock_guard lock(mutex_);
+            local_poller = std::move(poller_);
+            pending_bindings_.clear();
         }
 
-        pending_bindings_.clear();
+        if (local_poller)
+        {
+            local_poller->shutdown();
+        }
     }
 } // namespace DetourModKit

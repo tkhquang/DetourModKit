@@ -68,7 +68,7 @@ namespace DetourModKit
         std::string name;
         std::vector<int> keys;
         std::vector<int> modifiers;
-        InputMode mode;
+        InputMode mode = InputMode::Press;
         std::function<void()> on_press;
         std::function<void(bool)> on_state_change;
     };
