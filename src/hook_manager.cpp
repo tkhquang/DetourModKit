@@ -113,12 +113,6 @@ bool HookManager::hook_id_exists_locked(const std::string &hook_id) const
     return m_hooks.find(hook_id) != m_hooks.end();
 }
 
-Hook *HookManager::get_hook_raw_ptr_locked(const std::string &hook_id)
-{
-    auto it = m_hooks.find(hook_id);
-    return (it != m_hooks.end()) ? it->second.get() : nullptr;
-}
-
 std::expected<std::string, HookError> HookManager::create_inline_hook(
     const std::string &name,
     uintptr_t target_address,
@@ -411,71 +405,71 @@ void HookManager::remove_all_hooks()
 
 bool HookManager::enable_hook(const std::string &hook_id)
 {
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
-    if (it != m_hooks.end())
+    if (it == m_hooks.end())
     {
-        Hook *hook = it->second.get();
-        if (hook->get_status() == HookStatus::Disabled)
-        {
-            if (hook->enable())
-            {
-                m_logger.info("HookManager: Hook '{}' successfully enabled.", hook_id);
-                return true;
-            }
-            else
-            {
-                m_logger.error("HookManager: Failed to enable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
-                return false;
-            }
-        }
-        else if (hook->get_status() == HookStatus::Active)
-        {
-            m_logger.debug("HookManager: Hook '{}' is already active. Enable request ignored.", hook_id);
-            return true;
-        }
-        else
-        {
-            m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
-            return false;
-        }
+        m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
+        return false;
     }
-    m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
+
+    Hook *hook = it->second.get();
+    if (hook->enable())
+    {
+        m_logger.info("HookManager: Hook '{}' successfully enabled.", hook_id);
+        return true;
+    }
+
+    const auto status = hook->get_status();
+    if (status == HookStatus::Active)
+    {
+        m_logger.debug("HookManager: Hook '{}' is already active. Enable request ignored.", hook_id);
+        return true;
+    }
+
+    if (status == HookStatus::Disabled)
+    {
+        m_logger.error("HookManager: Failed to enable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
+    }
+    else
+    {
+        m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(status));
+    }
     return false;
 }
 
 bool HookManager::disable_hook(const std::string &hook_id)
 {
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
-    if (it != m_hooks.end())
+    if (it == m_hooks.end())
     {
-        Hook *hook = it->second.get();
-        if (hook->get_status() == HookStatus::Active)
-        {
-            if (hook->disable())
-            {
-                m_logger.info("HookManager: Hook '{}' successfully disabled.", hook_id);
-                return true;
-            }
-            else
-            {
-                m_logger.error("HookManager: Failed to disable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
-                return false;
-            }
-        }
-        else if (hook->get_status() == HookStatus::Disabled)
-        {
-            m_logger.debug("HookManager: Hook '{}' is already disabled. Disable request ignored.", hook_id);
-            return true;
-        }
-        else
-        {
-            m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
-            return false;
-        }
+        m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
+        return false;
     }
-    m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
+
+    Hook *hook = it->second.get();
+    if (hook->disable())
+    {
+        m_logger.info("HookManager: Hook '{}' successfully disabled.", hook_id);
+        return true;
+    }
+
+    const auto status = hook->get_status();
+    if (status == HookStatus::Disabled)
+    {
+        m_logger.debug("HookManager: Hook '{}' is already disabled. Disable request ignored.", hook_id);
+        return true;
+    }
+
+    if (status == HookStatus::Active)
+    {
+        m_logger.error("HookManager: Failed to disable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
+    }
+    else
+    {
+        m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(status));
+    }
     return false;
 }
 

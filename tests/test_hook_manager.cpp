@@ -2,6 +2,7 @@
 #include <functional>
 #include <thread>
 #include <chrono>
+#include <latch>
 #include <windows.h>
 
 #include "DetourModKit/hook_manager.hpp"
@@ -41,12 +42,16 @@ TEST_F(HookManagerTest, HookStatus)
 {
     HookStatus status1 = HookStatus::Active;
     HookStatus status2 = HookStatus::Disabled;
-    HookStatus status3 = HookStatus::Failed;
-    HookStatus status4 = HookStatus::Removed;
+    HookStatus status3 = HookStatus::Enabling;
+    HookStatus status4 = HookStatus::Disabling;
+    HookStatus status5 = HookStatus::Failed;
+    HookStatus status6 = HookStatus::Removed;
 
     EXPECT_NE(status1, status2);
     EXPECT_NE(status2, status3);
     EXPECT_NE(status3, status4);
+    EXPECT_NE(status4, status5);
+    EXPECT_NE(status5, status6);
 }
 
 TEST_F(HookManagerTest, HookType)
@@ -789,6 +794,8 @@ TEST_F(HookManagerTest, StatusToString_AllValues)
 {
     EXPECT_EQ(Hook::status_to_string(HookStatus::Active), "Active");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Disabled), "Disabled");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Enabling), "Enabling");
+    EXPECT_EQ(Hook::status_to_string(HookStatus::Disabling), "Disabling");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Failed), "Failed");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Removed), "Removed");
     EXPECT_EQ(Hook::status_to_string(static_cast<HookStatus>(999)), "Unknown");
@@ -883,7 +890,7 @@ TEST_F(HookManagerTest, CreateInlineHookAOB_Success)
     if (result.has_value())
     {
         EXPECT_NE(tramp, nullptr);
-        hook_manager_->remove_hook("AOBSuccessHook");
+        EXPECT_TRUE(hook_manager_->remove_hook("AOBSuccessHook"));
     }
 }
 
@@ -911,7 +918,7 @@ TEST_F(HookManagerTest, CreateMidHookAOB_Success)
 
     if (result.has_value())
     {
-        hook_manager_->remove_hook("MidAOBSuccess");
+        EXPECT_TRUE(hook_manager_->remove_hook("MidAOBSuccess"));
     }
 }
 
@@ -933,7 +940,7 @@ TEST_F(HookManagerTest, WithInlineHook_SuccessCallback)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithInlineCB");
 
-    hook_manager_->remove_hook("WithInlineCB");
+    EXPECT_TRUE(hook_manager_->remove_hook("WithInlineCB"));
 }
 
 TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
@@ -954,7 +961,7 @@ TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithMidCB");
 
-    hook_manager_->remove_hook("WithMidCB");
+    EXPECT_TRUE(hook_manager_->remove_hook("WithMidCB"));
 }
 
 TEST_F(HookManagerTest, TryWithInlineHook_Success)
@@ -976,7 +983,7 @@ TEST_F(HookManagerTest, TryWithInlineHook_Success)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "TryInlineCB");
 
-    hook_manager_->remove_hook("TryInlineCB");
+    EXPECT_TRUE(hook_manager_->remove_hook("TryInlineCB"));
 }
 
 TEST_F(HookManagerTest, TryWithInlineHook_NotFound)
@@ -1007,7 +1014,7 @@ TEST_F(HookManagerTest, TryWithMidHook_Success)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "TryMidCB");
 
-    hook_manager_->remove_hook("TryMidCB");
+    EXPECT_TRUE(hook_manager_->remove_hook("TryMidCB"));
 }
 
 TEST_F(HookManagerTest, TryWithMidHook_NotFound)
@@ -1042,7 +1049,131 @@ TEST_F(HookManagerTest, RealMidHook_CreateDisabledAutoEnable)
     EXPECT_TRUE(hook_manager_->disable_hook("MidDisabledAE"));
     EXPECT_EQ(*hook_manager_->get_hook_status("MidDisabledAE"), HookStatus::Disabled);
 
-    hook_manager_->remove_hook("MidDisabledAE");
+    EXPECT_TRUE(hook_manager_->remove_hook("MidDisabledAE"));
+}
+
+TEST_F(HookManagerTest, ConcurrentEnableDisable)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "ConcurrentHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    constexpr int num_threads = 4;
+    constexpr int iterations = 50;
+    std::vector<std::thread> threads;
+    std::latch start_latch(num_threads);
+    std::atomic<bool> saw_active{false};
+    std::atomic<bool> saw_disabled{false};
+
+    for (int i = 0; i < num_threads; ++i)
+    {
+        threads.emplace_back([this, i, &start_latch, &saw_active, &saw_disabled]()
+                             {
+            start_latch.arrive_and_wait();
+            for (int j = 0; j < iterations; ++j)
+            {
+                if (j % 2 == (i % 2))
+                {
+                    (void)hook_manager_->enable_hook("ConcurrentHook");
+                }
+                else
+                {
+                    (void)hook_manager_->disable_hook("ConcurrentHook");
+                }
+                auto s = hook_manager_->get_hook_status("ConcurrentHook");
+                if (s.has_value())
+                {
+                    if (*s == HookStatus::Active)
+                        saw_active.store(true, std::memory_order_relaxed);
+                    else if (*s == HookStatus::Disabled)
+                        saw_disabled.store(true, std::memory_order_relaxed);
+                }
+            } });
+    }
+
+    for (auto &t : threads)
+    {
+        t.join();
+    }
+
+    EXPECT_TRUE(saw_active.load()) << "Expected Active to be observed during concurrent toggling";
+    EXPECT_TRUE(saw_disabled.load()) << "Expected Disabled to be observed during concurrent toggling";
+
+    EXPECT_TRUE(hook_manager_->disable_hook("ConcurrentHook"));
+    EXPECT_EQ(*hook_manager_->get_hook_status("ConcurrentHook"), HookStatus::Disabled);
+    int disabled_result = real_hook_target_add(2, 3);
+    EXPECT_EQ(disabled_result, 5);
+
+    EXPECT_TRUE(hook_manager_->enable_hook("ConcurrentHook"));
+    EXPECT_EQ(*hook_manager_->get_hook_status("ConcurrentHook"), HookStatus::Active);
+    int enabled_result = real_hook_target_add(2, 3);
+    EXPECT_NE(enabled_result, 5);
+}
+
+TEST_F(HookManagerTest, WithInlineHook_DirectEnableDisable)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "DirectEnDisHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    auto cb_result = hook_manager_->with_inline_hook(
+        "DirectEnDisHook",
+        [](InlineHook &hook) -> bool
+        {
+            EXPECT_EQ(hook.get_status(), HookStatus::Active);
+
+            EXPECT_TRUE(hook.disable());
+            EXPECT_EQ(hook.get_status(), HookStatus::Disabled);
+
+            EXPECT_TRUE(hook.enable());
+            EXPECT_EQ(hook.get_status(), HookStatus::Active);
+
+            EXPECT_TRUE(hook.enable());
+
+            return true;
+        });
+
+    ASSERT_TRUE(cb_result.has_value());
+    EXPECT_TRUE(*cb_result);
+}
+
+TEST_F(HookManagerTest, WithMidHook_DirectEnableDisable)
+{
+    auto detour_fn = [](safetyhook::Context &) {};
+
+    auto result = hook_manager_->create_mid_hook(
+        "DirectMidEnDisHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(result.has_value());
+
+    auto cb_result = hook_manager_->with_mid_hook(
+        "DirectMidEnDisHook",
+        [](MidHook &hook) -> bool
+        {
+            EXPECT_EQ(hook.get_status(), HookStatus::Active);
+
+            EXPECT_TRUE(hook.disable());
+            EXPECT_EQ(hook.get_status(), HookStatus::Disabled);
+
+            EXPECT_TRUE(hook.enable());
+            EXPECT_EQ(hook.get_status(), HookStatus::Active);
+
+            EXPECT_TRUE(hook.disable());
+
+            return true;
+        });
+
+    ASSERT_TRUE(cb_result.has_value());
+    EXPECT_TRUE(*cb_result);
 }
 
 TEST_F(HookManagerTest, RemoveAllHooks_WithRealHooks)
@@ -1092,5 +1223,160 @@ TEST_F(HookManagerTest, RealInlineHook_DisabledEnableDisableCycle)
     EXPECT_TRUE(hook_manager_->disable_hook("InlineDisabled"));
     EXPECT_EQ(*hook_manager_->get_hook_status("InlineDisabled"), HookStatus::Disabled);
 
-    hook_manager_->remove_hook("InlineDisabled");
+    [[maybe_unused]] bool removed = hook_manager_->remove_hook("InlineDisabled");
+    EXPECT_TRUE(removed);
+}
+
+TEST_F(HookManagerTest, WithInlineHook_CallbackExecutesSuccessfully)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "CallbackExecHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    bool callback_executed = false;
+    auto hook_result = hook_manager_->with_inline_hook(
+        "CallbackExecHook",
+        [&callback_executed]([[maybe_unused]] InlineHook &hook) -> bool
+        {
+            callback_executed = true;
+            return true;
+        });
+
+    EXPECT_TRUE(hook_result.has_value());
+    EXPECT_TRUE(callback_executed);
+    EXPECT_TRUE(*hook_result);
+}
+
+TEST_F(HookManagerTest, WithMidHook_CallbackExecutesSuccessfully)
+{
+    auto detour_fn = [](safetyhook::Context &) {};
+    auto result = hook_manager_->create_mid_hook(
+        "MidCallbackExecHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(result.has_value());
+
+    bool callback_executed = false;
+    auto hook_result = hook_manager_->with_mid_hook(
+        "MidCallbackExecHook",
+        [&callback_executed]([[maybe_unused]] MidHook &hook) -> bool
+        {
+            callback_executed = true;
+            return true;
+        });
+
+    EXPECT_TRUE(hook_result.has_value());
+    EXPECT_TRUE(callback_executed);
+    EXPECT_TRUE(*hook_result);
+}
+
+TEST_F(HookManagerTest, TryWithInlineHook_CallbackExecutesSuccessfully)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "TryCallbackExecHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    bool callback_executed = false;
+    auto hook_result = hook_manager_->try_with_inline_hook(
+        "TryCallbackExecHook",
+        [&callback_executed]([[maybe_unused]] InlineHook &hook) -> bool
+        {
+            callback_executed = true;
+            return true;
+        });
+
+    EXPECT_TRUE(hook_result.has_value());
+    EXPECT_TRUE(callback_executed);
+    EXPECT_TRUE(*hook_result);
+}
+
+TEST_F(HookManagerTest, TryWithMidHook_CallbackExecutesSuccessfully)
+{
+    auto detour_fn = [](safetyhook::Context &) {};
+    auto result = hook_manager_->create_mid_hook(
+        "TryMidCallbackExecHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(result.has_value());
+
+    bool callback_executed = false;
+    auto hook_result = hook_manager_->try_with_mid_hook(
+        "TryMidCallbackExecHook",
+        [&callback_executed]([[maybe_unused]] MidHook &hook) -> bool
+        {
+            callback_executed = true;
+            return true;
+        });
+
+    EXPECT_TRUE(hook_result.has_value());
+    EXPECT_TRUE(callback_executed);
+    EXPECT_TRUE(*hook_result);
+}
+
+TEST_F(HookManagerTest, WithInlineHook_ReturnsNulloptForNonExistentHook)
+{
+    bool callback_executed = false;
+    auto hook_result = hook_manager_->with_inline_hook(
+        "NonExistentHook",
+        [&callback_executed]([[maybe_unused]] InlineHook &hook) -> bool
+        {
+            callback_executed = true;
+            return true;
+        });
+
+    EXPECT_FALSE(hook_result.has_value());
+    EXPECT_FALSE(callback_executed);
+}
+
+TEST_F(HookManagerTest, InlineHook_GetOriginal_Noexcept)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "NoexceptHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    auto hook_result = hook_manager_->with_inline_hook(
+        "NoexceptHook",
+        [](InlineHook &hook) -> bool
+        {
+            static_assert(noexcept(hook.get_original<int (*)(int, int)>()));
+            auto orig = hook.get_original<int (*)(int, int)>();
+            return orig != nullptr;
+        });
+
+    EXPECT_TRUE(hook_result.has_value());
+    EXPECT_TRUE(*hook_result);
+}
+
+TEST_F(HookManagerTest, MidHook_GetDestination_Noexcept)
+{
+    auto detour_fn = [](safetyhook::Context &) {};
+    auto result = hook_manager_->create_mid_hook(
+        "NoexceptMidHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(result.has_value());
+
+    auto hook_result = hook_manager_->with_mid_hook(
+        "NoexceptMidHook",
+        [](MidHook &hook) -> bool
+        {
+            static_assert(noexcept(hook.get_destination()));
+            auto dest = hook.get_destination();
+            return dest != nullptr;
+        });
+
+    EXPECT_TRUE(hook_result.has_value());
+    EXPECT_TRUE(*hook_result);
 }
