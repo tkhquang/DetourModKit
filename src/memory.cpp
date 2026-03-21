@@ -449,17 +449,21 @@ namespace MemoryUtilsCacheInternal
      */
     void cleanup_expired_entries(bool force) noexcept
     {
-        if (s_cacheShards.empty())
-            return;
-
-        // Background cleanup thread passes force=true and must hold state mutex
-        // to prevent racing with shutdown_cache() which clears vectors.
-        // On-demand cleanup passes force=false and is protected by cache initialization.
-        std::unique_lock<std::mutex> lock;
+        // Always hold state mutex to prevent racing with shutdown_cache()
+        // which clears the shard vectors. try_lock for on-demand to avoid
+        // blocking the hot path; forced cleanup blocks to guarantee progress.
+        std::unique_lock<std::mutex> lock(s_cacheStateMutex, std::defer_lock);
         if (force)
         {
-            lock = std::unique_lock<std::mutex>(s_cacheStateMutex);
+            lock.lock();
         }
+        else if (!lock.try_lock())
+        {
+            return; // Shutdown or forced cleanup in progress, skip
+        }
+
+        if (s_cacheShards.empty())
+            return;
 
         const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
         if (shard_count == 0)
@@ -470,8 +474,8 @@ namespace MemoryUtilsCacheInternal
 
         for (size_t i = 0; i < shard_count; ++i)
         {
-            std::unique_lock<SrwSharedMutex> lock(*s_shardMutexes[i], std::try_to_lock);
-            if (lock.owns_lock())
+            std::unique_lock<SrwSharedMutex> shard_lock(*s_shardMutexes[i], std::try_to_lock);
+            if (shard_lock.owns_lock())
             {
                 cleanup_expired_entries_in_shard(s_cacheShards[i], current_ts, expiry_ns);
                 // Also trim to hard upper bound

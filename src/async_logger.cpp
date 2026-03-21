@@ -11,17 +11,20 @@ namespace DetourModKit
 {
     StringPool::StringPool()
     {
-        grow_pool();
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+        grow_pool_locked();
     }
 
     StringPool::~StringPool() noexcept
     {
+        // Acquire the mutex to synchronize with any in-flight deallocate() calls
+        std::lock_guard<std::mutex> lock(pool_mutex_);
+
         Block *current = head_.load(std::memory_order_relaxed);
         while (current)
         {
             Block *next = current->next;
 
-            // Destroy any PoolSlot objects that were constructed via placement-new
             PoolSlot *slots = reinterpret_cast<PoolSlot *>(current->data);
             for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
             {
@@ -34,12 +37,11 @@ namespace DetourModKit
             ::operator delete(current);
             current = next;
         }
+        head_.store(nullptr, std::memory_order_relaxed);
     }
 
-    void StringPool::grow_pool()
+    void StringPool::grow_pool_locked()
     {
-        std::lock_guard<std::mutex> lock(pool_mutex_);
-
         Block *existing = head_.load(std::memory_order_relaxed);
         size_t count = 0;
         for (Block *b = existing; b; b = b->next)
@@ -98,21 +100,17 @@ namespace DetourModKit
     {
         if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
         {
-            return new std::string();
+            auto *ptr = new (std::nothrow) std::string();
+            return ptr;
         }
 
-        PoolSlot *slot = nullptr;
+        std::lock_guard<std::mutex> lock(pool_mutex_);
 
-        {
-            std::lock_guard<std::mutex> lock(pool_mutex_);
-            slot = claim_free_slot();
-        }
-
+        PoolSlot *slot = claim_free_slot();
         if (!slot)
         {
-            grow_pool();
-
-            std::lock_guard<std::mutex> lock(pool_mutex_);
+            // Grow while holding the lock to prevent TOCTOU on block count
+            grow_pool_locked();
             slot = claim_free_slot();
         }
 
@@ -122,39 +120,41 @@ namespace DetourModKit
             return &slot->str;
         }
 
-        return new std::string();
+        // Pool exhausted — fall back to heap (nothrow to support noexcept callers)
+        auto *ptr = new (std::nothrow) std::string();
+        return ptr;
     }
 
     void StringPool::deallocate(std::string *ptr) noexcept
     {
         if (!ptr)
-        {
             return;
-        }
 
-        std::unique_lock<std::mutex> lock(pool_mutex_);
-
-        Block *block = head_.load(std::memory_order_acquire);
-        for (Block *b = block; b; b = b->next)
         {
-            const auto *block_begin = reinterpret_cast<const char *>(b->data);
-            const auto *block_end = block_begin + POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot);
-            const auto *raw_ptr = reinterpret_cast<const char *>(ptr);
+            std::lock_guard<std::mutex> lock(pool_mutex_);
 
-            if (raw_ptr >= block_begin && raw_ptr < block_end)
+            Block *block = head_.load(std::memory_order_relaxed);
+            for (Block *b = block; b; b = b->next)
             {
-                auto offset = static_cast<size_t>(raw_ptr - block_begin);
-                PoolSlot *slot = reinterpret_cast<PoolSlot *>(b->data) + (offset / sizeof(PoolSlot));
-                slot->str.clear();
-                slot->str.shrink_to_fit();
-                slot->next_free = b->free_list;
-                b->free_list = slot;
-                ++b->slot_count;
-                return;
+                const auto *block_begin = reinterpret_cast<const char *>(b->data);
+                const auto *block_end = block_begin + POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot);
+                const auto *raw_ptr = reinterpret_cast<const char *>(ptr);
+
+                if (raw_ptr >= block_begin && raw_ptr < block_end)
+                {
+                    auto offset = static_cast<size_t>(raw_ptr - block_begin);
+                    PoolSlot *slot = reinterpret_cast<PoolSlot *>(b->data) + (offset / sizeof(PoolSlot));
+                    slot->str.clear();
+                    slot->str.shrink_to_fit();
+                    slot->next_free = b->free_list;
+                    b->free_list = slot;
+                    ++b->slot_count;
+                    return;
+                }
             }
         }
 
-        lock.unlock();
+        // Not from the pool — heap-allocated fallback
         delete ptr;
     }
 
@@ -180,11 +180,21 @@ namespace DetourModKit
             overflow = StringPool::instance().allocate(msg_size);
             if (overflow)
             {
-                overflow->assign(std::move(msg));
-                length = overflow->size();
+                try
+                {
+                    overflow->assign(std::move(msg));
+                    length = overflow->size();
+                }
+                catch (...)
+                {
+                    StringPool::instance().deallocate(overflow);
+                    overflow = nullptr;
+                    length = 0;
+                }
             }
             else
             {
+                // Allocation failed (OOM) — message is silently dropped
                 length = 0;
             }
         }

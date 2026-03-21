@@ -1,12 +1,12 @@
 #include <gtest/gtest.h>
 #include <cmath>
-#include <DirectXMath.h>
+#include <numbers>
 
 #include "DetourModKit/math.hpp"
 
 using namespace DetourModKit;
 
-static constexpr float PI = DirectX::XM_PI;
+static constexpr float PI = std::numbers::pi_v<float>;
 
 TEST(MathTest, degrees_to_radians_Zero)
 {
