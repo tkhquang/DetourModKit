@@ -1066,10 +1066,12 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
     constexpr int iterations = 50;
     std::vector<std::thread> threads;
     std::latch start_latch(num_threads);
+    std::atomic<bool> saw_active{false};
+    std::atomic<bool> saw_disabled{false};
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([this, i, &start_latch]()
+        threads.emplace_back([this, i, &start_latch, &saw_active, &saw_disabled]()
                              {
             start_latch.arrive_and_wait();
             for (int j = 0; j < iterations; ++j)
@@ -1082,6 +1084,14 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
                 {
                     (void)hook_manager_->disable_hook("ConcurrentHook");
                 }
+                auto s = hook_manager_->get_hook_status("ConcurrentHook");
+                if (s.has_value())
+                {
+                    if (*s == HookStatus::Active)
+                        saw_active.store(true, std::memory_order_relaxed);
+                    else if (*s == HookStatus::Disabled)
+                        saw_disabled.store(true, std::memory_order_relaxed);
+                }
             } });
     }
 
@@ -1090,9 +1100,8 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
         t.join();
     }
 
-    auto status = hook_manager_->get_hook_status("ConcurrentHook");
-    ASSERT_TRUE(status.has_value());
-    EXPECT_TRUE(*status == HookStatus::Active || *status == HookStatus::Disabled);
+    EXPECT_TRUE(saw_active.load()) << "Expected Active to be observed during concurrent toggling";
+    EXPECT_TRUE(saw_disabled.load()) << "Expected Disabled to be observed during concurrent toggling";
 
     EXPECT_TRUE(hook_manager_->disable_hook("ConcurrentHook"));
     EXPECT_EQ(*hook_manager_->get_hook_status("ConcurrentHook"), HookStatus::Disabled);
