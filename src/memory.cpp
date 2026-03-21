@@ -4,7 +4,7 @@
  *
  * Provides functions for checking memory readability and writability, writing bytes to memory,
  * and managing a memory region cache for performance optimization.
- * The cache uses sharded locks with shared_mutex for high-concurrency read-heavy access.
+ * The cache uses sharded locks with SRWLOCK for high-concurrency read-heavy access.
  * Uses monotonic counter-keyed map for O(log n) LRU eviction instead of O(n) scan.
  * In-flight query coalescing prevents cache stampede under high concurrency.
  * On-demand cleanup handles expired entry removal to avoid polluting the miss path.
@@ -46,6 +46,34 @@ namespace CachePermissions
 namespace
 {
     /**
+     * @class SrwSharedMutex
+     * @brief Shared mutex backed by Windows SRWLOCK instead of pthread_rwlock_t.
+     * @details MinGW/winpthreads' pthread_rwlock_t corrupts internal state under
+     *          high reader contention, causing assertion failures in lock_shared().
+     *          SRWLOCK is kernel-level, lock-free for uncontended cases, and does
+     *          not suffer from this bug.
+     */
+    class SrwSharedMutex
+    {
+    public:
+        SrwSharedMutex() noexcept { InitializeSRWLock(&srw_); }
+
+        SrwSharedMutex(const SrwSharedMutex &) = delete;
+        SrwSharedMutex &operator=(const SrwSharedMutex &) = delete;
+
+        void lock() noexcept { AcquireSRWLockExclusive(&srw_); }
+        bool try_lock() noexcept { return TryAcquireSRWLockExclusive(&srw_) != 0; }
+        void unlock() noexcept { ReleaseSRWLockExclusive(&srw_); }
+
+        void lock_shared() noexcept { AcquireSRWLockShared(&srw_); }
+        bool try_lock_shared() noexcept { return TryAcquireSRWLockShared(&srw_) != 0; }
+        void unlock_shared() noexcept { ReleaseSRWLockShared(&srw_); }
+
+    private:
+        SRWLOCK srw_;
+    };
+
+    /**
      * @struct CachedMemoryRegionInfo
      * @brief Structure to hold cached memory region information.
      * @details Uses timestamp for thread-safe updates and reduced memory footprint.
@@ -70,7 +98,7 @@ namespace
      * @brief Individual cache shard with O(1) address lookup and O(log n) LRU eviction.
      * @details Uses unordered_map keyed by region base address for fast lookup.
      *          std::map keyed by monotonic counter for efficient oldest-entry eviction.
-     *          shared_mutex allows multiple concurrent readers.
+     *          SrwSharedMutex allows multiple concurrent readers.
      *          in_flight flag prevents cache stampede by coalescing concurrent VirtualQuery calls.
      *          Mutex is stored separately to allow vector resize operations.
      */
@@ -121,7 +149,7 @@ namespace
 namespace MemoryUtilsCacheInternal
 {
     std::vector<CacheShard> s_cacheShards;
-    std::vector<std::unique_ptr<std::shared_mutex>> s_shardMutexes;
+    std::vector<std::unique_ptr<SrwSharedMutex>> s_shardMutexes;
     std::unique_ptr<std::atomic<char>[]> s_inFlight;
     std::atomic<size_t> s_shardCount{0};
     std::atomic<size_t> s_maxEntriesPerShard{0};
@@ -414,7 +442,7 @@ namespace MemoryUtilsCacheInternal
 
         for (size_t i = 0; i < shard_count; ++i)
         {
-            std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[i], std::try_to_lock);
+            std::unique_lock<SrwSharedMutex> lock(*s_shardMutexes[i], std::try_to_lock);
             if (lock.owns_lock())
             {
                 cleanup_expired_entries_in_shard(s_cacheShards[i], current_ts, expiry_ns);
@@ -515,7 +543,7 @@ namespace MemoryUtilsCacheInternal
             bool invalidated = false;
             for (size_t retry = 0; retry < MAX_INVALIDATION_RETRIES && !invalidated; ++retry)
             {
-                std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx], std::try_to_lock);
+                std::unique_lock<SrwSharedMutex> lock(*s_shardMutexes[shard_idx], std::try_to_lock);
                 if (!lock.owns_lock())
                 {
                     // Shard is locked by another writer - yield and retry
@@ -589,7 +617,7 @@ namespace MemoryUtilsCacheInternal
                 s_cacheShards[i].entries.reserve(entries_per_shard * 2);
                 s_cacheShards[i].capacity = entries_per_shard;
                 s_cacheShards[i].max_capacity = hard_max_per_shard;
-                s_shardMutexes[i] = std::make_unique<std::shared_mutex>();
+                s_shardMutexes[i] = std::make_unique<SrwSharedMutex>();
                 s_inFlight[i].store(0, std::memory_order_relaxed);
             }
         }
@@ -636,7 +664,7 @@ namespace MemoryUtilsCacheInternal
 
             if (result)
             {
-                std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx]);
+                std::unique_lock<SrwSharedMutex> lock(*s_shardMutexes[shard_idx]);
                 update_shard_with_region(shard, mbi_out, now_ns);
             }
 
@@ -657,7 +685,7 @@ namespace MemoryUtilsCacheInternal
                 {
                     // Query completed, check cache
                     const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
-                    std::shared_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx]);
+                    std::shared_lock<SrwSharedMutex> lock(*s_shardMutexes[shard_idx]);
                     CachedMemoryRegionInfo *cached = find_in_shard(shard, addr_val, 1, current_time_ns(), expiry_ns);
                     if (cached)
                     {
@@ -684,7 +712,7 @@ namespace MemoryUtilsCacheInternal
                 const bool result = VirtualQuery(address, &mbi_out, sizeof(mbi_out)) != 0;
                 if (result)
                 {
-                    std::unique_lock<std::shared_mutex> lock(*s_shardMutexes[shard_idx]);
+                    std::unique_lock<SrwSharedMutex> lock(*s_shardMutexes[shard_idx]);
                     const uint64_t now_ns = current_time_ns();
                     update_shard_with_region(shard, mbi_out, now_ns);
                 }
@@ -778,7 +806,7 @@ void DetourModKit::Memory::clear_cache()
         auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
         if (mutex_ptr)
         {
-            std::unique_lock<std::shared_mutex> shard_lock(*mutex_ptr);
+            std::unique_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
             MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
             MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
             MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
@@ -834,7 +862,7 @@ void DetourModKit::Memory::shutdown_cache()
     {
         if (MemoryUtilsCacheInternal::s_shardMutexes[i])
         {
-            std::unique_lock<std::shared_mutex> shard_lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
+            std::unique_lock<SrwSharedMutex> shard_lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
             MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
             MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
         }
@@ -852,7 +880,7 @@ void DetourModKit::Memory::shutdown_cache()
     MemoryUtilsCacheInternal::s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
     MemoryUtilsCacheInternal::s_lastCleanupTimeNs.store(0, std::memory_order_relaxed);
     MemoryUtilsCacheInternal::s_configuredExpiryMs.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_activeReaders.store(0, std::memory_order_relaxed);
+    MemoryUtilsCacheInternal::s_maxEntriesPerShard.store(0, std::memory_order_relaxed);
     MemoryUtilsCacheInternal::s_cleanupRequested.store(false, std::memory_order_relaxed);
 
     Logger::get_instance().debug("MemoryCache: Shutdown complete.");
@@ -882,7 +910,7 @@ std::string DetourModKit::Memory::get_cache_stats()
         auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
         if (mutex_ptr)
         {
-            std::shared_lock<std::shared_mutex> shard_lock(*mutex_ptr);
+            std::shared_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
             total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
             total_hard_max += MemoryUtilsCacheInternal::s_cacheShards[i].max_capacity;
         }
@@ -980,7 +1008,7 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
 
     // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
     {
-        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
+        std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
         CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
             MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
             query_addr_val, size, now_ns, expiry_ns);
@@ -1065,7 +1093,7 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
 
     // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
     {
-        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
+        std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
         CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
             MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
             query_addr_val, size, now_ns, expiry_ns);
