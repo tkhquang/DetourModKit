@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -139,54 +140,12 @@ TEST_F(InputPollerTest, DestructorStopsThread)
     EXPECT_TRUE(thread_was_running);
 }
 
-TEST_F(InputPollerTest, MoveConstruction)
+TEST_F(InputPollerTest, NonCopyableNonMovable)
 {
-    std::vector<InputBinding> bindings;
-
-    InputBinding binding;
-    binding.name = "move_test";
-    binding.keys = {0x41};
-    binding.mode = InputMode::Press;
-    binding.on_press = []() {};
-    bindings.push_back(std::move(binding));
-
-    InputPoller original(std::move(bindings));
-    EXPECT_TRUE(original.is_running());
-
-    InputPoller moved(std::move(original));
-    EXPECT_TRUE(moved.is_running());
-    EXPECT_EQ(moved.binding_count(), 1u);
-    EXPECT_FALSE(original.is_running());
-
-    moved.shutdown();
-}
-
-TEST_F(InputPollerTest, MoveAssignment)
-{
-    std::vector<InputBinding> bindings1;
-    InputBinding b1;
-    b1.name = "binding1";
-    b1.keys = {0x41};
-    b1.mode = InputMode::Press;
-    b1.on_press = []() {};
-    bindings1.push_back(std::move(b1));
-
-    std::vector<InputBinding> bindings2;
-    InputBinding b2;
-    b2.name = "binding2";
-    b2.keys = {0x42};
-    b2.mode = InputMode::Hold;
-    b2.on_state_change = [](bool) {};
-    bindings2.push_back(std::move(b2));
-
-    InputPoller poller1(std::move(bindings1));
-    InputPoller poller2(std::move(bindings2));
-
-    poller1 = std::move(poller2);
-    EXPECT_TRUE(poller1.is_running());
-    EXPECT_EQ(poller1.binding_count(), 1u);
-
-    poller1.shutdown();
+    EXPECT_FALSE(std::is_copy_constructible_v<InputPoller>);
+    EXPECT_FALSE(std::is_copy_assignable_v<InputPoller>);
+    EXPECT_FALSE(std::is_move_constructible_v<InputPoller>);
+    EXPECT_FALSE(std::is_move_assignable_v<InputPoller>);
 }
 
 TEST_F(InputPollerTest, EmptyKeysSkipped)
@@ -274,6 +233,22 @@ TEST_F(InputPollerTest, NullCallbackHandled)
     EXPECT_TRUE(poller.is_running());
 
     poller.shutdown();
+}
+
+TEST_F(InputPollerTest, ShutdownResponsiveness)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings), std::chrono::milliseconds{500});
+
+    EXPECT_TRUE(poller.is_running());
+
+    const auto start = std::chrono::steady_clock::now();
+    poller.shutdown();
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    // Shutdown should complete well under the poll interval due to CV wake-up
+    EXPECT_LT(elapsed, std::chrono::milliseconds{200});
+    EXPECT_FALSE(poller.is_running());
 }
 
 // --- InputManager ---
@@ -448,4 +423,35 @@ TEST_F(InputManagerTest, MultipleKeysPerBinding)
     EXPECT_EQ(mgr.binding_count(), 1u);
 
     mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, ConcurrentAccess)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    constexpr int thread_count = 4;
+    constexpr int ops_per_thread = 50;
+    std::atomic<int> registered{0};
+
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+
+    for (int t = 0; t < thread_count; ++t)
+    {
+        threads.emplace_back([&mgr, &registered, t]()
+                             {
+            for (int i = 0; i < ops_per_thread; ++i)
+            {
+                std::string name = "binding_" + std::to_string(t) + "_" + std::to_string(i);
+                mgr.register_press(name, {0x41}, []() {});
+                registered.fetch_add(1, std::memory_order_relaxed);
+            } });
+    }
+
+    for (auto &th : threads)
+    {
+        th.join();
+    }
+
+    EXPECT_EQ(mgr.binding_count(), static_cast<size_t>(thread_count * ops_per_thread));
 }

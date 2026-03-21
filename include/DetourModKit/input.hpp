@@ -3,9 +3,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -36,9 +38,8 @@ namespace DetourModKit
             return "Press";
         case InputMode::Hold:
             return "Hold";
-        default:
-            return "Unknown";
         }
+        return "Unknown";
     }
 
     // Input system configuration defaults
@@ -70,7 +71,7 @@ namespace DetourModKit
      *          (level-triggered) input modes. The polling thread is started on
      *          construction and stopped on destruction.
      *
-     * @note Non-copyable, movable. Callbacks are invoked on the polling thread.
+     * @note Non-copyable, non-movable. Callbacks are invoked on the polling thread.
      * @note This class is the building block for the InputManager singleton.
      */
     class InputPoller
@@ -89,8 +90,8 @@ namespace DetourModKit
 
         InputPoller(const InputPoller &) = delete;
         InputPoller &operator=(const InputPoller &) = delete;
-        InputPoller(InputPoller &&other) noexcept;
-        InputPoller &operator=(InputPoller &&other) noexcept;
+        InputPoller(InputPoller &&) = delete;
+        InputPoller &operator=(InputPoller &&) = delete;
 
         /**
          * @brief Checks if the polling thread is currently running.
@@ -124,11 +125,13 @@ namespace DetourModKit
         std::chrono::milliseconds poll_interval_;
         std::atomic<bool> running_{false};
         std::jthread poll_thread_;
+        std::mutex cv_mutex_;
+        std::condition_variable cv_;
 
         // Per-key state tracking for edge detection, indexed parallel to bindings_.
         // For Press mode: tracks whether any key in the binding was down last cycle.
         // For Hold mode: tracks whether the hold condition was active last cycle.
-        std::vector<bool> prev_states_;
+        std::vector<uint8_t> prev_states_;
     };
 
     /**
@@ -139,8 +142,8 @@ namespace DetourModKit
      *          calling start(), which constructs the poller. Integrates with
      *          DMK_Shutdown() for automatic cleanup.
      *
-     * @note For advanced use cases requiring multiple independent pollers or
-     *       custom lifetime management, use InputPoller directly.
+     * @note Thread-safe. For advanced use cases requiring multiple independent
+     *       pollers or custom lifetime management, use InputPoller directly.
      */
     class InputManager
     {
@@ -158,7 +161,7 @@ namespace DetourModKit
         /**
          * @brief Registers a press-mode binding.
          * @details The callback fires once per key-down edge for any key in the list.
-         *          Must be called before start().
+         *          Must be called before start(). Ignored if the poller is already running.
          * @param name Unique, descriptive name for the binding.
          * @param keys Vector of virtual key codes (any triggers the action).
          * @param callback Function to invoke on key press.
@@ -170,6 +173,7 @@ namespace DetourModKit
          * @brief Registers a hold-mode binding.
          * @details The callback fires with true when any key in the list is pressed,
          *          and false when all keys are released. Must be called before start().
+         *          Ignored if the poller is already running.
          * @param name Unique, descriptive name for the binding.
          * @param keys Vector of virtual key codes (any activates the hold).
          * @param callback Function invoked with the hold state (true = held, false = released).
@@ -212,9 +216,9 @@ namespace DetourModKit
         InputManager(const InputManager &) = delete;
         InputManager &operator=(const InputManager &) = delete;
 
+        mutable std::mutex mutex_;
         std::vector<InputBinding> pending_bindings_;
         std::unique_ptr<InputPoller> poller_;
-        std::atomic<bool> shutdown_called_{false};
     };
 } // namespace DetourModKit
 
