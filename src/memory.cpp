@@ -810,12 +810,18 @@ void DetourModKit::Memory::shutdown_cache()
 
     // Mark as not initialized and zero shard count.
     // This prevents new readers from entering the critical section.
-    MemoryUtilsCacheInternal::s_cacheInitialized.store(false, std::memory_order_release);
-    MemoryUtilsCacheInternal::s_shardCount.store(0, std::memory_order_release);
+    //
+    // seq_cst is required here and on the reader side to establish a Dekker-style
+    // ordering between s_shardCount (written here, read by readers) and
+    // s_activeReaders (written by readers, read below). Without a single total
+    // order, a reader could observe the old shard count after we observe zero
+    // active readers, leading to use-after-free on the destroyed data structures.
+    MemoryUtilsCacheInternal::s_cacheInitialized.store(false, std::memory_order_seq_cst);
+    MemoryUtilsCacheInternal::s_shardCount.store(0, std::memory_order_seq_cst);
 
     // Wait for in-flight readers to finish before destroying data structures.
     // Readers increment s_activeReaders on entry and decrement on exit.
-    while (MemoryUtilsCacheInternal::s_activeReaders.load(std::memory_order_acquire) > 0)
+    while (MemoryUtilsCacheInternal::s_activeReaders.load(std::memory_order_seq_cst) > 0)
     {
         std::this_thread::yield();
     }
@@ -856,8 +862,8 @@ std::string DetourModKit::Memory::get_cache_stats()
     size_t total_entries = 0;
     size_t total_hard_max = 0;
 
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
-    const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
+    const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
     for (size_t i = 0; i < active_shard_count; ++i)
     {
         total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
@@ -896,9 +902,9 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
         return;
 
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
     if (shard_count == 0)
     {
         MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
@@ -921,9 +927,9 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
     DetourModKit::Memory::init_cache();
 
     // Register as active reader to prevent shutdown from destroying data structures
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
     if (shard_count == 0)
     {
         MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
@@ -993,9 +999,9 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     DetourModKit::Memory::init_cache();
 
     // Register as active reader to prevent shutdown from destroying data structures
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
     if (shard_count == 0)
     {
         MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);

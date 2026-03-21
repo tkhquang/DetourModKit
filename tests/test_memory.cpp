@@ -25,19 +25,7 @@ protected:
     }
 };
 
-class MemoryTestWithShutdown : public ::testing::Test
-{
-protected:
-    void SetUp() override
-    {
-        Memory::init_cache();
-    }
 
-    void TearDown() override
-    {
-        Memory::shutdown_cache();
-    }
-};
 
 TEST_F(MemoryTest, InitMemoryCache)
 {
@@ -232,33 +220,6 @@ TEST_F(MemoryTest, MultipleRegions)
     EXPECT_TRUE(Memory::is_readable(buffer2, sizeof(buffer2)));
     EXPECT_TRUE(Memory::is_writable(buffer1, sizeof(buffer1)));
     EXPECT_TRUE(Memory::is_writable(buffer2, sizeof(buffer2)));
-}
-
-TEST_F(MemoryTest, ThreadSafety)
-{
-    const int num_threads = 4;
-    const int iterations = 100;
-
-    std::vector<std::thread> threads;
-
-    for (int i = 0; i < num_threads; ++i)
-    {
-        threads.emplace_back([iterations]()
-                             {
-            char buffer[100] = {0};
-            for (int j = 0; j < iterations; ++j)
-            {
-                Memory::is_readable(buffer, sizeof(buffer));
-                Memory::is_writable(buffer, sizeof(buffer));
-            } });
-    }
-
-    for (auto &t : threads)
-    {
-        t.join();
-    }
-
-    SUCCEED();
 }
 
 TEST_F(MemoryTest, CacheAfterClear)
@@ -846,10 +807,10 @@ TEST_F(MemoryTest, InvalidateRangeIncrementsCounter)
 TEST_F(MemoryTest, HardUpperBoundEnforced)
 {
     Memory::shutdown_cache();
-    // Initialize with 2 entries capacity per shard (with 2x hard max = 4)
+    // 1 shard, capacity=2, hard_max = capacity * 2 = 4
     Memory::init_cache(2, 60000, 1);
 
-    // Allocate multiple pages in different regions to force cache growth
+    // Allocate 10 distinct pages to force cache past capacity
     std::vector<void *> regions;
     for (int i = 0; i < 10; ++i)
     {
@@ -859,37 +820,35 @@ TEST_F(MemoryTest, HardUpperBoundEnforced)
         EXPECT_TRUE(Memory::is_readable(mem, 1));
     }
 
-    // Check stats to see total entries
     std::string stats = Memory::get_cache_stats();
-    EXPECT_NE(stats.find("TotalEntries:"), std::string::npos);
+    // Extract TotalEntries value and verify it respects hard upper bound
+    auto pos = stats.find("TotalEntries: ");
+    ASSERT_NE(pos, std::string::npos);
+    size_t total_entries = std::stoull(stats.substr(pos + 14));
+    EXPECT_LE(total_entries, 4u);
 
-    // Cleanup
     for (void *mem : regions)
     {
         VirtualFree(mem, 0, MEM_RELEASE);
     }
 }
 
-TEST_F(MemoryTestWithShutdown, BackgroundCleanupThreadRuns)
+TEST_F(MemoryTest, BackgroundCleanupThreadRuns)
 {
+    Memory::shutdown_cache();
+    Memory::init_cache(16, 10, 4);
+
     char buffer[100] = {0};
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
-    // Wait for background cleanup to run at least once
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    // Wait long enough for background cleanup to process expired entries (10ms expiry + interval)
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
-    // Cache should still work
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
-}
-
-TEST_F(MemoryTestWithShutdown, ShutdownCacheTerminatesCleanupThread)
-{
-    char buffer[100] = {0};
+    // Cache should still work after background cleanup
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
-    // Shutdown is called automatically in TearDown
-    // Just verify the cache functions before shutdown
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    std::string stats = Memory::get_cache_stats();
+    EXPECT_FALSE(stats.empty());
 }
 
 TEST_F(MemoryTest, InvalidateRangeTriggersBackgroundCleanup)
@@ -907,41 +866,6 @@ TEST_F(MemoryTest, InvalidateRangeTriggersBackgroundCleanup)
 
     // Cache should still work after invalidation
     EXPECT_TRUE(Memory::is_readable(mem, 64));
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-TEST_F(MemoryTest, CoalescedQueriesAccumulated)
-{
-    Memory::shutdown_cache();
-    Memory::init_cache(32, 60000, 1);
-
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-
-    // Multiple threads hitting same address should coalesce
-    const int num_threads = 8;
-    const int iterations = 50;
-
-    std::vector<std::thread> threads;
-    for (int i = 0; i < num_threads; ++i)
-    {
-        threads.emplace_back([&]()
-                             {
-            for (int j = 0; j < iterations; ++j)
-            {
-                Memory::is_readable(mem, 64);
-            } });
-    }
-
-    for (auto &t : threads)
-    {
-        t.join();
-    }
-
-    std::string stats = Memory::get_cache_stats();
-    // Should have some coalesced queries
-    EXPECT_NE(stats.find("Coalesced:"), std::string::npos);
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -985,7 +909,7 @@ TEST_F(MemoryTest, ClearCacheResetsOnDemandCleanupStat)
     EXPECT_NE(stats.find("OnDemandCleanups: 0"), std::string::npos);
 }
 
-TEST_F(MemoryTest, OnDemandCleanupFiresOnInterval)
+TEST_F(MemoryTest, ExpiredEntryTriggersReFetch)
 {
     Memory::shutdown_cache();
     Memory::init_cache(16, 10, 4);
@@ -993,17 +917,21 @@ TEST_F(MemoryTest, OnDemandCleanupFiresOnInterval)
     char buffer[100] = {0};
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
-    // Wait for on-demand cleanup interval (1 second) to potentially trigger
-    // In practice, this test verifies the mechanism exists without blocking too long
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    // Wait for cache entry to expire (10ms expiry)
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
+    // Re-query should succeed (re-fetch from OS) and register as a miss
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 
     std::string stats = Memory::get_cache_stats();
-    EXPECT_FALSE(stats.empty());
+    // At least 1 miss from the expired-entry re-fetch
+    auto pos = stats.find("Misses: ");
+    ASSERT_NE(pos, std::string::npos);
+    uint64_t misses = std::stoull(stats.substr(pos + 8));
+    EXPECT_GE(misses, 1u);
 }
 
-TEST_F(MemoryTest, CacheStampedeFollowerYields)
+TEST_F(MemoryTest, CacheHitPerformance_SingleThread)
 {
     Memory::shutdown_cache();
     Memory::init_cache(32, 60000, 1);
@@ -1011,36 +939,16 @@ TEST_F(MemoryTest, CacheStampedeFollowerYields)
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
-    // Single thread repeatedly accessing - should complete quickly without yielding
     auto start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < 100; ++i)
+    for (int i = 0; i < 1000; ++i)
     {
         EXPECT_TRUE(Memory::is_readable(mem, 64));
     }
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
 
-    // Should be fast - no exponential backoff sleep since cache hits
+    // 1000 cache-hit reads should complete well under 1 second
     EXPECT_LT(duration, 1000);
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-TEST_F(MemoryTest, OnDemandCleanupAfterLongDelay)
-{
-    Memory::shutdown_cache();
-    Memory::init_cache(16, 20, 4);
-
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-
-    EXPECT_TRUE(Memory::is_readable(mem, 64));
-
-    // Wait for entries to potentially expire
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Should still work - either cache hit with refreshed timestamp or miss with re-query
-    EXPECT_TRUE(Memory::is_readable(mem, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -1052,4 +960,71 @@ TEST_F(MemoryTest, CacheStatsIncludeHardMax)
 
     std::string stats = Memory::get_cache_stats();
     EXPECT_NE(stats.find("HardMax/Shard:"), std::string::npos);
+}
+
+TEST_F(MemoryTest, ShutdownAfterConcurrentWorkload)
+{
+    Memory::shutdown_cache();
+    Memory::init_cache(32, 60000, 4);
+
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    std::atomic<bool> keep_reading{true};
+    std::atomic<int> reads_completed{0};
+
+    const int num_threads = 4;
+    std::vector<std::thread> readers;
+    for (int i = 0; i < num_threads; ++i)
+    {
+        readers.emplace_back([&]()
+                             {
+            while (keep_reading.load(std::memory_order_acquire))
+            {
+                Memory::is_readable(mem, 64);
+                reads_completed.fetch_add(1, std::memory_order_relaxed);
+            } });
+    }
+
+    while (reads_completed.load(std::memory_order_relaxed) < 1000)
+    {
+        std::this_thread::yield();
+    }
+
+    keep_reading.store(false, std::memory_order_release);
+
+    for (auto &t : readers)
+    {
+        t.join();
+    }
+
+    // Shutdown after heavy concurrent usage must complete cleanly
+    Memory::shutdown_cache();
+
+    // Re-init and verify cache still works after teardown
+    EXPECT_TRUE(Memory::init_cache());
+    EXPECT_TRUE(Memory::is_readable(mem, 64));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ReinitAfterShutdown_DataIntegrity)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    for (int round = 0; round < 3; ++round)
+    {
+        Memory::shutdown_cache();
+        EXPECT_TRUE(Memory::init_cache(16, 5000, 4));
+
+        EXPECT_TRUE(Memory::is_readable(mem, 64));
+        EXPECT_TRUE(Memory::is_writable(mem, 64));
+
+        std::string stats = Memory::get_cache_stats();
+        EXPECT_NE(stats.find("Hits:"), std::string::npos);
+        EXPECT_NE(stats.find("Misses:"), std::string::npos);
+    }
+
+    VirtualFree(mem, 0, MEM_RELEASE);
 }
