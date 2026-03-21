@@ -2,6 +2,7 @@
 #include <functional>
 #include <thread>
 #include <chrono>
+#include <latch>
 #include <windows.h>
 
 #include "DetourModKit/hook_manager.hpp"
@@ -1058,11 +1059,13 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
     constexpr int num_threads = 4;
     constexpr int iterations = 50;
     std::vector<std::thread> threads;
+    std::latch start_latch(num_threads);
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([this, i]()
+        threads.emplace_back([this, i, &start_latch]()
                              {
+            start_latch.arrive_and_wait();
             for (int j = 0; j < iterations; ++j)
             {
                 if (j % 2 == (i % 2))
@@ -1084,6 +1087,16 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
     auto status = hook_manager_->get_hook_status("ConcurrentHook");
     ASSERT_TRUE(status.has_value());
     EXPECT_TRUE(*status == HookStatus::Active || *status == HookStatus::Disabled);
+
+    EXPECT_TRUE(hook_manager_->disable_hook("ConcurrentHook"));
+    EXPECT_EQ(*hook_manager_->get_hook_status("ConcurrentHook"), HookStatus::Disabled);
+    int disabled_result = real_hook_target_add(2, 3);
+    EXPECT_EQ(disabled_result, 5);
+
+    EXPECT_TRUE(hook_manager_->enable_hook("ConcurrentHook"));
+    EXPECT_EQ(*hook_manager_->get_hook_status("ConcurrentHook"), HookStatus::Active);
+    int enabled_result = real_hook_target_add(2, 3);
+    EXPECT_NE(enabled_result, 5);
 }
 
 TEST_F(HookManagerTest, WithInlineHook_DirectEnableDisable)
@@ -1195,7 +1208,8 @@ TEST_F(HookManagerTest, RealInlineHook_DisabledEnableDisableCycle)
     EXPECT_TRUE(hook_manager_->disable_hook("InlineDisabled"));
     EXPECT_EQ(*hook_manager_->get_hook_status("InlineDisabled"), HookStatus::Disabled);
 
-    EXPECT_TRUE(hook_manager_->remove_hook("InlineDisabled"));
+    [[maybe_unused]] bool removed = hook_manager_->remove_hook("InlineDisabled");
+    EXPECT_TRUE(removed);
 }
 
 TEST_F(HookManagerTest, WithInlineHook_CallbackExecutesSuccessfully)
@@ -1321,6 +1335,7 @@ TEST_F(HookManagerTest, InlineHook_GetOriginal_Noexcept)
         "NoexceptHook",
         [](InlineHook &hook) -> bool
         {
+            static_assert(noexcept(hook.get_original<int (*)(int, int)>()));
             auto orig = hook.get_original<int (*)(int, int)>();
             return orig != nullptr;
         });
@@ -1342,6 +1357,7 @@ TEST_F(HookManagerTest, MidHook_GetDestination_Noexcept)
         "NoexceptMidHook",
         [](MidHook &hook) -> bool
         {
+            static_assert(noexcept(hook.get_destination()));
             auto dest = hook.get_destination();
             return dest != nullptr;
         });
