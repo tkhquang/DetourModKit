@@ -267,11 +267,11 @@ TEST_F(HookManagerTest, ThreadSafety)
                              {
             for (int j = 0; j < 10; ++j)
             {
-                hook_manager_->get_hook_status("Thread" + std::to_string(i) + "_" + std::to_string(j));
-                hook_manager_->get_hook_counts();
-                hook_manager_->get_hook_ids();
-                hook_manager_->enable_hook("nonexistent_" + std::to_string(i));
-                hook_manager_->disable_hook("nonexistent_" + std::to_string(i));
+                (void)hook_manager_->get_hook_status("Thread" + std::to_string(i) + "_" + std::to_string(j));
+                (void)hook_manager_->get_hook_counts();
+                (void)hook_manager_->get_hook_ids();
+                (void)hook_manager_->enable_hook("nonexistent_" + std::to_string(i));
+                (void)hook_manager_->disable_hook("nonexistent_" + std::to_string(i));
             } });
     }
 
@@ -955,6 +955,68 @@ TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
     EXPECT_EQ(*name_opt, "WithMidCB");
 
     hook_manager_->remove_hook("WithMidCB");
+}
+
+TEST_F(HookManagerTest, TryWithInlineHook_Success)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "TryInlineCB",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    auto name_opt = hook_manager_->try_with_inline_hook(
+        "TryInlineCB",
+        [](InlineHook &hook) -> std::string
+        {
+            return std::string(hook.get_name());
+        });
+    ASSERT_TRUE(name_opt.has_value());
+    EXPECT_EQ(*name_opt, "TryInlineCB");
+
+    hook_manager_->remove_hook("TryInlineCB");
+}
+
+TEST_F(HookManagerTest, TryWithInlineHook_NotFound)
+{
+    auto result = hook_manager_->try_with_inline_hook(
+        "NonExistentTryHook",
+        [](InlineHook &) -> bool
+        { return true; });
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(HookManagerTest, TryWithMidHook_Success)
+{
+    auto detour_fn = [](safetyhook::Context &) {};
+
+    auto result = hook_manager_->create_mid_hook(
+        "TryMidCB",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(result.has_value());
+
+    auto name_opt = hook_manager_->try_with_mid_hook(
+        "TryMidCB",
+        [](MidHook &hook) -> std::string
+        {
+            return std::string(hook.get_name());
+        });
+    ASSERT_TRUE(name_opt.has_value());
+    EXPECT_EQ(*name_opt, "TryMidCB");
+
+    hook_manager_->remove_hook("TryMidCB");
+}
+
+TEST_F(HookManagerTest, TryWithMidHook_NotFound)
+{
+    auto result = hook_manager_->try_with_mid_hook(
+        "NonExistentTryMidHook",
+        [](MidHook &) -> bool
+        { return true; });
+    EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(HookManagerTest, RealMidHook_CreateDisabledAutoEnable)

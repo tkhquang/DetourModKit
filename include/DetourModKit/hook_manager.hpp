@@ -11,6 +11,8 @@
 #include <expected>
 #include <string_view>
 #include <type_traits>
+#include <cassert>
+#include <utility>
 
 #include "safetyhook.hpp"
 #include "DetourModKit/logger.hpp"
@@ -388,14 +390,14 @@ namespace DetourModKit
          * @param hook_id The name of the hook to enable.
          * @return true if the hook was found and successfully enabled, false otherwise.
          */
-        bool enable_hook(const std::string &hook_id);
+        [[nodiscard]] bool enable_hook(const std::string &hook_id);
 
         /**
          * @brief Disables an active hook temporarily without removing it.
          * @param hook_id The name of the hook to disable.
          * @return true if the hook was found and successfully disabled, false otherwise.
          */
-        bool disable_hook(const std::string &hook_id);
+        [[nodiscard]] bool disable_hook(const std::string &hook_id);
 
         /**
          * @brief Retrieves the current status of a hook.
@@ -420,19 +422,67 @@ namespace DetourModKit
         /**
          * @brief Safely accesses an InlineHook by its ID while holding the internal lock.
          * @details The callback is invoked with a reference to the InlineHook while the
-         *          shared_mutex is held, preventing concurrent removal.
-         * @warning Do not call HookManager methods that acquire a unique_lock from
-         *          within the callback — this will deadlock.
+         *          shared_mutex is held as a reader, preventing concurrent removal.
+         * @warning DANGER: Any callback holding m_hooks_mutex must NOT call methods that
+         *          acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook)
+         *          because those calls will deadlock. Perform such mutations outside the callback
+         *          or use an asynchronous/posted operation that does not hold m_hooks_mutex.
          * @tparam F Callable type accepting (InlineHook&) and returning a value.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
         template <typename F>
-        auto with_inline_hook(const std::string &hook_id, F &&fn)
+        [[nodiscard]] auto with_inline_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
+            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ++m_callback_reentrancy_guard;
+            struct Guard
+            {
+                int &counter;
+                ~Guard() noexcept { --counter; }
+            } guard{m_callback_reentrancy_guard};
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
+            {
+                return fn(static_cast<InlineHook &>(*it->second));
+            }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief Try-safe access to an InlineHook by its ID using a non-blocking lock.
+         * @details Provides a non-blocking alternative to with_inline_hook(). The callback
+         *          is invoked only if the lock is immediately acquired via std::try_to_lock.
+         *          Note: try_to_lock only avoids blocking on initial acquisition - it does NOT
+         *          make callbacks safe to re-enter HookManager methods that also acquire the
+         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback
+         *          needs to call those methods, it must release the lock first or perform those
+         *          calls asynchronously to avoid deadlock. See with_inline_hook for the blocking
+         *          analogue.
+         * @param hook_id The name of the inline hook.
+         * @param fn The callback to invoke with the hook reference.
+         * @return std::optional<R> The callback's return value. Returns std::nullopt if either
+         *         the lock could not be acquired or the hook was not found.
+         */
+        template <typename F>
+        [[nodiscard]] auto try_with_inline_hook(const std::string &hook_id, F &&fn)
+            -> std::optional<std::invoke_result_t<F, InlineHook &>>
+        {
+            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
+            if (!lock.owns_lock())
+            {
+                return std::nullopt;
+            }
+            ++m_callback_reentrancy_guard;
+            struct Guard
+            {
+                int &counter;
+                ~Guard() noexcept { --counter; }
+            } guard{m_callback_reentrancy_guard};
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
@@ -444,19 +494,67 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a MidHook by its ID while holding the internal lock.
          * @details The callback is invoked with a reference to the MidHook while the
-         *          shared_mutex is held, preventing concurrent removal.
-         * @warning Do not call HookManager methods that acquire a unique_lock from
-         *          within the callback — this will deadlock.
+         *          shared_mutex is held as a reader, preventing concurrent removal.
+         * @warning DANGER: Any callback holding m_hooks_mutex must NOT call methods that
+         *          acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook)
+         *          because those calls will deadlock. Perform such mutations outside the callback
+         *          or use an asynchronous/posted operation that does not hold m_hooks_mutex.
          * @tparam F Callable type accepting (MidHook&) and returning a value.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
         template <typename F>
-        auto with_mid_hook(const std::string &hook_id, F &&fn)
+        [[nodiscard]] auto with_mid_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
+            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ++m_callback_reentrancy_guard;
+            struct Guard
+            {
+                int &counter;
+                ~Guard() noexcept { --counter; }
+            } guard{m_callback_reentrancy_guard};
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
+            {
+                return fn(static_cast<MidHook &>(*it->second));
+            }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief Try-safe access to a MidHook by its ID using a non-blocking lock.
+         * @details Provides a non-blocking alternative to with_mid_hook(). The callback
+         *          is invoked only if the lock is immediately acquired via std::try_to_lock.
+         *          Note: try_to_lock only avoids blocking on initial acquisition - it does NOT
+         *          make callbacks safe to re-enter HookManager methods that also acquire the
+         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback
+         *          needs to call those methods, it must release the lock first or perform those
+         *          calls asynchronously to avoid deadlock. See with_mid_hook for the blocking
+         *          analogue.
+         * @param hook_id The name of the mid hook.
+         * @param fn The callback to invoke with the hook reference.
+         * @return std::optional<R> The callback's return value. Returns std::nullopt if either
+         *         the lock could not be acquired or the hook was not found.
+         */
+        template <typename F>
+        [[nodiscard]] auto try_with_mid_hook(const std::string &hook_id, F &&fn)
+            -> std::optional<std::invoke_result_t<F, MidHook &>>
+        {
+            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
+            if (!lock.owns_lock())
+            {
+                return std::nullopt;
+            }
+            ++m_callback_reentrancy_guard;
+            struct Guard
+            {
+                int &counter;
+                ~Guard() noexcept { --counter; }
+            } guard{m_callback_reentrancy_guard};
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
@@ -471,6 +569,7 @@ namespace DetourModKit
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
+        int m_callback_reentrancy_guard{0};
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;
