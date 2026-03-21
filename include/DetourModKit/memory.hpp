@@ -61,8 +61,9 @@ namespace DetourModKit
          * @param cache_size The desired number of entries in the cache. Defaults to 256.
          * @param expiry_ms Cache entry expiry time in milliseconds. Defaults to 50ms.
          * @param shard_count Number of cache shards for concurrent access. Defaults to 16.
-         * @return true if this call performed initialization, false if already initialized.
-         * @note Only the first call to init_cache has effect; subsequent calls return false.
+         * @return true if the cache is ready for use (newly or previously initialized), false on failure.
+         * @note Only the first call configures the cache; subsequent calls return true without reconfiguring.
+         *       To reconfigure, call shutdown_cache() first.
          * @note Starts a background cleanup thread that runs periodically.
          */
         bool init_cache(size_t cache_size = DEFAULT_CACHE_SIZE,
