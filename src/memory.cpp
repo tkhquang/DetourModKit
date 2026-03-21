@@ -8,7 +8,7 @@
  * Uses monotonic counter-keyed map for O(log n) LRU eviction instead of O(n) scan.
  * In-flight query coalescing prevents cache stampede under high concurrency.
  * On-demand cleanup handles expired entry removal to avoid polluting the miss path.
- * Active reader count prevents use-after-free during shutdown.
+ * Epoch-based reader tracking prevents use-after-free during shutdown.
  */
 
 #include "DetourModKit/memory.hpp"
@@ -67,15 +67,16 @@ namespace
 
     /**
      * @struct CacheShard
-     * @brief Individual cache shard with O(log n) lookup via timestamp-keyed map and O(1) LRU.
-     * @details Uses std::map keyed by timestamp for efficient oldest-entry eviction.
+     * @brief Individual cache shard with O(1) address lookup and O(log n) LRU eviction.
+     * @details Uses unordered_map keyed by region base address for fast lookup.
+     *          std::map keyed by monotonic counter for efficient oldest-entry eviction.
      *          shared_mutex allows multiple concurrent readers.
      *          in_flight flag prevents cache stampede by coalescing concurrent VirtualQuery calls.
      *          Mutex is stored separately to allow vector resize operations.
      */
     struct CacheShard
     {
-        // Map from baseAddress -> CachedMemoryRegionInfo for O(log n) lookup by address
+        // Map from baseAddress -> CachedMemoryRegionInfo for O(1) lookup by address
         std::unordered_map<uintptr_t, CachedMemoryRegionInfo> entries;
         // Map from monotonic counter -> baseAddress for O(log n) oldest-entry lookup (LRU)
         // Monotonic counter guarantees insertion-order uniqueness for correct eviction
@@ -93,7 +94,7 @@ namespace
     /**
      * @brief Returns current time in nanoseconds.
      */
-    constexpr inline uint64_t current_time_ns() noexcept
+    inline uint64_t current_time_ns() noexcept
     {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
                    std::chrono::steady_clock::now().time_since_epoch())
@@ -131,7 +132,7 @@ namespace MemoryUtilsCacheInternal
     // Protects against concurrent state changes that could leave vectors in invalid state
     std::mutex s_cacheStateMutex;
 
-    // Active reader count to prevent use-after-free during shutdown.
+    // Epoch-based reader tracking to prevent use-after-free during shutdown.
     // Readers increment on entry to is_readable/is_writable and decrement on exit.
     // shutdown_cache waits for this to reach zero before destroying data structures.
     std::atomic<int32_t> s_activeReaders{0};
@@ -204,14 +205,16 @@ namespace MemoryUtilsCacheInternal
     }
 
     /**
-     * @brief Finds and validates a cache entry in a shard.
+     * @brief Finds and validates a cache entry in a shard by scanning for range containment.
      * @param shard The cache shard to search.
-     * @param address Address to look up (page-aligned for lookup).
+     * @param address Address to look up.
      * @param size Size of the query range.
      * @param current_time_ns Current timestamp in nanoseconds.
      * @param expiry_ns Expiry time in nanoseconds.
      * @return Pointer to the matching entry, or nullptr if not found or expired.
      * @note Must be called with shard mutex held (shared or exclusive).
+     * @note First attempts direct lookup by page-aligned base address for O(1) fast path,
+     *       then falls back to linear scan for addresses within larger regions.
      */
     CachedMemoryRegionInfo *find_in_shard(CacheShard &shard,
                                           uintptr_t address,
@@ -219,6 +222,7 @@ namespace MemoryUtilsCacheInternal
                                           uint64_t current_time_ns,
                                           uint64_t expiry_ns) noexcept
     {
+        // Fast path: direct lookup by page-aligned base address
         const uintptr_t base_addr = address & ~static_cast<uintptr_t>(0xFFF);
         auto it = shard.entries.find(base_addr);
         if (it != shard.entries.end())
@@ -229,6 +233,19 @@ namespace MemoryUtilsCacheInternal
                 return &entry;
             }
         }
+
+        // Slow path: scan all entries for a region that contains the queried range.
+        // This handles addresses that fall within a larger region whose base address
+        // differs from the queried page. Shard sizes are bounded so this is fast.
+        for (auto &pair : shard.entries)
+        {
+            CachedMemoryRegionInfo &entry = pair.second;
+            if (is_entry_valid_and_covers(entry, address, size, current_time_ns, expiry_ns))
+            {
+                return &entry;
+            }
+        }
+
         return nullptr;
     }
 
@@ -270,16 +287,6 @@ namespace MemoryUtilsCacheInternal
     }
 
     /**
-     * @brief Generates a unique monotonic LRU key from a per-shard counter.
-     * @param counter The shard's monotonically increasing entry counter.
-     * @return A unique 64-bit key that preserves insertion order for LRU eviction.
-     */
-    constexpr inline uint64_t generate_lru_key(uint64_t counter) noexcept
-    {
-        return counter;
-    }
-
-    /**
      * @brief Updates or inserts a cache entry in a specific shard.
      * @param shard The cache shard to update.
      * @param mbi Memory basic information from VirtualQuery.
@@ -302,7 +309,7 @@ namespace MemoryUtilsCacheInternal
             }
 
             // Update existing entry with new monotonic LRU key
-            const uint64_t new_lru_key = generate_lru_key(shard.entry_counter++);
+            const uint64_t new_lru_key = shard.entry_counter++;
             old_entry.baseAddress = base_addr;
             old_entry.regionSize = mbi.RegionSize;
             old_entry.protection = mbi.Protect;
@@ -328,7 +335,7 @@ namespace MemoryUtilsCacheInternal
             }
 
             // Generate unique monotonic LRU key
-            const uint64_t new_lru_key = generate_lru_key(shard.entry_counter++);
+            const uint64_t new_lru_key = shard.entry_counter++;
 
             CachedMemoryRegionInfo new_entry;
             new_entry.baseAddress = base_addr;
@@ -639,12 +646,10 @@ namespace MemoryUtilsCacheInternal
         }
         else
         {
-            // We are a follower - VirtualQuery already in progress by another thread
-            // Use yield-based waiting to avoid OS scheduler issues with short sleeps
+            // We are a follower - VirtualQuery already in progress by another thread.
+            // Bounded wait to avoid stalling game threads.
             const uint64_t expiry_ns = static_cast<uint64_t>(s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
-
-            // Retry count with yield instead of sleep to avoid scheduler latency
-            constexpr size_t MAX_FOLLOWER_YIELDS = 1000;
+            constexpr size_t MAX_FOLLOWER_YIELDS = 64;
 
             for (size_t yield_count = 0; yield_count < MAX_FOLLOWER_YIELDS; ++yield_count)
             {
@@ -745,7 +750,6 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
             Logger::get_instance().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
         }
 
-        MemoryUtilsCacheInternal::s_cacheInitialized.store(true, std::memory_order_release);
         return true;
     }
 
@@ -810,18 +814,16 @@ void DetourModKit::Memory::shutdown_cache()
 
     // Mark as not initialized and zero shard count.
     // This prevents new readers from entering the critical section.
-    //
-    // seq_cst is required here and on the reader side to establish a Dekker-style
-    // ordering between s_shardCount (written here, read by readers) and
-    // s_activeReaders (written by readers, read below). Without a single total
-    // order, a reader could observe the old shard count after we observe zero
-    // active readers, leading to use-after-free on the destroyed data structures.
-    MemoryUtilsCacheInternal::s_cacheInitialized.store(false, std::memory_order_seq_cst);
-    MemoryUtilsCacheInternal::s_shardCount.store(0, std::memory_order_seq_cst);
+    // acquire/release is sufficient here because the state mutex provides the
+    // cross-thread ordering guarantee. Readers that observe shard_count == 0
+    // immediately exit without touching data structures.
+    MemoryUtilsCacheInternal::s_cacheInitialized.store(false, std::memory_order_release);
+    MemoryUtilsCacheInternal::s_shardCount.store(0, std::memory_order_release);
 
     // Wait for in-flight readers to finish before destroying data structures.
     // Readers increment s_activeReaders on entry and decrement on exit.
-    while (MemoryUtilsCacheInternal::s_activeReaders.load(std::memory_order_seq_cst) > 0)
+    // acquire ordering ensures we see the latest reader decrements.
+    while (MemoryUtilsCacheInternal::s_activeReaders.load(std::memory_order_acquire) > 0)
     {
         std::this_thread::yield();
     }
@@ -873,8 +875,8 @@ std::string DetourModKit::Memory::get_cache_stats()
     size_t total_entries = 0;
     size_t total_hard_max = 0;
 
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
-    const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+    const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     for (size_t i = 0; i < active_shard_count; ++i)
     {
         auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
@@ -918,9 +920,9 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
         return;
 
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
     {
         MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
@@ -943,12 +945,28 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
     if (!address || size == 0)
         return false;
 
-    DetourModKit::Memory::init_cache();
+    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    {
+        // Cache not initialized - fall back to direct VirtualQuery
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(address, &mbi, sizeof(mbi)))
+            return false;
+        if (mbi.State != MEM_COMMIT)
+            return false;
+        if (!MemoryUtilsCacheInternal::check_read_permission(mbi.Protect))
+            return false;
+        const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t query_end = query_addr_val + size;
+        if (query_end < query_addr_val)
+            return false;
+        return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
+    }
 
     // Register as active reader to prevent shutdown from destroying data structures
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
     {
         MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
@@ -960,21 +978,18 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
     const uint64_t now_ns = current_time_ns();
     const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
 
-    // Fast path: shared lock for concurrent read access (multiple readers allowed)
+    // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
     {
-        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
-        if (lock.owns_lock())
+        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
+        CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
+            MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+            query_addr_val, size, now_ns, expiry_ns);
+        if (cached_info)
         {
-            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
-                MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
-                query_addr_val, size, now_ns, expiry_ns);
-            if (cached_info)
-            {
-                const bool result = MemoryUtilsCacheInternal::check_read_permission(cached_info->protection);
-                MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
-                MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
-                return result;
-            }
+            const bool result = MemoryUtilsCacheInternal::check_read_permission(cached_info->protection);
+            MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+            MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
+            return result;
         }
     }
 
@@ -1015,12 +1030,28 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     if (!address || size == 0)
         return false;
 
-    DetourModKit::Memory::init_cache();
+    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    {
+        // Cache not initialized - fall back to direct VirtualQuery
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(address, &mbi, sizeof(mbi)))
+            return false;
+        if (mbi.State != MEM_COMMIT)
+            return false;
+        if (!MemoryUtilsCacheInternal::check_write_permission(mbi.Protect))
+            return false;
+        const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t query_end = query_addr_val + size;
+        if (query_end < query_addr_val)
+            return false;
+        return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
+    }
 
     // Register as active reader to prevent shutdown from destroying data structures
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
+    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_seq_cst);
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
     {
         MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
@@ -1032,21 +1063,18 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     const uint64_t now_ns = current_time_ns();
     const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
 
-    // Fast path: shared lock for concurrent read access (multiple readers allowed)
+    // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
     {
-        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
-        if (lock.owns_lock())
+        std::shared_lock<std::shared_mutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
+        CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
+            MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+            query_addr_val, size, now_ns, expiry_ns);
+        if (cached_info)
         {
-            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
-                MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
-                query_addr_val, size, now_ns, expiry_ns);
-            if (cached_info)
-            {
-                const bool result = MemoryUtilsCacheInternal::check_write_permission(cached_info->protection);
-                MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
-                MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
-                return result;
-            }
+            const bool result = MemoryUtilsCacheInternal::check_write_permission(cached_info->protection);
+            MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+            MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
+            return result;
         }
     }
 

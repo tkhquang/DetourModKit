@@ -990,6 +990,7 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
             readers_entered.fetch_add(1, std::memory_order_release);
             while (keep_reading.load(std::memory_order_acquire))
             {
+                // After shutdown, is_readable falls back to direct VirtualQuery
                 Memory::is_readable(mem, 64);
             } });
     }
@@ -1002,8 +1003,7 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
 
     // Shutdown on a separate thread while readers are still active.
     // shutdown_cache waits for s_activeReaders == 0 before destroying data.
-    // Readers that re-enter is_readable after shutdown will call init_cache,
-    // which blocks on s_cacheStateMutex until shutdown completes.
+    // Readers that re-enter after shutdown use direct VirtualQuery fallback.
     std::thread shutdown_thread([&]()
                                 { Memory::shutdown_cache(); });
 
@@ -1044,6 +1044,136 @@ TEST_F(MemoryTest, ReinitAfterShutdown_DataIntegrity)
         EXPECT_NE(stats.find("Hits:"), std::string::npos);
         EXPECT_NE(stats.find("Misses:"), std::string::npos);
     }
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, NoCacheFallback_Readable)
+{
+    // Shut down cache so is_readable uses direct VirtualQuery fallback
+    Memory::shutdown_cache();
+
+    char buffer[100] = {0};
+    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_FALSE(Memory::is_readable(nullptr, 1));
+    EXPECT_FALSE(Memory::is_readable(buffer, 0));
+
+    // Re-init for TearDown
+    Memory::init_cache();
+}
+
+TEST_F(MemoryTest, NoCacheFallback_Writable)
+{
+    // Shut down cache so is_writable uses direct VirtualQuery fallback
+    Memory::shutdown_cache();
+
+    char buffer[100] = {0};
+    EXPECT_TRUE(Memory::is_writable(buffer, sizeof(buffer)));
+    EXPECT_FALSE(Memory::is_writable(nullptr, 1));
+    EXPECT_FALSE(Memory::is_writable(buffer, 0));
+
+    // Re-init for TearDown
+    Memory::init_cache();
+}
+
+TEST_F(MemoryTest, NoCacheFallback_ReservedMemory)
+{
+    Memory::shutdown_cache();
+
+    void *reserved = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(reserved, nullptr);
+
+    EXPECT_FALSE(Memory::is_readable(reserved, 1));
+    EXPECT_FALSE(Memory::is_writable(reserved, 1));
+
+    VirtualFree(reserved, 0, MEM_RELEASE);
+
+    // Re-init for TearDown
+    Memory::init_cache();
+}
+
+TEST_F(MemoryTest, NoCacheFallback_ReadOnlyMemory)
+{
+    Memory::shutdown_cache();
+
+    void *readonly = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(readonly, nullptr);
+
+    EXPECT_TRUE(Memory::is_readable(readonly, 1));
+    EXPECT_FALSE(Memory::is_writable(readonly, 1));
+
+    VirtualFree(readonly, 0, MEM_RELEASE);
+
+    // Re-init for TearDown
+    Memory::init_cache();
+}
+
+TEST_F(MemoryTest, NoCacheFallback_SizeOverflow)
+{
+    Memory::shutdown_cache();
+
+    char buffer[1] = {0};
+    EXPECT_FALSE(Memory::is_readable(buffer, SIZE_MAX));
+    EXPECT_FALSE(Memory::is_writable(buffer, SIZE_MAX));
+
+    // Re-init for TearDown
+    Memory::init_cache();
+}
+
+TEST_F(MemoryTest, CacheRangeLookup_MidRegionHit)
+{
+    Memory::shutdown_cache();
+    Memory::init_cache(32, 60000, 1);
+
+    // Allocate a large region so VirtualQuery returns a base address that differs
+    // from the queried address within the region
+    void *mem = VirtualAlloc(nullptr, 65536, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    // Prime cache with a query at the region base
+    EXPECT_TRUE(Memory::is_readable(mem, 1));
+
+    // Query at an offset within the same region - should hit cache via range lookup
+    void *mid = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mem) + 8192);
+    EXPECT_TRUE(Memory::is_readable(mid, 64));
+    EXPECT_TRUE(Memory::is_writable(mid, 64));
+
+    std::string stats = Memory::get_cache_stats();
+    auto pos = stats.find("Hits: ");
+    ASSERT_NE(pos, std::string::npos);
+    const uint64_t hits = std::stoull(stats.substr(pos + 6));
+    // At least 2 hits: the mid-region readable and writable checks should hit
+    EXPECT_GE(hits, 2u);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, CacheHitRate_RepeatedAccess)
+{
+    Memory::shutdown_cache();
+    Memory::init_cache(32, 60000, 1);
+
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    // First access is a miss, subsequent accesses should hit
+    for (int i = 0; i < 100; ++i)
+    {
+        EXPECT_TRUE(Memory::is_readable(mem, 64));
+    }
+
+    std::string stats = Memory::get_cache_stats();
+    auto hits_pos = stats.find("Hits: ");
+    auto misses_pos = stats.find("Misses: ");
+    ASSERT_NE(hits_pos, std::string::npos);
+    ASSERT_NE(misses_pos, std::string::npos);
+
+    const uint64_t hits = std::stoull(stats.substr(hits_pos + 6));
+    const uint64_t misses = std::stoull(stats.substr(misses_pos + 8));
+
+    // With 100 queries, expect at least 95% hit rate (first query is miss)
+    EXPECT_GE(hits, 95u);
+    EXPECT_LE(misses, 5u);
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
