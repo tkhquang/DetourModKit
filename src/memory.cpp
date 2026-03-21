@@ -26,6 +26,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <stdexcept>
+#include <cassert>
 #include <cstddef>
 #include <thread>
 #include <condition_variable>
@@ -880,7 +881,8 @@ void DetourModKit::Memory::shutdown_cache()
     MemoryUtilsCacheInternal::s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
     MemoryUtilsCacheInternal::s_lastCleanupTimeNs.store(0, std::memory_order_relaxed);
     MemoryUtilsCacheInternal::s_configuredExpiryMs.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_activeReaders.store(0, std::memory_order_relaxed);
+    assert(MemoryUtilsCacheInternal::s_activeReaders.load(std::memory_order_relaxed) == 0 &&
+           "s_activeReaders must be zero after shutdown wait loop");
     MemoryUtilsCacheInternal::s_cleanupRequested.store(false, std::memory_order_relaxed);
 
     Logger::get_instance().debug("MemoryCache: Shutdown complete.");
