@@ -417,16 +417,17 @@ namespace DetourModKit
 
         LogMessage msg(level, std::move(message));
 
+        // Increment before push so flush cannot observe zero while a message
+        // is already in the queue but not yet counted.
+        pending_messages_.fetch_add(1, std::memory_order_acq_rel);
         if (queue_.try_push(msg))
         {
-            pending_messages_.fetch_add(1, std::memory_order_acq_rel);
             flush_cv_.notify_one();
             return true;
         }
-        else
-        {
-            return handle_overflow(std::move(msg));
-        }
+        // Push failed — undo the pre-increment before entering overflow handling
+        pending_messages_.fetch_sub(1, std::memory_order_acq_rel);
+        return handle_overflow(std::move(msg));
     }
 
     bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
@@ -613,11 +614,13 @@ namespace DetourModKit
             const auto deadline = std::chrono::steady_clock::now() + config_.block_timeout_ms;
             size_t spin_count = 0;
 
+            // Pre-increment so flush sees the in-flight message throughout the retry loop
+            pending_messages_.fetch_add(1, std::memory_order_acq_rel);
+
             while (std::chrono::steady_clock::now() < deadline)
             {
                 if (queue_.try_push(message))
                 {
-                    pending_messages_.fetch_add(1, std::memory_order_acq_rel);
                     flush_cv_.notify_one();
                     return true;
                 }
@@ -636,6 +639,8 @@ namespace DetourModKit
                     std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 }
             }
+            // Timed out — undo the pre-increment
+            pending_messages_.fetch_sub(1, std::memory_order_acq_rel);
             dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
