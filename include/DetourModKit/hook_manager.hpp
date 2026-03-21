@@ -11,6 +11,8 @@
 #include <expected>
 #include <string_view>
 #include <type_traits>
+#include <concepts>
+#include <atomic>
 #include <cassert>
 #include <utility>
 
@@ -84,53 +86,53 @@ namespace DetourModKit
         const std::string &get_name() const noexcept { return m_name; }
         HookType get_type() const noexcept { return m_type; }
         uintptr_t get_target_address() const noexcept { return m_target_address; }
-        HookStatus get_status() const noexcept { return m_status; }
+        HookStatus get_status() const noexcept { return m_status.load(std::memory_order_acquire); }
 
         /**
          * @brief Enables the hook.
-         * @return true if the hook was successfully enabled, false otherwise.
-         * @note This is a Template Method; derived classes implement do_enable().
+         * @return true if the hook was successfully enabled or already active, false otherwise.
+         * @note Uses atomic CAS for lock-free status transitions. Thread-safe without
+         *       requiring external synchronization.
          */
         bool enable()
         {
             if (!is_impl_valid())
                 return false;
-            if (m_status == HookStatus::Active)
-                return true;
-            if (m_status != HookStatus::Disabled)
-                return false;
+
+            auto expected = HookStatus::Disabled;
+            if (!m_status.compare_exchange_strong(expected, HookStatus::Active, std::memory_order_acq_rel))
+                return expected == HookStatus::Active;
 
             if (do_enable())
-            {
-                m_status = HookStatus::Active;
                 return true;
-            }
+
+            m_status.store(HookStatus::Disabled, std::memory_order_release);
             return false;
         }
 
         /**
          * @brief Disables the hook.
-         * @return true if the hook was successfully disabled, false otherwise.
-         * @note This is a Template Method; derived classes implement do_disable().
+         * @return true if the hook was successfully disabled or already disabled, false otherwise.
+         * @note Uses atomic CAS for lock-free status transitions. Thread-safe without
+         *       requiring external synchronization.
          */
         bool disable()
         {
             if (!is_impl_valid())
                 return false;
-            if (m_status == HookStatus::Disabled)
-                return true;
-            if (m_status != HookStatus::Active)
-                return false;
+
+            auto expected = HookStatus::Active;
+            if (!m_status.compare_exchange_strong(expected, HookStatus::Disabled, std::memory_order_acq_rel))
+                return expected == HookStatus::Disabled;
 
             if (do_disable())
-            {
-                m_status = HookStatus::Disabled;
                 return true;
-            }
+
+            m_status.store(HookStatus::Active, std::memory_order_release);
             return false;
         }
 
-        bool is_enabled() const noexcept { return m_status == HookStatus::Active; }
+        bool is_enabled() const noexcept { return m_status.load(std::memory_order_acquire) == HookStatus::Active; }
 
         static std::string_view status_to_string(HookStatus status)
         {
@@ -176,7 +178,7 @@ namespace DetourModKit
         std::string m_name;
         HookType m_type;
         uintptr_t m_target_address;
-        HookStatus m_status;
+        std::atomic<HookStatus> m_status;
 
         Hook(std::string name, HookType type, uintptr_t target_address, HookStatus initial_status)
             : m_name(std::move(name)), m_type(type), m_target_address(target_address), m_status(initial_status) {}
@@ -208,7 +210,7 @@ namespace DetourModKit
          * @return A function pointer of type T to the original function's trampoline.
          */
         template <typename T>
-        T get_original() const
+        T get_original() const noexcept
         {
             return m_safetyhook_impl ? m_safetyhook_impl->original<T>() : nullptr;
         }
@@ -247,7 +249,7 @@ namespace DetourModKit
          * @brief Gets the destination function of this mid-hook.
          * @return safetyhook::MidHookFn The function pointer to the detour.
          */
-        safetyhook::MidHookFn get_destination() const
+        safetyhook::MidHookFn get_destination() const noexcept
         {
             return m_safetyhook_impl ? m_safetyhook_impl->destination() : nullptr;
         }
@@ -284,7 +286,6 @@ namespace DetourModKit
          */
         static HookManager &get_instance();
 
-        explicit HookManager(Logger &logger = Logger::get_instance());
         ~HookManager();
 
         /**
@@ -378,7 +379,7 @@ namespace DetourModKit
          * @param hook_id The name of the hook to remove.
          * @return true if the hook was found and successfully removed, false otherwise.
          */
-        bool remove_hook(const std::string &hook_id);
+        [[nodiscard]] bool remove_hook(const std::string &hook_id);
 
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
@@ -404,7 +405,7 @@ namespace DetourModKit
          * @param hook_id The name of the hook.
          * @return std::optional<HookStatus> The current status, or std::nullopt if not found.
          */
-        std::optional<HookStatus> get_hook_status(const std::string &hook_id) const;
+        [[nodiscard]] std::optional<HookStatus> get_hook_status(const std::string &hook_id) const;
 
         /**
          * @brief Gets a summary of hook counts categorized by their status.
@@ -433,17 +434,17 @@ namespace DetourModKit
          * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
         template <typename F>
+            requires std::invocable<F, InlineHook &>
         [[nodiscard]] auto with_inline_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-            ++m_callback_reentrancy_guard;
-            struct Guard
+            if (get_reentrancy_guard() > 0)
             {
-                int &counter;
-                ~Guard() noexcept { --counter; }
-            } guard{m_callback_reentrancy_guard};
+                m_logger.error("HookManager: Reentrant callback detected in with_inline_hook('{}')! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.", hook_id);
+                return std::nullopt;
+            }
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
@@ -468,21 +469,21 @@ namespace DetourModKit
          *         the lock could not be acquired or the hook was not found.
          */
         template <typename F>
+            requires std::invocable<F, InlineHook &>
         [[nodiscard]] auto try_with_inline_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
+            if (get_reentrancy_guard() > 0)
+            {
+                m_logger.error("HookManager: Reentrant callback detected in try_with_inline_hook('{}')! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.", hook_id);
+                return std::nullopt;
+            }
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;
             }
-            ++m_callback_reentrancy_guard;
-            struct Guard
-            {
-                int &counter;
-                ~Guard() noexcept { --counter; }
-            } guard{m_callback_reentrancy_guard};
+            ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
@@ -505,17 +506,17 @@ namespace DetourModKit
          * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
          */
         template <typename F>
+            requires std::invocable<F, MidHook &>
         [[nodiscard]] auto with_mid_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-            ++m_callback_reentrancy_guard;
-            struct Guard
+            if (get_reentrancy_guard() > 0)
             {
-                int &counter;
-                ~Guard() noexcept { --counter; }
-            } guard{m_callback_reentrancy_guard};
+                m_logger.error("HookManager: Reentrant callback detected in with_mid_hook('{}')! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.", hook_id);
+                return std::nullopt;
+            }
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
@@ -540,21 +541,21 @@ namespace DetourModKit
          *         the lock could not be acquired or the hook was not found.
          */
         template <typename F>
+            requires std::invocable<F, MidHook &>
         [[nodiscard]] auto try_with_mid_hook(const std::string &hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
-            assert(!m_callback_reentrancy_guard && "HookManager: Reentrant callback detected! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.");
+            if (get_reentrancy_guard() > 0)
+            {
+                m_logger.error("HookManager: Reentrant callback detected in try_with_mid_hook('{}')! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.", hook_id);
+                return std::nullopt;
+            }
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;
             }
-            ++m_callback_reentrancy_guard;
-            struct Guard
-            {
-                int &counter;
-                ~Guard() noexcept { --counter; }
-            } guard{m_callback_reentrancy_guard};
+            ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
@@ -564,19 +565,36 @@ namespace DetourModKit
         }
 
     private:
+        explicit HookManager(Logger &logger = Logger::get_instance());
+
         mutable std::shared_mutex m_hooks_mutex;
         std::unordered_map<std::string, std::unique_ptr<Hook>> m_hooks;
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
-        int m_callback_reentrancy_guard{0};
+
+        [[nodiscard]] int &get_reentrancy_guard() noexcept
+        {
+            thread_local int reentrancy_counter{0};
+            return reentrancy_counter;
+        }
+
+        struct ReentrancyGuard
+        {
+            int &counter;
+            explicit ReentrancyGuard(int &cnt) noexcept : counter(cnt) { ++counter; }
+            ~ReentrancyGuard() noexcept { --counter; }
+            ReentrancyGuard(const ReentrancyGuard &) = delete;
+            ReentrancyGuard &operator=(const ReentrancyGuard &) = delete;
+            ReentrancyGuard(ReentrancyGuard &&) = delete;
+            ReentrancyGuard &operator=(ReentrancyGuard &&) = delete;
+        };
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;
 
-        // Non-locking variants - caller must already hold m_hooks_mutex
+        // Non-locking variant - caller must already hold m_hooks_mutex
         bool hook_id_exists_locked(const std::string &hook_id) const;
-        Hook *get_hook_raw_ptr_locked(const std::string &hook_id);
     };
 } // namespace DetourModKit
 
