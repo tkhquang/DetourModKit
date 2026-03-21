@@ -1,10 +1,9 @@
 #ifndef CONFIG_HPP
 #define CONFIG_HPP
 
-#include <vector>
-#include <string>
 #include <functional>
-#include <optional>
+#include <string>
+#include <vector>
 
 namespace DetourModKit
 {
