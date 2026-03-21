@@ -9,7 +9,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 * **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code.
 * **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
-* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
+* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `0x11+0x10+0x72` for Ctrl+Shift+F3). (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
 * **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
 * **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16ms default timeout (one frame at 60fps) to prevent thread starvation, inline buffer optimization for messages of size <=256 bytes (inclusive), and message size validation with truncation for messages larger than 16MB (messages >16MB are truncated to 16MB rather than rejected).
 * **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
@@ -17,6 +17,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **Format Utilities:** Custom formatters for game modding types (memory addresses, byte values, VK codes) with C++20 `std::format` support.
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 * **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
+* **Input System:** Hotkey monitoring with a background polling thread. Supports press (edge-triggered) and hold (level-triggered) input modes with modifier key combinations (AND logic for modifiers, OR logic for trigger keys). Focus-aware by default — key events are ignored when the process does not own the foreground window. Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Features two-phase initialization (construct then start) for safe thread launching, `condition_variable_any` with `stop_token` for responsive cooperative shutdown, exception-safe callback invocation, atomic `is_binding_active()` query for cross-thread state reads (e.g., from render hooks), automatic hold release on shutdown, and integration with the configuration system for loading VK codes from INI files. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
 
 ## Testing
 
@@ -104,6 +105,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── memory.hpp            <-- Memory utilities
     │   │   ├── filesystem.hpp        <-- Filesystem utilities
     │   │   ├── hook_manager.hpp      <-- Hook management
+    │   │   ├── input.hpp             <-- Input/hotkey system
     │   │   ├── logger.hpp            <-- Synchronous logger
     │   │   └── ...
     │   ├── DetourModKit.hpp          <-- Main DetourModKit include
@@ -306,6 +308,8 @@ This method uses a pre-built and installed version of DetourModKit.
 struct ModConfiguration {
     bool enable_greeting_hook = true;
     std::string log_level_setting = "INFO";
+    DMKKeyCombo toggle_combo;
+    DMKKeyCombo hold_scroll_combo;
 } g_mod_config;
 
 // Example Hook: Target function signature
@@ -344,9 +348,19 @@ void InitializeMyMod() {
     async_config.batch_size = 64;
     logger.enable_async_mode(async_config);
 
-    // Register your configuration variables
-    DMKConfig::register_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook", g_mod_config.enable_greeting_hook, true);
-    DMKConfig::register_string("Debug", "LogLevel", "Log Level", g_mod_config.log_level_setting, "INFO");
+    // Register your configuration variables (using callback-based API)
+    DMKConfig::register_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
+        [](bool v) { g_mod_config.enable_greeting_hook = v; }, true);
+    DMKConfig::register_string("Debug", "LogLevel", "Log Level",
+        [](const std::string& v) { g_mod_config.log_level_setting = v; }, "INFO");
+
+    // Register hotkey bindings from INI (modifier+trigger format)
+    // No modifiers: "0x72" or "0x72,0x70" (comma = OR for multiple trigger keys)
+    // With modifiers: "0x11+0x10+0x72" (plus = AND for modifiers, last segment = triggers)
+    DMKConfig::register_key_combo("Hotkeys", "ToggleKey", "Toggle Keys",
+        [](const DMKKeyCombo& c) { g_mod_config.toggle_combo = c; }, "0x72");
+    DMKConfig::register_key_combo("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
+        [](const DMKKeyCombo& c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file
     DMKConfig::load("MyMod.ini");
@@ -354,7 +368,7 @@ void InitializeMyMod() {
     // Apply LogLevel from loaded configuration
     logger.set_log_level(DMKLogger::string_to_log_level(g_mod_config.log_level_setting));
 
-    // Log the loaded configuration using format string placeholders
+    // Log the loaded configuration
     logger.info("MyMod configuration loaded and applied.");
     DMKConfig::log_all();
 
@@ -368,7 +382,6 @@ void InitializeMyMod() {
     if (game_module) {
         MODULEINFO module_info = {0};
         if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info))) {
-            // Using format string placeholders with custom formatters
             logger.debug("Scanning module at {} size {}",
                          DMKFormat::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)),
                          module_info.SizeOfImage);
@@ -386,25 +399,25 @@ void InitializeMyMod() {
                 );
                 if (found_pattern) {
                     target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
-                    logger.info("Pattern for GameFunction_PrintMessage found at: {}, target address: {}",
+                    logger.info("Pattern found at: {}, target address: {}",
                                 DMKFormat::format_address(reinterpret_cast<uintptr_t>(found_pattern)),
                                 DMKFormat::format_address(target_function_address));
                 } else {
-                    logger.error("AOB pattern for GameFunction_PrintMessage not found in target module.");
+                    logger.error("AOB pattern not found in target module.");
                 }
             } else {
-                 logger.error("Failed to parse AOB pattern: {}", aob_sig_str);
+                logger.error("Failed to parse AOB pattern: {}", aob_sig_str);
             }
         } else {
             logger.error("GetModuleInformation failed: {}", GetLastError());
         }
     } else {
-         logger.error("Failed to get game module handle.");
+        logger.error("Failed to get game module handle.");
     }
 
     if (target_function_address != 0) {
         DMKHookConfig hook_cfg;
-        std::string hook_id = hook_manager.create_inline_hook(
+        auto result = hook_manager.create_inline_hook(
             "GameFunction_PrintMessage_Hook",
             target_function_address,
             reinterpret_cast<void*>(Detour_GameFunction_PrintMessage),
@@ -412,39 +425,62 @@ void InitializeMyMod() {
             hook_cfg
         );
 
-        if (!hook_id.empty()) {
-            logger.info("Successfully created hook: {}", hook_id);
+        if (result.has_value()) {
+            logger.info("Successfully created hook: {}", result.value());
         } else {
-            logger.error("Failed to create hook for GameFunction_PrintMessage.");
+            logger.error("Failed to create hook: {}",
+                         DMK::Hook::error_to_string(result.error()));
         }
     } else {
-        logger.warning("Target address for GameFunction_PrintMessage is 0 or not found. Hook not created.");
+        logger.warning("Target address is 0 or not found. Hook not created.");
     }
+
+    // Register hotkey bindings with the InputManager (after hooks are ready)
+    DMKInputManager& input_mgr = DMKInputManager::get_instance();
+
+    if (!g_mod_config.toggle_combo.keys.empty()) {
+        input_mgr.register_press("toggle_view", g_mod_config.toggle_combo.keys,
+            g_mod_config.toggle_combo.modifiers, []() {
+                DMKLogger::get_instance().info("Toggle key pressed!");
+            });
+    }
+
+    if (!g_mod_config.hold_scroll_combo.keys.empty()) {
+        input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_combo.keys,
+            g_mod_config.hold_scroll_combo.modifiers, [](bool held) {
+                DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
+            });
+    }
+
+    // Start the input polling thread (focus-aware by default)
+    input_mgr.start();
 
     logger.info("MyMod Initialized using DetourModKit!");
 }
 
-// Mod Shutdown Function (optional)
+// Mod Shutdown Function
 void ShutdownMyMod() {
-    DMKLogger& logger = DMKLogger::get_instance();
-    logger.info("MyMod Shutting Down...");
+    DMKLogger::get_instance().info("MyMod Shutting Down...");
 
-    DMKHookManager::get_instance().remove_all_hooks();
-    DMKConfig::clear_registered_items();
-
-    // Flush any pending async log messages
-    logger.flush();
-
-    logger.info("MyMod Shutdown Complete.");
+    // Shuts down all singletons in correct dependency order:
+    // InputManager -> HookManager -> Memory cache -> Config -> Logger
+    DMK_Shutdown();
 }
 
-// DLL Main or equivalent entry point
+// WARNING: Calling join() on a thread inside DllMain can deadlock due to the
+// loader lock. Offload initialization to a worker thread so start() runs
+// outside DllMain, and call DMK_Shutdown() before DLL_PROCESS_DETACH
+// (e.g., from a game shutdown hook or an explicit trigger).
+
+static DWORD WINAPI InitThread(LPVOID) {
+    InitializeMyMod();
+    return 0;
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        InitializeMyMod();
-    } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
-        ShutdownMyMod();
+        CloseHandle(CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr));
     }
     return TRUE;
 }
@@ -462,7 +498,9 @@ EnableGreetingHook=true
 LogLevel=INFO
 
 [Hotkeys]
-ToggleKey=0x72,0x70  # F3, F1 (hex VK codes)
+ToggleKey=0x72,0x70    ; F3, F1 (hex VK codes, comma = OR)
+HoldScrollKey=0xA0     ; Left Shift
+DebugCombo=0x11+0x10+0x44  ; Ctrl+Shift+D (plus = AND for modifiers, last = trigger)
 ```
 
 ## Projects Using DetourModKit
