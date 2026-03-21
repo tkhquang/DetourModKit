@@ -474,8 +474,8 @@ namespace MemoryUtilsCacheInternal
 
         for (size_t i = 0; i < shard_count; ++i)
         {
-            std::unique_lock<SrwSharedMutex> lock(*s_shardMutexes[i], std::try_to_lock);
-            if (lock.owns_lock())
+            std::unique_lock<SrwSharedMutex> shard_lock(*s_shardMutexes[i], std::try_to_lock);
+            if (shard_lock.owns_lock())
             {
                 cleanup_expired_entries_in_shard(s_cacheShards[i], current_ts, expiry_ns);
                 // Also trim to hard upper bound
