@@ -64,9 +64,12 @@ inline void DMK_Shutdown()
     // 1. HookManager first (may have been logging via Logger)
     DetourModKit::HookManager::get_instance().shutdown();
 
-    // 2. Clear registered config items (static vector cleanup)
+    // 2. Memory cache (background cleanup thread must stop before Logger shuts down)
+    DetourModKit::Memory::shutdown_cache();
+
+    // 3. Clear registered config items (static vector cleanup)
     DetourModKit::Config::clear_registered_items();
 
-    // 3. Logger last (no more logging after this)
+    // 4. Logger last (no more logging after this)
     DetourModKit::Logger::get_instance().shutdown();
 }
