@@ -1,5 +1,4 @@
-#ifndef FORMAT_HPP
-#define FORMAT_HPP
+#pragma once
 
 /**
  * @file format.hpp
@@ -103,7 +102,10 @@ namespace DetourModKit
                 return "[]";
             }
 
-            std::string result = "[";
+            // "0x" + 2+ hex digits ≈ 4 chars per entry, plus ", " separator
+            std::string result;
+            result.reserve(1 + values.size() * 6 + 1);
+            result += '[';
             for (size_t i = 0; i < values.size(); ++i)
             {
                 if (i > 0)
@@ -112,7 +114,7 @@ namespace DetourModKit
                 }
                 result += format_hex(values[i], 2);
             }
-            result += "]";
+            result += ']';
             return result;
         }
 
@@ -138,5 +140,3 @@ namespace DetourModKit
 
     } // namespace Format
 } // namespace DetourModKit
-
-#endif // FORMAT_HPP
