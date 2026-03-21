@@ -3,7 +3,7 @@
  * @file math.hpp
  * @brief Provides basic mathematical utility functions.
  */
-#include <DirectXMath.h>
+#include <numbers>
 
 namespace DetourModKit
 {
@@ -12,13 +12,13 @@ namespace DetourModKit
         /// Converts an angle from degrees to radians.
         constexpr float degrees_to_radians(float degrees) noexcept
         {
-            return degrees * (DirectX::XM_PI / 180.0f);
+            return degrees * (std::numbers::pi_v<float> / 180.0f);
         }
 
         /// Converts an angle from radians to degrees.
         constexpr float radians_to_degrees(float radians) noexcept
         {
-            return radians * (180.0f / DirectX::XM_PI);
+            return radians * (180.0f / std::numbers::pi_v<float>);
         }
 
     } // namespace Math

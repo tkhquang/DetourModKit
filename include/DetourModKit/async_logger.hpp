@@ -82,7 +82,8 @@ namespace DetourModKit
         StringPool();
         ~StringPool() noexcept;
 
-        void grow_pool();
+        /// Must be called with pool_mutex_ held.
+        void grow_pool_locked();
         PoolSlot *claim_free_slot() noexcept;
         void release_slot(PoolSlot *slot) noexcept;
 

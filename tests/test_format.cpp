@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <climits>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -157,4 +160,50 @@ TEST(FormatTest, FormatAddress_Width)
 
     std::string result_max = Format::format_address(UINTPTR_MAX);
     EXPECT_EQ(result_max.size(), sizeof(uintptr_t) * 2 + 2);
+}
+
+TEST(FormatTest, FormatHex_PtrdiffPositive)
+{
+    ptrdiff_t value = 0x1234;
+    std::string result = Format::format_hex(value);
+    EXPECT_EQ(result, "0x1234");
+}
+
+TEST(FormatTest, FormatHex_PtrdiffNegative)
+{
+    ptrdiff_t value = -0x10;
+    std::string result = Format::format_hex(value);
+    EXPECT_EQ(result, "-0x10");
+}
+
+TEST(FormatTest, FormatHex_PtrdiffZero)
+{
+    ptrdiff_t value = 0;
+    std::string result = Format::format_hex(value);
+    EXPECT_EQ(result, "0x0");
+}
+
+TEST(FormatTest, FormatHex_PtrdiffMinNoUB)
+{
+    // This previously caused signed overflow UB via -PTRDIFF_MIN
+    ptrdiff_t value = PTRDIFF_MIN;
+    std::string result = Format::format_hex(value);
+    EXPECT_FALSE(result.empty());
+    EXPECT_EQ(result.substr(0, 1), "-");
+    EXPECT_NE(result.find("0x"), std::string::npos);
+}
+
+TEST(FormatTest, FormatHex_PtrdiffMax)
+{
+    ptrdiff_t value = PTRDIFF_MAX;
+    std::string result = Format::format_hex(value);
+    EXPECT_FALSE(result.empty());
+    EXPECT_EQ(result.substr(0, 2), "0x");
+}
+
+TEST(FormatTest, FormatHex_PtrdiffMinusOne)
+{
+    ptrdiff_t value = -1;
+    std::string result = Format::format_hex(value);
+    EXPECT_EQ(result, "-0x1");
 }

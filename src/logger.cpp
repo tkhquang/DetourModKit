@@ -62,9 +62,11 @@ namespace DetourModKit
 
     void Logger::reconfigure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
     {
-        std::lock_guard<std::mutex> lock(*log_mutex_ptr_);
+        // Acquire both async_mutex_ and log_mutex_ to prevent concurrent log() calls
+        // from reading partially-updated string members during reconfiguration
+        std::scoped_lock lock(async_mutex_, *log_mutex_ptr_);
 
-        shutdown_called_ = false;
+        shutdown_called_.store(false, std::memory_order_release);
 
         if (log_file_stream_ptr_->is_open() && log_file_stream_ptr_->good())
         {
@@ -234,6 +236,12 @@ namespace DetourModKit
                 *log_file_stream_ptr_ << "[" << get_timestamp() << "] "
                                       << "[" << std::setw(7) << std::left << level_str << "] :: "
                                       << message << '\n';
+
+                // Flush on warnings/errors to ensure critical messages survive crashes
+                if (level >= LogLevel::Warning)
+                {
+                    log_file_stream_ptr_->flush();
+                }
             }
             else if (level >= LogLevel::Error)
             {
@@ -257,13 +265,17 @@ namespace DetourModKit
             {
                 throw std::runtime_error("localtime_s failed to convert time.");
             }
-#else
-            std::tm *timeinfo_ptr = std::localtime(&in_time_t);
-            if (!timeinfo_ptr)
+#elif defined(__MINGW32__) || defined(__MINGW64__)
+            // MinGW: localtime_s has reversed parameter order (ISO C11 Annex K)
+            if (localtime_s(&timeinfo_struct, &in_time_t) != 0)
             {
-                throw std::runtime_error("std::localtime returned a null pointer.");
+                throw std::runtime_error("localtime_s failed to convert time.");
             }
-            timeinfo_struct = *timeinfo_ptr;
+#else
+            if (localtime_r(&in_time_t, &timeinfo_struct) == nullptr)
+            {
+                throw std::runtime_error("localtime_r failed to convert time.");
+            }
 #endif
             std::ostringstream oss;
             oss << std::put_time(&timeinfo_struct, timestamp_format_.c_str());

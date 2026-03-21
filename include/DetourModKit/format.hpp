@@ -76,7 +76,11 @@ namespace DetourModKit
         inline std::string format_hex(ptrdiff_t value)
         {
             if (value < 0)
-                return std::format("-0x{:X}", static_cast<size_t>(-value));
+            {
+                // Two's complement negation via unsigned cast avoids UB on PTRDIFF_MIN
+                const auto magnitude = static_cast<size_t>(~static_cast<size_t>(value) + 1u);
+                return std::format("-0x{:X}", magnitude);
+            }
             return std::format("0x{:X}", static_cast<size_t>(value));
         }
 

@@ -1300,3 +1300,144 @@ TEST_F(AsyncLoggerTest, MultiThread_EnqueueStress)
 
     logger.shutdown();
 }
+
+TEST(StringPoolTest, AllocateDeallocate_BasicCycle)
+{
+    auto &pool = StringPool::instance();
+
+    std::string *s = pool.allocate(32);
+    ASSERT_NE(s, nullptr);
+
+    s->assign("hello pool");
+    EXPECT_EQ(*s, "hello pool");
+
+    pool.deallocate(s);
+}
+
+TEST(StringPoolTest, AllocateDeallocate_MultipleSlots)
+{
+    auto &pool = StringPool::instance();
+
+    constexpr size_t kCount = 32;
+    std::vector<std::string *> ptrs;
+    ptrs.reserve(kCount);
+
+    for (size_t i = 0; i < kCount; ++i)
+    {
+        std::string *s = pool.allocate(64);
+        ASSERT_NE(s, nullptr);
+        s->assign("slot_" + std::to_string(i));
+        ptrs.push_back(s);
+    }
+
+    for (size_t i = 0; i < kCount; ++i)
+    {
+        EXPECT_EQ(*ptrs[i], "slot_" + std::to_string(i));
+    }
+
+    for (auto *p : ptrs)
+    {
+        pool.deallocate(p);
+    }
+}
+
+TEST(StringPoolTest, HeapFallback_OversizedAllocation)
+{
+    auto &pool = StringPool::instance();
+
+    std::string *s = pool.allocate(MEMORY_POOL_BLOCK_SIZE);
+    ASSERT_NE(s, nullptr);
+
+    s->assign("heap fallback string");
+    EXPECT_EQ(*s, "heap fallback string");
+
+    pool.deallocate(s);
+}
+
+TEST(StringPoolTest, ConcurrentAllocateDeallocate)
+{
+    auto &pool = StringPool::instance();
+
+    constexpr int kThreads = 4;
+    constexpr int kOpsPerThread = 100;
+    std::atomic<int> success_count{0};
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t)
+    {
+        threads.emplace_back([&, t]()
+                             {
+            for (int i = 0; i < kOpsPerThread; ++i)
+            {
+                std::string *s = pool.allocate(32);
+                if (s)
+                {
+                    s->assign("t" + std::to_string(t) + "_" + std::to_string(i));
+                    success_count.fetch_add(1, std::memory_order_relaxed);
+                    pool.deallocate(s);
+                }
+            } });
+    }
+
+    for (auto &th : threads)
+    {
+        th.join();
+    }
+
+    EXPECT_EQ(success_count.load(), kThreads * kOpsPerThread);
+}
+
+TEST(StringPoolTest, ReuseAfterDeallocate)
+{
+    auto &pool = StringPool::instance();
+
+    std::string *s1 = pool.allocate(16);
+    ASSERT_NE(s1, nullptr);
+    s1->assign("first");
+    pool.deallocate(s1);
+
+    std::string *s2 = pool.allocate(16);
+    ASSERT_NE(s2, nullptr);
+    s2->assign("second");
+    EXPECT_EQ(*s2, "second");
+    pool.deallocate(s2);
+}
+
+TEST(LogMessageTest, Reset_ClearsOverflow)
+{
+    std::string long_msg(LogMessage::MAX_INLINE_SIZE + 100, 'Z');
+    LogMessage msg(LogLevel::Info, long_msg);
+    EXPECT_NE(msg.overflow, nullptr);
+    EXPECT_TRUE(msg.is_valid());
+
+    msg.reset();
+
+    EXPECT_EQ(msg.overflow, nullptr);
+    EXPECT_EQ(msg.length, 0u);
+    EXPECT_EQ(msg.message().size(), 0u);
+}
+
+TEST(LogMessageTest, Reset_InlineMessage)
+{
+    LogMessage msg(LogLevel::Info, "short message");
+    EXPECT_EQ(msg.overflow, nullptr);
+    EXPECT_TRUE(msg.is_valid());
+
+    msg.reset();
+
+    EXPECT_EQ(msg.length, 0u);
+    EXPECT_EQ(msg.message().size(), 0u);
+}
+
+TEST(LogMessageTest, MoveOverflowMessage_ClearsSource)
+{
+    std::string long_msg(LogMessage::MAX_INLINE_SIZE + 50, 'Q');
+    LogMessage src(LogLevel::Error, long_msg);
+    ASSERT_NE(src.overflow, nullptr);
+
+    LogMessage dst(std::move(src));
+
+    EXPECT_NE(dst.overflow, nullptr);
+    EXPECT_EQ(dst.message().size(), LogMessage::MAX_INLINE_SIZE + 50);
+    EXPECT_EQ(src.overflow, nullptr);
+}

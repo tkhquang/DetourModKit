@@ -100,7 +100,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── async_logger.hpp      <-- Async logging system
     │   │   ├── config.hpp
     │   │   ├── format.hpp            <-- Format utilities
-    │   │   ├── math.hpp              <-- DirectXMath-powered math utilities
+    │   │   ├── math.hpp              <-- Math utilities (angle conversions)
     │   │   ├── memory.hpp            <-- Memory utilities
     │   │   ├── filesystem.hpp        <-- Filesystem utilities
     │   │   ├── hook_manager.hpp      <-- Hook management
