@@ -17,7 +17,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **Format Utilities:** Custom formatters for game modding types (memory addresses, byte values, VK codes) with C++20 `std::format` support.
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 * **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
-* **Input System:** Hotkey monitoring with a background polling thread. Supports press (edge-triggered) and hold (level-triggered) input modes. Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Features two-phase initialization (construct then start) for safe thread launching, `condition_variable_any` with `stop_token` for responsive cooperative shutdown, exception-safe callback invocation, and integration with the configuration system for loading VK codes from INI files. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
+* **Input System:** Hotkey monitoring with a background polling thread. Supports press (edge-triggered) and hold (level-triggered) input modes with modifier key combinations (AND logic for modifiers, OR logic for trigger keys). Focus-aware by default — key events are ignored when the process does not own the foreground window. Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Features two-phase initialization (construct then start) for safe thread launching, `condition_variable_any` with `stop_token` for responsive cooperative shutdown, exception-safe callback invocation, atomic `is_binding_active()` query for cross-thread state reads (e.g., from render hooks), automatic hold release on shutdown, and integration with the configuration system for loading VK codes from INI files. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
 
 ## Testing
 
@@ -448,7 +448,12 @@ void InitializeMyMod() {
         });
     }
 
-    // Start the input polling thread
+    // Register with modifier keys (Ctrl+Shift+D triggers only when both modifiers held)
+    input_mgr.register_press("debug_menu", {0x44}, {VK_CONTROL, VK_SHIFT}, []() {
+        DMKLogger::get_instance().info("Debug menu toggled!");
+    });
+
+    // Start the input polling thread (focus-aware by default)
     input_mgr.start();
 
     logger.info("MyMod Initialized using DetourModKit!");

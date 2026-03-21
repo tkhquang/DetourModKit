@@ -518,3 +518,294 @@ TEST_F(InputManagerTest, ConcurrentAccess)
 
     EXPECT_EQ(mgr.binding_count(), static_cast<size_t>(thread_count * ops_per_thread));
 }
+
+// --- InputPoller: Focus, Modifiers, Active State ---
+
+TEST_F(InputPollerTest, DefaultRequiresFocus)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings));
+
+    // Default require_focus is true; poller should start and run normally
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, ExplicitRequireFocusFalse)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings), DEFAULT_POLL_INTERVAL, false);
+
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, SetRequireFocusWhileRunning)
+{
+    std::vector<InputBinding> bindings;
+    InputPoller poller(std::move(bindings), DEFAULT_POLL_INTERVAL, true);
+
+    poller.start();
+    EXPECT_TRUE(poller.is_running());
+
+    // Changing focus requirement at runtime should not crash
+    poller.set_require_focus(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.set_require_focus(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, IsBindingActiveByIndexOutOfRange)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "test";
+    binding.keys = {0x41};
+    binding.mode = InputMode::Press;
+    binding.on_press = []() {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+
+    EXPECT_FALSE(poller.is_binding_active(0));
+    EXPECT_FALSE(poller.is_binding_active(1));
+    EXPECT_FALSE(poller.is_binding_active(999));
+}
+
+TEST_F(InputPollerTest, IsBindingActiveByName)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "test_binding";
+    binding.keys = {0x41};
+    binding.mode = InputMode::Press;
+    binding.on_press = []() {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+
+    EXPECT_FALSE(poller.is_binding_active("test_binding"));
+    EXPECT_FALSE(poller.is_binding_active("nonexistent"));
+    EXPECT_FALSE(poller.is_binding_active(""));
+}
+
+TEST_F(InputPollerTest, IsBindingActiveWhileRunning)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "active_test";
+    binding.keys = {0x41};
+    binding.mode = InputMode::Hold;
+    binding.on_state_change = [](bool) {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+    poller.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+
+    // No keys pressed in test environment
+    EXPECT_FALSE(poller.is_binding_active(0));
+    EXPECT_FALSE(poller.is_binding_active("active_test"));
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, ModifierBindingConstruction)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "ctrl_shift_a";
+    binding.keys = {0x41};
+    binding.modifiers = {0x11, 0x10}; // VK_CONTROL, VK_SHIFT
+    binding.mode = InputMode::Press;
+    binding.on_press = []() {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+
+    EXPECT_EQ(poller.binding_count(), 1u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, EmptyModifiersBackwardCompatible)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "no_mods";
+    binding.keys = {0x41};
+    // modifiers left empty (default)
+    binding.mode = InputMode::Press;
+    binding.on_press = []() {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+    poller.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, HoldBindingShutdownSafety)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "hold_shutdown_test";
+    binding.keys = {0x41};
+    binding.mode = InputMode::Hold;
+    binding.on_state_change = [](bool) {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+    poller.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+
+    // Shutdown with hold bindings should complete cleanly
+    EXPECT_NO_THROW(poller.shutdown());
+    EXPECT_FALSE(poller.is_running());
+    EXPECT_FALSE(poller.is_binding_active(0));
+}
+
+// --- InputManager: Focus, Modifiers, Active State ---
+
+TEST_F(InputManagerTest, RegisterPressWithModifiers)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("ctrl_a", {0x41}, {0x11}, []() {}); // Ctrl+A
+
+    EXPECT_EQ(mgr.binding_count(), 1u);
+}
+
+TEST_F(InputManagerTest, RegisterHoldWithModifiers)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_hold("shift_hold", {0x41}, {0x10}, [](bool) {}); // Shift+A
+
+    EXPECT_EQ(mgr.binding_count(), 1u);
+}
+
+TEST_F(InputManagerTest, RegisterMixedModifierBindings)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("plain", {0x41}, []() {});
+    mgr.register_press("ctrl_b", {0x42}, {0x11}, []() {});
+    mgr.register_hold("shift_c", {0x43}, {0x10, 0x11}, [](bool) {}); // Ctrl+Shift+C
+
+    EXPECT_EQ(mgr.binding_count(), 3u);
+}
+
+TEST_F(InputManagerTest, SetRequireFocusBeforeStart)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.set_require_focus(false);
+    mgr.register_press("test", {0x41}, []() {});
+    mgr.start();
+
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, SetRequireFocusWhileRunning)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("test", {0x41}, []() {});
+    mgr.start();
+
+    EXPECT_TRUE(mgr.is_running());
+
+    // Should not crash or affect running state
+    mgr.set_require_focus(false);
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.set_require_focus(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, IsBindingActiveNotRunning)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("test", {0x41}, []() {});
+
+    // Not started yet
+    EXPECT_FALSE(mgr.is_binding_active("test"));
+    EXPECT_FALSE(mgr.is_binding_active("nonexistent"));
+}
+
+TEST_F(InputManagerTest, IsBindingActiveWhileRunning)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("press_q", {0x51}, []() {});
+    mgr.register_hold("hold_w", {0x57}, [](bool) {});
+    mgr.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+
+    // No keys pressed in test environment
+    EXPECT_FALSE(mgr.is_binding_active("press_q"));
+    EXPECT_FALSE(mgr.is_binding_active("hold_w"));
+    EXPECT_FALSE(mgr.is_binding_active("nonexistent"));
+
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, IsBindingActiveAfterShutdown)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("test", {0x41}, []() {});
+    mgr.start();
+    mgr.shutdown();
+
+    EXPECT_FALSE(mgr.is_binding_active("test"));
+}
+
+TEST_F(InputManagerTest, ModifierBindingsIgnoredWhileRunning)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("before", {0x41}, []() {});
+    mgr.start();
+
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    mgr.register_press("after", {0x42}, {0x11}, []() {});
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    mgr.register_hold("after_hold", {0x43}, {0x10}, [](bool) {});
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    mgr.shutdown();
+}

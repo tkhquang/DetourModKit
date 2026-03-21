@@ -4,7 +4,8 @@
  *
  * Provides InputPoller (RAII polling engine) and InputManager (singleton wrapper)
  * for monitoring virtual key states on a background thread. Supports press
- * (edge-triggered) and hold (level-triggered) input modes.
+ * (edge-triggered) and hold (level-triggered) input modes with modifier key
+ * combinations and focus-aware polling.
  */
 
 #include "DetourModKit/input.hpp"
@@ -19,10 +20,12 @@ namespace DetourModKit
     // --- InputPoller ---
 
     InputPoller::InputPoller(std::vector<InputBinding> bindings,
-                             std::chrono::milliseconds poll_interval)
+                             std::chrono::milliseconds poll_interval,
+                             bool require_focus)
         : bindings_(std::move(bindings)),
           poll_interval_(std::clamp(poll_interval, MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)),
-          prev_states_(bindings_.size(), 0)
+          require_focus_(require_focus),
+          active_states_(std::make_unique<std::atomic<uint8_t>[]>(bindings_.size()))
     {
     }
 
@@ -35,6 +38,7 @@ namespace DetourModKit
     {
         if (poll_thread_.joinable())
         {
+            Logger::get_instance().warning("InputPoller: start() called while already running");
             return;
         }
 
@@ -57,6 +61,32 @@ namespace DetourModKit
         return poll_interval_;
     }
 
+    bool InputPoller::is_binding_active(size_t index) const noexcept
+    {
+        if (index >= bindings_.size())
+        {
+            return false;
+        }
+        return active_states_[index].load(std::memory_order_relaxed) != 0;
+    }
+
+    bool InputPoller::is_binding_active(const std::string &name) const noexcept
+    {
+        for (size_t i = 0; i < bindings_.size(); ++i)
+        {
+            if (bindings_[i].name == name)
+            {
+                return active_states_[i].load(std::memory_order_relaxed) != 0;
+            }
+        }
+        return false;
+    }
+
+    void InputPoller::set_require_focus(bool require_focus) noexcept
+    {
+        require_focus_.store(require_focus, std::memory_order_relaxed);
+    }
+
     void InputPoller::shutdown() noexcept
     {
         if (!poll_thread_.joinable())
@@ -67,6 +97,8 @@ namespace DetourModKit
         poll_thread_.request_stop();
         cv_.notify_all();
         poll_thread_.join();
+
+        release_active_holds();
     }
 
     void InputPoller::poll_loop(std::stop_token stop_token)
@@ -75,6 +107,9 @@ namespace DetourModKit
 
         while (!stop_token.stop_requested())
         {
+            const bool process_focused =
+                !require_focus_.load(std::memory_order_relaxed) || is_process_foreground();
+
             for (size_t i = 0; i < count; ++i)
             {
                 const auto &binding = bindings_[i];
@@ -84,16 +119,34 @@ namespace DetourModKit
                 }
 
                 bool any_pressed = false;
-                for (const int vk : binding.keys)
+
+                if (process_focused)
                 {
-                    if (vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0)
+                    bool modifiers_held = true;
+                    for (const int mod : binding.modifiers)
                     {
-                        any_pressed = true;
-                        break;
+                        if (mod != 0 && (GetAsyncKeyState(mod) & 0x8000) == 0)
+                        {
+                            modifiers_held = false;
+                            break;
+                        }
+                    }
+
+                    if (modifiers_held)
+                    {
+                        for (const int vk : binding.keys)
+                        {
+                            if (vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0)
+                            {
+                                any_pressed = true;
+                                break;
+                            }
+                        }
                     }
                 }
 
-                const bool was_active = (prev_states_[i] != 0);
+                const bool was_active =
+                    active_states_[i].load(std::memory_order_relaxed) != 0;
 
                 switch (binding.mode)
                 {
@@ -121,7 +174,7 @@ namespace DetourModKit
                             }
                         }
                     }
-                    prev_states_[i] = any_pressed ? 1 : 0;
+                    active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
                     break;
                 }
                 case InputMode::Hold:
@@ -148,7 +201,7 @@ namespace DetourModKit
                             }
                         }
                     }
-                    prev_states_[i] = any_pressed ? 1 : 0;
+                    active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
                     break;
                 }
                 }
@@ -160,9 +213,60 @@ namespace DetourModKit
         }
     }
 
+    void InputPoller::release_active_holds() noexcept
+    {
+        for (size_t i = 0; i < bindings_.size(); ++i)
+        {
+            if (active_states_[i].load(std::memory_order_relaxed) != 0)
+            {
+                active_states_[i].store(0, std::memory_order_relaxed);
+
+                const auto &binding = bindings_[i];
+                if (binding.mode == InputMode::Hold && binding.on_state_change)
+                {
+                    try
+                    {
+                        binding.on_state_change(false);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        Logger::get_instance().error(
+                            "InputPoller: Exception in hold release callback \"{}\": {}",
+                            binding.name, e.what());
+                    }
+                    catch (...)
+                    {
+                        Logger::get_instance().error(
+                            "InputPoller: Unknown exception in hold release callback \"{}\"",
+                            binding.name);
+                    }
+                }
+            }
+        }
+    }
+
+    bool InputPoller::is_process_foreground() const
+    {
+        HWND foreground = GetForegroundWindow();
+        if (!foreground)
+        {
+            return false;
+        }
+        DWORD foreground_pid = 0;
+        GetWindowThreadProcessId(foreground, &foreground_pid);
+        return foreground_pid == GetCurrentProcessId();
+    }
+
     // --- InputManager ---
 
     void InputManager::register_press(const std::string &name, const std::vector<int> &keys,
+                                      std::function<void()> callback)
+    {
+        register_press(name, keys, {}, std::move(callback));
+    }
+
+    void InputManager::register_press(const std::string &name, const std::vector<int> &keys,
+                                      const std::vector<int> &modifiers,
                                       std::function<void()> callback)
     {
         std::lock_guard lock(mutex_);
@@ -177,12 +281,20 @@ namespace DetourModKit
         InputBinding binding;
         binding.name = name;
         binding.keys = keys;
+        binding.modifiers = modifiers;
         binding.mode = InputMode::Press;
         binding.on_press = std::move(callback);
         pending_bindings_.push_back(std::move(binding));
     }
 
     void InputManager::register_hold(const std::string &name, const std::vector<int> &keys,
+                                     std::function<void(bool)> callback)
+    {
+        register_hold(name, keys, {}, std::move(callback));
+    }
+
+    void InputManager::register_hold(const std::string &name, const std::vector<int> &keys,
+                                     const std::vector<int> &modifiers,
                                      std::function<void(bool)> callback)
     {
         std::lock_guard lock(mutex_);
@@ -197,9 +309,20 @@ namespace DetourModKit
         InputBinding binding;
         binding.name = name;
         binding.keys = keys;
+        binding.modifiers = modifiers;
         binding.mode = InputMode::Hold;
         binding.on_state_change = std::move(callback);
         pending_bindings_.push_back(std::move(binding));
+    }
+
+    void InputManager::set_require_focus(bool require_focus)
+    {
+        std::lock_guard lock(mutex_);
+        require_focus_ = require_focus;
+        if (poller_)
+        {
+            poller_->set_require_focus(require_focus);
+        }
     }
 
     void InputManager::start(std::chrono::milliseconds poll_interval)
@@ -208,6 +331,7 @@ namespace DetourModKit
 
         if (poller_)
         {
+            Logger::get_instance().warning("InputManager: start() called while already running");
             return;
         }
 
@@ -226,7 +350,8 @@ namespace DetourModKit
                         input_mode_to_string(binding.mode), binding.name, binding.keys.size());
         }
 
-        poller_ = std::make_unique<InputPoller>(std::move(pending_bindings_), poll_interval);
+        poller_ = std::make_unique<InputPoller>(std::move(pending_bindings_), poll_interval,
+                                                require_focus_);
         pending_bindings_.clear();
         poller_->start();
     }
@@ -245,6 +370,16 @@ namespace DetourModKit
             return poller_->binding_count();
         }
         return pending_bindings_.size();
+    }
+
+    bool InputManager::is_binding_active(const std::string &name) const noexcept
+    {
+        std::lock_guard lock(mutex_);
+        if (poller_)
+        {
+            return poller_->is_binding_active(name);
+        }
+        return false;
     }
 
     void InputManager::shutdown() noexcept
