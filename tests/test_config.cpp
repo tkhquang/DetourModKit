@@ -546,6 +546,37 @@ TEST_F(ConfigTest, RegisterKeyList_DefaultOverflow)
     EXPECT_EQ(val[0], 0x43);
 }
 
+// Tests that hex values exceeding INT_MAX are skipped by the range check
+TEST_F(ConfigTest, KeyList_ValueExceedingIntMax)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    // 0x80000000 = 2147483648 which exceeds INT_MAX (2147483647) on 32-bit int
+    ini_file << "Keys=0x80000000, 0x41\n";
+    ini_file.close();
+
+    std::vector<int> test_value;
+    Config::register_key_list("TestSection", "Keys", "keys", [&test_value](const std::vector<int> &v)
+                                    { test_value = v; }, "");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    EXPECT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0], 0x41);
+}
+
+// Tests that hex values exceeding INT_MAX in default string are skipped
+TEST_F(ConfigTest, RegisterKeyList_DefaultValueExceedingIntMax)
+{
+    std::vector<int> val;
+    // 0x80000000 exceeds INT_MAX, should be skipped
+    Config::register_key_list("S", "K4", "k4", [&val](const std::vector<int> &v)
+                                    { val = v; }, "0x80000000, 0x44");
+    Config::load(test_ini_file_.string());
+    EXPECT_EQ(val.size(), 1u);
+    EXPECT_EQ(val[0], 0x44);
+}
+
 TEST_F(ConfigTest, DuplicateKeyRegistration)
 {
     std::ofstream ini_file(test_ini_file_);

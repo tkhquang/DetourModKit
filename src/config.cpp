@@ -15,17 +15,15 @@
 #include "SimpleIni.h"
 
 #include <windows.h>
+#include <cerrno>
+#include <cstdlib>
 #include <filesystem>
-#include <cctype>
-#include <algorithm>
-#include <string>
-#include <stdexcept>
-#include <sstream>
-#include <vector>
+#include <limits>
 #include <memory>
-#include <variant>
-#include <typeinfo>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <vector>
 
 using namespace DetourModKit;
 using namespace DetourModKit::Filesystem;
@@ -34,6 +32,77 @@ using namespace DetourModKit::String;
 // Anonymous namespace for internal helpers and storage
 namespace
 {
+    /**
+     * @brief Parses a comma-separated string of hex values into a vector of ints.
+     * @details Handles 0x/0X prefixes, inline semicolon comments, whitespace,
+     *          and gracefully skips invalid or out-of-range tokens.
+     * @param input The raw string to parse.
+     * @return std::vector<int> Parsed valid hex values.
+     */
+    std::vector<int> parse_hex_key_list(const std::string &input)
+    {
+        std::vector<int> result;
+
+        // Strip trailing comment from the full line
+        const size_t comment_pos = input.find(';');
+        const std::string effective = trim(
+            (comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
+        if (effective.empty())
+        {
+            return result;
+        }
+
+        // Walk comma-delimited tokens without istringstream overhead
+        size_t pos = 0;
+        while (pos < effective.size())
+        {
+            const size_t comma = effective.find(',', pos);
+            const size_t end = (comma != std::string::npos) ? comma : effective.size();
+            const std::string token = trim(effective.substr(pos, end - pos));
+            pos = end + 1;
+
+            if (token.empty())
+            {
+                continue;
+            }
+
+            // Strip optional 0x/0X prefix
+            size_t hex_start = 0;
+            if (token.size() >= 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X'))
+            {
+                hex_start = 2;
+            }
+            if (hex_start >= token.size())
+            {
+                continue;
+            }
+
+            // Validate all remaining characters are hex digits
+            const std::string_view hex_part(token.data() + hex_start, token.size() - hex_start);
+            if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string_view::npos)
+            {
+                continue;
+            }
+
+            // Convert via strtoul — no exception overhead on invalid input
+            char *end_ptr = nullptr;
+            const unsigned long value = std::strtoul(token.c_str() + hex_start, &end_ptr, 16);
+            if (end_ptr == token.c_str() + hex_start || errno == ERANGE)
+            {
+                errno = 0;
+                continue;
+            }
+            if (value > static_cast<unsigned long>(std::numeric_limits<int>::max()))
+            {
+                continue;
+            }
+
+            result.push_back(static_cast<int>(value));
+        }
+
+        return result;
+    }
+
     /**
      * @brief Base class for typed configuration items.
      * @details This allows storing different types of configuration items
@@ -169,59 +238,7 @@ namespace
         const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
         if (ini_value_str != nullptr)
         {
-            // Parse the INI value string into a vector
-            current_value.clear();
-            std::string str_no_comment = ini_value_str;
-            size_t comment_pos = str_no_comment.find(';');
-            if (comment_pos != std::string::npos)
-            {
-                str_no_comment = str_no_comment.substr(0, comment_pos);
-            }
-            std::string trimmed_val = trim(str_no_comment);
-
-            if (!trimmed_val.empty())
-            {
-                std::istringstream iss(trimmed_val);
-                std::string token;
-                while (std::getline(iss, token, ','))
-                {
-                    size_t token_comment_pos = token.find(';');
-                    if (token_comment_pos != std::string::npos)
-                    {
-                        token = token.substr(0, token_comment_pos);
-                    }
-                    std::string trimmed_token = trim(token);
-                    if (trimmed_token.empty())
-                    {
-                        continue;
-                    }
-
-                    std::string hex_part = trimmed_token;
-                    if (hex_part.size() >= 2 && hex_part[0] == '0' && (hex_part[1] == 'x' || hex_part[1] == 'X'))
-                    {
-                        hex_part = hex_part.substr(2);
-                        if (hex_part.empty())
-                        {
-                            continue;
-                        }
-                    }
-
-                    if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
-                        current_value.push_back(static_cast<int>(code_ul));
-                    }
-                    catch (const std::exception &)
-                    {
-                        // Skip invalid tokens
-                    }
-                }
-            }
+            current_value = parse_hex_key_list(ini_value_str);
         }
         // else: keep default_value which was set in constructor
 
@@ -325,48 +342,7 @@ void DetourModKit::Config::register_key_list(const std::string &section, const s
                                                    const std::string &default_value_str)
 {
     std::lock_guard<std::mutex> lock(getConfigMutex());
-    // Parse the default_value_str into a vector<int>
-    std::vector<int> default_keys_vector;
-    std::string str_no_comment = default_value_str;
-    size_t comment_pos = str_no_comment.find(';');
-    if (comment_pos != std::string::npos)
-    {
-        str_no_comment = str_no_comment.substr(0, comment_pos);
-    }
-    std::string trimmed_val = trim(str_no_comment);
-
-    if (!trimmed_val.empty())
-    {
-        std::istringstream iss(trimmed_val);
-        std::string token;
-        while (std::getline(iss, token, ','))
-        {
-            std::string trimmed_token = trim(token);
-            if (trimmed_token.empty())
-                continue;
-
-            std::string hex_part = trimmed_token;
-            if (hex_part.size() >= 2 && hex_part[0] == '0' && (hex_part[1] == 'x' || hex_part[1] == 'X'))
-            {
-                hex_part = hex_part.substr(2);
-                if (hex_part.empty())
-                    continue;
-            }
-
-            if (hex_part.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
-                continue;
-
-            try
-            {
-                unsigned long code_ul = std::stoul(hex_part, nullptr, 16);
-                default_keys_vector.push_back(static_cast<int>(code_ul));
-            }
-            catch (const std::exception &)
-            {
-                // Skip invalid
-            }
-        }
-    }
+    std::vector<int> default_keys_vector = parse_hex_key_list(default_value_str);
 
     getRegisteredConfigItems().push_back(
         std::make_unique<CallbackConfigItem<std::vector<int>>>(section, ini_key, log_key_name, std::move(setter), default_keys_vector));
