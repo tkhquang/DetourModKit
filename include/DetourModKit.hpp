@@ -13,6 +13,7 @@
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/input.hpp"
 
 // Module headers
 #include "DetourModKit/filesystem.hpp"
@@ -48,6 +49,10 @@ using DMKHookConfig = DetourModKit::HookConfig;
 using DMKAsyncLogger = DetourModKit::AsyncLogger;
 using DMKAsyncLoggerConfig = DetourModKit::AsyncLoggerConfig;
 using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
+using DMKInputManager = DetourModKit::InputManager;
+using DMKInputPoller = DetourModKit::InputPoller;
+using DMKInputMode = DetourModKit::InputMode;
+using DMKInputBinding = DetourModKit::InputBinding;
 
 /**
  * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
@@ -61,15 +66,18 @@ using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
 inline void DMK_Shutdown()
 {
     // Shutdown in reverse dependency order:
-    // 1. HookManager first (may have been logging via Logger)
+    // 1. InputManager first (polling thread may invoke callbacks that log)
+    DetourModKit::InputManager::get_instance().shutdown();
+
+    // 2. HookManager (may have been logging via Logger)
     DetourModKit::HookManager::get_instance().shutdown();
 
-    // 2. Memory cache (background cleanup thread must stop before Logger shuts down)
+    // 3. Memory cache (background cleanup thread must stop before Logger shuts down)
     DetourModKit::Memory::shutdown_cache();
 
-    // 3. Clear registered config items (static vector cleanup)
+    // 4. Clear registered config items (static vector cleanup)
     DetourModKit::Config::clear_registered_items();
 
-    // 4. Logger last (no more logging after this)
+    // 5. Logger last (no more logging after this)
     DetourModKit::Logger::get_instance().shutdown();
 }
