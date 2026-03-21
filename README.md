@@ -377,12 +377,12 @@ void InitializeMyMod() {
             std::string aob_sig_str = "48 89 ?? ?? 57";
             ptrdiff_t pattern_offset = 0;
 
-            std::vector<std::byte> pattern_bytes = DMKScanner::parse_aob(aob_sig_str);
-            if (!pattern_bytes.empty()) {
-                std::byte* found_pattern = DMKScanner::find_pattern(
-                    reinterpret_cast<std::byte*>(module_info.lpBaseOfDll),
+            auto pattern = DMKScanner::parse_aob(aob_sig_str);
+            if (pattern.has_value()) {
+                const std::byte* found_pattern = DMKScanner::find_pattern(
+                    reinterpret_cast<const std::byte*>(module_info.lpBaseOfDll),
                     module_info.SizeOfImage,
-                    pattern_bytes
+                    *pattern
                 );
                 if (found_pattern) {
                     target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;

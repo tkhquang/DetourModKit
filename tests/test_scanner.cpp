@@ -307,7 +307,7 @@ TEST(ScannerTest, find_pattern_null_address)
     auto pattern = Scanner::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(nullptr, 100, *pattern);
+    auto result = Scanner::find_pattern(static_cast<const std::byte *>(nullptr), 100, *pattern);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -333,10 +333,10 @@ TEST(ScannerTest, parse_aob_byte_values)
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 4u);
 
-    EXPECT_EQ(result->mask[0], 1);
-    EXPECT_EQ(result->mask[1], 1);
-    EXPECT_EQ(result->mask[2], 1);
-    EXPECT_EQ(result->mask[3], 1);
+    EXPECT_EQ(result->mask[0], std::byte{0xFF});
+    EXPECT_EQ(result->mask[1], std::byte{0xFF});
+    EXPECT_EQ(result->mask[2], std::byte{0xFF});
+    EXPECT_EQ(result->mask[3], std::byte{0xFF});
 
     EXPECT_EQ(result->bytes[0], std::byte{0x00});
     EXPECT_EQ(result->bytes[1], std::byte{0xFF});
@@ -350,11 +350,11 @@ TEST(ScannerTest, parse_aob_wildcard_mask)
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 4u);
 
-    EXPECT_EQ(result->mask[0], 1);
-    EXPECT_EQ(result->mask[2], 1);
+    EXPECT_EQ(result->mask[0], std::byte{0xFF});
+    EXPECT_EQ(result->mask[2], std::byte{0xFF});
 
-    EXPECT_EQ(result->mask[1], 0);
-    EXPECT_EQ(result->mask[3], 0);
+    EXPECT_EQ(result->mask[1], std::byte{0x00});
+    EXPECT_EQ(result->mask[3], std::byte{0x00});
 }
 
 TEST(ScannerTest, find_pattern_wildcard_before_start)
@@ -458,4 +458,52 @@ TEST(ScannerTest, find_pattern_long_wildcard_prefix)
 
     auto result2 = Scanner::find_pattern(small.data(), small.size(), *pattern);
     EXPECT_EQ(result2, nullptr);
+}
+
+TEST(ScannerTest, find_pattern_anchor_selection)
+{
+    // Fill data with 0x00 (very common byte). Place a pattern where the first
+    // non-wildcard is 0x00 but a later byte is rare (0x37). The smarter anchor
+    // should still find the correct match by anchoring on the rare byte.
+    std::vector<std::byte> data(512, std::byte{0x00});
+
+    // Place the real match at offset 200: 00 37 00
+    data[200] = std::byte{0x00};
+    data[201] = std::byte{0x37};
+    data[202] = std::byte{0x00};
+
+    auto pattern = Scanner::parse_aob("00 37 00");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 200);
+}
+
+TEST(ScannerTest, parse_aob_invariant)
+{
+    auto result = Scanner::parse_aob("48 ?? 8B 05 ?? ??");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->bytes.size(), result->mask.size());
+
+    auto single = Scanner::parse_aob("CC");
+    ASSERT_TRUE(single.has_value());
+    EXPECT_EQ(single->bytes.size(), single->mask.size());
+}
+
+TEST(ScannerTest, find_pattern_const_correctness)
+{
+    const std::vector<std::byte> data = {
+        std::byte{0x00}, std::byte{0x00},
+        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
+        std::byte{0x00}, std::byte{0x00}};
+
+    auto pattern = Scanner::parse_aob("48 8B 05");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 2);
 }
