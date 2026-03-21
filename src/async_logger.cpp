@@ -62,6 +62,22 @@ namespace DetourModKit
         return pool;
     }
 
+    StringPool::PoolSlot *StringPool::claim_free_slot() noexcept
+    {
+        Block *block = head_.load(std::memory_order_acquire);
+        for (Block *b = block; b; b = b->next)
+        {
+            if (b->free_list)
+            {
+                PoolSlot *slot = b->free_list;
+                b->free_list = slot->next_free;
+                --b->slot_count;
+                return slot;
+            }
+        }
+        return nullptr;
+    }
+
     std::string *StringPool::allocate(size_t size)
     {
         if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
@@ -73,17 +89,7 @@ namespace DetourModKit
 
         {
             std::lock_guard<std::mutex> lock(pool_mutex_);
-            Block *block = head_.load(std::memory_order_acquire);
-            for (Block *b = block; b; b = b->next)
-            {
-                if (b->free_list)
-                {
-                    slot = b->free_list;
-                    b->free_list = slot->next_free;
-                    --b->slot_count;
-                    break;
-                }
-            }
+            slot = claim_free_slot();
         }
 
         if (!slot)
@@ -91,17 +97,7 @@ namespace DetourModKit
             grow_pool();
 
             std::lock_guard<std::mutex> lock(pool_mutex_);
-            Block *block = head_.load(std::memory_order_acquire);
-            for (Block *b = block; b; b = b->next)
-            {
-                if (b->free_list)
-                {
-                    slot = b->free_list;
-                    b->free_list = slot->next_free;
-                    --b->slot_count;
-                    break;
-                }
-            }
+            slot = claim_free_slot();
         }
 
         if (slot)
@@ -125,19 +121,19 @@ namespace DetourModKit
         Block *block = head_.load(std::memory_order_acquire);
         for (Block *b = block; b; b = b->next)
         {
-            PoolSlot *slots = reinterpret_cast<PoolSlot *>(b->data);
+            const auto *block_begin = reinterpret_cast<const char *>(b->data);
+            const auto *block_end = block_begin + POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot);
+            const auto *raw_ptr = reinterpret_cast<const char *>(ptr);
 
-            for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
+            if (raw_ptr >= block_begin && raw_ptr < block_end)
             {
-                PoolSlot *slot = &slots[i];
-                if (&slot->str == ptr)
-                {
-                    slot->str.~basic_string();
-                    slot->next_free = b->free_list;
-                    b->free_list = slot;
-                    ++b->slot_count;
-                    return;
-                }
+                auto offset = static_cast<size_t>(raw_ptr - block_begin);
+                PoolSlot *slot = reinterpret_cast<PoolSlot *>(b->data) + (offset / sizeof(PoolSlot));
+                slot->str.~basic_string();
+                slot->next_free = b->free_list;
+                b->free_list = slot;
+                ++b->slot_count;
+                return;
             }
         }
 
@@ -235,7 +231,6 @@ namespace DetourModKit
             overflow = nullptr;
         }
         length = 0;
-        buffer.fill(0);
     }
 
     DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
