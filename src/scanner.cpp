@@ -10,106 +10,39 @@
 #include <vector>
 #include <string>
 #include <sstream>
-#include <iomanip>
 #include <cctype>
 #include <stdexcept>
-#include <limits>
 #include <cstddef>
 #include <cstring>
 
 using namespace DetourModKit;
 using namespace DetourModKit::String;
 
-// Anonymous namespace for internal helpers
 namespace
 {
     /**
-     * @struct ParsedPatternByte
-     * @brief Internal helper struct representing a parsed AOB element.
+     * @brief Returns a commonality score for a byte value in typical x64 PE code sections.
+     * @details Higher scores indicate bytes that appear more frequently, making them
+     *          poor candidates for anchor-based scanning.
      */
-    struct ParsedPatternByte
+    static constexpr uint8_t byte_frequency_class(uint8_t b) noexcept
     {
-        std::byte value;  /**< Byte value (used if not a wildcard). */
-        bool is_wildcard; /**< True if this element represents '??' or '?'. */
-    };
-
-    /**
-     * @brief Internal parser: Converts AOB string to a structured vector of ParsedPatternByte.
-     * @details Parses the input string token by token (space-separated).
-     *          Validates each token for format ('??', '?', or two hex digits).
-     *          Uses the Logger for detailed debug/error messages.
-     * @param aob_str Raw AOB string (e.g., "48 ?? 8B").
-     * @return std::vector<ParsedPatternByte> Vector of parsed structs, or empty on error.
-     */
-    std::vector<ParsedPatternByte> parse_aobInternal(std::string_view aob_str)
-    {
-        std::vector<ParsedPatternByte> pattern_elements;
-        std::string trimmed_aob = trim(std::string(aob_str));
-        std::istringstream iss(trimmed_aob);
-        std::string token;
-        Logger &logger = Logger::get_instance();
-        int token_idx = 0;
-
-        if (trimmed_aob.empty())
+        switch (b)
         {
-            if (!aob_str.empty())
-            {
-                logger.warning("AOB Parser: Input string became empty after trimming.");
-            }
-            return pattern_elements;
+        case 0x00: return 10; // null padding, very common
+        case 0xCC: return 9;  // INT3, debug padding
+        case 0x90: return 9;  // NOP
+        case 0xFF: return 8;  // call/jmp indirect, common
+        case 0x48: return 8;  // REX.W prefix, ubiquitous in x64
+        case 0x8B: return 7;  // MOV reg, r/m
+        case 0x89: return 7;  // MOV r/m, reg
+        case 0x0F: return 7;  // two-byte opcode escape
+        case 0xE8: return 6;  // CALL rel32
+        case 0xE9: return 6;  // JMP rel32
+        case 0x83: return 6;  // arithmetic imm8
+        case 0xC3: return 5;  // RET
+        default:   return 0;  // uncommon, ideal anchor
         }
-
-        logger.debug("AOB Parser: Parsing string: '{}'", trimmed_aob);
-
-        while (iss >> token)
-        {
-            token_idx++;
-            if (token == "??" || token == "?")
-            {
-                pattern_elements.push_back({std::byte{0x00}, true});
-            }
-            else if (token.length() == 2 && std::isxdigit(static_cast<unsigned char>(token[0])) && std::isxdigit(static_cast<unsigned char>(token[1])))
-            {
-                try
-                {
-                    unsigned long ulong_val = std::stoul(token, nullptr, 16);
-                    if (ulong_val > 0xFF)
-                    {
-                        throw std::out_of_range("Value parsed exceeds byte range (0xFF).");
-                    }
-                    pattern_elements.push_back({static_cast<std::byte>(ulong_val), false});
-                }
-                catch (const std::out_of_range &oor)
-                {
-                    logger.error("AOB Parser: Hex conversion out of range for '{}' (Pos {}): {}", token, token_idx, oor.what());
-                    return {};
-                }
-                catch (const std::invalid_argument &ia)
-                {
-                    logger.error("AOB Parser: Invalid argument for hex conversion '{}' (Pos {}): {}", token, token_idx, ia.what());
-                    return {};
-                }
-            }
-            else
-            {
-                std::ostringstream oss_err;
-                oss_err << "AOB Parser: Invalid token '" << token << "' at position " << token_idx
-                        << ". Expected hex byte (e.g., FF), '?', or '?\?'.";
-                logger.log(LogLevel::Error, oss_err.str());
-                return {};
-            }
-        }
-
-        if (pattern_elements.empty() && token_idx > 0)
-        {
-            logger.error("AOB Parser: Processed tokens but resulting pattern is empty.");
-        }
-        else if (!pattern_elements.empty())
-        {
-            logger.debug("AOB Parser: Parsed {} elements.", pattern_elements.size());
-        }
-
-        return pattern_elements;
     }
 } // anonymous namespace
 
@@ -121,35 +54,80 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
 {
     Logger &logger = Logger::get_instance();
 
-    std::vector<ParsedPatternByte> internal_pattern = parse_aobInternal(aob_str);
-
-    if (internal_pattern.empty())
+    std::string trimmed_aob = trim(std::string(aob_str));
+    if (trimmed_aob.empty())
     {
-        if (!trim(std::string(aob_str)).empty())
+        if (!aob_str.empty())
+        {
+            logger.warning("AOB Parser: Input string became empty after trimming.");
+        }
+        return std::nullopt;
+    }
+
+    CompiledPattern result;
+    std::istringstream iss(trimmed_aob);
+    std::string token;
+    size_t token_idx = 0;
+
+    while (iss >> token)
+    {
+        token_idx++;
+        if (token == "??" || token == "?")
+        {
+            result.bytes.push_back(std::byte{0x00});
+            result.mask.push_back(std::byte{0x00});
+        }
+        else if (token.length() == 2 && std::isxdigit(static_cast<unsigned char>(token[0])) && std::isxdigit(static_cast<unsigned char>(token[1])))
+        {
+            try
+            {
+                unsigned long ulong_val = std::stoul(token, nullptr, 16);
+                if (ulong_val > 0xFF)
+                {
+                    throw std::out_of_range("Value parsed exceeds byte range (0xFF).");
+                }
+                result.bytes.push_back(static_cast<std::byte>(ulong_val));
+                result.mask.push_back(std::byte{0xFF});
+            }
+            catch (const std::out_of_range &oor)
+            {
+                logger.error("AOB Parser: Hex conversion out of range for '{}' (Pos {}): {}", token, token_idx, oor.what());
+                return std::nullopt;
+            }
+            catch (const std::invalid_argument &ia)
+            {
+                logger.error("AOB Parser: Invalid argument for hex conversion '{}' (Pos {}): {}", token, token_idx, ia.what());
+                return std::nullopt;
+            }
+        }
+        else
+        {
+            std::ostringstream oss_err;
+            oss_err << "AOB Parser: Invalid token '" << token << "' at position " << token_idx
+                    << ". Expected hex byte (e.g., FF), '?' or '?\?'.";
+            logger.log(LogLevel::Error, oss_err.str());
+            return std::nullopt;
+        }
+    }
+
+    if (result.empty())
+    {
+        if (token_idx > 0)
+        {
+            logger.error("AOB Parser: Processed tokens but resulting pattern is empty.");
+        }
+        else if (!trimmed_aob.empty())
         {
             logger.warning("AOB: Parsing AOB string '{}' resulted in an empty pattern.", aob_str);
         }
         return std::nullopt;
     }
 
-    CompiledPattern result;
-    result.bytes.reserve(internal_pattern.size());
-    result.mask.reserve(internal_pattern.size());
-
-    for (const auto &element : internal_pattern)
-    {
-        result.bytes.push_back(element.value);
-        result.mask.push_back(element.is_wildcard ? 0 : 1);
-    }
-
-    logger.debug("AOB: Compiled pattern with {} bytes, {} wildcards.",
-                 result.bytes.size(),
-                 std::count(result.mask.begin(), result.mask.end(), 0));
     return result;
 }
 
-std::byte *DetourModKit::Scanner::find_pattern(std::byte *start_address, size_t region_size,
-                                              const CompiledPattern &pattern)
+const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_address, size_t region_size,
+                                                     const CompiledPattern &pattern)
 {
     Logger &logger = Logger::get_instance();
     const size_t pattern_size = pattern.size();
@@ -166,71 +144,60 @@ std::byte *DetourModKit::Scanner::find_pattern(std::byte *start_address, size_t 
     }
     if (region_size < pattern_size)
     {
-        logger.warning("find_pattern: Search region ({} bytes) is smaller than pattern ({} bytes).", region_size, pattern_size);
         return nullptr;
     }
 
-    logger.debug("find_pattern: Scanning {} bytes from {} for a {} byte pattern.",
-                 region_size, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(start_address)), pattern_size);
-
-    // Count wildcards for optimization decisions
-    int wildcard_count = 0;
-    size_t first_non_wildcard = pattern_size; // invalid index = all wildcards
+    // Select the best anchor byte: the non-wildcard byte with the lowest frequency score.
+    // Ties are broken by first occurrence for deterministic behavior.
+    size_t best_anchor = pattern_size; // invalid = all wildcards
+    uint8_t best_score = UINT8_MAX;
     for (size_t i = 0; i < pattern_size; ++i)
     {
-        if (pattern.mask[i] == 0)
+        if (pattern.mask[i] != std::byte{0x00})
         {
-            wildcard_count++;
-        }
-        else if (first_non_wildcard == pattern_size)
-        {
-            first_non_wildcard = i;
+            uint8_t score = byte_frequency_class(static_cast<uint8_t>(pattern.bytes[i]));
+            if (best_anchor == pattern_size || score < best_score)
+            {
+                best_anchor = i;
+                best_score = score;
+                if (score == 0)
+                {
+                    break; // Cannot improve on score 0
+                }
+            }
         }
     }
 
-    if (wildcard_count > 0)
+    // All wildcards: matches immediately at start
+    if (best_anchor == pattern_size)
     {
-        logger.debug("find_pattern: Pattern contains {} wildcard(s).", wildcard_count);
-    }
-
-    // Optimization: If pattern is ALL wildcards, return start_address (matches immediately)
-    if (first_non_wildcard == pattern_size)
-    {
-        logger.warning("find_pattern: Pattern is all wildcards. Returning start address.");
         return start_address;
     }
 
-    // Optimization: Use memchr to find the first non-wildcard byte, then verify full pattern
-    // This dramatically reduces the number of full pattern comparisons needed
-    const std::byte target_byte = pattern.bytes[first_non_wildcard];
+    const std::byte target_byte = pattern.bytes[best_anchor];
     const unsigned char target_val = static_cast<unsigned char>(target_byte);
 
-    // memchr searches for the anchor byte at its actual position within candidates.
-    // Valid pattern start positions: [start_address, start_address + (region_size - pattern_size)]
-    // The anchor byte is at offset first_non_wildcard within the pattern, so we search
-    // for it in [start_address + first_non_wildcard, start_address + (region_size - pattern_size) + first_non_wildcard]
-    std::byte *search_start = start_address + first_non_wildcard;
-    const std::byte *const search_end = start_address + (region_size - pattern_size) + first_non_wildcard;
+    const std::byte *search_start = start_address + best_anchor;
+    const std::byte *const search_end = start_address + (region_size - pattern_size) + best_anchor;
 
     while (search_start <= search_end)
     {
-        void *found = memchr(search_start, static_cast<int>(target_val),
-                             static_cast<size_t>(search_end - search_start + 1));
+        const void *found = memchr(search_start, static_cast<int>(target_val),
+                                   static_cast<size_t>(search_end - search_start + 1));
 
         if (!found)
         {
             break;
         }
 
-        std::byte *current_scan_ptr = static_cast<std::byte *>(found);
-
-        std::byte *pattern_start = current_scan_ptr - first_non_wildcard;
+        const std::byte *current_scan_ptr = static_cast<const std::byte *>(found);
+        const std::byte *pattern_start = current_scan_ptr - best_anchor;
 
         // Verify the full pattern at this position
         bool match_found = true;
         for (size_t j = 0; j < pattern_size; ++j)
         {
-            if (pattern.mask[j] != 0 && pattern_start[j] != pattern.bytes[j])
+            if (pattern.mask[j] != std::byte{0x00} && pattern_start[j] != pattern.bytes[j])
             {
                 match_found = false;
                 break;
@@ -239,10 +206,6 @@ std::byte *DetourModKit::Scanner::find_pattern(std::byte *start_address, size_t 
 
         if (match_found)
         {
-            uintptr_t absolute_match_address = reinterpret_cast<uintptr_t>(pattern_start);
-            uintptr_t rva_offset = absolute_match_address - reinterpret_cast<uintptr_t>(start_address);
-            logger.info("find_pattern: Pattern match found at address: {} (RVA: {})",
-                        DetourModKit::Format::format_address(absolute_match_address), DetourModKit::Format::format_address(rva_offset));
             return pattern_start;
         }
 
@@ -250,6 +213,5 @@ std::byte *DetourModKit::Scanner::find_pattern(std::byte *start_address, size_t 
         search_start = current_scan_ptr + 1;
     }
 
-    logger.warning("find_pattern: Pattern not found in the specified memory region.");
     return nullptr;
 }

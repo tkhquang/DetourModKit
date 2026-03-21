@@ -21,7 +21,7 @@ namespace DetourModKit
         struct CompiledPattern
         {
             std::vector<std::byte> bytes; ///< Pattern bytes (wildcard positions contain arbitrary values)
-            std::vector<uint8_t> mask;    ///< 1 = match this byte, 0 = wildcard (skip)
+            std::vector<std::byte> mask;   ///< 0xFF = match this byte, 0x00 = wildcard (skip)
 
             /**
              * @brief Returns the size of the pattern.
@@ -52,11 +52,11 @@ namespace DetourModKit
          * @param start_address Pointer to the beginning of the memory region to scan.
          * @param region_size The size (in bytes) of the memory region to scan.
          * @param pattern The compiled pattern to search for.
-         * @return std::byte* Pointer to the first occurrence of the pattern within
+         * @return const std::byte* Pointer to the first occurrence of the pattern within
          *         the specified region. Returns nullptr if pattern not found.
          */
-        std::byte *find_pattern(std::byte *start_address, size_t region_size,
-                               const CompiledPattern &pattern);
+        const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
+                                      const CompiledPattern &pattern);
     } // namespace Scanner
 } // namespace DetourModKit
 

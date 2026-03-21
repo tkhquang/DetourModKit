@@ -231,7 +231,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
         return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    std::byte *found_address_start = find_pattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
+    const std::byte *found_address_start = find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
         m_logger.error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
@@ -355,7 +355,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
         return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    std::byte *found_address_start = find_pattern(reinterpret_cast<std::byte *>(module_base), module_size, pattern.value());
+    const std::byte *found_address_start = find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
         m_logger.error("HookManager: AOB pattern not found for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
@@ -401,6 +401,10 @@ void HookManager::remove_all_hooks()
     {
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
+
+    // Allow shutdown() to be called again after a full reset.
+    // Safe because the manager is now in a clean state with no hooks to double-free.
+    m_shutdown_called.store(false, std::memory_order_release);
 }
 
 bool HookManager::enable_hook(const std::string &hook_id)
