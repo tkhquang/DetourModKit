@@ -147,8 +147,8 @@ namespace
                            std::function<void(T)> set_fn, T def_val)
             : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)),
               setter(std::move(set_fn)),
-              default_value(std::move(def_val)),
-              current_value(default_value)
+              default_value(def_val),
+              current_value(std::move(def_val))
         {
             // Initialize with default value via callback
             if (setter)

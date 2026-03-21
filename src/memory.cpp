@@ -165,6 +165,28 @@ namespace MemoryUtilsCacheInternal
     // shutdown_cache waits for this to reach zero before destroying data structures.
     std::atomic<int32_t> s_activeReaders{0};
 
+    /**
+     * @class ActiveReaderGuard
+     * @brief RAII guard that increments s_activeReaders on construction and
+     *        decrements on destruction, ensuring correct pairing on all exit paths.
+     */
+    class ActiveReaderGuard
+    {
+    public:
+        ActiveReaderGuard() noexcept
+        {
+            s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+        }
+
+        ~ActiveReaderGuard() noexcept
+        {
+            s_activeReaders.fetch_sub(1, std::memory_order_release);
+        }
+
+        ActiveReaderGuard(const ActiveReaderGuard &) = delete;
+        ActiveReaderGuard &operator=(const ActiveReaderGuard &) = delete;
+    };
+
     // Background cleanup thread
     std::atomic<bool> s_cleanupThreadRunning{false};
     std::thread s_cleanupThread;
@@ -210,7 +232,13 @@ namespace MemoryUtilsCacheInternal
             return false;
 
         const uintptr_t endAddress = address + size;
+        if (endAddress < address)
+            return false;
+
         const uintptr_t entryEndAddress = entry.baseAddress + entry.regionSize;
+        if (entryEndAddress < entry.baseAddress)
+            return false;
+
         return address >= entry.baseAddress && endAddress <= entryEndAddress;
     }
 
@@ -675,9 +703,9 @@ namespace MemoryUtilsCacheInternal
         else
         {
             // We are a follower - VirtualQuery already in progress by another thread.
-            // Bounded wait to avoid stalling game threads.
+            // Bounded wait to avoid stalling game threads on render-critical paths.
             const uint64_t expiry_ns = static_cast<uint64_t>(s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
-            constexpr size_t MAX_FOLLOWER_YIELDS = 64;
+            constexpr size_t MAX_FOLLOWER_YIELDS = 8;
 
             for (size_t yield_count = 0; yield_count < MAX_FOLLOWER_YIELDS; ++yield_count)
             {
@@ -903,19 +931,20 @@ std::string DetourModKit::Memory::get_cache_stats()
     size_t total_entries = 0;
     size_t total_hard_max = 0;
 
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
-    const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
-    for (size_t i = 0; i < active_shard_count; ++i)
     {
-        auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
-        if (mutex_ptr)
+        MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+        const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+        for (size_t i = 0; i < active_shard_count; ++i)
         {
-            std::shared_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
-            total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
-            total_hard_max += MemoryUtilsCacheInternal::s_cacheShards[i].max_capacity;
+            auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
+            if (mutex_ptr)
+            {
+                std::shared_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
+                total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
+                total_hard_max += MemoryUtilsCacheInternal::s_cacheShards[i].max_capacity;
+            }
         }
     }
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
 
     std::ostringstream oss;
     oss << "MemoryCache Stats (Shards: " << shard_count
@@ -948,14 +977,11 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
         return;
 
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
 
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
-    {
-        MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
         return;
-    }
 
     const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
     MemoryUtilsCacheInternal::invalidate_range_internal(addr_val, size);
@@ -964,8 +990,6 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     // which iterates shards without s_cacheStateMutex. Keep s_activeReaders > 0
     // so shutdown_cache cannot destroy shards during the cleanup pass.
     MemoryUtilsCacheInternal::request_cleanup();
-
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
 }
 
 bool DetourModKit::Memory::is_readable(const void *address, size_t size)
@@ -991,15 +1015,11 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
         return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
     }
 
-    // Register as active reader to prevent shutdown from destroying data structures
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
 
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
-    {
-        MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
         return false;
-    }
 
     const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
@@ -1014,10 +1034,8 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
             query_addr_val, size, now_ns, expiry_ns);
         if (cached_info)
         {
-            const bool result = MemoryUtilsCacheInternal::check_read_permission(cached_info->protection);
             MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
-            MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
-            return result;
+            return MemoryUtilsCacheInternal::check_read_permission(cached_info->protection);
         }
     }
 
@@ -1026,12 +1044,7 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
     // Cache miss: call VirtualQuery with stampede coalescing
     MEMORY_BASIC_INFORMATION mbi;
     if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
-    {
-        MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
         return false;
-    }
-
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
 
     if (mbi.State != MEM_COMMIT)
         return false;
@@ -1046,11 +1059,7 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
     if (query_end_addr < query_addr_val)
         return false;
 
-    const bool is_fully_contained = query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
-    if (!is_fully_contained)
-        return false;
-
-    return true;
+    return query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
 }
 
 bool DetourModKit::Memory::is_writable(void *address, size_t size)
@@ -1076,15 +1085,11 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
         return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
     }
 
-    // Register as active reader to prevent shutdown from destroying data structures
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
 
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
-    {
-        MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
         return false;
-    }
 
     const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
@@ -1099,10 +1104,8 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
             query_addr_val, size, now_ns, expiry_ns);
         if (cached_info)
         {
-            const bool result = MemoryUtilsCacheInternal::check_write_permission(cached_info->protection);
             MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
-            MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
-            return result;
+            return MemoryUtilsCacheInternal::check_write_permission(cached_info->protection);
         }
     }
 
@@ -1110,12 +1113,7 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
 
     MEMORY_BASIC_INFORMATION mbi;
     if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
-    {
-        MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
         return false;
-    }
-
-    MemoryUtilsCacheInternal::s_activeReaders.fetch_sub(1, std::memory_order_release);
 
     if (mbi.State != MEM_COMMIT)
         return false;
@@ -1130,11 +1128,7 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     if (query_end_addr < query_addr_val)
         return false;
 
-    const bool is_fully_contained = query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
-    if (!is_fully_contained)
-        return false;
-
-    return true;
+    return query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
 }
 
 std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)

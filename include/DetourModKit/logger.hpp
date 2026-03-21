@@ -257,7 +257,7 @@ namespace DetourModKit
         std::atomic<bool> shutdown_called_{false};
 
         // Async logging support (forward declared)
-        std::unique_ptr<AsyncLogger> async_logger_;
+        std::shared_ptr<AsyncLogger> async_logger_;
         std::atomic<bool> async_mode_enabled_{false};
         std::mutex async_mutex_;
     };

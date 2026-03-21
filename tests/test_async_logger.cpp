@@ -420,6 +420,7 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_Block)
     config.queue_capacity = 2;
     config.batch_size = 10;
     config.overflow_policy = OverflowPolicy::Block;
+    config.block_timeout_ms = std::chrono::milliseconds{200};
     config.flush_interval = std::chrono::milliseconds{50};
 
     auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
@@ -1129,4 +1130,173 @@ TEST(DynamicMPMCQueueTest, TryPopBatch_PreservesOrder)
         std::string expected = "ordered_msg_" + std::to_string(i);
         EXPECT_EQ(items[i].message(), expected);
     }
+}
+
+TEST(AsyncLoggerConfigTest, BlockTimeoutDefault_IsSingleFrame)
+{
+    AsyncLoggerConfig config;
+    EXPECT_EQ(config.block_timeout_ms.count(), 16);
+}
+
+TEST(LogMessageTest, TruncatedMessage_UsesCorrectSize)
+{
+    // Verify that after truncation, the stored size matches the truncated content
+    const size_t truncation_boundary = LogMessage::MAX_VALID_LENGTH;
+    std::string large_msg(truncation_boundary + 100, 'X');
+
+    LogMessage msg(LogLevel::Info, std::move(large_msg));
+    EXPECT_TRUE(msg.is_valid());
+    EXPECT_EQ(msg.message().size(), truncation_boundary);
+}
+
+TEST(LogMessageTest, InlineBoundary_256Bytes)
+{
+    // Exactly MAX_INLINE_SIZE should use inline buffer
+    std::string exact(LogMessage::MAX_INLINE_SIZE, 'A');
+    LogMessage msg_inline(LogLevel::Info, std::string(exact));
+    EXPECT_TRUE(msg_inline.is_valid());
+    EXPECT_EQ(msg_inline.message().size(), LogMessage::MAX_INLINE_SIZE);
+    EXPECT_EQ(msg_inline.overflow, nullptr);
+}
+
+TEST(LogMessageTest, OverflowBoundary_257Bytes)
+{
+    // MAX_INLINE_SIZE + 1 should use overflow path
+    std::string overflow_msg(LogMessage::MAX_INLINE_SIZE + 1, 'B');
+    LogMessage msg_overflow(LogLevel::Info, std::string(overflow_msg));
+    EXPECT_TRUE(msg_overflow.is_valid());
+    EXPECT_EQ(msg_overflow.message().size(), LogMessage::MAX_INLINE_SIZE + 1);
+    EXPECT_NE(msg_overflow.overflow, nullptr);
+}
+
+TEST_F(AsyncLoggerTest, DropOldest_NoCounterUnderflow)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 4;
+    config.batch_size = 2;
+    config.overflow_policy = OverflowPolicy::DropOldest;
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+
+    // Fill the queue
+    for (int i = 0; i < 4; ++i)
+    {
+        static_cast<void>(logger.enqueue(LogLevel::Info, "fill_" + std::to_string(i)));
+    }
+
+    // Overflow: should drop oldest and push new
+    for (int i = 0; i < 4; ++i)
+    {
+        static_cast<void>(logger.enqueue(LogLevel::Info, "overflow_" + std::to_string(i)));
+    }
+
+    // flush should complete without hanging (no counter underflow)
+    bool flushed = logger.flush_with_timeout(std::chrono::milliseconds(2000));
+    EXPECT_TRUE(flushed);
+
+    logger.shutdown();
+}
+
+TEST_F(AsyncLoggerTest, SyncFallback_WritesWhenQueueFull)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 2;
+    config.batch_size = 1;
+    config.overflow_policy = OverflowPolicy::SyncFallback;
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+
+    // Fill the queue
+    static_cast<void>(logger.enqueue(LogLevel::Info, "msg1"));
+    static_cast<void>(logger.enqueue(LogLevel::Info, "msg2"));
+
+    // This should trigger SyncFallback path
+    bool result = logger.enqueue(LogLevel::Info, "sync_fallback_message");
+    EXPECT_TRUE(result);
+
+    logger.shutdown();
+    file_stream->close();
+
+    // Verify the sync fallback message was written
+    std::ifstream read_file(test_log_file_.string());
+    std::string content((std::istreambuf_iterator<char>(read_file)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("sync_fallback_message"), std::string::npos);
+}
+
+TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_WritesSync)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 64;
+    config.batch_size = 10;
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+    logger.shutdown();
+
+    // After shutdown, enqueue should fall back to synchronous write
+    bool result = logger.enqueue(LogLevel::Info, "post_shutdown_message");
+    EXPECT_TRUE(result);
+
+    file_stream->close();
+
+    std::ifstream read_file(test_log_file_.string());
+    std::string content((std::istreambuf_iterator<char>(read_file)),
+                        std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("post_shutdown_message"), std::string::npos);
+}
+
+TEST_F(AsyncLoggerTest, MultiThread_EnqueueStress)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 1024;
+    config.batch_size = 32;
+    config.overflow_policy = OverflowPolicy::DropNewest;
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    AsyncLogger logger(config, file_stream, log_mutex);
+
+    constexpr int num_threads = 4;
+    constexpr int msgs_per_thread = 500;
+    std::atomic<int> total_enqueued{0};
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < num_threads; ++t)
+    {
+        threads.emplace_back([&, t]()
+                             {
+            for (int i = 0; i < msgs_per_thread; ++i)
+            {
+                if (logger.enqueue(LogLevel::Info, "thread_" + std::to_string(t) + "_msg_" + std::to_string(i)))
+                {
+                    total_enqueued.fetch_add(1, std::memory_order_relaxed);
+                }
+            } });
+    }
+
+    for (auto &th : threads)
+    {
+        th.join();
+    }
+
+    bool flushed = logger.flush_with_timeout(std::chrono::milliseconds(5000));
+    EXPECT_TRUE(flushed);
+
+    // At least some messages should have been enqueued
+    EXPECT_GT(total_enqueued.load(), 0);
+    // Total enqueued + dropped should equal total attempted
+    EXPECT_EQ(total_enqueued.load() + static_cast<int>(logger.dropped_count()),
+              num_threads * msgs_per_thread);
+
+    logger.shutdown();
 }

@@ -71,6 +71,7 @@ namespace DetourModKit
             Block *next{nullptr};
             PoolSlot *free_list{nullptr};
             size_t slot_count{0};
+            uint32_t constructed_mask{0};
 
             PoolSlot *get_slot(size_t index) noexcept
             {
@@ -234,7 +235,7 @@ namespace DetourModKit
         std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
         OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
         size_t spin_backoff_iterations = DEFAULT_SPIN_BACKOFF_ITERATIONS;
-        std::chrono::milliseconds block_timeout_ms{100};
+        std::chrono::milliseconds block_timeout_ms{16};
         size_t block_max_spin_iterations{1000};
 
         [[nodiscard]] constexpr bool validate() const noexcept
