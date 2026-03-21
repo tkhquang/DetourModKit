@@ -12,65 +12,84 @@
 #include <windows.h>
 #include <filesystem>
 #include <stdexcept>
+#include <string>
 
 using namespace DetourModKit;
 
+namespace
+{
+    /**
+     * @brief Resolves the directory of the currently executing module.
+     * @details Called exactly once; the result is cached by the caller.
+     */
+    std::string resolve_module_directory()
+    {
+        HMODULE h_self_module = nullptr;
+        wchar_t module_path_buffer[MAX_PATH] = {0};
+        std::string result_directory_path;
+        Logger &logger = Logger::get_instance();
+
+        try
+        {
+            // Use the address of the public function to locate the containing module (DLL or EXE).
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCWSTR>(&Filesystem::get_runtime_directory),
+                                    &h_self_module) ||
+                h_self_module == nullptr)
+            {
+                const DWORD last_error = GetLastError();
+                throw std::runtime_error("GetModuleHandleExW failed to retrieve module handle. Error: " + std::to_string(last_error));
+            }
+
+            const DWORD path_length = GetModuleFileNameW(h_self_module, module_path_buffer, MAX_PATH);
+            if (path_length == 0)
+            {
+                const DWORD last_error = GetLastError();
+                throw std::runtime_error("GetModuleFileNameW failed to retrieve module path. Error: " + std::to_string(last_error));
+            }
+            if (path_length >= MAX_PATH)
+            {
+                throw std::runtime_error("GetModuleFileNameW failed: Path buffer was too small.");
+            }
+
+            const std::filesystem::path module_full_path(module_path_buffer);
+            result_directory_path = module_full_path.parent_path().string();
+
+            logger.debug("get_runtime_directory: Successfully determined module directory: {}", result_directory_path);
+        }
+        catch (const std::filesystem::filesystem_error &fs_err)
+        {
+            logger.warning("get_runtime_directory: Filesystem error: {}. Attempting to fall back to current working directory.", fs_err.what());
+        }
+        catch (const std::exception &e)
+        {
+            logger.warning("get_runtime_directory: Failed to determine module directory: {}. Attempting to fall back to current working directory.", e.what());
+        }
+
+        if (result_directory_path.empty())
+        {
+            wchar_t current_dir_buffer[MAX_PATH] = {0};
+            if (GetCurrentDirectoryW(MAX_PATH, current_dir_buffer) > 0)
+            {
+                result_directory_path = std::filesystem::path(current_dir_buffer).string();
+                logger.warning("get_runtime_directory: Using current working directory as fallback: {}", result_directory_path);
+            }
+            else
+            {
+                const DWORD last_error = GetLastError();
+                // If even GetCurrentDirectoryW fails, use "." as a last resort.
+                result_directory_path = ".";
+                logger.error("get_runtime_directory: Failed to get current working directory. Using relative path anchor '.'. Error: {}", last_error);
+            }
+        }
+        return result_directory_path;
+    }
+} // anonymous namespace
+
 std::string DetourModKit::Filesystem::get_runtime_directory()
 {
-    HMODULE h_self_module = NULL;
-    char module_path_buffer[MAX_PATH] = {0};
-    std::string result_directory_path;
-    Logger &logger = Logger::get_instance();
-
-    try
-    {
-        // Use the address of this function to locate the containing module (DLL or EXE).
-        if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                reinterpret_cast<LPCSTR>(&get_runtime_directory),
-                                &h_self_module) ||
-            h_self_module == NULL)
-        {
-            throw std::runtime_error("GetModuleHandleExA failed to retrieve module handle. Error: " + std::to_string(GetLastError()));
-        }
-
-        DWORD path_length = GetModuleFileNameA(h_self_module, module_path_buffer, MAX_PATH);
-        if (path_length == 0)
-        {
-            throw std::runtime_error("GetModuleFileNameA failed to retrieve module path. Error: " + std::to_string(GetLastError()));
-        }
-        if (path_length >= MAX_PATH)
-        {
-            throw std::runtime_error("GetModuleFileNameA failed: Path buffer was too small.");
-        }
-
-        std::filesystem::path module_full_path(module_path_buffer);
-        result_directory_path = module_full_path.parent_path().string();
-
-        logger.debug("get_runtime_directory: Successfully determined module directory: {}", result_directory_path);
-    }
-    catch (const std::filesystem::filesystem_error &fs_err)
-    {
-        logger.warning("get_runtime_directory: Filesystem error: {}. Attempting to fall back to current working directory.", fs_err.what());
-    }
-    catch (const std::exception &e)
-    {
-        logger.warning("get_runtime_directory: Failed to determine module directory: {}. Attempting to fall back to current working directory.", e.what());
-    }
-
-    if (result_directory_path.empty())
-    {
-        char current_dir_buffer[MAX_PATH] = {0};
-        if (GetCurrentDirectoryA(MAX_PATH, current_dir_buffer) > 0)
-        {
-            result_directory_path = current_dir_buffer;
-            logger.warning("get_runtime_directory: Using current working directory as fallback: {}", result_directory_path);
-        }
-        else
-        {
-            // If even GetCurrentDirectoryA fails, use "." as a last resort.
-            result_directory_path = ".";
-            logger.error("get_runtime_directory: Failed to get current working directory. Using relative path anchor '.'. Error: {}", GetLastError());
-        }
-    }
-    return result_directory_path;
+    // C++11 magic statics guarantee thread-safe, one-time initialization.
+    // The module directory never changes at runtime, so caching is safe.
+    static const std::string cached_directory = resolve_module_directory();
+    return cached_directory;
 }

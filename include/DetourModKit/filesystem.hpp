@@ -18,14 +18,17 @@ namespace DetourModKit
 
         /**
          * @brief Gets the directory containing the currently executing module (DLL/EXE).
-         * @details Uses Windows API (GetModuleHandleExA, GetModuleFileNameA) to determine
+         * @details Uses Windows Wide APIs (GetModuleHandleExW, GetModuleFileNameW) to determine
          *          the full path of the current module and extracts its parent directory using
-         *          std::filesystem. Falls back to the current working directory if module
-         *          path detection fails for any reason. Logs details of its operation and
-         *          any fallbacks using the Logger.
-         * @return std::string The absolute directory path of the current module. If detection fails,
-         *         it returns the current working directory. In case of further failure, it might
-         *         return ".", representing the current directory in a relative sense.
+         *          std::filesystem. The result is cached after the first successful resolution,
+         *          making subsequent calls zero-cost. Falls back to the current working directory
+         *          if module path detection fails for any reason. Logs details of its operation
+         *          and any fallbacks using the Logger.
+         * @return std::string The absolute directory path of the current module, encoded in the
+         *         system's active code page (ACP). If
+         *         detection fails, it returns the current working directory. In case of further
+         *         failure, it might return ".", representing the current directory in a relative
+         *         sense.
          */
         std::string get_runtime_directory();
     } // namespace Filesystem
