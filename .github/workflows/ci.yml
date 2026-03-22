@@ -6,6 +6,9 @@ on:
 
   workflow_dispatch:
 
+env:
+  MINGW_BIN: C:\mingw64\bin
+
 jobs:
   build-test:
     name: Build, Test & Coverage
@@ -18,10 +21,7 @@ jobs:
           submodules: "recursive"
 
       - name: Add MinGW to PATH
-        run: |
-          $mingwBin = (Split-Path -Parent (Get-Command g++).Source)
-          echo "MinGW bin dir: $mingwBin"
-          echo $mingwBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
 
       - name: Cache pip packages
@@ -62,7 +62,9 @@ jobs:
         shell: bash
 
       - name: Run Tests
-        run: ctest --preset mingw-debug
+        run: |
+          export PATH="${{ env.MINGW_BIN }}:$PATH"
+          ctest --preset mingw-debug
         shell: bash
 
       - name: Generate Coverage Report
