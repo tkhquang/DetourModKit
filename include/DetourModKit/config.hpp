@@ -1,6 +1,8 @@
 #ifndef CONFIG_HPP
 #define CONFIG_HPP
 
+#include "DetourModKit/input_codes.hpp"
+
 #include <functional>
 #include <string>
 #include <vector>
@@ -30,19 +32,23 @@ namespace DetourModKit
          * @brief Represents a key combination parsed from an INI value.
          * @details Contains trigger keys (OR logic) and modifier keys (AND logic).
          *          Designed for direct use with InputManager::register_press/register_hold.
+         *          Each key is an InputCode identifying both the device source and button.
          *
-         *          INI format: modifier hex codes separated by '+', with the last
-         *          '+'-delimited segment containing trigger key(s) (comma-separated for
-         *          multiple triggers). Examples:
-         *            - "0x72"              → keys=[F3], modifiers=[]
-         *            - "0x11+0x72"         → keys=[F3], modifiers=[Ctrl]
-         *            - "0x11+0x10+0x72"    → keys=[F3], modifiers=[Ctrl, Shift]
-         *            - "0x11+0x72,0x73"    → keys=[F3, F4], modifiers=[Ctrl]
+         *          INI format: modifiers separated by '+', with the last '+'-delimited
+         *          segment containing trigger key(s) (comma-separated for multiple triggers).
+         *          Tokens can be human-readable names or hex VK codes:
+         *            - "F3"                → keys=[F3], modifiers=[]
+         *            - "Ctrl+F3"           → keys=[F3], modifiers=[Ctrl]
+         *            - "Ctrl+Shift+F3"     → keys=[F3], modifiers=[Ctrl, Shift]
+         *            - "Ctrl+F3,F4"        → keys=[F3, F4], modifiers=[Ctrl]
+         *            - "Mouse4"            → keys=[Mouse4], modifiers=[]
+         *            - "Gamepad_LB+Gamepad_A" → keys=[Gamepad_A], modifiers=[Gamepad_LB]
+         *            - "0x11+0x72"         → keys=[0x72], modifiers=[0x11] (hex fallback)
          */
         struct KeyCombo
         {
-            std::vector<int> keys;
-            std::vector<int> modifiers;
+            std::vector<InputCode> keys;
+            std::vector<InputCode> modifiers;
         };
 
         /// Registers an integer configuration item.

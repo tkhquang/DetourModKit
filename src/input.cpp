@@ -3,30 +3,112 @@
  * @brief Implementation of the input polling and hotkey management system.
  *
  * Provides InputPoller (RAII polling engine) and InputManager (singleton wrapper)
- * for monitoring virtual key states on a background thread. Supports press
- * (edge-triggered) and hold (level-triggered) input modes with modifier key
- * combinations and focus-aware polling.
+ * for monitoring keyboard, mouse, and gamepad input states on a background thread.
+ * Supports press (edge-triggered) and hold (level-triggered) input modes with
+ * modifier combinations, focus-aware polling, and XInput gamepad support.
  */
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>
+#include <Xinput.h>
 #include <algorithm>
 #include <exception>
 
 namespace DetourModKit
 {
+    namespace
+    {
+        /**
+         * @brief Checks whether a single InputCode is currently pressed.
+         * @param code The input code to check.
+         * @param gamepad_state Cached XInput state for the current poll cycle.
+         * @param gamepad_connected Whether the gamepad is connected.
+         * @param trigger_threshold Analog trigger deadzone threshold.
+         * @return true if the input is currently pressed.
+         */
+        bool is_code_pressed(const InputCode &code,
+                             const XINPUT_STATE &gamepad_state,
+                             bool gamepad_connected,
+                             int trigger_threshold) noexcept
+        {
+            switch (code.source)
+            {
+            case InputSource::Keyboard:
+            case InputSource::Mouse:
+                return code.code != 0 && (GetAsyncKeyState(code.code) & 0x8000) != 0;
+            case InputSource::Gamepad:
+            {
+                if (!gamepad_connected)
+                {
+                    return false;
+                }
+                if (code.code == GamepadCode::LeftTrigger)
+                {
+                    return gamepad_state.Gamepad.bLeftTrigger > trigger_threshold;
+                }
+                if (code.code == GamepadCode::RightTrigger)
+                {
+                    return gamepad_state.Gamepad.bRightTrigger > trigger_threshold;
+                }
+                return (gamepad_state.Gamepad.wButtons & static_cast<WORD>(code.code)) != 0;
+            }
+            }
+            return false;
+        }
+
+        /**
+         * @brief Scans bindings to determine if any use gamepad input codes.
+         * @param bindings The vector of bindings to scan.
+         * @return true if at least one binding contains a gamepad InputCode.
+         */
+        bool scan_for_gamepad_bindings(const std::vector<InputBinding> &bindings) noexcept
+        {
+            for (const auto &binding : bindings)
+            {
+                for (const auto &key : binding.keys)
+                {
+                    if (key.source == InputSource::Gamepad)
+                    {
+                        return true;
+                    }
+                }
+                for (const auto &mod : binding.modifiers)
+                {
+                    if (mod.source == InputSource::Gamepad)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    } // anonymous namespace
+
     // --- InputPoller ---
 
     InputPoller::InputPoller(std::vector<InputBinding> bindings,
                              std::chrono::milliseconds poll_interval,
-                             bool require_focus)
+                             bool require_focus,
+                             int gamepad_index,
+                             int trigger_threshold)
         : bindings_(std::move(bindings)),
           poll_interval_(std::clamp(poll_interval, MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)),
           require_focus_(require_focus),
-          active_states_(std::make_unique<std::atomic<uint8_t>[]>(bindings_.size()))
+          active_states_(std::make_unique<std::atomic<uint8_t>[]>(bindings_.size())),
+          gamepad_index_(std::clamp(gamepad_index, 0, 3)),
+          trigger_threshold_(std::clamp(trigger_threshold, 0, 255)),
+          has_gamepad_bindings_(scan_for_gamepad_bindings(bindings_))
     {
+        name_index_.reserve(bindings_.size());
+        for (size_t i = 0; i < bindings_.size(); ++i)
+        {
+            if (!bindings_[i].name.empty())
+            {
+                name_index_.emplace(bindings_[i].name, i);
+            }
+        }
     }
 
     InputPoller::~InputPoller()
@@ -42,13 +124,14 @@ namespace DetourModKit
             return;
         }
 
+        running_.store(true, std::memory_order_relaxed);
         poll_thread_ = std::jthread([this](std::stop_token token)
                                     { poll_loop(std::move(token)); });
     }
 
     bool InputPoller::is_running() const noexcept
     {
-        return poll_thread_.joinable() && !poll_thread_.get_stop_token().stop_requested();
+        return running_.load(std::memory_order_relaxed);
     }
 
     size_t InputPoller::binding_count() const noexcept
@@ -72,12 +155,10 @@ namespace DetourModKit
 
     bool InputPoller::is_binding_active(const std::string &name) const noexcept
     {
-        for (size_t i = 0; i < bindings_.size(); ++i)
+        const auto it = name_index_.find(name);
+        if (it != name_index_.end())
         {
-            if (bindings_[i].name == name)
-            {
-                return active_states_[i].load(std::memory_order_relaxed) != 0;
-            }
+            return active_states_[it->second].load(std::memory_order_relaxed) != 0;
         }
         return false;
     }
@@ -103,20 +184,30 @@ namespace DetourModKit
         }
         else
         {
+            Logger::get_instance().error(
+                "InputPoller: shutdown() called from poll thread — cannot self-join, skipping join");
             poll_thread_.detach();
         }
 
+        running_.store(false, std::memory_order_relaxed);
         release_active_holds();
     }
 
     void InputPoller::poll_loop(std::stop_token stop_token)
     {
         const size_t count = bindings_.size();
+        const int threshold = trigger_threshold_;
 
         while (!stop_token.stop_requested())
         {
             const bool process_focused =
                 !require_focus_.load(std::memory_order_relaxed) || is_process_foreground();
+
+            // Poll gamepad state once per cycle (only if bindings use it)
+            XINPUT_STATE gamepad_state{};
+            const bool gamepad_connected = has_gamepad_bindings_ && process_focused &&
+                                           (XInputGetState(static_cast<DWORD>(gamepad_index_),
+                                                           &gamepad_state) == ERROR_SUCCESS);
 
             for (size_t i = 0; i < count; ++i)
             {
@@ -131,9 +222,9 @@ namespace DetourModKit
                 if (process_focused)
                 {
                     bool modifiers_held = true;
-                    for (const int mod : binding.modifiers)
+                    for (const auto &mod : binding.modifiers)
                     {
-                        if (mod != 0 && (GetAsyncKeyState(mod) & 0x8000) == 0)
+                        if (!is_code_pressed(mod, gamepad_state, gamepad_connected, threshold))
                         {
                             modifiers_held = false;
                             break;
@@ -142,9 +233,9 @@ namespace DetourModKit
 
                     if (modifiers_held)
                     {
-                        for (const int vk : binding.keys)
+                        for (const auto &key : binding.keys)
                         {
-                            if (vk != 0 && (GetAsyncKeyState(vk) & 0x8000) != 0)
+                            if (is_code_pressed(key, gamepad_state, gamepad_connected, threshold))
                             {
                                 any_pressed = true;
                                 break;
@@ -267,14 +358,14 @@ namespace DetourModKit
 
     // --- InputManager ---
 
-    void InputManager::register_press(const std::string &name, const std::vector<int> &keys,
+    void InputManager::register_press(const std::string &name, const std::vector<InputCode> &keys,
                                       std::function<void()> callback)
     {
         register_press(name, keys, {}, std::move(callback));
     }
 
-    void InputManager::register_press(const std::string &name, const std::vector<int> &keys,
-                                      const std::vector<int> &modifiers,
+    void InputManager::register_press(const std::string &name, const std::vector<InputCode> &keys,
+                                      const std::vector<InputCode> &modifiers,
                                       std::function<void()> callback)
     {
         std::lock_guard lock(mutex_);
@@ -295,14 +386,14 @@ namespace DetourModKit
         pending_bindings_.push_back(std::move(binding));
     }
 
-    void InputManager::register_hold(const std::string &name, const std::vector<int> &keys,
+    void InputManager::register_hold(const std::string &name, const std::vector<InputCode> &keys,
                                      std::function<void(bool)> callback)
     {
         register_hold(name, keys, {}, std::move(callback));
     }
 
-    void InputManager::register_hold(const std::string &name, const std::vector<int> &keys,
-                                     const std::vector<int> &modifiers,
+    void InputManager::register_hold(const std::string &name, const std::vector<InputCode> &keys,
+                                     const std::vector<InputCode> &modifiers,
                                      std::function<void(bool)> callback)
     {
         std::lock_guard lock(mutex_);
@@ -333,6 +424,18 @@ namespace DetourModKit
         }
     }
 
+    void InputManager::set_gamepad_index(int index)
+    {
+        std::lock_guard lock(mutex_);
+        gamepad_index_ = std::clamp(index, 0, 3);
+    }
+
+    void InputManager::set_trigger_threshold(int threshold)
+    {
+        std::lock_guard lock(mutex_);
+        trigger_threshold_ = std::clamp(threshold, 0, 255);
+    }
+
     void InputManager::start(std::chrono::milliseconds poll_interval)
     {
         std::lock_guard lock(mutex_);
@@ -359,15 +462,15 @@ namespace DetourModKit
         }
 
         poller_ = std::make_unique<InputPoller>(std::move(pending_bindings_), poll_interval,
-                                                require_focus_);
+                                                require_focus_, gamepad_index_, trigger_threshold_);
         pending_bindings_.clear();
         poller_->start();
+        running_.store(true, std::memory_order_release);
     }
 
     bool InputManager::is_running() const noexcept
     {
-        std::lock_guard lock(mutex_);
-        return poller_ && poller_->is_running();
+        return running_.load(std::memory_order_acquire);
     }
 
     size_t InputManager::binding_count() const noexcept
@@ -382,6 +485,10 @@ namespace DetourModKit
 
     bool InputManager::is_binding_active(const std::string &name) const noexcept
     {
+        if (!running_.load(std::memory_order_acquire))
+        {
+            return false;
+        }
         std::lock_guard lock(mutex_);
         if (poller_)
         {
@@ -404,5 +511,6 @@ namespace DetourModKit
         {
             local_poller->shutdown();
         }
+        running_.store(false, std::memory_order_release);
     }
 } // namespace DetourModKit

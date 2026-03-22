@@ -184,9 +184,8 @@ endif()
 # Link necessary system libraries for Windows API calls.
 if(WIN32)
   target_link_libraries(DetourModKit PRIVATE
-    psapi # Example: for process information functions
-
-    # Add other Windows libraries DetourModKit directly uses, e.g., user32, shell32
+    psapi   # Process information functions
+    xinput  # XInput gamepad polling
   )
 endif()
 
