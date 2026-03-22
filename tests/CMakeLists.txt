@@ -22,6 +22,15 @@ foreach(_ext_target gtest gtest_main gmock gmock_main)
   endif()
 endforeach()
 
+# Test fixture DLL for cross-module hook integration tests
+add_library(hook_target_lib SHARED
+  "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/hook_target_lib.cpp"
+)
+set_target_properties(hook_target_lib PROPERTIES
+  PREFIX ""
+  OUTPUT_NAME "hook_target_lib"
+)
+
 # Automatically collect all test source files
 # This will include all test_*.cpp files and main.cpp
 file(GLOB TEST_SOURCES
@@ -42,11 +51,20 @@ endforeach()
 # Enable testing for the DetourModKit library
 add_executable(DetourModKit_tests ${TEST_SOURCES})
 
+# Ensure the hook target DLL is built before tests and placed alongside the test exe
+add_dependencies(DetourModKit_tests hook_target_lib)
+add_custom_command(TARGET hook_target_lib POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:hook_target_lib>
+    $<TARGET_FILE_DIR:DetourModKit_tests>
+)
+
 # Link GoogleTest and DetourModKit
 target_link_libraries(DetourModKit_tests
   PRIVATE
   DetourModKit
   GTest::gtest_main
+  psapi
 )
 
 # Include directories
