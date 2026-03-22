@@ -58,6 +58,7 @@ namespace DetourModKit
         InvalidDetourFunction,
         InvalidTrampolinePointer,
         HookAlreadyExists,
+        ShutdownInProgress,
         SafetyHookError,
         UnknownError
     };

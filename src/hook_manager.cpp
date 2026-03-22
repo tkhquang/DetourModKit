@@ -132,6 +132,11 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name), LogLevel::Error}}};
+        }
         if (!m_allocator)
         {
             return {std::unexpected(HookError::AllocatorNotAvailable),
@@ -184,23 +189,15 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
             }
 
             auto sh_inline_hook_ptr = std::make_unique<safetyhook::InlineHook>(std::move(hook_creation_result.value()));
-            *original_trampoline = sh_inline_hook_ptr->original<void *>();
+            void *trampoline = sh_inline_hook_ptr->original<void *>();
 
-            HookStatus initial_status;
-            if (sh_inline_hook_ptr->enabled())
-            {
-                initial_status = HookStatus::Active;
-            }
-            else
-            {
-                initial_status = HookStatus::Disabled;
-            }
+            HookStatus initial_status = sh_inline_hook_ptr->enabled() ? HookStatus::Active : HookStatus::Disabled;
 
-            auto managed_hook = std::make_unique<InlineHook>(name, target_address, std::move(sh_inline_hook_ptr), initial_status);
-            m_hooks.emplace(name, std::move(managed_hook));
-
+            // Pre-build log entries before committing to m_hooks so that
+            // allocation failures in std::format cannot leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
             std::vector<DeferredLog> logs;
+            logs.reserve(2);
             logs.push_back({std::format("HookManager: Successfully created {} inline hook '{}' targeting {}.",
                                         status_message, name, DetourModKit::Format::format_address(target_address)),
                             LogLevel::Info});
@@ -210,6 +207,10 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
                 logs.push_back({std::format("HookManager: Inline hook '{}' was configured for auto-enable but is currently disabled post-creation.", name),
                                 LogLevel::Warning});
             }
+
+            auto managed_hook = std::make_unique<InlineHook>(name, target_address, std::move(sh_inline_hook_ptr), initial_status);
+            m_hooks.emplace(name, std::move(managed_hook));
+            *original_trampoline = trampoline;
 
             return {name, std::move(logs)};
         }
@@ -283,6 +284,11 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name), LogLevel::Error}}};
+        }
         if (!m_allocator)
         {
             return {std::unexpected(HookError::AllocatorNotAvailable),
@@ -330,21 +336,13 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
             auto sh_mid_hook_ptr = std::make_unique<safetyhook::MidHook>(std::move(hook_creation_result.value()));
 
-            HookStatus initial_status;
-            if (sh_mid_hook_ptr->enabled())
-            {
-                initial_status = HookStatus::Active;
-            }
-            else
-            {
-                initial_status = HookStatus::Disabled;
-            }
+            HookStatus initial_status = sh_mid_hook_ptr->enabled() ? HookStatus::Active : HookStatus::Disabled;
 
-            auto managed_hook = std::make_unique<MidHook>(name, target_address, std::move(sh_mid_hook_ptr), initial_status);
-            m_hooks.emplace(name, std::move(managed_hook));
-
+            // Pre-build log entries before committing to m_hooks so that
+            // allocation failures in std::format cannot leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
             std::vector<DeferredLog> logs;
+            logs.reserve(2);
             logs.push_back({std::format("HookManager: Successfully created {} mid hook '{}' targeting {}.",
                                         status_message, name, DetourModKit::Format::format_address(target_address)),
                             LogLevel::Info});
@@ -354,6 +352,9 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
                 logs.push_back({std::format("HookManager: Mid hook '{}' was configured for auto-enable but is currently disabled post-creation.", name),
                                 LogLevel::Warning});
             }
+
+            auto managed_hook = std::make_unique<MidHook>(name, target_address, std::move(sh_mid_hook_ptr), initial_status);
+            m_hooks.emplace(name, std::move(managed_hook));
 
             return {name, std::move(logs)};
         }
