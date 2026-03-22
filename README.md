@@ -591,7 +591,7 @@ For practical reference and real-world usage examples:
 
 ## Acknowledgements
 
-DetourModKit incorporates components from other open-source projects. See [DetourModKit_Acknowledgements.txt](/DetourModKit_Acknowledgements.txt) for full details.
+DetourModKit incorporates components from other open-source projects. See [DetourModKit_Acknowledgements.txt](DetourModKit_Acknowledgements.txt) for full details.
 
 * [SafetyHook](https://github.com/cursey/safetyhook) (Boost Software License 1.0)
 * [SimpleIni](https://github.com/brofield/simpleini) (MIT)

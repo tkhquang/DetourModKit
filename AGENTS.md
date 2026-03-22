@@ -67,7 +67,7 @@ make clean        # Remove all build directories
 
 ## Project structure
 
-```
+```text
 include/DetourModKit/    # Public headers — one per module
   scanner.hpp            # AOB pattern scanning with SSE2
   hook_manager.hpp       # SafetyHook wrapper (inline + mid hooks)
@@ -94,7 +94,7 @@ CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/releas
 
 - **Standard:** C++23 with `-std=c++23`. No compiler extensions (`CMAKE_CXX_EXTENSIONS OFF`).
 - **Naming:** `snake_case` for functions, variables, and file names. `PascalCase` for types and classes. `UPPER_SNAKE_CASE` for constants and macros. Prefix `m_` for class member variables. Prefix `s_` for file-scope statics.
-- **Braces:** Allman style — opening brace on its own line for functions and classes, same line for control flow within a function body using K&R style indented blocks.
+- **Braces:** Allman style — opening brace on its own line for functions and classes, same line for control flow within a function body using K&R-style indented blocks.
 - **Indentation:** 4 spaces, no tabs.
 - **Namespaces:** All public API lives in `namespace DetourModKit`. No `using namespace` in headers.
 - **Includes:** Project headers use `"DetourModKit/header.hpp"`. System/external headers use `<angle brackets>`. Group: project headers, then external, then standard library.
