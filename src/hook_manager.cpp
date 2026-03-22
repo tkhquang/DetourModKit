@@ -195,7 +195,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
 
             // Pre-build log entries before committing to m_hooks so that
             // allocation failures in std::format cannot leave a ghost hook.
-            std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
+            std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
             std::vector<DeferredLog> logs;
             logs.reserve(2);
             logs.push_back({std::format("HookManager: Successfully created {} inline hook '{}' targeting {}.",
@@ -340,7 +340,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
             // Pre-build log entries before committing to m_hooks so that
             // allocation failures in std::format cannot leave a ghost hook.
-            std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
+            std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
             std::vector<DeferredLog> logs;
             logs.reserve(2);
             logs.push_back({std::format("HookManager: Successfully created {} mid hook '{}' targeting {}.",
