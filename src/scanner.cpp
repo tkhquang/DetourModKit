@@ -80,10 +80,22 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
     std::string token;
     size_t token_idx = 0;
 
+    bool offset_set = false;
+
     while (iss >> token)
     {
         token_idx++;
-        if (token == "??" || token == "?")
+        if (token == "|")
+        {
+            if (offset_set)
+            {
+                logger.error("AOB Parser: Multiple '|' offset markers at position {}.", token_idx);
+                return std::nullopt;
+            }
+            result.offset = result.bytes.size();
+            offset_set = true;
+        }
+        else if (token == "??" || token == "?")
         {
             result.bytes.push_back(std::byte{0x00});
             result.mask.push_back(std::byte{0x00});
@@ -222,6 +234,37 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
 
         // No match, continue searching from next position
         search_start = current_scan_ptr + 1;
+    }
+
+    return nullptr;
+}
+
+const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_address, size_t region_size,
+                                                     const CompiledPattern &pattern, size_t occurrence)
+{
+    if (occurrence == 0)
+    {
+        return nullptr;
+    }
+
+    const std::byte *cursor = start_address;
+    size_t remaining = region_size;
+    size_t found_count = 0;
+
+    while (remaining >= pattern.size())
+    {
+        const std::byte *match = find_pattern(cursor, remaining, pattern);
+        if (!match)
+        {
+            break;
+        }
+        if (++found_count == occurrence)
+        {
+            return match;
+        }
+        const size_t advance = static_cast<size_t>(match - cursor) + 1;
+        cursor += advance;
+        remaining -= advance;
     }
 
     return nullptr;

@@ -494,6 +494,194 @@ TEST(ScannerTest, parse_aob_invariant)
     EXPECT_EQ(single->bytes.size(), single->mask.size());
 }
 
+// --- Pipe offset marker ---
+
+TEST(ScannerTest, parse_aob_offset_marker)
+{
+    auto result = Scanner::parse_aob("48 8B 88 B8 00 00 00 | 48 89 4C 24 68");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->size(), 12u);
+    EXPECT_EQ(result->offset, 7u);
+    EXPECT_EQ(result->bytes[0], std::byte{0x48});
+    EXPECT_EQ(result->bytes[7], std::byte{0x48});
+}
+
+TEST(ScannerTest, parse_aob_offset_marker_at_start)
+{
+    auto result = Scanner::parse_aob("| 48 8B 05");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->size(), 3u);
+    EXPECT_EQ(result->offset, 0u);
+}
+
+TEST(ScannerTest, parse_aob_offset_marker_at_end)
+{
+    auto result = Scanner::parse_aob("48 8B 05 |");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->size(), 3u);
+    EXPECT_EQ(result->offset, 3u);
+}
+
+TEST(ScannerTest, parse_aob_no_offset_marker)
+{
+    auto result = Scanner::parse_aob("48 8B 05");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->offset, 0u);
+}
+
+TEST(ScannerTest, parse_aob_multiple_offset_markers_fails)
+{
+    auto result = Scanner::parse_aob("48 | 8B | 05");
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(ScannerTest, parse_aob_offset_marker_with_wildcards)
+{
+    auto result = Scanner::parse_aob("?? ?? | 48 8B ??");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->size(), 5u);
+    EXPECT_EQ(result->offset, 2u);
+}
+
+TEST(ScannerTest, find_pattern_with_offset_marker)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[50] = std::byte{0xAA};
+    data[51] = std::byte{0xBB};
+    data[52] = std::byte{0xCC};
+    data[53] = std::byte{0xDD};
+
+    auto pattern = Scanner::parse_aob("AA BB | CC DD");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 50);
+
+    // The caller can use result + pattern->offset to get the marked position
+    EXPECT_EQ((result + pattern->offset) - data.data(), 52);
+}
+
+// --- Nth-occurrence matching ---
+
+TEST(ScannerTest, find_pattern_nth_occurrence_first)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[50] = std::byte{0x90};
+    data[51] = std::byte{0x90};
+    data[100] = std::byte{0x90};
+    data[101] = std::byte{0x90};
+
+    auto pattern = Scanner::parse_aob("90 90");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 1);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 50);
+}
+
+TEST(ScannerTest, find_pattern_nth_occurrence_second)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[50] = std::byte{0x90};
+    data[51] = std::byte{0x90};
+    data[100] = std::byte{0x90};
+    data[101] = std::byte{0x90};
+
+    auto pattern = Scanner::parse_aob("90 90");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 100);
+}
+
+TEST(ScannerTest, find_pattern_nth_occurrence_third)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[30] = std::byte{0xAB};
+    data[31] = std::byte{0xCD};
+    data[80] = std::byte{0xAB};
+    data[81] = std::byte{0xCD};
+    data[200] = std::byte{0xAB};
+    data[201] = std::byte{0xCD};
+
+    auto pattern = Scanner::parse_aob("AB CD");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 3);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 200);
+}
+
+TEST(ScannerTest, find_pattern_nth_occurrence_not_enough)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[50] = std::byte{0x90};
+    data[51] = std::byte{0x90};
+
+    auto pattern = Scanner::parse_aob("90 90");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(ScannerTest, find_pattern_nth_occurrence_zero)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[50] = std::byte{0x90};
+
+    auto pattern = Scanner::parse_aob("90");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 0);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(ScannerTest, find_pattern_nth_occurrence_with_offset)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[40] = std::byte{0xAA};
+    data[41] = std::byte{0xBB};
+    data[42] = std::byte{0xCC};
+    data[100] = std::byte{0xAA};
+    data[101] = std::byte{0xBB};
+    data[102] = std::byte{0xCC};
+
+    auto pattern = Scanner::parse_aob("AA | BB CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 100);
+    EXPECT_EQ((result + pattern->offset) - data.data(), 101);
+}
+
+TEST(ScannerTest, find_pattern_nth_occurrence_with_overlap)
+{
+    std::vector<std::byte> data = {
+        std::byte{0xAA}, std::byte{0xAA}, std::byte{0xAA}, std::byte{0xAA}};
+
+    auto pattern = Scanner::parse_aob("AA AA");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto r1 = Scanner::find_pattern(data.data(), data.size(), *pattern, 1);
+    ASSERT_NE(r1, nullptr);
+    EXPECT_EQ(r1 - data.data(), 0);
+
+    auto r2 = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    ASSERT_NE(r2, nullptr);
+    EXPECT_EQ(r2 - data.data(), 1);
+
+    auto r3 = Scanner::find_pattern(data.data(), data.size(), *pattern, 3);
+    ASSERT_NE(r3, nullptr);
+    EXPECT_EQ(r3 - data.data(), 2);
+
+    auto r4 = Scanner::find_pattern(data.data(), data.size(), *pattern, 4);
+    EXPECT_EQ(r4, nullptr);
+}
+
 TEST(ScannerTest, find_pattern_const_correctness)
 {
     const std::vector<std::byte> data = {

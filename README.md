@@ -7,7 +7,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 ## Features
 
-* **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code.
+* **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support. Supports `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7) and nth-occurrence matching (1-based) for patterns that hit multiple locations. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code.
 * **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
 * **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `Ctrl+Shift+F3`). Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats are all supported. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
 * **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
