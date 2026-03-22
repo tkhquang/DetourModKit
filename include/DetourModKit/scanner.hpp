@@ -23,6 +23,8 @@ namespace DetourModKit
         {
             std::vector<std::byte> bytes; ///< Pattern bytes (wildcard positions contain arbitrary values)
             std::vector<std::byte> mask;  ///< 0xFF = match this byte, 0x00 = wildcard (skip)
+            size_t offset = 0;            ///< Byte offset from pattern start to the point of interest.
+                                          ///< Set by `|` marker in the AOB string, or 0 if absent.
 
             /**
              * @brief Returns the size of the pattern.
@@ -40,7 +42,10 @@ namespace DetourModKit
         /**
          * @brief Parses a space-separated AOB string into a compiled pattern.
          * @details Converts hexadecimal strings to byte values and wildcard tokens
-         *          ('??' or '?') into mask=false entries.
+         *          ('??' or '?') into mask=false entries. An optional `|` token marks
+         *          the offset within the pattern (stored in CompiledPattern::offset).
+         *          This lets wider patterns precisely target a specific instruction:
+         *          e.g., "48 8B 88 B8 00 00 00 | 48 89 4C 24 68" sets offset=7.
          * @param aob_str The AOB pattern string.
          * @return std::optional<CompiledPattern> The compiled pattern, or std::nullopt on parse failure.
          */
@@ -58,6 +63,18 @@ namespace DetourModKit
          */
         const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
                                       const CompiledPattern &pattern);
+
+        /**
+         * @brief Scans a memory region for the Nth occurrence of a byte pattern.
+         * @param start_address Pointer to the beginning of the memory region to scan.
+         * @param region_size The size (in bytes) of the memory region to scan.
+         * @param pattern The compiled pattern to search for.
+         * @param occurrence Which occurrence to return (1-based). 1 = first match.
+         * @return const std::byte* Pointer to the Nth occurrence, or nullptr if fewer
+         *         than N matches exist.
+         */
+        const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
+                                      const CompiledPattern &pattern, size_t occurrence);
         // Common x86-64 RIP-relative opcode prefixes (bytes preceding the disp32 field)
         inline constexpr std::byte PREFIX_MOV_RAX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
         inline constexpr std::byte PREFIX_MOV_RCX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}};
