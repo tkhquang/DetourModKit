@@ -59,7 +59,9 @@ add_custom_command(TARGET hook_target_lib POST_BUILD
     $<TARGET_FILE_DIR:DetourModKit_tests>
 )
 
-# Link GoogleTest and DetourModKit
+# Link GoogleTest and DetourModKit.
+# psapi is needed by test_hook_integration.cpp (GetModuleInformation).
+# user32 and xinput1_4 propagate transitively from DetourModKit (INTERFACE).
 target_link_libraries(DetourModKit_tests
   PRIVATE
   DetourModKit
