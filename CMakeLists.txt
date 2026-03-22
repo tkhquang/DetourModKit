@@ -7,7 +7,16 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(BUILD_SHARED_LIBS OFF) # Build DetourModKit as a static library
-set(CMAKE_POSITION_INDEPENDENT_CODE ON) # Good practice for libraries
+
+# CMAKE_POSITION_INDEPENDENT_CODE is intentionally not set here.
+# On Windows (PE/COFF), all code is position-independent by default;
+# -fPIC is a no-op on MinGW and ignored by MSVC.
+
+# Make CRT linkage explicit and overridable by consumers.
+# Default: dynamic CRT (/MD Release, /MDd Debug).
+if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+endif()
 
 # --- Compiler Flags ---
 if(MSVC)
@@ -15,8 +24,11 @@ if(MSVC)
   # Add /WX to treat warnings as errors in CI or for strict builds if desired.
   add_compile_options(/W4)
 
-  # Generate separate PDB files to avoid access conflicts
-  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded")
+  # Debug builds: embed CodeView debug info directly into .obj files (/Z7)
+  # to avoid PDB file locking issues during parallel builds.
+  # Release builds: no debug info to minimize binary size.
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+    "$<$<CONFIG:Debug>:Embedded>$<$<NOT:$<CONFIG:Debug>>:>")
   set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pdb")
 
 # Suppress some common noisy MSVC warnings if necessary:
@@ -24,7 +36,14 @@ if(MSVC)
 # add_compile_options(/wd4275) # non dll-interface class 'type' used as base...
 else()
   # GCC/Clang specific flags
-  add_compile_options(-Wall -Wextra -Wpedantic -fexceptions)
+  add_compile_options(-Wall -Wextra -Wpedantic)
+
+  # Override CMake's default -O3 for Release with -O2.
+  # -O2 provides a better code-size/performance tradeoff; the scanner's
+  # SSE2 intrinsics are already hand-optimized and do not benefit from
+  # -O3's aggressive loop unrolling and auto-vectorization.
+  string(REPLACE "-O3" "-O2" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+  string(REPLACE "-O3" "-O2" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
 
   # Suppress specific GCC/Clang warnings if they are noisy or from dependencies
   # add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers)
@@ -121,6 +140,26 @@ if(WIN32)
   target_compile_definitions(DetourModKit PUBLIC NOMINMAX)
 endif()
 
+# --- Target-Scoped Release Optimizations ---
+# Applied per-target so they do not leak into external subdirectory targets.
+if(MSVC)
+  # /Gy: function-level linking, /Gw: global data optimization.
+  # These enable the linker to discard unreferenced code/data via /OPT:REF,ICF.
+  target_compile_options(DetourModKit PRIVATE
+    $<$<CONFIG:Release>:/Gy /Gw>
+  )
+else()
+  # -ffunction-sections/-fdata-sections + --gc-sections: GCC/Clang equivalent
+  # of MSVC's /Gy + /OPT:REF for dead code elimination.
+  # -s: strip all symbols from the final binary.
+  target_compile_options(DetourModKit PRIVATE
+    $<$<CONFIG:Release>:-ffunction-sections -fdata-sections>
+  )
+  target_link_options(DetourModKit PUBLIC
+    $<$<CONFIG:Release>:-Wl,--gc-sections -s>
+  )
+endif()
+
 # Set output name and prefix properties for consistency
 # For most generators (like MinGW Makefiles), PREFIX is "lib" by default for static/shared libs.
 # For MSVC, PREFIX is empty by default for static/shared libs.
@@ -182,10 +221,21 @@ else()
 endif()
 
 # Link necessary system libraries for Windows API calls.
+# INTERFACE so consumers of this static library automatically resolve these
+# import libraries when linking the final DLL/EXE.
+# The XInput import library name differs between toolchains:
+#   MSVC / Windows SDK: xinput.lib  (links against xinput1_4.dll at runtime)
+#   MinGW:              -lxinput1_4 (libxinput1_4.a ships with mingw-w64)
 if(WIN32)
-  target_link_libraries(DetourModKit PRIVATE
-    psapi   # Process information functions
-    xinput1_4  # XInput gamepad polling (xinput1_4.dll ships with Win8+)
+  if(MSVC)
+    set(_DMK_XINPUT_LIB xinput)
+  else()
+    set(_DMK_XINPUT_LIB xinput1_4)
+  endif()
+
+  target_link_libraries(DetourModKit INTERFACE
+    user32          # GetAsyncKeyState, GetForegroundWindow, GetWindowThreadProcessId
+    ${_DMK_XINPUT_LIB} # XInput gamepad polling (xinput1_4.dll ships with Win8+)
   )
 endif()
 
@@ -335,6 +385,22 @@ if(DMK_ENABLE_SANITIZERS AND NOT MSVC)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
   message(STATUS "Sanitizers enabled: ASan + UBSan")
+endif()
+
+# --- Link-Time Optimization ---
+# LTO enables cross-translation-unit optimization and dead code elimination
+# in Release builds. Applied per-target to avoid inflating build times for
+# external subdirectory targets (SafetyHook, Zydis, Zycore).
+include(CheckIPOSupported)
+check_ipo_supported(RESULT _ipo_supported LANGUAGES CXX OUTPUT _ipo_error)
+
+if(_ipo_supported)
+  set_target_properties(DetourModKit PROPERTIES
+    INTERPROCEDURAL_OPTIMIZATION_RELEASE ON
+  )
+  message(STATUS "LTO enabled for DetourModKit Release builds")
+else()
+  message(STATUS "LTO not supported: ${_ipo_error}")
 endif()
 
 # --- Unit Tests ---

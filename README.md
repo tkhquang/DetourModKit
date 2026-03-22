@@ -96,6 +96,16 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     | `msvc-debug` | MSVC (cl) | Debug | ON |
     | `msvc-release` | MSVC (cl) | Release | OFF |
 
+   > [!NOTE]
+   > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
+   > along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
+   > with `--gc-sections` on GCC/Clang). MinGW Release builds use `-O2` (overriding CMake's
+   > default `-O3`) for a better code-size/performance tradeoff and are stripped of symbols.
+   > MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
+   > Release builds omit debug info entirely to minimize binary size.
+
+   <!-- -->
+
    > [!TIP]
    > You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
 
@@ -241,12 +251,13 @@ This method is ideal for active development and ensures you always have the late
     # Create your mod target
     add_library(MyMod SHARED src/main.cpp)
 
-    # Link against DetourModKit (all dependencies are transitively linked)
+    # Link against DetourModKit (all dependencies are transitively linked).
+    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage.
     target_link_libraries(MyMod PRIVATE DetourModKit)
 
-    # Add system libraries (Windows)
+    # Add any extra system libraries your own mod code needs (Windows)
     if(WIN32)
-        target_link_libraries(MyMod PRIVATE psapi user32 kernel32)
+        target_link_libraries(MyMod PRIVATE psapi kernel32)
     endif()
     ```
 
@@ -285,12 +296,13 @@ This method uses a pre-built and installed version of DetourModKit.
     # Create your mod target
     add_library(MyMod SHARED src/main.cpp)
 
-    # Link against DetourModKit
+    # Link against DetourModKit.
+    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage.
     target_link_libraries(MyMod PRIVATE DetourModKit::DetourModKit)
 
-    # Add system libraries (Windows)
+    # Add any extra system libraries your own mod code needs (Windows)
     if(WIN32)
-        target_link_libraries(MyMod PRIVATE psapi user32 kernel32)
+        target_link_libraries(MyMod PRIVATE psapi kernel32)
     endif()
     ```
 
@@ -303,7 +315,9 @@ This method uses a pre-built and installed version of DetourModKit.
     CXXFLAGS += -I$(DETOURMODKIT_DIR)/include
     LDFLAGS += -L$(DETOURMODKIT_DIR)/lib
     LIBS += -lDetourModKit -lsafetyhook -lZydis -lZycore
-    # Add system libs like: -lpsapi -luser32 -lkernel32 -lshlwapi -static-libgcc -static-libstdc++
+    # Add system libs: -luser32 -lxinput1_4 are required by DetourModKit.
+    # Add -lpsapi -lkernel32 etc. if your own mod code uses them.
+    LIBS += -luser32 -lxinput1_4 -static-libgcc -static-libstdc++
 
     # Example link command:
     # $(CXX) $(YOUR_OBJECTS) -o YourMod.asi -shared $(LDFLAGS) $(LIBS)
