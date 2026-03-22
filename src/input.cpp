@@ -124,9 +124,17 @@ namespace DetourModKit
             return;
         }
 
-        poll_thread_ = std::jthread([this](std::stop_token token)
-                                    { poll_loop(std::move(token)); });
         running_.store(true, std::memory_order_relaxed);
+        try
+        {
+            poll_thread_ = std::jthread([this](std::stop_token token)
+                                        { poll_loop(std::move(token)); });
+        }
+        catch (...)
+        {
+            running_.store(false, std::memory_order_relaxed);
+            throw;
+        }
     }
 
     bool InputPoller::is_running() const noexcept
@@ -193,16 +201,33 @@ namespace DetourModKit
         const size_t count = bindings_.size();
         const int threshold = trigger_threshold_;
 
+        constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
+        bool gamepad_was_connected = false;
+        auto last_gamepad_poll = std::chrono::steady_clock::time_point{};
+
         while (!stop_token.stop_requested())
         {
             const bool process_focused =
                 !require_focus_.load(std::memory_order_relaxed) || is_process_foreground();
 
-            // Poll gamepad state once per cycle (only if bindings use it)
+            // Poll gamepad state once per cycle when connected.
+            // When disconnected, throttle reconnection attempts to avoid
+            // the per-cycle overhead of XInputGetState on empty slots.
             XINPUT_STATE gamepad_state{};
-            const bool gamepad_connected = has_gamepad_bindings_ && process_focused &&
-                                           (XInputGetState(static_cast<DWORD>(gamepad_index_),
-                                                           &gamepad_state) == ERROR_SUCCESS);
+            bool gamepad_connected = false;
+            if (has_gamepad_bindings_ && process_focused)
+            {
+                const auto now = std::chrono::steady_clock::now();
+                if (gamepad_was_connected ||
+                    (now - last_gamepad_poll) >= gamepad_reconnect_interval)
+                {
+                    last_gamepad_poll = now;
+                    gamepad_was_connected =
+                        XInputGetState(static_cast<DWORD>(gamepad_index_),
+                                       &gamepad_state) == ERROR_SUCCESS;
+                }
+                gamepad_connected = gamepad_was_connected;
+            }
 
             for (size_t i = 0; i < count; ++i)
             {
