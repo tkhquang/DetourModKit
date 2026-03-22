@@ -35,15 +35,13 @@ jobs:
         run: pip install gcovr
         shell: powershell
 
-      - name: Cache CMake build (dependencies)
+      - name: Cache CMake build
         uses: actions/cache@v4
         with:
-          path: |
-            build/mingw-debug/_deps
-            build/mingw-debug/external
-            build/mingw-debug/lib
-          key: cmake-deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**') }}
-          restore-keys: cmake-deps-${{ runner.os }}-
+          path: build/mingw-debug
+          key: cmake-build-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**') }}
+          restore-keys: |
+            cmake-build-${{ runner.os }}-
 
       - name: Verify Tools
         run: |
@@ -61,21 +59,12 @@ jobs:
         run: cmake --build --preset mingw-debug --parallel
         shell: bash
 
-      - name: Diagnose and copy MinGW runtime DLLs
+      - name: Copy MinGW runtime DLLs
         run: |
           $testDir = "build\mingw-debug\tests"
-          $mingw = "${{ env.MINGW_BIN }}"
-          echo "MinGW dir: $mingw"
-          echo "Test dir: $testDir"
-          echo "--- MinGW DLLs ---"
-          Get-ChildItem "$mingw\lib*.dll" | ForEach-Object { echo $_.Name }
-          echo "--- Copying ---"
-          Get-ChildItem "$mingw\lib*.dll" | ForEach-Object {
-            echo "  Copying $($_.Name)"
+          Get-ChildItem "${{ env.MINGW_BIN }}\lib*.dll" | ForEach-Object {
             Copy-Item $_.FullName "$testDir\"
           }
-          echo "--- Test dir contents ---"
-          Get-ChildItem "$testDir\*.dll" | ForEach-Object { echo $_.Name }
         shell: powershell
 
       - name: Run Tests
