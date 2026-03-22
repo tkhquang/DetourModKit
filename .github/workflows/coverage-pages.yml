@@ -3,6 +3,14 @@ name: Coverage Report ≥ 80%
 on:
   push:
     branches: [main]
+    paths:
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'external/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/coverage-pages.yml'
 
   workflow_dispatch:
 

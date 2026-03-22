@@ -3,6 +3,14 @@ name: PR Check - Tests & Coverage
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - 'external/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - '.github/workflows/pr-check.yml'
 
   workflow_dispatch:
 
