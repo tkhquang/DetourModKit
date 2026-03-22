@@ -5,7 +5,6 @@ install_package/*
 CMakeUserPresets.json
 !/**/.gitkeep
 
-# Coverage reports (dynamically generated)
-docs/tests/coverage*
-docs/tests/*.css
-docs/tests/*.js
+# Coverage reports (generated into docs/tests/coverage/)
+docs/tests/coverage/
+!docs/tests/coverage/.gitignore

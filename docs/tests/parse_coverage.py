@@ -1,6 +1,14 @@
 import json
+import sys
+from pathlib import Path
 
-with open('coverage.json', 'r') as f:
+if len(sys.argv) > 1:
+    coverage_path = sys.argv[1]
+else:
+    script_dir = Path(__file__).resolve().parent
+    coverage_path = str(script_dir / 'coverage' / 'coverage.json')
+
+with open(coverage_path, 'r') as f:
     d = json.load(f)
 
 files = d.get('files', [])

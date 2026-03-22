@@ -1,120 +1,183 @@
-# Test Coverage Improvement Guide
+# Test Coverage Guide
 
 ## Overview
 
-This guide documents lessons learned from improving code coverage for DetourModKit, including how to create tests, run coverage analysis, identify uncovered areas, and address common obstacles.
+This guide documents the testing strategy for DetourModKit, including how to build with coverage, run tests, interpret reports, and address common obstacles.
 
 ## Quick Commands
 
 ### Build with Coverage
 
 ```bash
-# Clean rebuild with coverage flags
-set "PATH=C:\msys64\mingw64\bin;%PATH%"
-rm -rf build/mingw-debug
-cmake -S . -B build/mingw-debug -G "Ninja" ^
-    -DCMAKE_BUILD_TYPE=Debug -DDMK_BUILD_TESTS=ON ^
-    -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++ ^
-    -DCMAKE_C_FLAGS="-fprofile-arcs -ftest-coverage" ^
-    -DCMAKE_CXX_FLAGS="-fprofile-arcs -ftest-coverage"
+# Using CMake presets (recommended)
+PATH="/c/msys64/mingw64/bin:$PATH"
+cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 cmake --build build/mingw-debug --parallel
-```bash
+```
 
 ### Run Tests
 
 ```bash
-cd build/mingw-debug
-ctest --output-on-failure
-```bash
+PATH="/c/msys64/mingw64/bin:$PATH"
+./build/mingw-debug/tests/DetourModKit_tests.exe
+
+# Run a specific test suite
+./build/mingw-debug/tests/DetourModKit_tests.exe --gtest_filter="LoggerTest.*"
+
+# Run via CTest
+ctest --preset mingw-debug --output-on-failure
+```
 
 ### Generate Coverage Report
 
 ```bash
-# Full report
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" ^
-    --exclude "external/" --exclude "build/" --exclude "tests/" ^
-    --gcov-ignore-parse-errors negative_hits.warn ^
+# Summary report
+python -m gcovr --root . --filter "src/" --filter "include/" \
+    --exclude "external/" --exclude "build/" --exclude "tests/" \
+    --gcov-ignore-parse-errors negative_hits.warn \
     --print-summary
 
-# Detailed HTML report (saved to docs/tests/)
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" ^
-    --exclude "external/" --exclude "build/" --exclude "tests/" ^
-    --html-details docs/tests/coverage_details.html
-```bash
+# HTML report (output to docs/tests/coverage/, gitignored)
+python -m gcovr --root . --filter "src/" --filter "include/" \
+    --exclude "external/" --exclude "build/" --exclude "tests/" \
+    --gcov-ignore-parse-errors negative_hits.warn \
+    --html-details docs/tests/coverage/index.html
+```
 
 ## Coverage Analysis Workflow
 
 ### 1. Identify Low-Coverage Files
 
-Run the full coverage report and look for files with <90% coverage:
+Run the full coverage report and look for files below the 80% gate:
 
 ```bash
-TOTAL                                       1935     1585    81%
-```bash
+python -m gcovr --root . --filter "src/" --filter "include/" \
+    --exclude "external/" --exclude "build/" --exclude "tests/" \
+    --gcov-ignore-parse-errors negative_hits.warn \
+    --print-summary
+```
 
 ### 2. Check Specific File Coverage
 
 ```bash
 python -m gcovr --root . --filter "src/hook_manager.cpp" --txt
+```
+
+### 3. Analyze Uncovered Lines
+
+Look at the "Missing" column for specific line numbers, then categorize by reason:
+
+| Reason | Examples | Solution |
+| ------ | -------- | -------- |
+| **Invalid memory addresses** | Hook functions requiring valid function pointers | Use real function addresses with `[[gnu::noinline]]` |
+| **Error paths** | Exception handlers, error returns | Test with invalid inputs that trigger errors |
+| **Windows API errors** | `GetModuleHandleExA`, `VirtualQuery` failures | Accept limitation or mock |
+| **Template instantiation** | Template methods only instantiated with specific types | Add tests calling with those types |
+| **Threading race conditions** | Lock-free CAS retry loops | Difficult to cover deterministically |
+| **Cross-module paths** | DLL hooking, module scanning | Use integration tests with `hook_target_lib.dll` |
+
+## Test Architecture
+
+### Unit Tests
+
+Each module has a corresponding test file that tests the module in isolation:
+
 ```text
+src/<module>.cpp  →  tests/test_<module>.cpp
+```
 
-### 3. Identify Uncovered Lines
+Unit tests use `[[gnu::noinline]]` static functions as hook targets within the test binary itself. This validates the hooking mechanics without cross-module complexity.
 
-Look at the "Missing" column for specific line numbers that aren't covered.
+### Integration Tests
 
-### 4. Analyze Why Lines Are Uncovered
+`tests/test_hook_integration.cpp` tests the real-world DLL hooking workflow against `tests/fixtures/hook_target_lib.cpp` (built as a shared library):
 
-#### Common Reasons for Uncovered Code
+1. `LoadLibrary` the fixture DLL
+2. `GetProcAddress` to resolve exports
+3. Hook exported functions via `HookManager` (by address and AOB scan)
+4. Verify behavioral changes (altered return values)
+5. Remove hooks and verify original behavior is restored
 
-|Reason|Examples|Solution|
-|--------|----------|----------|
-|**Invalid memory addresses**|Hook functions requiring valid function pointers|Use real function addresses (see below)|
-|**Error paths**|Exception handlers, error returns|Test with invalid inputs that trigger errors|
-|**Windows API errors**|GetModuleHandleExA, VirtualQuery failures|Mock or accept limitation|
-|**Template instantiation**|Template methods only instantiated with specific types|Add tests using those types|
-|**Threading race conditions**|Lock-free CAS retry loops|Extremely difficult to cover in unit tests|
-|**SEGFAULT risks**|Invalid addresses causing crashes|Use valid addresses, not 0x12345678|
+The fixture DLL exports `extern "C"` functions with volatile magic constants for stable AOB patterns across builds.
 
 ## Hook Manager Testing
-
-### The SEGFAULT Problem
-
-Early tests used invalid addresses like `0x12345678` which cause SEGFAULT:
-
-```cpp
-// BAD - causes SEGFAULT
-auto result = hook_manager_->create_inline_hook("Test", 0x12345678, detour, &tramp);
-// GOOD - use real function address
-auto result = hook_manager_->create_inline_hook("Test",
-    reinterpret_cast<uintptr_t>(&real_hook_target_add), detour, &tramp);
-```cpp
 
 ### Using Real Function Addresses
 
 ```cpp
-#include <windows.h>
-
-// Use Windows API functions that are guaranteed to exist
-void *api_func = reinterpret_cast<void *>(&GetTickCount);
-void *detour_fn = reinterpret_cast<void *>(&real_hook_detour_add);
-
-// Or use test-local functions
-[[gnu::noinline]] static int real_hook_target_add(int a, int b) {
+// Test-local functions marked noinline to prevent the compiler
+// from optimizing away the function body
+[[gnu::noinline]] static int real_hook_target_add(int a, int b)
+{
     return a + b;
 }
+
+[[gnu::noinline]] static int real_hook_detour_add(int a, int b)
+{
+    return a + b + 100;
+}
+
+// Create a hook on a real, callable function
+void *trampoline = nullptr;
+auto result = hook_manager_->create_inline_hook(
+    "TestHook",
+    reinterpret_cast<uintptr_t>(&real_hook_target_add),
+    reinterpret_cast<void *>(&real_hook_detour_add),
+    &trampoline);
+ASSERT_TRUE(result.has_value());
+```
+
+### Cross-Module Hooking (Integration Tests)
+
 ```cpp
+// Load the fixture DLL and hook its exports
+HMODULE dll = LoadLibraryA("hook_target_lib.dll");
+auto fn = reinterpret_cast<ComputeDamageFn>(GetProcAddress(dll, "compute_damage"));
+
+void *trampoline = nullptr;
+auto result = m_hook_manager->create_inline_hook(
+    "DamageHook",
+    reinterpret_cast<uintptr_t>(fn),
+    reinterpret_cast<void *>(&detour_compute_damage),
+    &trampoline);
+```
+
+### AOB Scan + Hook Pipeline
+
+```cpp
+// Build a signature from the export's first 16 bytes
+auto *bytes = reinterpret_cast<const unsigned char *>(fn);
+std::string aob = build_aob_from_bytes(bytes, 16);
+
+// Scan the DLL's memory region for the pattern
+auto pattern = Scanner::parse_aob(aob);
+const auto *found = Scanner::find_pattern(
+    reinterpret_cast<const std::byte *>(module_base),
+    module_size, pattern.value());
+
+// Verify it found the exact export address, then hook it
+EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(fn));
+```
 
 ### What Can Be Tested
 
-- **Pre-flight checks**: Invalid addresses, null pointers, duplicate names
-- **Hook existence**: Create hooks, check status, remove hooks
-- **Template methods**: getOriginal&lt;T&gt;(), with_inline_hook&lt;T&gt;()
+- **Pre-flight validation**: Invalid addresses, null pointers, duplicate names, shutdown state
+- **Hook lifecycle**: Create, enable, disable, remove, re-enable
+- **Callback execution**: `with_inline_hook`, `with_mid_hook`, `try_with_*` variants
+- **Concurrent access**: Multi-threaded hook creation stress tests
+- **Cross-module hooking**: DLL exports hooked and verified via integration tests
+- **AOB scan pipeline**: Scanner finds patterns in loaded DLLs, hooks the result
+- **Mid hooks**: Argument inspection and modification via `safetyhook::Context`
 
-### What Cannot Be Tested (Without Integration)
+### Platform-Specific Tests
 
-- Actual hook installation success paths (requires valid memory)
-- safetyhook library internals
-- Runtime memory protection behaviors
+Mid hook tests that modify registers (`ctx.rcx`, `ctx.rdx`) are x86-64 specific. Guard with:
+
+```cpp
+#if !defined(__x86_64__) && !defined(_M_X64)
+    GTEST_SKIP() << "Requires x86-64 calling convention";
+#endif
+```
 
 ## Test Naming Conventions
 
@@ -122,226 +185,149 @@ void *detour_fn = reinterpret_cast<void *>(&real_hook_detour_add);
 // Pattern: Subject_ConditionOrScenario
 TEST_F(ClassName, Method_ExpectedBehavior)
 TEST_F(HookManagerTest, CreateInlineHook_InvalidAddress)
-TEST_F(HookManagerTest, DISABLED_SafetyHookError_Path)  // Prefix disabled tests with DISABLED_
-```cpp
+TEST_F(HookIntegrationTest, AOBScan_HookManager_EndToEnd)
+```
 
 ## Adding New Tests
 
-### 1. For Error Paths
+### For Error Paths
 
 ```cpp
 TEST_F(SomeTest, Method_ErrorCondition)
 {
-    // Set up invalid input
     auto result = object->method(invalid_input);
-    // Should return error
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), ExpectedError::Value);
 }
-```text
+```
 
-### 2. For Template Methods
-
-```cpp
-// Template methods only get coverage when instantiated
-// Make sure to call them with the right types
-auto hook_result = hook_manager_->with_inline_hook("Name",
-    [](auto &orig) -> decltype(orig) { return orig(); });
-```text
-
-### 3. For Config Parsing
+### For Template Methods
 
 ```cpp
-// Test INI file contents carefully
+// Template methods only get coverage when instantiated with specific types
+auto hook_result = hook_manager_->with_inline_hook(
+    "HookName",
+    [](InlineHook &hook) -> bool
+    {
+        auto orig = hook.get_original<int (*)(int, int)>();
+        return orig != nullptr;
+    });
+```
+
+### For Config Parsing
+
+```cpp
+// Comments are stripped per-token, not per-line
 ini_file << "Keys=0x10, 0x20 ; comment at end\n";
-// Note: Comment stripping happens per-token, not per-line
-```text
+```
 
 ## Common Issues and Fixes
 
-### Issue: Duplicate Test Name
+### Duplicate Test Name
 
 ```text
 error: 'TestName' is defined twice
-```cpp
+```
 
-**Fix**: Rename one of the tests:
+**Fix**: Use distinct, descriptive names. Never append numeric suffixes.
 
-```cpp
-TEST_F(MemoryUtilsTest, CacheBehavior)      // Original
-TEST_F(MemoryUtilsTest, CacheBehavior2)     // Rename duplicate
-```cpp
+### std::byte Array Initialization
 
-### Issue: std::byte Array Initialization
-
-```cpp
+```text
 error: cannot initialize 'std::byte' with 'int'
-```cpp
+```
 
 **Fix**: Use explicit casts:
 
 ```cpp
 std::byte data[] = {static_cast<std::byte>(0x48), static_cast<std::byte>(0x8B)};
-```text
+```
 
-### Issue: g++ Coverage Tool Bug
+### g++ Coverage Tool Bug
 
 ```text
 Got negative hit value in: ...
-```cpp
+```
 
-**Fix**: Add `--gcov-ignore-parse-errors negative_hits.warn` to gcovr command
+**Fix**: Add `--gcov-ignore-parse-errors negative_hits.warn` to the gcovr command.
 
-### Issue: Test Causes SEGFAULT
+### GetProcAddress Cast Warning
 
-**Fix**: Disable the test and document why:
-
-```cpp
-TEST_F(HookManagerTest, DISABLED_SafetyHookError_Path)
-// Reason: safetyhook::create() with invalid address causes SEGFAULT
-// Would require mocking safetyhook or valid memory address
 ```text
+warning: cast between incompatible function types [-Wcast-function-type]
+```
+
+This is expected when casting `FARPROC` from `GetProcAddress` to a typed function pointer. The warning is harmless for integration tests.
 
 ## Coverage Targets
 
-### Achievable Targets
-
-|Target|Difficulty|Notes|
-|--------|------------|-------|
-|80%|Easy|Basic error path testing|
-|85%|Medium|Template instantiation, more error paths|
-|90%|Hard|Requires integration tests or mocking|
-|95%+|Very Hard|Requires refactoring for testability|
-
-### When 90% Is Not Achievable
-
-If coverage is stuck below 90% due to:
-
-- **External library calls** (safetyhook): Mock or accept limitation
-- **Windows API errors**: Mock or accept limitation
-- **SEGFAULT risks**: Keep tests disabled, document reason
-
-Document the limitation:
-
-```cpp
-// Coverage limitation: This code path requires valid hook installation
-// which cannot be tested in unit tests without mocking safetyhook.
-// Integration tests with real game modules would be needed.
-```text
+| Target | Difficulty | Notes |
+| ------ | ---------- | ----- |
+| 80% | Baseline | Error path testing, basic happy paths. CI gate. |
+| 85% | Medium | Template instantiation, more error paths |
+| 90% | Hard | Integration tests, edge cases in threading |
+| 95%+ | Very Hard | Requires mocking Windows API or refactoring |
 
 ## Project Structure
 
 ```text
-DetourModKit/
-├── src/                    # Source code (libDetourModKit.a)
-├── include/DetourModKit/    # Public headers
-├── tests/                  # Unit tests (gtest-based)
-│   ├── CMakeLists.txt       # Test discovery configuration
-│   ├── main.cpp            # Test entry point
-│   ├── test_hook_manager.cpp # Hook tests (~1385 lines)
-│   ├── test_logger.cpp     # Logger tests (~1450 lines)
-│   ├── test_config.cpp     # Config tests (~620 lines)
-│   ├── test_memory_utils.cpp # Memory tests (~410 lines)
-│   ├── test_aob_scanner.cpp # Scanner tests (~500 lines)
-│   └── ...                 # Other test files
-├── docs/tests/             # Test documentation and coverage reports
-│   ├── test_coverage_guide.md  # This guide
-│   ├── parse_coverage.py       # Coverage JSON parser script
-│   ├── test_compile.cpp        # Minimal compile test stub
-│   ├── coverage_details.html   # HTML coverage report
-│   ├── coverage_details.*.html # Per-file coverage details
-│   ├── coverage.xml            # XML coverage data (gcovr)
-│   ├── coverage.json           # JSON coverage data (gcovr)
-│   ├── coverage_details.css    # HTML styles
-│   └── coverage_details.js     # HTML scripts
-└── build/                  # Build output (gitignored)
-```bash
+tests/
+├── CMakeLists.txt              # Test discovery, fixture DLL build
+├── main.cpp                    # GoogleTest entry point
+├── fixtures/
+│   └── hook_target_lib.cpp     # Fixture DLL (4 exported functions)
+├── test_async_logger.cpp       # Async logger tests (~1527 lines)
+├── test_hook_manager.cpp       # Hook manager unit tests (~1426 lines)
+├── test_input.cpp              # Input system tests (~1261 lines)
+├── test_memory.cpp             # Memory utilities tests (~1260 lines)
+├── test_scanner.cpp            # AOB scanner tests (~1023 lines)
+├── test_logger.cpp             # Logger tests (~1023 lines)
+├── test_config.cpp             # Configuration tests (~1001 lines)
+├── test_hook_integration.cpp   # Cross-module hook integration (~319 lines)
+├── test_format.cpp             # Format utilities tests (~209 lines)
+├── test_math.cpp               # Math utilities tests (~107 lines)
+├── test_filesystem.cpp         # Filesystem tests (~102 lines)
+└── test_string.cpp             # String utilities tests (~81 lines)
 
-## Coverage Report Interpretation
+docs/tests/
+├── test_coverage_guide.md      # This guide
+├── parse_coverage.py           # Coverage JSON parser script
+├── test_compile.cpp            # Minimal toolchain verification stub
+└── coverage/                   # Generated HTML reports (gitignored)
+    └── index.html              # Entry point for HTML coverage report
+```
 
-### Line Coverage
-
-- **Percentage**: Lines executed / Total lines
-- **Uncovered lines**: Listed in "Missing" column
-
-### Function Coverage
-
-- **Percentage**: Functions called / Total functions
-- **Lower than line coverage**: Indicates some functions never called at all
-
-### Branch Coverage
-
-- **Percentage**: Branches taken / Total branches
-- **Low branch coverage**: Indicates many if/else paths not exercised
-
-## Best Practices
-
-1. **Start with error paths**: Test invalid inputs first (easy coverage)
-2. **Use real addresses**: For hook tests, use valid function addresses
-3. **Disable, don't remove**: Keep SEGFAULTing tests disabled with documentation
-4. **Test templates explicitly**: Ensure template methods are instantiated
-5. **Watch for duplicate names**: gcov shows errors but tests may still compile
-6. **Clean rebuild**: After major changes, clean and rebuild for accurate coverage
-
-## Integration Testing Recommendations
-
-For coverage >90%, consider:
-
-1. **Game Module Integration Tests**
-    - Load actual game DLLs
-    - Hook real game functions
-    - Test in actual game environment
-
-2. **Mocking Framework**
-    - Mock safetyhook library
-    - Mock Windows API calls
-    - Use GMock for expectations
-
-3. **Code Refactoring**
-    - Extract hard-to-test code into interfaces
-    - Use dependency injection
-    - Add test seams for mocking
-
-## Helper Scripts and Tools
+## Helper Scripts
 
 ### parse_coverage.py
 
-A lightweight Python script for parsing `coverage.json` to display per-file coverage statistics.
-
-**Usage:**
+Parses `coverage.json` to display per-file coverage statistics:
 
 ```bash
-# First generate coverage.json
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" ^
-    --exclude "external/" --exclude "build/" --exclude "tests/" ^
-    --json coverage.json
+# Generate coverage.json into the coverage subdirectory
+python -m gcovr --root . --filter "src/" --filter "include/" \
+    --exclude "external/" --exclude "build/" --exclude "tests/" \
+    --gcov-ignore-parse-errors negative_hits.warn \
+    --json docs/tests/coverage/coverage.json
 
 # Run the parser
-python docs/tests/parse_coverage.py
-```text
-
-**Output:**
-
-```text
-src/hook_manager.cpp
-   Lines: 150/200 (75.0%)
-   Funcs: 10/12 (83.3%)
-src/logger.cpp
-   Lines: 300/350 (85.7%)
-   Funcs: 25/25 (100.0%)
-
-Total Lines: 450/550 (81.8%)
-Total Funcs: 35/37 (94.6%)
-```bash
+python docs/tests/parse_coverage.py docs/tests/coverage/coverage.json
+```
 
 ### test_compile.cpp
 
-A minimal stub file (`int main() { return 0; }`) used for basic compilation testing. Can be compiled standalone to verify the toolchain works:
+A minimal stub (`int main() { return 0; }`) for verifying the toolchain works:
 
 ```bash
 g++ -o test_compile.exe docs/tests/test_compile.cpp
 ```
 
-## Contact
+## Best Practices
 
-For questions about testing strategy, refer to the project maintainers.
+1. **Start with error paths**: Test invalid inputs first (easy coverage gains).
+2. **Use real addresses**: For hook tests, use `[[gnu::noinline]]` functions or DLL exports.
+3. **Use `ASSERT_*` for preconditions**: Stop the test immediately if setup fails.
+4. **Use `EXPECT_*` for verifications**: Continue testing even if one check fails.
+5. **Guard platform-specific tests**: Use `GTEST_SKIP()` for architecture-dependent logic.
+6. **Clean rebuild for coverage**: After major changes, delete `.gcda` files or rebuild from scratch.
+7. **Follow naming conventions**: `s_` for file-scope statics, `m_` for members, `snake_case` for functions.
