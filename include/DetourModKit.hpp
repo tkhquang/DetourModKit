@@ -11,6 +11,7 @@
 // Core functionality headers
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/input.hpp"
@@ -52,6 +53,8 @@ using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
 using DMKInputManager = DetourModKit::InputManager;
 using DMKInputPoller = DetourModKit::InputPoller;
 using DMKInputMode = DetourModKit::InputMode;
+using DMKInputSource = DetourModKit::InputSource;
+using DMKInputCode = DetourModKit::InputCode;
 using DMKKeyCombo = DetourModKit::Config::KeyCombo;
 using DMKInputBinding = DetourModKit::InputBinding;
 

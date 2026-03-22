@@ -9,6 +9,7 @@
  */
 
 #include "DetourModKit/config.hpp"
+#include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
@@ -33,15 +34,17 @@ using namespace DetourModKit::String;
 namespace
 {
     /**
-     * @brief Parses a comma-separated string of hex values into a vector of ints.
-     * @details Handles 0x/0X prefixes, inline semicolon comments, whitespace,
-     *          and gracefully skips invalid or out-of-range tokens.
+     * @brief Parses a comma-separated string of input tokens into a vector of InputCodes.
+     * @details Each token is first matched against the named key table (case-insensitive).
+     *          If no name matches, the token is parsed as a hexadecimal VK code (with or
+     *          without 0x prefix), defaulting to InputSource::Keyboard. Handles inline
+     *          semicolon comments, whitespace, and gracefully skips invalid tokens.
      * @param input The raw string to parse.
-     * @return std::vector<int> Parsed valid hex values.
+     * @return std::vector<InputCode> Parsed valid input codes.
      */
-    std::vector<int> parse_hex_key_list(const std::string &input)
+    std::vector<InputCode> parse_input_code_list(const std::string &input)
     {
-        std::vector<int> result;
+        std::vector<InputCode> result;
 
         // Strip trailing comment from the full line
         const size_t comment_pos = input.find(';');
@@ -66,7 +69,15 @@ namespace
                 continue;
             }
 
-            // Strip optional 0x/0X prefix
+            // Try named key lookup first (case-insensitive)
+            auto named = parse_input_name(token);
+            if (named.has_value())
+            {
+                result.push_back(*named);
+                continue;
+            }
+
+            // Fall back to hex parsing (defaults to Keyboard source)
             size_t hex_start = 0;
             if (token.size() >= 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X'))
             {
@@ -97,7 +108,7 @@ namespace
                 continue;
             }
 
-            result.push_back(static_cast<int>(value));
+            result.push_back(InputCode{InputSource::Keyboard, static_cast<int>(value)});
         }
 
         return result;
@@ -105,10 +116,10 @@ namespace
 
     /**
      * @brief Parses a key combo string into a KeyCombo struct.
-     * @details Format: "modifier1+modifier2+trigger1,trigger2" where all values
-     *          are hex VK codes. The last '+'-delimited segment contains trigger
-     *          key(s) (comma-separated for OR logic). All preceding segments are
-     *          individual modifier keys (AND logic).
+     * @details Format: "modifier1+modifier2+trigger1,trigger2" where each token
+     *          is a named key or hex VK code. The last '+'-delimited segment
+     *          contains trigger key(s) (comma-separated for OR logic). All preceding
+     *          segments are individual modifier keys (AND logic).
      * @param input The raw string to parse.
      * @return Config::KeyCombo Parsed key combination.
      */
@@ -146,31 +157,39 @@ namespace
         }
 
         // Last segment contains trigger key(s) (comma-separated for OR logic)
-        result.keys = parse_hex_key_list(segments.back());
+        result.keys = parse_input_code_list(segments.back());
 
         // All preceding segments are individual modifier keys
         for (size_t i = 0; i + 1 < segments.size(); ++i)
         {
-            auto mod_keys = parse_hex_key_list(segments[i]);
-            result.modifiers.insert(result.modifiers.end(), mod_keys.begin(), mod_keys.end());
+            auto mod_codes = parse_input_code_list(segments[i]);
+            result.modifiers.insert(result.modifiers.end(), mod_codes.begin(), mod_codes.end());
         }
 
         return result;
     }
 
     /**
-     * @brief Formats a KeyCombo back to its INI-style string representation.
+     * @brief Formats a KeyCombo as a human-readable string.
+     * @details Uses named keys where available, falls back to hex for unknown codes.
      * @param combo The key combination to format.
-     * @return std::string Formatted string (e.g., "0x11+0x10+0x72,0x73").
+     * @return std::string Formatted string (e.g., "Ctrl+Shift+F3,F4").
      */
     std::string format_key_combo(const Config::KeyCombo &combo)
     {
         std::string result;
-        for (const int mod : combo.modifiers)
+        for (const auto &mod : combo.modifiers)
         {
-            result += DetourModKit::Format::format_vkcode(mod) + "+";
+            result += DetourModKit::format_input_code(mod) + "+";
         }
-        result += DetourModKit::Format::format_vkcode_list(combo.keys);
+        for (size_t i = 0; i < combo.keys.size(); ++i)
+        {
+            if (i > 0)
+            {
+                result += ",";
+            }
+            result += DetourModKit::format_input_code(combo.keys[i]);
+        }
         return result;
     }
 

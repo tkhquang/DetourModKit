@@ -6,43 +6,13 @@ on:
 
   workflow_dispatch:
 
+env:
+  MINGW_BIN: C:\mingw64\bin
+
 jobs:
-  build-os:
-    name: Setup MinGW (Build OS)
-    runs-on: windows-latest
-    outputs:
-      cache_hit: ${{ steps.cache-mingw.outputs.cache-hit }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-
-      - name: Cache MinGW
-        id: cache-mingw
-        uses: actions/cache@v4
-        with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
-
-      - name: Install MinGW (if not cached)
-        if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
-        shell: powershell
-
-      - name: Add MinGW to PATH
-        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-        shell: powershell
-
-      - name: Install Ninja
-        run: choco install ninja --yes --force --no-progress
-        shell: powershell
-
   build-test:
     name: Build, Test & Coverage
     runs-on: windows-latest
-    needs: build-os
 
     steps:
       - name: Checkout code
@@ -51,21 +21,27 @@ jobs:
           submodules: "recursive"
 
       - name: Add MinGW to PATH
-        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
         shell: powershell
 
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~\AppData\Local\pip\Cache
-          key: pip-${{ runner.os }}-v2
-          restore-keys: |
-            pip-${{ runner.os }}-v2-
-            pip-${{ runner.os }}-
+          key: pip-gcovr-${{ runner.os }}
+          restore-keys: pip-gcovr-
 
       - name: Install gcovr
         run: pip install gcovr
         shell: powershell
+
+      - name: Cache CMake build
+        uses: actions/cache@v4
+        with:
+          path: build/mingw-debug
+          key: cmake-build-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**') }}
+          restore-keys: |
+            cmake-build-${{ runner.os }}-
 
       - name: Verify Tools
         run: |
@@ -76,16 +52,26 @@ jobs:
         shell: bash
 
       - name: Configure (Debug + Tests + Coverage)
-        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
         shell: bash
 
       - name: Build
         run: cmake --build --preset mingw-debug --parallel
         shell: bash
 
+      - name: Copy MinGW runtime DLLs
+        run: |
+          $testDir = "build\mingw-debug\tests"
+          Get-ChildItem "${{ env.MINGW_BIN }}\lib*.dll" | ForEach-Object {
+            Copy-Item $_.FullName "$testDir\"
+          }
+        shell: powershell
+
       - name: Run Tests
-        run: ctest --preset mingw-debug
-        shell: bash
+        run: |
+          & ".\build\mingw-debug\tests\DetourModKit_tests.exe" --gtest_output=xml:test-results.xml
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE" }
+        shell: powershell
 
       - name: Generate Coverage Report
         run: |

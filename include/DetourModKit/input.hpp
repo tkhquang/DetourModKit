@@ -1,6 +1,8 @@
 #ifndef INPUT_HPP
 #define INPUT_HPP
 
+#include "DetourModKit/input_codes.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -11,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace DetourModKit
@@ -49,15 +52,19 @@ namespace DetourModKit
 
     /**
      * @struct InputBinding
-     * @brief Describes a single key-to-action binding.
-     * @details Holds the action name, virtual key codes, modifier keys, input mode,
+     * @brief Describes a single input-to-action binding.
+     * @details Holds the action name, input codes, modifier codes, input mode,
      *          and callbacks. For Press mode, the press callback fires on key-down edge.
      *          For Hold mode, the state callback fires with true on press and false on
      *          release (including during shutdown for active holds).
      *
-     *          The keys vector uses OR logic: any single key triggers the binding.
-     *          The modifiers vector uses AND logic: all modifier keys must be held
+     *          The keys vector uses OR logic: any single input triggers the binding.
+     *          The modifiers vector uses AND logic: all modifiers must be held
      *          simultaneously for the binding to activate.
+     *
+     *          Each InputCode identifies both the device source (keyboard, mouse,
+     *          gamepad) and the button/key code. All codes within a binding should
+     *          be from the same device group (keyboard/mouse or gamepad).
      *
      * @warning Callbacks are invoked on the polling thread. They must not capture references
      *          or pointers to objects whose lifetime may end before shutdown() completes.
@@ -66,8 +73,8 @@ namespace DetourModKit
     struct InputBinding
     {
         std::string name;
-        std::vector<int> keys;
-        std::vector<int> modifiers;
+        std::vector<InputCode> keys;
+        std::vector<InputCode> modifiers;
         InputMode mode = InputMode::Press;
         std::function<void()> on_press;
         std::function<void(bool)> on_state_change;
@@ -101,11 +108,16 @@ namespace DetourModKit
          * @param poll_interval Time between polling cycles.
          * @param require_focus When true, key events are ignored unless the current
          *                      process owns the foreground window.
+         * @param gamepad_index XInput controller index (0-3) to poll for gamepad bindings.
+         * @param trigger_threshold Analog trigger deadzone threshold (0-255). Trigger values
+         *                          above this threshold are considered "pressed".
          * @note The polling thread does not start until start() is called.
          */
         explicit InputPoller(std::vector<InputBinding> bindings,
                              std::chrono::milliseconds poll_interval = DEFAULT_POLL_INTERVAL,
-                             bool require_focus = true);
+                             bool require_focus = true,
+                             int gamepad_index = 0,
+                             int trigger_threshold = GamepadCode::TriggerThreshold);
 
         ~InputPoller();
 
@@ -137,6 +149,12 @@ namespace DetourModKit
          * @return std::chrono::milliseconds The poll interval.
          */
         [[nodiscard]] std::chrono::milliseconds poll_interval() const noexcept;
+
+        /**
+         * @brief Returns the configured gamepad controller index.
+         * @return int The XInput controller index (0-3).
+         */
+        [[nodiscard]] int gamepad_index() const noexcept;
 
         /**
          * @brief Queries whether a binding is currently active by index.
@@ -179,8 +197,10 @@ namespace DetourModKit
         [[nodiscard]] bool is_process_foreground() const;
 
         std::vector<InputBinding> bindings_;
+        std::unordered_map<std::string, size_t> name_index_;
         std::chrono::milliseconds poll_interval_;
         std::atomic<bool> require_focus_;
+        std::atomic<bool> running_{false};
         std::jthread poll_thread_;
         std::mutex cv_mutex_;
         std::condition_variable_any cv_;
@@ -188,6 +208,10 @@ namespace DetourModKit
         // Per-binding active state, indexed parallel to bindings_.
         // Atomic for cross-thread reads via is_binding_active().
         std::unique_ptr<std::atomic<uint8_t>[]> active_states_;
+
+        int gamepad_index_;
+        int trigger_threshold_;
+        bool has_gamepad_bindings_;
     };
 
     /**
@@ -222,49 +246,49 @@ namespace DetourModKit
          * @details The callback fires once per key-down edge for any key in the list.
          *          Must be called before start(). Ignored if the poller is already running.
          * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of virtual key codes (any triggers the action).
+         * @param keys Vector of input codes (any triggers the action).
          * @param callback Function to invoke on key press.
          */
-        void register_press(const std::string &name, const std::vector<int> &keys,
+        void register_press(const std::string &name, const std::vector<InputCode> &keys,
                             std::function<void()> callback);
 
         /**
          * @brief Registers a press-mode binding with modifier keys.
          * @details The callback fires once per key-down edge for any key in the list,
-         *          but only when all modifier keys are simultaneously held.
+         *          but only when all modifier inputs are simultaneously held.
          * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of virtual key codes (any triggers the action).
-         * @param modifiers Vector of modifier VK codes (all must be held).
+         * @param keys Vector of input codes (any triggers the action).
+         * @param modifiers Vector of modifier input codes (all must be held).
          * @param callback Function to invoke on key press.
          */
-        void register_press(const std::string &name, const std::vector<int> &keys,
-                            const std::vector<int> &modifiers,
+        void register_press(const std::string &name, const std::vector<InputCode> &keys,
+                            const std::vector<InputCode> &modifiers,
                             std::function<void()> callback);
 
         /**
          * @brief Registers a hold-mode binding.
-         * @details The callback fires with true when any key in the list is pressed,
-         *          and false when all keys are released. Must be called before start().
+         * @details The callback fires with true when any input in the list is pressed,
+         *          and false when all are released. Must be called before start().
          *          Ignored if the poller is already running.
          * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of virtual key codes (any activates the hold).
+         * @param keys Vector of input codes (any activates the hold).
          * @param callback Function invoked with the hold state (true = held, false = released).
          */
-        void register_hold(const std::string &name, const std::vector<int> &keys,
+        void register_hold(const std::string &name, const std::vector<InputCode> &keys,
                            std::function<void(bool)> callback);
 
         /**
          * @brief Registers a hold-mode binding with modifier keys.
-         * @details The callback fires with true when any key in the list is pressed
-         *          and all modifier keys are simultaneously held, and false when the
+         * @details The callback fires with true when any input in the list is pressed
+         *          and all modifier inputs are simultaneously held, and false when the
          *          condition is no longer met.
          * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of virtual key codes (any activates the hold).
-         * @param modifiers Vector of modifier VK codes (all must be held).
+         * @param keys Vector of input codes (any activates the hold).
+         * @param modifiers Vector of modifier input codes (all must be held).
          * @param callback Function invoked with the hold state (true = held, false = released).
          */
-        void register_hold(const std::string &name, const std::vector<int> &keys,
-                           const std::vector<int> &modifiers,
+        void register_hold(const std::string &name, const std::vector<InputCode> &keys,
+                           const std::vector<InputCode> &modifiers,
                            std::function<void(bool)> callback);
 
         /**
@@ -274,6 +298,20 @@ namespace DetourModKit
          * @note Can be called before or after start(). Changes take effect immediately.
          */
         void set_require_focus(bool require_focus);
+
+        /**
+         * @brief Sets the XInput controller index to poll for gamepad bindings.
+         * @param index Controller index (0-3). Clamped to valid range.
+         * @note Must be called before start(). Has no effect while the poller is running.
+         */
+        void set_gamepad_index(int index);
+
+        /**
+         * @brief Sets the analog trigger deadzone threshold for gamepad bindings.
+         * @param threshold Trigger values above this threshold (0-255) are "pressed".
+         * @note Must be called before start(). Has no effect while the poller is running.
+         */
+        void set_trigger_threshold(int threshold);
 
         /**
          * @brief Starts the input polling thread with all registered bindings.
@@ -322,7 +360,10 @@ namespace DetourModKit
         mutable std::mutex mutex_;
         std::vector<InputBinding> pending_bindings_;
         std::unique_ptr<InputPoller> poller_;
+        std::atomic<bool> running_{false};
         bool require_focus_ = true;
+        int gamepad_index_ = 0;
+        int trigger_threshold_ = GamepadCode::TriggerThreshold;
     };
 } // namespace DetourModKit
 

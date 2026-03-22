@@ -8,6 +8,57 @@
 #include "DetourModKit/input.hpp"
 
 using namespace DetourModKit;
+using DetourModKit::keyboard_key;
+using DetourModKit::gamepad_button;
+
+// --- InputSource string conversion ---
+
+TEST(InputSourceTest, KeyboardToString)
+{
+    EXPECT_EQ(input_source_to_string(InputSource::Keyboard), "Keyboard");
+}
+
+TEST(InputSourceTest, MouseToString)
+{
+    EXPECT_EQ(input_source_to_string(InputSource::Mouse), "Mouse");
+}
+
+TEST(InputSourceTest, GamepadToString)
+{
+    EXPECT_EQ(input_source_to_string(InputSource::Gamepad), "Gamepad");
+}
+
+// --- InputCode ---
+
+TEST(InputCodeTest, DefaultConstruction)
+{
+    InputCode code;
+    EXPECT_EQ(code.source, InputSource::Keyboard);
+    EXPECT_EQ(code.code, 0);
+}
+
+TEST(InputCodeTest, Equality)
+{
+    EXPECT_EQ(keyboard_key(0x41), keyboard_key(0x41));
+    EXPECT_NE(keyboard_key(0x41), keyboard_key(0x42));
+    EXPECT_NE(keyboard_key(0x41), mouse_button(0x41));
+    EXPECT_NE(keyboard_key(0x41), gamepad_button(0x41));
+}
+
+TEST(InputCodeTest, FactoryFunctions)
+{
+    auto kb = keyboard_key(0x41);
+    EXPECT_EQ(kb.source, InputSource::Keyboard);
+    EXPECT_EQ(kb.code, 0x41);
+
+    auto mouse = mouse_button(0x05);
+    EXPECT_EQ(mouse.source, InputSource::Mouse);
+    EXPECT_EQ(mouse.code, 0x05);
+
+    auto gp = gamepad_button(GamepadCode::A);
+    EXPECT_EQ(gp.source, InputSource::Gamepad);
+    EXPECT_EQ(gp.code, GamepadCode::A);
+}
 
 // --- InputMode string conversion ---
 
@@ -61,14 +112,14 @@ TEST_F(InputPollerTest, ConstructWithBindings)
 
     InputBinding press_binding;
     press_binding.name = "test_press";
-    press_binding.keys = {0x41}; // 'A' key
+    press_binding.keys = {keyboard_key(0x41)};
     press_binding.mode = InputMode::Press;
     press_binding.on_press = []() {};
     bindings.push_back(std::move(press_binding));
 
     InputBinding hold_binding;
     hold_binding.name = "test_hold";
-    hold_binding.keys = {0x42}; // 'B' key
+    hold_binding.keys = {keyboard_key(0x42)};
     hold_binding.mode = InputMode::Hold;
     hold_binding.on_state_change = [](bool) {};
     bindings.push_back(std::move(hold_binding));
@@ -221,13 +272,13 @@ TEST_F(InputPollerTest, EmptyKeysSkipped)
     poller.shutdown();
 }
 
-TEST_F(InputPollerTest, ZeroVkCodeSkipped)
+TEST_F(InputPollerTest, ZeroCodeSkipped)
 {
     std::vector<InputBinding> bindings;
 
     InputBinding binding;
-    binding.name = "zero_vk";
-    binding.keys = {0, 0, 0};
+    binding.name = "zero_code";
+    binding.keys = {keyboard_key(0), keyboard_key(0), keyboard_key(0)};
     binding.mode = InputMode::Press;
     binding.on_press = []() {};
     bindings.push_back(std::move(binding));
@@ -249,7 +300,7 @@ TEST_F(InputPollerTest, MultipleBindingsMixed)
     {
         InputBinding binding;
         binding.name = "binding_" + std::to_string(i);
-        binding.keys = {0x41 + i};
+        binding.keys = {keyboard_key(0x41 + i)};
         binding.mode = (i % 2 == 0) ? InputMode::Press : InputMode::Hold;
         if (binding.mode == InputMode::Press)
         {
@@ -277,7 +328,7 @@ TEST_F(InputPollerTest, NullCallbackHandled)
 
     InputBinding binding;
     binding.name = "null_callback";
-    binding.keys = {0x41};
+    binding.keys = {keyboard_key(0x41)};
     binding.mode = InputMode::Press;
     // on_press intentionally left empty
     bindings.push_back(std::move(binding));
@@ -322,6 +373,115 @@ TEST_F(InputPollerTest, IsRunningFalseAfterShutdownCompletes)
     EXPECT_FALSE(poller.is_running());
 }
 
+// --- InputPoller: Gamepad ---
+
+TEST_F(InputPollerTest, GamepadBindingConstruction)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "gamepad_test";
+    binding.keys = {gamepad_button(GamepadCode::A)};
+    binding.mode = InputMode::Press;
+    binding.on_press = []() {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+
+    EXPECT_EQ(poller.binding_count(), 1u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, GamepadWithModifiers)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "gamepad_combo";
+    binding.keys = {gamepad_button(GamepadCode::A)};
+    binding.modifiers = {gamepad_button(GamepadCode::LeftBumper)};
+    binding.mode = InputMode::Press;
+    binding.on_press = []() {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+    poller.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+    EXPECT_FALSE(poller.is_binding_active("gamepad_combo"));
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, GamepadTriggerBinding)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "trigger_test";
+    binding.keys = {gamepad_button(GamepadCode::LeftTrigger)};
+    binding.mode = InputMode::Hold;
+    binding.on_state_change = [](bool) {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings), DEFAULT_POLL_INTERVAL, true, 0, 50);
+    poller.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, GamepadIndexClamped)
+{
+    std::vector<InputBinding> bindings;
+
+    // Index -1 should clamp to 0, index 5 should clamp to 3
+    InputPoller poller_low(std::move(bindings), DEFAULT_POLL_INTERVAL, true, -1);
+    EXPECT_EQ(poller_low.binding_count(), 0u);
+    EXPECT_EQ(poller_low.gamepad_index(), 0);
+
+    std::vector<InputBinding> bindings2;
+    InputPoller poller_high(std::move(bindings2), DEFAULT_POLL_INTERVAL, true, 5);
+    EXPECT_EQ(poller_high.binding_count(), 0u);
+    EXPECT_EQ(poller_high.gamepad_index(), 3);
+}
+
+TEST_F(InputPollerTest, MixedKeyboardAndGamepadBindings)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding kb_binding;
+    kb_binding.name = "keyboard";
+    kb_binding.keys = {keyboard_key(0x41)};
+    kb_binding.mode = InputMode::Press;
+    kb_binding.on_press = []() {};
+    bindings.push_back(std::move(kb_binding));
+
+    InputBinding gp_binding;
+    gp_binding.name = "gamepad";
+    gp_binding.keys = {gamepad_button(GamepadCode::A)};
+    gp_binding.mode = InputMode::Press;
+    gp_binding.on_press = []() {};
+    bindings.push_back(std::move(gp_binding));
+
+    InputPoller poller(std::move(bindings));
+    poller.start();
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+    EXPECT_EQ(poller.binding_count(), 2u);
+
+    poller.shutdown();
+}
+
 // --- InputManager ---
 
 class InputManagerTest : public ::testing::Test
@@ -358,7 +518,7 @@ TEST_F(InputManagerTest, RegisterPressBinding)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test_press", {0x41}, []() {});
+    mgr.register_press("test_press", {keyboard_key(0x41)}, []() {});
 
     EXPECT_EQ(mgr.binding_count(), 1u);
     EXPECT_FALSE(mgr.is_running());
@@ -368,7 +528,7 @@ TEST_F(InputManagerTest, RegisterHoldBinding)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_hold("test_hold", {0x42}, [](bool) {});
+    mgr.register_hold("test_hold", {keyboard_key(0x42)}, [](bool) {});
 
     EXPECT_EQ(mgr.binding_count(), 1u);
     EXPECT_FALSE(mgr.is_running());
@@ -378,9 +538,9 @@ TEST_F(InputManagerTest, RegisterMultipleBindings)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("press1", {0x41}, []() {});
-    mgr.register_press("press2", {0x42}, []() {});
-    mgr.register_hold("hold1", {0x43}, [](bool) {});
+    mgr.register_press("press1", {keyboard_key(0x41)}, []() {});
+    mgr.register_press("press2", {keyboard_key(0x42)}, []() {});
+    mgr.register_hold("hold1", {keyboard_key(0x43)}, [](bool) {});
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 }
@@ -389,7 +549,7 @@ TEST_F(InputManagerTest, StartAndShutdown)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
     mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -414,7 +574,7 @@ TEST_F(InputManagerTest, ShutdownIdempotent)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
     mgr.start();
 
     mgr.shutdown();
@@ -426,12 +586,12 @@ TEST_F(InputManagerTest, RegisterIgnoredWhileRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("before", {0x41}, []() {});
+    mgr.register_press("before", {keyboard_key(0x41)}, []() {});
     mgr.start();
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 
-    mgr.register_press("after", {0x42}, []() {});
+    mgr.register_press("after", {keyboard_key(0x42)}, []() {});
     EXPECT_EQ(mgr.binding_count(), 1u);
 
     mgr.shutdown();
@@ -441,14 +601,14 @@ TEST_F(InputManagerTest, RestartAfterShutdown)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("first_run", {0x41}, []() {});
+    mgr.register_press("first_run", {keyboard_key(0x41)}, []() {});
     mgr.start();
     EXPECT_TRUE(mgr.is_running());
 
     mgr.shutdown();
     EXPECT_FALSE(mgr.is_running());
 
-    mgr.register_hold("second_run", {0x42}, [](bool) {});
+    mgr.register_hold("second_run", {keyboard_key(0x42)}, [](bool) {});
     mgr.start();
     EXPECT_TRUE(mgr.is_running());
     EXPECT_EQ(mgr.binding_count(), 1u);
@@ -460,7 +620,7 @@ TEST_F(InputManagerTest, StartWithCustomPollInterval)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
     mgr.start(std::chrono::milliseconds{32});
 
     EXPECT_TRUE(mgr.is_running());
@@ -472,7 +632,7 @@ TEST_F(InputManagerTest, DoubleStartIgnored)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
     mgr.start();
     EXPECT_TRUE(mgr.is_running());
 
@@ -487,7 +647,7 @@ TEST_F(InputManagerTest, MultipleKeysPerBinding)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("multi_key", {0x70, 0x71, 0x72}, []() {}); // F1, F2, F3
+    mgr.register_press("multi_key", {keyboard_key(0x70), keyboard_key(0x71), keyboard_key(0x72)}, []() {});
     mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -514,7 +674,7 @@ TEST_F(InputManagerTest, ConcurrentAccess)
             for (int i = 0; i < ops_per_thread; ++i)
             {
                 std::string name = "binding_" + std::to_string(t) + "_" + std::to_string(i);
-                mgr.register_press(name, {0x41}, []() {});
+                mgr.register_press(name, {keyboard_key(0x41)}, []() {});
                 registered.fetch_add(1, std::memory_order_relaxed);
             } });
     }
@@ -576,7 +736,7 @@ TEST_F(InputPollerTest, IsBindingActiveByIndexOutOfRange)
 
     InputBinding binding;
     binding.name = "test";
-    binding.keys = {0x41};
+    binding.keys = {keyboard_key(0x41)};
     binding.mode = InputMode::Press;
     binding.on_press = []() {};
     bindings.push_back(std::move(binding));
@@ -594,7 +754,7 @@ TEST_F(InputPollerTest, IsBindingActiveByName)
 
     InputBinding binding;
     binding.name = "test_binding";
-    binding.keys = {0x41};
+    binding.keys = {keyboard_key(0x41)};
     binding.mode = InputMode::Press;
     binding.on_press = []() {};
     bindings.push_back(std::move(binding));
@@ -612,7 +772,7 @@ TEST_F(InputPollerTest, IsBindingActiveWhileRunning)
 
     InputBinding binding;
     binding.name = "active_test";
-    binding.keys = {0x41};
+    binding.keys = {keyboard_key(0x41)};
     binding.mode = InputMode::Hold;
     binding.on_state_change = [](bool) {};
     bindings.push_back(std::move(binding));
@@ -635,8 +795,8 @@ TEST_F(InputPollerTest, ModifierBindingConstruction)
 
     InputBinding binding;
     binding.name = "ctrl_shift_a";
-    binding.keys = {0x41};
-    binding.modifiers = {0x11, 0x10}; // VK_CONTROL, VK_SHIFT
+    binding.keys = {keyboard_key(0x41)};
+    binding.modifiers = {keyboard_key(0x11), keyboard_key(0x10)};
     binding.mode = InputMode::Press;
     binding.on_press = []() {};
     bindings.push_back(std::move(binding));
@@ -658,7 +818,7 @@ TEST_F(InputPollerTest, EmptyModifiersBackwardCompatible)
 
     InputBinding binding;
     binding.name = "no_mods";
-    binding.keys = {0x41};
+    binding.keys = {keyboard_key(0x41)};
     // modifiers left empty (default)
     binding.mode = InputMode::Press;
     binding.on_press = []() {};
@@ -679,7 +839,7 @@ TEST_F(InputPollerTest, HoldBindingShutdownSafety)
 
     InputBinding binding;
     binding.name = "hold_shutdown_test";
-    binding.keys = {0x41};
+    binding.keys = {keyboard_key(0x41)};
     binding.mode = InputMode::Hold;
     binding.on_state_change = [](bool) {};
     bindings.push_back(std::move(binding));
@@ -701,7 +861,7 @@ TEST_F(InputManagerTest, RegisterPressWithModifiers)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("ctrl_a", {0x41}, {0x11}, []() {}); // Ctrl+A
+    mgr.register_press("ctrl_a", {keyboard_key(0x41)}, {keyboard_key(0x11)}, []() {});
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -710,7 +870,7 @@ TEST_F(InputManagerTest, RegisterHoldWithModifiers)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_hold("shift_hold", {0x41}, {0x10}, [](bool) {}); // Shift+A
+    mgr.register_hold("shift_hold", {keyboard_key(0x41)}, {keyboard_key(0x10)}, [](bool) {});
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -719,9 +879,9 @@ TEST_F(InputManagerTest, RegisterMixedModifierBindings)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("plain", {0x41}, []() {});
-    mgr.register_press("ctrl_b", {0x42}, {0x11}, []() {});
-    mgr.register_hold("shift_c", {0x43}, {0x10, 0x11}, [](bool) {}); // Ctrl+Shift+C
+    mgr.register_press("plain", {keyboard_key(0x41)}, []() {});
+    mgr.register_press("ctrl_b", {keyboard_key(0x42)}, {keyboard_key(0x11)}, []() {});
+    mgr.register_hold("shift_c", {keyboard_key(0x43)}, {keyboard_key(0x10), keyboard_key(0x11)}, [](bool) {});
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 }
@@ -731,7 +891,7 @@ TEST_F(InputManagerTest, SetRequireFocusBeforeStart)
     InputManager &mgr = InputManager::get_instance();
 
     mgr.set_require_focus(false);
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
     mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -743,7 +903,7 @@ TEST_F(InputManagerTest, SetRequireFocusWhileRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
     mgr.start();
 
     EXPECT_TRUE(mgr.is_running());
@@ -764,7 +924,7 @@ TEST_F(InputManagerTest, IsBindingActiveNotRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
 
     // Not started yet
     EXPECT_FALSE(mgr.is_binding_active("test"));
@@ -775,8 +935,8 @@ TEST_F(InputManagerTest, IsBindingActiveWhileRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("press_q", {0x51}, []() {});
-    mgr.register_hold("hold_w", {0x57}, [](bool) {});
+    mgr.register_press("press_q", {keyboard_key(0x51)}, []() {});
+    mgr.register_hold("hold_w", {keyboard_key(0x57)}, [](bool) {});
     mgr.start();
 
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
@@ -793,7 +953,7 @@ TEST_F(InputManagerTest, IsBindingActiveAfterShutdown)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("test", {0x41}, []() {});
+    mgr.register_press("test", {keyboard_key(0x41)}, []() {});
     mgr.start();
     mgr.shutdown();
 
@@ -804,16 +964,167 @@ TEST_F(InputManagerTest, ModifierBindingsIgnoredWhileRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("before", {0x41}, []() {});
+    mgr.register_press("before", {keyboard_key(0x41)}, []() {});
     mgr.start();
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 
-    mgr.register_press("after", {0x42}, {0x11}, []() {});
+    mgr.register_press("after", {keyboard_key(0x42)}, {keyboard_key(0x11)}, []() {});
     EXPECT_EQ(mgr.binding_count(), 1u);
 
-    mgr.register_hold("after_hold", {0x43}, {0x10}, [](bool) {});
+    mgr.register_hold("after_hold", {keyboard_key(0x43)}, {keyboard_key(0x10)}, [](bool) {});
     EXPECT_EQ(mgr.binding_count(), 1u);
 
     mgr.shutdown();
+}
+
+// --- InputManager: Gamepad ---
+
+TEST_F(InputManagerTest, RegisterGamepadBinding)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("gamepad_a", {gamepad_button(GamepadCode::A)}, []() {});
+
+    EXPECT_EQ(mgr.binding_count(), 1u);
+}
+
+TEST_F(InputManagerTest, RegisterGamepadWithModifier)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("lb_a", {gamepad_button(GamepadCode::A)},
+                        {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+
+    EXPECT_EQ(mgr.binding_count(), 1u);
+}
+
+TEST_F(InputManagerTest, SetGamepadIndex)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.set_gamepad_index(1);
+    mgr.register_press("test", {gamepad_button(GamepadCode::A)}, []() {});
+    mgr.start();
+
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, SetTriggerThreshold)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.set_trigger_threshold(100);
+    mgr.register_hold("lt", {gamepad_button(GamepadCode::LeftTrigger)}, [](bool) {});
+    mgr.start();
+
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, MixedKeyboardAndGamepadBindings)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("kb_toggle", {keyboard_key(0x72)}, {keyboard_key(0x11)}, []() {});
+    mgr.register_press("gp_toggle", {gamepad_button(GamepadCode::A)},
+                        {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+    mgr.register_hold("mouse_hold", {mouse_button(0x05)}, [](bool) {});
+
+    EXPECT_EQ(mgr.binding_count(), 3u);
+
+    mgr.start();
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}
+
+// --- InputCode: Name Resolution ---
+
+TEST(InputCodeNameTest, ParseKeyboardNames)
+{
+    auto ctrl = parse_input_name("Ctrl");
+    ASSERT_TRUE(ctrl.has_value());
+    EXPECT_EQ(ctrl->source, InputSource::Keyboard);
+    EXPECT_EQ(ctrl->code, 0x11);
+
+    auto f3 = parse_input_name("F3");
+    ASSERT_TRUE(f3.has_value());
+    EXPECT_EQ(f3->source, InputSource::Keyboard);
+    EXPECT_EQ(f3->code, 0x72);
+
+    auto a = parse_input_name("A");
+    ASSERT_TRUE(a.has_value());
+    EXPECT_EQ(a->source, InputSource::Keyboard);
+    EXPECT_EQ(a->code, 0x41);
+}
+
+TEST(InputCodeNameTest, ParseMouseNames)
+{
+    auto m4 = parse_input_name("Mouse4");
+    ASSERT_TRUE(m4.has_value());
+    EXPECT_EQ(m4->source, InputSource::Mouse);
+    EXPECT_EQ(m4->code, 0x05);
+
+    auto m1 = parse_input_name("Mouse1");
+    ASSERT_TRUE(m1.has_value());
+    EXPECT_EQ(m1->source, InputSource::Mouse);
+    EXPECT_EQ(m1->code, 0x01);
+}
+
+TEST(InputCodeNameTest, ParseGamepadNames)
+{
+    auto ga = parse_input_name("Gamepad_A");
+    ASSERT_TRUE(ga.has_value());
+    EXPECT_EQ(ga->source, InputSource::Gamepad);
+    EXPECT_EQ(ga->code, GamepadCode::A);
+
+    auto lb = parse_input_name("Gamepad_LB");
+    ASSERT_TRUE(lb.has_value());
+    EXPECT_EQ(lb->source, InputSource::Gamepad);
+    EXPECT_EQ(lb->code, GamepadCode::LeftBumper);
+
+    auto lt = parse_input_name("Gamepad_LT");
+    ASSERT_TRUE(lt.has_value());
+    EXPECT_EQ(lt->source, InputSource::Gamepad);
+    EXPECT_EQ(lt->code, GamepadCode::LeftTrigger);
+}
+
+TEST(InputCodeNameTest, CaseInsensitive)
+{
+    auto ctrl = parse_input_name("ctrl");
+    ASSERT_TRUE(ctrl.has_value());
+    EXPECT_EQ(*ctrl, keyboard_key(0x11));
+
+    auto gpa = parse_input_name("gamepad_a");
+    ASSERT_TRUE(gpa.has_value());
+    EXPECT_EQ(*gpa, gamepad_button(GamepadCode::A));
+}
+
+TEST(InputCodeNameTest, UnknownNameReturnsNullopt)
+{
+    EXPECT_FALSE(parse_input_name("InvalidKey").has_value());
+    EXPECT_FALSE(parse_input_name("").has_value());
+    EXPECT_FALSE(parse_input_name("Gamepad_Z").has_value());
+}
+
+TEST(InputCodeNameTest, ReverseNameLookup)
+{
+    EXPECT_EQ(input_code_to_name(keyboard_key(0x11)), "Ctrl");
+    EXPECT_EQ(input_code_to_name(mouse_button(0x05)), "Mouse4");
+    EXPECT_EQ(input_code_to_name(gamepad_button(GamepadCode::A)), "Gamepad_A");
+    EXPECT_TRUE(input_code_to_name(keyboard_key(0xFF)).empty());
+}
+
+TEST(InputCodeNameTest, FormatInputCode)
+{
+    EXPECT_EQ(format_input_code(keyboard_key(0x11)), "Ctrl");
+    EXPECT_EQ(format_input_code(keyboard_key(0x72)), "F3");
+    EXPECT_EQ(format_input_code(mouse_button(0x05)), "Mouse4");
+    EXPECT_EQ(format_input_code(gamepad_button(GamepadCode::A)), "Gamepad_A");
+    // Unknown code falls back to hex
+    EXPECT_EQ(format_input_code(keyboard_key(0xFF)), "0xFF");
 }

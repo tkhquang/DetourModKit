@@ -9,15 +9,20 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 * **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code.
 * **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
-* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `0x11+0x10+0x72` for Ctrl+Shift+F3). (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
+* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `Ctrl+Shift+F3`). Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats are all supported. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
 * **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
-* **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16ms default timeout (one frame at 60fps) to prevent thread starvation, inline buffer optimization for messages of size <=256 bytes (inclusive), and message size validation with truncation for messages larger than 16MB (messages >16MB are truncated to 16MB rather than rejected).
+* **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation, inline buffer optimization for messages of size <= 256 bytes (inclusive), and message size validation with truncation for messages larger than 16 MB (messages > 16 MB are truncated to 16 MB rather than rejected).
 * **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
 * **String Utilities:** Helper functions for formatting addresses, hexadecimal values, virtual key codes, etc.
 * **Format Utilities:** Custom formatters for game modding types (memory addresses, byte values, VK codes) with C++20 `std::format` support.
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 * **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
-* **Input System:** Hotkey monitoring with a background polling thread. Supports press (edge-triggered) and hold (level-triggered) input modes with modifier key combinations (AND logic for modifiers, OR logic for trigger keys). Focus-aware by default — key events are ignored when the process does not own the foreground window. Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Features two-phase initialization (construct then start) for safe thread launching, `condition_variable_any` with `stop_token` for responsive cooperative shutdown, exception-safe callback invocation, atomic `is_binding_active()` query for cross-thread state reads (e.g., from render hooks), automatic hold release on shutdown, and integration with the configuration system for loading VK codes from INI files. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
+* **Input System:** Hotkey monitoring with a background polling thread.
+  * **Input sources & modes:** Supports keyboard, mouse, and XInput gamepad input via a unified `InputCode` tagged type (`InputSource` + button code). Press (edge-triggered) and hold (level-triggered) input modes with modifier combinations (AND logic for modifiers, OR logic for trigger keys). Gamepad analog triggers (LT/RT) are treated as digital buttons with a configurable deadzone threshold. Focus-aware by default — input events are ignored when the process does not own the foreground window.
+  * **Threading & lifecycle:** Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Two-phase initialization (construct then start) for safe thread launching. `condition_variable_any` with `stop_token` for responsive cooperative shutdown. Exception-safe callback invocation. Automatic hold release on shutdown. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
+  * **Performance:** O(1) hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps). Lock-free `is_running()` via atomic flag. O(1) reverse name lookup for `input_code_to_name()`.
+  * **Gamepad & polling:** XInput is polled once per cycle and skipped entirely when no gamepad bindings are registered.
+  * **Configuration integration:** Loading input codes from INI files (named keys, hex VK codes, or mixed). Named key resolution uses binary search for efficient lookup.
 
 ## Testing
 
@@ -106,6 +111,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── filesystem.hpp        <-- Filesystem utilities
     │   │   ├── hook_manager.hpp      <-- Hook management
     │   │   ├── input.hpp             <-- Input/hotkey system
+    │   │   ├── input_codes.hpp       <-- Unified input codes (keyboard/mouse/gamepad)
     │   │   ├── logger.hpp            <-- Synchronous logger
     │   │   └── ...
     │   ├── DetourModKit.hpp          <-- Main DetourModKit include
@@ -355,10 +361,13 @@ void InitializeMyMod() {
         [](const std::string& v) { g_mod_config.log_level_setting = v; }, "INFO");
 
     // Register hotkey bindings from INI (modifier+trigger format)
-    // No modifiers: "0x72" or "0x72,0x70" (comma = OR for multiple trigger keys)
-    // With modifiers: "0x11+0x10+0x72" (plus = AND for modifiers, last segment = triggers)
+    // Named keys: "F3" or "F3,F1" (comma = OR for multiple trigger keys)
+    // With modifiers: "Ctrl+Shift+F3" (plus = AND for modifiers, last segment = triggers)
+    // Hex VK codes still work: "0x72", "0x11+0x72"
+    // Mouse: "Mouse4", "Ctrl+Mouse1"
+    // Gamepad: "Gamepad_A", "Gamepad_LB+Gamepad_A"
     DMKConfig::register_key_combo("Hotkeys", "ToggleKey", "Toggle Keys",
-        [](const DMKKeyCombo& c) { g_mod_config.toggle_combo = c; }, "0x72");
+        [](const DMKKeyCombo& c) { g_mod_config.toggle_combo = c; }, "F3");
     DMKConfig::register_key_combo("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
         [](const DMKKeyCombo& c) { g_mod_config.hold_scroll_combo = c; }, "");
 
@@ -498,10 +507,42 @@ EnableGreetingHook=true
 LogLevel=INFO
 
 [Hotkeys]
-ToggleKey=0x72,0x70    ; F3, F1 (hex VK codes, comma = OR)
-HoldScrollKey=0xA0     ; Left Shift
-DebugCombo=0x11+0x10+0x44  ; Ctrl+Shift+D (plus = AND for modifiers, last = trigger)
+; Named keys (recommended)
+ToggleKey=F3,F1              ; F3 or F1 (comma = OR)
+HoldScrollKey=LShift         ; Left Shift
+DebugCombo=Ctrl+Shift+D      ; Ctrl AND Shift AND D (plus = AND for modifiers, last = trigger)
+
+; Mouse buttons
+AimToggle=Mouse4             ; Mouse button 4 (side button)
+QuickAction=Ctrl+Mouse1      ; Ctrl + Left click
+
+; Gamepad buttons (XInput)
+GamepadToggle=Gamepad_A                ; A button
+GamepadCombo=Gamepad_LB+Gamepad_A      ; LB (modifier) + A (trigger)
+GamepadTrigger=Gamepad_LT              ; Left trigger (digital, configurable deadzone)
+
+; Hex VK codes still supported
+LegacyKey=0x72               ; F3 by hex code
+LegacyCombo=0x11+0x10+0x44   ; Ctrl+Shift+D by hex codes
 ```
+
+## Supported Input Names
+
+The configuration system recognizes the following named input codes (case-insensitive):
+
+| Category | Names |
+| --- | --- |
+| **Modifiers** | `Ctrl`, `LCtrl`, `RCtrl`, `Shift`, `LShift`, `RShift`, `Alt`, `LAlt`, `RAlt` |
+| **Letters** | `A`–`Z` |
+| **Digits** | `0`–`9` |
+| **Function keys** | `F1`–`F24` |
+| **Navigation** | `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete` |
+| **Common** | `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `CapsLock`, `NumLock`, `ScrollLock`, `PrintScreen`, `Pause` |
+| **Numpad** | `Numpad0`–`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal` |
+| **Mouse** | `Mouse1` (left), `Mouse2` (right), `Mouse3` (middle), `Mouse4`, `Mouse5` |
+| **Gamepad** | `Gamepad_A`, `Gamepad_B`, `Gamepad_X`, `Gamepad_Y`, `Gamepad_LB`, `Gamepad_RB`, `Gamepad_LT`, `Gamepad_RT`, `Gamepad_Start`, `Gamepad_Back`, `Gamepad_LS`, `Gamepad_RS`, `Gamepad_DpadUp`, `Gamepad_DpadDown`, `Gamepad_DpadLeft`, `Gamepad_DpadRight` |
+
+Hex VK codes with `0x` prefix (e.g., `0x72` for F3) are also accepted and default to keyboard input.
 
 ## Projects Using DetourModKit
 
