@@ -69,8 +69,10 @@ jobs:
         shell: powershell
 
       - name: Run Tests
-        run: ./build/mingw-debug/tests/DetourModKit_tests.exe --gtest_output=xml:test-results.xml
-        shell: bash
+        run: |
+          & ".\build\mingw-debug\tests\DetourModKit_tests.exe" --gtest_output=xml:test-results.xml
+          if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE" }
+        shell: powershell
 
       - name: Generate Coverage Report
         run: |
