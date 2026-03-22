@@ -1,6 +1,6 @@
 # DetourModKit
 
-[![Coverage: 80%+](https://img.shields.io/badge/coverage-%E2%89%A580%25-brightgreen)](https://tkhquang.github.io/DetourModKit/)
+[![Coverage: 80%+](https://img.shields.io/badge/Coverage%20Report-%E2%89%A580%25-brightgreen)](https://tkhquang.github.io/DetourModKit/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
