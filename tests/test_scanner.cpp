@@ -658,6 +658,30 @@ TEST(ScannerTest, find_pattern_nth_occurrence_with_offset)
     EXPECT_EQ((result + pattern->offset) - data.data(), 101);
 }
 
+TEST(ScannerTest, find_pattern_nth_occurrence_with_overlap)
+{
+    std::vector<std::byte> data = {
+        std::byte{0xAA}, std::byte{0xAA}, std::byte{0xAA}, std::byte{0xAA}};
+
+    auto pattern = Scanner::parse_aob("AA AA");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto r1 = Scanner::find_pattern(data.data(), data.size(), *pattern, 1);
+    ASSERT_NE(r1, nullptr);
+    EXPECT_EQ(r1 - data.data(), 0);
+
+    auto r2 = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    ASSERT_NE(r2, nullptr);
+    EXPECT_EQ(r2 - data.data(), 1);
+
+    auto r3 = Scanner::find_pattern(data.data(), data.size(), *pattern, 3);
+    ASSERT_NE(r3, nullptr);
+    EXPECT_EQ(r3 - data.data(), 2);
+
+    auto r4 = Scanner::find_pattern(data.data(), data.size(), *pattern, 4);
+    EXPECT_EQ(r4, nullptr);
+}
+
 TEST(ScannerTest, find_pattern_const_correctness)
 {
     const std::vector<std::byte> data = {

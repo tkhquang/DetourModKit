@@ -25,6 +25,7 @@ namespace DetourModKit
             std::vector<std::byte> mask;  ///< 0xFF = match this byte, 0x00 = wildcard (skip)
             size_t offset = 0;            ///< Byte offset from pattern start to the point of interest.
                                           ///< Set by `|` marker in the AOB string, or 0 if absent.
+                                          ///< May equal bytes.size() when `|` appears at the end.
 
             /**
              * @brief Returns the size of the pattern.
