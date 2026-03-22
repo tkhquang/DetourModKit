@@ -967,3 +967,35 @@ TEST_F(ConfigTest, RegisterKeyCombo_MouseDefault)
     ASSERT_EQ(combo.modifiers.size(), 1u);
     EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
 }
+
+TEST_F(ConfigTest, RegisterKeyCombo_ThumbstickDefault)
+{
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "LS", "ls", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "Gamepad_LB+Gamepad_LSUp");
+
+    ASSERT_EQ(combo.keys.size(), 1u);
+    EXPECT_EQ(combo.keys[0], gamepad_button(GamepadCode::LeftStickUp));
+    ASSERT_EQ(combo.modifiers.size(), 1u);
+    EXPECT_EQ(combo.modifiers[0], gamepad_button(GamepadCode::LeftBumper));
+}
+
+TEST_F(ConfigTest, KeyCombo_ThumbstickFromFile)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Hotkeys]\n";
+    ini_file << "StickCombo=Gamepad_RSLeft,Gamepad_RSRight\n";
+    ini_file.close();
+
+    Config::KeyCombo combo;
+
+    Config::register_key_combo("Hotkeys", "StickCombo", "stick", [&combo](const Config::KeyCombo &c)
+                               { combo = c; }, "");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combo.keys.size(), 2u);
+    EXPECT_EQ(combo.keys[0], gamepad_button(GamepadCode::RightStickLeft));
+    EXPECT_EQ(combo.keys[1], gamepad_button(GamepadCode::RightStickRight));
+}

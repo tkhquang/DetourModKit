@@ -26,12 +26,14 @@ namespace DetourModKit
          * @param gamepad_state Cached XInput state for the current poll cycle.
          * @param gamepad_connected Whether the gamepad is connected.
          * @param trigger_threshold Analog trigger deadzone threshold.
+         * @param stick_threshold Thumbstick deadzone threshold.
          * @return true if the input is currently pressed.
          */
         bool is_code_pressed(const InputCode &code,
                              const XINPUT_STATE &gamepad_state,
                              bool gamepad_connected,
-                             int trigger_threshold) noexcept
+                             int trigger_threshold,
+                             int stick_threshold) noexcept
         {
             switch (code.source)
             {
@@ -44,15 +46,37 @@ namespace DetourModKit
                 {
                     return false;
                 }
-                if (code.code == GamepadCode::LeftTrigger)
+                // Fast path: digital button bitmask (all codes below synthetic range)
+                if (code.code < GamepadCode::LeftTrigger)
                 {
+                    return (gamepad_state.Gamepad.wButtons & static_cast<WORD>(code.code)) != 0;
+                }
+                // Synthetic analog codes
+                switch (code.code)
+                {
+                case GamepadCode::LeftTrigger:
                     return gamepad_state.Gamepad.bLeftTrigger > trigger_threshold;
-                }
-                if (code.code == GamepadCode::RightTrigger)
-                {
+                case GamepadCode::RightTrigger:
                     return gamepad_state.Gamepad.bRightTrigger > trigger_threshold;
+                case GamepadCode::LeftStickUp:
+                    return gamepad_state.Gamepad.sThumbLY > stick_threshold;
+                case GamepadCode::LeftStickDown:
+                    return gamepad_state.Gamepad.sThumbLY < -stick_threshold;
+                case GamepadCode::LeftStickLeft:
+                    return gamepad_state.Gamepad.sThumbLX < -stick_threshold;
+                case GamepadCode::LeftStickRight:
+                    return gamepad_state.Gamepad.sThumbLX > stick_threshold;
+                case GamepadCode::RightStickUp:
+                    return gamepad_state.Gamepad.sThumbRY > stick_threshold;
+                case GamepadCode::RightStickDown:
+                    return gamepad_state.Gamepad.sThumbRY < -stick_threshold;
+                case GamepadCode::RightStickLeft:
+                    return gamepad_state.Gamepad.sThumbRX < -stick_threshold;
+                case GamepadCode::RightStickRight:
+                    return gamepad_state.Gamepad.sThumbRX > stick_threshold;
+                default:
+                    return false;
                 }
-                return (gamepad_state.Gamepad.wButtons & static_cast<WORD>(code.code)) != 0;
             }
             }
             return false;
@@ -92,13 +116,15 @@ namespace DetourModKit
                              std::chrono::milliseconds poll_interval,
                              bool require_focus,
                              int gamepad_index,
-                             int trigger_threshold)
+                             int trigger_threshold,
+                             int stick_threshold)
         : bindings_(std::move(bindings)),
           poll_interval_(std::clamp(poll_interval, MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)),
           require_focus_(require_focus),
           active_states_(std::make_unique<std::atomic<uint8_t>[]>(bindings_.size())),
           gamepad_index_(std::clamp(gamepad_index, 0, 3)),
           trigger_threshold_(std::clamp(trigger_threshold, 0, 255)),
+          stick_threshold_(std::clamp(stick_threshold, 0, 32767)),
           has_gamepad_bindings_(scan_for_gamepad_bindings(bindings_))
     {
         name_index_.reserve(bindings_.size());
@@ -199,7 +225,8 @@ namespace DetourModKit
     void InputPoller::poll_loop(std::stop_token stop_token)
     {
         const size_t count = bindings_.size();
-        const int threshold = trigger_threshold_;
+        const int trigger_thresh = trigger_threshold_;
+        const int stick_thresh = stick_threshold_;
 
         constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
         bool gamepad_was_connected = false;
@@ -244,7 +271,7 @@ namespace DetourModKit
                     bool modifiers_held = true;
                     for (const auto &mod : binding.modifiers)
                     {
-                        if (!is_code_pressed(mod, gamepad_state, gamepad_connected, threshold))
+                        if (!is_code_pressed(mod, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
                         {
                             modifiers_held = false;
                             break;
@@ -255,7 +282,7 @@ namespace DetourModKit
                     {
                         for (const auto &key : binding.keys)
                         {
-                            if (is_code_pressed(key, gamepad_state, gamepad_connected, threshold))
+                            if (is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
                             {
                                 any_pressed = true;
                                 break;
@@ -456,6 +483,12 @@ namespace DetourModKit
         trigger_threshold_ = std::clamp(threshold, 0, 255);
     }
 
+    void InputManager::set_stick_threshold(int threshold)
+    {
+        std::lock_guard lock(mutex_);
+        stick_threshold_ = std::clamp(threshold, 0, 32767);
+    }
+
     void InputManager::start(std::chrono::milliseconds poll_interval)
     {
         std::lock_guard lock(mutex_);
@@ -482,7 +515,8 @@ namespace DetourModKit
         }
 
         poller_ = std::make_unique<InputPoller>(std::move(pending_bindings_), poll_interval,
-                                                require_focus_, gamepad_index_, trigger_threshold_);
+                                                require_focus_, gamepad_index_, trigger_threshold_,
+                                                stick_threshold_);
         pending_bindings_.clear();
         poller_->start();
         running_.store(true, std::memory_order_release);

@@ -18,7 +18,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 * **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
 * **Input System:** Hotkey monitoring with a background polling thread.
-  * **Input sources & modes:** Supports keyboard, mouse, and XInput gamepad input via a unified `InputCode` tagged type (`InputSource` + button code). Press (edge-triggered) and hold (level-triggered) input modes with modifier combinations (AND logic for modifiers, OR logic for trigger keys). Gamepad analog triggers (LT/RT) are treated as digital buttons with a configurable deadzone threshold. Focus-aware by default — input events are ignored when the process does not own the foreground window.
+  * **Input sources & modes:** Supports keyboard, mouse, and XInput gamepad input via a unified `InputCode` tagged type (`InputSource` + button code). Press (edge-triggered) and hold (level-triggered) input modes with modifier combinations (AND logic for modifiers, OR logic for trigger keys). Gamepad analog triggers (LT/RT) and thumbstick axes are treated as digital buttons with configurable deadzone thresholds. Focus-aware by default — input events are ignored when the process does not own the foreground window.
   * **Threading & lifecycle:** Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Two-phase initialization (construct then start) for safe thread launching. `condition_variable_any` with `stop_token` for responsive cooperative shutdown. Exception-safe callback invocation. Automatic hold release on shutdown. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
   * **Performance:** O(1) hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps). Lock-free `is_running()` via atomic flag. O(1) reverse name lookup for `input_code_to_name()`.
   * **Gamepad & polling:** XInput is polled once per cycle and skipped entirely when no gamepad bindings are registered. Reconnection attempts are throttled to every 2 seconds when no controller is connected, avoiding the per-cycle overhead of `XInputGetState` on disconnected slots.
@@ -541,8 +541,31 @@ The configuration system recognizes the following named input codes (case-insens
 | **Numpad** | `Numpad0`–`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal` |
 | **Mouse** | `Mouse1` (left), `Mouse2` (right), `Mouse3` (middle), `Mouse4`, `Mouse5` |
 | **Gamepad** | `Gamepad_A`, `Gamepad_B`, `Gamepad_X`, `Gamepad_Y`, `Gamepad_LB`, `Gamepad_RB`, `Gamepad_LT`, `Gamepad_RT`, `Gamepad_Start`, `Gamepad_Back`, `Gamepad_LS`, `Gamepad_RS`, `Gamepad_DpadUp`, `Gamepad_DpadDown`, `Gamepad_DpadLeft`, `Gamepad_DpadRight` |
+| **Gamepad sticks** | `Gamepad_LSUp`, `Gamepad_LSDown`, `Gamepad_LSLeft`, `Gamepad_LSRight`, `Gamepad_RSUp`, `Gamepad_RSDown`, `Gamepad_RSLeft`, `Gamepad_RSRight` |
 
 Hex VK codes with `0x` prefix (e.g., `0x72` for F3) are also accepted and default to keyboard input.
+
+## Gamepad Compatibility
+
+Gamepad support uses the **XInput** API. The following controllers are supported natively:
+
+| Controller | Supported |
+| --- | --- |
+| Xbox 360 | Yes (native XInput) |
+| Xbox One / Series X\|S | Yes (native XInput) |
+| GameSir (XInput mode) | Yes (switch controller to XInput mode) |
+| PS4 DualShock 4 | Via [DS4Windows](https://github.com/Ryochan7/DS4Windows) or Steam Input |
+| PS5 DualSense | Via [DualSenseX](https://github.com/Jehan-HENRY/DualSenseX) or Steam Input |
+| Nintendo Switch Pro | Via [BetterJoy](https://github.com/Davidobot/BetterJoy) or Steam Input |
+| Generic USB gamepads | Only if the controller exposes an XInput interface |
+
+**Why XInput only?** DetourModKit's input system is designed for mod hotkeys and toggles, not for replacing a game's primary input handling. XInput covers Xbox controllers natively, and the vast majority of PC players using non-Xbox controllers already use Steam Input or similar remapping tools that present their controller as XInput. Adding DirectInput or Windows.Gaming.Input would significantly increase complexity for a use case where XInput + keyboard/mouse covers nearly all real users.
+
+**Limitations:**
+
+* Maximum 4 controllers (XInput hard limit, indices 0-3).
+* Analog triggers (LT/RT) and thumbstick axes are treated as digital buttons with configurable deadzone thresholds.
+* No event-driven hot-plug detection; controller connection is checked via polling (reconnection attempts are throttled to every 2 seconds when disconnected).
 
 ## Projects Using DetourModKit
 

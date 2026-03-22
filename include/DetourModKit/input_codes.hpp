@@ -84,10 +84,11 @@ namespace DetourModKit
 
     /**
      * @namespace GamepadCode
-     * @brief XInput-compatible gamepad button codes and synthetic trigger identifiers.
+     * @brief XInput-compatible gamepad button codes and synthetic analog identifiers.
      * @details Digital button codes match XInput XINPUT_GAMEPAD_* bitmask values.
-     *          LeftTrigger and RightTrigger are synthetic codes for analog triggers
-     *          treated as digital inputs with a configurable deadzone threshold.
+     *          LeftTrigger/RightTrigger and thumbstick direction codes are synthetic
+     *          identifiers for analog inputs treated as digital with configurable
+     *          deadzone thresholds.
      */
     namespace GamepadCode
     {
@@ -110,8 +111,23 @@ namespace DetourModKit
         inline constexpr int LeftTrigger = 0x10000;
         inline constexpr int RightTrigger = 0x10001;
 
+        /// Synthetic codes for thumbstick axes treated as digital inputs.
+        /// Each direction fires when the axis exceeds the stick deadzone threshold.
+        inline constexpr int LeftStickUp = 0x10002;
+        inline constexpr int LeftStickDown = 0x10003;
+        inline constexpr int LeftStickLeft = 0x10004;
+        inline constexpr int LeftStickRight = 0x10005;
+        inline constexpr int RightStickUp = 0x10006;
+        inline constexpr int RightStickDown = 0x10007;
+        inline constexpr int RightStickLeft = 0x10008;
+        inline constexpr int RightStickRight = 0x10009;
+
         /// Default analog trigger threshold (0-255 range, values above are "pressed").
         inline constexpr int TriggerThreshold = 30;
+
+        /// Default thumbstick deadzone threshold (0-32767 range).
+        /// Matches XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE (7849).
+        inline constexpr int StickThreshold = 7849;
     } // namespace GamepadCode
 
     /**

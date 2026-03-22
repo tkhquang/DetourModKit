@@ -1128,3 +1128,134 @@ TEST(InputCodeNameTest, FormatInputCode)
     // Unknown code falls back to hex
     EXPECT_EQ(format_input_code(keyboard_key(0xFF)), "0xFF");
 }
+
+// --- Thumbstick axis codes ---
+
+TEST(InputCodeNameTest, ParseThumbstickNames)
+{
+    auto lsu = parse_input_name("Gamepad_LSUp");
+    ASSERT_TRUE(lsu.has_value());
+    EXPECT_EQ(lsu->source, InputSource::Gamepad);
+    EXPECT_EQ(lsu->code, GamepadCode::LeftStickUp);
+
+    auto lsd = parse_input_name("Gamepad_LSDown");
+    ASSERT_TRUE(lsd.has_value());
+    EXPECT_EQ(lsd->code, GamepadCode::LeftStickDown);
+
+    auto lsl = parse_input_name("Gamepad_LSLeft");
+    ASSERT_TRUE(lsl.has_value());
+    EXPECT_EQ(lsl->code, GamepadCode::LeftStickLeft);
+
+    auto lsr = parse_input_name("Gamepad_LSRight");
+    ASSERT_TRUE(lsr.has_value());
+    EXPECT_EQ(lsr->code, GamepadCode::LeftStickRight);
+
+    auto rsu = parse_input_name("Gamepad_RSUp");
+    ASSERT_TRUE(rsu.has_value());
+    EXPECT_EQ(rsu->code, GamepadCode::RightStickUp);
+
+    auto rsd = parse_input_name("Gamepad_RSDown");
+    ASSERT_TRUE(rsd.has_value());
+    EXPECT_EQ(rsd->code, GamepadCode::RightStickDown);
+
+    auto rsl = parse_input_name("Gamepad_RSLeft");
+    ASSERT_TRUE(rsl.has_value());
+    EXPECT_EQ(rsl->code, GamepadCode::RightStickLeft);
+
+    auto rsr = parse_input_name("Gamepad_RSRight");
+    ASSERT_TRUE(rsr.has_value());
+    EXPECT_EQ(rsr->code, GamepadCode::RightStickRight);
+}
+
+TEST(InputCodeNameTest, ThumbstickCaseInsensitive)
+{
+    auto code = parse_input_name("gamepad_lsup");
+    ASSERT_TRUE(code.has_value());
+    EXPECT_EQ(*code, gamepad_button(GamepadCode::LeftStickUp));
+}
+
+TEST(InputCodeNameTest, ThumbstickReverseNameLookup)
+{
+    EXPECT_EQ(input_code_to_name(gamepad_button(GamepadCode::LeftStickUp)), "Gamepad_LSUp");
+    EXPECT_EQ(input_code_to_name(gamepad_button(GamepadCode::RightStickRight)), "Gamepad_RSRight");
+}
+
+TEST(InputCodeNameTest, FormatThumbstickCode)
+{
+    EXPECT_EQ(format_input_code(gamepad_button(GamepadCode::LeftStickUp)), "Gamepad_LSUp");
+    EXPECT_EQ(format_input_code(gamepad_button(GamepadCode::RightStickDown)), "Gamepad_RSDown");
+}
+
+TEST_F(InputPollerTest, ThumbstickBindingConstruction)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "stick_test";
+    binding.keys = {gamepad_button(GamepadCode::LeftStickUp)};
+    binding.mode = InputMode::Hold;
+    binding.on_state_change = [](bool) {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings));
+
+    EXPECT_EQ(poller.binding_count(), 1u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, ThumbstickWithCustomThreshold)
+{
+    std::vector<InputBinding> bindings;
+
+    InputBinding binding;
+    binding.name = "stick_custom";
+    binding.keys = {gamepad_button(GamepadCode::RightStickLeft)};
+    binding.mode = InputMode::Press;
+    binding.on_press = []() {};
+    bindings.push_back(std::move(binding));
+
+    InputPoller poller(std::move(bindings), DEFAULT_POLL_INTERVAL, true, 0,
+                       GamepadCode::TriggerThreshold, 16000);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+    EXPECT_FALSE(poller.is_binding_active("stick_custom"));
+
+    poller.shutdown();
+}
+
+TEST_F(InputManagerTest, SetStickThreshold)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.set_stick_threshold(12000);
+    mgr.register_hold("ls_up", {gamepad_button(GamepadCode::LeftStickUp)}, [](bool) {});
+    mgr.start();
+
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, ThumbstickAndButtonMixed)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("gp_a", {gamepad_button(GamepadCode::A)}, []() {});
+    mgr.register_hold("ls_up", {gamepad_button(GamepadCode::LeftStickUp)}, [](bool) {});
+    mgr.register_press("rs_right", {gamepad_button(GamepadCode::RightStickRight)},
+                        {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+
+    EXPECT_EQ(mgr.binding_count(), 3u);
+
+    mgr.start();
+    EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}

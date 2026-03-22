@@ -111,13 +111,16 @@ namespace DetourModKit
          * @param gamepad_index XInput controller index (0-3) to poll for gamepad bindings.
          * @param trigger_threshold Analog trigger deadzone threshold (0-255). Trigger values
          *                          above this threshold are considered "pressed".
+         * @param stick_threshold Thumbstick deadzone threshold (0-32767). Axis values
+         *                        exceeding this threshold in any direction are "pressed".
          * @note The polling thread does not start until start() is called.
          */
         explicit InputPoller(std::vector<InputBinding> bindings,
                              std::chrono::milliseconds poll_interval = DEFAULT_POLL_INTERVAL,
                              bool require_focus = true,
                              int gamepad_index = 0,
-                             int trigger_threshold = GamepadCode::TriggerThreshold);
+                             int trigger_threshold = GamepadCode::TriggerThreshold,
+                             int stick_threshold = GamepadCode::StickThreshold);
 
         ~InputPoller();
 
@@ -211,6 +214,7 @@ namespace DetourModKit
 
         int gamepad_index_;
         int trigger_threshold_;
+        int stick_threshold_;
         bool has_gamepad_bindings_;
     };
 
@@ -314,6 +318,13 @@ namespace DetourModKit
         void set_trigger_threshold(int threshold);
 
         /**
+         * @brief Sets the thumbstick deadzone threshold for gamepad bindings.
+         * @param threshold Axis values exceeding this threshold (0-32767) are "pressed".
+         * @note Must be called before start(). Has no effect while the poller is running.
+         */
+        void set_stick_threshold(int threshold);
+
+        /**
          * @brief Starts the input polling thread with all registered bindings.
          * @details Constructs an internal InputPoller with the current bindings
          *          and begins monitoring. Subsequent register calls are ignored
@@ -364,6 +375,7 @@ namespace DetourModKit
         bool require_focus_ = true;
         int gamepad_index_ = 0;
         int trigger_threshold_ = GamepadCode::TriggerThreshold;
+        int stick_threshold_ = GamepadCode::StickThreshold;
     };
 } // namespace DetourModKit
 
