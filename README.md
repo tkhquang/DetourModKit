@@ -96,19 +96,19 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     | `msvc-debug` | MSVC (cl) | Debug | ON |
     | `msvc-release` | MSVC (cl) | Release | OFF |
 
-    > [!NOTE]
-    > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
-    > along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
-    > with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE
-    > linkage so unused DetourModKit symbols are stripped at final link time. MinGW Release builds
-    > use `-O2` (overriding CMake's default `-O3`) for a better code-size/performance tradeoff.
-    > MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
-    > Release builds omit debug info entirely to minimize binary size.
+> [!NOTE]
+> Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
+> along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
+> with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE
+> linkage so unused DetourModKit symbols are stripped at final link time. MinGW Release builds
+> use `-O2` (overriding CMake's default `-O3`) for a better code-size/performance tradeoff.
+> MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
+> Release builds omit debug info entirely to minimize binary size.
 
-    ---
+---
 
-    > [!TIP]
-    > You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
+> [!TIP]
+> You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
 
    After running the install command, the install directory (`build/install/` for the Makefile wrapper, or whichever `--prefix` you passed to `cmake --install`) will contain:
 
