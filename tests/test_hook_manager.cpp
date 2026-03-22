@@ -1380,3 +1380,47 @@ TEST_F(HookManagerTest, MidHook_GetDestination_Noexcept)
     EXPECT_TRUE(hook_result.has_value());
     EXPECT_TRUE(*hook_result);
 }
+
+TEST_F(HookManagerTest, CreateInlineHook_AfterShutdown_ReturnsShutdownInProgress)
+{
+    hook_manager_->shutdown();
+
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "PostShutdownHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::ShutdownInProgress);
+    EXPECT_EQ(tramp, nullptr);
+}
+
+TEST_F(HookManagerTest, CreateMidHook_AfterShutdown_ReturnsShutdownInProgress)
+{
+    hook_manager_->shutdown();
+
+    auto detour_fn = [](safetyhook::Context &) {};
+    auto result = hook_manager_->create_mid_hook(
+        "PostShutdownMidHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::ShutdownInProgress);
+}
+
+TEST_F(HookManagerTest, CreateInlineHook_TrampolineNotSetOnFailure)
+{
+    void *tramp = reinterpret_cast<void *>(0xDEADBEEF);
+    auto result = hook_manager_->create_inline_hook(
+        "NullTargetHook",
+        0,
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+
+    ASSERT_FALSE(result.has_value());
+    // Trampoline should remain unchanged on early validation failure
+    EXPECT_EQ(tramp, reinterpret_cast<void *>(0xDEADBEEF));
+}

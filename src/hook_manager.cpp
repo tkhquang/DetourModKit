@@ -1,12 +1,21 @@
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/format.hpp"
 
-#include <sstream>
 #include <algorithm>
 #include <cstddef>
+#include <format>
 
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
+
+namespace
+{
+    struct DeferredLog
+    {
+        std::string msg;
+        LogLevel level;
+    };
+} // anonymous namespace
 
 HookManager &HookManager::get_instance()
 {
@@ -29,13 +38,15 @@ HookManager::HookManager(Logger &logger)
     m_logger.info("HookManager: Initialized.");
 }
 
-HookManager::~HookManager()
+HookManager::~HookManager() noexcept
 {
     if (!m_shutdown_called.load(std::memory_order_acquire))
     {
-        // Fallback if DMK_Shutdown() was not called — cannot safely log
-        // because Logger might already be destroyed.
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        for (auto &[name, hook] : m_hooks)
+        {
+            hook->disable();
+        }
         m_hooks.clear();
     }
 }
@@ -47,64 +58,61 @@ void HookManager::shutdown()
         return;
 
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    for (auto &[name, hook] : m_hooks)
+    {
+        hook->disable();
+    }
     m_hooks.clear();
 }
 
 std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &err) const
 {
-    std::ostringstream oss;
-    oss << "SafetyHook InlineHook Error (Type: " << static_cast<int>(err.type) << "): ";
+    const int type_int = static_cast<int>(err.type);
+    const auto ip_str = DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
+
     switch (err.type)
     {
     case safetyhook::InlineHook::Error::BAD_ALLOCATION:
-        oss << "Bad allocation (Allocator error: " << static_cast<int>(err.allocator_error) << ")";
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): Bad allocation (Allocator error: {})",
+                           type_int, static_cast<int>(err.allocator_error));
     case safetyhook::InlineHook::Error::FAILED_TO_DECODE_INSTRUCTION:
-        oss << "Failed to decode instruction at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): Failed to decode instruction at address {}",
+                           type_int, ip_str);
     case safetyhook::InlineHook::Error::SHORT_JUMP_IN_TRAMPOLINE:
-        oss << "Short jump found in trampoline at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): Short jump found in trampoline at address {}",
+                           type_int, ip_str);
     case safetyhook::InlineHook::Error::IP_RELATIVE_INSTRUCTION_OUT_OF_RANGE:
-        oss << "IP-relative instruction out of range at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): IP-relative instruction out of range at address {}",
+                           type_int, ip_str);
     case safetyhook::InlineHook::Error::UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE:
-        oss << "Unsupported instruction in trampoline at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): Unsupported instruction in trampoline at address {}",
+                           type_int, ip_str);
     case safetyhook::InlineHook::Error::FAILED_TO_UNPROTECT:
-        oss << "Failed to unprotect memory at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): Failed to unprotect memory at address {}",
+                           type_int, ip_str);
     case safetyhook::InlineHook::Error::NOT_ENOUGH_SPACE:
-        oss << "Not enough space for the hook (prologue too short) at address " << DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): Not enough space for the hook (prologue too short) at address {}",
+                           type_int, ip_str);
     default:
-        oss << "Unknown SafetyHook::InlineHook::Error type.";
-        break;
+        return std::format("SafetyHook InlineHook Error (Type: {}): Unknown error type", type_int);
     }
-    if (err.type == safetyhook::InlineHook::Error::BAD_ALLOCATION)
-    {
-        oss << "; Allocator specific error code: " << static_cast<int>(err.allocator_error);
-    }
-    return oss.str();
 }
 
 std::string HookManager::error_to_string(const safetyhook::MidHook::Error &err) const
 {
-    std::ostringstream oss;
-    oss << "SafetyHook MidHook Error (Type: " << static_cast<int>(err.type) << "): ";
+    const int type_int = static_cast<int>(err.type);
+
     switch (err.type)
     {
     case safetyhook::MidHook::Error::BAD_ALLOCATION:
-        oss << "Bad allocation (Allocator error: " << static_cast<int>(err.allocator_error) << ")";
-        break;
+        return std::format("SafetyHook MidHook Error (Type: {}): Bad allocation (Allocator error: {})",
+                           type_int, static_cast<int>(err.allocator_error));
     case safetyhook::MidHook::Error::BAD_INLINE_HOOK:
-        oss << "Bad underlying inline hook. Details: " << error_to_string(err.inline_hook_error);
-        break;
+        return std::format("SafetyHook MidHook Error (Type: {}): Bad underlying inline hook. Details: {}",
+                           type_int, error_to_string(err.inline_hook_error));
     default:
-        oss << "Unknown SafetyHook::MidHook::Error type.";
-        break;
+        return std::format("SafetyHook MidHook Error (Type: {}): Unknown error type", type_int);
     }
-    return oss.str();
 }
 
 // Non-locking internal helpers - caller must hold m_hooks_mutex
@@ -120,93 +128,111 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     void **original_trampoline,
     const HookConfig &config)
 {
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
+    {
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
-    if (!m_allocator)
-    {
-        m_logger.error("HookManager: Allocator not available. Cannot create inline hook '{}'.", name);
-        return std::unexpected(HookError::AllocatorNotAvailable);
-    }
-    if (target_address == 0)
-    {
-        m_logger.error("HookManager: Target address is NULL for inline hook '{}'.", name);
-        return std::unexpected(HookError::InvalidTargetAddress);
-    }
-    if (detour_function == nullptr)
-    {
-        m_logger.error("HookManager: Detour function is NULL for inline hook '{}'.", name);
-        return std::unexpected(HookError::InvalidDetourFunction);
-    }
-    if (original_trampoline == nullptr)
-    {
-        m_logger.error("HookManager: Original trampoline pointer (output) is NULL for inline hook '{}'.", name);
-        return std::unexpected(HookError::InvalidTrampolinePointer);
-    }
-    *original_trampoline = nullptr;
-
-    if (hook_id_exists_locked(name))
-    {
-        m_logger.error("HookManager: A hook with the name '{}' already exists.", name);
-        return std::unexpected(HookError::HookAlreadyExists);
-    }
-
-    try
-    {
-        safetyhook::InlineHook::Flags sh_flags = config.inline_flags;
-        if (!config.auto_enable)
+        if (m_shutdown_called.load(std::memory_order_acquire))
         {
-            sh_flags = static_cast<safetyhook::InlineHook::Flags>(
-                static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::InlineHook::StartDisabled));
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (!m_allocator)
+        {
+            return {std::unexpected(HookError::AllocatorNotAvailable),
+                    {{std::format("HookManager: Allocator not available. Cannot create inline hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (target_address == 0)
+        {
+            return {std::unexpected(HookError::InvalidTargetAddress),
+                    {{std::format("HookManager: Target address is NULL for inline hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (detour_function == nullptr)
+        {
+            return {std::unexpected(HookError::InvalidDetourFunction),
+                    {{std::format("HookManager: Detour function is NULL for inline hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (original_trampoline == nullptr)
+        {
+            return {std::unexpected(HookError::InvalidTrampolinePointer),
+                    {{std::format("HookManager: Original trampoline pointer (output) is NULL for inline hook '{}'.", name), LogLevel::Error}}};
+        }
+        *original_trampoline = nullptr;
+
+        if (hook_id_exists_locked(name))
+        {
+            return {std::unexpected(HookError::HookAlreadyExists),
+                    {{std::format("HookManager: A hook with the name '{}' already exists.", name), LogLevel::Error}}};
         }
 
-        auto hook_creation_result = safetyhook::InlineHook::create(
-            m_allocator,
-            reinterpret_cast<void *>(target_address),
-            detour_function,
-            sh_flags);
-
-        if (!hook_creation_result)
+        try
         {
-            m_logger.error("HookManager: Failed to create SafetyHook::InlineHook for '{}' at {}. Error: {}",
-                           name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error()));
-            return std::unexpected(HookError::SafetyHookError);
-        }
-
-        auto sh_inline_hook_ptr = std::make_unique<safetyhook::InlineHook>(std::move(hook_creation_result.value()));
-        *original_trampoline = sh_inline_hook_ptr->original<void *>();
-
-        HookStatus initial_status;
-        if (sh_inline_hook_ptr->enabled())
-        {
-            initial_status = HookStatus::Active;
-        }
-        else
-        {
-            initial_status = HookStatus::Disabled;
-            if (config.auto_enable)
+            safetyhook::InlineHook::Flags sh_flags = config.inline_flags;
+            if (!config.auto_enable)
             {
-                m_logger.warning("HookManager: Inline hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
+                sh_flags = static_cast<safetyhook::InlineHook::Flags>(
+                    static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::InlineHook::StartDisabled));
             }
+
+            auto hook_creation_result = safetyhook::InlineHook::create(
+                m_allocator,
+                reinterpret_cast<void *>(target_address),
+                detour_function,
+                sh_flags);
+
+            if (!hook_creation_result)
+            {
+                return {std::unexpected(HookError::SafetyHookError),
+                        {{std::format("HookManager: Failed to create SafetyHook::InlineHook for '{}' at {}. Error: {}",
+                                      name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error())),
+                          LogLevel::Error}}};
+            }
+
+            auto sh_inline_hook_ptr = std::make_unique<safetyhook::InlineHook>(std::move(hook_creation_result.value()));
+            void *trampoline = sh_inline_hook_ptr->original<void *>();
+
+            HookStatus initial_status = sh_inline_hook_ptr->enabled() ? HookStatus::Active : HookStatus::Disabled;
+
+            // Pre-build log entries before committing to m_hooks so that
+            // allocation failures in std::format cannot leave a ghost hook.
+            std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
+            std::vector<DeferredLog> logs;
+            logs.reserve(2);
+            logs.push_back({std::format("HookManager: Successfully created {} inline hook '{}' targeting {}.",
+                                        status_message, name, DetourModKit::Format::format_address(target_address)),
+                            LogLevel::Info});
+
+            if (initial_status == HookStatus::Disabled && config.auto_enable)
+            {
+                logs.push_back({std::format("HookManager: Inline hook '{}' was configured for auto-enable but is currently disabled post-creation.", name),
+                                LogLevel::Warning});
+            }
+
+            auto managed_hook = std::make_unique<InlineHook>(name, target_address, std::move(sh_inline_hook_ptr), initial_status);
+            m_hooks.emplace(name, std::move(managed_hook));
+            *original_trampoline = trampoline;
+
+            return {name, std::move(logs)};
         }
+        catch (const std::exception &e)
+        {
+            return {std::unexpected(HookError::UnknownError),
+                    {{std::format("HookManager: An std::exception occurred during inline hook creation for '{}': {}", name, e.what()),
+                      LogLevel::Error}}};
+        }
+        catch (...)
+        {
+            return {std::unexpected(HookError::UnknownError),
+                    {{std::format("HookManager: An unknown exception occurred during inline hook creation for '{}'.", name),
+                      LogLevel::Error}}};
+        }
+    }();
 
-        auto managed_hook = std::make_unique<InlineHook>(name, target_address, std::move(sh_inline_hook_ptr), initial_status);
-        m_hooks.emplace(name, std::move(managed_hook));
-
-        std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
-        m_logger.info("HookManager: Successfully created {} inline hook '{}' targeting {}.",
-                      status_message, name, DetourModKit::Format::format_address(target_address));
-        return name;
-    }
-    catch (const std::exception &e)
+    for (const auto &entry : deferred_logs)
     {
-        m_logger.error("HookManager: An std::exception occurred during inline hook creation for '{}': {}", name, e.what());
-        return std::unexpected(HookError::UnknownError);
+        m_logger.log(entry.level, entry.msg);
     }
-    catch (...)
-    {
-        m_logger.error("HookManager: An unknown exception occurred during inline hook creation for '{}'.", name);
-        return std::unexpected(HookError::UnknownError);
-    }
+    return result;
 }
 
 std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
@@ -254,86 +280,103 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
+    {
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
-    if (!m_allocator)
-    {
-        m_logger.error("HookManager: Allocator not available. Cannot create mid hook '{}'.", name);
-        return std::unexpected(HookError::AllocatorNotAvailable);
-    }
-    if (target_address == 0)
-    {
-        m_logger.error("HookManager: Target address is NULL for mid hook '{}'.", name);
-        return std::unexpected(HookError::InvalidTargetAddress);
-    }
-    if (detour_function == nullptr)
-    {
-        m_logger.error("HookManager: Detour function is NULL for mid hook '{}'.", name);
-        return std::unexpected(HookError::InvalidDetourFunction);
-    }
-
-    if (hook_id_exists_locked(name))
-    {
-        m_logger.error("HookManager: A hook with the name '{}' already exists.", name);
-        return std::unexpected(HookError::HookAlreadyExists);
-    }
-
-    try
-    {
-        safetyhook::MidHook::Flags sh_flags = config.mid_flags;
-        if (!config.auto_enable)
+        if (m_shutdown_called.load(std::memory_order_acquire))
         {
-            sh_flags = static_cast<safetyhook::MidHook::Flags>(
-                static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::MidHook::StartDisabled));
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (!m_allocator)
+        {
+            return {std::unexpected(HookError::AllocatorNotAvailable),
+                    {{std::format("HookManager: Allocator not available. Cannot create mid hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (target_address == 0)
+        {
+            return {std::unexpected(HookError::InvalidTargetAddress),
+                    {{std::format("HookManager: Target address is NULL for mid hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (detour_function == nullptr)
+        {
+            return {std::unexpected(HookError::InvalidDetourFunction),
+                    {{std::format("HookManager: Detour function is NULL for mid hook '{}'.", name), LogLevel::Error}}};
         }
 
-        auto hook_creation_result = safetyhook::MidHook::create(
-            m_allocator,
-            reinterpret_cast<void *>(target_address),
-            detour_function,
-            sh_flags);
-
-        if (!hook_creation_result)
+        if (hook_id_exists_locked(name))
         {
-            m_logger.error("HookManager: Failed to create SafetyHook::MidHook for '{}' at {}. Error: {}",
-                           name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error()));
-            return std::unexpected(HookError::SafetyHookError);
+            return {std::unexpected(HookError::HookAlreadyExists),
+                    {{std::format("HookManager: A hook with the name '{}' already exists.", name), LogLevel::Error}}};
         }
 
-        auto sh_mid_hook_ptr = std::make_unique<safetyhook::MidHook>(std::move(hook_creation_result.value()));
-
-        HookStatus initial_status;
-        if (sh_mid_hook_ptr->enabled())
+        try
         {
-            initial_status = HookStatus::Active;
-        }
-        else
-        {
-            initial_status = HookStatus::Disabled;
-            if (config.auto_enable)
+            safetyhook::MidHook::Flags sh_flags = config.mid_flags;
+            if (!config.auto_enable)
             {
-                m_logger.warning("HookManager: Mid hook '{}' was configured for auto-enable but is currently disabled post-creation.", name);
+                sh_flags = static_cast<safetyhook::MidHook::Flags>(
+                    static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::MidHook::StartDisabled));
             }
+
+            auto hook_creation_result = safetyhook::MidHook::create(
+                m_allocator,
+                reinterpret_cast<void *>(target_address),
+                detour_function,
+                sh_flags);
+
+            if (!hook_creation_result)
+            {
+                return {std::unexpected(HookError::SafetyHookError),
+                        {{std::format("HookManager: Failed to create SafetyHook::MidHook for '{}' at {}. Error: {}",
+                                      name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error())),
+                          LogLevel::Error}}};
+            }
+
+            auto sh_mid_hook_ptr = std::make_unique<safetyhook::MidHook>(std::move(hook_creation_result.value()));
+
+            HookStatus initial_status = sh_mid_hook_ptr->enabled() ? HookStatus::Active : HookStatus::Disabled;
+
+            // Pre-build log entries before committing to m_hooks so that
+            // allocation failures in std::format cannot leave a ghost hook.
+            std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
+            std::vector<DeferredLog> logs;
+            logs.reserve(2);
+            logs.push_back({std::format("HookManager: Successfully created {} mid hook '{}' targeting {}.",
+                                        status_message, name, DetourModKit::Format::format_address(target_address)),
+                            LogLevel::Info});
+
+            if (initial_status == HookStatus::Disabled && config.auto_enable)
+            {
+                logs.push_back({std::format("HookManager: Mid hook '{}' was configured for auto-enable but is currently disabled post-creation.", name),
+                                LogLevel::Warning});
+            }
+
+            auto managed_hook = std::make_unique<MidHook>(name, target_address, std::move(sh_mid_hook_ptr), initial_status);
+            m_hooks.emplace(name, std::move(managed_hook));
+
+            return {name, std::move(logs)};
         }
+        catch (const std::exception &e)
+        {
+            return {std::unexpected(HookError::UnknownError),
+                    {{std::format("HookManager: An std::exception occurred during mid hook creation for '{}': {}", name, e.what()),
+                      LogLevel::Error}}};
+        }
+        catch (...)
+        {
+            return {std::unexpected(HookError::UnknownError),
+                    {{std::format("HookManager: An unknown exception occurred during mid hook creation for '{}'.", name),
+                      LogLevel::Error}}};
+        }
+    }();
 
-        auto managed_hook = std::make_unique<MidHook>(name, target_address, std::move(sh_mid_hook_ptr), initial_status);
-        m_hooks.emplace(name, std::move(managed_hook));
-
-        std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : " (created disabled)";
-        m_logger.info("HookManager: Successfully created {} mid hook '{}' targeting {}.",
-                      status_message, name, DetourModKit::Format::format_address(target_address));
-        return name;
-    }
-    catch (const std::exception &e)
+    for (const auto &entry : deferred_logs)
     {
-        m_logger.error("HookManager: An std::exception occurred during mid hook creation for '{}': {}", name, e.what());
-        return std::unexpected(HookError::UnknownError);
+        m_logger.log(entry.level, entry.msg);
     }
-    catch (...)
-    {
-        m_logger.error("HookManager: An unknown exception occurred during mid hook creation for '{}'.", name);
-        return std::unexpected(HookError::UnknownError);
-    }
+    return result;
 }
 
 std::expected<std::string, HookError> HookManager::create_mid_hook_aob(

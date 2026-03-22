@@ -698,6 +698,61 @@ TEST(ScannerTest, find_pattern_const_correctness)
     EXPECT_EQ(result - data.data(), 2);
 }
 
+TEST(ScannerTest, find_pattern_sse2_path_exact_16_bytes)
+{
+    std::vector<std::byte> data(512, std::byte{0x00});
+
+    for (int i = 0; i < 16; ++i)
+    {
+        data[200 + i] = std::byte{static_cast<uint8_t>(0x10 + i)};
+    }
+
+    auto pattern = Scanner::parse_aob("10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F");
+    ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->size(), 16u);
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 200);
+}
+
+TEST(ScannerTest, find_pattern_sse2_path_with_wildcards)
+{
+    std::vector<std::byte> data(512, std::byte{0x00});
+
+    for (int i = 0; i < 20; ++i)
+    {
+        data[100 + i] = std::byte{static_cast<uint8_t>(0x30 + i)};
+    }
+
+    auto pattern = Scanner::parse_aob("30 31 ?? 33 34 35 ?? 37 38 39 3A 3B 3C 3D ?? 3F 40 41 42 43");
+    ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->size(), 20u);
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 100);
+}
+
+TEST(ScannerTest, find_pattern_sse2_path_not_found)
+{
+    std::vector<std::byte> data(512, std::byte{0x00});
+
+    for (int i = 0; i < 16; ++i)
+    {
+        data[200 + i] = std::byte{static_cast<uint8_t>(0x10 + i)};
+    }
+
+    auto pattern = Scanner::parse_aob("10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E FF");
+    ASSERT_TRUE(pattern.has_value());
+
+    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+
+    EXPECT_EQ(result, nullptr);
+}
+
 class ScannerRipTest : public ::testing::Test
 {
 protected:

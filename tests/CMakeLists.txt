@@ -25,6 +25,7 @@ endforeach()
 # Automatically collect all test source files
 # This will include all test_*.cpp files and main.cpp
 file(GLOB TEST_SOURCES
+  CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/test_*.cpp"
 )

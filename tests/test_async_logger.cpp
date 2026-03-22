@@ -1441,3 +1441,87 @@ TEST(LogMessageTest, MoveOverflowMessage_ClearsSource)
     EXPECT_EQ(dst.message().size(), LogMessage::MAX_INLINE_SIZE + 50);
     EXPECT_EQ(src.overflow, nullptr);
 }
+
+TEST(LogMessageTest, MoveConstructor_PartialBufferCopy)
+{
+    const std::string short_msg = "hello";
+    LogMessage src(LogLevel::Info, short_msg);
+    ASSERT_EQ(src.overflow, nullptr);
+    ASSERT_EQ(src.length, short_msg.size());
+
+    LogMessage dst(std::move(src));
+
+    EXPECT_EQ(dst.length, short_msg.size());
+    EXPECT_EQ(dst.overflow, nullptr);
+    EXPECT_EQ(dst.message(), short_msg);
+    EXPECT_EQ(dst.level, LogLevel::Info);
+    EXPECT_TRUE(dst.is_valid());
+}
+
+TEST(LogMessageTest, MoveAssignment_PartialBufferCopy)
+{
+    const std::string msg = "partial copy test";
+    LogMessage src(LogLevel::Warning, msg);
+    ASSERT_EQ(src.overflow, nullptr);
+
+    LogMessage dst;
+    dst = std::move(src);
+
+    EXPECT_EQ(dst.length, msg.size());
+    EXPECT_EQ(dst.overflow, nullptr);
+    EXPECT_EQ(dst.message(), msg);
+    EXPECT_EQ(dst.level, LogLevel::Warning);
+    EXPECT_TRUE(dst.is_valid());
+}
+
+TEST(LogMessageTest, MoveConstructor_EmptyMessage)
+{
+    LogMessage src(LogLevel::Debug, "");
+    ASSERT_EQ(src.length, 0u);
+
+    LogMessage dst(std::move(src));
+
+    EXPECT_EQ(dst.length, 0u);
+    EXPECT_EQ(dst.overflow, nullptr);
+    EXPECT_EQ(dst.message(), "");
+    EXPECT_TRUE(dst.is_valid());
+}
+
+TEST(LogMessageTest, MoveAssignment_OverflowToInline)
+{
+    std::string long_msg(LogMessage::MAX_INLINE_SIZE + 100, 'Z');
+    LogMessage dst(LogLevel::Info, long_msg);
+    ASSERT_NE(dst.overflow, nullptr);
+
+    const std::string short_msg = "short";
+    LogMessage src(LogLevel::Debug, short_msg);
+    ASSERT_EQ(src.overflow, nullptr);
+
+    dst = std::move(src);
+
+    EXPECT_EQ(dst.overflow, nullptr);
+    EXPECT_EQ(dst.length, short_msg.size());
+    EXPECT_EQ(dst.message(), short_msg);
+}
+
+TEST_F(AsyncLoggerTest, FlushWithTimeout_ReturnsTrue_WhenDrained)
+{
+    AsyncLoggerConfig config;
+    config.batch_size = 64;
+    config.flush_interval = std::chrono::milliseconds{10};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    for (int i = 0; i < 10; ++i)
+    {
+        EXPECT_TRUE(logger->enqueue(LogLevel::Info, "flush_test_" + std::to_string(i)));
+    }
+
+    EXPECT_TRUE(logger->flush_with_timeout(std::chrono::milliseconds{500}));
+    EXPECT_EQ(logger->queue_size(), 0u);
+
+    logger->shutdown();
+}

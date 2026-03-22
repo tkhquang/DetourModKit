@@ -85,9 +85,9 @@ namespace DetourModKit
         /// Must be called with pool_mutex_ held.
         void grow_pool_locked();
         PoolSlot *claim_free_slot() noexcept;
-        void release_slot(PoolSlot *slot) noexcept;
+        void return_slot_locked(PoolSlot *slot, Block *block) noexcept;
 
-        alignas(64) std::atomic<Block *> head_{nullptr};
+        std::atomic<Block *> head_{nullptr};
         std::atomic<size_t> pool_size_{0};
         std::mutex pool_mutex_;
     };
@@ -106,7 +106,7 @@ namespace DetourModKit
 
         static constexpr size_t MAX_INLINE_SIZE = 256;
         static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
-        std::array<char, MAX_INLINE_SIZE> buffer{};
+        std::array<char, MAX_INLINE_SIZE> buffer;
         size_t length{0};
 
         std::string *overflow{nullptr};
@@ -114,7 +114,7 @@ namespace DetourModKit
         LogMessage(LogLevel lvl, std::string msg);
         LogMessage() noexcept = default;
 
-        ~LogMessage();
+        ~LogMessage() noexcept;
 
         LogMessage(LogMessage &&other) noexcept;
         LogMessage &operator=(LogMessage &&other) noexcept;
@@ -282,7 +282,7 @@ namespace DetourModKit
                              std::shared_ptr<std::ofstream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex);
 
-        ~AsyncLogger();
+        ~AsyncLogger() noexcept;
 
         AsyncLogger(const AsyncLogger &) = delete;
         AsyncLogger &operator=(const AsyncLogger &) = delete;

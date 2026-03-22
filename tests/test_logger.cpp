@@ -909,3 +909,60 @@ TEST_F(LoggerTest, AsyncMode_OutputVerification)
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("ASYNC_VERIFY_MSG_6j9n"), std::string::npos);
 }
+
+TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
+{
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> threads;
+
+    threads.emplace_back([&stop]()
+                         {
+        while (!stop.load(std::memory_order_acquire))
+        {
+            auto level = Logger::string_to_log_level("INVALID_LEVEL");
+            EXPECT_EQ(level, LogLevel::Info);
+        } });
+
+    threads.emplace_back([&stop, this]()
+                         {
+        for (int i = 0; i < 50; ++i)
+        {
+            Logger::configure("PREFIX_" + std::to_string(i), test_log_file_.string(), "%Y-%m-%d %H:%M:%S");
+        }
+        stop.store(true, std::memory_order_release); });
+
+    for (auto &t : threads)
+    {
+        t.join();
+    }
+
+    SUCCEED();
+}
+
+TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.info("TIMESTAMP_CHECK_MSG_2k4j");
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    EXPECT_NE(content.find("TIMESTAMP_CHECK_MSG_2k4j"), std::string::npos);
+
+    // Verify timestamp format: [YYYY-MM-DD HH:MM:SS]
+    auto pos = content.find("[20");
+    ASSERT_NE(pos, std::string::npos);
+    auto end_bracket = content.find(']', pos);
+    ASSERT_NE(end_bracket, std::string::npos);
+    std::string timestamp = content.substr(pos + 1, end_bracket - pos - 1);
+    ASSERT_GE(timestamp.size(), 19u);
+    EXPECT_EQ(timestamp[4], '-');
+    EXPECT_EQ(timestamp[7], '-');
+    EXPECT_EQ(timestamp[10], ' ');
+    EXPECT_EQ(timestamp[13], ':');
+    EXPECT_EQ(timestamp[16], ':');
+}

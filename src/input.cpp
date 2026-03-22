@@ -137,7 +137,7 @@ namespace DetourModKit
         }
     }
 
-    InputPoller::~InputPoller()
+    InputPoller::~InputPoller() noexcept
     {
         shutdown();
     }
@@ -150,7 +150,7 @@ namespace DetourModKit
             return;
         }
 
-        running_.store(true, std::memory_order_relaxed);
+        running_.store(true, std::memory_order_release);
         try
         {
             poll_thread_ = std::jthread([this](std::stop_token token)
@@ -158,14 +158,14 @@ namespace DetourModKit
         }
         catch (...)
         {
-            running_.store(false, std::memory_order_relaxed);
+            running_.store(false, std::memory_order_release);
             throw;
         }
     }
 
     bool InputPoller::is_running() const noexcept
     {
-        return running_.load(std::memory_order_relaxed);
+        return running_.load(std::memory_order_acquire);
     }
 
     size_t InputPoller::binding_count() const noexcept
@@ -218,7 +218,7 @@ namespace DetourModKit
         cv_.notify_all();
         poll_thread_.join();
 
-        running_.store(false, std::memory_order_relaxed);
+        running_.store(false, std::memory_order_release);
         release_active_holds();
     }
 
@@ -519,6 +519,7 @@ namespace DetourModKit
                                                 stick_threshold_);
         pending_bindings_.clear();
         poller_->start();
+        active_poller_.store(poller_.get(), std::memory_order_release);
         running_.store(true, std::memory_order_release);
     }
 
@@ -539,14 +540,10 @@ namespace DetourModKit
 
     bool InputManager::is_binding_active(const std::string &name) const noexcept
     {
-        if (!running_.load(std::memory_order_acquire))
+        InputPoller *p = active_poller_.load(std::memory_order_acquire);
+        if (p)
         {
-            return false;
-        }
-        std::lock_guard lock(mutex_);
-        if (poller_)
-        {
-            return poller_->is_binding_active(name);
+            return p->is_binding_active(name);
         }
         return false;
     }
@@ -557,6 +554,10 @@ namespace DetourModKit
 
         {
             std::lock_guard lock(mutex_);
+            // Clear atomic pointer before destroying the poller to ensure
+            // is_binding_active() never accesses a destroyed object.
+            active_poller_.store(nullptr, std::memory_order_release);
+            running_.store(false, std::memory_order_release);
             local_poller = std::move(poller_);
             pending_bindings_.clear();
         }
@@ -565,6 +566,5 @@ namespace DetourModKit
         {
             local_poller->shutdown();
         }
-        running_.store(false, std::memory_order_release);
     }
 } // namespace DetourModKit

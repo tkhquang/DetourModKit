@@ -17,6 +17,11 @@
 #include <cstdint>
 #include <cstring>
 
+#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#define DMK_HAS_SSE2 1
+#include <emmintrin.h>
+#endif
+
 using namespace DetourModKit;
 using namespace DetourModKit::String;
 
@@ -218,12 +223,32 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
 
         // Verify the full pattern at this position
         bool match_found = true;
-        for (size_t j = 0; j < pattern_size; ++j)
+        size_t j = 0;
+
+#ifdef DMK_HAS_SSE2
+        for (; j + 16 <= pattern_size; j += 16)
+        {
+            __m128i mem = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern_start + j));
+            __m128i pat = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern.bytes.data() + j));
+            __m128i msk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern.mask.data() + j));
+
+            __m128i xored = _mm_xor_si128(mem, pat);
+            __m128i masked = _mm_and_si128(xored, msk);
+            __m128i cmp = _mm_cmpeq_epi8(masked, _mm_setzero_si128());
+
+            if (_mm_movemask_epi8(cmp) != 0xFFFF)
+            {
+                match_found = false;
+                break;
+            }
+        }
+#endif // DMK_HAS_SSE2
+
+        for (; match_found && j < pattern_size; ++j)
         {
             if (pattern.mask[j] != std::byte{0x00} && pattern_start[j] != pattern.bytes[j])
             {
                 match_found = false;
-                break;
             }
         }
 
