@@ -275,8 +275,10 @@ namespace DetourModKit
         std::atomic<LogLevel> current_log_level_{LogLevel::Info};
         std::atomic<bool> shutdown_called_{false};
 
-        // Async logging support (forward declared)
-        std::shared_ptr<AsyncLogger> async_logger_;
+        // Async logging support (forward declared).
+        // async_logger_ is atomic for lock-free reads on the log() hot path.
+        // async_mutex_ serializes lifecycle operations (enable/disable/shutdown).
+        std::atomic<std::shared_ptr<AsyncLogger>> async_logger_{};
         std::atomic<bool> async_mode_enabled_{false};
         std::mutex async_mutex_;
     };

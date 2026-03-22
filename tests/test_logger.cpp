@@ -939,6 +939,61 @@ TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
     SUCCEED();
 }
 
+TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    constexpr int iterations = 200;
+    constexpr int writer_count = 4;
+    std::atomic<bool> stop{false};
+    std::atomic<int> total_logged{0};
+
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+
+    // Writer threads hammer log() while async mode is active
+    std::vector<std::thread> writers;
+    for (int w = 0; w < writer_count; ++w)
+    {
+        writers.emplace_back([&, w]()
+                             {
+            for (int i = 0; i < iterations && !stop.load(std::memory_order_relaxed); ++i)
+            {
+                logger.info("CONCURRENT_W{}_MSG_{}", w, i);
+                total_logged.fetch_add(1, std::memory_order_relaxed);
+            } });
+    }
+
+    // Toggler thread disables and re-enables async mode mid-flight
+    std::thread toggler([&]()
+                        {
+        for (int i = 0; i < 5; ++i)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            logger.disable_async_mode();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            logger.enable_async_mode();
+        } });
+
+    for (auto &t : writers)
+    {
+        t.join();
+    }
+    stop.store(true, std::memory_order_relaxed);
+    toggler.join();
+
+    logger.disable_async_mode();
+    logger.flush();
+
+    // Verify at least some messages survived (no crashes, no hangs)
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_GT(total_logged.load(), 0);
+    EXPECT_NE(content.find("CONCURRENT_W0_MSG_"), std::string::npos);
+}
+
 TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
 {
     Logger &logger = Logger::get_instance();
