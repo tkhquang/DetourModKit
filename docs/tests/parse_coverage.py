@@ -1,6 +1,9 @@
 import json
+import sys
 
-with open('coverage.json', 'r') as f:
+coverage_path = sys.argv[1] if len(sys.argv) > 1 else 'docs/tests/coverage/coverage.json'
+
+with open(coverage_path, 'r') as f:
     d = json.load(f)
 
 files = d.get('files', [])
