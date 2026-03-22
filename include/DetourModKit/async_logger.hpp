@@ -109,6 +109,7 @@ namespace DetourModKit
         std::array<char, MAX_INLINE_SIZE> buffer;
         size_t length{0};
 
+        // Owned: allocated by StringPool, freed by reset().
         std::string *overflow{nullptr};
 
         LogMessage(LogLevel lvl, std::string msg);

@@ -132,6 +132,8 @@ namespace DetourModKit
         /**
          * @brief Starts the polling thread.
          * @details Safe to call only once. Subsequent calls are ignored with a warning.
+         * @note Not thread-safe. Must be called from a single thread. Use
+         *       InputManager::start() for a thread-safe wrapper.
          */
         void start();
 
