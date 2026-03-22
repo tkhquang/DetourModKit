@@ -2,6 +2,9 @@
 
 [![CI - Tests & Coverage](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml/badge.svg)](https://github.com/tkhquang/DetourModKit/actions/workflows/ci.yml)
 ![Coverage: 80%+](https://img.shields.io/badge/coverage-%E2%89%A580%25-brightgreen)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+[Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
 
 DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, and configuration management. It is built with MinGW in mind but aims for general C++ compatibility.
 
@@ -94,9 +97,10 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     | `msvc-debug` | MSVC (cl) | Debug | ON |
     | `msvc-release` | MSVC (cl) | Release | OFF |
 
-    You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
+   > [!TIP]
+   > You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
 
-    After running the install command, the install directory will contain a structure ready for consumption:
+   After running the install command, the install directory will contain a structure ready for consumption:
 
     ```text
     install_package/mingw/
@@ -167,11 +171,11 @@ cmake --build --preset msvc-debug --parallel
 ctest --preset msvc-debug
 ```
 
-### If the build is failing due to a PDB file locking issue
-
-```bash
-taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
-```
+> [!TIP]
+> If the MSVC build is failing due to a PDB file locking issue, kill stale compiler processes:
+> ```bash
+> taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
+> ```
 
 ### Enabling Sanitizers
 
@@ -485,10 +489,8 @@ void ShutdownMyMod() {
     DMK_Shutdown();
 }
 
-// WARNING: Calling join() on a thread inside DllMain can deadlock due to the
-// loader lock. Offload initialization to a worker thread so start() runs
-// outside DllMain, and call DMK_Shutdown() before DLL_PROCESS_DETACH
-// (e.g., from a game shutdown hook or an explicit trigger).
+// IMPORTANT: Offload initialization to a worker thread so start() runs
+// outside DllMain, and call DMK_Shutdown() before DLL_PROCESS_DETACH.
 
 static DWORD WINAPI InitThread(LPVOID) {
     InitializeMyMod();
@@ -503,6 +505,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     return TRUE;
 }
 ```
+
+> [!WARNING]
+> Calling `join()` on a thread inside `DllMain` can deadlock due to the Windows loader lock. Always offload initialization to a worker thread (as shown above) and call `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
 
 ## Configuration File Example
 
@@ -584,19 +589,11 @@ For practical reference and real-world usage examples:
 * **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
 * **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
 
-## License
+## Acknowledgements
 
-DetourModKit is licensed under the **MIT License**. See the `LICENSE` file in the repository for full details.
+DetourModKit incorporates components from other open-source projects. See [DetourModKit_Acknowledgements.txt](/DetourModKit_Acknowledgements.txt) for full details.
 
-This project incorporates components from other open-source projects. Please refer to the [DetourModKit_Acknowledgements.txt](/DetourModKit_Acknowledgements.txt) file for a list of these components and their respective licenses:
-
-* **SafetyHook:** Boost Software License 1.0
-* **SimpleIni:** MIT License
-* **DirectXMath:** MIT License
-* **Zydis & Zycore (dependencies of SafetyHook):** MIT License
-
-Users of DetourModKit are responsible for ensuring compliance with all included licenses.
-
-## Contributing
-
-Contributions to DetourModKit are welcome! If you have bug fixes, feature enhancements, or other improvements, please feel free to open an issue to discuss or submit a pull request.
+* [SafetyHook](https://github.com/cursey/safetyhook) (Boost Software License 1.0)
+* [SimpleIni](https://github.com/brofield/simpleini) (MIT)
+* [DirectXMath](https://github.com/microsoft/DirectXMath) (MIT)
+* [Zydis & Zycore](https://github.com/zyantific/zydis) (MIT)
