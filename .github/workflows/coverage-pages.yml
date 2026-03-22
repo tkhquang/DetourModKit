@@ -45,16 +45,8 @@ jobs:
           restore-keys: pip-gcovr-
 
       - name: Install gcovr
-        run: pip install gcovr
+        run: pip install "gcovr>=6.0"
         shell: powershell
-
-      - name: Cache CMake build
-        uses: actions/cache@v4
-        with:
-          path: build/mingw-debug
-          key: cmake-build-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**') }}
-          restore-keys: |
-            cmake-build-${{ runner.os }}-
 
       - name: Configure (Debug + Tests + Coverage)
         run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
