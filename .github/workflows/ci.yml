@@ -61,11 +61,16 @@ jobs:
         run: cmake --build --preset mingw-debug --parallel
         shell: bash
 
-      - name: Run Tests
+      - name: Copy MinGW runtime DLLs next to test exe
         run: |
-          set "PATH=${{ env.MINGW_BIN }};%PATH%"
-          "build\mingw-debug\tests\DetourModKit_tests.exe" --gtest_output=xml:test-results.xml
-        shell: cmd
+          Copy-Item "${{ env.MINGW_BIN }}\libstdc++-6.dll" "build\mingw-debug\tests\" -ErrorAction SilentlyContinue
+          Copy-Item "${{ env.MINGW_BIN }}\libgcc_s_seh-1.dll" "build\mingw-debug\tests\" -ErrorAction SilentlyContinue
+          Copy-Item "${{ env.MINGW_BIN }}\libwinpthread-1.dll" "build\mingw-debug\tests\" -ErrorAction SilentlyContinue
+        shell: powershell
+
+      - name: Run Tests
+        run: ./build/mingw-debug/tests/DetourModKit_tests.exe --gtest_output=xml:test-results.xml
+        shell: bash
 
       - name: Generate Coverage Report
         run: |
