@@ -58,8 +58,15 @@ jobs:
           echo "--- gcovr ---" && gcovr --version
         shell: bash
 
+      - name: Locate MinGW and add to PATH
+        run: |
+          MINGW_DIR=$(dirname "$(which g++)")
+          echo "MinGW bin dir: $MINGW_DIR"
+          echo "$MINGW_DIR" >> "$GITHUB_PATH"
+        shell: bash
+
       - name: Configure (Debug + Tests + Coverage)
-        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON -DCMAKE_EXE_LINKER_FLAGS="-static"
+        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
         shell: bash
 
       - name: Build
