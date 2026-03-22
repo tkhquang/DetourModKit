@@ -168,6 +168,16 @@ namespace DetourModKit
             {"Gamepad_DpadDown",   {InputSource::Gamepad, GamepadCode::DpadDown}},
             {"Gamepad_DpadLeft",   {InputSource::Gamepad, GamepadCode::DpadLeft}},
             {"Gamepad_DpadRight",  {InputSource::Gamepad, GamepadCode::DpadRight}},
+
+            // --- Gamepad thumbstick axes (digital) ---
+            {"Gamepad_LSUp",       {InputSource::Gamepad, GamepadCode::LeftStickUp}},
+            {"Gamepad_LSDown",     {InputSource::Gamepad, GamepadCode::LeftStickDown}},
+            {"Gamepad_LSLeft",     {InputSource::Gamepad, GamepadCode::LeftStickLeft}},
+            {"Gamepad_LSRight",    {InputSource::Gamepad, GamepadCode::LeftStickRight}},
+            {"Gamepad_RSUp",       {InputSource::Gamepad, GamepadCode::RightStickUp}},
+            {"Gamepad_RSDown",     {InputSource::Gamepad, GamepadCode::RightStickDown}},
+            {"Gamepad_RSLeft",     {InputSource::Gamepad, GamepadCode::RightStickLeft}},
+            {"Gamepad_RSRight",    {InputSource::Gamepad, GamepadCode::RightStickRight}},
         };
         // clang-format on
 
