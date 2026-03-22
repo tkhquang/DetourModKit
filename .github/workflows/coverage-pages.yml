@@ -1,4 +1,4 @@
-name: Coverage Report - GitHub Pages
+name: Coverage Report ≥ 80%
 
 on:
   push:
