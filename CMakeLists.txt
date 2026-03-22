@@ -185,7 +185,7 @@ endif()
 if(WIN32)
   target_link_libraries(DetourModKit PRIVATE
     psapi   # Process information functions
-    xinput  # XInput gamepad polling
+    xinput1_4  # XInput gamepad polling (xinput1_4.dll ships with Win8+)
   )
 endif()
 
