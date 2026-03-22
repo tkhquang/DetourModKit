@@ -195,7 +195,7 @@ cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 cmake --build --preset mingw-debug --parallel
 ```
 
-All pull requests to `main` are automatically tested via CI with a **80% minimum line coverage** gate. See the [PR Check workflow](.github/workflows/pr-check.yml) for details. The latest coverage report is published to [GitHub Pages](https://tkhquang.github.io/DetourModKit/) on every push to `main`.
+All pull requests to `main` are automatically tested via CI with an **80% minimum line coverage** gate. See the [PR Check workflow](.github/workflows/pr-check.yml) for details. The latest coverage report is published to [GitHub Pages](https://tkhquang.github.io/DetourModKit/) on every push to `main`.
 
 ## Using DetourModKit in Your Mod Project
 

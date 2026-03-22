@@ -5,5 +5,6 @@ install_package/*
 CMakeUserPresets.json
 !/**/.gitkeep
 
-# Coverage reports (generated into docs/tests/coverage/, has its own .gitignore)
+# Coverage reports (generated into docs/tests/coverage/)
 docs/tests/coverage/
+!docs/tests/coverage/.gitignore

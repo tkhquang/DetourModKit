@@ -32,13 +32,13 @@ ctest --preset mingw-debug --output-on-failure
 
 ```bash
 # Summary report
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" \
+python -m gcovr --root . --filter "src/" --filter "include/" \
     --exclude "external/" --exclude "build/" --exclude "tests/" \
     --gcov-ignore-parse-errors negative_hits.warn \
     --print-summary
 
 # HTML report (output to docs/tests/coverage/, gitignored)
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" \
+python -m gcovr --root . --filter "src/" --filter "include/" \
     --exclude "external/" --exclude "build/" --exclude "tests/" \
     --gcov-ignore-parse-errors negative_hits.warn \
     --html-details docs/tests/coverage/index.html
@@ -51,7 +51,7 @@ python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" \
 Run the full coverage report and look for files below the 80% gate:
 
 ```bash
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" \
+python -m gcovr --root . --filter "src/" --filter "include/" \
     --exclude "external/" --exclude "build/" --exclude "tests/" \
     --gcov-ignore-parse-errors negative_hits.warn \
     --print-summary
@@ -305,7 +305,7 @@ Parses `coverage.json` to display per-file coverage statistics:
 
 ```bash
 # Generate coverage.json into the coverage subdirectory
-python -m gcovr --root . --filter "src/" --filter "include/DetourModKit/" \
+python -m gcovr --root . --filter "src/" --filter "include/" \
     --exclude "external/" --exclude "build/" --exclude "tests/" \
     --gcov-ignore-parse-errors negative_hits.warn \
     --json docs/tests/coverage/coverage.json
