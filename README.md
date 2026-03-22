@@ -15,8 +15,8 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
 * **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation, inline buffer optimization for messages of size <= 256 bytes (inclusive), and message size validation with truncation for messages larger than 16 MB (messages > 16 MB are truncated to 16 MB rather than rejected).
 * **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
-* **String Utilities:** Helper functions for formatting addresses, hexadecimal values, virtual key codes, etc.
-* **Format Utilities:** Custom formatters for game modding types (memory addresses, byte values, VK codes) with C++20 `std::format` support.
+* **String Utilities:** Whitespace trimming for string cleanup.
+* **Format Utilities:** Inline formatting helpers for memory addresses, byte values, VK codes, and hex integer vectors using `std::format`.
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 * **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
 * **Input System:** Hotkey monitoring with a background polling thread.
@@ -99,16 +99,16 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
    > [!TIP]
    > You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
 
-   After running the install command, the install directory will contain a structure ready for consumption:
+   After running the install command, the install directory (`build/install/` for the Makefile wrapper, or whichever `--prefix` you passed to `cmake --install`) will contain:
 
     ```text
-    install_package/mingw/
+    <install_prefix>/
     ├── include/
     │   ├── DetourModKit/             <-- DetourModKit public headers
     │   │   ├── scanner.hpp           <-- AOB scanner
     │   │   ├── async_logger.hpp      <-- Async logging system
     │   │   ├── config.hpp
-    │   │   ├── format.hpp            <-- Format utilities
+    │   │   ├── format.hpp            <-- String & format utilities
     │   │   ├── math.hpp              <-- Math utilities (angle conversions)
     │   │   ├── memory.hpp            <-- Memory utilities
     │   │   ├── filesystem.hpp        <-- Filesystem utilities
@@ -129,8 +129,8 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   ├── safetyhook.hpp            <-- Main SafetyHook include
     │   └── SimpleIni.h               <-- SimpleIni header
     ├── lib/
-    │   ├── libDetourModKit.a         <-- MinGW: .a files
-    │   ├── libsafetyhook.a           <-- MSVC: .lib files
+    │   ├── libDetourModKit.a         <-- Static libraries (.a for MinGW, .lib for MSVC)
+    │   ├── libsafetyhook.a
     │   ├── libZydis.a
     │   └── libZycore.a
     └── lib/cmake/DetourModKit/       <-- CMake config files
@@ -264,8 +264,8 @@ This method is ideal for active development and ensures you always have the late
 This method uses a pre-built and installed version of DetourModKit.
 
 1. **Integrate DetourModKit:**
-    * After building DetourModKit, copy the entire `install_package/mingw/` or `install_package/msvc/` directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
-    * Alternatively, adjust your mod's build system to point to DetourModKit's install directory directly.
+    * After building and installing DetourModKit, copy the install directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
+    * Alternatively, point your mod's build system to DetourModKit's install directory directly.
 
 2. **Configure Your Mod's Build System:**
 
@@ -314,6 +314,7 @@ This method uses a pre-built and installed version of DetourModKit.
 ```c++
 // MyMod/src/main.cpp
 #include <windows.h>
+#include <Psapi.h>
 
 // Single include for all DetourModKit functionality
 #include <DetourModKit.hpp>

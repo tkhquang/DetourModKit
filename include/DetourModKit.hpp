@@ -65,8 +65,9 @@ using DMKInputBinding = DetourModKit::InputBinding;
  * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
  * @details This function should be called before process exit or DLL unload to ensure
  *          proper cleanup without use-after-free errors. It shuts down singletons in
- *          reverse dependency order: HookManager first (which may log), then Logger.
- *          After calling this function, the singletons are in a safe state for destruction.
+ *          reverse dependency order: InputManager, HookManager, Memory cache, Config,
+ *          then Logger last. After calling this function, the singletons are in a safe
+ *          state for destruction.
  *
  * @note This function is idempotent - calling it multiple times is safe.
  * @warning Must be called before DLL_PROCESS_DETACH. Calling from DllMain risks
