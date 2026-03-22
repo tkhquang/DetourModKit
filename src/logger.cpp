@@ -292,7 +292,13 @@ namespace DetourModKit
             {
                 return "TIMESTAMP_FORMAT_ERROR";
             }
-            return std::string(buf, len);
+
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now.time_since_epoch()) %
+                            1000;
+            char ms_buf[5];
+            std::snprintf(ms_buf, sizeof(ms_buf), ".%03d", static_cast<int>(ms.count()));
+            return std::string(buf, len) + ms_buf;
         }
         catch (const std::exception &e)
         {

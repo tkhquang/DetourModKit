@@ -1008,16 +1008,17 @@ TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
 
     EXPECT_NE(content.find("TIMESTAMP_CHECK_MSG_2k4j"), std::string::npos);
 
-    // Verify timestamp format: [YYYY-MM-DD HH:MM:SS]
+    // Verify timestamp format: [YYYY-MM-DD HH:MM:SS.mmm]
     auto pos = content.find("[20");
     ASSERT_NE(pos, std::string::npos);
     auto end_bracket = content.find(']', pos);
     ASSERT_NE(end_bracket, std::string::npos);
     std::string timestamp = content.substr(pos + 1, end_bracket - pos - 1);
-    ASSERT_GE(timestamp.size(), 19u);
+    ASSERT_GE(timestamp.size(), 23u);
     EXPECT_EQ(timestamp[4], '-');
     EXPECT_EQ(timestamp[7], '-');
     EXPECT_EQ(timestamp[10], ' ');
     EXPECT_EQ(timestamp[13], ':');
     EXPECT_EQ(timestamp[16], ':');
+    EXPECT_EQ(timestamp[19], '.');
 }

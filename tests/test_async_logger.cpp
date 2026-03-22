@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <regex>
 
 #include "DetourModKit/async_logger.hpp"
 
@@ -1524,4 +1525,52 @@ TEST_F(AsyncLoggerTest, FlushWithTimeout_ReturnsTrue_WhenDrained)
     EXPECT_EQ(logger->queue_size(), 0u);
 
     logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
+{
+    AsyncLoggerConfig config;
+    config.batch_size = 64;
+    config.flush_interval = std::chrono::milliseconds{10};
+
+    auto file_stream = std::make_shared<std::ofstream>(test_log_file_);
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+    static_cast<void>(logger->enqueue(LogLevel::Info, "FORMAT_CHECK_INFO_7f3a"));
+    static_cast<void>(logger->enqueue(LogLevel::Debug, "FORMAT_CHECK_DEBUG_8b2c"));
+    static_cast<void>(logger->enqueue(LogLevel::Warning, "FORMAT_CHECK_WARN_9d4e"));
+    logger->shutdown();
+    file_stream->close();
+
+    std::ifstream in(test_log_file_);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+
+    // Expected format: [YYYY-MM-DD HH:MM:SS.mmm] [LEVEL  ] :: message
+    // Level field is 7 chars wide, left-aligned, space-padded
+    const std::regex line_pattern(
+        R"(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] \[\w{1,7}\s*\] :: .+)");
+
+    std::istringstream stream(content);
+    std::string line;
+    int matched = 0;
+    while (std::getline(stream, line))
+    {
+        if (line.empty())
+        {
+            continue;
+        }
+        EXPECT_TRUE(std::regex_search(line, line_pattern))
+            << "Async log line does not match expected format: " << line;
+        ++matched;
+    }
+    EXPECT_EQ(matched, 3);
+
+    // Verify level fields use space-padding, not zero-padding
+    EXPECT_NE(content.find("[INFO   ]"), std::string::npos);
+    EXPECT_NE(content.find("[DEBUG  ]"), std::string::npos);
+    EXPECT_NE(content.find("[WARNING]"), std::string::npos);
+    EXPECT_EQ(content.find("[INFO000]"), std::string::npos);
+    EXPECT_EQ(content.find("[DEBUG00]"), std::string::npos);
 }

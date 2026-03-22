@@ -425,7 +425,12 @@ namespace DetourModKit
                 localtime_r(&time_t, &tm_buf);
 #endif
 
-                *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    now.time_since_epoch()) %
+                                1000;
+                *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
+                              << "." << std::setfill('0') << std::setw(3) << ms.count()
+                              << std::setfill(' ') << "] "
                               << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
                               << message << '\n';
                 file_stream_->flush();
@@ -595,7 +600,8 @@ namespace DetourModKit
                             1000;
 
             *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
-                          << "." << std::setfill('0') << std::setw(3) << ms.count() << "] "
+                          << "." << std::setfill('0') << std::setw(3) << ms.count()
+                          << std::setfill(' ') << "] "
                           << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
                           << msg.message() << '\n';
         }
@@ -683,7 +689,12 @@ namespace DetourModKit
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S") << "] "
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                message.timestamp.time_since_epoch()) %
+                            1000;
+            *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
+                          << "." << std::setfill('0') << std::setw(3) << ms.count()
+                          << std::setfill(' ') << "] "
                           << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
                           << message.message() << '\n';
             file_stream_->flush();
