@@ -71,6 +71,7 @@ namespace DetourModKit
          * @param region_size The size (in bytes) of the memory region to scan.
          * @param pattern The compiled pattern to search for.
          * @param occurrence Which occurrence to return (1-based). 1 = first match.
+         *                   Passing 0 returns nullptr.
          * @return const std::byte* Pointer to the Nth occurrence, or nullptr if fewer
          *         than N matches exist.
          */
