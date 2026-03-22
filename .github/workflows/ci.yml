@@ -7,43 +7,31 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-os:
-    name: Setup MinGW (Build OS)
+  setup:
+    name: Setup Build Environment
     runs-on: windows-latest
 
     steps:
-      - name: Cache MinGW
-        id: cache-mingw
-        uses: actions/cache@v4
-        with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
+      - name: Verify MinGW available
+        run: |
+          echo "--- g++ ---" && g++ --version
+          echo "--- MinGW path ---" && where g++
+        shell: bash
 
-      - name: Install MinGW (if not cached)
-        if: steps.cache-mingw.outputs.cache-hit != 'true'
-        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+      - name: Install Ninja
+        run: choco install ninja --yes --force --no-progress
         shell: powershell
 
   build-test:
     name: Build, Test & Coverage
     runs-on: windows-latest
-    needs: build-os
+    needs: setup
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: "recursive"
-
-      - name: Restore MinGW cache
-        uses: actions/cache@v4
-        with:
-          path: C:\ProgramData\chocolatey\lib\mingw
-          key: ${{ runner.os }}-mingw-13.2.0-v2
-
-      - name: Add MinGW to PATH
-        run: echo "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-        shell: powershell
 
       - name: Install Ninja
         run: choco install ninja --yes --force --no-progress
@@ -71,7 +59,7 @@ jobs:
         shell: bash
 
       - name: Configure (Debug + Tests + Coverage)
-        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON -DCMAKE_EXE_LINKER_FLAGS="-static"
         shell: bash
 
       - name: Build
