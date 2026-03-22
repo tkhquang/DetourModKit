@@ -196,7 +196,9 @@ namespace DetourModKit
         }
 
         {
-            std::lock_guard<std::mutex> lock(*log_mutex_ptr_);
+            // Acquire both mutexes to prevent configure()/reconfigure() from
+            // opening a new stream in the gap after BLOCK 1 releases async_mutex_.
+            std::scoped_lock lock(async_mutex_, *log_mutex_ptr_);
             if (log_file_stream_ptr_ && log_file_stream_ptr_->is_open())
             {
                 log_file_stream_ptr_->flush();
