@@ -955,11 +955,14 @@ TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
 
     // Verify timestamp format: [YYYY-MM-DD HH:MM:SS]
     auto pos = content.find("[20");
-    EXPECT_NE(pos, std::string::npos);
-    if (pos != std::string::npos)
-    {
-        // Verify the timestamp contains expected date separators
-        EXPECT_EQ(content[pos + 5], '-');
-        EXPECT_EQ(content[pos + 8], '-');
-    }
+    ASSERT_NE(pos, std::string::npos);
+    auto end_bracket = content.find(']', pos);
+    ASSERT_NE(end_bracket, std::string::npos);
+    std::string timestamp = content.substr(pos + 1, end_bracket - pos - 1);
+    ASSERT_GE(timestamp.size(), 19u);
+    EXPECT_EQ(timestamp[4], '-');
+    EXPECT_EQ(timestamp[7], '-');
+    EXPECT_EQ(timestamp[10], ' ');
+    EXPECT_EQ(timestamp[13], ':');
+    EXPECT_EQ(timestamp[16], ':');
 }

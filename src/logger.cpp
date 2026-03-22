@@ -86,8 +86,11 @@ namespace DetourModKit
         // from reading partially-updated string members during reconfiguration
         std::scoped_lock lock(async_mutex_, *log_mutex_ptr_);
 
-        // Check under lock to avoid racing with concurrent configure()/reconfigure() calls
-        if (log_prefix_ == prefix &&
+        // Skip reconfiguration only when all parameters match AND the stream is usable.
+        // After shutdown or a prior open failure the stream may be closed, so we must
+        // fall through to reopen even if the strings are identical.
+        if (log_file_stream_ptr_->is_open() &&
+            log_prefix_ == prefix &&
             log_file_name_ == file_name &&
             timestamp_format_ == timestamp_fmt)
         {

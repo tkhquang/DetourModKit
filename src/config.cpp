@@ -257,14 +257,13 @@ namespace
         void load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger) override;
         void log_current_value(Logger &logger) const override;
 
-        /// Returns a lightweight callback that invokes setter with current_value.
-        /// The caller must ensure this item outlives the returned function.
+        /// Returns a self-contained callback that invokes setter with current_value.
         [[nodiscard]] std::function<void()> take_deferred_apply() const override
         {
             if (!setter)
                 return {};
-            return [this]()
-            { setter(current_value); };
+            return [fn = setter, val = current_value]() mutable
+            { fn(std::move(val)); };
         }
     };
 
@@ -394,60 +393,52 @@ void DetourModKit::Config::register_int(const std::string &section, const std::s
                                                const std::string &log_key_name, std::function<void(int)> setter,
                                                int default_value)
 {
-    {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
-        getRegisteredConfigItems().push_back(
-            std::make_unique<CallbackConfigItem<int>>(section, ini_key, log_key_name, setter, default_value));
-    }
     if (setter)
     {
         setter(default_value);
     }
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<CallbackConfigItem<int>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
 void DetourModKit::Config::register_float(const std::string &section, const std::string &ini_key,
                                                  const std::string &log_key_name, std::function<void(float)> setter,
                                                  float default_value)
 {
-    {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
-        getRegisteredConfigItems().push_back(
-            std::make_unique<CallbackConfigItem<float>>(section, ini_key, log_key_name, setter, default_value));
-    }
     if (setter)
     {
         setter(default_value);
     }
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<CallbackConfigItem<float>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
 void DetourModKit::Config::register_bool(const std::string &section, const std::string &ini_key,
                                                 const std::string &log_key_name, std::function<void(bool)> setter,
                                                 bool default_value)
 {
-    {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
-        getRegisteredConfigItems().push_back(
-            std::make_unique<CallbackConfigItem<bool>>(section, ini_key, log_key_name, setter, default_value));
-    }
     if (setter)
     {
         setter(default_value);
     }
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<CallbackConfigItem<bool>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
 void DetourModKit::Config::register_string(const std::string &section, const std::string &ini_key,
                                                   const std::string &log_key_name, std::function<void(const std::string &)> setter,
                                                   std::string default_value)
 {
-    {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
-        getRegisteredConfigItems().push_back(
-            std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, setter, default_value));
-    }
     if (setter)
     {
         setter(default_value);
     }
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, std::move(setter), std::move(default_value)));
 }
 
 void DetourModKit::Config::register_key_combo(const std::string &section, const std::string &ini_key,
@@ -456,15 +447,13 @@ void DetourModKit::Config::register_key_combo(const std::string &section, const 
 {
     Config::KeyCombo default_combo = parse_key_combo(default_value_str);
 
-    {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
-        getRegisteredConfigItems().push_back(
-            std::make_unique<CallbackConfigItem<Config::KeyCombo>>(section, ini_key, log_key_name, setter, default_combo));
-    }
     if (setter)
     {
         setter(default_combo);
     }
+    std::lock_guard<std::mutex> lock(getConfigMutex());
+    getRegisteredConfigItems().push_back(
+        std::make_unique<CallbackConfigItem<Config::KeyCombo>>(section, ini_key, log_key_name, std::move(setter), std::move(default_combo)));
 }
 
 void DetourModKit::Config::load(const std::string &ini_filename)

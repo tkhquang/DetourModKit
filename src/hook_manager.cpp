@@ -8,6 +8,15 @@
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
 
+namespace
+{
+    struct DeferredLog
+    {
+        std::string msg;
+        LogLevel level;
+    };
+} // anonymous namespace
+
 HookManager &HookManager::get_instance()
 {
     static HookManager instance;
@@ -119,12 +128,6 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     void **original_trampoline,
     const HookConfig &config)
 {
-    struct DeferredLog
-    {
-        std::string msg;
-        LogLevel level;
-    };
-
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
@@ -276,12 +279,6 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
-    struct DeferredLog
-    {
-        std::string msg;
-        LogLevel level;
-    };
-
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
