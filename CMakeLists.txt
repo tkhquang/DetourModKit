@@ -151,12 +151,14 @@ if(MSVC)
 else()
   # -ffunction-sections/-fdata-sections + --gc-sections: GCC/Clang equivalent
   # of MSVC's /Gy + /OPT:REF for dead code elimination.
-  # -s: strip all symbols from the final binary.
   target_compile_options(DetourModKit PRIVATE
     $<$<CONFIG:Release>:-ffunction-sections -fdata-sections>
   )
-  target_link_options(DetourModKit PUBLIC
-    $<$<CONFIG:Release>:-Wl,--gc-sections -s>
+  # --gc-sections is INTERFACE so consumers benefit from dead code elimination
+  # of unused DetourModKit symbols. Symbol stripping (-s) is deliberately left
+  # to the consumer's own build setup.
+  target_link_options(DetourModKit INTERFACE
+    $<$<CONFIG:Release>:-Wl,--gc-sections>
   )
 endif()
 

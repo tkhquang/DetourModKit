@@ -99,8 +99,9 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
    > [!NOTE]
    > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
    > along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
-   > with `--gc-sections` on GCC/Clang). MinGW Release builds use `-O2` (overriding CMake's
-   > default `-O3`) for a better code-size/performance tradeoff and are stripped of symbols.
+   > with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE
+   > linkage so unused DetourModKit symbols are stripped at final link time. MinGW Release builds
+   > use `-O2` (overriding CMake's default `-O3`) for a better code-size/performance tradeoff.
    > MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
    > Release builds omit debug info entirely to minimize binary size.
 

@@ -67,7 +67,6 @@ target_link_libraries(DetourModKit_tests
   DetourModKit
   GTest::gtest_main
   psapi
-  user32
 )
 
 # Include directories
