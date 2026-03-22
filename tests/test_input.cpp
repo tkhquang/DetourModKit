@@ -446,10 +446,12 @@ TEST_F(InputPollerTest, GamepadIndexClamped)
     // Index -1 should clamp to 0, index 5 should clamp to 3
     InputPoller poller_low(std::move(bindings), DEFAULT_POLL_INTERVAL, true, -1);
     EXPECT_EQ(poller_low.binding_count(), 0u);
+    EXPECT_EQ(poller_low.gamepad_index(), 0);
 
     std::vector<InputBinding> bindings2;
     InputPoller poller_high(std::move(bindings2), DEFAULT_POLL_INTERVAL, true, 5);
     EXPECT_EQ(poller_high.binding_count(), 0u);
+    EXPECT_EQ(poller_high.gamepad_index(), 3);
 }
 
 TEST_F(InputPollerTest, MixedKeyboardAndGamepadBindings)

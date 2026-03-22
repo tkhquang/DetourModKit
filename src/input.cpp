@@ -124,9 +124,9 @@ namespace DetourModKit
             return;
         }
 
-        running_.store(true, std::memory_order_relaxed);
         poll_thread_ = std::jthread([this](std::stop_token token)
                                     { poll_loop(std::move(token)); });
+        running_.store(true, std::memory_order_relaxed);
     }
 
     bool InputPoller::is_running() const noexcept
@@ -142,6 +142,11 @@ namespace DetourModKit
     std::chrono::milliseconds InputPoller::poll_interval() const noexcept
     {
         return poll_interval_;
+    }
+
+    int InputPoller::gamepad_index() const noexcept
+    {
+        return gamepad_index_;
     }
 
     bool InputPoller::is_binding_active(size_t index) const noexcept
@@ -177,17 +182,7 @@ namespace DetourModKit
 
         poll_thread_.request_stop();
         cv_.notify_all();
-
-        if (std::this_thread::get_id() != poll_thread_.get_id())
-        {
-            poll_thread_.join();
-        }
-        else
-        {
-            Logger::get_instance().error(
-                "InputPoller: shutdown() called from poll thread — cannot self-join, skipping join");
-            poll_thread_.detach();
-        }
+        poll_thread_.join();
 
         running_.store(false, std::memory_order_relaxed);
         release_active_holds();

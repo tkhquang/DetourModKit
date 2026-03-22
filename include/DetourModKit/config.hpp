@@ -70,10 +70,12 @@ namespace DetourModKit
         /**
          * @brief Registers a key combo configuration item.
          * @details Parses an INI value as a key combination with optional modifier keys.
-         *          Format: "modifier1+modifier2+trigger_key1,trigger_key2" where all
-         *          values are hex VK codes. The '+' separator delimits modifier keys from
+         *          Format: "modifier1+modifier2+trigger_key1,trigger_key2" where tokens
+         *          can be human-readable names (e.g., "Ctrl", "F3", "Gamepad_A") or hex
+         *          VK codes (e.g., "0x72"). The '+' separator delimits modifier keys from
          *          trigger keys, with the last segment being trigger key(s). Commas within
-         *          the last segment provide OR logic for multiple trigger keys.
+         *          the last segment provide OR logic for multiple trigger keys. See
+         *          KeyCombo for full parsing semantics.
          * @param section INI section name.
          * @param ini_key INI key name.
          * @param log_key_name Human-readable name shown in log output.

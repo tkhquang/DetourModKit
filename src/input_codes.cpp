@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <unordered_map>
 
 namespace DetourModKit
 {
@@ -216,6 +217,33 @@ namespace DetourModKit
             static const SortedNameIndex instance;
             return instance;
         }
+        struct InputCodeHash
+        {
+            size_t operator()(const InputCode &c) const noexcept
+            {
+                return std::hash<int>{}(c.code) ^ (std::hash<uint8_t>{}(static_cast<uint8_t>(c.source)) << 16);
+            }
+        };
+
+        struct CodeNameMap
+        {
+            std::unordered_map<InputCode, std::string_view, InputCodeHash> map;
+
+            CodeNameMap()
+            {
+                map.reserve(name_table_size);
+                for (size_t i = 0; i < name_table_size; ++i)
+                {
+                    map.emplace(name_table[i].code, name_table[i].name);
+                }
+            }
+        };
+
+        const CodeNameMap &get_code_name_map()
+        {
+            static const CodeNameMap instance;
+            return instance;
+        }
     } // anonymous namespace
 
     std::optional<InputCode> parse_input_name(std::string_view name)
@@ -245,12 +273,11 @@ namespace DetourModKit
 
     std::string_view input_code_to_name(const InputCode &code)
     {
-        for (size_t i = 0; i < name_table_size; ++i)
+        const auto &map = get_code_name_map().map;
+        const auto it = map.find(code);
+        if (it != map.end())
         {
-            if (name_table[i].code == code)
-            {
-                return name_table[i].name;
-            }
+            return it->second;
         }
         return {};
     }

@@ -106,7 +106,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── filesystem.hpp        <-- Filesystem utilities
     │   │   ├── hook_manager.hpp      <-- Hook management
     │   │   ├── input.hpp             <-- Input/hotkey system
-    │   │   ├── input_codes.hpp      <-- Unified input codes (keyboard/mouse/gamepad)
+    │   │   ├── input_codes.hpp       <-- Unified input codes (keyboard/mouse/gamepad)
     │   │   ├── logger.hpp            <-- Synchronous logger
     │   │   └── ...
     │   ├── DetourModKit.hpp          <-- Main DetourModKit include
@@ -533,7 +533,7 @@ The configuration system recognizes the following named input codes (case-insens
 | **Function keys** | `F1`–`F24` |
 | **Navigation** | `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete` |
 | **Common** | `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `CapsLock`, `NumLock`, `ScrollLock`, `PrintScreen`, `Pause` |
-| **Numpad** | `Numpad0`–`Numpad9`, `NumpadAdd`, `NumpadSub`, `NumpadMul`, `NumpadDiv`, `NumpadDot`, `NumpadEnter` |
+| **Numpad** | `Numpad0`–`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal` |
 | **Mouse** | `Mouse1` (left), `Mouse2` (right), `Mouse3` (middle), `Mouse4`, `Mouse5` |
 | **Gamepad** | `Gamepad_A`, `Gamepad_B`, `Gamepad_X`, `Gamepad_Y`, `Gamepad_LB`, `Gamepad_RB`, `Gamepad_LT`, `Gamepad_RT`, `Gamepad_Start`, `Gamepad_Back`, `Gamepad_LS`, `Gamepad_RS`, `Gamepad_DpadUp`, `Gamepad_DpadDown`, `Gamepad_DpadLeft`, `Gamepad_DpadRight` |
 

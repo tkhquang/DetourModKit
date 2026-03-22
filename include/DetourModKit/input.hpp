@@ -151,6 +151,12 @@ namespace DetourModKit
         [[nodiscard]] std::chrono::milliseconds poll_interval() const noexcept;
 
         /**
+         * @brief Returns the configured gamepad controller index.
+         * @return int The XInput controller index (0-3).
+         */
+        [[nodiscard]] int gamepad_index() const noexcept;
+
+        /**
          * @brief Queries whether a binding is currently active by index.
          * @param index Zero-based index into the bindings vector.
          * @return true if the binding's key(s) are currently pressed.
