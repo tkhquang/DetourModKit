@@ -205,6 +205,8 @@ namespace DetourModKit
 
         Hook(const Hook &) = delete;
         Hook &operator=(const Hook &) = delete;
+        Hook(Hook &&) = delete;
+        Hook &operator=(Hook &&) = delete;
     };
 
     /**
@@ -302,7 +304,7 @@ namespace DetourModKit
          */
         static HookManager &get_instance();
 
-        ~HookManager();
+        ~HookManager() noexcept;
 
         /**
          * @brief Explicitly shuts down the HookManager, removing all hooks without logging.

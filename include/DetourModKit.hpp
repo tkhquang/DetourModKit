@@ -37,9 +37,11 @@ namespace DMKFilesystem = DetourModKit::Filesystem;
 namespace DMKMemory = DetourModKit::Memory;
 namespace DMKMath = DetourModKit::Math;
 
+#ifndef DMK_NO_SHORT_NAMES
 /**
  * @brief Convenient type aliases for commonly used DetourModKit types.
  * @details These aliases provide shorter names for frequently used types.
+ *          Define DMK_NO_SHORT_NAMES before including this header to disable them.
  */
 using DMKLogger = DetourModKit::Logger;
 using DMKHookManager = DetourModKit::HookManager;
@@ -57,6 +59,7 @@ using DMKInputSource = DetourModKit::InputSource;
 using DMKInputCode = DetourModKit::InputCode;
 using DMKKeyCombo = DetourModKit::Config::KeyCombo;
 using DMKInputBinding = DetourModKit::InputBinding;
+#endif // DMK_NO_SHORT_NAMES
 
 /**
  * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
@@ -66,6 +69,8 @@ using DMKInputBinding = DetourModKit::InputBinding;
  *          After calling this function, the singletons are in a safe state for destruction.
  *
  * @note This function is idempotent - calling it multiple times is safe.
+ * @warning Must be called before DLL_PROCESS_DETACH. Calling from DllMain risks
+ *          deadlock because background threads cannot exit while the loader lock is held.
  */
 inline void DMK_Shutdown()
 {

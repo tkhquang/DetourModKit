@@ -207,6 +207,10 @@ namespace
         ConfigItemBase(std::string sec, std::string key, std::string log_name)
             : section(std::move(sec)), ini_key(std::move(key)), log_key_name(std::move(log_name)) {}
         virtual ~ConfigItemBase() = default;
+        ConfigItemBase(const ConfigItemBase &) = delete;
+        ConfigItemBase &operator=(const ConfigItemBase &) = delete;
+        ConfigItemBase(ConfigItemBase &&) = delete;
+        ConfigItemBase &operator=(ConfigItemBase &&) = delete;
 
         /**
          * @brief Loads the configuration value from the INI file.
@@ -214,6 +218,12 @@ namespace
          * @param logger Reference to the Logger object.
          */
         virtual void load(CSimpleIniA &ini, Logger &logger) = 0;
+
+        /**
+         * @brief Returns a deferred callback to invoke the setter outside the config mutex.
+         * @return A self-contained callable, or empty if no setter is configured.
+         */
+        [[nodiscard]] virtual std::function<void()> take_deferred_apply() const = 0;
 
         /**
          * @brief Logs the current value of the configuration item.
@@ -225,6 +235,8 @@ namespace
     /**
      * @brief Configuration item using std::function callback for value setting.
      * @tparam T The data type of the configuration item (e.g., int, bool, std::string).
+     * @note Setter callbacks are invoked outside the config mutex to prevent deadlocks.
+     *       See register_* and load() for the deferred invocation pattern.
      */
     template <typename T>
     struct CallbackConfigItem : public ConfigItemBase
@@ -240,15 +252,20 @@ namespace
               default_value(def_val),
               current_value(std::move(def_val))
         {
-            // Initialize with default value via callback
-            if (setter)
-            {
-                setter(current_value);
-            }
         }
 
         void load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger) override;
         void log_current_value(Logger &logger) const override;
+
+        /// Returns a lightweight callback that invokes setter with current_value.
+        /// The caller must ensure this item outlives the returned function.
+        [[nodiscard]] std::function<void()> take_deferred_apply() const override
+        {
+            if (!setter)
+                return {};
+            return [this]()
+            { setter(current_value); };
+        }
     };
 
     // --- Specializations for CallbackConfigItem<T>::load and ::log_current_value ---
@@ -258,10 +275,6 @@ namespace
     void CallbackConfigItem<int>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         current_value = static_cast<int>(ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value));
-        if (setter)
-        {
-            setter(current_value);
-        }
     }
 
     template <>
@@ -275,10 +288,6 @@ namespace
     void CallbackConfigItem<float>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         current_value = static_cast<float>(ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
-        if (setter)
-        {
-            setter(current_value);
-        }
     }
 
     template <>
@@ -292,10 +301,6 @@ namespace
     void CallbackConfigItem<bool>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         current_value = ini.GetBoolValue(section.c_str(), ini_key.c_str(), default_value);
-        if (setter)
-        {
-            setter(current_value);
-        }
     }
 
     template <>
@@ -309,10 +314,6 @@ namespace
     void CallbackConfigItem<std::string>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         current_value = ini.GetValue(section.c_str(), ini_key.c_str(), default_value.c_str());
-        if (setter)
-        {
-            setter(current_value);
-        }
     }
 
     template <>
@@ -333,11 +334,6 @@ namespace
         else
         {
             current_value = default_value;
-        }
-
-        if (setter)
-        {
-            setter(current_value);
         }
     }
 
@@ -398,78 +394,123 @@ void DetourModKit::Config::register_int(const std::string &section, const std::s
                                                const std::string &log_key_name, std::function<void(int)> setter,
                                                int default_value)
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<CallbackConfigItem<int>>(section, ini_key, log_key_name, std::move(setter), default_value));
+    {
+        std::lock_guard<std::mutex> lock(getConfigMutex());
+        getRegisteredConfigItems().push_back(
+            std::make_unique<CallbackConfigItem<int>>(section, ini_key, log_key_name, setter, default_value));
+    }
+    if (setter)
+    {
+        setter(default_value);
+    }
 }
 
 void DetourModKit::Config::register_float(const std::string &section, const std::string &ini_key,
                                                  const std::string &log_key_name, std::function<void(float)> setter,
                                                  float default_value)
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<CallbackConfigItem<float>>(section, ini_key, log_key_name, std::move(setter), default_value));
+    {
+        std::lock_guard<std::mutex> lock(getConfigMutex());
+        getRegisteredConfigItems().push_back(
+            std::make_unique<CallbackConfigItem<float>>(section, ini_key, log_key_name, setter, default_value));
+    }
+    if (setter)
+    {
+        setter(default_value);
+    }
 }
 
 void DetourModKit::Config::register_bool(const std::string &section, const std::string &ini_key,
                                                 const std::string &log_key_name, std::function<void(bool)> setter,
                                                 bool default_value)
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<CallbackConfigItem<bool>>(section, ini_key, log_key_name, std::move(setter), default_value));
+    {
+        std::lock_guard<std::mutex> lock(getConfigMutex());
+        getRegisteredConfigItems().push_back(
+            std::make_unique<CallbackConfigItem<bool>>(section, ini_key, log_key_name, setter, default_value));
+    }
+    if (setter)
+    {
+        setter(default_value);
+    }
 }
 
 void DetourModKit::Config::register_string(const std::string &section, const std::string &ini_key,
                                                   const std::string &log_key_name, std::function<void(const std::string &)> setter,
                                                   std::string default_value)
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
-        std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, std::move(setter), std::move(default_value)));
+    {
+        std::lock_guard<std::mutex> lock(getConfigMutex());
+        getRegisteredConfigItems().push_back(
+            std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, setter, default_value));
+    }
+    if (setter)
+    {
+        setter(default_value);
+    }
 }
 
 void DetourModKit::Config::register_key_combo(const std::string &section, const std::string &ini_key,
                                                       const std::string &log_key_name, std::function<void(const KeyCombo &)> setter,
                                                       const std::string &default_value_str)
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
     Config::KeyCombo default_combo = parse_key_combo(default_value_str);
 
-    getRegisteredConfigItems().push_back(
-        std::make_unique<CallbackConfigItem<Config::KeyCombo>>(section, ini_key, log_key_name, std::move(setter), default_combo));
+    {
+        std::lock_guard<std::mutex> lock(getConfigMutex());
+        getRegisteredConfigItems().push_back(
+            std::make_unique<CallbackConfigItem<Config::KeyCombo>>(section, ini_key, log_key_name, setter, default_combo));
+    }
+    if (setter)
+    {
+        setter(default_combo);
+    }
 }
 
 void DetourModKit::Config::load(const std::string &ini_filename)
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
+    std::vector<std::function<void()>> deferred_callbacks;
 
-    Logger &logger = Logger::get_instance();
-    std::string ini_path = getIniFilePath(ini_filename, logger);
-    logger.info("Config: Attempting to load configuration from: {}", ini_path);
-
-    CSimpleIniA ini;
-    ini.SetUnicode(false);  // Assume ASCII/MBCS INI
-    ini.SetMultiKey(false); // Disallow duplicate keys in a section
-
-    SI_Error rc = ini.LoadFile(ini_path.c_str());
-    if (rc < 0)
     {
-        logger.error("Config: Failed to open INI file '{}'. Error code: {}. Using default values for all registered settings.", ini_path, rc);
-    }
-    else
-    {
-        logger.info("Config: Successfully opened INI file: {}", ini_path);
+        std::lock_guard<std::mutex> lock(getConfigMutex());
+
+        Logger &logger = Logger::get_instance();
+        std::string ini_path = getIniFilePath(ini_filename, logger);
+        logger.info("Config: Attempting to load configuration from: {}", ini_path);
+
+        CSimpleIniA ini;
+        ini.SetUnicode(false);  // Assume ASCII/MBCS INI
+        ini.SetMultiKey(false); // Disallow duplicate keys in a section
+
+        SI_Error rc = ini.LoadFile(ini_path.c_str());
+        if (rc < 0)
+        {
+            logger.error("Config: Failed to open INI file '{}'. Error code: {}. Using default values for all registered settings.", ini_path, rc);
+        }
+        else
+        {
+            logger.info("Config: Successfully opened INI file: {}", ini_path);
+        }
+
+        // Read all values under lock, but defer setter callbacks
+        for (const auto &item : getRegisteredConfigItems())
+        {
+            item->load(ini, logger);
+            auto cb = item->take_deferred_apply();
+            if (cb)
+            {
+                deferred_callbacks.push_back(std::move(cb));
+            }
+        }
+
+        logger.info("Config: Configuration loading complete. {} items processed.", getRegisteredConfigItems().size());
     }
 
-    // Load all registered items.
-    for (const auto &item : getRegisteredConfigItems())
+    // Invoke setter callbacks outside the config mutex to prevent deadlocks
+    for (auto &cb : deferred_callbacks)
     {
-        item->load(ini, logger);
+        cb();
     }
-
-    logger.info("Config: Configuration loading complete. {} items processed.", getRegisteredConfigItems().size());
 }
 
 void DetourModKit::Config::log_all()

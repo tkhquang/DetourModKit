@@ -122,7 +122,7 @@ namespace DetourModKit
                              int trigger_threshold = GamepadCode::TriggerThreshold,
                              int stick_threshold = GamepadCode::StickThreshold);
 
-        ~InputPoller();
+        ~InputPoller() noexcept;
 
         InputPoller(const InputPoller &) = delete;
         InputPoller &operator=(const InputPoller &) = delete;
@@ -371,6 +371,7 @@ namespace DetourModKit
         mutable std::mutex mutex_;
         std::vector<InputBinding> pending_bindings_;
         std::unique_ptr<InputPoller> poller_;
+        std::atomic<InputPoller *> active_poller_{nullptr};
         std::atomic<bool> running_{false};
         bool require_focus_ = true;
         int gamepad_index_ = 0;

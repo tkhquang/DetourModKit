@@ -155,7 +155,7 @@ namespace DetourModKit
          * @param level The LogLevel of the message.
          * @param message The message string to log.
          */
-        void log(LogLevel level, const std::string &message);
+        void log(LogLevel level, std::string_view message);
 
         /**
          * @brief Logs a formatted message with the specified log level.
@@ -216,9 +216,26 @@ namespace DetourModKit
          */
         static LogLevel string_to_log_level(const std::string &level_str);
 
+        /**
+         * @struct StaticConfig
+         * @brief Immutable configuration snapshot for thread-safe static configuration.
+         * @details Stored behind an atomic shared_ptr so readers never need a mutex.
+         */
+        struct StaticConfig
+        {
+            std::string log_prefix;
+            std::string log_file_name;
+            std::string timestamp_format;
+
+            StaticConfig(std::string prefix, std::string file, std::string ts_fmt)
+                : log_prefix(std::move(prefix)),
+                  log_file_name(std::move(file)),
+                  timestamp_format(std::move(ts_fmt)) {}
+        };
+
     private:
         Logger();
-        ~Logger();
+        ~Logger() noexcept;
 
         Logger(const Logger &) = delete;
         Logger &operator=(const Logger &) = delete;
@@ -226,7 +243,12 @@ namespace DetourModKit
         Logger &operator=(Logger &&) = delete;
 
         /**
-         * @brief Generates the current timestamp formatted according to timestamp_format_instance.
+         * @brief Shared shutdown logic used by both ~Logger() and shutdown().
+         */
+        void shutdown_internal();
+
+        /**
+         * @brief Generates the current timestamp formatted according to timestamp_format_.
          * @return std::string The formatted timestamp string.
          */
         std::string get_timestamp() const;
@@ -237,15 +259,12 @@ namespace DetourModKit
          */
         std::string generate_log_file_path() const;
 
-        /**
-         * @brief Provides a mutex for initializing/configuring static logger members.
-         * @return A reference to a static mutex.
-         */
-        static std::mutex &get_init_mutex();
+        static std::shared_ptr<const StaticConfig> get_static_config();
+        static void set_static_config(std::shared_ptr<const StaticConfig> config);
 
-        static std::string s_log_prefix_;
-        static std::string s_log_file_name_;
-        static std::string s_timestamp_format_;
+        // Lock ordering (must be acquired in this order to prevent deadlock):
+        //   1. async_mutex_      — async logger lifecycle
+        //   2. *log_mutex_ptr_   — file stream I/O
 
         std::string log_prefix_;
         std::string log_file_name_;

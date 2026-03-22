@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(DetourModKit VERSION 1.0.0 LANGUAGES CXX)
+project(DetourModKit VERSION 2.0.0 LANGUAGES CXX)
 
 # --- Standard and Compiler Options ---
 set(CMAKE_CXX_STANDARD 23)
@@ -24,7 +24,7 @@ if(MSVC)
 # add_compile_options(/wd4275) # non dll-interface class 'type' used as base...
 else()
   # GCC/Clang specific flags
-  add_compile_options(-Wall -Wextra -fexceptions)
+  add_compile_options(-Wall -Wextra -Wpedantic -fexceptions)
 
   # Suppress specific GCC/Clang warnings if they are noisy or from dependencies
   # add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers)
@@ -327,6 +327,15 @@ message(STATUS "  Install CMake Config Dir:    ${DETOURMODKIT_CMAKE_CONFIG_INSTA
 message(STATUS "  Install Docs Dir:            ${CMAKE_INSTALL_DOCDIR} (standard path)")
 message(STATUS "  DirectXMath Include Dir:    ${DIRECTXMATH_INCLUDE_DIR}")
 message(STATUS "---------------------------------------------------------------------")
+
+# --- Sanitizers ---
+option(DMK_ENABLE_SANITIZERS "Enable ASan and UBSan (GCC/Clang only)" OFF)
+
+if(DMK_ENABLE_SANITIZERS AND NOT MSVC)
+  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
+  message(STATUS "Sanitizers enabled: ASan + UBSan")
+endif()
 
 # --- Unit Tests ---
 option(DMK_BUILD_TESTS "Build unit tests" OFF)

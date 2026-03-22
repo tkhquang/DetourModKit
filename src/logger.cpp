@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <ctime>
 #include <filesystem>
 #include <chrono>
 #include <iomanip>
@@ -15,9 +16,26 @@
 namespace DetourModKit
 {
 
-    std::string Logger::s_log_prefix_ = "DetourModKit";
-    std::string Logger::s_log_file_name_ = "DetourModKit_Log.txt";
-    std::string Logger::s_timestamp_format_ = "%Y-%m-%d %H:%M:%S";
+    namespace
+    {
+        std::atomic<std::shared_ptr<const Logger::StaticConfig>> &static_config_atom()
+        {
+            static std::atomic<std::shared_ptr<const Logger::StaticConfig>> instance{
+                std::make_shared<const Logger::StaticConfig>(
+                    DEFAULT_LOG_PREFIX, DEFAULT_LOG_FILE_NAME, DEFAULT_TIMESTAMP_FORMAT)};
+            return instance;
+        }
+    } // anonymous namespace
+
+    std::shared_ptr<const Logger::StaticConfig> Logger::get_static_config()
+    {
+        return static_config_atom().load(std::memory_order_acquire);
+    }
+
+    void Logger::set_static_config(std::shared_ptr<const StaticConfig> config)
+    {
+        static_config_atom().store(std::move(config), std::memory_order_release);
+    }
 
     LogLevel Logger::string_to_log_level(const std::string &level_str)
     {
@@ -37,36 +55,44 @@ namespace DetourModKit
         if (upper_level_str == "ERROR")
             return LogLevel::Error;
 
-        std::cerr << "[" << s_log_prefix_ << " Logger WARNING] Unrecognized log level string '" << level_str
-                  << "'. Defaulting to INFO." << std::endl;
+        std::cerr << "[" << DEFAULT_LOG_PREFIX << " Logger WARNING] Unrecognized log level string '" << level_str
+                  << "'. Defaulting to INFO." << '\n';
         return LogLevel::Info;
     }
 
     void Logger::configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
     {
-        std::lock_guard<std::mutex> lock(Logger::get_init_mutex());
-
-        s_log_prefix_ = prefix;
-        s_log_file_name_ = file_name;
-        s_timestamp_format_ = timestamp_fmt;
+        set_static_config(std::make_shared<const StaticConfig>(prefix, file_name, timestamp_fmt));
 
         Logger &instance = get_instance();
 
-        if (instance.log_prefix_ != prefix ||
-            instance.log_file_name_ != file_name ||
-            instance.timestamp_format_ != timestamp_fmt)
-        {
-            instance.reconfigure(prefix, file_name, timestamp_fmt);
-        }
+        // configure() is the authoritative reset path — allow reconfiguration
+        // even after shutdown to support reuse (e.g., test fixtures).
+        instance.shutdown_called_.store(false, std::memory_order_release);
+
+        // Comparison is done inside reconfigure() under the lock to prevent
+        // reading string members while another thread is modifying them.
+        instance.reconfigure(prefix, file_name, timestamp_fmt);
     }
 
     void Logger::reconfigure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
     {
+        if (shutdown_called_.load(std::memory_order_acquire))
+        {
+            return;
+        }
+
         // Acquire both async_mutex_ and log_mutex_ to prevent concurrent log() calls
         // from reading partially-updated string members during reconfiguration
         std::scoped_lock lock(async_mutex_, *log_mutex_ptr_);
 
-        shutdown_called_.store(false, std::memory_order_release);
+        // Check under lock to avoid racing with concurrent configure()/reconfigure() calls
+        if (log_prefix_ == prefix &&
+            log_file_name_ == file_name &&
+            timestamp_format_ == timestamp_fmt)
+        {
+            return;
+        }
 
         if (log_file_stream_ptr_->is_open() && log_file_stream_ptr_->good())
         {
@@ -88,7 +114,7 @@ namespace DetourModKit
         {
             std::cerr << "[" << log_prefix_ << " Logger CRITICAL ERROR] "
                       << "Failed to open log file at: " << log_file_full_path
-                      << ". Subsequent logs to file will fail." << std::endl;
+                      << ". Subsequent logs to file will fail." << '\n';
         }
         else
         {
@@ -102,9 +128,12 @@ namespace DetourModKit
         : log_file_stream_ptr_(std::make_shared<std::ofstream>()),
           log_mutex_ptr_(std::make_shared<std::mutex>())
     {
-        log_prefix_ = s_log_prefix_;
-        log_file_name_ = s_log_file_name_;
-        timestamp_format_ = s_timestamp_format_;
+        {
+            auto config = get_static_config();
+            log_prefix_ = config->log_prefix;
+            log_file_name_ = config->log_file_name;
+            timestamp_format_ = config->timestamp_format;
+        }
 
         const std::string log_file_full_path = generate_log_file_path();
         log_file_stream_ptr_->open(log_file_full_path, std::ios::out | std::ios::trunc);
@@ -113,7 +142,7 @@ namespace DetourModKit
         {
             std::cerr << "[" << log_prefix_ << " Logger CRITICAL ERROR] "
                       << "Failed to open log file at: " << log_file_full_path
-                      << ". Subsequent logs to file will fail." << std::endl;
+                      << ". Subsequent logs to file will fail." << '\n';
         }
         else
         {
@@ -123,7 +152,7 @@ namespace DetourModKit
         }
     }
 
-    Logger::~Logger()
+    Logger::~Logger() noexcept
     {
         bool expected = false;
         if (!shutdown_called_.compare_exchange_strong(expected, true,
@@ -131,31 +160,7 @@ namespace DetourModKit
         {
             return;
         }
-
-        std::shared_ptr<AsyncLogger> local_logger;
-
-        {
-            std::lock_guard<std::mutex> lock(async_mutex_);
-            if (async_mode_enabled_.load(std::memory_order_acquire) && async_logger_)
-            {
-                local_logger = std::move(async_logger_);
-                async_logger_.reset();
-                async_mode_enabled_.store(false, std::memory_order_release);
-                if (local_logger)
-                {
-                    local_logger->shutdown();
-                }
-            }
-        }
-
-        {
-            std::lock_guard<std::mutex> lock(*log_mutex_ptr_);
-            if (log_file_stream_ptr_ && log_file_stream_ptr_->is_open())
-            {
-                log_file_stream_ptr_->flush();
-                log_file_stream_ptr_->close();
-            }
-        }
+        shutdown_internal();
     }
 
     void Logger::shutdown()
@@ -166,7 +171,11 @@ namespace DetourModKit
         {
             return;
         }
+        shutdown_internal();
+    }
 
+    void Logger::shutdown_internal()
+    {
         std::shared_ptr<AsyncLogger> local_logger;
 
         {
@@ -196,7 +205,7 @@ namespace DetourModKit
     void Logger::set_log_level(LogLevel level)
     {
         auto level_int = static_cast<std::underlying_type_t<LogLevel>>(level);
-        if (level_int < 0 || level_int > 4)
+        if (level_int < 0 || level_int > static_cast<std::underlying_type_t<LogLevel>>(LogLevel::Error))
         {
             log(LogLevel::Warning, "Attempted to set an invalid log level value ({}). Keeping current level.", level_int);
             return;
@@ -209,7 +218,7 @@ namespace DetourModKit
             log_level_to_string(old_level), log_level_to_string(level));
     }
 
-    void Logger::log(LogLevel level, const std::string &message)
+    void Logger::log(LogLevel level, std::string_view message)
     {
         if (level >= current_log_level_.load(std::memory_order_acquire))
         {
@@ -223,7 +232,7 @@ namespace DetourModKit
                 }
                 if (local_logger)
                 {
-                    static_cast<void>(local_logger->enqueue(level, message));
+                    static_cast<void>(local_logger->enqueue(level, std::string(message)));
                     return;
                 }
             }
@@ -247,7 +256,7 @@ namespace DetourModKit
             {
                 std::cerr << "[" << log_prefix_ << " LOG_FILE_WRITE_ERROR] [" << get_timestamp() << "] ["
                           << std::setw(7) << std::left << level_str << "] :: "
-                          << message << std::endl;
+                          << message << '\n';
             }
         }
     }
@@ -277,18 +286,22 @@ namespace DetourModKit
                 throw std::runtime_error("localtime_r failed to convert time.");
             }
 #endif
-            std::ostringstream oss;
-            oss << std::put_time(&timeinfo_struct, timestamp_format_.c_str());
-            return oss.str();
+            char buf[128];
+            const size_t len = std::strftime(buf, sizeof(buf), timestamp_format_.c_str(), &timeinfo_struct);
+            if (len == 0)
+            {
+                return "TIMESTAMP_FORMAT_ERROR";
+            }
+            return std::string(buf, len);
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[" << log_prefix_ << " Logger TIMESTAMP_ERROR] Failed to generate timestamp: " << e.what() << std::endl;
+            std::cerr << "[" << log_prefix_ << " Logger TIMESTAMP_ERROR] Failed to generate timestamp: " << e.what() << '\n';
             return "TIMESTAMP_GENERATION_ERROR";
         }
         catch (...)
         {
-            std::cerr << "[" << log_prefix_ << " Logger TIMESTAMP_ERROR] Unknown exception during timestamp generation." << std::endl;
+            std::cerr << "[" << log_prefix_ << " Logger TIMESTAMP_ERROR] Unknown exception during timestamp generation." << '\n';
             return "TIMESTAMP_GENERATION_ERROR";
         }
     }
@@ -333,13 +346,13 @@ namespace DetourModKit
         catch (const std::exception &e)
         {
             std::cerr << "[" << log_prefix_ << " Logger PATH_WARNING] Failed to determine module directory for log file: "
-                      << e.what() << ". Using relative path for log file: " << log_file_name_ << std::endl;
+                      << e.what() << ". Using relative path for log file: " << log_file_name_ << '\n';
             return log_file_name_;
         }
         catch (...)
         {
             std::cerr << "[" << log_prefix_ << " Logger PATH_WARNING] Unknown exception while determining module directory for log file."
-                      << " Using relative path: " << log_file_name_ << std::endl;
+                      << " Using relative path: " << log_file_name_ << '\n';
             return log_file_name_;
         }
     }
@@ -455,10 +468,5 @@ namespace DetourModKit
         }
     }
 
-    std::mutex &Logger::get_init_mutex()
-    {
-        static std::mutex mutex;
-        return mutex;
-    }
 
 } // namespace DetourModKit

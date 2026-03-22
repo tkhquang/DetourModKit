@@ -138,7 +138,7 @@ namespace
      */
     constexpr inline size_t compute_shard_index(uintptr_t address, size_t shard_count) noexcept
     {
-        return (static_cast<size_t>((address * 0x9E3779B97F4A7C15ULL) >> 58)) % shard_count;
+        return (static_cast<size_t>((address * 0x9E3779B97F4A7C15ULL) >> 48)) % shard_count;
     }
 }
 
@@ -1001,6 +1001,10 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
     if (!address || size == 0)
         return false;
 
+    // Construct reader guard BEFORE checking s_cacheInitialized to prevent
+    // shutdown_cache from destroying data structures between the check and access.
+    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+
     if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
     {
         // Cache not initialized - fall back to direct VirtualQuery
@@ -1019,7 +1023,7 @@ bool DetourModKit::Memory::is_readable(const void *address, size_t size)
         return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
     }
 
-    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+    // Reader guard already active — safe to access cache data structures
 
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
@@ -1071,6 +1075,10 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     if (!address || size == 0)
         return false;
 
+    // Construct reader guard BEFORE checking s_cacheInitialized to prevent
+    // shutdown_cache from destroying data structures between the check and access.
+    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+
     if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
     {
         // Cache not initialized - fall back to direct VirtualQuery
@@ -1089,7 +1097,7 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
         return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
     }
 
-    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+    // Reader guard already active — safe to access cache data structures
 
     const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
