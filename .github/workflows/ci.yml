@@ -63,9 +63,10 @@ jobs:
 
       - name: Run Tests
         run: |
-          export PATH="${{ env.MINGW_BIN }}:$PATH"
-          ctest --preset mingw-debug
-        shell: bash
+          $env:PATH = "${{ env.MINGW_BIN }};$env:PATH"
+          & "./build/mingw-debug/tests/DetourModKit_tests.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        shell: powershell
 
       - name: Generate Coverage Report
         run: |
