@@ -83,6 +83,7 @@ include/DetourModKit/    # Public headers — one per module
   string.hpp             # String trim (header-only)
 src/                     # Implementation files (one .cpp per module)
 tests/                   # GoogleTest suites (one test_*.cpp per module)
+  fixtures/              # Test support files (hook_target_lib DLL source)
 external/                # Git submodules (safetyhook, DirectXMath, simpleini)
 CMakeLists.txt           # Single CMakeLists — static library target
 CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/release)
@@ -135,6 +136,7 @@ hook_manager.with_inline_hook("camera_update", [](const safetyhook::InlineHook &
 
 - **Framework:** GoogleTest. Test entry point is `tests/main.cpp`.
 - **One test file per module:** `tests/test_<module>.cpp` mirrors `src/<module>.cpp`.
+- **Integration tests:** `tests/test_hook_integration.cpp` tests cross-module hooking against `tests/fixtures/hook_target_lib.cpp` (built as a DLL). The DLL exports `extern "C"` functions with volatile magic constants for stable AOB patterns.
 - **Test fixture pattern:** Each suite uses a `::testing::Test` subclass with `SetUp()`/`TearDown()` for temp file cleanup.
 - **Coverage gate:** 80% minimum line coverage enforced in CI. All PRs must pass.
 - **Concurrency tests:** Use `std::atomic<bool> stop` flag pattern with multiple threads. See `AsyncMode_ConcurrentLogAndDisable` in `test_logger.cpp` for the reference pattern.
