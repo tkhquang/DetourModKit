@@ -61,11 +61,21 @@ jobs:
         run: cmake --build --preset mingw-debug --parallel
         shell: bash
 
-      - name: Copy MinGW runtime DLLs next to test exe
+      - name: Diagnose and copy MinGW runtime DLLs
         run: |
-          Copy-Item "${{ env.MINGW_BIN }}\libstdc++-6.dll" "build\mingw-debug\tests\" -ErrorAction SilentlyContinue
-          Copy-Item "${{ env.MINGW_BIN }}\libgcc_s_seh-1.dll" "build\mingw-debug\tests\" -ErrorAction SilentlyContinue
-          Copy-Item "${{ env.MINGW_BIN }}\libwinpthread-1.dll" "build\mingw-debug\tests\" -ErrorAction SilentlyContinue
+          $testDir = "build\mingw-debug\tests"
+          $mingw = "${{ env.MINGW_BIN }}"
+          echo "MinGW dir: $mingw"
+          echo "Test dir: $testDir"
+          echo "--- MinGW DLLs ---"
+          Get-ChildItem "$mingw\lib*.dll" | ForEach-Object { echo $_.Name }
+          echo "--- Copying ---"
+          Get-ChildItem "$mingw\lib*.dll" | ForEach-Object {
+            echo "  Copying $($_.Name)"
+            Copy-Item $_.FullName "$testDir\"
+          }
+          echo "--- Test dir contents ---"
+          Get-ChildItem "$testDir\*.dll" | ForEach-Object { echo $_.Name }
         shell: powershell
 
       - name: Run Tests
