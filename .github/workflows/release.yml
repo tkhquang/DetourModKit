@@ -197,6 +197,21 @@ jobs:
     needs: [build-mingw, build-msvc]
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - name: Create annotated tag
+        run: |
+          TITLE="${{ github.event.inputs.release_title }}"
+          VERSION="v${{ github.event.inputs.version }}"
+          TAG_MESSAGE="${TITLE:-DetourModKit ${VERSION}}"
+          git config user.name "Quang Trinh"
+          git config user.email "khacquang.trinh@gmail.com"
+          git tag -a "$VERSION" -m "$TAG_MESSAGE"
+          git push origin "$VERSION"
+
       - name: Download MinGW artifact
         uses: actions/download-artifact@v4
         with:
@@ -232,8 +247,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ steps.file_list.outputs.FILES_TO_RELEASE }}
-          name: DetourModKit v${{ github.event.inputs.version }}
           tag_name: v${{ github.event.inputs.version }}
+          name: DetourModKit v${{ github.event.inputs.version }}
           body: |
             **Release Title:** ${{ github.event.inputs.release_title }}
             **Version:** ${{ github.event.inputs.version }}
@@ -251,5 +266,4 @@ jobs:
             See README for detailed usage instructions.
           draft: false
           prerelease: ${{ github.event.inputs.prerelease }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          token: ${{ secrets.RELEASE_TOKEN }}
