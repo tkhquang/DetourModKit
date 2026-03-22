@@ -96,19 +96,19 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     | `msvc-debug` | MSVC (cl) | Debug | ON |
     | `msvc-release` | MSVC (cl) | Release | OFF |
 
-   > [!NOTE]
-   > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
-   > along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
-   > with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE
-   > linkage so unused DetourModKit symbols are stripped at final link time. MinGW Release builds
-   > use `-O2` (overriding CMake's default `-O3`) for a better code-size/performance tradeoff.
-   > MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
-   > Release builds omit debug info entirely to minimize binary size.
+    > [!NOTE]
+    > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
+    > along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
+    > with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE
+    > linkage so unused DetourModKit symbols are stripped at final link time. MinGW Release builds
+    > use `-O2` (overriding CMake's default `-O3`) for a better code-size/performance tradeoff.
+    > MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
+    > Release builds omit debug info entirely to minimize binary size.
 
-   <!-- -->
+    ---
 
-   > [!TIP]
-   > You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
+    > [!TIP]
+    > You can create a `CMakeUserPresets.json` file (git-ignored) to define your own local presets that inherit from the ones above.
 
    After running the install command, the install directory (`build/install/` for the Makefile wrapper, or whichever `--prefix` you passed to `cmake --install`) will contain:
 
@@ -183,6 +183,7 @@ ctest --preset msvc-debug
 
 > [!TIP]
 > If the MSVC build is failing due to a PDB file locking issue, kill stale compiler processes:
+>
 > ```bash
 > taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
 > ```
@@ -221,6 +222,27 @@ This method is ideal for active development and ensures you always have the late
     # In your project root
     git submodule add https://github.com/tkhquang/DetourModKit.git external/DetourModKit
     git submodule update --init --recursive
+    ```
+
+    To pin a specific release version:
+
+    ```bash
+    cd external/DetourModKit
+    git checkout v2.0.0          # or v1.0.1, v1.0.0, etc.
+    cd ../..
+    git add external/DetourModKit
+    git commit -m "pin DetourModKit to v2.0.0"
+    ```
+
+    To upgrade to a newer version later:
+
+    ```bash
+    cd external/DetourModKit
+    git fetch --tags
+    git checkout v2.1.0          # desired version
+    cd ../..
+    git add external/DetourModKit
+    git commit -m "upgrade DetourModKit to v2.1.0"
     ```
 
 2. **Configure your CMakeLists.txt:**
@@ -275,11 +297,17 @@ This method is ideal for active development and ensures you always have the late
 
 This method uses a pre-built and installed version of DetourModKit.
 
-1. **Integrate DetourModKit:**
-    * After building and installing DetourModKit, copy the install directory into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
-    * Alternatively, point your mod's build system to DetourModKit's install directory directly.
+1. **Download a release package:**
 
-2. **Configure Your Mod's Build System:**
+    Pre-built packages for MinGW and MSVC are available on the [Releases](https://github.com/tkhquang/DetourModKit/releases) page. Download the zip matching your toolchain and version (e.g., `DetourModKit_MinGW_v2.0.0.zip` or `DetourModKit_MSVC_v2.0.0.zip`).
+
+    To upgrade, download the newer release zip and replace the contents of your `external/DetourModKit/` directory.
+
+2. **Integrate DetourModKit:**
+    * Extract the downloaded zip into your mod project (e.g., into an `external/DetourModKit/` subdirectory).
+    * Alternatively, build from source and run `cmake --install` to produce the same directory layout (see [Building](#building-detourmodkit-static-library-via-cmake)).
+
+3. **Configure Your Mod's Build System:**
 
    #### CMake
 
