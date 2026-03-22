@@ -84,13 +84,13 @@ protected:
             << "Failed to load hook_target_lib.dll. Error: " << GetLastError();
 
         m_fn_compute_damage = reinterpret_cast<ComputeDamageFn>(
-            GetProcAddress(m_dll_handle, "compute_damage"));
+            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_damage")));
         m_fn_compute_armor = reinterpret_cast<ComputeArmorFn>(
-            GetProcAddress(m_dll_handle, "compute_armor"));
+            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_armor")));
         m_fn_compute_speed = reinterpret_cast<ComputeSpeedFn>(
-            GetProcAddress(m_dll_handle, "compute_speed"));
+            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_speed")));
         m_fn_compute_critical = reinterpret_cast<ComputeCriticalFn>(
-            GetProcAddress(m_dll_handle, "compute_critical"));
+            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_critical")));
 
         ASSERT_NE(m_fn_compute_damage, nullptr) << "compute_damage export not found";
         ASSERT_NE(m_fn_compute_armor, nullptr) << "compute_armor export not found";
