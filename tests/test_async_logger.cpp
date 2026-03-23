@@ -7,6 +7,7 @@
 #include <fstream>
 #include <mutex>
 #include <regex>
+#include <cstdint>
 
 #include "DetourModKit/async_logger.hpp"
 
@@ -492,6 +493,17 @@ TEST(DynamicMPMCQueueTest, CapacityAccessor)
 {
     DynamicMPMCQueue queue(4);
     EXPECT_EQ(queue.capacity(), 4u);
+}
+
+TEST(DynamicMPMCQueueTest, CacheLineAlignment)
+{
+    DynamicMPMCQueue queue(4);
+    auto addr = reinterpret_cast<std::uintptr_t>(&queue);
+
+    // DynamicMPMCQueue contains alignas(64) members; the struct itself
+    // must satisfy that alignment so the atomics land on separate cache lines.
+    EXPECT_EQ(alignof(DynamicMPMCQueue), 64u);
+    EXPECT_EQ(addr % 64u, 0u);
 }
 
 TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)

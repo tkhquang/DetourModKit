@@ -31,7 +31,8 @@ if(MSVC)
     "$<$<CONFIG:Debug>:Embedded>$<$<NOT:$<CONFIG:Debug>>:>")
   set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pdb")
 
-# Suppress some common noisy MSVC warnings if necessary:
+# Suppress noisy MSVC warnings:
+  add_compile_options(/wd4324) # structure was padded due to alignment specifier (intentional alignas)
 # add_compile_options(/wd4251) # class 'type' needs to have dll-interface...
 # add_compile_options(/wd4275) # non dll-interface class 'type' used as base...
 else()
