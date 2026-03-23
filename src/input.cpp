@@ -9,6 +9,7 @@
  */
 
 #include "DetourModKit/input.hpp"
+#include "DetourModKit/config.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>
@@ -465,6 +466,24 @@ namespace DetourModKit
         binding.mode = InputMode::Hold;
         binding.on_state_change = std::move(callback);
         pending_bindings_.push_back(std::move(binding));
+    }
+
+    void InputManager::register_press(const std::string &name, const Config::KeyComboList &combos,
+                                      std::function<void()> callback)
+    {
+        for (const auto &combo : combos)
+        {
+            register_press(name, combo.keys, combo.modifiers, callback);
+        }
+    }
+
+    void InputManager::register_hold(const std::string &name, const Config::KeyComboList &combos,
+                                     std::function<void(bool)> callback)
+    {
+        for (const auto &combo : combos)
+        {
+            register_hold(name, combo.keys, combo.modifiers, callback);
+        }
     }
 
     void InputManager::set_require_focus(bool require_focus)

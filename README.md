@@ -24,7 +24,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
   * **Threading & lifecycle:** Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Two-phase initialization (construct then start) for safe thread launching. `condition_variable_any` with `stop_token` for responsive cooperative shutdown. Exception-safe callback invocation. Automatic hold release on shutdown. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
   * **Performance:** Hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps). Supports multiple bindings per name for multi-combo hotkeys. Lock-free `is_running()` via atomic flag. O(1) reverse name lookup for `input_code_to_name()`.
   * **Gamepad & polling:** XInput is polled once per cycle and skipped entirely when no gamepad bindings are registered. Reconnection attempts are throttled to every 2 seconds when no controller is connected, avoiding the per-cycle overhead of `XInputGetState` on disconnected slots.
-  * **Configuration integration:** Loading input codes from INI files (named keys, hex VK codes, or mixed). Named key resolution uses binary search for efficient lookup.
+  * **Configuration integration:** Loading input codes from INI files (named keys, hex VK codes, or mixed). Named key resolution uses binary search for efficient lookup. `register_press` and `register_hold` accept `KeyComboList` directly for zero-boilerplate binding of config-parsed key combos.
 
 ## Testing
 
@@ -500,22 +500,18 @@ void InitializeMyMod() {
         logger.warning("Target address is 0 or not found. Hook not created.");
     }
 
-    // Register hotkey bindings with the InputManager (after hooks are ready)
+    // Register hotkey bindings with the InputManager (after hooks are ready).
+    // register_press/register_hold accept a KeyComboList directly — one binding
+    // is created per combo, all sharing the same name for OR-logic queries.
     DMKInputManager& input_mgr = DMKInputManager::get_instance();
 
-    for (const auto& combo : g_mod_config.toggle_combo) {
-        input_mgr.register_press("toggle_view", combo.keys,
-            combo.modifiers, []() {
-                DMKLogger::get_instance().info("Toggle key pressed!");
-            });
-    }
+    input_mgr.register_press("toggle_view", g_mod_config.toggle_combo, []() {
+        DMKLogger::get_instance().info("Toggle key pressed!");
+    });
 
-    for (const auto& combo : g_mod_config.hold_scroll_combo) {
-        input_mgr.register_hold("hold_scroll", combo.keys,
-            combo.modifiers, [](bool held) {
-                DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
-            });
-    }
+    input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_combo, [](bool held) {
+        DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
+    });
 
     // Start the input polling thread (focus-aware by default)
     input_mgr.start();

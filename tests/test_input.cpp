@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "DetourModKit/input.hpp"
+#include "DetourModKit/config.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::keyboard_key;
@@ -1038,6 +1039,124 @@ TEST_F(InputManagerTest, MixedKeyboardAndGamepadBindings)
 
     mgr.start();
     EXPECT_TRUE(mgr.is_running());
+
+    mgr.shutdown();
+}
+
+// --- InputManager: KeyComboList overloads ---
+
+TEST_F(InputManagerTest, RegisterPressFromKeyComboList)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    Config::KeyComboList combos = {
+        {.keys = {keyboard_key(0x72)}, .modifiers = {}},
+        {.keys = {gamepad_button(GamepadCode::A)}, .modifiers = {gamepad_button(GamepadCode::LeftBumper)}}};
+
+    mgr.register_press("toggle", combos, []() {});
+
+    EXPECT_EQ(mgr.binding_count(), 2u);
+}
+
+TEST_F(InputManagerTest, RegisterHoldFromKeyComboList)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    Config::KeyComboList combos = {
+        {.keys = {keyboard_key(0x10)}, .modifiers = {}},
+        {.keys = {gamepad_button(GamepadCode::LeftTrigger)}, .modifiers = {}}};
+
+    mgr.register_hold("hold_action", combos, [](bool) {});
+
+    EXPECT_EQ(mgr.binding_count(), 2u);
+}
+
+TEST_F(InputManagerTest, RegisterPressFromEmptyKeyComboList)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    Config::KeyComboList combos;
+
+    mgr.register_press("empty", combos, []() {});
+
+    EXPECT_EQ(mgr.binding_count(), 0u);
+}
+
+TEST_F(InputManagerTest, RegisterHoldFromEmptyKeyComboList)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    Config::KeyComboList combos;
+
+    mgr.register_hold("empty", combos, [](bool) {});
+
+    EXPECT_EQ(mgr.binding_count(), 0u);
+}
+
+TEST_F(InputManagerTest, RegisterPressFromSingleCombo)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    Config::KeyComboList combos = {
+        {.keys = {keyboard_key(0x72)}, .modifiers = {keyboard_key(0x11)}}};
+
+    mgr.register_press("single", combos, []() {});
+
+    EXPECT_EQ(mgr.binding_count(), 1u);
+}
+
+TEST_F(InputManagerTest, KeyComboListBindingsShareName)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    Config::KeyComboList combos = {
+        {.keys = {keyboard_key(0x72)}, .modifiers = {}},
+        {.keys = {keyboard_key(0x73)}, .modifiers = {}}};
+
+    mgr.register_press("shared_name", combos, []() {});
+    mgr.start();
+
+    EXPECT_TRUE(mgr.is_running());
+    EXPECT_EQ(mgr.binding_count(), 2u);
+
+    // is_binding_active queries by shared name (OR logic across combos)
+    EXPECT_FALSE(mgr.is_binding_active("shared_name"));
+
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, KeyComboListMixedWithIndividualBindings)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("individual", {keyboard_key(0x41)}, []() {});
+
+    Config::KeyComboList combos = {
+        {.keys = {keyboard_key(0x72)}, .modifiers = {}},
+        {.keys = {keyboard_key(0x73)}, .modifiers = {}}};
+
+    mgr.register_hold("combo_hold", combos, [](bool) {});
+
+    EXPECT_EQ(mgr.binding_count(), 3u);
+}
+
+TEST_F(InputManagerTest, KeyComboListIgnoredWhileRunning)
+{
+    InputManager &mgr = InputManager::get_instance();
+
+    mgr.register_press("before", {keyboard_key(0x41)}, []() {});
+    mgr.start();
+
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    Config::KeyComboList combos = {
+        {.keys = {keyboard_key(0x72)}, .modifiers = {}}};
+
+    mgr.register_press("after", combos, []() {});
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    mgr.register_hold("after_hold", combos, [](bool) {});
+    EXPECT_EQ(mgr.binding_count(), 1u);
 
     mgr.shutdown();
 }
