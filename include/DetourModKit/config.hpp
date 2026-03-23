@@ -29,27 +29,34 @@ namespace DetourModKit
 
         /**
          * @struct KeyCombo
-         * @brief Represents a key combination parsed from an INI value.
+         * @brief Represents a single key combination with trigger keys and modifiers.
          * @details Contains trigger keys (OR logic) and modifier keys (AND logic).
          *          Designed for direct use with InputManager::register_press/register_hold.
          *          Each key is an InputCode identifying both the device source and button.
          *
-         *          INI format: modifiers separated by '+', with the last '+'-delimited
-         *          segment containing trigger key(s) (comma-separated for multiple triggers).
-         *          Tokens can be human-readable names or hex VK codes:
-         *            - "F3"                → keys=[F3], modifiers=[]
-         *            - "Ctrl+F3"           → keys=[F3], modifiers=[Ctrl]
-         *            - "Ctrl+Shift+F3"     → keys=[F3], modifiers=[Ctrl, Shift]
-         *            - "Ctrl+F3,F4"        → keys=[F3, F4], modifiers=[Ctrl]
-         *            - "Mouse4"            → keys=[Mouse4], modifiers=[]
+         *          Within a single combo, modifiers are separated by '+' and the last
+         *          '+'-delimited token is the trigger key. Tokens can be human-readable
+         *          names or hex VK codes:
+         *            - "F3"                   → keys=[F3], modifiers=[]
+         *            - "Ctrl+F3"              → keys=[F3], modifiers=[Ctrl]
+         *            - "Ctrl+Shift+F3"        → keys=[F3], modifiers=[Ctrl, Shift]
+         *            - "Mouse4"               → keys=[Mouse4], modifiers=[]
          *            - "Gamepad_LB+Gamepad_A" → keys=[Gamepad_A], modifiers=[Gamepad_LB]
-         *            - "0x11+0x72"         → keys=[0x72], modifiers=[0x11] (hex fallback)
+         *            - "0x11+0x72"            → keys=[0x72], modifiers=[0x11] (hex fallback)
+         *
+         *          Multiple combos are separated by commas in INI values, parsed into
+         *          a KeyComboList. Each combo is independent (OR logic between combos):
+         *            - "F3,Gamepad_LT+Gamepad_B" → [{keys=[F3]}, {keys=[Gamepad_B], mods=[Gamepad_LT]}]
+         *            - "Ctrl+F3,Ctrl+F4"          → [{keys=[F3], mods=[Ctrl]}, {keys=[F4], mods=[Ctrl]}]
          */
         struct KeyCombo
         {
             std::vector<InputCode> keys;
             std::vector<InputCode> modifiers;
         };
+
+        /// A list of alternative key combinations (OR logic between combos).
+        using KeyComboList = std::vector<KeyCombo>;
 
         /// Registers an integer configuration item.
         void register_int(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
@@ -69,21 +76,19 @@ namespace DetourModKit
 
         /**
          * @brief Registers a key combo configuration item.
-         * @details Parses an INI value as a key combination with optional modifier keys.
-         *          Format: "modifier1+modifier2+trigger_key1,trigger_key2" where tokens
+         * @details Parses an INI value as one or more key combinations. Commas at the
+         *          top level separate independent combos (OR logic). Within each combo,
+         *          '+' separates modifier keys from the trigger key (last token). Tokens
          *          can be human-readable names (e.g., "Ctrl", "F3", "Gamepad_A") or hex
-         *          VK codes (e.g., "0x72"). The '+' separator delimits modifier keys from
-         *          trigger keys, with the last segment being trigger key(s). Commas within
-         *          the last segment provide OR logic for multiple trigger keys. See
-         *          KeyCombo for full parsing semantics.
+         *          VK codes (e.g., "0x72"). See KeyCombo for full parsing semantics.
          * @param section INI section name.
          * @param ini_key INI key name.
          * @param log_key_name Human-readable name shown in log output.
-         * @param setter Callback invoked with the parsed KeyCombo.
+         * @param setter Callback invoked with the parsed KeyComboList.
          * @param default_value_str Default value string in the same format.
          */
         void register_key_combo(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                               std::function<void(const KeyCombo &)> setter, const std::string &default_value_str);
+                               std::function<void(const KeyComboList &)> setter, const std::string &default_value_str);
 
         /**
          * @brief Loads all registered configuration settings from the specified INI file.

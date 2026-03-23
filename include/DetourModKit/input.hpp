@@ -202,7 +202,7 @@ namespace DetourModKit
         [[nodiscard]] bool is_process_foreground() const;
 
         std::vector<InputBinding> bindings_;
-        std::unordered_map<std::string, size_t> name_index_;
+        std::unordered_map<std::string, std::vector<size_t>> name_index_;
         std::chrono::milliseconds poll_interval_;
         std::atomic<bool> require_focus_;
         std::atomic<bool> running_{false};

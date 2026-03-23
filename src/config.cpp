@@ -115,22 +115,20 @@ namespace
     }
 
     /**
-     * @brief Parses a key combo string into a KeyCombo struct.
-     * @details Format: "modifier1+modifier2+trigger1,trigger2" where each token
-     *          is a named key or hex VK code. The last '+'-delimited segment
-     *          contains trigger key(s) (comma-separated for OR logic). All preceding
-     *          segments are individual modifier keys (AND logic).
-     * @param input The raw string to parse.
+     * @brief Parses a single key combo string into a KeyCombo struct.
+     * @details Format: "modifier1+modifier2+trigger_key" where each token is a
+     *          named key or hex VK code. The last '+'-delimited token is the trigger
+     *          key, all preceding tokens are modifier keys (AND logic). This function
+     *          expects a single combo with no commas; use parse_key_combo_list to
+     *          split comma-separated alternatives first.
+     * @param input The raw string to parse (no commas expected).
      * @return Config::KeyCombo Parsed key combination.
      */
     Config::KeyCombo parse_key_combo(const std::string &input)
     {
         Config::KeyCombo result;
 
-        // Strip trailing comment from the full line
-        const size_t comment_pos = input.find(';');
-        const std::string effective = trim(
-            (comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
+        const std::string effective = trim(input);
         if (effective.empty())
         {
             return result;
@@ -156,7 +154,7 @@ namespace
             return result;
         }
 
-        // Last segment contains trigger key(s) (comma-separated for OR logic)
+        // Last segment is the trigger key
         result.keys = parse_input_code_list(segments.back());
 
         // All preceding segments are individual modifier keys
@@ -170,10 +168,55 @@ namespace
     }
 
     /**
-     * @brief Formats a KeyCombo as a human-readable string.
+     * @brief Parses a comma-separated string of key combos into a KeyComboList.
+     * @details Commas at the top level separate independent combos (OR logic between
+     *          combos). Each combo is parsed by parse_key_combo. Handles inline
+     *          semicolon comments, whitespace, and gracefully skips empty/invalid combos.
+     * @param input The raw string to parse.
+     * @return Config::KeyComboList Parsed list of key combinations.
+     */
+    Config::KeyComboList parse_key_combo_list(const std::string &input)
+    {
+        Config::KeyComboList result;
+
+        // Strip trailing comment from the full line
+        const size_t comment_pos = input.find(';');
+        const std::string effective = trim(
+            (comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
+        if (effective.empty())
+        {
+            return result;
+        }
+
+        // Split by comma into independent combo strings
+        size_t pos = 0;
+        while (pos < effective.size())
+        {
+            const size_t comma = effective.find(',', pos);
+            const size_t end = (comma != std::string::npos) ? comma : effective.size();
+            const std::string combo_str = trim(effective.substr(pos, end - pos));
+            pos = end + 1;
+
+            if (combo_str.empty())
+            {
+                continue;
+            }
+
+            auto combo = parse_key_combo(combo_str);
+            if (!combo.keys.empty())
+            {
+                result.push_back(std::move(combo));
+            }
+        }
+
+        return result;
+    }
+
+    /**
+     * @brief Formats a single KeyCombo as a human-readable string.
      * @details Uses named keys where available, falls back to hex for unknown codes.
      * @param combo The key combination to format.
-     * @return std::string Formatted string (e.g., "Ctrl+Shift+F3,F4").
+     * @return std::string Formatted string (e.g., "Ctrl+Shift+F3").
      */
     std::string format_key_combo(const Config::KeyCombo &combo)
     {
@@ -189,6 +232,26 @@ namespace
                 result += ",";
             }
             result += DetourModKit::format_input_code(combo.keys[i]);
+        }
+        return result;
+    }
+
+    /**
+     * @brief Formats a KeyComboList as a human-readable string.
+     * @details Joins individual combos with commas.
+     * @param combos The list of key combinations to format.
+     * @return std::string Formatted string (e.g., "F3,Gamepad_LT+Gamepad_B").
+     */
+    std::string format_key_combo_list(const Config::KeyComboList &combos)
+    {
+        std::string result;
+        for (size_t i = 0; i < combos.size(); ++i)
+        {
+            if (i > 0)
+            {
+                result += ",";
+            }
+            result += format_key_combo(combos[i]);
         }
         return result;
     }
@@ -321,14 +384,14 @@ namespace
         logger.info("Config: {} ({}.{}) = \"{}\"", log_key_name, section, ini_key, current_value);
     }
 
-    // For Config::KeyCombo (key combination with modifiers)
+    // For Config::KeyComboList (list of key combinations)
     template <>
-    void CallbackConfigItem<Config::KeyCombo>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    void CallbackConfigItem<Config::KeyComboList>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
         if (ini_value_str != nullptr)
         {
-            current_value = parse_key_combo(ini_value_str);
+            current_value = parse_key_combo_list(ini_value_str);
         }
         else
         {
@@ -337,9 +400,9 @@ namespace
     }
 
     template <>
-    void CallbackConfigItem<Config::KeyCombo>::log_current_value(Logger &logger) const
+    void CallbackConfigItem<Config::KeyComboList>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_key_combo(current_value));
+        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_key_combo_list(current_value));
     }
 
     // --- Global storage for registered configuration items ---
@@ -442,18 +505,18 @@ void DetourModKit::Config::register_string(const std::string &section, const std
 }
 
 void DetourModKit::Config::register_key_combo(const std::string &section, const std::string &ini_key,
-                                                      const std::string &log_key_name, std::function<void(const KeyCombo &)> setter,
+                                                      const std::string &log_key_name, std::function<void(const KeyComboList &)> setter,
                                                       const std::string &default_value_str)
 {
-    Config::KeyCombo default_combo = parse_key_combo(default_value_str);
+    Config::KeyComboList default_combos = parse_key_combo_list(default_value_str);
 
     if (setter)
     {
-        setter(default_combo);
+        setter(default_combos);
     }
     std::lock_guard<std::mutex> lock(getConfigMutex());
     getRegisteredConfigItems().push_back(
-        std::make_unique<CallbackConfigItem<Config::KeyCombo>>(section, ini_key, log_key_name, std::move(setter), std::move(default_combo)));
+        std::make_unique<CallbackConfigItem<Config::KeyComboList>>(section, ini_key, log_key_name, std::move(setter), std::move(default_combos)));
 }
 
 void DetourModKit::Config::load(const std::string &ini_filename)

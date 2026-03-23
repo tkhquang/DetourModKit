@@ -11,7 +11,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 * **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support and SSE2-accelerated pattern verification (when compiled with SSE2 support) for patterns >= 16 bytes. Supports `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7) and nth-occurrence matching (1-based) for patterns that hit multiple locations. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code.
 * **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
-* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `Ctrl+Shift+F3`). Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats are all supported. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
+* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `Ctrl+Shift+F3`). Multiple independent combos can be comma-separated (e.g., `F3,Gamepad_LT+Gamepad_B`). Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats are all supported. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
 * **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
 * **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation, inline buffer optimization for messages of size <= 256 bytes (inclusive), and message size validation with truncation for messages larger than 16 MB (messages > 16 MB are truncated to 16 MB rather than rejected).
 * **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
@@ -20,9 +20,9 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
 * **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
 * **Input System:** Hotkey monitoring with a background polling thread.
-  * **Input sources & modes:** Supports keyboard, mouse, and XInput gamepad input via a unified `InputCode` tagged type (`InputSource` + button code). Press (edge-triggered) and hold (level-triggered) input modes with modifier combinations (AND logic for modifiers, OR logic for trigger keys). Gamepad analog triggers (LT/RT) and thumbstick axes are treated as digital buttons with configurable deadzone thresholds. Focus-aware by default — input events are ignored when the process does not own the foreground window.
+  * **Input sources & modes:** Supports keyboard, mouse, and XInput gamepad input via a unified `InputCode` tagged type (`InputSource` + button code). Press (edge-triggered) and hold (level-triggered) input modes with modifier combinations (AND logic for modifiers, OR logic between independent combos). Multiple independent combos can share a single binding name for cross-device hotkeys (e.g., keyboard F3 OR gamepad LT+B). Gamepad analog triggers (LT/RT) and thumbstick axes are treated as digital buttons with configurable deadzone thresholds. Focus-aware by default — input events are ignored when the process does not own the foreground window.
   * **Threading & lifecycle:** Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Two-phase initialization (construct then start) for safe thread launching. `condition_variable_any` with `stop_token` for responsive cooperative shutdown. Exception-safe callback invocation. Automatic hold release on shutdown. DLL-safe when used with `DMK_Shutdown()` before `DLL_PROCESS_DETACH`.
-  * **Performance:** O(1) hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps). Lock-free `is_running()` via atomic flag. O(1) reverse name lookup for `input_code_to_name()`.
+  * **Performance:** Hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps). Supports multiple bindings per name for multi-combo hotkeys. Lock-free `is_running()` via atomic flag. O(1) reverse name lookup for `input_code_to_name()`.
   * **Gamepad & polling:** XInput is polled once per cycle and skipped entirely when no gamepad bindings are registered. Reconnection attempts are throttled to every 2 seconds when no controller is connected, avoiding the per-cycle overhead of `XInputGetState` on disconnected slots.
   * **Configuration integration:** Loading input codes from INI files (named keys, hex VK codes, or mixed). Named key resolution uses binary search for efficient lookup.
 
@@ -370,8 +370,8 @@ This method uses a pre-built and installed version of DetourModKit.
 struct ModConfiguration {
     bool enable_greeting_hook = true;
     std::string log_level_setting = "INFO";
-    DMKKeyCombo toggle_combo;
-    DMKKeyCombo hold_scroll_combo;
+    DMKKeyComboList toggle_combo;
+    DMKKeyComboList hold_scroll_combo;
 } g_mod_config;
 
 // Example Hook: Target function signature
@@ -417,15 +417,15 @@ void InitializeMyMod() {
         [](const std::string& v) { g_mod_config.log_level_setting = v; }, "INFO");
 
     // Register hotkey bindings from INI (modifier+trigger format)
-    // Named keys: "F3" or "F3,F1" (comma = OR for multiple trigger keys)
-    // With modifiers: "Ctrl+Shift+F3" (plus = AND for modifiers, last segment = triggers)
+    // Comma separates independent combos: "F3,Gamepad_LT+Gamepad_B" (F3 OR LT+B)
+    // Plus separates modifiers from trigger: "Ctrl+Shift+F3" (AND for modifiers, last = trigger)
     // Hex VK codes still work: "0x72", "0x11+0x72"
     // Mouse: "Mouse4", "Ctrl+Mouse1"
     // Gamepad: "Gamepad_A", "Gamepad_LB+Gamepad_A"
     DMKConfig::register_key_combo("Hotkeys", "ToggleKey", "Toggle Keys",
-        [](const DMKKeyCombo& c) { g_mod_config.toggle_combo = c; }, "F3");
+        [](const DMKKeyComboList& c) { g_mod_config.toggle_combo = c; }, "F3");
     DMKConfig::register_key_combo("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
-        [](const DMKKeyCombo& c) { g_mod_config.hold_scroll_combo = c; }, "");
+        [](const DMKKeyComboList& c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file
     DMKConfig::load("MyMod.ini");
@@ -503,16 +503,16 @@ void InitializeMyMod() {
     // Register hotkey bindings with the InputManager (after hooks are ready)
     DMKInputManager& input_mgr = DMKInputManager::get_instance();
 
-    if (!g_mod_config.toggle_combo.keys.empty()) {
-        input_mgr.register_press("toggle_view", g_mod_config.toggle_combo.keys,
-            g_mod_config.toggle_combo.modifiers, []() {
+    for (const auto& combo : g_mod_config.toggle_combo) {
+        input_mgr.register_press("toggle_view", combo.keys,
+            combo.modifiers, []() {
                 DMKLogger::get_instance().info("Toggle key pressed!");
             });
     }
 
-    if (!g_mod_config.hold_scroll_combo.keys.empty()) {
-        input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_combo.keys,
-            g_mod_config.hold_scroll_combo.modifiers, [](bool held) {
+    for (const auto& combo : g_mod_config.hold_scroll_combo) {
+        input_mgr.register_hold("hold_scroll", combo.keys,
+            combo.modifiers, [](bool held) {
                 DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
             });
     }
@@ -565,9 +565,13 @@ LogLevel=INFO
 
 [Hotkeys]
 ; Named keys (recommended)
-ToggleKey=F3,F1              ; F3 or F1 (comma = OR)
+ToggleKey=F3                 ; Single key
 HoldScrollKey=LShift         ; Left Shift
 DebugCombo=Ctrl+Shift+D      ; Ctrl AND Shift AND D (plus = AND for modifiers, last = trigger)
+
+; Multiple independent combos (comma = OR between combos)
+DualInput=F3,Gamepad_LT+Gamepad_B     ; F3 alone OR (hold LT + press B)
+MultiCombo=Ctrl+F3,Ctrl+F4            ; Ctrl+F3 OR Ctrl+F4
 
 ; Mouse buttons
 AimToggle=Mouse4             ; Mouse button 4 (side button)

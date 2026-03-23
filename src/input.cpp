@@ -132,7 +132,7 @@ namespace DetourModKit
         {
             if (!bindings_[i].name.empty())
             {
-                name_index_.emplace(bindings_[i].name, i);
+                name_index_[bindings_[i].name].push_back(i);
             }
         }
     }
@@ -197,7 +197,13 @@ namespace DetourModKit
         const auto it = name_index_.find(name);
         if (it != name_index_.end())
         {
-            return active_states_[it->second].load(std::memory_order_relaxed) != 0;
+            for (const size_t idx : it->second)
+            {
+                if (active_states_[idx].load(std::memory_order_relaxed) != 0)
+                {
+                    return true;
+                }
+            }
         }
         return false;
     }

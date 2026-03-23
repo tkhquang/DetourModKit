@@ -122,18 +122,18 @@ TEST_F(ConfigTest, KeyCombo_HexFormats)
     ini_file << "TestKeys=0x01, 0X02, 0x03, 0x04\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 4u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x01));
-    EXPECT_EQ(test_value.keys[1], keyboard_key(0x02));
-    EXPECT_EQ(test_value.keys[2], keyboard_key(0x03));
-    EXPECT_EQ(test_value.keys[3], keyboard_key(0x04));
+    ASSERT_EQ(test_value.size(), 4u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x01));
+    EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x02));
+    EXPECT_EQ(test_value[2].keys[0], keyboard_key(0x03));
+    EXPECT_EQ(test_value[3].keys[0], keyboard_key(0x04));
 }
 
 TEST_F(ConfigTest, KeyCombo_NamedKeys)
@@ -143,17 +143,17 @@ TEST_F(ConfigTest, KeyCombo_NamedKeys)
     ini_file << "TestKeys=F3, F4, A\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(test_value.keys.size(), 3u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x72));
-    EXPECT_EQ(test_value.keys[1], keyboard_key(0x73));
-    EXPECT_EQ(test_value.keys[2], keyboard_key(0x41));
+    ASSERT_EQ(test_value.size(), 3u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
+    EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x73));
+    EXPECT_EQ(test_value[2].keys[0], keyboard_key(0x41));
 }
 
 TEST_F(ConfigTest, KeyCombo_MouseButton)
@@ -163,15 +163,15 @@ TEST_F(ConfigTest, KeyCombo_MouseButton)
     ini_file << "TestKeys=Mouse4\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(test_value.keys.size(), 1u);
-    EXPECT_EQ(test_value.keys[0], mouse_button(0x05));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], mouse_button(0x05));
 }
 
 TEST_F(ConfigTest, KeyCombo_GamepadButton)
@@ -181,15 +181,15 @@ TEST_F(ConfigTest, KeyCombo_GamepadButton)
     ini_file << "TestKeys=Gamepad_A\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(test_value.keys.size(), 1u);
-    EXPECT_EQ(test_value.keys[0], gamepad_button(GamepadCode::A));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], gamepad_button(GamepadCode::A));
 }
 
 TEST_F(ConfigTest, KeyCombo_GamepadCombo)
@@ -199,17 +199,17 @@ TEST_F(ConfigTest, KeyCombo_GamepadCombo)
     ini_file << "TestKeys=Gamepad_LB+Gamepad_A\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(test_value.keys.size(), 1u);
-    EXPECT_EQ(test_value.keys[0], gamepad_button(GamepadCode::A));
-    ASSERT_EQ(test_value.modifiers.size(), 1u);
-    EXPECT_EQ(test_value.modifiers[0], gamepad_button(GamepadCode::LeftBumper));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], gamepad_button(GamepadCode::A));
+    ASSERT_EQ(test_value[0].modifiers.size(), 1u);
+    EXPECT_EQ(test_value[0].modifiers[0], gamepad_button(GamepadCode::LeftBumper));
 }
 
 TEST_F(ConfigTest, KeyCombo_InvalidHex)
@@ -219,16 +219,16 @@ TEST_F(ConfigTest, KeyCombo_InvalidHex)
     ini_file << "TestKeys=0x10, INVALID, 0xGG, 0x20\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 2u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x10));
-    EXPECT_EQ(test_value.keys[1], keyboard_key(0x20));
+    ASSERT_EQ(test_value.size(), 2u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
+    EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x20));
 }
 
 TEST_F(ConfigTest, ClearRegisteredItems)
@@ -313,7 +313,7 @@ TEST_F(ConfigTest, MixedConfigTypes)
     float float_val = 0.0f;
     bool bool_val = false;
     std::string string_val;
-    Config::KeyCombo keys_val;
+    Config::KeyComboList keys_val;
 
     Config::register_int("Section1", "IntVal", "int_val", [&int_val](int v)
                          { int_val = v; }, 0);
@@ -323,7 +323,7 @@ TEST_F(ConfigTest, MixedConfigTypes)
                           { bool_val = v; }, false);
     Config::register_string("Section2", "StringVal", "string_val", [&string_val](const std::string &v)
                             { string_val = v; }, "");
-    Config::register_key_combo("Section2", "Keys", "keys_val", [&keys_val](const Config::KeyCombo &c)
+    Config::register_key_combo("Section2", "Keys", "keys_val", [&keys_val](const Config::KeyComboList &c)
                                { keys_val = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
@@ -332,7 +332,7 @@ TEST_F(ConfigTest, MixedConfigTypes)
     EXPECT_NEAR(float_val, 3.14f, 0.01f);
     EXPECT_TRUE(bool_val);
     EXPECT_EQ(string_val, "hello");
-    EXPECT_EQ(keys_val.keys.size(), 2u);
+    ASSERT_EQ(keys_val.size(), 2u);
 }
 
 TEST_F(ConfigTest, BoolVariations)
@@ -396,16 +396,16 @@ TEST_F(ConfigTest, KeyCombo_CommentsAndSpaces)
     ini_file << "Keys=  0x10  ,  0x20  ; this is a comment\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 2u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x10));
-    EXPECT_EQ(test_value.keys[1], keyboard_key(0x20));
+    ASSERT_EQ(test_value.size(), 2u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
+    EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x20));
 }
 
 TEST_F(ConfigTest, KeyCombo_JustPrefix)
@@ -415,15 +415,15 @@ TEST_F(ConfigTest, KeyCombo_JustPrefix)
     ini_file << "Keys=0x, 0x10\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
+    Config::KeyComboList test_value;
 
-    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 1u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x10));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
 }
 
 TEST_F(ConfigTest, MultipleRegistrationsSameType)
@@ -452,7 +452,7 @@ TEST_F(ConfigTest, LogAll_AllTypes)
     float f_val = 0.0f;
     bool b_val = false;
     std::string s_val;
-    Config::KeyCombo k_val;
+    Config::KeyComboList k_val;
 
     Config::register_float("Sec", "F", "f_val", [&f_val](float v)
                            { f_val = v; }, 1.5f);
@@ -460,7 +460,7 @@ TEST_F(ConfigTest, LogAll_AllTypes)
                           { b_val = v; }, true);
     Config::register_string("Sec", "S", "s_val", [&s_val](const std::string &v)
                             { s_val = v; }, "hello");
-    Config::register_key_combo("Sec", "K", "k_val", [&k_val](const Config::KeyCombo &c)
+    Config::register_key_combo("Sec", "K", "k_val", [&k_val](const Config::KeyComboList &c)
                                { k_val = c; }, "0x41");
 
     Config::load(test_ini_file_.string());
@@ -470,7 +470,7 @@ TEST_F(ConfigTest, LogAll_AllTypes)
     EXPECT_NEAR(f_val, 1.5f, 0.01f);
     EXPECT_TRUE(b_val);
     EXPECT_EQ(s_val, "hello");
-    EXPECT_EQ(k_val.keys.size(), 1u);
+    ASSERT_EQ(k_val.size(), 1u);
 }
 
 TEST_F(ConfigTest, KeyCombo_InlineTokenComment)
@@ -480,15 +480,15 @@ TEST_F(ConfigTest, KeyCombo_InlineTokenComment)
     ini_file << "Keys=0x10, 0x20 ; inline comment at end of line\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
-    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 2u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x10));
-    EXPECT_EQ(test_value.keys[1], keyboard_key(0x20));
+    ASSERT_EQ(test_value.size(), 2u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
+    EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x20));
 }
 
 TEST_F(ConfigTest, KeyCombo_EmptyTokenFromConsecutiveCommas)
@@ -498,15 +498,15 @@ TEST_F(ConfigTest, KeyCombo_EmptyTokenFromConsecutiveCommas)
     ini_file << "Keys=0x10,,0x20\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
-    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 2u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x10));
-    EXPECT_EQ(test_value.keys[1], keyboard_key(0x20));
+    ASSERT_EQ(test_value.size(), 2u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
+    EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x20));
 }
 
 TEST_F(ConfigTest, KeyCombo_OverflowValue)
@@ -516,43 +516,43 @@ TEST_F(ConfigTest, KeyCombo_OverflowValue)
     ini_file << "Keys=FFFFFFFFFFFFFFFFFFFFFFFF, 0x41\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
-    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 1u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x41));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x41));
 }
 
 TEST_F(ConfigTest, KeyCombo_DefaultEmptyToken)
 {
-    Config::KeyCombo val;
-    Config::register_key_combo("S", "K1", "k1", [&val](const Config::KeyCombo &c)
+    Config::KeyComboList val;
+    Config::register_key_combo("S", "K1", "k1", [&val](const Config::KeyComboList &c)
                                { val = c; }, "0x41,,0x42");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.keys.size(), 2u);
+    ASSERT_EQ(val.size(), 2u);
 }
 
 TEST_F(ConfigTest, KeyCombo_DefaultBarePrefix)
 {
-    Config::KeyCombo val;
-    Config::register_key_combo("S", "K2", "k2", [&val](const Config::KeyCombo &c)
+    Config::KeyComboList val;
+    Config::register_key_combo("S", "K2", "k2", [&val](const Config::KeyComboList &c)
                                { val = c; }, "0x, 0x42");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.keys.size(), 1u);
-    EXPECT_EQ(val.keys[0], keyboard_key(0x42));
+    ASSERT_EQ(val.size(), 1u);
+    EXPECT_EQ(val[0].keys[0], keyboard_key(0x42));
 }
 
 TEST_F(ConfigTest, KeyCombo_DefaultOverflow)
 {
-    Config::KeyCombo val;
-    Config::register_key_combo("S", "K3", "k3", [&val](const Config::KeyCombo &c)
+    Config::KeyComboList val;
+    Config::register_key_combo("S", "K3", "k3", [&val](const Config::KeyComboList &c)
                                { val = c; }, "FFFFFFFFFFFFFFFFFFFFFFFF, 0x43");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.keys.size(), 1u);
-    EXPECT_EQ(val.keys[0], keyboard_key(0x43));
+    ASSERT_EQ(val.size(), 1u);
+    EXPECT_EQ(val[0].keys[0], keyboard_key(0x43));
 }
 
 TEST_F(ConfigTest, KeyCombo_ValueExceedingIntMax)
@@ -562,24 +562,24 @@ TEST_F(ConfigTest, KeyCombo_ValueExceedingIntMax)
     ini_file << "Keys=0x80000000, 0x41\n";
     ini_file.close();
 
-    Config::KeyCombo test_value;
-    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyCombo &c)
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "Keys", "keys", [&test_value](const Config::KeyComboList &c)
                                { test_value = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_EQ(test_value.keys.size(), 1u);
-    EXPECT_EQ(test_value.keys[0], keyboard_key(0x41));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x41));
 }
 
 TEST_F(ConfigTest, KeyCombo_DefaultValueExceedingIntMax)
 {
-    Config::KeyCombo val;
-    Config::register_key_combo("S", "K4", "k4", [&val](const Config::KeyCombo &c)
+    Config::KeyComboList val;
+    Config::register_key_combo("S", "K4", "k4", [&val](const Config::KeyComboList &c)
                                { val = c; }, "0x80000000, 0x44");
     Config::load(test_ini_file_.string());
-    EXPECT_EQ(val.keys.size(), 1u);
-    EXPECT_EQ(val.keys[0], keyboard_key(0x44));
+    ASSERT_EQ(val.size(), 1u);
+    EXPECT_EQ(val[0].keys[0], keyboard_key(0x44));
 }
 
 TEST_F(ConfigTest, DuplicateKeyRegistration)
@@ -721,105 +721,105 @@ TEST_F(ConfigTest, RegisterString_DefaultValueNotMovedFrom)
 
 TEST_F(ConfigTest, RegisterKeyCombo_SingleKey)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "0x72");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    EXPECT_TRUE(combo.modifiers.empty());
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    EXPECT_TRUE(combo[0].modifiers.empty());
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_NamedSingleKey)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "F3");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    EXPECT_TRUE(combo.modifiers.empty());
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    EXPECT_TRUE(combo[0].modifiers.empty());
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_SingleModifier)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "0x11+0x72");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_NamedModifier)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Ctrl+F3");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_MultipleModifiers)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Ctrl+Shift+F3");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    ASSERT_EQ(combo.modifiers.size(), 2u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
-    EXPECT_EQ(combo.modifiers[1], keyboard_key(0x10));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 2u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
+    EXPECT_EQ(combo[0].modifiers[1], keyboard_key(0x10));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_MultipleTriggerKeys)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Ctrl+F3,F4");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 2u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    EXPECT_EQ(combo.keys[1], keyboard_key(0x73));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
+    ASSERT_EQ(combo.size(), 2u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
+    EXPECT_EQ(combo[1].keys[0], keyboard_key(0x73));
+    EXPECT_TRUE(combo[1].modifiers.empty());
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_Empty)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    EXPECT_TRUE(combo.keys.empty());
-    EXPECT_TRUE(combo.modifiers.empty());
+    EXPECT_TRUE(combo.empty());
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_FromFile)
@@ -829,18 +829,18 @@ TEST_F(ConfigTest, RegisterKeyCombo_FromFile)
     ini_file << "Toggle=Ctrl+Shift+F3 ; Ctrl+Shift+F3\n";
     ini_file.close();
 
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "0x41");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    ASSERT_EQ(combo.modifiers.size(), 2u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
-    EXPECT_EQ(combo.modifiers[1], keyboard_key(0x10));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 2u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
+    EXPECT_EQ(combo[0].modifiers[1], keyboard_key(0x10));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_FromFileNoModifiers)
@@ -850,16 +850,16 @@ TEST_F(ConfigTest, RegisterKeyCombo_FromFileNoModifiers)
     ini_file << "Toggle=F3\n";
     ini_file.close();
 
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    EXPECT_TRUE(combo.modifiers.empty());
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    EXPECT_TRUE(combo[0].modifiers.empty());
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_FromFileMultipleTriggers)
@@ -869,71 +869,73 @@ TEST_F(ConfigTest, RegisterKeyCombo_FromFileMultipleTriggers)
     ini_file << "Toggle=Ctrl+F3,F4,F5\n";
     ini_file.close();
 
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 3u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    EXPECT_EQ(combo.keys[1], keyboard_key(0x73));
-    EXPECT_EQ(combo.keys[2], keyboard_key(0x74));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
+    ASSERT_EQ(combo.size(), 3u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
+    EXPECT_EQ(combo[1].keys[0], keyboard_key(0x73));
+    EXPECT_TRUE(combo[1].modifiers.empty());
+    EXPECT_EQ(combo[2].keys[0], keyboard_key(0x74));
+    EXPECT_TRUE(combo[2].modifiers.empty());
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_InvalidModifierSkipped)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "0xGG+Ctrl+F3");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_WhitespaceAroundPlus)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "  Ctrl  +  Shift  +  F3  ");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    ASSERT_EQ(combo.modifiers.size(), 2u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
-    EXPECT_EQ(combo.modifiers[1], keyboard_key(0x10));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 2u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
+    EXPECT_EQ(combo[0].modifiers[1], keyboard_key(0x10));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_DefaultValueApplied)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Ctrl+F3");
 
     // Before load(), the setter should have been called with the parsed default
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], keyboard_key(0x72));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_LogAll)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Ctrl+F3");
 
     Config::load(test_ini_file_.string());
@@ -943,42 +945,43 @@ TEST_F(ConfigTest, RegisterKeyCombo_LogAll)
 
 TEST_F(ConfigTest, RegisterKeyCombo_GamepadDefault)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "GP", "gp", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "GP", "gp", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Gamepad_LB+Gamepad_A,Gamepad_B");
 
-    ASSERT_EQ(combo.keys.size(), 2u);
-    EXPECT_EQ(combo.keys[0], gamepad_button(GamepadCode::A));
-    EXPECT_EQ(combo.keys[1], gamepad_button(GamepadCode::B));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], gamepad_button(GamepadCode::LeftBumper));
+    ASSERT_EQ(combo.size(), 2u);
+    EXPECT_EQ(combo[0].keys[0], gamepad_button(GamepadCode::A));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], gamepad_button(GamepadCode::LeftBumper));
+    EXPECT_EQ(combo[1].keys[0], gamepad_button(GamepadCode::B));
+    EXPECT_TRUE(combo[1].modifiers.empty());
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_MouseDefault)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "MS", "ms", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "MS", "ms", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Ctrl+Mouse4");
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], mouse_button(0x05));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], keyboard_key(0x11));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], mouse_button(0x05));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], keyboard_key(0x11));
 }
 
 TEST_F(ConfigTest, RegisterKeyCombo_ThumbstickDefault)
 {
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "LS", "ls", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "LS", "ls", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "Gamepad_LB+Gamepad_LSUp");
 
-    ASSERT_EQ(combo.keys.size(), 1u);
-    EXPECT_EQ(combo.keys[0], gamepad_button(GamepadCode::LeftStickUp));
-    ASSERT_EQ(combo.modifiers.size(), 1u);
-    EXPECT_EQ(combo.modifiers[0], gamepad_button(GamepadCode::LeftBumper));
+    ASSERT_EQ(combo.size(), 1u);
+    EXPECT_EQ(combo[0].keys[0], gamepad_button(GamepadCode::LeftStickUp));
+    ASSERT_EQ(combo[0].modifiers.size(), 1u);
+    EXPECT_EQ(combo[0].modifiers[0], gamepad_button(GamepadCode::LeftBumper));
 }
 
 TEST_F(ConfigTest, KeyCombo_ThumbstickFromFile)
@@ -988,14 +991,73 @@ TEST_F(ConfigTest, KeyCombo_ThumbstickFromFile)
     ini_file << "StickCombo=Gamepad_RSLeft,Gamepad_RSRight\n";
     ini_file.close();
 
-    Config::KeyCombo combo;
+    Config::KeyComboList combo;
 
-    Config::register_key_combo("Hotkeys", "StickCombo", "stick", [&combo](const Config::KeyCombo &c)
+    Config::register_key_combo("Hotkeys", "StickCombo", "stick", [&combo](const Config::KeyComboList &c)
                                { combo = c; }, "");
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    ASSERT_EQ(combo.keys.size(), 2u);
-    EXPECT_EQ(combo.keys[0], gamepad_button(GamepadCode::RightStickLeft));
-    EXPECT_EQ(combo.keys[1], gamepad_button(GamepadCode::RightStickRight));
+    ASSERT_EQ(combo.size(), 2u);
+    EXPECT_EQ(combo[0].keys[0], gamepad_button(GamepadCode::RightStickLeft));
+    EXPECT_EQ(combo[1].keys[0], gamepad_button(GamepadCode::RightStickRight));
+}
+
+TEST_F(ConfigTest, KeyComboList_IndependentCombos)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Hotkeys]\n";
+    ini_file << "Toggle=F3,Gamepad_LT+Gamepad_B\n";
+    ini_file.close();
+
+    Config::KeyComboList combos;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combos](const Config::KeyComboList &c)
+                               { combos = c; }, "");
+
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(combos.size(), 2u);
+    ASSERT_EQ(combos[0].keys.size(), 1u);
+    EXPECT_EQ(combos[0].keys[0], keyboard_key(0x72));
+    EXPECT_TRUE(combos[0].modifiers.empty());
+    ASSERT_EQ(combos[1].keys.size(), 1u);
+    EXPECT_EQ(combos[1].keys[0], gamepad_button(GamepadCode::B));
+    ASSERT_EQ(combos[1].modifiers.size(), 1u);
+    EXPECT_EQ(combos[1].modifiers[0], gamepad_button(GamepadCode::LeftTrigger));
+}
+
+TEST_F(ConfigTest, KeyComboList_IndependentCombosDefault)
+{
+    Config::KeyComboList combos;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&combos](const Config::KeyComboList &c)
+                               { combos = c; }, "F3,Gamepad_LT+Gamepad_B");
+
+    ASSERT_EQ(combos.size(), 2u);
+    ASSERT_EQ(combos[0].keys.size(), 1u);
+    EXPECT_EQ(combos[0].keys[0], keyboard_key(0x72));
+    EXPECT_TRUE(combos[0].modifiers.empty());
+    ASSERT_EQ(combos[1].keys.size(), 1u);
+    EXPECT_EQ(combos[1].keys[0], gamepad_button(GamepadCode::B));
+    ASSERT_EQ(combos[1].modifiers.size(), 1u);
+    EXPECT_EQ(combos[1].modifiers[0], gamepad_button(GamepadCode::LeftTrigger));
+}
+
+TEST_F(ConfigTest, KeyComboList_MixedDeviceCombos)
+{
+    Config::KeyComboList combos;
+
+    Config::register_key_combo("Hotkeys", "Action", "action", [&combos](const Config::KeyComboList &c)
+                               { combos = c; }, "Ctrl+F3,Mouse4,Gamepad_LB+Gamepad_A");
+
+    ASSERT_EQ(combos.size(), 3u);
+    EXPECT_EQ(combos[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(combos[0].modifiers.size(), 1u);
+    EXPECT_EQ(combos[0].modifiers[0], keyboard_key(0x11));
+    EXPECT_EQ(combos[1].keys[0], mouse_button(0x05));
+    EXPECT_TRUE(combos[1].modifiers.empty());
+    EXPECT_EQ(combos[2].keys[0], gamepad_button(GamepadCode::A));
+    ASSERT_EQ(combos[2].modifiers.size(), 1u);
+    EXPECT_EQ(combos[2].modifiers[0], gamepad_button(GamepadCode::LeftBumper));
 }

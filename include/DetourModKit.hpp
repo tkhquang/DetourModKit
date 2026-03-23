@@ -58,6 +58,7 @@ using DMKInputMode = DetourModKit::InputMode;
 using DMKInputSource = DetourModKit::InputSource;
 using DMKInputCode = DetourModKit::InputCode;
 using DMKKeyCombo = DetourModKit::Config::KeyCombo;
+using DMKKeyComboList = DetourModKit::Config::KeyComboList;
 using DMKInputBinding = DetourModKit::InputBinding;
 #endif // DMK_NO_SHORT_NAMES
 

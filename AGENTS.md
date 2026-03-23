@@ -177,7 +177,8 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 
 These are called at 60+ fps from game hook callbacks. Never add allocations, locks, or blocking I/O to them:
 
-- `InputPoller::is_binding_active()` — single atomic load
+- `InputPoller::is_binding_active(index)` — single atomic load
+- `InputPoller::is_binding_active(name)` — hash lookup + atomic load per binding (typically 1–3)
 - `HookManager::with_inline_hook()` — shared_lock read
 - `Logger::log()` level check — single atomic load
 - `Logger::log()` async enqueue — atomic shared_ptr load + lock-free queue push
