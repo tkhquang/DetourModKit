@@ -2,6 +2,7 @@
 #define INPUT_HPP
 
 #include "DetourModKit/input_codes.hpp"
+#include "DetourModKit/config.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -272,6 +273,18 @@ namespace DetourModKit
                             std::function<void()> callback);
 
         /**
+         * @brief Registers press-mode bindings from a KeyComboList.
+         * @details Registers one binding per combo in the list. All bindings share
+         *          the same name, enabling OR-logic via is_binding_active().
+         *          Must be called before start(). Ignored if the poller is already running.
+         * @param name Shared binding name for all combos.
+         * @param combos List of key combinations (each combo is registered independently).
+         * @param callback Function to invoke on key press.
+         */
+        void register_press(const std::string &name, const Config::KeyComboList &combos,
+                            std::function<void()> callback);
+
+        /**
          * @brief Registers a hold-mode binding.
          * @details The callback fires with true when any input in the list is pressed,
          *          and false when all are released. Must be called before start().
@@ -295,6 +308,18 @@ namespace DetourModKit
          */
         void register_hold(const std::string &name, const std::vector<InputCode> &keys,
                            const std::vector<InputCode> &modifiers,
+                           std::function<void(bool)> callback);
+
+        /**
+         * @brief Registers hold-mode bindings from a KeyComboList.
+         * @details Registers one binding per combo in the list. All bindings share
+         *          the same name, enabling OR-logic via is_binding_active().
+         *          Must be called before start(). Ignored if the poller is already running.
+         * @param name Shared binding name for all combos.
+         * @param combos List of key combinations (each combo is registered independently).
+         * @param callback Function invoked with the hold state (true = held, false = released).
+         */
+        void register_hold(const std::string &name, const Config::KeyComboList &combos,
                            std::function<void(bool)> callback);
 
         /**
