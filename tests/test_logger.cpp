@@ -1022,3 +1022,205 @@ TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
     EXPECT_EQ(timestamp[16], ':');
     EXPECT_EQ(timestamp[19], '.');
 }
+
+TEST_F(LoggerTest, ConcurrentFileAccess_ReadWhileLogging)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    const int pre_open_count = 10;
+    const int during_open_count = 20;
+    const int post_close_count = 10;
+
+    for (int i = 0; i < pre_open_count; ++i)
+    {
+        logger.info("PRE_OPEN_{}", i);
+    }
+    logger.flush();
+
+    // Simulate an external process opening the log file for reading
+    HANDLE external_handle = CreateFileA(
+        test_log_file_.string().c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    ASSERT_NE(external_handle, INVALID_HANDLE_VALUE)
+        << "Failed to open log file externally: " << GetLastError();
+
+    for (int i = 0; i < during_open_count; ++i)
+    {
+        logger.info("DURING_OPEN_{}", i);
+    }
+    logger.flush();
+
+    CloseHandle(external_handle);
+
+    for (int i = 0; i < post_close_count; ++i)
+    {
+        logger.info("POST_CLOSE_{}", i);
+    }
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    for (int i = 0; i < pre_open_count; ++i)
+    {
+        EXPECT_NE(content.find("PRE_OPEN_" + std::to_string(i)), std::string::npos)
+            << "Missing PRE_OPEN_" << i;
+    }
+    for (int i = 0; i < during_open_count; ++i)
+    {
+        EXPECT_NE(content.find("DURING_OPEN_" + std::to_string(i)), std::string::npos)
+            << "Missing DURING_OPEN_" << i;
+    }
+    for (int i = 0; i < post_close_count; ++i)
+    {
+        EXPECT_NE(content.find("POST_CLOSE_" + std::to_string(i)), std::string::npos)
+            << "Missing POST_CLOSE_" << i;
+    }
+}
+
+TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    logger.info("BEFORE_EXCLUSIVE_OPEN");
+    logger.flush();
+
+    // Open with no sharing flags (simulates an editor that locks the file)
+    HANDLE exclusive_handle = CreateFileA(
+        test_log_file_.string().c_str(),
+        GENERIC_READ,
+        0, // No sharing — exclusive lock
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+
+    // This open may or may not succeed depending on OS sharing enforcement.
+    // The key assertion is that logging continues to work regardless.
+    const int msg_count = 10;
+    for (int i = 0; i < msg_count; ++i)
+    {
+        EXPECT_NO_THROW(logger.info("EXCLUSIVE_TEST_{}", i));
+    }
+    logger.flush();
+
+    if (exclusive_handle != INVALID_HANDLE_VALUE)
+    {
+        CloseHandle(exclusive_handle);
+    }
+
+    // Re-read and verify messages written before the exclusive open
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    EXPECT_NE(content.find("BEFORE_EXCLUSIVE_OPEN"), std::string::npos);
+}
+
+TEST_F(LoggerTest, ConcurrentFileAccess_RepeatedOpenClose)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    const int iterations = 5;
+    const int msgs_per_iter = 5;
+
+    for (int iter = 0; iter < iterations; ++iter)
+    {
+        for (int i = 0; i < msgs_per_iter; ++i)
+        {
+            logger.info("ITER{}_{}", iter, i);
+        }
+        logger.flush();
+
+        HANDLE h = CreateFileA(
+            test_log_file_.string().c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr);
+
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            CloseHandle(h);
+        }
+    }
+
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    for (int iter = 0; iter < iterations; ++iter)
+    {
+        for (int i = 0; i < msgs_per_iter; ++i)
+        {
+            EXPECT_NE(content.find("ITER" + std::to_string(iter) + "_" + std::to_string(i)), std::string::npos)
+                << "Missing ITER" << iter << "_" << i;
+        }
+    }
+}
+
+TEST_F(LoggerTest, ConcurrentFileAccess_AsyncModeReadWhileLogging)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+
+    const int pre_open_count = 10;
+    const int during_open_count = 20;
+
+    for (int i = 0; i < pre_open_count; ++i)
+    {
+        logger.info("ASYNC_PRE_{}", i);
+    }
+    logger.flush();
+
+    HANDLE external_handle = CreateFileA(
+        test_log_file_.string().c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    ASSERT_NE(external_handle, INVALID_HANDLE_VALUE);
+
+    for (int i = 0; i < during_open_count; ++i)
+    {
+        logger.info("ASYNC_DURING_{}", i);
+    }
+    logger.flush();
+
+    CloseHandle(external_handle);
+
+    logger.disable_async_mode();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    for (int i = 0; i < pre_open_count; ++i)
+    {
+        EXPECT_NE(content.find("ASYNC_PRE_" + std::to_string(i)), std::string::npos)
+            << "Missing ASYNC_PRE_" << i;
+    }
+    for (int i = 0; i < during_open_count; ++i)
+    {
+        EXPECT_NE(content.find("ASYNC_DURING_" + std::to_string(i)), std::string::npos)
+            << "Missing ASYNC_DURING_" << i;
+    }
+}

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -377,7 +376,7 @@ namespace DetourModKit
     }
 
     AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config,
-                             std::shared_ptr<std::ofstream> file_stream,
+                             std::shared_ptr<WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex)
         : queue_(config.queue_capacity),
           config_(config),

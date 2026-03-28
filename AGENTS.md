@@ -73,6 +73,7 @@ include/DetourModKit/    # Public headers — one per module
   hook_manager.hpp       # SafetyHook wrapper (inline + mid hooks)
   async_logger.hpp       # Lock-free MPMC queue logger
   logger.hpp             # Synchronous singleton logger
+  win_file_stream.hpp    # Win32 shared-access file stream (CreateFile backend)
   config.hpp             # INI configuration with callback setters
   input.hpp              # Input polling (keyboard/mouse/XInput)
   input_codes.hpp        # Unified InputCode type and named key tables

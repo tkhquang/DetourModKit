@@ -3,12 +3,13 @@
 
 #include <string>
 #include <string_view>
-#include <fstream>
 #include <mutex>
 #include <memory>
 #include <chrono>
 #include <format>
 #include <atomic>
+
+#include "DetourModKit/win_file_stream.hpp"
 
 namespace DetourModKit
 {
@@ -270,7 +271,7 @@ namespace DetourModKit
         std::string log_file_name_;
         std::string timestamp_format_;
 
-        std::shared_ptr<std::ofstream> log_file_stream_ptr_;
+        std::shared_ptr<WinFileStream> log_file_stream_ptr_;
         std::shared_ptr<std::mutex> log_mutex_ptr_;
         std::atomic<LogLevel> current_log_level_{LogLevel::Info};
         std::atomic<bool> shutdown_called_{false};
