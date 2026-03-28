@@ -10,6 +10,7 @@
  */
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -59,6 +60,18 @@ namespace DetourModKit
         int code = 0;
 
         constexpr bool operator==(const InputCode &) const noexcept = default;
+    };
+
+    /**
+     * @brief Hash functor for InputCode, enabling use in unordered containers.
+     */
+    struct InputCodeHash
+    {
+        std::size_t operator()(const InputCode &ic) const noexcept
+        {
+            return std::hash<int>{}(ic.code) ^
+                   (std::hash<uint8_t>{}(static_cast<uint8_t>(ic.source)) << 16);
+        }
     };
 
     /**

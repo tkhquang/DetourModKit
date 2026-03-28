@@ -16,6 +16,7 @@
 #include <Xinput.h>
 #include <algorithm>
 #include <exception>
+#include <unordered_set>
 
 namespace DetourModKit
 {
@@ -84,6 +85,51 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Checks if a held input satisfies a required modifier.
+         * @details Returns true when the codes match exactly, or when both are
+         *          keyboard modifiers in the same family (e.g., LShift satisfies
+         *          generic Shift, and generic Shift satisfies LShift).
+         */
+        bool modifier_satisfies(const InputCode &required, const InputCode &held) noexcept
+        {
+            if (required == held)
+            {
+                return true;
+            }
+            if (required.source != InputSource::Keyboard || held.source != InputSource::Keyboard)
+            {
+                return false;
+            }
+            // Modifier family groups: {generic, left, right}
+            constexpr int families[][3] = {
+                {0x11, 0xA2, 0xA3}, // Ctrl, LCtrl, RCtrl
+                {0x10, 0xA0, 0xA1}, // Shift, LShift, RShift
+                {0x12, 0xA4, 0xA5}, // Alt, LAlt, RAlt
+            };
+            for (const auto &family : families)
+            {
+                bool req_in = false;
+                bool held_in = false;
+                for (int vk : family)
+                {
+                    if (required.code == vk)
+                    {
+                        req_in = true;
+                    }
+                    if (held.code == vk)
+                    {
+                        held_in = true;
+                    }
+                }
+                if (req_in && held_in)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
          * @brief Scans bindings to determine if any use gamepad input codes.
          * @param bindings The vector of bindings to scan.
          * @return true if at least one binding contains a gamepad InputCode.
@@ -129,13 +175,19 @@ namespace DetourModKit
           has_gamepad_bindings_(scan_for_gamepad_bindings(bindings_))
     {
         name_index_.reserve(bindings_.size());
+        std::unordered_set<InputCode, InputCodeHash> modifier_set;
         for (size_t i = 0; i < bindings_.size(); ++i)
         {
             if (!bindings_[i].name.empty())
             {
                 name_index_[bindings_[i].name].push_back(i);
             }
+            for (const auto &mod : bindings_[i].modifiers)
+            {
+                modifier_set.insert(mod);
+            }
         }
+        known_modifiers_.assign(modifier_set.begin(), modifier_set.end());
     }
 
     InputPoller::~InputPoller() noexcept
@@ -234,6 +286,7 @@ namespace DetourModKit
         const size_t count = bindings_.size();
         const int trigger_thresh = trigger_threshold_;
         const int stick_thresh = stick_threshold_;
+        const auto &known_mods = known_modifiers_;
 
         constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
         bool gamepad_was_connected = false;
@@ -282,6 +335,33 @@ namespace DetourModKit
                         {
                             modifiers_held = false;
                             break;
+                        }
+                    }
+
+                    if (modifiers_held)
+                    {
+                        // Strict matching: reject if any known modifier that is
+                        // NOT in this binding's required set is currently held.
+                        for (const auto &km : known_mods)
+                        {
+                            if (!is_code_pressed(km, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
+                            {
+                                continue;
+                            }
+                            bool is_required = false;
+                            for (const auto &mod : binding.modifiers)
+                            {
+                                if (modifier_satisfies(mod, km))
+                                {
+                                    is_required = true;
+                                    break;
+                                }
+                            }
+                            if (!is_required)
+                            {
+                                modifiers_held = false;
+                                break;
+                            }
                         }
                     }
 

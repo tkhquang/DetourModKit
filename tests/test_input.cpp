@@ -856,6 +856,227 @@ TEST_F(InputPollerTest, HoldBindingShutdownSafety)
     EXPECT_FALSE(poller.is_binding_active(0));
 }
 
+// --- InputPoller: Strict Modifier Matching ---
+
+TEST_F(InputPollerTest, StrictModifierMatchingConstruction)
+{
+    // When "V" and "Shift+V" are both registered, the poller should
+    // construct without error and track Shift as a known modifier.
+    std::vector<InputBinding> bindings;
+
+    InputBinding plain_v;
+    plain_v.name = "plain_v";
+    plain_v.keys = {keyboard_key(0x56)};
+    plain_v.mode = InputMode::Press;
+    plain_v.on_press = []() {};
+    bindings.push_back(std::move(plain_v));
+
+    InputBinding shift_v;
+    shift_v.name = "shift_v";
+    shift_v.keys = {keyboard_key(0x56)};
+    shift_v.modifiers = {keyboard_key(0x10)};
+    shift_v.mode = InputMode::Press;
+    shift_v.on_press = []() {};
+    bindings.push_back(std::move(shift_v));
+
+    InputPoller poller(std::move(bindings));
+    EXPECT_EQ(poller.binding_count(), 2u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, StrictModifierMatchingMultipleModifiers)
+{
+    // "A", "Ctrl+A", "Ctrl+Shift+A" — three levels of modifier specificity
+    std::vector<InputBinding> bindings;
+
+    InputBinding plain;
+    plain.name = "plain_a";
+    plain.keys = {keyboard_key(0x41)};
+    plain.mode = InputMode::Press;
+    plain.on_press = []() {};
+    bindings.push_back(std::move(plain));
+
+    InputBinding ctrl_a;
+    ctrl_a.name = "ctrl_a";
+    ctrl_a.keys = {keyboard_key(0x41)};
+    ctrl_a.modifiers = {keyboard_key(0x11)};
+    ctrl_a.mode = InputMode::Press;
+    ctrl_a.on_press = []() {};
+    bindings.push_back(std::move(ctrl_a));
+
+    InputBinding ctrl_shift_a;
+    ctrl_shift_a.name = "ctrl_shift_a";
+    ctrl_shift_a.keys = {keyboard_key(0x41)};
+    ctrl_shift_a.modifiers = {keyboard_key(0x11), keyboard_key(0x10)};
+    ctrl_shift_a.mode = InputMode::Press;
+    ctrl_shift_a.on_press = []() {};
+    bindings.push_back(std::move(ctrl_shift_a));
+
+    InputPoller poller(std::move(bindings));
+    EXPECT_EQ(poller.binding_count(), 3u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, StrictModifierMatchingNoModifierBindingsUnaffected)
+{
+    // When no binding uses modifiers, all bindings should work normally
+    std::vector<InputBinding> bindings;
+
+    InputBinding a;
+    a.name = "key_a";
+    a.keys = {keyboard_key(0x41)};
+    a.mode = InputMode::Press;
+    a.on_press = []() {};
+    bindings.push_back(std::move(a));
+
+    InputBinding b;
+    b.name = "key_b";
+    b.keys = {keyboard_key(0x42)};
+    b.mode = InputMode::Press;
+    b.on_press = []() {};
+    bindings.push_back(std::move(b));
+
+    InputPoller poller(std::move(bindings));
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, StrictModifierMatchingWithHoldMode)
+{
+    // Hold mode should also respect strict modifier matching
+    std::vector<InputBinding> bindings;
+
+    InputBinding plain;
+    plain.name = "hold_v";
+    plain.keys = {keyboard_key(0x56)};
+    plain.mode = InputMode::Hold;
+    plain.on_state_change = [](bool) {};
+    bindings.push_back(std::move(plain));
+
+    InputBinding shift;
+    shift.name = "shift_hold_v";
+    shift.keys = {keyboard_key(0x56)};
+    shift.modifiers = {keyboard_key(0x10)};
+    shift.mode = InputMode::Hold;
+    shift.on_state_change = [](bool) {};
+    bindings.push_back(std::move(shift));
+
+    InputPoller poller(std::move(bindings));
+    EXPECT_EQ(poller.binding_count(), 2u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, StrictModifierMatchingNonStandardModifier)
+{
+    // Non-standard modifier: "A+B" where A is the modifier
+    std::vector<InputBinding> bindings;
+
+    InputBinding plain_b;
+    plain_b.name = "plain_b";
+    plain_b.keys = {keyboard_key(0x42)};
+    plain_b.mode = InputMode::Press;
+    plain_b.on_press = []() {};
+    bindings.push_back(std::move(plain_b));
+
+    InputBinding a_plus_b;
+    a_plus_b.name = "a_plus_b";
+    a_plus_b.keys = {keyboard_key(0x42)};
+    a_plus_b.modifiers = {keyboard_key(0x41)};
+    a_plus_b.mode = InputMode::Press;
+    a_plus_b.on_press = []() {};
+    bindings.push_back(std::move(a_plus_b));
+
+    InputPoller poller(std::move(bindings));
+    EXPECT_EQ(poller.binding_count(), 2u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, StrictModifierMatchingGamepadBindings)
+{
+    // Gamepad modifiers should be tracked in the known modifiers set
+    std::vector<InputBinding> bindings;
+
+    InputBinding plain;
+    plain.name = "gp_a";
+    plain.keys = {gamepad_button(GamepadCode::A)};
+    plain.mode = InputMode::Press;
+    plain.on_press = []() {};
+    bindings.push_back(std::move(plain));
+
+    InputBinding lb_a;
+    lb_a.name = "lb_gp_a";
+    lb_a.keys = {gamepad_button(GamepadCode::A)};
+    lb_a.modifiers = {gamepad_button(GamepadCode::LeftBumper)};
+    lb_a.mode = InputMode::Press;
+    lb_a.on_press = []() {};
+    bindings.push_back(std::move(lb_a));
+
+    InputPoller poller(std::move(bindings));
+    EXPECT_EQ(poller.binding_count(), 2u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
+TEST_F(InputPollerTest, StrictModifierMatchingCrossFeatureIsolation)
+{
+    // Modifier from unrelated binding blocks other bare bindings.
+    // Feature A: "V", Feature B: "Shift+G" — Shift is known, so
+    // plain "V" won't fire while Shift is held.
+    std::vector<InputBinding> bindings;
+
+    InputBinding plain_v;
+    plain_v.name = "feature_a";
+    plain_v.keys = {keyboard_key(0x56)};
+    plain_v.mode = InputMode::Press;
+    plain_v.on_press = []() {};
+    bindings.push_back(std::move(plain_v));
+
+    InputBinding shift_g;
+    shift_g.name = "feature_b";
+    shift_g.keys = {keyboard_key(0x47)};
+    shift_g.modifiers = {keyboard_key(0x10)};
+    shift_g.mode = InputMode::Press;
+    shift_g.on_press = []() {};
+    bindings.push_back(std::move(shift_g));
+
+    InputPoller poller(std::move(bindings));
+    EXPECT_EQ(poller.binding_count(), 2u);
+
+    poller.start();
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    EXPECT_TRUE(poller.is_running());
+
+    poller.shutdown();
+}
+
 // --- InputManager: Focus, Modifiers, Active State ---
 
 TEST_F(InputManagerTest, RegisterPressWithModifiers)

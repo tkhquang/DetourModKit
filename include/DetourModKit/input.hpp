@@ -15,6 +15,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace DetourModKit
@@ -61,7 +62,10 @@ namespace DetourModKit
      *
      *          The keys vector uses OR logic: any single input triggers the binding.
      *          The modifiers vector uses AND logic: all modifiers must be held
-     *          simultaneously for the binding to activate.
+     *          simultaneously for the binding to activate. Modifier matching is
+     *          strict: any key that appears as a modifier in *any* registered
+     *          binding will block bindings that do not list it as a required
+     *          modifier. This prevents "V" from firing when "Shift+V" is pressed.
      *
      *          Each InputCode identifies both the device source (keyboard, mouse,
      *          gamepad) and the button/key code. All codes within a binding should
@@ -204,6 +208,7 @@ namespace DetourModKit
 
         std::vector<InputBinding> bindings_;
         std::unordered_map<std::string, std::vector<size_t>> name_index_;
+        std::vector<InputCode> known_modifiers_;
         std::chrono::milliseconds poll_interval_;
         std::atomic<bool> require_focus_;
         std::atomic<bool> running_{false};
