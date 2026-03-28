@@ -268,7 +268,7 @@ namespace DetourModKit
      * @details Uses a lock-free queue to accept log messages from multiple threads
      *          and a dedicated writer thread to perform batched file writes.
      *          This significantly reduces latency on the producer side.
-     * @note Uses shared_ptr<ofstream> to safely handle Logger reconfiguration during runtime.
+     * @note Uses shared_ptr<WinFileStream> to safely handle Logger reconfiguration during runtime.
      */
     class AsyncLogger
     {
@@ -280,7 +280,7 @@ namespace DetourModKit
          * @param log_mutex Shared pointer to the mutex protecting the file stream.
          */
         explicit AsyncLogger(const AsyncLoggerConfig &config,
-                             std::shared_ptr<std::ofstream> file_stream,
+                             std::shared_ptr<WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex);
 
         ~AsyncLogger() noexcept;
@@ -341,7 +341,7 @@ namespace DetourModKit
         DynamicMPMCQueue queue_;
         AsyncLoggerConfig config_;
 
-        std::shared_ptr<std::ofstream> file_stream_;
+        std::shared_ptr<WinFileStream> file_stream_;
         std::shared_ptr<std::mutex> log_mutex_;
 
         std::jthread writer_thread_;

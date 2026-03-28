@@ -12,7 +12,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support and SSE2-accelerated pattern verification (when compiled with SSE2 support) for patterns >= 16 bytes. Supports `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7) and nth-occurrence matching (1-based) for patterns that hit multiple locations. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code.
 * **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline and mid-function hooks, by direct address or AOB scan.
 * **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `Ctrl+Shift+F3`). Multiple independent combos can be comma-separated (e.g., `F3,Gamepad_LT+Gamepad_B`). Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats are all supported. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
-* **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios and **format string placeholders** for concise log messages.
+* **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios, **format string placeholders** for concise log messages, and **concurrent file access** via Win32 shared-access file handles (log files can be read by external tools while logging is active).
 * **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation, inline buffer optimization for messages of size <= 256 bytes (inclusive), and message size validation with truncation for messages larger than 16 MB (messages > 16 MB are truncated to 16 MB rather than rejected).
 * **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache.
 * **String Utilities:** Whitespace trimming for string cleanup.
@@ -127,6 +127,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── input.hpp             <-- Input/hotkey system
     │   │   ├── input_codes.hpp       <-- Unified input codes (keyboard/mouse/gamepad)
     │   │   ├── logger.hpp            <-- Synchronous logger
+    │   │   ├── win_file_stream.hpp   <-- Win32 shared-access file stream
     │   │   └── ...
     │   ├── DetourModKit.hpp          <-- Main DetourModKit include
     │   ├── DirectXMath/              <-- DirectXMath headers

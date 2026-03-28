@@ -11,7 +11,6 @@
 #include <iostream>
 #include <stdexcept>
 #include <array>
-#include <map>
 
 namespace DetourModKit
 {
@@ -128,7 +127,7 @@ namespace DetourModKit
     }
 
     Logger::Logger()
-        : log_file_stream_ptr_(std::make_shared<std::ofstream>()),
+        : log_file_stream_ptr_(std::make_shared<WinFileStream>()),
           log_mutex_ptr_(std::make_shared<std::mutex>())
     {
         {
