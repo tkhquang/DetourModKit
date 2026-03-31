@@ -259,9 +259,9 @@ namespace DetourModKit
         }
     };
 
-    // Compile-time validation: Default queue capacity must be power of 2
-    static_assert((DEFAULT_QUEUE_CAPACITY & (DEFAULT_QUEUE_CAPACITY - 1)) == 0,
-                  "DEFAULT_QUEUE_CAPACITY must be a power of 2");
+    // Compile-time validation: Default queue capacity must be a power of 2 and >= 2
+    static_assert(DEFAULT_QUEUE_CAPACITY >= 2 && (DEFAULT_QUEUE_CAPACITY & (DEFAULT_QUEUE_CAPACITY - 1)) == 0,
+                  "DEFAULT_QUEUE_CAPACITY must be a power of 2 and at least 2");
 
     /**
      * @class AsyncLogger
