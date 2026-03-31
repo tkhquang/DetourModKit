@@ -1187,7 +1187,7 @@ TEST(LogMessageTest, TruncatedMessage_UsesCorrectSize)
     EXPECT_EQ(msg.message().size(), truncation_boundary);
 }
 
-TEST(LogMessageTest, InlineBoundary_256Bytes)
+TEST(LogMessageTest, InlineBoundary_512Bytes)
 {
     // Exactly MAX_INLINE_SIZE should use inline buffer
     std::string exact(LogMessage::MAX_INLINE_SIZE, 'A');
@@ -1197,7 +1197,7 @@ TEST(LogMessageTest, InlineBoundary_256Bytes)
     EXPECT_EQ(msg_inline.overflow, nullptr);
 }
 
-TEST(LogMessageTest, OverflowBoundary_257Bytes)
+TEST(LogMessageTest, OverflowBoundary_513Bytes)
 {
     // MAX_INLINE_SIZE + 1 should use overflow path
     std::string overflow_msg(LogMessage::MAX_INLINE_SIZE + 1, 'B');

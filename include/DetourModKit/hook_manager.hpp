@@ -333,7 +333,7 @@ namespace DetourModKit
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
         [[nodiscard]] std::expected<std::string, HookError> create_inline_hook(
-            const std::string &name,
+            std::string_view name,
             uintptr_t target_address,
             void *detour_function,
             void **original_trampoline,
@@ -352,10 +352,10 @@ namespace DetourModKit
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
         [[nodiscard]] std::expected<std::string, HookError> create_inline_hook_aob(
-            const std::string &name,
+            std::string_view name,
             uintptr_t module_base,
             size_t module_size,
-            const std::string &aob_pattern_str,
+            std::string_view aob_pattern_str,
             ptrdiff_t aob_offset,
             void *detour_function,
             void **original_trampoline,
@@ -370,7 +370,7 @@ namespace DetourModKit
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
         [[nodiscard]] std::expected<std::string, HookError> create_mid_hook(
-            const std::string &name,
+            std::string_view name,
             uintptr_t target_address,
             safetyhook::MidHookFn detour_function,
             const HookConfig &config = HookConfig());
@@ -387,10 +387,10 @@ namespace DetourModKit
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          */
         [[nodiscard]] std::expected<std::string, HookError> create_mid_hook_aob(
-            const std::string &name,
+            std::string_view name,
             uintptr_t module_base,
             size_t module_size,
-            const std::string &aob_pattern_str,
+            std::string_view aob_pattern_str,
             ptrdiff_t aob_offset,
             safetyhook::MidHookFn detour_function,
             const HookConfig &config = HookConfig());
@@ -400,7 +400,7 @@ namespace DetourModKit
          * @param hook_id The name of the hook to remove.
          * @return true if the hook was found and successfully removed, false otherwise.
          */
-        [[nodiscard]] bool remove_hook(const std::string &hook_id);
+        [[nodiscard]] bool remove_hook(std::string_view hook_id);
 
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
@@ -412,21 +412,21 @@ namespace DetourModKit
          * @param hook_id The name of the hook to enable.
          * @return true if the hook was found and successfully enabled, false otherwise.
          */
-        [[nodiscard]] bool enable_hook(const std::string &hook_id);
+        [[nodiscard]] bool enable_hook(std::string_view hook_id);
 
         /**
          * @brief Disables an active hook temporarily without removing it.
          * @param hook_id The name of the hook to disable.
          * @return true if the hook was found and successfully disabled, false otherwise.
          */
-        [[nodiscard]] bool disable_hook(const std::string &hook_id);
+        [[nodiscard]] bool disable_hook(std::string_view hook_id);
 
         /**
          * @brief Retrieves the current status of a hook.
          * @param hook_id The name of the hook.
          * @return std::optional<HookStatus> The current status, or std::nullopt if not found.
          */
-        [[nodiscard]] std::optional<HookStatus> get_hook_status(const std::string &hook_id) const;
+        [[nodiscard]] std::optional<HookStatus> get_hook_status(std::string_view hook_id) const;
 
         /**
          * @brief Gets a summary of hook counts categorized by their status.
@@ -458,7 +458,7 @@ namespace DetourModKit
             requires std::invocable<F, InlineHook &> &&
                      (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
                      (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
-        [[nodiscard]] auto with_inline_hook(const std::string &hook_id, F &&fn)
+        [[nodiscard]] auto with_inline_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
             if (get_reentrancy_guard() > 0)
@@ -468,7 +468,8 @@ namespace DetourModKit
             }
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
-            auto it = m_hooks.find(hook_id);
+            const std::string key{hook_id};
+            auto it = m_hooks.find(key);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<InlineHook &>(*it->second));
@@ -495,7 +496,7 @@ namespace DetourModKit
             requires std::invocable<F, InlineHook &> &&
                      (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
                      (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
-        [[nodiscard]] auto try_with_inline_hook(const std::string &hook_id, F &&fn)
+        [[nodiscard]] auto try_with_inline_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
             if (get_reentrancy_guard() > 0)
@@ -509,7 +510,8 @@ namespace DetourModKit
                 return std::nullopt;
             }
             ReentrancyGuard guard(get_reentrancy_guard());
-            auto it = m_hooks.find(hook_id);
+            const std::string key{hook_id};
+            auto it = m_hooks.find(key);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<InlineHook &>(*it->second));
@@ -534,7 +536,7 @@ namespace DetourModKit
             requires std::invocable<F, MidHook &> &&
                      (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
                      (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
-        [[nodiscard]] auto with_mid_hook(const std::string &hook_id, F &&fn)
+        [[nodiscard]] auto with_mid_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
             if (get_reentrancy_guard() > 0)
@@ -544,7 +546,8 @@ namespace DetourModKit
             }
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
-            auto it = m_hooks.find(hook_id);
+            const std::string key{hook_id};
+            auto it = m_hooks.find(key);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<MidHook &>(*it->second));
@@ -571,7 +574,7 @@ namespace DetourModKit
             requires std::invocable<F, MidHook &> &&
                      (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
                      (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
-        [[nodiscard]] auto try_with_mid_hook(const std::string &hook_id, F &&fn)
+        [[nodiscard]] auto try_with_mid_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
             if (get_reentrancy_guard() > 0)
@@ -585,7 +588,8 @@ namespace DetourModKit
                 return std::nullopt;
             }
             ReentrancyGuard guard(get_reentrancy_guard());
-            auto it = m_hooks.find(hook_id);
+            const std::string key{hook_id};
+            auto it = m_hooks.find(key);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<MidHook &>(*it->second));
@@ -623,7 +627,7 @@ namespace DetourModKit
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;
 
         // Non-locking variant - caller must already hold m_hooks_mutex
-        bool hook_id_exists_locked(const std::string &hook_id) const;
+        bool hook_id_exists_locked(std::string_view hook_id) const;
     };
 } // namespace DetourModKit
 

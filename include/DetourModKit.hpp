@@ -1,4 +1,5 @@
-#pragma once
+#ifndef DETOURMODKIT_HPP
+#define DETOURMODKIT_HPP
 
 /**
  * @file DetourModKit.hpp
@@ -92,3 +93,5 @@ inline void DMK_Shutdown()
     // 5. Logger last (no more logging after this)
     DetourModKit::Logger::get_instance().shutdown();
 }
+
+#endif // DETOURMODKIT_HPP

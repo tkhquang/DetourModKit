@@ -245,7 +245,7 @@ namespace DetourModKit
         return active_states_[index].load(std::memory_order_relaxed) != 0;
     }
 
-    bool InputPoller::is_binding_active(const std::string &name) const noexcept
+    bool InputPoller::is_binding_active(std::string_view name) const noexcept
     {
         const auto it = name_index_.find(name);
         if (it != name_index_.end())
@@ -492,13 +492,13 @@ namespace DetourModKit
 
     // --- InputManager ---
 
-    void InputManager::register_press(const std::string &name, const std::vector<InputCode> &keys,
+    void InputManager::register_press(std::string_view name, const std::vector<InputCode> &keys,
                                       std::function<void()> callback)
     {
         register_press(name, keys, {}, std::move(callback));
     }
 
-    void InputManager::register_press(const std::string &name, const std::vector<InputCode> &keys,
+    void InputManager::register_press(std::string_view name, const std::vector<InputCode> &keys,
                                       const std::vector<InputCode> &modifiers,
                                       std::function<void()> callback)
     {
@@ -512,7 +512,7 @@ namespace DetourModKit
         }
 
         InputBinding binding;
-        binding.name = name;
+        binding.name = std::string{name};
         binding.keys = keys;
         binding.modifiers = modifiers;
         binding.mode = InputMode::Press;
@@ -520,13 +520,13 @@ namespace DetourModKit
         pending_bindings_.push_back(std::move(binding));
     }
 
-    void InputManager::register_hold(const std::string &name, const std::vector<InputCode> &keys,
+    void InputManager::register_hold(std::string_view name, const std::vector<InputCode> &keys,
                                      std::function<void(bool)> callback)
     {
         register_hold(name, keys, {}, std::move(callback));
     }
 
-    void InputManager::register_hold(const std::string &name, const std::vector<InputCode> &keys,
+    void InputManager::register_hold(std::string_view name, const std::vector<InputCode> &keys,
                                      const std::vector<InputCode> &modifiers,
                                      std::function<void(bool)> callback)
     {
@@ -540,7 +540,7 @@ namespace DetourModKit
         }
 
         InputBinding binding;
-        binding.name = name;
+        binding.name = std::string{name};
         binding.keys = keys;
         binding.modifiers = modifiers;
         binding.mode = InputMode::Hold;
@@ -548,7 +548,7 @@ namespace DetourModKit
         pending_bindings_.push_back(std::move(binding));
     }
 
-    void InputManager::register_press(const std::string &name, const Config::KeyComboList &combos,
+    void InputManager::register_press(std::string_view name, const Config::KeyComboList &combos,
                                       std::function<void()> callback)
     {
         for (const auto &combo : combos)
@@ -557,7 +557,7 @@ namespace DetourModKit
         }
     }
 
-    void InputManager::register_hold(const std::string &name, const Config::KeyComboList &combos,
+    void InputManager::register_hold(std::string_view name, const Config::KeyComboList &combos,
                                      std::function<void(bool)> callback)
     {
         for (const auto &combo : combos)
@@ -643,7 +643,7 @@ namespace DetourModKit
         return pending_bindings_.size();
     }
 
-    bool InputManager::is_binding_active(const std::string &name) const noexcept
+    bool InputManager::is_binding_active(std::string_view name) const noexcept
     {
         auto p = active_poller_.load(std::memory_order_acquire);
         if (p)

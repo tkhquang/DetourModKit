@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace DetourModKit
@@ -59,19 +60,19 @@ namespace DetourModKit
         using KeyComboList = std::vector<KeyCombo>;
 
         /// Registers an integer configuration item.
-        void register_int(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+        void register_int(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                          std::function<void(int)> setter, int default_value);
 
         /// Registers a floating-point configuration item.
-        void register_float(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+        void register_float(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                            std::function<void(float)> setter, float default_value);
 
         /// Registers a boolean configuration item.
-        void register_bool(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+        void register_bool(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                           std::function<void(bool)> setter, bool default_value);
 
         /// Registers a string configuration item.
-        void register_string(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
+        void register_string(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                             std::function<void(const std::string &)> setter, std::string default_value);
 
         /**
@@ -87,8 +88,8 @@ namespace DetourModKit
          * @param setter Callback invoked with the parsed KeyComboList.
          * @param default_value_str Default value string in the same format.
          */
-        void register_key_combo(const std::string &section, const std::string &ini_key, const std::string &log_key_name,
-                               std::function<void(const KeyComboList &)> setter, const std::string &default_value_str);
+        void register_key_combo(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
+                               std::function<void(const KeyComboList &)> setter, std::string_view default_value_str);
 
         /**
          * @brief Loads all registered configuration settings from the specified INI file.
@@ -98,7 +99,7 @@ namespace DetourModKit
          * @param ini_filename The base filename of the INI file. Path will be resolved
          *                     relative to the mod's runtime directory.
          */
-        void load(const std::string &ini_filename);
+        void load(std::string_view ini_filename);
 
         /**
          * @brief Logs the current values of all registered configuration settings.

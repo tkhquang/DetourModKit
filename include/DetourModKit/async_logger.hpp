@@ -106,7 +106,7 @@ namespace DetourModKit
     /**
      * @struct LogMessage
      * @brief A log entry with inline buffer optimization and overflow handling.
-     * @details Messages <= 256 bytes are stored inline. Larger messages use
+     * @details Messages <= 512 bytes are stored inline. Larger messages use
      *          heap allocation via StringPool.
      */
     struct LogMessage
@@ -115,7 +115,7 @@ namespace DetourModKit
         std::chrono::system_clock::time_point timestamp;
         std::thread::id thread_id;
 
-        static constexpr size_t MAX_INLINE_SIZE = 256;
+        static constexpr size_t MAX_INLINE_SIZE = 512;
         static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
         std::array<char, MAX_INLINE_SIZE> buffer;
         size_t length{0};
@@ -160,6 +160,8 @@ namespace DetourModKit
 
         DynamicMPMCQueue(const DynamicMPMCQueue &) = delete;
         DynamicMPMCQueue &operator=(const DynamicMPMCQueue &) = delete;
+        DynamicMPMCQueue(DynamicMPMCQueue &&) = delete;
+        DynamicMPMCQueue &operator=(DynamicMPMCQueue &&) = delete;
 
         /**
          * @brief Attempts to push an item into the queue.
