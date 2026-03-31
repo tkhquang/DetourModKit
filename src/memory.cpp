@@ -882,10 +882,23 @@ void DetourModKit::Memory::shutdown_cache()
 
     // Wait for in-flight readers to finish before destroying data structures.
     // Readers increment s_activeReaders on entry and decrement on exit.
-    // acquire ordering ensures we see the latest reader decrements.
+    // ActiveReaderGuard is RAII so readers always decrement; this loop is
+    // bounded by the maximum time a single cache lookup can take.
+    // Escalate from yield to sleep to avoid burning CPU if a reader is
+    // preempted by the OS scheduler.
+    constexpr int yield_spins = 4096;
+    int spins = 0;
     while (MemoryUtilsCacheInternal::s_activeReaders.load(std::memory_order_acquire) > 0)
     {
-        std::this_thread::yield();
+        if (spins < yield_spins)
+        {
+            std::this_thread::yield();
+        }
+        else
+        {
+            std::this_thread::sleep_for(std::chrono::microseconds(100));
+        }
+        ++spins;
     }
 
     // All readers have exited - safe to destroy data structures

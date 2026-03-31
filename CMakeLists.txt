@@ -24,6 +24,10 @@ if(MSVC)
   # Add /WX to treat warnings as errors in CI or for strict builds if desired.
   add_compile_options(/W4)
 
+  # Security hardening: ASLR, DEP, and Control Flow Guard
+  add_link_options(/DYNAMICBASE /NXCOMPAT /GUARD:CF)
+  add_compile_options(/guard:cf)
+
   # Debug builds: embed CodeView debug info directly into .obj files (/Z7)
   # to avoid PDB file locking issues during parallel builds.
   # Release builds: no debug info to minimize binary size.
@@ -38,6 +42,9 @@ if(MSVC)
 else()
   # GCC/Clang specific flags
   add_compile_options(-Wall -Wextra -Wpedantic)
+
+  # Security hardening: ASLR and DEP (NX) for MinGW targets
+  add_link_options(-Wl,--dynamicbase -Wl,--nxcompat)
 
   # Override CMake's default -O3 for Release with -O2.
   # -O2 provides a better code-size/performance tradeoff; the scanner's

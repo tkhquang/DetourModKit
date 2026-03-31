@@ -1,5 +1,5 @@
-#ifndef HOOK_MANAGER_HPP
-#define HOOK_MANAGER_HPP
+#ifndef DETOURMODKIT_HOOK_MANAGER_HPP
+#define DETOURMODKIT_HOOK_MANAGER_HPP
 
 #include <string>
 #include <unordered_map>
@@ -627,4 +627,4 @@ namespace DetourModKit
     };
 } // namespace DetourModKit
 
-#endif // HOOK_MANAGER_HPP
+#endif // DETOURMODKIT_HOOK_MANAGER_HPP

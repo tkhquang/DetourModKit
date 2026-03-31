@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <process.h>
 #include <regex>
 #include <cstdint>
 
@@ -18,7 +19,9 @@ class AsyncLoggerTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        test_log_file_ = std::filesystem::temp_directory_path() / "test_async_logger.log";
+        static int test_counter = 0;
+        test_log_file_ = std::filesystem::temp_directory_path() /
+                         ("test_async_logger_" + std::to_string(_getpid()) + "_" + std::to_string(test_counter++) + ".log");
     }
 
     void TearDown() override

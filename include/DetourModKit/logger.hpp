@@ -1,5 +1,5 @@
-#ifndef LOGGER_HPP
-#define LOGGER_HPP
+#ifndef DETOURMODKIT_LOGGER_HPP
+#define DETOURMODKIT_LOGGER_HPP
 
 #include <string>
 #include <string_view>
@@ -285,4 +285,4 @@ namespace DetourModKit
     };
 } // namespace DetourModKit
 
-#endif // LOGGER_HPP
+#endif // DETOURMODKIT_LOGGER_HPP

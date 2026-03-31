@@ -236,7 +236,7 @@ namespace DetourModKit
                 auto local_logger = async_logger_.load(std::memory_order_acquire);
                 if (local_logger)
                 {
-                    static_cast<void>(local_logger->enqueue(level, std::string(message)));
+                    static_cast<void>(local_logger->enqueue(level, message));
                     return;
                 }
             }

@@ -1,4 +1,5 @@
-#pragma once
+#ifndef DETOURMODKIT_FORMAT_HPP
+#define DETOURMODKIT_FORMAT_HPP
 
 /**
  * @file format.hpp
@@ -144,3 +145,5 @@ namespace DetourModKit
 
     } // namespace Format
 } // namespace DetourModKit
+
+#endif // DETOURMODKIT_FORMAT_HPP

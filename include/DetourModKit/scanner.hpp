@@ -1,5 +1,5 @@
-#ifndef SCANNER_HPP
-#define SCANNER_HPP
+#ifndef DETOURMODKIT_SCANNER_HPP
+#define DETOURMODKIT_SCANNER_HPP
 
 #include <vector>
 #include <string>
@@ -120,4 +120,4 @@ namespace DetourModKit
     } // namespace Scanner
 } // namespace DetourModKit
 
-#endif // SCANNER_HPP
+#endif // DETOURMODKIT_SCANNER_HPP

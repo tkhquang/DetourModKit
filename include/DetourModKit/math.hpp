@@ -1,4 +1,6 @@
-#pragma once
+#ifndef DETOURMODKIT_MATH_HPP
+#define DETOURMODKIT_MATH_HPP
+
 /**
  * @file math.hpp
  * @brief Provides basic mathematical utility functions.
@@ -23,3 +25,5 @@ namespace DetourModKit
 
     } // namespace Math
 } // namespace DetourModKit
+
+#endif // DETOURMODKIT_MATH_HPP

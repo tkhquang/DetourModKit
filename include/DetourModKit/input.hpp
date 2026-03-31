@@ -1,5 +1,5 @@
-#ifndef INPUT_HPP
-#define INPUT_HPP
+#ifndef DETOURMODKIT_INPUT_HPP
+#define DETOURMODKIT_INPUT_HPP
 
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/config.hpp"
@@ -412,4 +412,4 @@ namespace DetourModKit
     };
 } // namespace DetourModKit
 
-#endif // INPUT_HPP
+#endif // DETOURMODKIT_INPUT_HPP
