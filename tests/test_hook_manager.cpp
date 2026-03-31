@@ -757,6 +757,72 @@ TEST_F(HookManagerTest, WithMidHook_NotFound)
     EXPECT_FALSE(result.has_value());
 }
 
+TEST_F(HookManagerTest, HotReload_InlineHookAfterShutdown)
+{
+    void *tramp = nullptr;
+
+    auto r1 = hook_manager_->create_inline_hook(
+        "PreShutdownHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(r1.has_value());
+
+    hook_manager_->shutdown();
+    EXPECT_TRUE(hook_manager_->get_hook_ids().empty());
+
+    tramp = nullptr;
+    auto r2 = hook_manager_->create_inline_hook(
+        "PostShutdownHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(r2.has_value()) << "Hook creation must succeed after shutdown (hot-reload)";
+    EXPECT_NE(tramp, nullptr);
+}
+
+TEST_F(HookManagerTest, HotReload_MidHookAfterShutdown)
+{
+    auto detour_fn = [](safetyhook::Context &) {};
+
+    auto r1 = hook_manager_->create_mid_hook(
+        "PreShutdownMid",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(r1.has_value());
+
+    hook_manager_->shutdown();
+
+    auto r2 = hook_manager_->create_mid_hook(
+        "PostShutdownMid",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(r2.has_value()) << "Mid hook creation must succeed after shutdown (hot-reload)";
+}
+
+TEST_F(HookManagerTest, ShutdownThenRemoveAll_Succeeds)
+{
+    void *tramp = nullptr;
+
+    auto r1 = hook_manager_->create_inline_hook(
+        "ShutRemAll",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(r1.has_value());
+
+    hook_manager_->shutdown();
+    hook_manager_->remove_all_hooks();
+
+    tramp = nullptr;
+    auto r2 = hook_manager_->create_inline_hook(
+        "AfterShutRemAll",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(r2.has_value());
+}
+
 TEST_F(HookManagerTest, WithInlineHook_WrongType)
 {
     auto detour_fn = [](safetyhook::Context &) {};
@@ -1379,36 +1445,6 @@ TEST_F(HookManagerTest, MidHook_GetDestination_Noexcept)
 
     EXPECT_TRUE(hook_result.has_value());
     EXPECT_TRUE(*hook_result);
-}
-
-TEST_F(HookManagerTest, CreateInlineHook_AfterShutdown_ReturnsShutdownInProgress)
-{
-    hook_manager_->shutdown();
-
-    void *tramp = nullptr;
-    auto result = hook_manager_->create_inline_hook(
-        "PostShutdownHook",
-        reinterpret_cast<uintptr_t>(&real_hook_target_add),
-        reinterpret_cast<void *>(&real_hook_detour_add),
-        &tramp);
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), HookError::ShutdownInProgress);
-    EXPECT_EQ(tramp, nullptr);
-}
-
-TEST_F(HookManagerTest, CreateMidHook_AfterShutdown_ReturnsShutdownInProgress)
-{
-    hook_manager_->shutdown();
-
-    auto detour_fn = [](safetyhook::Context &) {};
-    auto result = hook_manager_->create_mid_hook(
-        "PostShutdownMidHook",
-        reinterpret_cast<uintptr_t>(&real_hook_target_add),
-        detour_fn);
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), HookError::ShutdownInProgress);
 }
 
 TEST_F(HookManagerTest, CreateInlineHook_TrampolineNotSetOnFailure)
