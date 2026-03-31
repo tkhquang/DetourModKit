@@ -284,15 +284,19 @@ namespace DetourModKit
         length = 0;
     }
 
-    DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
-        : capacity_(capacity), mask_(capacity - 1),
-          buffer_(std::make_unique<Slot[]>(capacity))
+    size_t DynamicMPMCQueue::validated_capacity(size_t capacity)
     {
         if ((capacity & (capacity - 1)) != 0 || capacity < 2)
         {
             throw std::invalid_argument("DynamicMPMCQueue capacity must be a power of 2 and at least 2");
         }
+        return capacity;
+    }
 
+    DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
+        : capacity_(validated_capacity(capacity)), mask_(capacity_ - 1),
+          buffer_(std::make_unique<Slot[]>(capacity_))
+    {
         for (size_t i = 0; i < capacity_; ++i)
         {
             buffer_[i].sequence.store(i, std::memory_order_relaxed);

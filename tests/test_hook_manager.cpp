@@ -1464,15 +1464,15 @@ TEST_F(HookManagerTest, CreateInlineHook_TrampolineNotSetOnFailure)
 TEST_F(HookManagerTest, ShutdownResetsFlag)
 {
     // After shutdown(), the manager accepts new hook creation requests
-    // (returns validation errors, not ShutdownInProgress)
+    // (returns validation errors, not ShutdownInProgress).
+    // Use a real target address so the test depends on the shutdown flag
+    // rather than the validation ordering of target_address == 0.
     hook_manager_->shutdown();
 
-    // Verify by checking that a subsequent call doesn't return ShutdownInProgress.
-    // Use nullptr detour to trigger InvalidDetourFunction rather than ShutdownInProgress.
     void *tramp = nullptr;
     auto result = hook_manager_->create_inline_hook(
         "PostShutdownHook",
-        0x1000,
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
         nullptr,
         &tramp);
 

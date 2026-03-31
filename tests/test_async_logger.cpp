@@ -494,8 +494,10 @@ TEST(DynamicMPMCQueueTest, ValidCapacity)
 
 TEST(DynamicMPMCQueueTest, CapacityAccessor)
 {
-    DynamicMPMCQueue queue(4);
-    EXPECT_EQ(queue.capacity(), 4u);
+    DynamicMPMCQueue queue(64);
+    EXPECT_EQ(queue.capacity(), 64u);
+    EXPECT_TRUE(queue.empty());
+    EXPECT_EQ(queue.size(), 0u);
 }
 
 TEST(DynamicMPMCQueueTest, CacheLineAlignment)
@@ -529,9 +531,25 @@ TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)
 
     LogMessage popped;
     EXPECT_TRUE(queue.try_pop(popped));
+    EXPECT_EQ(popped.message(), "msg1");
     EXPECT_TRUE(queue.try_pop(popped));
+    EXPECT_EQ(popped.message(), "msg2");
 
     EXPECT_FALSE(queue.try_pop(popped));
+    EXPECT_TRUE(queue.empty());
+
+    // Wraparound: push/pop again after draining to exercise head/tail wrap
+    LogMessage wrap1(LogLevel::Debug, "wrap1");
+    LogMessage wrap2(LogLevel::Debug, "wrap2");
+    EXPECT_TRUE(queue.try_push(wrap1));
+    EXPECT_TRUE(queue.try_push(wrap2));
+    EXPECT_EQ(queue.size(), 2u);
+
+    LogMessage wrap_out;
+    EXPECT_TRUE(queue.try_pop(wrap_out));
+    EXPECT_EQ(wrap_out.message(), "wrap1");
+    EXPECT_TRUE(queue.try_pop(wrap_out));
+    EXPECT_EQ(wrap_out.message(), "wrap2");
     EXPECT_TRUE(queue.empty());
 }
 
@@ -1627,38 +1645,3 @@ TEST(LogMessageMoveTest, MovedFromMessageReturnsEmpty)
     EXPECT_TRUE(src.message().empty());
 }
 
-// --- DynamicMPMCQueue with unique_ptr buffer ---
-
-TEST(DynamicMPMCQueueTest, CapacityIsImmutable)
-{
-    DynamicMPMCQueue queue(64);
-    EXPECT_EQ(queue.capacity(), 64);
-    EXPECT_TRUE(queue.empty());
-    EXPECT_EQ(queue.size(), 0);
-}
-
-TEST(DynamicMPMCQueueTest, PushPopRoundTrip)
-{
-    DynamicMPMCQueue queue(16);
-    LogMessage msg(LogLevel::Info, "roundtrip");
-    ASSERT_TRUE(queue.try_push(msg));
-    EXPECT_EQ(queue.size(), 1);
-
-    LogMessage out;
-    ASSERT_TRUE(queue.try_pop(out));
-    EXPECT_EQ(out.message(), "roundtrip");
-    EXPECT_TRUE(queue.empty());
-}
-
-TEST(DynamicMPMCQueueTest, FullQueueRejectsPush)
-{
-    DynamicMPMCQueue queue(2);
-
-    LogMessage m1(LogLevel::Info, "a");
-    LogMessage m2(LogLevel::Info, "b");
-    LogMessage m3(LogLevel::Info, "c");
-
-    ASSERT_TRUE(queue.try_push(m1));
-    ASSERT_TRUE(queue.try_push(m2));
-    EXPECT_FALSE(queue.try_push(m3));
-}

@@ -145,7 +145,7 @@ namespace DetourModKit
     public:
         /**
          * @brief Constructs a queue with the specified capacity.
-         * @param capacity The maximum number of elements (must be power of 2).
+         * @param capacity The maximum number of elements (must be power of 2 and >= 2).
          */
         explicit DynamicMPMCQueue(size_t capacity);
 
@@ -202,6 +202,10 @@ namespace DetourModKit
             Slot(Slot &&) = delete;
             Slot &operator=(Slot &&) = delete;
         };
+
+        /// Validates capacity before member initialization to prevent
+        /// allocation of an invalid-sized buffer in the initializer list.
+        static size_t validated_capacity(size_t capacity);
 
         // Immutable after construction — never resized.
         const size_t capacity_;
