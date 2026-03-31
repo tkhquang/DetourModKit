@@ -582,7 +582,7 @@ TEST_F(ConfigTest, KeyCombo_DefaultValueExceedingIntMax)
     EXPECT_EQ(val[0].keys[0], keyboard_key(0x44));
 }
 
-TEST_F(ConfigTest, DuplicateKeyRegistration)
+TEST_F(ConfigTest, DuplicateKeyRegistration_ReplacesExisting)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
@@ -599,10 +599,9 @@ TEST_F(ConfigTest, DuplicateKeyRegistration)
 
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // The implementation appends each registration independently to the item
-    // list. Both callbacks are invoked during load(), so both variables receive
-    // the value read from the INI file.
-    EXPECT_EQ(first_val, 77);
+    // Re-registration with the same section+key replaces the previous entry.
+    // Only the second (latest) callback receives the loaded value.
+    EXPECT_EQ(first_val, 10);
     EXPECT_EQ(second_val, 77);
 }
 
@@ -1084,4 +1083,77 @@ TEST_F(ConfigTest, LogAll_EmptyKeyComboList)
     Config::register_key_combo("Sec", "K", "empty_combo", nullptr, "");
 
     EXPECT_NO_THROW(Config::log_all());
+}
+
+TEST_F(ConfigTest, ReRegistration_ReplacesCallback)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestInt=50\n";
+    ini_file.close();
+
+    int old_val = 0;
+    int new_val = 0;
+
+    Config::register_int("TestSection", "TestInt", "old", [&old_val](int v)
+                         { old_val = v; }, 10);
+
+    // Simulate hot-reload: re-register the same section+key with a new callback.
+    Config::register_int("TestSection", "TestInt", "new", [&new_val](int v)
+                         { new_val = v; }, 20);
+
+    Config::load(test_ini_file_.string());
+
+    // The old callback is replaced — only the new callback receives the loaded value.
+    EXPECT_EQ(old_val, 10);
+    EXPECT_EQ(new_val, 50);
+}
+
+TEST_F(ConfigTest, ReRegistration_PreservesOtherKeys)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Sec]\n";
+    ini_file << "A=1\n";
+    ini_file << "B=2\n";
+    ini_file.close();
+
+    int a_val = 0, b_val = 0, a_val_new = 0;
+
+    Config::register_int("Sec", "A", "a", [&a_val](int v)
+                         { a_val = v; }, 0);
+    Config::register_int("Sec", "B", "b", [&b_val](int v)
+                         { b_val = v; }, 0);
+
+    // Re-register only key A.
+    Config::register_int("Sec", "A", "a_new", [&a_val_new](int v)
+                         { a_val_new = v; }, 0);
+
+    Config::load(test_ini_file_.string());
+
+    EXPECT_EQ(a_val, 0);
+    EXPECT_EQ(a_val_new, 1);
+    EXPECT_EQ(b_val, 2);
+}
+
+TEST_F(ConfigTest, ReRegistration_DifferentSectionsSameKey)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[Sec1]\n";
+    ini_file << "Key=10\n";
+    ini_file << "[Sec2]\n";
+    ini_file << "Key=20\n";
+    ini_file.close();
+
+    int val1 = 0, val2 = 0;
+
+    Config::register_int("Sec1", "Key", "k1", [&val1](int v)
+                         { val1 = v; }, 0);
+    Config::register_int("Sec2", "Key", "k2", [&val2](int v)
+                         { val2 = v; }, 0);
+
+    Config::load(test_ini_file_.string());
+
+    // Same key name but different sections — both should be kept independently.
+    EXPECT_EQ(val1, 10);
+    EXPECT_EQ(val2, 20);
 }

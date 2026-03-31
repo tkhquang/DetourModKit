@@ -995,3 +995,13 @@ A: Yes — this is actually the safest time to reload, since fewer game systems 
 
 **Q: What about C++ exceptions thrown during Init()?**
 A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw across DLL boundaries). Use `try/catch` inside `Init()` and return `false` on failure. The loader will log the error and leave the logic DLL unloaded until the next reload attempt.
+
+---
+
+## Hot-Reload Safety Guarantees
+
+DetourModKit's core systems are designed to be safe across DLL reload cycles:
+
+**HookManager:** `shutdown()` removes all hooks and resets its internal state, allowing subsequent `create_*_hook()` calls to succeed. The same applies to `remove_all_hooks()`. Both methods leave the singleton in a clean, reusable state for the next `Init()` cycle. There is no need to call both — either one prepares the HookManager for reuse.
+
+**Config:** `register_*()` functions use replace-on-duplicate semantics. If a new DLL registers a config item with the same section and INI key as an existing entry, the old registration is replaced rather than appended. This prevents doubled registrations across reload cycles without requiring an explicit `clear_registered_items()` call. Calling `clear_registered_items()` before re-registration is still supported but no longer required.

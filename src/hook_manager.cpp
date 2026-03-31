@@ -63,6 +63,8 @@ void HookManager::shutdown()
         hook->disable();
     }
     m_hooks.clear();
+
+    m_shutdown_called.store(false, std::memory_order_release);
 }
 
 std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &err) const

@@ -311,7 +311,9 @@ namespace DetourModKit
          * @brief Explicitly shuts down the HookManager, removing all hooks without logging.
          * @details This method is safe to call during shutdown when Logger may be destroyed.
          *          It removes all hooks without attempting to log, preventing use-after-free.
-         *          After calling shutdown(), the destructor becomes a no-op.
+         *          The shutdown flag is reset after hooks are cleared, allowing subsequent
+         *          hook creation for hot-reload scenarios. The destructor becomes a no-op
+         *          only while the flag is set during the shutdown operation itself.
          */
         void shutdown();
 

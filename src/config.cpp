@@ -427,6 +427,22 @@ namespace
         return s_registered_items;
     }
 
+    /// Replaces an existing item with the same section+key, or appends if none found.
+    /// Caller must hold getConfigMutex().
+    void replace_or_append(std::unique_ptr<ConfigItemBase> item)
+    {
+        auto &items = getRegisteredConfigItems();
+        for (auto &existing : items)
+        {
+            if (existing->section == item->section && existing->ini_key == item->ini_key)
+            {
+                existing = std::move(item);
+                return;
+            }
+        }
+        items.push_back(std::move(item));
+    }
+
     /**
      * @brief Determines the full absolute path for the INI configuration file.
      */
@@ -469,7 +485,7 @@ void DetourModKit::Config::register_int(const std::string &section, const std::s
         setter(default_value);
     }
     std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
+    replace_or_append(
         std::make_unique<CallbackConfigItem<int>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
@@ -482,7 +498,7 @@ void DetourModKit::Config::register_float(const std::string &section, const std:
         setter(default_value);
     }
     std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
+    replace_or_append(
         std::make_unique<CallbackConfigItem<float>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
@@ -495,7 +511,7 @@ void DetourModKit::Config::register_bool(const std::string &section, const std::
         setter(default_value);
     }
     std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
+    replace_or_append(
         std::make_unique<CallbackConfigItem<bool>>(section, ini_key, log_key_name, std::move(setter), default_value));
 }
 
@@ -508,7 +524,7 @@ void DetourModKit::Config::register_string(const std::string &section, const std
         setter(default_value);
     }
     std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
+    replace_or_append(
         std::make_unique<CallbackConfigItem<std::string>>(section, ini_key, log_key_name, std::move(setter), std::move(default_value)));
 }
 
@@ -523,7 +539,7 @@ void DetourModKit::Config::register_key_combo(const std::string &section, const 
         setter(default_combos);
     }
     std::lock_guard<std::mutex> lock(getConfigMutex());
-    getRegisteredConfigItems().push_back(
+    replace_or_append(
         std::make_unique<CallbackConfigItem<Config::KeyComboList>>(section, ini_key, log_key_name, std::move(setter), std::move(default_combos)));
 }
 
