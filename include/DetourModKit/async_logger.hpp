@@ -65,6 +65,15 @@ namespace DetourModKit
             std::string str;
             PoolSlot *next_free{nullptr};
         };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
+        static_assert(offsetof(PoolSlot, str) == 0,
+                      "PoolSlot::str must be the first member for pointer arithmetic in deallocate()");
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
         struct Block
         {
@@ -143,7 +152,7 @@ namespace DetourModKit
     public:
         /**
          * @brief Constructs a queue with the specified capacity.
-         * @param capacity The maximum number of elements (must be power of 2).
+         * @param capacity The maximum number of elements (must be power of 2 and >= 2).
          */
         explicit DynamicMPMCQueue(size_t capacity);
 
@@ -197,31 +206,21 @@ namespace DetourModKit
 
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
-
-            // Move operations are safe because:
-            // 1. Only the single writer thread calls try_pop (consumer)
-            // 2. try_push only moves INTO empty slots (enqueue_pos slots)
-            // 3. No concurrent moves can occur on the same slot
-            Slot(Slot &&other) noexcept
-                : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data))
-            {
-            }
-
-            Slot &operator=(Slot &&other) noexcept
-            {
-                if (this != &other)
-                {
-                    sequence.store(other.sequence.load(std::memory_order_relaxed), std::memory_order_relaxed);
-                    data = std::move(other.data);
-                }
-                return *this;
-            }
+            Slot(Slot &&) = delete;
+            Slot &operator=(Slot &&) = delete;
         };
 
-        // Read-only after construction
-        size_t capacity_;
-        size_t mask_;
-        std::vector<Slot> buffer_;
+        /// Validates capacity before member initialization to prevent
+        /// allocation of an invalid-sized buffer in the initializer list.
+        static size_t validated_capacity(size_t capacity);
+
+        // Immutable after construction — never resized.
+        const size_t capacity_;
+        const size_t mask_;
+
+        // Allocated once in the constructor; the unique_ptr ensures immutability
+        // (no accidental resize) while maintaining contiguous cache-friendly layout.
+        std::unique_ptr<Slot[]> buffer_;
 
         // Cache-line aligned to prevent false sharing between producers and consumers.
         alignas(64) std::atomic<size_t> enqueue_pos_{0};
@@ -244,7 +243,7 @@ namespace DetourModKit
 
         [[nodiscard]] constexpr bool validate() const noexcept
         {
-            if (queue_capacity == 0 || (queue_capacity & (queue_capacity - 1)) != 0)
+            if (queue_capacity < 2 || (queue_capacity & (queue_capacity - 1)) != 0)
                 return false;
             if (batch_size == 0)
                 return false;
@@ -260,9 +259,9 @@ namespace DetourModKit
         }
     };
 
-    // Compile-time validation: Default queue capacity must be power of 2
-    static_assert((DEFAULT_QUEUE_CAPACITY & (DEFAULT_QUEUE_CAPACITY - 1)) == 0,
-                  "DEFAULT_QUEUE_CAPACITY must be a power of 2");
+    // Compile-time validation: Default queue capacity must be a power of 2 and >= 2
+    static_assert(DEFAULT_QUEUE_CAPACITY >= 2 && (DEFAULT_QUEUE_CAPACITY & (DEFAULT_QUEUE_CAPACITY - 1)) == 0,
+                  "DEFAULT_QUEUE_CAPACITY must be a power of 2 and at least 2");
 
     /**
      * @class AsyncLogger

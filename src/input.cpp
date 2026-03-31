@@ -619,12 +619,12 @@ namespace DetourModKit
                          input_mode_to_string(binding.mode), binding.name, binding.keys.size());
         }
 
-        poller_ = std::make_unique<InputPoller>(std::move(pending_bindings_), poll_interval,
+        poller_ = std::make_shared<InputPoller>(std::move(pending_bindings_), poll_interval,
                                                 require_focus_, gamepad_index_, trigger_threshold_,
                                                 stick_threshold_);
         pending_bindings_.clear();
         poller_->start();
-        active_poller_.store(poller_.get(), std::memory_order_release);
+        active_poller_.store(poller_, std::memory_order_release);
         running_.store(true, std::memory_order_release);
     }
 
@@ -645,7 +645,7 @@ namespace DetourModKit
 
     bool InputManager::is_binding_active(const std::string &name) const noexcept
     {
-        InputPoller *p = active_poller_.load(std::memory_order_acquire);
+        auto p = active_poller_.load(std::memory_order_acquire);
         if (p)
         {
             return p->is_binding_active(name);
@@ -655,12 +655,12 @@ namespace DetourModKit
 
     void InputManager::shutdown() noexcept
     {
-        std::unique_ptr<InputPoller> local_poller;
+        std::shared_ptr<InputPoller> local_poller;
 
         {
             std::lock_guard lock(mutex_);
-            // Clear atomic pointer before destroying the poller to ensure
-            // is_binding_active() never accesses a destroyed object.
+            // Clear atomic shared_ptr before releasing the poller to ensure
+            // concurrent is_binding_active() callers hold a valid shared_ptr.
             active_poller_.store(nullptr, std::memory_order_release);
             running_.store(false, std::memory_order_release);
             local_poller = std::move(poller_);

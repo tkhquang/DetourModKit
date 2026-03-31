@@ -166,7 +166,10 @@ namespace DetourModKit
 
         // Not a pool allocation — heap delete under lock is safe and brief.
         delete ptr;
-        heap_fallback_count_.fetch_sub(1, std::memory_order_relaxed);
+        if (heap_fallback_count_.load(std::memory_order_relaxed) > 0)
+        {
+            heap_fallback_count_.fetch_sub(1, std::memory_order_relaxed);
+        }
     }
 
     void StringPool::return_slot_locked(PoolSlot *slot, Block *block) noexcept
@@ -230,6 +233,7 @@ namespace DetourModKit
             std::memcpy(buffer.data(), other.buffer.data(), length);
         }
         other.overflow = nullptr;
+        other.length = 0;
     }
 
     LogMessage &LogMessage::operator=(LogMessage &&other) noexcept
@@ -247,6 +251,7 @@ namespace DetourModKit
                 std::memcpy(buffer.data(), other.buffer.data(), length);
             }
             other.overflow = nullptr;
+            other.length = 0;
         }
         return *this;
     }
@@ -279,17 +284,20 @@ namespace DetourModKit
         length = 0;
     }
 
-    DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
-        : capacity_(capacity), mask_(capacity - 1)
+    size_t DynamicMPMCQueue::validated_capacity(size_t capacity)
     {
         if ((capacity & (capacity - 1)) != 0 || capacity < 2)
         {
             throw std::invalid_argument("DynamicMPMCQueue capacity must be a power of 2 and at least 2");
         }
+        return capacity;
+    }
 
-        buffer_.resize(capacity);
-
-        for (size_t i = 0; i < capacity; ++i)
+    DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
+        : capacity_(validated_capacity(capacity)), mask_(capacity_ - 1),
+          buffer_(std::make_unique<Slot[]>(capacity_))
+    {
+        for (size_t i = 0; i < capacity_; ++i)
         {
             buffer_[i].sequence.store(i, std::memory_order_relaxed);
         }
@@ -636,6 +644,7 @@ namespace DetourModKit
             LogMessage oldest;
             if (queue_.try_pop(oldest))
             {
+                // Count the evicted oldest message as dropped
                 dropped_messages_.fetch_add(1, std::memory_order_relaxed);
                 if (queue_.try_push(message))
                 {
@@ -646,6 +655,8 @@ namespace DetourModKit
                 // Pop succeeded but push failed: net -1
                 pending_messages_.fetch_sub(1, std::memory_order_acq_rel);
             }
+            // Count the new message as dropped (separate from the evicted oldest above).
+            // dropped_messages_ counts individual lost messages, not overflow events.
             dropped_messages_.fetch_add(1, std::memory_order_relaxed);
             return false;
         }

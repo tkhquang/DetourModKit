@@ -1,8 +1,8 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
 
-#include <windows.h>
 #include <algorithm>
 #include <ctime>
 #include <filesystem>
@@ -324,33 +324,17 @@ namespace DetourModKit
             return log_file_name_;
         }
 
-        std::string determined_module_dir;
-        HMODULE h_current_module = NULL;
-        char module_full_path_buffer[MAX_PATH] = {0};
-
         try
         {
-            if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                    reinterpret_cast<LPCSTR>(&Logger::get_instance),
-                                    &h_current_module) ||
-                h_current_module == NULL)
+            std::string module_dir = Filesystem::get_runtime_directory();
+            if (module_dir.empty() || module_dir == ".")
             {
-                throw std::runtime_error("GetModuleHandleExA failed for logger's module. Error: " + std::to_string(GetLastError()));
+                std::cerr << "[" << log_prefix_ << " Logger PATH_WARNING] "
+                          << "Could not determine module directory. Using relative path: " << log_file_name_ << '\n';
+                return log_file_name_;
             }
 
-            const DWORD path_len = GetModuleFileNameA(h_current_module, module_full_path_buffer, MAX_PATH);
-            if (path_len == 0)
-            {
-                throw std::runtime_error("GetModuleFileNameA failed for logger's module path. Error: " + std::to_string(GetLastError()));
-            }
-            if (path_len == MAX_PATH && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
-            {
-                throw std::runtime_error("GetModuleHandleEx buffer too small for logger's module path.");
-            }
-
-            std::filesystem::path actual_module_path(module_full_path_buffer);
-            determined_module_dir = actual_module_path.parent_path().string();
-            const std::filesystem::path final_log_path = std::filesystem::path(determined_module_dir) / log_file_name_;
+            const std::filesystem::path final_log_path = std::filesystem::path(module_dir) / log_file_name_;
             return final_log_path.lexically_normal().string();
         }
         catch (const std::exception &e)

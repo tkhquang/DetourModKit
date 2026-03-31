@@ -19,10 +19,13 @@ if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
 endif()
 
 # --- Compiler Flags ---
+option(DMK_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+
 if(MSVC)
-  # /W4 for high warning level.
-  # Add /WX to treat warnings as errors in CI or for strict builds if desired.
   add_compile_options(/W4)
+  if(DMK_WARNINGS_AS_ERRORS)
+    add_compile_options(/WX)
+  endif()
 
   # Security hardening: ASLR, DEP, and Control Flow Guard
   add_link_options(/DYNAMICBASE /NXCOMPAT /GUARD:CF)
@@ -42,6 +45,9 @@ if(MSVC)
 else()
   # GCC/Clang specific flags
   add_compile_options(-Wall -Wextra -Wpedantic)
+  if(DMK_WARNINGS_AS_ERRORS)
+    add_compile_options(-Werror)
+  endif()
 
   # Security hardening: ASLR and DEP (NX) for MinGW targets
   add_link_options(-Wl,--dynamicbase -Wl,--nxcompat)

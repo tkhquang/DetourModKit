@@ -494,8 +494,10 @@ TEST(DynamicMPMCQueueTest, ValidCapacity)
 
 TEST(DynamicMPMCQueueTest, CapacityAccessor)
 {
-    DynamicMPMCQueue queue(4);
-    EXPECT_EQ(queue.capacity(), 4u);
+    DynamicMPMCQueue queue(64);
+    EXPECT_EQ(queue.capacity(), 64u);
+    EXPECT_TRUE(queue.empty());
+    EXPECT_EQ(queue.size(), 0u);
 }
 
 TEST(DynamicMPMCQueueTest, CacheLineAlignment)
@@ -529,9 +531,25 @@ TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)
 
     LogMessage popped;
     EXPECT_TRUE(queue.try_pop(popped));
+    EXPECT_EQ(popped.message(), "msg1");
     EXPECT_TRUE(queue.try_pop(popped));
+    EXPECT_EQ(popped.message(), "msg2");
 
     EXPECT_FALSE(queue.try_pop(popped));
+    EXPECT_TRUE(queue.empty());
+
+    // Wraparound: push/pop again after draining to exercise head/tail wrap
+    LogMessage wrap1(LogLevel::Debug, "wrap1");
+    LogMessage wrap2(LogLevel::Debug, "wrap2");
+    EXPECT_TRUE(queue.try_push(wrap1));
+    EXPECT_TRUE(queue.try_push(wrap2));
+    EXPECT_EQ(queue.size(), 2u);
+
+    LogMessage wrap_out;
+    EXPECT_TRUE(queue.try_pop(wrap_out));
+    EXPECT_EQ(wrap_out.message(), "wrap1");
+    EXPECT_TRUE(queue.try_pop(wrap_out));
+    EXPECT_EQ(wrap_out.message(), "wrap2");
     EXPECT_TRUE(queue.empty());
 }
 
@@ -588,6 +606,10 @@ TEST(AsyncLoggerConfigTest, Validate_AllReturnValues)
     AsyncLoggerConfig zero_cap;
     zero_cap.queue_capacity = 0;
     EXPECT_FALSE(zero_cap.validate());
+
+    AsyncLoggerConfig cap_one;
+    cap_one.queue_capacity = 1;
+    EXPECT_FALSE(cap_one.validate());
 
     AsyncLoggerConfig bad_cap;
     bad_cap.queue_capacity = 100;
@@ -1589,3 +1611,41 @@ TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
     EXPECT_EQ(content.find("[INFO000]"), std::string::npos);
     EXPECT_EQ(content.find("[DEBUG00]"), std::string::npos);
 }
+
+// --- LogMessage move semantics ---
+
+TEST(LogMessageMoveTest, MoveConstructorZerosSourceLength)
+{
+    LogMessage src(LogLevel::Info, "hello");
+    ASSERT_EQ(src.length, 5);
+    ASSERT_TRUE(src.is_valid());
+
+    LogMessage dst(std::move(src));
+
+    EXPECT_EQ(dst.length, 5);
+    EXPECT_EQ(dst.message(), "hello");
+    EXPECT_EQ(src.length, 0);
+    EXPECT_EQ(src.overflow, nullptr);
+}
+
+TEST(LogMessageMoveTest, MoveAssignmentZerosSourceLength)
+{
+    LogMessage src(LogLevel::Info, "world");
+    LogMessage dst;
+
+    dst = std::move(src);
+
+    EXPECT_EQ(dst.length, 5);
+    EXPECT_EQ(dst.message(), "world");
+    EXPECT_EQ(src.length, 0);
+    EXPECT_EQ(src.overflow, nullptr);
+}
+
+TEST(LogMessageMoveTest, MovedFromMessageReturnsEmpty)
+{
+    LogMessage src(LogLevel::Debug, "test message");
+    LogMessage dst(std::move(src));
+
+    EXPECT_TRUE(src.message().empty());
+}
+
