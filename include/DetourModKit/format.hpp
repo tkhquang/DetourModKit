@@ -25,22 +25,22 @@ namespace DetourModKit
          * @brief Trims leading and trailing whitespace characters from a string.
          * @details Whitespace characters considered are space, tab, newline, carriage return,
          *          form feed, and vertical tab.
-         * @param s The const reference to the std::string to trim.
+         * @param s The string_view to trim.
          * @return std::string A new string with leading/trailing whitespace removed.
          *         Returns an empty string if the input string is empty or contains only whitespace.
          */
-        inline std::string trim(const std::string &s)
+        inline std::string trim(std::string_view s)
         {
             const char *whitespace_chars = " \t\n\r\f\v";
 
-            size_t first_non_whitespace = s.find_first_not_of(whitespace_chars);
-            if (std::string::npos == first_non_whitespace)
+            const size_t first_non_whitespace = s.find_first_not_of(whitespace_chars);
+            if (std::string_view::npos == first_non_whitespace)
             {
                 return "";
             }
 
-            size_t last_non_whitespace = s.find_last_not_of(whitespace_chars);
-            return s.substr(first_non_whitespace, (last_non_whitespace - first_non_whitespace + 1));
+            const size_t last_non_whitespace = s.find_last_not_of(whitespace_chars);
+            return std::string(s.substr(first_non_whitespace, (last_non_whitespace - first_non_whitespace + 1)));
         }
     } // namespace String
 

@@ -4,6 +4,7 @@
 #include "DetourModKit/format.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <ctime>
 #include <filesystem>
 #include <chrono>
@@ -36,9 +37,9 @@ namespace DetourModKit
         static_config_atom().store(std::move(config), std::memory_order_release);
     }
 
-    LogLevel Logger::string_to_log_level(const std::string &level_str)
+    LogLevel Logger::string_to_log_level(std::string_view level_str)
     {
-        std::string upper_level_str = level_str;
+        std::string upper_level_str(level_str);
         std::transform(upper_level_str.begin(), upper_level_str.end(), upper_level_str.begin(),
                        [](unsigned char c)
                        { return static_cast<char>(std::toupper(c)); });
@@ -59,9 +60,9 @@ namespace DetourModKit
         return LogLevel::Info;
     }
 
-    void Logger::configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
+    void Logger::configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
     {
-        set_static_config(std::make_shared<const StaticConfig>(prefix, file_name, timestamp_fmt));
+        set_static_config(std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name), std::string(timestamp_fmt)));
 
         Logger &instance = get_instance();
 
@@ -74,7 +75,7 @@ namespace DetourModKit
         instance.reconfigure(prefix, file_name, timestamp_fmt);
     }
 
-    void Logger::reconfigure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt)
+    void Logger::reconfigure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
     {
         if (shutdown_called_.load(std::memory_order_acquire))
         {
@@ -290,8 +291,9 @@ namespace DetourModKit
                 throw std::runtime_error("localtime_r failed to convert time.");
             }
 #endif
-            char buf[128];
-            const size_t len = std::strftime(buf, sizeof(buf), timestamp_format_.c_str(), &timeinfo_struct);
+            // Single stack buffer for timestamp + milliseconds, no heap allocation
+            char buf[134];
+            const size_t len = std::strftime(buf, sizeof(buf) - 5, timestamp_format_.c_str(), &timeinfo_struct);
             if (len == 0)
             {
                 return "TIMESTAMP_FORMAT_ERROR";
@@ -300,9 +302,8 @@ namespace DetourModKit
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 now.time_since_epoch()) %
                             1000;
-            char ms_buf[5];
-            std::snprintf(ms_buf, sizeof(ms_buf), ".%03d", static_cast<int>(ms.count()));
-            return std::string(buf, len) + ms_buf;
+            const int ms_len = std::snprintf(buf + len, 5, ".%03d", static_cast<int>(ms.count()));
+            return std::string(buf, len + static_cast<size_t>(ms_len));
         }
         catch (const std::exception &e)
         {

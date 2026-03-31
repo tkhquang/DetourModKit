@@ -123,13 +123,14 @@ std::string HookManager::error_to_string(const safetyhook::MidHook::Error &err) 
 }
 
 // Non-locking internal helpers - caller must hold m_hooks_mutex
-bool HookManager::hook_id_exists_locked(const std::string &hook_id) const
+bool HookManager::hook_id_exists_locked(std::string_view hook_id) const
 {
-    return m_hooks.find(hook_id) != m_hooks.end();
+    const std::string key{hook_id};
+    return m_hooks.find(key) != m_hooks.end();
 }
 
 std::expected<std::string, HookError> HookManager::create_inline_hook(
-    const std::string &name,
+    std::string_view name,
     uintptr_t target_address,
     void *detour_function,
     void **original_trampoline,
@@ -215,11 +216,12 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
                                 LogLevel::Warning});
             }
 
-            auto managed_hook = std::make_unique<InlineHook>(name, target_address, std::move(sh_inline_hook_ptr), initial_status);
-            m_hooks.emplace(name, std::move(managed_hook));
+            std::string name_str{name};
+            auto managed_hook = std::make_unique<InlineHook>(name_str, target_address, std::move(sh_inline_hook_ptr), initial_status);
+            m_hooks.emplace(name_str, std::move(managed_hook));
             *original_trampoline = trampoline;
 
-            return {name, std::move(logs)};
+            return {std::move(name_str), std::move(logs)};
         }
         catch (const std::exception &e)
         {
@@ -243,10 +245,10 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
 }
 
 std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
-    const std::string &name,
+    std::string_view name,
     uintptr_t module_base,
     size_t module_size,
-    const std::string &aob_pattern_str,
+    std::string_view aob_pattern_str,
     ptrdiff_t aob_offset,
     void *detour_function,
     void **original_trampoline,
@@ -282,7 +284,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
 }
 
 std::expected<std::string, HookError> HookManager::create_mid_hook(
-    const std::string &name,
+    std::string_view name,
     uintptr_t target_address,
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
@@ -360,10 +362,11 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
                                 LogLevel::Warning});
             }
 
-            auto managed_hook = std::make_unique<MidHook>(name, target_address, std::move(sh_mid_hook_ptr), initial_status);
-            m_hooks.emplace(name, std::move(managed_hook));
+            std::string name_str{name};
+            auto managed_hook = std::make_unique<MidHook>(name_str, target_address, std::move(sh_mid_hook_ptr), initial_status);
+            m_hooks.emplace(name_str, std::move(managed_hook));
 
-            return {name, std::move(logs)};
+            return {std::move(name_str), std::move(logs)};
         }
         catch (const std::exception &e)
         {
@@ -387,10 +390,10 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 }
 
 std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
-    const std::string &name,
+    std::string_view name,
     uintptr_t module_base,
     size_t module_size,
-    const std::string &aob_pattern_str,
+    std::string_view aob_pattern_str,
     ptrdiff_t aob_offset,
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
@@ -420,10 +423,11 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     return create_mid_hook(name, target_address, detour_function, config);
 }
 
-bool HookManager::remove_hook(const std::string &hook_id)
+bool HookManager::remove_hook(std::string_view hook_id)
 {
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_hooks.find(hook_id);
+    const std::string key{hook_id};
+    auto it = m_hooks.find(key);
     if (it != m_hooks.end())
     {
         std::string name_of_removed_hook = it->second->get_name();
@@ -457,10 +461,11 @@ void HookManager::remove_all_hooks()
     m_shutdown_called.store(false, std::memory_order_release);
 }
 
-bool HookManager::enable_hook(const std::string &hook_id)
+bool HookManager::enable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_hooks.find(hook_id);
+    const std::string key{hook_id};
+    auto it = m_hooks.find(key);
     if (it == m_hooks.end())
     {
         m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
@@ -492,10 +497,11 @@ bool HookManager::enable_hook(const std::string &hook_id)
     return false;
 }
 
-bool HookManager::disable_hook(const std::string &hook_id)
+bool HookManager::disable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_hooks.find(hook_id);
+    const std::string key{hook_id};
+    auto it = m_hooks.find(key);
     if (it == m_hooks.end())
     {
         m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
@@ -527,10 +533,11 @@ bool HookManager::disable_hook(const std::string &hook_id)
     return false;
 }
 
-std::optional<HookStatus> HookManager::get_hook_status(const std::string &hook_id) const
+std::optional<HookStatus> HookManager::get_hook_status(std::string_view hook_id) const
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_hooks.find(hook_id);
+    const std::string key{hook_id};
+    auto it = m_hooks.find(key);
     if (it != m_hooks.end())
     {
         return it->second->get_status();

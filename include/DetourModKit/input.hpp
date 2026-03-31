@@ -182,7 +182,7 @@ namespace DetourModKit
          *         Returns false if no binding with the given name exists.
          * @note Thread-safe. Can be called from any thread.
          */
-        [[nodiscard]] bool is_binding_active(const std::string &name) const noexcept;
+        [[nodiscard]] bool is_binding_active(std::string_view name) const noexcept;
 
         /**
          * @brief Sets whether the poller requires the current process to own the
@@ -206,8 +206,18 @@ namespace DetourModKit
         void release_active_holds() noexcept;
         [[nodiscard]] bool is_process_foreground() const;
 
+        /// Transparent hasher enabling std::string_view lookup without allocation.
+        struct StringHash
+        {
+            using is_transparent = void;
+            size_t operator()(std::string_view sv) const noexcept
+            {
+                return std::hash<std::string_view>{}(sv);
+            }
+        };
+
         std::vector<InputBinding> bindings_;
-        std::unordered_map<std::string, std::vector<size_t>> name_index_;
+        std::unordered_map<std::string, std::vector<size_t>, StringHash, std::equal_to<>> name_index_;
         std::vector<InputCode> known_modifiers_;
         std::chrono::milliseconds poll_interval_;
         std::atomic<bool> require_focus_;
@@ -261,7 +271,7 @@ namespace DetourModKit
          * @param keys Vector of input codes (any triggers the action).
          * @param callback Function to invoke on key press.
          */
-        void register_press(const std::string &name, const std::vector<InputCode> &keys,
+        void register_press(std::string_view name, const std::vector<InputCode> &keys,
                             std::function<void()> callback);
 
         /**
@@ -273,7 +283,7 @@ namespace DetourModKit
          * @param modifiers Vector of modifier input codes (all must be held).
          * @param callback Function to invoke on key press.
          */
-        void register_press(const std::string &name, const std::vector<InputCode> &keys,
+        void register_press(std::string_view name, const std::vector<InputCode> &keys,
                             const std::vector<InputCode> &modifiers,
                             std::function<void()> callback);
 
@@ -286,7 +296,7 @@ namespace DetourModKit
          * @param combos List of key combinations (each combo is registered independently).
          * @param callback Function to invoke on key press.
          */
-        void register_press(const std::string &name, const Config::KeyComboList &combos,
+        void register_press(std::string_view name, const Config::KeyComboList &combos,
                             std::function<void()> callback);
 
         /**
@@ -298,7 +308,7 @@ namespace DetourModKit
          * @param keys Vector of input codes (any activates the hold).
          * @param callback Function invoked with the hold state (true = held, false = released).
          */
-        void register_hold(const std::string &name, const std::vector<InputCode> &keys,
+        void register_hold(std::string_view name, const std::vector<InputCode> &keys,
                            std::function<void(bool)> callback);
 
         /**
@@ -311,7 +321,7 @@ namespace DetourModKit
          * @param modifiers Vector of modifier input codes (all must be held).
          * @param callback Function invoked with the hold state (true = held, false = released).
          */
-        void register_hold(const std::string &name, const std::vector<InputCode> &keys,
+        void register_hold(std::string_view name, const std::vector<InputCode> &keys,
                            const std::vector<InputCode> &modifiers,
                            std::function<void(bool)> callback);
 
@@ -324,7 +334,7 @@ namespace DetourModKit
          * @param combos List of key combinations (each combo is registered independently).
          * @param callback Function invoked with the hold state (true = held, false = released).
          */
-        void register_hold(const std::string &name, const Config::KeyComboList &combos,
+        void register_hold(std::string_view name, const Config::KeyComboList &combos,
                            std::function<void(bool)> callback);
 
         /**
@@ -384,7 +394,7 @@ namespace DetourModKit
          *         Returns false if the poller is not running or the name is unknown.
          * @note Thread-safe. Can be called from any thread (e.g., render thread).
          */
-        [[nodiscard]] bool is_binding_active(const std::string &name) const noexcept;
+        [[nodiscard]] bool is_binding_active(std::string_view name) const noexcept;
 
         /**
          * @brief Stops the polling thread and clears all registered bindings.
@@ -399,6 +409,8 @@ namespace DetourModKit
 
         InputManager(const InputManager &) = delete;
         InputManager &operator=(const InputManager &) = delete;
+        InputManager(InputManager &&) = delete;
+        InputManager &operator=(InputManager &&) = delete;
 
         mutable std::mutex mutex_;
         std::vector<InputBinding> pending_bindings_;

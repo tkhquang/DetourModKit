@@ -2,6 +2,8 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <cassert>
+#include <climits>
 #include <cstring>
 
 namespace DetourModKit
@@ -127,6 +129,7 @@ namespace DetourModKit
             if (to_copy > 0)
             {
                 std::memcpy(pptr(), s + written, static_cast<size_t>(to_copy));
+                assert(to_copy <= INT_MAX);
                 pbump(static_cast<int>(to_copy));
                 written += to_copy;
             }

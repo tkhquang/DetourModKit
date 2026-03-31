@@ -87,7 +87,7 @@ namespace DetourModKit
          * @param file_name Default log file name.
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
          */
-        static void configure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt);
+        static void configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt);
 
         /**
          * @brief Reconfigures an existing logger instance with new settings.
@@ -97,7 +97,7 @@ namespace DetourModKit
          * @param file_name New log file name.
          * @param timestamp_fmt New timestamp format string (strftime compatible).
          */
-        void reconfigure(const std::string &prefix, const std::string &file_name, const std::string &timestamp_fmt);
+        void reconfigure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt);
 
         /**
          * @brief Enables asynchronous logging mode.
@@ -215,7 +215,7 @@ namespace DetourModKit
          * @param level_str The string to convert (case-insensitive).
          * @return The corresponding LogLevel enum. Defaults to LogLevel::Info if unrecognized.
          */
-        static LogLevel string_to_log_level(const std::string &level_str);
+        static LogLevel string_to_log_level(std::string_view level_str);
 
         /**
          * @struct StaticConfig
