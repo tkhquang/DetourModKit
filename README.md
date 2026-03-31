@@ -189,6 +189,15 @@ ctest --preset msvc-debug
 > taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
 > ```
 
+### Warnings as Errors
+
+To treat compiler warnings as errors (enabled by default in CI):
+
+```bash
+cmake --preset mingw-debug -DDMK_WARNINGS_AS_ERRORS=ON
+cmake --build --preset mingw-debug --parallel
+```
+
 ### Enabling Sanitizers
 
 To enable AddressSanitizer and UndefinedBehaviorSanitizer (requires GCC/Clang):

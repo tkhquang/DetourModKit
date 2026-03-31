@@ -402,8 +402,8 @@ namespace DetourModKit
 
         mutable std::mutex mutex_;
         std::vector<InputBinding> pending_bindings_;
-        std::unique_ptr<InputPoller> poller_;
-        std::atomic<InputPoller *> active_poller_{nullptr};
+        std::shared_ptr<InputPoller> poller_;
+        std::atomic<std::shared_ptr<InputPoller>> active_poller_{};
         std::atomic<bool> running_{false};
         bool require_focus_ = true;
         int gamepad_index_ = 0;

@@ -1589,3 +1589,76 @@ TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
     EXPECT_EQ(content.find("[INFO000]"), std::string::npos);
     EXPECT_EQ(content.find("[DEBUG00]"), std::string::npos);
 }
+
+// --- LogMessage move semantics ---
+
+TEST(LogMessageMoveTest, MoveConstructorZerosSourceLength)
+{
+    LogMessage src(LogLevel::Info, "hello");
+    ASSERT_EQ(src.length, 5);
+    ASSERT_TRUE(src.is_valid());
+
+    LogMessage dst(std::move(src));
+
+    EXPECT_EQ(dst.length, 5);
+    EXPECT_EQ(dst.message(), "hello");
+    EXPECT_EQ(src.length, 0);
+    EXPECT_EQ(src.overflow, nullptr);
+}
+
+TEST(LogMessageMoveTest, MoveAssignmentZerosSourceLength)
+{
+    LogMessage src(LogLevel::Info, "world");
+    LogMessage dst;
+
+    dst = std::move(src);
+
+    EXPECT_EQ(dst.length, 5);
+    EXPECT_EQ(dst.message(), "world");
+    EXPECT_EQ(src.length, 0);
+    EXPECT_EQ(src.overflow, nullptr);
+}
+
+TEST(LogMessageMoveTest, MovedFromMessageReturnsEmpty)
+{
+    LogMessage src(LogLevel::Debug, "test message");
+    LogMessage dst(std::move(src));
+
+    EXPECT_TRUE(src.message().empty());
+}
+
+// --- DynamicMPMCQueue with unique_ptr buffer ---
+
+TEST(DynamicMPMCQueueTest, CapacityIsImmutable)
+{
+    DynamicMPMCQueue queue(64);
+    EXPECT_EQ(queue.capacity(), 64);
+    EXPECT_TRUE(queue.empty());
+    EXPECT_EQ(queue.size(), 0);
+}
+
+TEST(DynamicMPMCQueueTest, PushPopRoundTrip)
+{
+    DynamicMPMCQueue queue(16);
+    LogMessage msg(LogLevel::Info, "roundtrip");
+    ASSERT_TRUE(queue.try_push(msg));
+    EXPECT_EQ(queue.size(), 1);
+
+    LogMessage out;
+    ASSERT_TRUE(queue.try_pop(out));
+    EXPECT_EQ(out.message(), "roundtrip");
+    EXPECT_TRUE(queue.empty());
+}
+
+TEST(DynamicMPMCQueueTest, FullQueueRejectsPush)
+{
+    DynamicMPMCQueue queue(2);
+
+    LogMessage m1(LogLevel::Info, "a");
+    LogMessage m2(LogLevel::Info, "b");
+    LogMessage m3(LogLevel::Info, "c");
+
+    ASSERT_TRUE(queue.try_push(m1));
+    ASSERT_TRUE(queue.try_push(m2));
+    EXPECT_FALSE(queue.try_push(m3));
+}

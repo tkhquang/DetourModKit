@@ -1460,3 +1460,22 @@ TEST_F(HookManagerTest, CreateInlineHook_TrampolineNotSetOnFailure)
     // Trampoline should remain unchanged on early validation failure
     EXPECT_EQ(tramp, reinterpret_cast<void *>(0xDEADBEEF));
 }
+
+TEST_F(HookManagerTest, ShutdownResetsFlag)
+{
+    // After shutdown(), the manager accepts new hook creation requests
+    // (returns validation errors, not ShutdownInProgress)
+    hook_manager_->shutdown();
+
+    // Verify by checking that a subsequent call doesn't return ShutdownInProgress.
+    // Use nullptr detour to trigger InvalidDetourFunction rather than ShutdownInProgress.
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "PostShutdownHook",
+        0x1000,
+        nullptr,
+        &tramp);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::InvalidDetourFunction);
+}

@@ -60,7 +60,7 @@ jobs:
         shell: bash
 
       - name: Configure (Debug + Tests + Coverage)
-        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
+        run: cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON -DDMK_WARNINGS_AS_ERRORS=ON
         shell: bash
 
       - name: Build

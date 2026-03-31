@@ -57,14 +57,19 @@ void HookManager::shutdown()
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    for (auto &[name, hook] : m_hooks)
     {
-        hook->disable();
-    }
-    m_hooks.clear();
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        for (auto &[name, hook] : m_hooks)
+        {
+            hook->disable();
+        }
+        m_hooks.clear();
 
-    m_shutdown_called.store(false, std::memory_order_release);
+        // Reset under the lock so concurrent create_*_hook calls cannot
+        // observe the flag as true (rejected) and then immediately see it
+        // as false (accepted) before the map is fully cleared.
+        m_shutdown_called.store(false, std::memory_order_release);
+    }
 }
 
 std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &err) const

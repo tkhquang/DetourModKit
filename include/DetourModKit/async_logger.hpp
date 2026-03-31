@@ -65,6 +65,8 @@ namespace DetourModKit
             std::string str;
             PoolSlot *next_free{nullptr};
         };
+        static_assert(offsetof(PoolSlot, str) == 0,
+                      "PoolSlot::str must be the first member for pointer arithmetic in deallocate()");
 
         struct Block
         {
@@ -197,31 +199,17 @@ namespace DetourModKit
 
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
-
-            // Move operations are safe because:
-            // 1. Only the single writer thread calls try_pop (consumer)
-            // 2. try_push only moves INTO empty slots (enqueue_pos slots)
-            // 3. No concurrent moves can occur on the same slot
-            Slot(Slot &&other) noexcept
-                : sequence(other.sequence.load(std::memory_order_relaxed)), data(std::move(other.data))
-            {
-            }
-
-            Slot &operator=(Slot &&other) noexcept
-            {
-                if (this != &other)
-                {
-                    sequence.store(other.sequence.load(std::memory_order_relaxed), std::memory_order_relaxed);
-                    data = std::move(other.data);
-                }
-                return *this;
-            }
+            Slot(Slot &&) = delete;
+            Slot &operator=(Slot &&) = delete;
         };
 
-        // Read-only after construction
-        size_t capacity_;
-        size_t mask_;
-        std::vector<Slot> buffer_;
+        // Immutable after construction — never resized.
+        const size_t capacity_;
+        const size_t mask_;
+
+        // Allocated once in the constructor; the unique_ptr ensures immutability
+        // (no accidental resize) while maintaining contiguous cache-friendly layout.
+        std::unique_ptr<Slot[]> buffer_;
 
         // Cache-line aligned to prevent false sharing between producers and consumers.
         alignas(64) std::atomic<size_t> enqueue_pos_{0};
