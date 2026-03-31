@@ -215,6 +215,11 @@ namespace DetourModKit
         }
 
         auto old_level = current_log_level_.load(std::memory_order_acquire);
+        if (old_level == level)
+        {
+            return;
+        }
+
         current_log_level_.store(level, std::memory_order_release);
 
         log(LogLevel::Info, "Log level changed from {} to {}",
