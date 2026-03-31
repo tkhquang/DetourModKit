@@ -1,5 +1,5 @@
-#ifndef MEMORY_HPP
-#define MEMORY_HPP
+#ifndef DETOURMODKIT_MEMORY_HPP
+#define DETOURMODKIT_MEMORY_HPP
 
 #include <cstddef>
 #include <cstdint>
@@ -134,4 +134,4 @@ namespace DetourModKit
     } // namespace Memory
 } // namespace DetourModKit
 
-#endif // MEMORY_HPP
+#endif // DETOURMODKIT_MEMORY_HPP

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
+#include <process.h>
 #include <thread>
 #include <vector>
 
@@ -16,7 +17,9 @@ class ConfigTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        test_ini_file_ = std::filesystem::temp_directory_path() / "test_config.ini";
+        static int test_counter = 0;
+        test_ini_file_ = std::filesystem::temp_directory_path() /
+                         ("test_config_" + std::to_string(_getpid()) + "_" + std::to_string(test_counter++) + ".ini");
         Config::clear_registered_items();
     }
 

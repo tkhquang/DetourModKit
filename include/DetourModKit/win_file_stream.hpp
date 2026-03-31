@@ -1,5 +1,5 @@
-#ifndef WIN_FILE_STREAM_HPP
-#define WIN_FILE_STREAM_HPP
+#ifndef DETOURMODKIT_WIN_FILE_STREAM_HPP
+#define DETOURMODKIT_WIN_FILE_STREAM_HPP
 
 #include <array>
 #include <ios>
@@ -74,4 +74,4 @@ namespace DetourModKit
 
 } // namespace DetourModKit
 
-#endif // WIN_FILE_STREAM_HPP
+#endif // DETOURMODKIT_WIN_FILE_STREAM_HPP

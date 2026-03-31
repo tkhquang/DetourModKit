@@ -1,5 +1,5 @@
-#ifndef ASYNC_LOGGER_HPP
-#define ASYNC_LOGGER_HPP
+#ifndef DETOURMODKIT_ASYNC_LOGGER_HPP
+#define DETOURMODKIT_ASYNC_LOGGER_HPP
 
 #include "DetourModKit/logger.hpp"
 
@@ -15,6 +15,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -89,6 +90,7 @@ namespace DetourModKit
 
         std::atomic<Block *> head_{nullptr};
         std::atomic<size_t> pool_size_{0};
+        std::atomic<size_t> heap_fallback_count_{0};
         std::mutex pool_mutex_;
     };
 
@@ -112,7 +114,7 @@ namespace DetourModKit
         // Owned: allocated by StringPool, freed by reset().
         std::string *overflow{nullptr};
 
-        LogMessage(LogLevel lvl, std::string msg);
+        LogMessage(LogLevel lvl, std::string_view msg);
         LogMessage() noexcept = default;
 
         ~LogMessage() noexcept;
@@ -298,7 +300,7 @@ namespace DetourModKit
          * @details This method is non-blocking (unless OverflowPolicy::Block is used).
          *          The message will be written to the log file by the writer thread.
          */
-        [[nodiscard]] bool enqueue(LogLevel level, std::string message) noexcept;
+        [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
 
         /**
          * @brief Flushes all pending log messages with a timeout.
@@ -356,4 +358,4 @@ namespace DetourModKit
 
 } // namespace DetourModKit
 
-#endif // ASYNC_LOGGER_HPP
+#endif // DETOURMODKIT_ASYNC_LOGGER_HPP

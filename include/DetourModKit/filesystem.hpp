@@ -6,8 +6,8 @@
  * of the currently executing module.
  */
 
-#ifndef FILESYSTEM_HPP
-#define FILESYSTEM_HPP
+#ifndef DETOURMODKIT_FILESYSTEM_HPP
+#define DETOURMODKIT_FILESYSTEM_HPP
 
 #include <string>
 
@@ -34,4 +34,4 @@ namespace DetourModKit
     } // namespace Filesystem
 } // namespace DetourModKit
 
-#endif // FILESYSTEM_HPP
+#endif // DETOURMODKIT_FILESYSTEM_HPP

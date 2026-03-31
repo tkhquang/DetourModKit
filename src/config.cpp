@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 using namespace DetourModKit;
@@ -602,17 +603,12 @@ void DetourModKit::Config::log_all()
     logger.info("Config: {} registered values across {} section(s)",
                 items.size(), [&items]()
                 {
-                    size_t sections = 0;
-                    std::string prev;
+                    std::unordered_set<std::string_view> seen;
                     for (const auto &item : items)
                     {
-                        if (item->section != prev)
-                        {
-                            ++sections;
-                            prev = item->section;
-                        }
+                        seen.insert(item->section);
                     }
-                    return sections;
+                    return seen.size();
                 }());
 
     std::string current_section;

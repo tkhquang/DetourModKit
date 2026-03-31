@@ -1,5 +1,5 @@
-#ifndef CONFIG_HPP
-#define CONFIG_HPP
+#ifndef DETOURMODKIT_CONFIG_HPP
+#define DETOURMODKIT_CONFIG_HPP
 
 #include "DetourModKit/input_codes.hpp"
 
@@ -117,4 +117,4 @@ namespace DetourModKit
     } // namespace Config
 } // namespace DetourModKit
 
-#endif // CONFIG_HPP
+#endif // DETOURMODKIT_CONFIG_HPP

@@ -1,5 +1,5 @@
-#ifndef INPUT_CODES_HPP
-#define INPUT_CODES_HPP
+#ifndef DETOURMODKIT_INPUT_CODES_HPP
+#define DETOURMODKIT_INPUT_CODES_HPP
 
 /**
  * @file input_codes.hpp
@@ -177,4 +177,4 @@ namespace DetourModKit
 
 } // namespace DetourModKit
 
-#endif // INPUT_CODES_HPP
+#endif // DETOURMODKIT_INPUT_CODES_HPP

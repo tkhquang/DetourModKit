@@ -99,6 +99,7 @@ CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/releas
 - **Braces:** Allman style — opening brace on its own line for functions and classes, same line for control flow within a function body using K&R-style indented blocks.
 - **Indentation:** 4 spaces, no tabs.
 - **Namespaces:** All public API lives in `namespace DetourModKit`. No `using namespace` in headers.
+- **Include guards:** All headers use `#ifndef DETOURMODKIT_<MODULE>_HPP` / `#define` / `#endif` guards (not `#pragma once`). Guard names must be prefixed with `DETOURMODKIT_` to avoid collisions with consumer projects.
 - **Includes:** Project headers use `"DetourModKit/header.hpp"`. System/external headers use `<angle brackets>`. Group: project headers, then external, then standard library.
 
 ### Patterns used throughout
@@ -108,6 +109,7 @@ CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/releas
 - **Lock ordering:** When acquiring multiple locks, document the order in the class header and follow it strictly. Example from `logger.hpp`: `1. async_mutex_` → `2. *log_mutex_ptr_`.
 - **Deferred logging:** When logging inside a critical section, collect messages into a local vector and emit after releasing the lock. This prevents deadlocks when Logger acquires its own locks.
 - **Error returns:** `std::expected` for memory operations, `std::optional` for scanner results. Reserve exceptions for construction failures and truly exceptional conditions.
+- **Security hardening:** The build enables ASLR (`/DYNAMICBASE`), DEP (`/NXCOMPAT`), and Control Flow Guard (`/GUARD:CF`) on MSVC, and equivalent flags (`--dynamicbase`, `--nxcompat`) on MinGW. Do not remove these.
 
 ### Example — good function style
 
@@ -138,7 +140,7 @@ hook_manager.with_inline_hook("camera_update", [](const safetyhook::InlineHook &
 - **Framework:** GoogleTest. Test entry point is `tests/main.cpp`.
 - **One test file per module:** `tests/test_<module>.cpp` mirrors `src/<module>.cpp`.
 - **Integration tests:** `tests/test_hook_integration.cpp` tests cross-module hooking against `tests/fixtures/hook_target_lib.cpp` (built as a DLL). The DLL exports `extern "C"` functions with volatile magic constants for stable AOB patterns.
-- **Test fixture pattern:** Each suite uses a `::testing::Test` subclass with `SetUp()`/`TearDown()` for temp file cleanup.
+- **Test fixture pattern:** Each suite uses a `::testing::Test` subclass with `SetUp()`/`TearDown()` for temp file cleanup. Temp file paths must include the process ID (`_getpid()`) and a counter to avoid collisions when CTest runs tests in parallel as separate processes.
 - **Coverage gate:** 80% minimum line coverage enforced in CI. All PRs must pass.
 - **Concurrency tests:** Use `std::atomic<bool> stop` flag pattern with multiple threads. See `AsyncMode_ConcurrentLogAndDisable` in `test_logger.cpp` for the reference pattern.
 - **Build flag:** Tests are enabled with `DMK_BUILD_TESTS=ON` (on by default in debug presets).

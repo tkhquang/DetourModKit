@@ -16,8 +16,19 @@ namespace DetourModKit
 
     StringPool::~StringPool() noexcept
     {
-        // Acquire the mutex to synchronize with any in-flight deallocate() calls
-        std::lock_guard<std::mutex> lock(pool_mutex_);
+        size_t leaked = 0;
+
+        {
+            // Acquire the mutex to synchronize with any in-flight deallocate() calls
+            std::lock_guard<std::mutex> lock(pool_mutex_);
+            leaked = heap_fallback_count_.load(std::memory_order_relaxed);
+        }
+
+        if (leaked > 0)
+        {
+            std::cerr << "[StringPool] " << leaked
+                      << " heap-fallback string(s) were not returned before destruction\n";
+        }
 
         Block *current = head_.load(std::memory_order_relaxed);
         while (current)
@@ -100,6 +111,10 @@ namespace DetourModKit
         if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
         {
             auto *ptr = new (std::nothrow) std::string();
+            if (ptr)
+            {
+                heap_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+            }
             return ptr;
         }
 
@@ -119,6 +134,10 @@ namespace DetourModKit
         }
 
         auto *ptr = new (std::nothrow) std::string();
+        if (ptr)
+        {
+            heap_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+        }
         return ptr;
     }
 
@@ -147,6 +166,7 @@ namespace DetourModKit
 
         // Not a pool allocation — heap delete under lock is safe and brief.
         delete ptr;
+        heap_fallback_count_.fetch_sub(1, std::memory_order_relaxed);
     }
 
     void StringPool::return_slot_locked(PoolSlot *slot, Block *block) noexcept
@@ -156,17 +176,12 @@ namespace DetourModKit
         ++block->slot_count;
     }
 
-    LogMessage::LogMessage(LogLevel lvl, std::string msg)
+    LogMessage::LogMessage(LogLevel lvl, std::string_view msg)
         : level(lvl),
           timestamp(std::chrono::system_clock::now()),
           thread_id(std::this_thread::get_id())
     {
-        if (msg.size() > MAX_VALID_LENGTH)
-        {
-            msg.resize(MAX_VALID_LENGTH);
-        }
-
-        const size_t msg_size = msg.size();
+        const size_t msg_size = std::min(msg.size(), MAX_VALID_LENGTH);
 
         if (msg_size <= MAX_INLINE_SIZE)
         {
@@ -180,7 +195,7 @@ namespace DetourModKit
             {
                 try
                 {
-                    overflow->assign(std::move(msg));
+                    overflow->assign(msg.data(), msg_size);
                     length = overflow->size();
                 }
                 catch (...)
@@ -407,7 +422,7 @@ namespace DetourModKit
         shutdown();
     }
 
-    bool AsyncLogger::enqueue(LogLevel level, std::string message) noexcept
+    bool AsyncLogger::enqueue(LogLevel level, std::string_view message) noexcept
     {
         if (shutdown_requested_.load(std::memory_order_acquire))
         {
@@ -437,7 +452,7 @@ namespace DetourModKit
             return true;
         }
 
-        LogMessage msg(level, std::move(message));
+        LogMessage msg(level, message);
 
         // Increment before push so flush cannot observe zero while a message
         // is already in the queue but not yet counted.
