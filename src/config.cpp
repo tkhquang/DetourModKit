@@ -342,7 +342,7 @@ namespace
     template <>
     void CallbackConfigItem<int>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, current_value);
+        logger.debug("Config:   {} = {}", ini_key, current_value);
     }
 
     // For float
@@ -355,7 +355,7 @@ namespace
     template <>
     void CallbackConfigItem<float>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, current_value);
+        logger.debug("Config:   {} = {}", ini_key, current_value);
     }
 
     // For bool
@@ -368,7 +368,7 @@ namespace
     template <>
     void CallbackConfigItem<bool>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, current_value ? "true" : "false");
+        logger.debug("Config:   {} = {}", ini_key, current_value ? "true" : "false");
     }
 
     // For std::string
@@ -381,7 +381,7 @@ namespace
     template <>
     void CallbackConfigItem<std::string>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = \"{}\"", log_key_name, section, ini_key, current_value);
+        logger.debug("Config:   {} = \"{}\"", ini_key, current_value);
     }
 
     // For Config::KeyComboList (list of key combinations)
@@ -402,7 +402,15 @@ namespace
     template <>
     void CallbackConfigItem<Config::KeyComboList>::log_current_value(Logger &logger) const
     {
-        logger.info("Config: {} ({}.{}) = {}", log_key_name, section, ini_key, format_key_combo_list(current_value));
+        const std::string formatted = format_key_combo_list(current_value);
+        if (formatted.empty())
+        {
+            logger.debug("Config:   {} = (none)", ini_key);
+        }
+        else
+        {
+            logger.debug("Config:   {} = {}", ini_key, formatted);
+        }
     }
 
     // --- Global storage for registered configuration items ---
@@ -528,8 +536,6 @@ void DetourModKit::Config::load(const std::string &ini_filename)
 
         Logger &logger = Logger::get_instance();
         std::string ini_path = getIniFilePath(ini_filename, logger);
-        logger.info("Config: Attempting to load configuration from: {}", ini_path);
-
         CSimpleIniA ini;
         ini.SetUnicode(false);  // Assume ASCII/MBCS INI
         ini.SetMultiKey(false); // Disallow duplicate keys in a section
@@ -537,11 +543,11 @@ void DetourModKit::Config::load(const std::string &ini_filename)
         SI_Error rc = ini.LoadFile(ini_path.c_str());
         if (rc < 0)
         {
-            logger.error("Config: Failed to open INI file '{}'. Error code: {}. Using default values for all registered settings.", ini_path, rc);
+            logger.error("Config: Failed to open '{}' (error {}). Using defaults.", ini_path, rc);
         }
         else
         {
-            logger.info("Config: Successfully opened INI file: {}", ini_path);
+            logger.debug("Config: Opened {}", ini_path);
         }
 
         // Read all values under lock, but defer setter callbacks
@@ -555,7 +561,7 @@ void DetourModKit::Config::load(const std::string &ini_filename)
             }
         }
 
-        logger.info("Config: Configuration loading complete. {} items processed.", getRegisteredConfigItems().size());
+        logger.info("Config: Loaded {} items from {}", getRegisteredConfigItems().size(), ini_path);
     }
 
     // Invoke setter callbacks outside the config mutex to prevent deadlocks
@@ -570,18 +576,39 @@ void DetourModKit::Config::log_all()
     std::lock_guard<std::mutex> lock(getConfigMutex());
 
     Logger &logger = Logger::get_instance();
-    if (getRegisteredConfigItems().empty())
+    const auto &items = getRegisteredConfigItems();
+    if (items.empty())
     {
-        logger.info("Config: No configuration items registered to log.");
+        logger.info("Config: No configuration items registered.");
         return;
     }
 
-    logger.info("Config: Logging {} registered configuration values:", getRegisteredConfigItems().size());
-    for (const auto &item : getRegisteredConfigItems())
+    logger.info("Config: {} registered values across {} section(s)",
+                items.size(), [&items]()
+                {
+                    size_t sections = 0;
+                    std::string prev;
+                    for (const auto &item : items)
+                    {
+                        if (item->section != prev)
+                        {
+                            ++sections;
+                            prev = item->section;
+                        }
+                    }
+                    return sections;
+                }());
+
+    std::string current_section;
+    for (const auto &item : items)
     {
+        if (item->section != current_section)
+        {
+            current_section = item->section;
+            logger.debug("Config: [{}]", current_section);
+        }
         item->log_current_value(logger);
     }
-    logger.info("Config: Configuration logging completed.");
 }
 
 void DetourModKit::Config::clear_registered_items()

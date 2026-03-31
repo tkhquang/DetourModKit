@@ -615,8 +615,8 @@ namespace DetourModKit
 
         for (const auto &binding : pending_bindings_)
         {
-            logger.info("InputManager: Registered {} binding \"{}\" with {} key(s)",
-                        input_mode_to_string(binding.mode), binding.name, binding.keys.size());
+            logger.debug("InputManager: Registered {} binding \"{}\" with {} key(s)",
+                         input_mode_to_string(binding.mode), binding.name, binding.keys.size());
         }
 
         poller_ = std::make_unique<InputPoller>(std::move(pending_bindings_), poll_interval,

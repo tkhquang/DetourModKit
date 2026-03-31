@@ -1224,3 +1224,43 @@ TEST_F(LoggerTest, ConcurrentFileAccess_AsyncModeReadWhileLogging)
             << "Missing ASYNC_DURING_" << i;
     }
 }
+
+TEST_F(LoggerTest, SetLogLevel_SameLevel_NoLogMessage)
+{
+    Logger &logger = Logger::get_instance();
+
+    // Stabilize: set to Trace, then set again — second call must be silent
+    logger.set_log_level(LogLevel::Trace);
+    logger.info("MARKER_BEFORE_SAME_a7k2");
+    logger.set_log_level(LogLevel::Trace);
+    logger.info("MARKER_AFTER_SAME_a7k2");
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    EXPECT_NE(content.find("MARKER_BEFORE_SAME_a7k2"), std::string::npos);
+    EXPECT_NE(content.find("MARKER_AFTER_SAME_a7k2"), std::string::npos);
+
+    // Only one "Log level changed" should exist (the initial set to Trace)
+    // and none after the marker
+    auto marker_pos = content.find("MARKER_BEFORE_SAME_a7k2");
+    auto change_after = content.find("Log level changed", marker_pos);
+    EXPECT_EQ(change_after, std::string::npos)
+        << "set_log_level with same level should not produce a log message";
+}
+
+TEST_F(LoggerTest, SetLogLevel_DifferentLevel_LogsChange)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Debug);
+    logger.set_log_level(LogLevel::Info);
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    EXPECT_NE(content.find("Log level changed from DEBUG to INFO"), std::string::npos);
+}

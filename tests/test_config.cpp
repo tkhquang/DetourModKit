@@ -1061,3 +1061,27 @@ TEST_F(ConfigTest, KeyComboList_MixedDeviceCombos)
     ASSERT_EQ(combos[2].modifiers.size(), 1u);
     EXPECT_EQ(combos[2].modifiers[0], gamepad_button(GamepadCode::LeftBumper));
 }
+
+TEST_F(ConfigTest, LogAll_SectionGrouping)
+{
+    Config::register_int("SectionA", "Key1", "A Key1", nullptr, 1);
+    Config::register_int("SectionA", "Key2", "A Key2", nullptr, 2);
+    Config::register_int("SectionB", "Key1", "B Key1", nullptr, 3);
+
+    EXPECT_NO_THROW(Config::log_all());
+}
+
+TEST_F(ConfigTest, LogAll_LongStringNotTruncated)
+{
+    std::string long_value(200, 'x');
+    Config::register_string("Sec", "LongVal", "long_val", nullptr, long_value);
+
+    EXPECT_NO_THROW(Config::log_all());
+}
+
+TEST_F(ConfigTest, LogAll_EmptyKeyComboList)
+{
+    Config::register_key_combo("Sec", "K", "empty_combo", nullptr, "");
+
+    EXPECT_NO_THROW(Config::log_all());
+}
