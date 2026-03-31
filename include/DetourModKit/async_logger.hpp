@@ -65,8 +65,15 @@ namespace DetourModKit
             std::string str;
             PoolSlot *next_free{nullptr};
         };
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Winvalid-offsetof"
+#endif
         static_assert(offsetof(PoolSlot, str) == 0,
                       "PoolSlot::str must be the first member for pointer arithmetic in deallocate()");
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
         struct Block
         {
@@ -236,7 +243,7 @@ namespace DetourModKit
 
         [[nodiscard]] constexpr bool validate() const noexcept
         {
-            if (queue_capacity == 0 || (queue_capacity & (queue_capacity - 1)) != 0)
+            if (queue_capacity < 2 || (queue_capacity & (queue_capacity - 1)) != 0)
                 return false;
             if (batch_size == 0)
                 return false;

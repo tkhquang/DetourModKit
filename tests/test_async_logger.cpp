@@ -607,6 +607,10 @@ TEST(AsyncLoggerConfigTest, Validate_AllReturnValues)
     zero_cap.queue_capacity = 0;
     EXPECT_FALSE(zero_cap.validate());
 
+    AsyncLoggerConfig cap_one;
+    cap_one.queue_capacity = 1;
+    EXPECT_FALSE(cap_one.validate());
+
     AsyncLoggerConfig bad_cap;
     bad_cap.queue_capacity = 100;
     EXPECT_FALSE(bad_cap.validate());
