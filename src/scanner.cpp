@@ -8,6 +8,7 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/format.hpp"
 
+#include <windows.h>
 #include <vector>
 #include <string>
 #include <sstream>
@@ -353,4 +354,47 @@ std::optional<uintptr_t> DetourModKit::Scanner::find_and_resolve_rip_relative(co
     }
 
     return std::nullopt;
+}
+
+const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPattern &pattern, size_t occurrence)
+{
+    if (pattern.empty() || occurrence == 0)
+        return nullptr;
+
+    constexpr DWORD EXEC_FLAGS = PAGE_EXECUTE | PAGE_EXECUTE_READ |
+                                 PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+
+    size_t matches_remaining = occurrence;
+    MEMORY_BASIC_INFORMATION mbi{};
+    uintptr_t addr = 0;
+
+    while (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+    {
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & EXEC_FLAGS) != 0 &&
+            (mbi.Protect & PAGE_GUARD) == 0 && mbi.RegionSize >= pattern.size())
+        {
+            const auto *region_start = reinterpret_cast<const std::byte *>(mbi.BaseAddress);
+
+            const std::byte *match = find_pattern(region_start, mbi.RegionSize, pattern);
+            while (match != nullptr)
+            {
+                --matches_remaining;
+                if (matches_remaining == 0)
+                    return match + pattern.offset;
+
+                // Continue scanning past the current match
+                const size_t consumed = static_cast<size_t>(match - region_start) + 1;
+                if (consumed >= mbi.RegionSize)
+                    break;
+                match = find_pattern(match + 1, mbi.RegionSize - consumed, pattern);
+            }
+        }
+
+        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (next <= addr)
+            break; // Overflow guard
+        addr = next;
+    }
+
+    return nullptr;
 }

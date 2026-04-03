@@ -666,10 +666,14 @@ set(GAME_STAGING_DIR "${GAME_BIN_DIR}/staging")
 
 set_target_properties(mod_logic PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${GAME_STAGING_DIR}"
+    PDB_OUTPUT_DIRECTORY "${GAME_STAGING_DIR}"
     # For multi-config generators (Visual Studio), set per-config too:
     RUNTIME_OUTPUT_DIRECTORY_DEBUG "${GAME_STAGING_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_RELEASE "${GAME_STAGING_DIR}"
     RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_STAGING_DIR}"
+    PDB_OUTPUT_DIRECTORY_DEBUG "${GAME_STAGING_DIR}"
+    PDB_OUTPUT_DIRECTORY_RELEASE "${GAME_STAGING_DIR}"
+    PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_STAGING_DIR}"
 )
 ```
 
@@ -753,7 +757,8 @@ Both DLLs should use the same CMake preset (e.g., both `mingw-release` or both `
 
 When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
-- **MSVC:** The linker locks the `.pdb` file while the DLL is loaded. Use `/pdbaltpath:%_PDB%` or the `/Fd` flag to generate uniquely-named PDBs (e.g., `mod_logic_<timestamp>.pdb`), or unload before rebuilding.
+- **MSVC:** The linker locks the `.pdb` file while the DLL is loaded. Use `/pdbaltpath:%_PDB%` or the `/Fd` flag to generate uniquely-named PDBs (e.g., `mod_logic_<timestamp>.pdb`), or unload before rebuilding. Set `PDB_OUTPUT_DIRECTORY` alongside `RUNTIME_OUTPUT_DIRECTORY` in CMake so PDBs are staged with the DLL (see Section 5).
+- **PDB copy on reload:** If your loader copies the DLL from a staging directory, copy the `.pdb` alongside it. Without the matching PDB next to the loaded DLL, debuggers lose source-level mapping after a hot reload.
 - **MinGW:** Debug info is embedded in the DLL (DWARF), so no separate PDB locking issue. However, GDB/x64dbg may cache the old symbol table — after reload, re-run `symload` or detach and reattach.
 - **After reload:** x64dbg will not automatically pick up new symbols. Use `Debug → Symbols → Reload module` or the `symload` command on the reloaded `mod_logic.dll`.
 
@@ -762,6 +767,76 @@ When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 **TLS (`thread_local` variables):** If your logic DLL declares `thread_local` variables, be aware that `FreeLibrary` does **not** run TLS destructors for threads that were not created by the DLL. This can leak resources. Avoid `thread_local` in logic DLLs, or ensure cleanup runs in `Shutdown()`.
 
 **Static constructors/destructors:** `FreeLibrary` runs destructors for file-scope `static` objects in the logic DLL. If those destructors depend on external state (game memory, other DLLs), they may crash. Prefer explicit init/shutdown functions over static constructors. DetourModKit singletons are safe because `DMK_Shutdown()` runs them in controlled order *before* `FreeLibrary`.
+
+### 9. Background Thread Lifecycle
+
+If your logic DLL spawns background threads (e.g., for deferred scanning, periodic polling, or async I/O), you **must** join them in `Shutdown()` before calling `DMK_Shutdown()`. A thread that outlives `FreeLibrary` will execute unmapped code and crash.
+
+```cpp
+// In Shutdown():
+void Shutdown()
+{
+    // 1. Signal threads to stop
+    s_scan_thread_running.store(false, std::memory_order_release);
+    s_scan_cv.notify_one();
+
+    // 2. Join with a bounded timeout to avoid blocking the reload indefinitely
+    if (s_scan_thread.joinable())
+    {
+        // Use a future to implement a timed join (std::thread has no native timeout)
+        auto join_future = std::async(std::launch::async, [&] { s_scan_thread.join(); });
+        if (join_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout)
+        {
+            Logger::get_instance().warning("Shutdown: background thread did not exit within 2s");
+            // Thread is stuck — detach as last resort so FreeLibrary can proceed.
+            // The thread will crash when it touches unmapped code, but that is
+            // preferable to deadlocking the reload cycle.
+            s_scan_thread.detach();
+        }
+    }
+
+    // 3. Now safe to tear down DMK
+    DMK_Shutdown();
+}
+```
+
+**Rules:**
+
+- Never `detach()` threads in a reloadable DLL — detached threads cannot be joined. The `detach()` above is a last-resort fallback when a thread is stuck, not normal practice.
+- Use `std::atomic<bool>` flags and `condition_variable::notify_one()` for cooperative shutdown.
+- Prefer a bounded join timeout (as shown above) when threads perform blocking I/O or long operations. For cooperative-shutdown threads with short poll intervals (e.g., `condition_variable::wait_for` with a 1-second timeout), an unbounded `join()` is acceptable since the thread will observe the stop flag promptly.
+
+### 10. Preprocessor Guards for Dev Builds
+
+When using the two-DLL architecture, the logic DLL should skip its `DllMain` initialization when loaded by the dev loader (which calls `Init()` directly). Use a preprocessor guard:
+
+```cpp
+// dllmain.cpp
+#ifndef MY_MOD_DEV_BUILD
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        DisableThreadLibraryCalls(hModule);
+        // Spawn init thread for production ASI loading
+    }
+    return TRUE;
+}
+#endif
+// When MY_MOD_DEV_BUILD is defined, DllMain is omitted entirely.
+// The dev loader calls Init()/Shutdown() via GetProcAddress.
+```
+
+Toggle this in CMake:
+
+```cmake
+option(MY_MOD_DEV_BUILD "Two-DLL hot-reload configuration" OFF)
+if(MY_MOD_DEV_BUILD)
+    target_compile_definitions(mod_logic PRIVATE MY_MOD_DEV_BUILD)
+endif()
+```
+
+This prevents double-initialization (once from `DllMain`, once from the loader's `Init()` call) and avoids spawning orphaned init threads during hot-reload.
 
 ---
 

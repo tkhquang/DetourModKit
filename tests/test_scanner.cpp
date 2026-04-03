@@ -6,6 +6,12 @@
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/memory.hpp"
 
+// windows.h included after project headers to avoid macro conflicts (e.g., 'small')
+#include <windows.h>
+#ifdef small
+#undef small
+#endif
+
 using namespace DetourModKit;
 
 TEST(ScannerTest, parse_aob_valid)
@@ -1020,4 +1026,182 @@ TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x50;
     EXPECT_EQ(*result, expected);
+}
+
+// --- Tests for scan_executable_regions ---
+
+TEST(ScannerExecRegionTest, FindsPatternInExecutableMemory)
+{
+    void *exec_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(exec_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(exec_mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    // 16-byte pattern unlikely to appear elsewhere in process memory
+    const std::byte sig[] = {
+        std::byte{0x7A}, std::byte{0x3F}, std::byte{0xE1}, std::byte{0x9C},
+        std::byte{0x42}, std::byte{0xB8}, std::byte{0x05}, std::byte{0xD7},
+        std::byte{0x6E}, std::byte{0xA3}, std::byte{0x11}, std::byte{0x8F},
+        std::byte{0x54}, std::byte{0xC6}, std::byte{0x29}, std::byte{0x70}};
+    std::memcpy(&bytes[256], sig, sizeof(sig));
+
+    auto pattern = Scanner::parse_aob("7A 3F E1 9C 42 B8 05 D7 6E A3 11 8F 54 C6 29 70");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &bytes[256]);
+
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerExecRegionTest, ReturnsNullForNoMatch)
+{
+    // Pattern unlikely to exist in any executable page
+    auto pattern = Scanner::parse_aob("FE ED FA CE DE AD BE EF CA FE BA BE 01 02 03 04");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(ScannerExecRegionTest, EmptyPattern)
+{
+    Scanner::CompiledPattern empty;
+    const std::byte *result = Scanner::scan_executable_regions(empty);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(ScannerExecRegionTest, ZeroOccurrence)
+{
+    auto pattern = Scanner::parse_aob("CC CC CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *result = Scanner::scan_executable_regions(*pattern, 0);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(ScannerExecRegionTest, NthOccurrence)
+{
+    void *exec_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(exec_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(exec_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    // 16-byte unique pattern placed at two offsets within our page
+    const std::byte sig[] = {
+        std::byte{0xB1}, std::byte{0x4D}, std::byte{0xF8}, std::byte{0xA2},
+        std::byte{0x63}, std::byte{0xC9}, std::byte{0x07}, std::byte{0xE5},
+        std::byte{0x3A}, std::byte{0x96}, std::byte{0x1B}, std::byte{0xD4},
+        std::byte{0x58}, std::byte{0x0E}, std::byte{0x7C}, std::byte{0x2F}};
+    std::memcpy(&bytes[100], sig, sizeof(sig));
+    std::memcpy(&bytes[500], sig, sizeof(sig));
+
+    auto pattern = Scanner::parse_aob("B1 4D F8 A2 63 C9 07 E5 3A 96 1B D4 58 0E 7C 2F");
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto *region_start = reinterpret_cast<const std::byte *>(exec_mem);
+    const auto *region_end = region_start + 4096;
+
+    const std::byte *first = Scanner::scan_executable_regions(*pattern, 1);
+    ASSERT_NE(first, nullptr);
+    EXPECT_GE(first, region_start);
+    EXPECT_LT(first, region_end);
+    EXPECT_EQ(first, &bytes[100]);
+
+    const std::byte *second = Scanner::scan_executable_regions(*pattern, 2);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second, &bytes[500]);
+
+    // Third occurrence should not exist
+    const std::byte *third = Scanner::scan_executable_regions(*pattern, 3);
+    EXPECT_EQ(third, nullptr);
+
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerExecRegionTest, SkipsNonExecutableMemory)
+{
+    void *rw_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(rw_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(rw_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    const std::byte sig[] = {
+        std::byte{0xF0}, std::byte{0x0D}, std::byte{0xCA}, std::byte{0xFE},
+        std::byte{0x91}, std::byte{0x3E}, std::byte{0x7B}, std::byte{0xA5},
+        std::byte{0xD2}, std::byte{0x48}, std::byte{0x16}, std::byte{0xC3},
+        std::byte{0x6A}, std::byte{0xEF}, std::byte{0x04}, std::byte{0x87}};
+    std::memcpy(&bytes[0], sig, sizeof(sig));
+
+    auto pattern = Scanner::parse_aob("F0 0D CA FE 91 3E 7B A5 D2 48 16 C3 6A EF 04 87");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    EXPECT_EQ(result, nullptr);
+
+    VirtualFree(rw_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerExecRegionTest, RespectsPatternOffset)
+{
+    void *exec_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(exec_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(exec_mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    // Unique 12-byte pattern with offset marker after byte 4
+    bytes[200] = std::byte{0xD3};
+    bytes[201] = std::byte{0x7A};
+    bytes[202] = std::byte{0xE9};
+    bytes[203] = std::byte{0x15};
+    bytes[204] = std::byte{0x82};
+    bytes[205] = std::byte{0xF6};
+    bytes[206] = std::byte{0x4B};
+    bytes[207] = std::byte{0xC0};
+    bytes[208] = std::byte{0x37};
+    bytes[209] = std::byte{0xA1};
+    bytes[210] = std::byte{0x5E};
+    bytes[211] = std::byte{0x94};
+
+    auto pattern = Scanner::parse_aob("D3 7A E9 15 | 82 F6 4B C0 37 A1 5E 94");
+    ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->offset, 4u);
+
+    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &bytes[204]);
+
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerExecRegionTest, SkipsGuardPages)
+{
+    void *exec_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(exec_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(exec_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    const std::byte sig[] = {
+        std::byte{0xC7}, std::byte{0x3B}, std::byte{0xA0}, std::byte{0xD9},
+        std::byte{0x14}, std::byte{0x6F}, std::byte{0xE2}, std::byte{0x85},
+        std::byte{0x4C}, std::byte{0x01}, std::byte{0x7D}, std::byte{0xF3},
+        std::byte{0xA8}, std::byte{0x56}, std::byte{0x2E}, std::byte{0xBB}};
+    std::memcpy(&bytes[0], sig, sizeof(sig));
+
+    DWORD old_protect;
+    VirtualProtect(exec_mem, 4096, PAGE_EXECUTE_READ | PAGE_GUARD, &old_protect);
+
+    auto pattern = Scanner::parse_aob("C7 3B A0 D9 14 6F E2 85 4C 01 7D F3 A8 56 2E BB");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    EXPECT_EQ(result, nullptr);
+
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
 }
