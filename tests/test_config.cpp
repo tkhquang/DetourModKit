@@ -1160,3 +1160,122 @@ TEST_F(ConfigTest, ReRegistration_DifferentSectionsSameKey)
     EXPECT_EQ(val1, 10);
     EXPECT_EQ(val2, 20);
 }
+
+TEST_F(ConfigTest, SetterCalledOnRegistrationAndLoad)
+{
+    // Verify that setter fires twice: once during register (with default),
+    // once during load (with INI or default value). Consumers must be idempotent.
+    std::vector<int> invocations;
+
+    Config::register_int("TestSection", "TestKey", "test_int", [&invocations](int v)
+                         { invocations.push_back(v); }, 42);
+
+    // After registration, setter should have been called once with default
+    ASSERT_EQ(invocations.size(), 1u);
+    EXPECT_EQ(invocations[0], 42);
+
+    // Load with no INI file — setter called again with default
+    Config::load(test_ini_file_.string());
+
+    ASSERT_EQ(invocations.size(), 2u);
+    EXPECT_EQ(invocations[1], 42);
+}
+
+TEST_F(ConfigTest, SetterCalledOnRegistrationAndLoad_WithFile)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestKey=99\n";
+    ini_file.close();
+
+    std::vector<int> invocations;
+
+    Config::register_int("TestSection", "TestKey", "test_int", [&invocations](int v)
+                         { invocations.push_back(v); }, 42);
+
+    // After registration, setter called with default
+    ASSERT_EQ(invocations.size(), 1u);
+    EXPECT_EQ(invocations[0], 42);
+
+    // Load from INI — setter called with file value
+    Config::load(test_ini_file_.string());
+
+    ASSERT_EQ(invocations.size(), 2u);
+    EXPECT_EQ(invocations[1], 99);
+}
+
+TEST_F(ConfigTest, AccumulativeSetterMustBeIdempotent)
+{
+    // Demonstrates the pattern consumers should use: clear-before-add
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "Items=alpha\n";
+    ini_file.close();
+
+    std::vector<std::string> items;
+
+    Config::register_string("TestSection", "Items", "items",
+                            [&items](const std::string &v)
+                            {
+                                // Idempotent pattern: clear before applying
+                                items.clear();
+                                items.push_back(v);
+                            },
+                            "default_item");
+
+    // After registration: ["default_item"]
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(items[0], "default_item");
+
+    // After load: ["alpha"] (not ["default_item", "alpha"])
+    Config::load(test_ini_file_.string());
+
+    ASSERT_EQ(items.size(), 1u);
+    EXPECT_EQ(items[0], "alpha");
+}
+
+TEST_F(ConfigTest, SetterCalledTwice_Float)
+{
+    std::vector<float> invocations;
+
+    Config::register_float("TestSection", "TestFloat", "test_float", [&invocations](float v)
+                           { invocations.push_back(v); }, 1.5f);
+
+    ASSERT_EQ(invocations.size(), 1u);
+    EXPECT_NEAR(invocations[0], 1.5f, 0.01f);
+
+    Config::load(test_ini_file_.string());
+
+    ASSERT_EQ(invocations.size(), 2u);
+    EXPECT_NEAR(invocations[1], 1.5f, 0.01f);
+}
+
+TEST_F(ConfigTest, SetterCalledTwice_Bool)
+{
+    std::vector<bool> invocations;
+
+    Config::register_bool("TestSection", "TestBool", "test_bool", [&invocations](bool v)
+                          { invocations.push_back(v); }, true);
+
+    ASSERT_EQ(invocations.size(), 1u);
+    EXPECT_TRUE(invocations[0]);
+
+    Config::load(test_ini_file_.string());
+
+    ASSERT_EQ(invocations.size(), 2u);
+    EXPECT_TRUE(invocations[1]);
+}
+
+TEST_F(ConfigTest, SetterCalledTwice_KeyCombo)
+{
+    int call_count = 0;
+
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&call_count](const Config::KeyComboList &)
+                               { ++call_count; }, "F3");
+
+    EXPECT_EQ(call_count, 1);
+
+    Config::load(test_ini_file_.string());
+
+    EXPECT_EQ(call_count, 2);
+}

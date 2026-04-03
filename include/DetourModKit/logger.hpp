@@ -146,6 +146,18 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Checks whether messages at the given level would be logged.
+         * @details Useful for gating expensive trace-only work (e.g. iterating
+         *          a data structure solely to build a log message).
+         * @param level The LogLevel to test.
+         * @return true if a message at this level would pass the current filter.
+         */
+        bool is_enabled(LogLevel level) const noexcept
+        {
+            return level >= current_log_level_.load(std::memory_order_acquire);
+        }
+
+        /**
          * @brief Sets the minimum log level for messages to be recorded.
          * @param level The minimum LogLevel to record.
          */

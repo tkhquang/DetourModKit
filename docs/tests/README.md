@@ -275,19 +275,19 @@ tests/
 ├── CMakeLists.txt              # Test discovery, fixture DLL build
 ├── main.cpp                    # GoogleTest entry point
 ├── fixtures/
-│   └── hook_target_lib.cpp     # Fixture DLL (4 exported functions)
-├── test_async_logger.cpp       # Async logger tests (~1527 lines)
-├── test_hook_manager.cpp       # Hook manager unit tests (~1426 lines)
-├── test_input.cpp              # Input system tests (~1261 lines)
-├── test_memory.cpp             # Memory utilities tests (~1260 lines)
-├── test_scanner.cpp            # AOB scanner tests (~1023 lines)
-├── test_logger.cpp             # Logger tests (~1023 lines)
-├── test_config.cpp             # Configuration tests (~1001 lines)
-├── test_hook_integration.cpp   # Cross-module hook integration (~319 lines)
-├── test_format.cpp             # Format utilities tests (~209 lines)
-├── test_math.cpp               # Math utilities tests (~107 lines)
-├── test_filesystem.cpp         # Filesystem tests (~102 lines)
-└── test_string.cpp             # String utilities tests (~81 lines)
+│   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
+├── test_async_logger.cpp       # Async logger tests
+├── test_hook_manager.cpp       # Hook manager unit tests
+├── test_hook_integration.cpp   # Cross-module hook integration tests
+├── test_input.cpp              # Input system tests
+├── test_memory.cpp             # Memory utilities tests
+├── test_scanner.cpp            # AOB scanner tests
+├── test_logger.cpp             # Logger tests
+├── test_config.cpp             # Configuration tests
+├── test_format.cpp             # Format utilities tests
+├── test_math.cpp               # Math utilities tests
+├── test_filesystem.cpp         # Filesystem tests
+└── test_string.cpp             # String utilities tests
 
 docs/tests/
 ├── test_coverage_guide.md      # This guide

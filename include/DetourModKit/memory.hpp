@@ -111,6 +111,40 @@ namespace DetourModKit
         bool is_readable(const void *address, size_t size);
 
         /**
+         * @enum ReadableStatus
+         * @brief Tri-state result for non-blocking readability checks.
+         */
+        enum class ReadableStatus
+        {
+            Readable,
+            NotReadable,
+            Unknown
+        };
+
+        /**
+         * @brief Non-blocking readability check that avoids contention on shared locks.
+         * @details Attempts a try-lock on the cache shard. Returns Unknown if the lock
+         *          cannot be acquired, allowing callers on latency-sensitive threads to
+         *          fall back to SEH instead of stalling.
+         * @param address Starting address of the memory region.
+         * @param size Number of bytes in the memory region to check.
+         * @return ReadableStatus indicating readable, not readable, or unknown (lock busy).
+         */
+        ReadableStatus is_readable_nonblocking(const void *address, size_t size);
+
+        /**
+         * @brief Reads a pointer-sized value at (base + offset), returning 0 on fault.
+         * @details On MSVC, uses SEH (__try/__except) to catch access violations with
+         *          zero overhead on the success path. On MinGW, falls back to a single
+         *          VirtualQuery guard before dereferencing (no cache interaction).
+         *          Suitable for hot paths that already manage their own error recovery.
+         * @param base The base address to read from.
+         * @param offset Byte offset added to base before dereferencing.
+         * @return The pointer-sized value at the address, or 0 if the read faults.
+         */
+        uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
+
+        /**
          * @brief Checks if a specified memory region is writable.
          * @details Verifies if the memory range has write permissions and is committed.
          * @param address Starting address of the memory region.

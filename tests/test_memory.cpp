@@ -1258,3 +1258,244 @@ TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
     // Re-init for TearDown
     Memory::init_cache();
 }
+
+TEST_F(MemoryTest, ReadPtrUnsafe_ValidPointer)
+{
+    uintptr_t value = 0xDEADBEEF;
+    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(&value), 0);
+    EXPECT_EQ(result, 0xDEADBEEF);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_WithOffset)
+{
+    uintptr_t values[2] = {0x11111111, 0x22222222};
+    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
+    EXPECT_EQ(result, 0x22222222);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_NullAddress)
+{
+    uintptr_t result = Memory::read_ptr_unsafe(0, 0);
+    EXPECT_EQ(result, 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_InvalidAddress)
+{
+    uintptr_t result = Memory::read_ptr_unsafe(0xDEAD, 0);
+    EXPECT_EQ(result, 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_FreedMemory)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    *reinterpret_cast<uintptr_t *>(mem) = 0xCAFEBABE;
+    VirtualFree(mem, 0, MEM_RELEASE);
+
+    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    EXPECT_EQ(result, 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_HeapAllocation)
+{
+    auto buffer = std::make_unique<uintptr_t>(0xABCD1234);
+    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(buffer.get()), 0);
+    EXPECT_EQ(result, 0xABCD1234);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_ValidMemory)
+{
+    char buffer[100] = {0};
+    auto status = Memory::is_readable_nonblocking(buffer, sizeof(buffer));
+    // Cache is not primed, so this will be a cache miss returning Unknown
+    EXPECT_NE(status, Memory::ReadableStatus::NotReadable);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_NullAddress)
+{
+    auto status = Memory::is_readable_nonblocking(nullptr, 100);
+    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_ZeroSize)
+{
+    char buffer[100] = {0};
+    auto status = Memory::is_readable_nonblocking(buffer, 0);
+    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_NoAccessMemory)
+{
+    void *noaccess = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(noaccess, nullptr);
+
+    // Prime cache so nonblocking has data
+    Memory::is_readable(noaccess, 1);
+
+    auto status = Memory::is_readable_nonblocking(noaccess, 1);
+    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+
+    VirtualFree(noaccess, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_CachedHit)
+{
+    char buffer[100] = {0};
+
+    // Prime cache with a regular read
+    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+
+    // Nonblocking should hit cache
+    auto status = Memory::is_readable_nonblocking(buffer, sizeof(buffer));
+    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_NoCacheInitialized)
+{
+    Memory::shutdown_cache();
+
+    char buffer[100] = {0};
+    auto status = Memory::is_readable_nonblocking(buffer, sizeof(buffer));
+    // Falls back to direct VirtualQuery when cache is not initialized
+    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+
+    Memory::init_cache();
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_FreedMemory)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    VirtualFree(mem, 0, MEM_RELEASE);
+
+    Memory::clear_cache();
+    Memory::shutdown_cache();
+
+    auto status = Memory::is_readable_nonblocking(mem, 1);
+    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+
+    Memory::init_cache();
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_NoAccessPage)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(mem, nullptr);
+
+    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    EXPECT_EQ(result, 0u);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_GuardPage)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    *reinterpret_cast<uintptr_t *>(mem) = 0x12345678;
+
+    DWORD old_protect;
+    VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
+
+    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    // MSVC SEH catches the guard page exception and returns 0.
+    // MinGW VirtualQuery detects PAGE_GUARD and returns 0.
+    EXPECT_EQ(result, 0u);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_ReadOnlyPage)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    *reinterpret_cast<uintptr_t *>(mem) = 0xFEEDFACE;
+
+    DWORD old_protect;
+    VirtualProtect(mem, 4096, PAGE_READONLY, &old_protect);
+
+    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    EXPECT_EQ(result, 0xFEEDFACE);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_NegativeOffset)
+{
+    uintptr_t values[3] = {0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC};
+    uintptr_t base = reinterpret_cast<uintptr_t>(&values[2]);
+    uintptr_t result = Memory::read_ptr_unsafe(base, -static_cast<ptrdiff_t>(sizeof(uintptr_t)));
+    EXPECT_EQ(result, 0xBBBBBBBB);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_ReservedMemory)
+{
+    void *reserved = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(reserved, nullptr);
+
+    // Prime cache
+    Memory::is_readable(reserved, 1);
+
+    auto status = Memory::is_readable_nonblocking(reserved, 1);
+    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+
+    VirtualFree(reserved, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_GuardPage)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    DWORD old_protect;
+    VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
+
+    Memory::clear_cache();
+    // Prime cache with guard-page state
+    Memory::is_readable(mem, 1);
+
+    auto status = Memory::is_readable_nonblocking(mem, 1);
+    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_ReadOnlyPage)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem, nullptr);
+
+    // Prime cache
+    Memory::is_readable(mem, 1);
+
+    auto status = Memory::is_readable_nonblocking(mem, 1);
+    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_SizeOverflow)
+{
+    char buffer[1] = {0};
+    auto status = Memory::is_readable_nonblocking(buffer, SIZE_MAX);
+    // Overflow in address arithmetic — should not return Readable
+    EXPECT_NE(status, Memory::ReadableStatus::Readable);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_HeapAllocation)
+{
+    auto buffer = std::make_unique<char[]>(100);
+
+    // Prime cache
+    Memory::is_readable(buffer.get(), 100);
+
+    auto status = Memory::is_readable_nonblocking(buffer.get(), 100);
+    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+}
+
+TEST_F(MemoryTest, ReadableStatus_EnumValues)
+{
+    EXPECT_NE(Memory::ReadableStatus::Readable, Memory::ReadableStatus::NotReadable);
+    EXPECT_NE(Memory::ReadableStatus::Readable, Memory::ReadableStatus::Unknown);
+    EXPECT_NE(Memory::ReadableStatus::NotReadable, Memory::ReadableStatus::Unknown);
+}
