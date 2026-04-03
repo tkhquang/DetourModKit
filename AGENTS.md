@@ -185,7 +185,10 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, loc
 - `HookManager::with_inline_hook()` — shared_lock read
 - `Logger::log()` level check — single atomic load
 - `Logger::log()` async enqueue — atomic shared_ptr load + lock-free queue push
-- `Memory::is_memory_readable()` — sharded SRWLOCK reader + cache lookup
+- `Memory::is_readable()` — sharded SRWLOCK reader + cache lookup
+- `Memory::is_readable_nonblocking()` — try_lock_shared + cache lookup (returns Unknown on contention)
+- `Memory::read_ptr_unsafe()` — SEH-protected raw dereference, zero cache overhead
+- `Logger::is_enabled()` — single atomic load (gate expensive trace-only work)
 
 ## Boundaries
 

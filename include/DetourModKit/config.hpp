@@ -24,6 +24,11 @@ namespace DetourModKit
      *   - @p ini_key     INI key name.
      *   - @p log_key_name  Human-readable name shown in log output.
      *   - @p setter      Callback invoked with the loaded (or default) value.
+     *
+     * @note Setter callbacks are invoked at two points: immediately during registration
+     *       (with the default value) and again during load() (with the INI or default value).
+     *       Consumers that accumulate state (e.g. building a lookup map) must be idempotent —
+     *       clear accumulated state before applying the new value to avoid stale entries.
      */
     namespace Config
     {
@@ -60,18 +65,22 @@ namespace DetourModKit
         using KeyComboList = std::vector<KeyCombo>;
 
         /// Registers an integer configuration item.
+        /// @note The setter is called immediately with default_value and again on load().
         void register_int(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                          std::function<void(int)> setter, int default_value);
 
         /// Registers a floating-point configuration item.
+        /// @note The setter is called immediately with default_value and again on load().
         void register_float(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                            std::function<void(float)> setter, float default_value);
 
         /// Registers a boolean configuration item.
+        /// @note The setter is called immediately with default_value and again on load().
         void register_bool(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                           std::function<void(bool)> setter, bool default_value);
 
         /// Registers a string configuration item.
+        /// @note The setter is called immediately with default_value and again on load().
         void register_string(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                             std::function<void(const std::string &)> setter, std::string default_value);
 
@@ -87,6 +96,7 @@ namespace DetourModKit
          * @param log_key_name Human-readable name shown in log output.
          * @param setter Callback invoked with the parsed KeyComboList.
          * @param default_value_str Default value string in the same format.
+         * @note The setter is called immediately with the parsed default and again on load().
          */
         void register_key_combo(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                                std::function<void(const KeyComboList &)> setter, std::string_view default_value_str);

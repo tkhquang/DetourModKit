@@ -1209,3 +1209,90 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
                  numBytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)));
     return {};
 }
+
+Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void *address, size_t size)
+{
+    if (!address || size == 0)
+        return ReadableStatus::NotReadable;
+
+    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+
+    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    {
+        // Cache not initialized - fall back to direct VirtualQuery (blocking)
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(address, &mbi, sizeof(mbi)))
+            return ReadableStatus::NotReadable;
+        if (mbi.State != MEM_COMMIT)
+            return ReadableStatus::NotReadable;
+        if (!MemoryUtilsCacheInternal::check_read_permission(mbi.Protect))
+            return ReadableStatus::NotReadable;
+        const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t query_end = query_addr_val + size;
+        if (query_end < query_addr_val)
+            return ReadableStatus::NotReadable;
+        if (query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize)
+            return ReadableStatus::Readable;
+        return ReadableStatus::NotReadable;
+    }
+
+    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    if (shard_count == 0)
+        return ReadableStatus::Unknown;
+
+    const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+    const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
+    const uint64_t now_ns = current_time_ns();
+    const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+
+    // Non-blocking: try_lock_shared to avoid stalling latency-sensitive threads
+    std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
+    if (!lock.owns_lock())
+        return ReadableStatus::Unknown;
+
+    CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
+        MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+        query_addr_val, size, now_ns, expiry_ns);
+    if (cached_info)
+    {
+        MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+        return MemoryUtilsCacheInternal::check_read_permission(cached_info->protection)
+                   ? ReadableStatus::Readable
+                   : ReadableStatus::NotReadable;
+    }
+
+    // Cache miss with non-blocking semantics: return Unknown rather than issuing VirtualQuery
+    return ReadableStatus::Unknown;
+}
+
+uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept
+{
+#ifdef _MSC_VER
+    __try
+    {
+        return *reinterpret_cast<const uintptr_t *>(base + offset);
+    }
+    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
+               GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH)
+    {
+        return 0;
+    }
+#else
+    // MinGW/GCC lacks __try/__except. Use VirtualQuery as a lightweight
+    // guard before the raw dereference. This is still faster than
+    // is_readable() because it bypasses the entire cache machinery.
+    const void *addr = reinterpret_cast<const void *>(base + offset);
+    MEMORY_BASIC_INFORMATION mbi;
+    if (!VirtualQuery(addr, &mbi, sizeof(mbi)))
+        return 0;
+    if (mbi.State != MEM_COMMIT)
+        return 0;
+    if ((mbi.Protect & CachePermissions::READ_PERMISSION_FLAGS) == 0 ||
+        (mbi.Protect & CachePermissions::NOACCESS_GUARD_FLAGS) != 0)
+        return 0;
+    return *reinterpret_cast<const uintptr_t *>(base + offset);
+#endif
+}

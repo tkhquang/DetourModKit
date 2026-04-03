@@ -1264,3 +1264,59 @@ TEST_F(LoggerTest, SetLogLevel_DifferentLevel_LogsChange)
 
     EXPECT_NE(content.find("Log level changed from DEBUG to INFO"), std::string::npos);
 }
+
+TEST_F(LoggerTest, IsEnabled_AtCurrentLevel)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Info));
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Warning));
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Error));
+    EXPECT_FALSE(logger.is_enabled(LogLevel::Debug));
+    EXPECT_FALSE(logger.is_enabled(LogLevel::Trace));
+}
+
+TEST_F(LoggerTest, IsEnabled_TraceLevel)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Trace));
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Debug));
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Info));
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Warning));
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Error));
+}
+
+TEST_F(LoggerTest, IsEnabled_ErrorLevel)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Error);
+
+    EXPECT_FALSE(logger.is_enabled(LogLevel::Trace));
+    EXPECT_FALSE(logger.is_enabled(LogLevel::Debug));
+    EXPECT_FALSE(logger.is_enabled(LogLevel::Info));
+    EXPECT_FALSE(logger.is_enabled(LogLevel::Warning));
+    EXPECT_TRUE(logger.is_enabled(LogLevel::Error));
+}
+
+TEST_F(LoggerTest, IsEnabled_ConsistentWithGetLogLevel)
+{
+    Logger &logger = Logger::get_instance();
+
+    const LogLevel all_levels[] = {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning, LogLevel::Error};
+
+    for (auto configured : all_levels)
+    {
+        logger.set_log_level(configured);
+        EXPECT_EQ(logger.get_log_level(), configured);
+
+        for (auto queried : all_levels)
+        {
+            EXPECT_EQ(logger.is_enabled(queried), queried >= configured)
+                << "configured=" << static_cast<int>(configured)
+                << " queried=" << static_cast<int>(queried);
+        }
+    }
+}
