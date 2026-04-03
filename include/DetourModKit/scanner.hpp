@@ -117,6 +117,18 @@ namespace DetourModKit
                                                                std::span<const std::byte> opcode_prefix,
                                                                size_t instruction_length);
 
+        /**
+         * @brief Scans all committed executable memory regions for a byte pattern.
+         * @details Walks the process address space via VirtualQuery, scanning each
+         *          committed region with execute permission. Useful for games with
+         *          packed or protected binaries that unpack code into anonymous pages
+         *          outside any loaded module's address range.
+         * @param pattern The compiled pattern to search for.
+         * @param occurrence Which occurrence to return (1-based). 1 = first match.
+         * @return Pointer to the match (adjusted by pattern offset), or nullptr if not found.
+         */
+        const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
+
     } // namespace Scanner
 } // namespace DetourModKit
 
