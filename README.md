@@ -621,8 +621,8 @@ Gamepad support uses the **XInput** API. The following controllers are supported
 | Xbox 360 | Yes (native XInput) |
 | Xbox One / Series X\|S | Yes (native XInput) |
 | GameSir (XInput mode) | Yes (switch controller to XInput mode) |
-| PS4 DualShock 4 | Via [DS4Windows](https://github.com/Ryochan7/DS4Windows) or Steam Input |
-| PS5 DualSense | Via [DualSenseX](https://github.com/Jehan-HENRY/DualSenseX) or Steam Input |
+| PS4 DualShock 4 | Via [DS4Windows](https://github.com/ds4windowsapp/DS4Windows) or Steam Input |
+| PS5 DualSense | Via [DualSenseX](https://github.com/Paliverse/DualSenseX) or Steam Input |
 | Nintendo Switch Pro | Via [BetterJoy](https://github.com/Davidobot/BetterJoy) or Steam Input |
 | Generic USB gamepads | Only if the controller exposes an XInput interface |
 
@@ -633,6 +633,7 @@ Gamepad support uses the **XInput** API. The following controllers are supported
 * Maximum 4 controllers (XInput hard limit, indices 0-3).
 * Analog triggers (LT/RT) and thumbstick axes are treated as digital buttons with configurable deadzone thresholds.
 * No event-driven hot-plug detection; controller connection is checked via polling (reconnection attempts are throttled to every 2 seconds when disconnected).
+* **Shift + Numpad keys:** When Shift is held, Windows translates numpad keys to their navigation equivalents (e.g., `Numpad5` becomes `VK_CLEAR` instead of `VK_NUMPAD5`). This means combos like `LShift+Numpad5` will never fire because `GetAsyncKeyState` sees the translated VK code, not the original numpad code. **Workaround:** use `Ctrl` or `Alt` instead of `Shift` for numpad combos, or use non-numpad keys. ([More info](https://learn.microsoft.com/en-us/answers/questions/3935239/how-to-make-it-so-left-shift-doesnt-affect-number))
 
 ## Projects Using DetourModKit
 
@@ -641,6 +642,7 @@ For practical reference and real-world usage examples:
 * **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
 * **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
 * **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
+* **CrimsonDesert-EquipHide**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide)
 
 ## Acknowledgements
 
