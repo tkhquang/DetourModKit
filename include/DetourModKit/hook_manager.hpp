@@ -24,6 +24,16 @@
 namespace DetourModKit
 {
     /**
+     * @brief Transparent hash functor for heterogeneous lookup in string-keyed maps.
+     * @details Allows std::string_view lookups without constructing a temporary std::string.
+     */
+    struct TransparentStringHash
+    {
+        using is_transparent = void;
+        size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+    };
+
+    /**
      * @enum HookType
      * @brief Enumeration of supported hook types, corresponding to SafetyHook capabilities.
      */
@@ -42,9 +52,7 @@ namespace DetourModKit
         Active,
         Disabled,
         Enabling,
-        Disabling,
-        Failed,
-        Removed
+        Disabling
     };
 
     /**
@@ -70,8 +78,6 @@ namespace DetourModKit
     struct HookConfig
     {
         bool auto_enable = true;
-        safetyhook::InlineHook::Flags inline_flags = static_cast<safetyhook::InlineHook::Flags>(0);
-        safetyhook::MidHook::Flags mid_flags = static_cast<safetyhook::MidHook::Flags>(0);
     };
 
     /**
@@ -159,10 +165,6 @@ namespace DetourModKit
                 return "Enabling";
             case HookStatus::Disabling:
                 return "Disabling";
-            case HookStatus::Failed:
-                return "Failed";
-            case HookStatus::Removed:
-                return "Removed";
             default:
                 return "Unknown";
             }
@@ -218,7 +220,7 @@ namespace DetourModKit
     {
     public:
         InlineHook(std::string name, uintptr_t target_address,
-                   std::unique_ptr<safetyhook::InlineHook> hook_obj,
+                   safetyhook::InlineHook hook_obj,
                    HookStatus initial_status)
             : Hook(std::move(name), HookType::Inline, target_address, initial_status),
               m_safetyhook_impl(std::move(hook_obj)) {}
@@ -231,24 +233,24 @@ namespace DetourModKit
         template <typename T>
         T get_original() const noexcept
         {
-            return m_safetyhook_impl ? m_safetyhook_impl->original<T>() : nullptr;
+            return m_safetyhook_impl ? m_safetyhook_impl.original<T>() : nullptr;
         }
 
     protected:
-        bool is_impl_valid() const noexcept override { return m_safetyhook_impl != nullptr; }
+        bool is_impl_valid() const noexcept override { return static_cast<bool>(m_safetyhook_impl); }
         bool do_enable() override
         {
-            auto result = m_safetyhook_impl->enable();
+            auto result = m_safetyhook_impl.enable();
             return result.has_value();
         }
         bool do_disable() override
         {
-            auto result = m_safetyhook_impl->disable();
+            auto result = m_safetyhook_impl.disable();
             return result.has_value();
         }
 
     private:
-        std::unique_ptr<safetyhook::InlineHook> m_safetyhook_impl;
+        safetyhook::InlineHook m_safetyhook_impl;
     };
 
     /**
@@ -259,7 +261,7 @@ namespace DetourModKit
     {
     public:
         MidHook(std::string name, uintptr_t target_address,
-                std::unique_ptr<safetyhook::MidHook> hook_obj,
+                safetyhook::MidHook hook_obj,
                 HookStatus initial_status)
             : Hook(std::move(name), HookType::Mid, target_address, initial_status),
               m_safetyhook_impl(std::move(hook_obj)) {}
@@ -270,24 +272,24 @@ namespace DetourModKit
          */
         safetyhook::MidHookFn get_destination() const noexcept
         {
-            return m_safetyhook_impl ? m_safetyhook_impl->destination() : nullptr;
+            return m_safetyhook_impl ? m_safetyhook_impl.destination() : nullptr;
         }
 
     protected:
-        bool is_impl_valid() const noexcept override { return m_safetyhook_impl != nullptr; }
+        bool is_impl_valid() const noexcept override { return static_cast<bool>(m_safetyhook_impl); }
         bool do_enable() override
         {
-            auto result = m_safetyhook_impl->enable();
+            auto result = m_safetyhook_impl.enable();
             return result.has_value();
         }
         bool do_disable() override
         {
-            auto result = m_safetyhook_impl->disable();
+            auto result = m_safetyhook_impl.disable();
             return result.has_value();
         }
 
     private:
-        std::unique_ptr<safetyhook::MidHook> m_safetyhook_impl;
+        safetyhook::MidHook m_safetyhook_impl;
     };
 
     /**
@@ -468,13 +470,40 @@ namespace DetourModKit
             }
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
-            const std::string key{hook_id};
-            auto it = m_hooks.find(key);
+            auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<InlineHook &>(*it->second));
             }
             return std::nullopt;
+        }
+
+        /**
+         * @brief Safely accesses an InlineHook by its ID for a void-returning callback.
+         * @details Same locking and reentrancy semantics as the value-returning overload.
+         * @param hook_id The name of the inline hook.
+         * @param fn The void-returning callback to invoke with the hook reference.
+         * @return true if the hook was found and the callback was invoked, false otherwise.
+         */
+        template <typename F>
+            requires std::invocable<F, InlineHook &> &&
+                     std::is_void_v<std::invoke_result_t<F, InlineHook &>>
+        [[nodiscard]] bool with_inline_hook(std::string_view hook_id, F &&fn)
+        {
+            if (get_reentrancy_guard() > 0)
+            {
+                m_logger.error("HookManager: Reentrant callback detected in with_inline_hook('{}')! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.", hook_id);
+                return false;
+            }
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ReentrancyGuard guard(get_reentrancy_guard());
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
+            {
+                std::invoke(std::forward<F>(fn), static_cast<InlineHook &>(*it->second));
+                return true;
+            }
+            return false;
         }
 
         /**
@@ -510,8 +539,7 @@ namespace DetourModKit
                 return std::nullopt;
             }
             ReentrancyGuard guard(get_reentrancy_guard());
-            const std::string key{hook_id};
-            auto it = m_hooks.find(key);
+            auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<InlineHook &>(*it->second));
@@ -546,13 +574,40 @@ namespace DetourModKit
             }
             std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
-            const std::string key{hook_id};
-            auto it = m_hooks.find(key);
+            auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<MidHook &>(*it->second));
             }
             return std::nullopt;
+        }
+
+        /**
+         * @brief Safely accesses a MidHook by its ID for a void-returning callback.
+         * @details Same locking and reentrancy semantics as the value-returning overload.
+         * @param hook_id The name of the mid hook.
+         * @param fn The void-returning callback to invoke with the hook reference.
+         * @return true if the hook was found and the callback was invoked, false otherwise.
+         */
+        template <typename F>
+            requires std::invocable<F, MidHook &> &&
+                     std::is_void_v<std::invoke_result_t<F, MidHook &>>
+        [[nodiscard]] bool with_mid_hook(std::string_view hook_id, F &&fn)
+        {
+            if (get_reentrancy_guard() > 0)
+            {
+                m_logger.error("HookManager: Reentrant callback detected in with_mid_hook('{}')! Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook). Perform mutations outside the callback or use an asynchronous operation.", hook_id);
+                return false;
+            }
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ReentrancyGuard guard(get_reentrancy_guard());
+            auto it = m_hooks.find(hook_id);
+            if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
+            {
+                std::invoke(std::forward<F>(fn), static_cast<MidHook &>(*it->second));
+                return true;
+            }
+            return false;
         }
 
         /**
@@ -588,8 +643,7 @@ namespace DetourModKit
                 return std::nullopt;
             }
             ReentrancyGuard guard(get_reentrancy_guard());
-            const std::string key{hook_id};
-            auto it = m_hooks.find(key);
+            auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
             {
                 return std::invoke(std::forward<F>(fn), static_cast<MidHook &>(*it->second));
@@ -601,7 +655,7 @@ namespace DetourModKit
         explicit HookManager(Logger &logger = Logger::get_instance());
 
         mutable std::shared_mutex m_hooks_mutex;
-        std::unordered_map<std::string, std::unique_ptr<Hook>> m_hooks;
+        std::unordered_map<std::string, std::unique_ptr<Hook>, TransparentStringHash, std::equal_to<>> m_hooks;
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
@@ -626,8 +680,10 @@ namespace DetourModKit
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;
 
-        // Non-locking variant - caller must already hold m_hooks_mutex
-        bool hook_id_exists_locked(std::string_view hook_id) const;
+        bool hook_id_exists_locked(std::string_view hook_id) const
+        {
+            return m_hooks.find(hook_id) != m_hooks.end();
+        }
     };
 } // namespace DetourModKit
 

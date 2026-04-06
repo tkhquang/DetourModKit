@@ -122,13 +122,6 @@ std::string HookManager::error_to_string(const safetyhook::MidHook::Error &err) 
     }
 }
 
-// Non-locking internal helpers - caller must hold m_hooks_mutex
-bool HookManager::hook_id_exists_locked(std::string_view hook_id) const
-{
-    const std::string key{hook_id};
-    return m_hooks.find(key) != m_hooks.end();
-}
-
 std::expected<std::string, HookError> HookManager::create_inline_hook(
     std::string_view name,
     uintptr_t target_address,
@@ -175,12 +168,9 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
 
         try
         {
-            safetyhook::InlineHook::Flags sh_flags = config.inline_flags;
-            if (!config.auto_enable)
-            {
-                sh_flags = static_cast<safetyhook::InlineHook::Flags>(
-                    static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::InlineHook::StartDisabled));
-            }
+            auto sh_flags = config.auto_enable
+                                ? safetyhook::InlineHook::Default
+                                : safetyhook::InlineHook::StartDisabled;
 
             auto hook_creation_result = safetyhook::InlineHook::create(
                 m_allocator,
@@ -196,10 +186,10 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
                           LogLevel::Error}}};
             }
 
-            auto sh_inline_hook_ptr = std::make_unique<safetyhook::InlineHook>(std::move(hook_creation_result.value()));
-            void *trampoline = sh_inline_hook_ptr->original<void *>();
+            auto sh_inline_hook = std::move(hook_creation_result.value());
+            void *trampoline = sh_inline_hook.original<void *>();
 
-            HookStatus initial_status = sh_inline_hook_ptr->enabled() ? HookStatus::Active : HookStatus::Disabled;
+            HookStatus initial_status = sh_inline_hook.enabled() ? HookStatus::Active : HookStatus::Disabled;
 
             // Pre-build log entries before committing to m_hooks so that
             // allocation failures in std::format cannot leave a ghost hook.
@@ -217,7 +207,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
             }
 
             std::string name_str{name};
-            auto managed_hook = std::make_unique<InlineHook>(name_str, target_address, std::move(sh_inline_hook_ptr), initial_status);
+            auto managed_hook = std::make_unique<InlineHook>(name_str, target_address, std::move(sh_inline_hook), initial_status);
             m_hooks.emplace(name_str, std::move(managed_hook));
             *original_trampoline = trampoline;
 
@@ -322,12 +312,9 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
         try
         {
-            safetyhook::MidHook::Flags sh_flags = config.mid_flags;
-            if (!config.auto_enable)
-            {
-                sh_flags = static_cast<safetyhook::MidHook::Flags>(
-                    static_cast<uint32_t>(sh_flags) | static_cast<uint32_t>(safetyhook::MidHook::StartDisabled));
-            }
+            auto sh_flags = config.auto_enable
+                                ? safetyhook::MidHook::Default
+                                : safetyhook::MidHook::StartDisabled;
 
             auto hook_creation_result = safetyhook::MidHook::create(
                 m_allocator,
@@ -343,9 +330,9 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
                           LogLevel::Error}}};
             }
 
-            auto sh_mid_hook_ptr = std::make_unique<safetyhook::MidHook>(std::move(hook_creation_result.value()));
+            auto sh_mid_hook = std::move(hook_creation_result.value());
 
-            HookStatus initial_status = sh_mid_hook_ptr->enabled() ? HookStatus::Active : HookStatus::Disabled;
+            HookStatus initial_status = sh_mid_hook.enabled() ? HookStatus::Active : HookStatus::Disabled;
 
             // Pre-build log entries before committing to m_hooks so that
             // allocation failures in std::format cannot leave a ghost hook.
@@ -363,7 +350,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
             }
 
             std::string name_str{name};
-            auto managed_hook = std::make_unique<MidHook>(name_str, target_address, std::move(sh_mid_hook_ptr), initial_status);
+            auto managed_hook = std::make_unique<MidHook>(name_str, target_address, std::move(sh_mid_hook), initial_status);
             m_hooks.emplace(name_str, std::move(managed_hook));
 
             return {std::move(name_str), std::move(logs)};
@@ -426,8 +413,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
 bool HookManager::remove_hook(std::string_view hook_id)
 {
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    const std::string key{hook_id};
-    auto it = m_hooks.find(key);
+    auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
         std::string name_of_removed_hook = it->second->get_name();
@@ -464,8 +450,7 @@ void HookManager::remove_all_hooks()
 bool HookManager::enable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    const std::string key{hook_id};
-    auto it = m_hooks.find(key);
+    auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
         m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
@@ -500,8 +485,7 @@ bool HookManager::enable_hook(std::string_view hook_id)
 bool HookManager::disable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    const std::string key{hook_id};
-    auto it = m_hooks.find(key);
+    auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
         m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
@@ -536,8 +520,7 @@ bool HookManager::disable_hook(std::string_view hook_id)
 std::optional<HookStatus> HookManager::get_hook_status(std::string_view hook_id) const
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    const std::string key{hook_id};
-    auto it = m_hooks.find(key);
+    auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
         return it->second->get_status();
@@ -551,8 +534,6 @@ std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
     std::unordered_map<HookStatus, size_t> counts;
     counts[HookStatus::Active] = 0;
     counts[HookStatus::Disabled] = 0;
-    counts[HookStatus::Failed] = 0;
-    counts[HookStatus::Removed] = 0;
     for (const auto &[name, hook_ptr] : m_hooks)
     {
         counts[hook_ptr->get_status()]++;

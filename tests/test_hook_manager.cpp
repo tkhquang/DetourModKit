@@ -44,14 +44,10 @@ TEST_F(HookManagerTest, HookStatus)
     HookStatus status2 = HookStatus::Disabled;
     HookStatus status3 = HookStatus::Enabling;
     HookStatus status4 = HookStatus::Disabling;
-    HookStatus status5 = HookStatus::Failed;
-    HookStatus status6 = HookStatus::Removed;
 
     EXPECT_NE(status1, status2);
     EXPECT_NE(status2, status3);
     EXPECT_NE(status3, status4);
-    EXPECT_NE(status4, status5);
-    EXPECT_NE(status5, status6);
 }
 
 TEST_F(HookManagerTest, HookType)
@@ -160,8 +156,8 @@ TEST_F(HookManagerTest, GetHookIds_WithFilter)
     auto disabled_ids = hook_manager_->get_hook_ids(HookStatus::Disabled);
     EXPECT_TRUE(disabled_ids.empty());
 
-    auto failed_ids = hook_manager_->get_hook_ids(HookStatus::Failed);
-    EXPECT_TRUE(failed_ids.empty());
+    auto enabling_ids = hook_manager_->get_hook_ids(HookStatus::Enabling);
+    EXPECT_TRUE(enabling_ids.empty());
 }
 
 TEST_F(HookManagerTest, RemoveAllHooks)
@@ -299,28 +295,12 @@ TEST(HookErrorStringTest, ErrorToString_All)
     EXPECT_EQ(Hook::error_to_string(HookError::UnknownError), "Unknown error");
 }
 
-TEST_F(HookManagerTest, HookConfig_Flags)
-{
-    HookConfig config;
-    config.auto_enable = false;
-
-    EXPECT_FALSE(config.auto_enable);
-
-    config.inline_flags = static_cast<safetyhook::InlineHook::Flags>(0);
-    config.mid_flags = static_cast<safetyhook::MidHook::Flags>(0);
-
-    (void)config.inline_flags;
-    (void)config.mid_flags;
-}
-
 TEST_F(HookManagerTest, GetHookCounts_Empty)
 {
     auto counts = hook_manager_->get_hook_counts();
 
     EXPECT_EQ(counts[HookStatus::Active], 0u);
     EXPECT_EQ(counts[HookStatus::Disabled], 0u);
-    EXPECT_EQ(counts[HookStatus::Failed], 0u);
-    EXPECT_EQ(counts[HookStatus::Removed], 0u);
 }
 
 TEST_F(HookManagerTest, Shutdown_Multiple)
@@ -862,8 +842,6 @@ TEST_F(HookManagerTest, StatusToString_AllValues)
     EXPECT_EQ(Hook::status_to_string(HookStatus::Disabled), "Disabled");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Enabling), "Enabling");
     EXPECT_EQ(Hook::status_to_string(HookStatus::Disabling), "Disabling");
-    EXPECT_EQ(Hook::status_to_string(HookStatus::Failed), "Failed");
-    EXPECT_EQ(Hook::status_to_string(HookStatus::Removed), "Removed");
     EXPECT_EQ(Hook::status_to_string(static_cast<HookStatus>(999)), "Unknown");
 }
 
@@ -897,7 +875,7 @@ TEST_F(HookManagerTest, GetHookStatus_NotFound)
 
 TEST_F(HookManagerTest, GetHookIds_FilteredEmpty)
 {
-    auto ids = hook_manager_->get_hook_ids(HookStatus::Failed);
+    auto ids = hook_manager_->get_hook_ids(HookStatus::Disabled);
     EXPECT_TRUE(ids.empty());
 }
 
@@ -1478,4 +1456,77 @@ TEST_F(HookManagerTest, ShutdownResetsFlag)
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidDetourFunction);
+}
+
+TEST_F(HookManagerTest, WithInlineHook_VoidCallback)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "VoidInlineCB",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    bool callback_executed = false;
+    bool found = hook_manager_->with_inline_hook(
+        "VoidInlineCB",
+        [&callback_executed](InlineHook &hook)
+        {
+            callback_executed = true;
+            EXPECT_EQ(hook.get_type(), HookType::Inline);
+        });
+
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(callback_executed);
+}
+
+TEST_F(HookManagerTest, WithInlineHook_VoidCallback_NotFound)
+{
+    bool callback_executed = false;
+    bool found = hook_manager_->with_inline_hook(
+        "NonExistentVoidCB",
+        [&callback_executed]([[maybe_unused]] InlineHook &hook)
+        {
+            callback_executed = true;
+        });
+
+    EXPECT_FALSE(found);
+    EXPECT_FALSE(callback_executed);
+}
+
+TEST_F(HookManagerTest, WithMidHook_VoidCallback)
+{
+    auto detour_fn = [](safetyhook::Context &) {};
+    auto result = hook_manager_->create_mid_hook(
+        "VoidMidCB",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        detour_fn);
+    ASSERT_TRUE(result.has_value());
+
+    bool callback_executed = false;
+    bool found = hook_manager_->with_mid_hook(
+        "VoidMidCB",
+        [&callback_executed](MidHook &hook)
+        {
+            callback_executed = true;
+            EXPECT_EQ(hook.get_type(), HookType::Mid);
+        });
+
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(callback_executed);
+}
+
+TEST_F(HookManagerTest, WithMidHook_VoidCallback_NotFound)
+{
+    bool callback_executed = false;
+    bool found = hook_manager_->with_mid_hook(
+        "NonExistentVoidMidCB",
+        [&callback_executed]([[maybe_unused]] MidHook &hook)
+        {
+            callback_executed = true;
+        });
+
+    EXPECT_FALSE(found);
+    EXPECT_FALSE(callback_executed);
 }
