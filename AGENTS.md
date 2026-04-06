@@ -70,7 +70,7 @@ make clean        # Remove all build directories
 ```text
 include/DetourModKit/    # Public headers -- one per module
   scanner.hpp            # AOB pattern scanning with SSE2
-  hook_manager.hpp       # SafetyHook wrapper (inline + mid hooks)
+  hook_manager.hpp       # SafetyHook wrapper (inline, mid, and VMT hooks)
   async_logger.hpp       # Lock-free MPMC queue logger
   logger.hpp             # Synchronous singleton logger
   win_file_stream.hpp    # Win32 shared-access file stream (CreateFile backend)
@@ -141,6 +141,7 @@ hook_manager.with_inline_hook("camera_update", [](InlineHook &hook) {
 - **One test file per module:** `tests/test_<module>.cpp` mirrors `src/<module>.cpp`.
 - **Integration tests:** `tests/test_hook_integration.cpp` tests cross-module hooking against `tests/fixtures/hook_target_lib.cpp` (built as a DLL). The DLL exports `extern "C"` functions with volatile magic constants for stable AOB patterns.
 - **Test fixture pattern:** Each suite uses a `::testing::Test` subclass with `SetUp()`/`TearDown()` for temp file cleanup. Temp file paths must include the process ID (`_getpid()`) and a counter to avoid collisions when CTest runs tests in parallel as separate processes.
+- **VMT hook test lifetime:** GoogleTest destroys test-body locals *before* calling `TearDown()`. VMT tests must explicitly call `remove_all_vmt_hooks()` (or `remove_vmt_hook`) before target objects go out of scope. Do not rely on `TearDown()` for VMT cleanup when the hooked object is a test-body local.
 - **Coverage gate:** 80% minimum line coverage enforced in CI. All PRs must pass.
 - **Concurrency tests:** Use `std::atomic<bool> stop` flag pattern with multiple threads. See `AsyncMode_ConcurrentLogAndDisable` in `test_logger.cpp` for the reference pattern.
 - **Build flag:** Tests are enabled with `DMK_BUILD_TESTS=ON` (on by default in debug presets).
