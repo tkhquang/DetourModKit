@@ -145,6 +145,26 @@ namespace DetourModKit
         uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
 
         /**
+         * @brief Inline pointer dereference with a low-address validity guard.
+         * @details Reads a pointer-sized value at (base + offset) and rejects values
+         *          at or below min_valid. Addresses below 0x10000 are never valid
+         *          usermode pointers on Windows (null page + guard pages), so this
+         *          check terminates stale/dangling pointer chain traversals early.
+         *          No SEH frame is set up — callers must provide their own outer
+         *          exception guard when the target memory may be unmapped.
+         * @param base The base address to read from.
+         * @param offset Byte offset added to base before dereferencing.
+         * @param min_valid Minimum address value to accept (default 0x10000).
+         * @return The pointer-sized value at the address, or 0 if the value <= min_valid.
+         */
+        inline uintptr_t read_ptr_checked(uintptr_t base, ptrdiff_t offset,
+                                          uintptr_t min_valid = 0x10000) noexcept
+        {
+            const auto addr = *reinterpret_cast<const uintptr_t *>(base + offset);
+            return (addr > min_valid) ? addr : 0;
+        }
+
+        /**
          * @brief Checks if a specified memory region is writable.
          * @details Verifies if the memory range has write permissions and is committed.
          * @param address Starting address of the memory region.

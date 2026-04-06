@@ -3,13 +3,49 @@
 
 #include <vector>
 #include <string>
+#include <string_view>
 #include <cstddef>
-#include <optional>
 #include <cstdint>
+#include <expected>
+#include <optional>
 #include <span>
 
 namespace DetourModKit
 {
+    /**
+     * @enum RipResolveError
+     * @brief Error codes for RIP-relative resolution failures.
+     */
+    enum class RipResolveError
+    {
+        NullInput,
+        PrefixNotFound,
+        RegionTooSmall,
+        UnreadableDisplacement
+    };
+
+    /**
+     * @brief Converts a RipResolveError to a human-readable string.
+     * @param error The error code.
+     * @return A string view describing the error.
+     */
+    constexpr std::string_view rip_resolve_error_to_string(RipResolveError error)
+    {
+        switch (error)
+        {
+        case RipResolveError::NullInput:
+            return "Null input pointer";
+        case RipResolveError::PrefixNotFound:
+            return "Opcode prefix not found in search region";
+        case RipResolveError::RegionTooSmall:
+            return "Search region too small for prefix + displacement";
+        case RipResolveError::UnreadableDisplacement:
+            return "Displacement bytes at matched location are not readable";
+        default:
+            return "Unknown RIP resolve error";
+        }
+    }
+
     namespace Scanner
     {
         /**
@@ -95,11 +131,12 @@ namespace DetourModKit
          * @param instruction_address Pointer to the first byte of the instruction.
          * @param displacement_offset Byte offset from instruction_address to the disp32 field.
          * @param instruction_length Total length of the instruction in bytes.
-         * @return The resolved absolute address, or std::nullopt on null input or unreadable displacement.
+         * @return The resolved absolute address, or RipResolveError on failure.
          */
-        std::optional<uintptr_t> resolve_rip_relative(const std::byte *instruction_address,
-                                                      size_t displacement_offset,
-                                                      size_t instruction_length);
+        [[nodiscard]] std::expected<uintptr_t, RipResolveError> resolve_rip_relative(
+            const std::byte *instruction_address,
+            size_t displacement_offset,
+            size_t instruction_length);
 
         /**
          * @brief Scans forward from a starting address for an opcode prefix, then resolves the RIP-relative target.
@@ -110,12 +147,13 @@ namespace DetourModKit
          * @param search_length Maximum number of bytes to search forward.
          * @param opcode_prefix The opcode byte sequence to search for (disp32 must follow immediately).
          * @param instruction_length Total length of the instruction in bytes.
-         * @return The resolved absolute address, or std::nullopt if prefix not found or displacement unreadable.
+         * @return The resolved absolute address, or RipResolveError describing the failure.
          */
-        std::optional<uintptr_t> find_and_resolve_rip_relative(const std::byte *search_start,
-                                                               size_t search_length,
-                                                               std::span<const std::byte> opcode_prefix,
-                                                               size_t instruction_length);
+        [[nodiscard]] std::expected<uintptr_t, RipResolveError> find_and_resolve_rip_relative(
+            const std::byte *search_start,
+            size_t search_length,
+            std::span<const std::byte> opcode_prefix,
+            size_t instruction_length);
 
         /**
          * @brief Scans all committed executable memory regions for a byte pattern.

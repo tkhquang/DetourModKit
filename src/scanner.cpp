@@ -296,19 +296,20 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
     return nullptr;
 }
 
-std::optional<uintptr_t> DetourModKit::Scanner::resolve_rip_relative(const std::byte *instruction_address,
-                                                                     size_t displacement_offset,
-                                                                     size_t instruction_length)
+std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::resolve_rip_relative(
+    const std::byte *instruction_address,
+    size_t displacement_offset,
+    size_t instruction_length)
 {
     if (!instruction_address)
     {
-        return std::nullopt;
+        return std::unexpected(RipResolveError::NullInput);
     }
 
     const std::byte *disp_ptr = instruction_address + displacement_offset;
     if (!Memory::is_readable(disp_ptr, sizeof(int32_t)))
     {
-        return std::nullopt;
+        return std::unexpected(RipResolveError::UnreadableDisplacement);
     }
 
     int32_t displacement;
@@ -318,21 +319,22 @@ std::optional<uintptr_t> DetourModKit::Scanner::resolve_rip_relative(const std::
     return base + instruction_length + static_cast<uintptr_t>(static_cast<intptr_t>(displacement));
 }
 
-std::optional<uintptr_t> DetourModKit::Scanner::find_and_resolve_rip_relative(const std::byte *search_start,
-                                                                              size_t search_length,
-                                                                              std::span<const std::byte> opcode_prefix,
-                                                                              size_t instruction_length)
+std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::find_and_resolve_rip_relative(
+    const std::byte *search_start,
+    size_t search_length,
+    std::span<const std::byte> opcode_prefix,
+    size_t instruction_length)
 {
     if (!search_start || opcode_prefix.empty())
     {
-        return std::nullopt;
+        return std::unexpected(RipResolveError::NullInput);
     }
 
     const size_t prefix_len = opcode_prefix.size();
     const size_t min_bytes = prefix_len + sizeof(int32_t);
     if (search_length < min_bytes)
     {
-        return std::nullopt;
+        return std::unexpected(RipResolveError::RegionTooSmall);
     }
 
     const size_t scan_limit = search_length - min_bytes;
@@ -353,7 +355,7 @@ std::optional<uintptr_t> DetourModKit::Scanner::find_and_resolve_rip_relative(co
         return resolve_rip_relative(&search_start[i], prefix_len, instruction_length);
     }
 
-    return std::nullopt;
+    return std::unexpected(RipResolveError::PrefixNotFound);
 }
 
 const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPattern &pattern, size_t occurrence)

@@ -19,7 +19,7 @@ Split your mod into two binaries:
 | `mod_loader.asi` | Thin loader stub                       | Lives for entire game session | Rarely (only when loader logic changes) |
 | `mod_logic.dll`  | All mod code (hooks, features, config) | Loaded/unloaded on demand     | Every iteration                         |
 
-The loader watches for a reload hotkey. When pressed, it tears down the logic DLL and reloads it from disk — **no game restart required**.
+The loader watches for a reload hotkey. When pressed, it tears down the logic DLL and reloads it from disk -- **no game restart required**.
 
 ### Architecture Diagram
 
@@ -143,7 +143,7 @@ extern "C" __declspec(dllexport) bool Init()
 
         if (!setup_hooks())
         {
-            logger.error("mod_logic: Hook setup failed — rolling back");
+            logger.error("mod_logic: Hook setup failed -- rolling back");
             DMK_Shutdown();
             return false;
         }
@@ -186,7 +186,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
     {
         DisableThreadLibraryCalls(hModule);
         s_this_module = hModule;
-        // Do NOT initialize here — Init() is called explicitly by the loader
+        // Do NOT initialize here -- Init() is called explicitly by the loader
     }
     return TRUE;
 }
@@ -238,7 +238,7 @@ The loader is intentionally minimal. It should almost never need rebuilding.
 
 // ─── Configuration ──────────────────────────────────────────────────
 
-// Reload hotkey — VK_NUMPAD0 (Numpad 0). Change as needed.
+// Reload hotkey -- VK_NUMPAD0 (Numpad 0). Change as needed.
 // Numpad keys are unlikely to conflict with game controls or InputManager bindings.
 constexpr int RELOAD_KEY = VK_NUMPAD0;
 
@@ -398,11 +398,11 @@ static DWORD WINAPI LoaderThread(LPVOID /*param*/)
 {
     s_logic_dll_path = resolve_logic_dll_path();
 
-    // Initial load — do NOT exit if this fails.
+    // Initial load -- do NOT exit if this fails.
     // The thread must stay alive so the reload hotkey can retry
     // (e.g., logic DLL not yet built on first launch).
     if (!load_logic_dll())
-        loader_log("Initial load failed — press reload key to retry");
+        loader_log("Initial load failed -- press reload key to retry");
 
     // Poll for reload hotkey
     while (s_running.load())
@@ -458,94 +458,206 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 
 ### Step 4: CMake Build Configuration
 
-You need two separate CMake targets. Here is a reference structure:
+Use a single CMakeLists.txt with a build option that switches between:
+
+- **Production:** single ASI (all code in one binary)
+- **Dev build:** two-DLL hot-reload (loader ASI + logic DLL)
 
 ```text
 my_mod/
-├── CMakeLists.txt              ← Top-level, defines both targets
+├── CMakeLists.txt              <- Top-level, defines both target configurations
 ├── external/
-│   └── DetourModKit/           ← Git submodule
-├── mod_loader/
-│   └── dllmain.cpp             ← Loader ASI source
-├── mod_logic/
-│   ├── dllmain.cpp             ← Logic DLL source
-│   ├── exports.hpp             ← Shared Init/Shutdown typedefs
-│   └── features/               ← Your mod feature code
-│       ├── camera.cpp
-│       └── camera.hpp
+│   └── DetourModKit/           <- Git submodule
+├── src/
+│   ├── dllmain.cpp             <- Main entry point (production ASI)
+│   ├── features/               <- Your mod feature code
+│   │   ├── camera.cpp
+│   │   └── camera.hpp
+│   └── dev/
+│       ├── loader_main.cpp     <- Loader ASI source (dev only)
+│       └── logic_exports.cpp   <- Init/Shutdown exports (dev only)
 └── config/
-    └── mod_config.ini           ← Runtime configuration
+    └── mod_config.ini          <- Runtime configuration
 ```
 
 **CMakeLists.txt:**
 
 ```cmake
 cmake_minimum_required(VERSION 3.25)
-project(MyMod LANGUAGES CXX)
+project(MyMod VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ─── DetourModKit ────────────────────────────────────────────────────
+# -- DetourModKit ---------------------------------------------------------
 add_subdirectory(external/DetourModKit)
 
-# ─── Loader ASI (thin stub, rarely rebuilt) ──────────────────────────
-add_library(mod_loader SHARED
-    mod_loader/dllmain.cpp
-)
-set_target_properties(mod_loader PROPERTIES
-    OUTPUT_NAME "mod_loader"
-    SUFFIX ".asi"
-    # Output directly to game directory for convenience
-    # RUNTIME_OUTPUT_DIRECTORY "D:/Games/SteamLibrary/steamapps/common/YourGame/bin64"
-)
+# -- Dev build toggle -----------------------------------------------------
+option(MY_MOD_DEV_BUILD "Two-DLL hot-reload configuration for development" OFF)
 
-# ─── Logic DLL (rebuilt frequently, hot-reloaded) ────────────────────
-add_library(mod_logic SHARED
-    mod_logic/dllmain.cpp
-    mod_logic/features/camera.cpp
+# -- Common source files (shared by both configurations) ------------------
+set(COMMON_SOURCES
+    src/dllmain.cpp
+    src/features/camera.cpp
     # Add more source files as needed
 )
-target_link_libraries(mod_logic PRIVATE DetourModKit)
-target_include_directories(mod_logic PRIVATE
-    ${CMAKE_SOURCE_DIR}/mod_logic
+
+# -- Game output directory ------------------------------------------------
+set(GAME_BIN_DIR "D:/Games/SteamLibrary/steamapps/common/YourGame/bin64/plugins")
+
+if(MY_MOD_DEV_BUILD)
+    # =================================================================
+    # Dev Build: two-DLL hot-reload (loader + logic)
+    # =================================================================
+    message(STATUS "DEV BUILD enabled -- building loader + logic DLL pair")
+
+    # -- Loader ASI (thin stub, no DetourModKit, rarely rebuilt) -------
+    add_library(mod_loader SHARED src/dev/loader_main.cpp)
+
+    target_link_libraries(mod_loader PRIVATE kernel32 user32)
+
+    set_target_properties(mod_loader PROPERTIES
+        OUTPUT_NAME "MyMod"
+        SUFFIX ".asi"
+        PREFIX ""
+        RUNTIME_OUTPUT_DIRECTORY "${GAME_BIN_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${GAME_BIN_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${GAME_BIN_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_BIN_DIR}"
+    )
+
+    # -- Logic DLL (all mod code, rebuilt frequently) ------------------
+    add_library(mod_logic SHARED
+        ${COMMON_SOURCES}
+        src/dev/logic_exports.cpp
+    )
+
+    target_include_directories(mod_logic PRIVATE src)
+    target_compile_definitions(mod_logic PRIVATE MY_MOD_DEV_BUILD)
+    target_link_libraries(mod_logic PRIVATE DetourModKit)
+
+    # Build to staging/ so the linker never conflicts with a game-locked
+    # DLL. The loader copies from staging/ before LoadLibrary.
+    set(GAME_STAGING_DIR "${GAME_BIN_DIR}/staging")
+
+    set_target_properties(mod_logic PROPERTIES
+        OUTPUT_NAME "MyMod_Logic"
+        PREFIX ""
+        # RUNTIME for .dll, LIBRARY for .dll.a (MinGW import lib)
+        RUNTIME_OUTPUT_DIRECTORY "${GAME_STAGING_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${GAME_STAGING_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${GAME_STAGING_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_STAGING_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY "${GAME_STAGING_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY_DEBUG "${GAME_STAGING_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${GAME_STAGING_DIR}"
+        LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_STAGING_DIR}"
+        PDB_OUTPUT_DIRECTORY "${GAME_STAGING_DIR}"
+        PDB_OUTPUT_DIRECTORY_DEBUG "${GAME_STAGING_DIR}"
+        PDB_OUTPUT_DIRECTORY_RELEASE "${GAME_STAGING_DIR}"
+        PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_STAGING_DIR}"
+    )
+
+    # Debug info for the logic DLL (MSVC)
+    if(MSVC)
+        target_compile_options(mod_logic PRIVATE /Zi)
+        target_link_options(mod_logic PRIVATE /DEBUG /OPT:REF /OPT:ICF)
+    endif()
+
+    # -- Post-build deploy script -------------------------------------
+    # Tries to copy DLL+PDB directly to the game directory.
+    # If the DLL is locked (game running), both files stay in staging/
+    # for the hot-reload loader to pick up.
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/deploy_logic.cmake" [=[
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E copy "${SRC_DLL}" "${DST_DLL}"
+    RESULT_VARIABLE rc
 )
-set_target_properties(mod_logic PROPERTIES
-    OUTPUT_NAME "mod_logic"
-    # Output to same directory as the loader ASI
-    # RUNTIME_OUTPUT_DIRECTORY "D:/Games/SteamLibrary/steamapps/common/YourGame/bin64"
-)
+if(rc EQUAL 0)
+    message(STATUS "Direct deploy OK -- cleaning staging")
+    file(REMOVE "${STAGING_DLL}")
+    if(EXISTS "${SRC_PDB}")
+        execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E copy "${SRC_PDB}" "${DST_PDB}"
+            RESULT_VARIABLE pdb_rc
+        )
+        if(pdb_rc EQUAL 0)
+            file(REMOVE "${STAGING_PDB}")
+        endif()
+    endif()
+else()
+    message(STATUS "Direct deploy skipped (file locked) -- using staging")
+endif()
+]=])
+
+    add_custom_command(TARGET mod_logic POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            -DSRC_DLL=$<TARGET_FILE:mod_logic>
+            -DDST_DLL=${GAME_BIN_DIR}/MyMod_Logic.dll
+            -DSTAGING_DLL=${GAME_STAGING_DIR}/MyMod_Logic.dll
+            -DSRC_PDB=$<TARGET_PDB_FILE:mod_logic>
+            -DDST_PDB=${GAME_BIN_DIR}/MyMod_Logic.pdb
+            -DSTAGING_PDB=${GAME_STAGING_DIR}/MyMod_Logic.pdb
+            -P "${CMAKE_CURRENT_BINARY_DIR}/deploy_logic.cmake"
+        COMMENT "Deploying Logic DLL+PDB (falls back to staging if locked)"
+    )
+
+else()
+    # =================================================================
+    # Production Build: single ASI
+    # =================================================================
+    add_library(${PROJECT_NAME}-ASI SHARED ${COMMON_SOURCES})
+
+    target_include_directories(${PROJECT_NAME}-ASI PRIVATE src)
+    target_link_libraries(${PROJECT_NAME}-ASI PRIVATE DetourModKit)
+
+    set_target_properties(${PROJECT_NAME}-ASI PROPERTIES
+        OUTPUT_NAME "MyMod"
+        SUFFIX ".asi"
+        PREFIX ""
+    )
+
+    target_compile_options(${PROJECT_NAME}-ASI PRIVATE
+        $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:MSVC>:/O1 /Gy /Gw>>
+    )
+    target_link_options(${PROJECT_NAME}-ASI PRIVATE
+        $<$<CONFIG:Release>:$<$<CXX_COMPILER_ID:MSVC>:/OPT:REF /OPT:ICF>>
+    )
+endif()
 ```
+
+**Key design decisions:**
+
+- **Staging directory:** The logic DLL builds to `staging/` so the linker never hits a file locked by the running game. A post-build script tries to deploy directly; if the DLL is locked, it stays in staging for the loader to copy at reload time.
+- **`PREFIX ""`:** Prevents MinGW from prepending `lib` to the output name.
+- **`LIBRARY_OUTPUT_DIRECTORY`:** Required alongside `RUNTIME_OUTPUT_DIRECTORY` for multi-config generators (Visual Studio) and MinGW import libraries.
+- **`/Zi` + `/DEBUG /OPT:REF /OPT:ICF`:** Generates debug info for the logic DLL while still optimizing the binary. Essential for debugging hot-reloaded code.
+- **Dev build preprocessor guard:** `MY_MOD_DEV_BUILD` is defined only on the logic DLL, allowing `#ifdef` guards in shared source files (see Section 10 below).
 
 ### Step 5: Build and Deploy
 
 ```bash
-# One-time: build and deploy the loader
-cmake --build build --target mod_loader --parallel
-cp build/mod_loader.asi /path/to/game/bin64/
+# Configure (one-time, with dev build enabled)
+cmake -S . -B build -DMY_MOD_DEV_BUILD=ON
+
+# Build both targets (first time)
+cmake --build build --parallel
 
 # Iterative: rebuild only the logic DLL
 cmake --build build --target mod_logic --parallel
-cp build/mod_logic.dll /path/to/game/bin64/
-
-# In-game: press Numpad 0 to hot-reload (no restart needed)
+# Post-build script deploys automatically -- press Numpad 0 in-game
 ```
 
-For maximum convenience, set `RUNTIME_OUTPUT_DIRECTORY` in CMake to output directly to the game directory:
+The post-build deploy script handles three scenarios:
 
-```cmake
-set_target_properties(mod_logic PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "D:/Games/SteamLibrary/steamapps/common/YourGame/bin64"
-)
-```
+| Game running?      | Staging file? | What happens                                          |
+|--------------------|---------------|-------------------------------------------------------|
+| No                 | -             | DLL copied directly to game dir, staging cleaned      |
+| Yes (DLL loaded)   | Yes           | DLL stays in staging; loader copies it on next reload |
+| Yes (DLL unloaded) | -             | DLL copied directly (lock released by FreeLibrary)    |
 
-Then the workflow becomes:
-
-```bash
-# Build → file appears in game dir → press Numpad 0 in-game
-cmake --build build --target mod_logic --parallel
-```
+With this setup, the workflow is always **build, then press reload key**. The post-build script and loader staging logic handle the rest.
 
 ---
 
@@ -567,13 +679,13 @@ cmake --build build --target mod_logic --parallel
 **Every `FreeLibrary` + `LoadLibrary` cycle resets all global/static variables** in the logic DLL. This is usually desirable (clean slate), but be aware:
 
 **Global variables in logic DLL:**
-Reset to initial values on reload. This is expected — design for it.
+Reset to initial values on reload. This is expected -- design for it.
 
 **DMK singletons (Logger, HookManager, etc.):**
 **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
 
 **Game memory (patched bytes, written values):**
-**Persists** — the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `Memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
+**Persists** -- the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `Memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
 
 **Config file on disk:**
 **Persists** across reloads. Edit the INI, press reload, and new values take effect.
@@ -581,7 +693,7 @@ Reset to initial values on reload. This is expected — design for it.
 **If you need state to survive reloads** (e.g., a toggle that should stay on), store it in the loader:
 
 ```cpp
-// In mod_loader — survives reload
+// In mod_loader -- survives reload
 struct PersistentState
 {
     bool camera_unlocked = false;
@@ -649,38 +761,21 @@ The DMK Logger opens a file handle when the singleton is constructed (configured
 
 ### 5. Build System File Locking
 
-On Windows, the game process holds a file lock on `mod_logic.dll` while it's loaded. You **cannot overwrite the DLL while it's loaded**. The workflow must be:
+On Windows, the game process holds a file lock on `mod_logic.dll` while it's loaded. You **cannot overwrite the DLL while it's loaded**.
+
+Without staging, the workflow requires two steps:
 
 ```text
-1. Press Numpad 0 → FreeLibrary releases the file lock
-2. Build → compiler writes new mod_logic.dll (now possible)
-3. Press Numpad 0 again → LoadLibrary picks up the new binary
+1. Press Numpad 0 -> FreeLibrary releases the file lock
+2. Build -> compiler writes new mod_logic.dll (now possible)
+3. Press Numpad 0 again -> LoadLibrary picks up the new binary
 ```
 
-**Recommended approach:** configure the build system to output to a **staging directory**, and have the loader copy from staging before `LoadLibrary`. This lets you rebuild at any time without touching the game:
+**Recommended approach:** Use the staging directory pattern from Step 4. The CMake post-build script tries to deploy directly; if the file is locked, it stays in `staging/`. The loader copies from staging before `LoadLibrary`, making the workflow a single step: **build, then press reload key**.
 
-```cmake
-# CMakeLists.txt — build to staging/ so the linker never hits a locked file
-set(GAME_BIN_DIR "D:/Games/.../bin64")
-set(GAME_STAGING_DIR "${GAME_BIN_DIR}/staging")
-
-set_target_properties(mod_logic PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${GAME_STAGING_DIR}"
-    PDB_OUTPUT_DIRECTORY "${GAME_STAGING_DIR}"
-    # For multi-config generators (Visual Studio), set per-config too:
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${GAME_STAGING_DIR}"
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${GAME_STAGING_DIR}"
-    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_STAGING_DIR}"
-    PDB_OUTPUT_DIRECTORY_DEBUG "${GAME_STAGING_DIR}"
-    PDB_OUTPUT_DIRECTORY_RELEASE "${GAME_STAGING_DIR}"
-    PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO "${GAME_STAGING_DIR}"
-)
-```
+To integrate staging into the loader, add the following to the code from Step 3:
 
 ```cpp
-// In the loader, before LoadLibrary in both initial load and reload paths.
-// Derives the directory from s_logic_dll_path (already resolved at startup).
-
 // Resolve the loader's directory (cached once at startup alongside s_logic_dll_path).
 static std::string s_loader_dir;  // e.g., "D:/Games/.../bin64/"
 
@@ -721,9 +816,9 @@ static bool copy_from_staging()
 }
 ```
 
-To integrate staging, make the following changes to the loader code from Step 3:
+Then wire it in:
 
-1. Add `s_loader_dir` initialization in `LoaderThread`, right after `s_logic_dll_path`:
+1. Initialize `s_loader_dir` in `LoaderThread`, right after `s_logic_dll_path`:
 
 ```cpp
 s_logic_dll_path = resolve_logic_dll_path();
@@ -743,10 +838,6 @@ static bool load_logic_dll()
     // ... rest unchanged
 ```
 
-With staging, the workflow becomes: **build → press reload key** (one step, not two). The loader handles the copy internally.
-
-Alternatively, use a **two-press workflow**: Numpad 0 to unload, rebuild, Numpad 0 to reload. This is simpler but requires manual sequencing.
-
 ### 6. Compiler/Linker Compatibility
 
 The loader and logic DLL must be built with the **same compiler and C runtime**. Mixing MinGW-built loader with MSVC-built logic (or vice versa) will crash due to CRT/ABI incompatibilities.
@@ -757,9 +848,9 @@ Both DLLs should use the same CMake preset (e.g., both `mingw-release` or both `
 
 When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
-- **MSVC:** The linker locks the `.pdb` file while the DLL is loaded. Use `/pdbaltpath:%_PDB%` or the `/Fd` flag to generate uniquely-named PDBs (e.g., `mod_logic_<timestamp>.pdb`), or unload before rebuilding. Set `PDB_OUTPUT_DIRECTORY` alongside `RUNTIME_OUTPUT_DIRECTORY` in CMake so PDBs are staged with the DLL (see Section 5).
+- **MSVC:** The linker locks the `.pdb` file while the DLL is loaded. Use `/pdbaltpath:%_PDB%` or the `/Fd` flag to generate uniquely-named PDBs (e.g., `mod_logic_<timestamp>.pdb`), or unload before rebuilding. The CMake configuration in Step 4 already sets `PDB_OUTPUT_DIRECTORY` to the staging directory and the post-build script handles PDB deployment alongside the DLL.
 - **PDB copy on reload:** If your loader copies the DLL from a staging directory, copy the `.pdb` alongside it. Without the matching PDB next to the loaded DLL, debuggers lose source-level mapping after a hot reload.
-- **MinGW:** Debug info is embedded in the DLL (DWARF), so no separate PDB locking issue. However, GDB/x64dbg may cache the old symbol table — after reload, re-run `symload` or detach and reattach.
+- **MinGW:** Debug info is embedded in the DLL (DWARF), so no separate PDB locking issue. However, GDB/x64dbg may cache the old symbol table -- after reload, re-run `symload` or detach and reattach.
 - **After reload:** x64dbg will not automatically pick up new symbols. Use `Debug → Symbols → Reload module` or the `symload` command on the reloaded `mod_logic.dll`.
 
 ### 8. Thread-Local Storage (TLS) and Static Constructors
@@ -788,7 +879,7 @@ void Shutdown()
         if (join_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout)
         {
             Logger::get_instance().warning("Shutdown: background thread did not exit within 2s");
-            // Thread is stuck — detach as last resort so FreeLibrary can proceed.
+            // Thread is stuck -- detach as last resort so FreeLibrary can proceed.
             // The thread will crash when it touches unmapped code, but that is
             // preferable to deadlocking the reload cycle.
             s_scan_thread.detach();
@@ -802,7 +893,7 @@ void Shutdown()
 
 **Rules:**
 
-- Never `detach()` threads in a reloadable DLL — detached threads cannot be joined. The `detach()` above is a last-resort fallback when a thread is stuck, not normal practice.
+- Never `detach()` threads in a reloadable DLL -- detached threads cannot be joined. The `detach()` above is a last-resort fallback when a thread is stuck, not normal practice.
 - Use `std::atomic<bool>` flags and `condition_variable::notify_one()` for cooperative shutdown.
 - Prefer a bounded join timeout (as shown above) when threads perform blocking I/O or long operations. For cooperative-shutdown threads with short poll intervals (e.g., `condition_variable::wait_for` with a 1-second timeout), an unbounded `join()` is acceptable since the thread will observe the stop flag promptly.
 
@@ -827,14 +918,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 // The dev loader calls Init()/Shutdown() via GetProcAddress.
 ```
 
-Toggle this in CMake:
-
-```cmake
-option(MY_MOD_DEV_BUILD "Two-DLL hot-reload configuration" OFF)
-if(MY_MOD_DEV_BUILD)
-    target_compile_definitions(mod_logic PRIVATE MY_MOD_DEV_BUILD)
-endif()
-```
+The CMake configuration in Step 4 already sets `target_compile_definitions(mod_logic PRIVATE MY_MOD_DEV_BUILD)` when the dev build option is enabled.
 
 This prevents double-initialization (once from `DllMain`, once from the loader's `Init()` call) and avoids spawning orphaned init threads during hot-reload.
 
@@ -845,7 +929,7 @@ This prevents double-initialization (once from `DllMain`, once from the loader's
 ### Common Crashes and Their Causes
 
 **Crash on reload (access violation at 0x00000000):**
-`GetProcAddress` returned null — export name mismatch. Verify `extern "C"` on exports, check with `dumpbin /exports mod_logic.dll`.
+`GetProcAddress` returned null -- export name mismatch. Verify `extern "C"` on exports, check with `dumpbin /exports mod_logic.dll`.
 
 **Crash during hook callback after reload:**
 Old function pointer stored somewhere. Ensure all hook callbacks reference only data within mod_logic.dll.
@@ -863,7 +947,7 @@ AOB pattern scan finds wrong address. Game may have moved memory; verify base ad
 Global state reset on DLL reload. Use persistent state in loader (see Section 2 above).
 
 **Build fails: "cannot open mod_logic.dll for writing":**
-Game still has DLL loaded. Unload first (Numpad 0), then build.
+Game still has DLL loaded. Use the staging directory pattern from Step 4 to avoid this entirely. Without staging: unload first (Numpad 0), then build.
 
 ### Diagnostic Tools
 
@@ -899,7 +983,7 @@ static DWORD WINAPI LoaderThread(LPVOID /*param*/)
 
     if (dir_handle == INVALID_HANDLE_VALUE)
     {
-        loader_log("WARNING: File watcher failed — falling back to hotkey-only mode");
+        loader_log("WARNING: File watcher failed -- falling back to hotkey-only mode");
     }
 
     while (s_running.load())
@@ -921,7 +1005,7 @@ static DWORD WINAPI LoaderThread(LPVOID /*param*/)
                 Sleep(DEBOUNCE_MS);
                 FindNextChangeNotification(dir_handle);
 
-                loader_log("File change detected — reloading");
+                loader_log("File change detected -- reloading");
                 reload_logic_dll();
             }
         }
@@ -951,7 +1035,7 @@ struct SharedModState
     bool camera_unlocked;
     float fov;
     float position[3];
-    // Add fields as needed — keep it POD (no pointers, no std:: types)
+    // Add fields as needed -- keep it POD (no pointers, no std:: types)
 };
 
 static SharedModState* s_shared_state = nullptr;
@@ -1054,7 +1138,7 @@ Time per iteration: 15-20 seconds
 ## FAQ
 
 **Q: Can I hot-reload the loader ASI itself?**
-A: No. The ASI is loaded by the game's ASI loader at startup and cannot be unloaded. But you should rarely need to change the loader — it's just a thin stub.
+A: No. The ASI is loaded by the game's ASI loader at startup and cannot be unloaded. But you should rarely need to change the loader -- it's just a thin stub.
 
 **Q: What if the game crashes during reload?**
 A: Attach a debugger (x64dbg) and check the crash address. If it's in unmapped memory (the old logic DLL's address space), a callback was still executing during `FreeLibrary`. Increase the sleep duration or add a reference-counting mechanism to wait for all callbacks to complete.
@@ -1066,7 +1150,7 @@ A: Yes. The ASI loader loads `mod_loader.asi` normally. The loader then manages 
 A: If the game has anti-cheat that monitors `LoadLibrary` calls, hot-reload may trigger detection. This approach is intended for single-player modding and development environments only.
 
 **Q: Can I reload while a game menu/pause screen is open?**
-A: Yes — this is actually the safest time to reload, since fewer game systems are actively calling hooked functions. The pause screen reduces the chance of a callback being mid-execution during teardown.
+A: Yes -- this is actually the safest time to reload, since fewer game systems are actively calling hooked functions. The pause screen reduces the chance of a callback being mid-execution during teardown.
 
 **Q: What about C++ exceptions thrown during Init()?**
 A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw across DLL boundaries). Use `try/catch` inside `Init()` and return `false` on failure. The loader will log the error and leave the logic DLL unloaded until the next reload attempt.
@@ -1077,6 +1161,6 @@ A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw a
 
 DetourModKit's core systems are designed to be safe across DLL reload cycles:
 
-**HookManager:** `shutdown()` removes all hooks and resets its internal state, allowing subsequent `create_*_hook()` calls to succeed. The same applies to `remove_all_hooks()`. Both methods leave the singleton in a clean, reusable state for the next `Init()` cycle. There is no need to call both — either one prepares the HookManager for reuse.
+**HookManager:** `shutdown()` removes all hooks and resets its internal state, allowing subsequent `create_*_hook()` calls to succeed. The same applies to `remove_all_hooks()`. Both methods leave the singleton in a clean, reusable state for the next `Init()` cycle. There is no need to call both -- either one prepares the HookManager for reuse.
 
 **Config:** `register_*()` functions use replace-on-duplicate semantics. If a new DLL registers a config item with the same section and INI key as an existing entry, the old registration is replaced rather than appended. This prevents doubled registrations across reload cycles without requiring an explicit `clear_registered_items()` call. Calling `clear_registered_items()` before re-registration is still supported but no longer required.

@@ -1,4 +1,4 @@
-# AGENTS.md — DetourModKit
+# AGENTS.md -- DetourModKit
 
 ## Project overview
 
@@ -8,9 +8,9 @@ DetourModKit is a C++23 static library for Windows game modding. It provides AOB
 
 **Key dependencies (git submodules):**
 
-- `external/safetyhook` — inline/mid-function hooking (links Zydis/Zycore)
-- `external/DirectXMath` — header-only math library
-- `external/simpleini` — INI file parser (header-only)
+- `external/safetyhook` -- inline/mid-function hooking (links Zydis/Zycore)
+- `external/DirectXMath` -- header-only math library
+- `external/simpleini` -- INI file parser (header-only)
 
 ## Build and test commands
 
@@ -68,7 +68,7 @@ make clean        # Remove all build directories
 ## Project structure
 
 ```text
-include/DetourModKit/    # Public headers — one per module
+include/DetourModKit/    # Public headers -- one per module
   scanner.hpp            # AOB pattern scanning with SSE2
   hook_manager.hpp       # SafetyHook wrapper (inline + mid hooks)
   async_logger.hpp       # Lock-free MPMC queue logger
@@ -86,7 +86,7 @@ src/                     # Implementation files (one .cpp per module)
 tests/                   # GoogleTest suites (one test_*.cpp per module)
   fixtures/              # Test support files (hook_target_lib DLL source)
 external/                # Git submodules (safetyhook, DirectXMath, simpleini)
-CMakeLists.txt           # Single CMakeLists — static library target
+CMakeLists.txt           # Single CMakeLists -- static library target
 CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/release)
 ```
 
@@ -96,7 +96,7 @@ CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/releas
 
 - **Standard:** C++23 with `-std=c++23`. No compiler extensions (`CMAKE_CXX_EXTENSIONS OFF`).
 - **Naming:** `snake_case` for functions, variables, and file names. `PascalCase` for types and classes. `UPPER_SNAKE_CASE` for constants and macros. Prefix `m_` for class member variables. Prefix `s_` for file-scope statics.
-- **Braces:** Allman style — opening brace on its own line for functions and classes, same line for control flow within a function body using K&R-style indented blocks.
+- **Braces:** Allman style -- opening brace on its own line for functions and classes, same line for control flow within a function body using K&R-style indented blocks.
 - **Indentation:** 4 spaces, no tabs.
 - **Namespaces:** All public API lives in `namespace DetourModKit`. No `using namespace` in headers.
 - **Include guards:** All headers use `#ifndef DETOURMODKIT_<MODULE>_HPP` / `#define` / `#endif` guards (not `#pragma once`). Guard names must be prefixed with `DETOURMODKIT_` to avoid collisions with consumer projects.
@@ -111,7 +111,7 @@ CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/releas
 - **Error returns:** `std::expected` for memory operations, `std::optional` for scanner results. Reserve exceptions for construction failures and truly exceptional conditions.
 - **Security hardening:** The build enables ASLR (`/DYNAMICBASE`), DEP (`/NXCOMPAT`), and Control Flow Guard (`/GUARD:CF`) on MSVC, and equivalent flags (`--dynamicbase`, `--nxcompat`) on MinGW. Do not remove these.
 
-### Example — good function style
+### Example -- good function style
 
 ```cpp
 [[nodiscard]] bool InputPoller::is_binding_active(size_t index) const noexcept
@@ -124,11 +124,11 @@ CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/releas
 }
 ```
 
-### Example — good hook callback pattern
+### Example -- good hook callback pattern
 
 ```cpp
 hook_manager.with_inline_hook("camera_update", [](const safetyhook::InlineHook &hook) {
-    // shared_lock held — safe to read hook state
+    // shared_lock held -- safe to read hook state
     // Do NOT call create_hook/remove_hook from here (deadlock)
     auto original = hook.original<CameraUpdateFn>();
     original(camera_ptr);
@@ -154,7 +154,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 
 ## Git workflow
 
-- **Commit messages:** Conventional Commits format — `type(scope): description`.
+- **Commit messages:** Conventional Commits format -- `type(scope): description`.
   - Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`.
   - Scopes: module names (`logger`, `scanner`, `hook_manager`, `input`, `memory`, `config`, `filesystem`). Omit scope for cross-cutting changes.
   - Examples: `feat(input): add XInput gamepad support`, `fix(memory): resolve data race in cache`, `perf(logger): lock-free async hot path`.
@@ -167,7 +167,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 
 | Module | Thread safety | Hot-path mechanism |
 |--------|--------------|-------------------|
-| Scanner | Stateless — inherently safe | N/A (startup only) |
+| Scanner | Stateless -- inherently safe | N/A (startup only) |
 | HookManager | `shared_mutex` (readers) / `unique_lock` (writers) | `shared_lock` for `with_inline_hook()` |
 | Logger | `atomic<shared_ptr>` for lock-free async reads | Single atomic load on log level check |
 | AsyncLogger | Lock-free MPMC queue (Vyukov-style) | Atomic sequence numbers per slot |
@@ -180,19 +180,20 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 
 These are called at 60+ fps from game hook callbacks. Never add allocations, locks, or blocking I/O to them:
 
-- `InputPoller::is_binding_active(index)` — single atomic load
-- `InputPoller::is_binding_active(name)` — hash lookup + atomic load per binding (typically 1–3)
-- `HookManager::with_inline_hook()` — shared_lock read
-- `Logger::log()` level check — single atomic load
-- `Logger::log()` async enqueue — atomic shared_ptr load + lock-free queue push
-- `Memory::is_readable()` — sharded SRWLOCK reader + cache lookup
-- `Memory::is_readable_nonblocking()` — try_lock_shared + cache lookup (returns Unknown on contention)
-- `Memory::read_ptr_unsafe()` — SEH-protected raw dereference, zero cache overhead
-- `Logger::is_enabled()` — single atomic load (gate expensive trace-only work)
+- `InputPoller::is_binding_active(index)` -- single atomic load
+- `InputPoller::is_binding_active(name)` -- hash lookup + atomic load per binding (typically 1–3)
+- `HookManager::with_inline_hook()` -- shared_lock read
+- `Logger::log()` level check -- single atomic load
+- `Logger::log()` async enqueue -- atomic shared_ptr load + lock-free queue push
+- `Memory::is_readable()` -- sharded SRWLOCK reader + cache lookup
+- `Memory::is_readable_nonblocking()` -- try_lock_shared + cache lookup (returns Unknown on contention)
+- `Memory::read_ptr_unsafe()` -- SEH-protected raw dereference, zero cache overhead
+- `Memory::read_ptr_checked()` -- inline pointer dereference with low-address validity guard, no SEH (caller provides outer frame)
+- `Logger::is_enabled()` -- single atomic load (gate expensive trace-only work)
 
 ## Boundaries
 
-- **Do not modify** files under `external/` — these are git submodules.
+- **Do not modify** files under `external/` -- these are git submodules.
 - **Do not add** `using namespace` directives in header files.
 - **Do not add** heap allocations on hot paths (see list above).
 - **Do not break** the lock ordering documented in class headers.

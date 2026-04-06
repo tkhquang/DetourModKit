@@ -1428,6 +1428,64 @@ TEST_F(MemoryTest, ReadPtrUnsafe_NegativeOffset)
     EXPECT_EQ(result, 0xBBBBBBBB);
 }
 
+// --- Tests for read_ptr_checked (inline hot-path variant) ---
+
+TEST_F(MemoryTest, ReadPtrChecked_ValidHighPointer)
+{
+    uintptr_t value = 0x00007FF700000000;
+    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    EXPECT_EQ(result, 0x00007FF700000000);
+}
+
+TEST_F(MemoryTest, ReadPtrChecked_RejectsNullValue)
+{
+    uintptr_t value = 0;
+    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    EXPECT_EQ(result, 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrChecked_RejectsLowPointer)
+{
+    uintptr_t value = 0x1000;
+    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    EXPECT_EQ(result, 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrChecked_RejectsBoundaryValue)
+{
+    uintptr_t value = 0x10000;
+    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    EXPECT_EQ(result, 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrChecked_AcceptsAboveBoundary)
+{
+    uintptr_t value = 0x10001;
+    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    EXPECT_EQ(result, 0x10001);
+}
+
+TEST_F(MemoryTest, ReadPtrChecked_WithOffset)
+{
+    uintptr_t values[2] = {0x1000, 0x00007FF700001234};
+    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
+    EXPECT_EQ(result, 0x00007FF700001234);
+}
+
+TEST_F(MemoryTest, ReadPtrChecked_CustomThreshold)
+{
+    uintptr_t value = 0x500;
+    EXPECT_EQ(Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0, 0x1000), 0u);
+    EXPECT_EQ(Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0, 0x100), 0x500);
+}
+
+TEST_F(MemoryTest, ReadPtrChecked_ZeroThreshold)
+{
+    uintptr_t value = 1;
+    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0, 0);
+    EXPECT_EQ(result, 1u);
+}
+
 TEST_F(MemoryTest, IsReadableNonblocking_ReservedMemory)
 {
     void *reserved = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE);

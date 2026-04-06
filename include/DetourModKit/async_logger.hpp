@@ -147,6 +147,11 @@ namespace DetourModKit
      * @note This queue is designed to be constructed once and never resized.
      *       Moving slots after construction is not supported and will cause data corruption.
      */
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4324) // structure was padded due to alignment specifier
+#endif
+
     class DynamicMPMCQueue
     {
     public:
@@ -228,6 +233,10 @@ namespace DetourModKit
         alignas(64) std::atomic<size_t> enqueue_pos_{0};
         alignas(64) std::atomic<size_t> dequeue_pos_{0};
     };
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
     /**
      * @struct AsyncLoggerConfig
