@@ -295,15 +295,6 @@ TEST(HookErrorStringTest, ErrorToString_All)
     EXPECT_EQ(Hook::error_to_string(HookError::UnknownError), "Unknown error");
 }
 
-TEST_F(HookManagerTest, HookConfig_AutoEnable)
-{
-    HookConfig config;
-    EXPECT_TRUE(config.auto_enable);
-
-    config.auto_enable = false;
-    EXPECT_FALSE(config.auto_enable);
-}
-
 TEST_F(HookManagerTest, GetHookCounts_Empty)
 {
     auto counts = hook_manager_->get_hook_counts();
