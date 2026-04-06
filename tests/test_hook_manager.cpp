@@ -1578,6 +1578,8 @@ TEST_F(HookManagerTest, VmtHook_CreateSuccess)
     auto names = hook_manager_->get_vmt_hook_names();
     EXPECT_EQ(names.size(), 1u);
     EXPECT_EQ(names[0], "TestVmt");
+
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_CreateNullObject)
@@ -1597,6 +1599,8 @@ TEST_F(HookManagerTest, VmtHook_CreateDuplicate)
     auto r2 = hook_manager_->create_vmt_hook("DupVmt", target.get());
     ASSERT_FALSE(r2.has_value());
     EXPECT_EQ(r2.error(), HookError::HookAlreadyExists);
+
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_HookMethod)
@@ -1620,6 +1624,7 @@ TEST_F(HookManagerTest, VmtHook_HookMethod)
     EXPECT_EQ(target->compute(3, 4), 1007);
 
     g_compute_vm_hook = nullptr;
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_HookMethodDuplicate)
@@ -1639,6 +1644,7 @@ TEST_F(HookManagerTest, VmtHook_HookMethodDuplicate)
     EXPECT_EQ(r2.error(), HookError::MethodAlreadyHooked);
 
     g_compute_vm_hook = nullptr;
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_HookMethodNotFound)
@@ -1673,6 +1679,8 @@ TEST_F(HookManagerTest, VmtHook_RemoveMethod)
     EXPECT_EQ(target->compute(5, 5), 10);
 
     EXPECT_FALSE(hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX));
+
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_RemoveEntireHook)
@@ -1734,6 +1742,7 @@ TEST_F(HookManagerTest, VmtHook_ApplyToMultipleObjects)
     EXPECT_EQ(target1->compute(1, 1), 1002);
 
     g_compute_vm_hook = nullptr;
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_RemoveAllVmt)
@@ -1771,6 +1780,8 @@ TEST_F(HookManagerTest, VmtHook_ShutdownClearsVmt)
     EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
 
     ASSERT_TRUE(hook_manager_->create_vmt_hook("VmtPostShutdown", target.get()).has_value());
+
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_WithVmtMethod_ValueCallback)
@@ -1793,6 +1804,7 @@ TEST_F(HookManagerTest, VmtHook_WithVmtMethod_ValueCallback)
     EXPECT_TRUE(*result);
 
     g_compute_vm_hook = nullptr;
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_WithVmtMethod_NotFound)
@@ -1817,6 +1829,8 @@ TEST_F(HookManagerTest, VmtHook_WithVmtMethod_MethodNotFound)
         { return true; });
 
     EXPECT_FALSE(result.has_value());
+
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_WithVmtMethod_VoidCallback)
@@ -1840,6 +1854,7 @@ TEST_F(HookManagerTest, VmtHook_WithVmtMethod_VoidCallback)
     EXPECT_TRUE(callback_executed);
 
     g_compute_vm_hook = nullptr;
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_ErrorStrings)
@@ -1856,6 +1871,8 @@ TEST_F(HookManagerTest, VmtHook_ApplyNullObject)
     ASSERT_TRUE(hook_manager_->create_vmt_hook("ApplyNullVmt", target.get()).has_value());
 
     EXPECT_FALSE(hook_manager_->apply_vmt_hook("ApplyNullVmt", nullptr));
+
+    hook_manager_->remove_all_vmt_hooks();
 }
 
 TEST_F(HookManagerTest, VmtHook_RemoveFromNullObject)
@@ -1864,4 +1881,6 @@ TEST_F(HookManagerTest, VmtHook_RemoveFromNullObject)
     ASSERT_TRUE(hook_manager_->create_vmt_hook("RemNullVmt", target.get()).has_value());
 
     EXPECT_FALSE(hook_manager_->remove_vmt_from_object("RemNullVmt", nullptr));
+
+    hook_manager_->remove_all_vmt_hooks();
 }
