@@ -43,6 +43,7 @@ HookManager::~HookManager() noexcept
     if (!m_shutdown_called.load(std::memory_order_acquire))
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        m_vmt_hooks.clear();
         for (auto &[name, hook] : m_hooks)
         {
             hook->disable();
@@ -59,6 +60,7 @@ void HookManager::shutdown()
 
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        m_vmt_hooks.clear();
         for (auto &[name, hook] : m_hooks)
         {
             hook->disable();
@@ -430,6 +432,14 @@ bool HookManager::remove_hook(std::string_view hook_id)
 void HookManager::remove_all_hooks()
 {
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+
+    size_t num_vmt = m_vmt_hooks.size();
+    if (num_vmt > 0)
+    {
+        m_logger.info("HookManager: Removing all {} VMT hooks...", num_vmt);
+        m_vmt_hooks.clear();
+    }
+
     if (!m_hooks.empty())
     {
         size_t num_hooks = m_hooks.size();
@@ -437,13 +447,13 @@ void HookManager::remove_all_hooks()
         m_hooks.clear();
         m_logger.info("HookManager: All {} managed hooks have been removed and unhooked.", num_hooks);
     }
-    else
+    else if (num_vmt == 0)
     {
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 
     // Reset shutdown flag to allow reuse after a full reset.
-    // Safe because all hooks have been cleared — no double-free risk.
+    // Safe because all hooks have been cleared -- no double-free risk.
     m_shutdown_called.store(false, std::memory_order_release);
 }
 
@@ -554,4 +564,171 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
         }
     }
     return ids;
+}
+
+// --- VMT Hook Implementation ---
+
+std::expected<std::string, HookError> HookManager::create_vmt_hook(
+    std::string_view name, void *object)
+{
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
+    {
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot create VMT hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (object == nullptr)
+        {
+            return {std::unexpected(HookError::InvalidObject),
+                    {{std::format("HookManager: Object pointer is NULL for VMT hook '{}'.", name), LogLevel::Error}}};
+        }
+        if (vmt_hook_exists_locked(name))
+        {
+            return {std::unexpected(HookError::HookAlreadyExists),
+                    {{std::format("HookManager: A VMT hook with the name '{}' already exists.", name), LogLevel::Error}}};
+        }
+
+        try
+        {
+            auto vmt_result = safetyhook::VmtHook::create(object);
+
+            if (!vmt_result)
+            {
+                return {std::unexpected(HookError::SafetyHookError),
+                        {{std::format("HookManager: Failed to create SafetyHook::VmtHook for '{}' on object {}.",
+                                      name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                          LogLevel::Error}}};
+            }
+
+            std::string name_str{name};
+
+            std::vector<DeferredLog> logs;
+            logs.push_back({std::format("HookManager: Successfully created VMT hook '{}' on object {}.",
+                                        name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                            LogLevel::Info});
+
+            m_vmt_hooks.emplace(
+                std::piecewise_construct,
+                std::forward_as_tuple(name_str),
+                std::forward_as_tuple(name_str, std::move(vmt_result.value())));
+
+            return {std::move(name_str), std::move(logs)};
+        }
+        catch (const std::exception &e)
+        {
+            return {std::unexpected(HookError::UnknownError),
+                    {{std::format("HookManager: Exception during VMT hook creation for '{}': {}", name, e.what()),
+                      LogLevel::Error}}};
+        }
+        catch (...)
+        {
+            return {std::unexpected(HookError::UnknownError),
+                    {{std::format("HookManager: Unknown exception during VMT hook creation for '{}'.", name),
+                      LogLevel::Error}}};
+        }
+    }();
+
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
+    }
+    return result;
+}
+
+bool HookManager::remove_vmt_hook(std::string_view vmt_name)
+{
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    auto it = m_vmt_hooks.find(vmt_name);
+    if (it != m_vmt_hooks.end())
+    {
+        std::string removed_name = it->second.get_name();
+        m_vmt_hooks.erase(it);
+        m_logger.info("HookManager: VMT hook '{}' has been removed.", removed_name);
+        return true;
+    }
+    m_logger.warning("HookManager: Attempted to remove VMT hook '{}', but it was not found.", vmt_name);
+    return false;
+}
+
+bool HookManager::remove_vmt_method(std::string_view vmt_name, size_t method_index)
+{
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    auto it = m_vmt_hooks.find(vmt_name);
+    if (it == m_vmt_hooks.end())
+    {
+        m_logger.warning("HookManager: VMT hook '{}' not found for method removal.", vmt_name);
+        return false;
+    }
+
+    if (it->second.remove_method_hook(method_index))
+    {
+        m_logger.info("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index);
+        return true;
+    }
+
+    m_logger.warning("HookManager: VMT '{}' has no hooked method at index {}.", vmt_name, method_index);
+    return false;
+}
+
+bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
+{
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    auto it = m_vmt_hooks.find(vmt_name);
+    if (it == m_vmt_hooks.end())
+    {
+        m_logger.warning("HookManager: VMT hook '{}' not found for apply.", vmt_name);
+        return false;
+    }
+
+    it->second.vmt_hook().apply(object);
+    m_logger.info("HookManager: VMT hook '{}' applied to object {}.",
+                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
+    return true;
+}
+
+bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object)
+{
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    auto it = m_vmt_hooks.find(vmt_name);
+    if (it == m_vmt_hooks.end())
+    {
+        m_logger.warning("HookManager: VMT hook '{}' not found for object removal.", vmt_name);
+        return false;
+    }
+
+    it->second.vmt_hook().remove(object);
+    m_logger.info("HookManager: VMT hook '{}' removed from object {}.",
+                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
+    return true;
+}
+
+void HookManager::remove_all_vmt_hooks()
+{
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (!m_vmt_hooks.empty())
+    {
+        size_t num_hooks = m_vmt_hooks.size();
+        m_logger.info("HookManager: Removing all {} VMT hooks...", num_hooks);
+        m_vmt_hooks.clear();
+        m_logger.info("HookManager: All {} VMT hooks have been removed.", num_hooks);
+    }
+    else
+    {
+        m_logger.debug("HookManager: remove_all_vmt_hooks called, but no VMT hooks were active.");
+    }
+}
+
+std::vector<std::string> HookManager::get_vmt_hook_names() const
+{
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::vector<std::string> names;
+    names.reserve(m_vmt_hooks.size());
+    for (const auto &[name, entry] : m_vmt_hooks)
+    {
+        names.push_back(name);
+    }
+    return names;
 }

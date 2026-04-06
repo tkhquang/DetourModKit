@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cassert>
 #include <utility>
+#include <format>
 
 #include "safetyhook.hpp"
 #include "DetourModKit/logger.hpp"
@@ -40,7 +41,8 @@ namespace DetourModKit
     enum class HookType
     {
         Inline,
-        Mid
+        Mid,
+        Vmt
     };
 
     /**
@@ -68,6 +70,9 @@ namespace DetourModKit
         HookAlreadyExists,
         ShutdownInProgress,
         SafetyHookError,
+        InvalidObject,
+        VmtHookNotFound,
+        MethodAlreadyHooked,
         UnknownError
     };
 
@@ -186,6 +191,12 @@ namespace DetourModKit
                 return "Hook already exists";
             case HookError::SafetyHookError:
                 return "SafetyHook error";
+            case HookError::InvalidObject:
+                return "Invalid object pointer";
+            case HookError::VmtHookNotFound:
+                return "VMT hook not found";
+            case HookError::MethodAlreadyHooked:
+                return "VMT method already hooked";
             case HookError::UnknownError:
                 return "Unknown error";
             default:
@@ -293,8 +304,64 @@ namespace DetourModKit
     };
 
     /**
+     * @class VmtHookEntry
+     * @brief Manages a VMT hook for a single object class, wrapping SafetyHook's VmtHook.
+     * @details Owns the cloned vtable and tracks individual method hooks by vtable index.
+     *          VMT hooks operate at the object level by replacing the vptr with a cloned
+     *          vtable. Individual methods are hooked by index within the cloned table.
+     *          Does not support enable/disable toggling (SafetyHook VmHook limitation).
+     */
+    class VmtHookEntry
+    {
+    public:
+        VmtHookEntry(std::string name, safetyhook::VmtHook vmt_hook)
+            : m_name(std::move(name)), m_vmt_hook(std::move(vmt_hook)) {}
+
+        const std::string &get_name() const noexcept { return m_name; }
+
+        safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
+        const safetyhook::VmtHook &vmt_hook() const noexcept { return m_vmt_hook; }
+
+        bool has_method_hook(size_t index) const { return m_method_hooks.find(index) != m_method_hooks.end(); }
+
+        safetyhook::VmHook *get_method_hook(size_t index)
+        {
+            auto it = m_method_hooks.find(index);
+            return it != m_method_hooks.end() ? &it->second : nullptr;
+        }
+
+        const safetyhook::VmHook *get_method_hook(size_t index) const
+        {
+            auto it = m_method_hooks.find(index);
+            return it != m_method_hooks.end() ? &it->second : nullptr;
+        }
+
+        void add_method_hook(size_t index, safetyhook::VmHook hook)
+        {
+            m_method_hooks.emplace(index, std::move(hook));
+        }
+
+        bool remove_method_hook(size_t index)
+        {
+            return m_method_hooks.erase(index) > 0;
+        }
+
+        size_t method_hook_count() const noexcept { return m_method_hooks.size(); }
+
+        VmtHookEntry(const VmtHookEntry &) = delete;
+        VmtHookEntry &operator=(const VmtHookEntry &) = delete;
+        VmtHookEntry(VmtHookEntry &&) = default;
+        VmtHookEntry &operator=(VmtHookEntry &&) = default;
+
+    private:
+        std::string m_name;
+        safetyhook::VmtHook m_vmt_hook;
+        std::unordered_map<size_t, safetyhook::VmHook> m_method_hooks;
+    };
+
+    /**
      * @class HookManager
-     * @brief Manages the lifecycle of all hooks (Inline and Mid) using SafetyHook.
+     * @brief Manages the lifecycle of all hooks (Inline, Mid, and VMT) using SafetyHook.
      * @details Provides a centralized API for creating, removing, enabling, and disabling hooks.
      *          Thread-safe for all public methods. Uses std::expected for explicit error handling.
      */
@@ -396,6 +463,204 @@ namespace DetourModKit
             ptrdiff_t aob_offset,
             safetyhook::MidHookFn detour_function,
             const HookConfig &config = HookConfig());
+
+        // --- VMT Hook API ---
+
+        /**
+         * @brief Creates a VMT hook for the given object, cloning its vtable.
+         * @param name A unique, descriptive name for the VMT hook.
+         * @param object Pointer to the polymorphic object whose vptr will be replaced.
+         * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
+         */
+        [[nodiscard]] std::expected<std::string, HookError> create_vmt_hook(
+            std::string_view name, void *object);
+
+        /**
+         * @brief Hooks a specific virtual method by index in a named VMT hook.
+         * @tparam T The type of the destination function (function pointer or member function pointer).
+         * @param vmt_name The name of the VMT hook (from create_vmt_hook).
+         * @param method_index The zero-based vtable index of the method to hook.
+         * @param destination The replacement function.
+         * @return std::expected<size_t, HookError> The method index if successful, error code otherwise.
+         */
+        template <typename T>
+        [[nodiscard]] std::expected<size_t, HookError> hook_vmt_method(
+            std::string_view vmt_name, size_t method_index, T destination)
+        {
+            struct DeferredLogEntry
+            {
+                std::string msg;
+                LogLevel level;
+            };
+
+            auto [result, deferred_logs] = [&]() -> std::pair<std::expected<size_t, HookError>, std::vector<DeferredLogEntry>>
+            {
+                std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+
+                if (m_shutdown_called.load(std::memory_order_acquire))
+                {
+                    return {std::unexpected(HookError::ShutdownInProgress),
+                            {{std::format("HookManager: Shutdown in progress. Cannot hook VMT method on '{}'.", vmt_name), LogLevel::Error}}};
+                }
+
+                auto vmt_it = m_vmt_hooks.find(vmt_name);
+                if (vmt_it == m_vmt_hooks.end())
+                {
+                    return {std::unexpected(HookError::VmtHookNotFound),
+                            {{std::format("HookManager: VMT hook '{}' not found for method hook at index {}.", vmt_name, method_index), LogLevel::Error}}};
+                }
+
+                if (vmt_it->second.has_method_hook(method_index))
+                {
+                    return {std::unexpected(HookError::MethodAlreadyHooked),
+                            {{std::format("HookManager: VMT '{}' method index {} is already hooked.", vmt_name, method_index), LogLevel::Error}}};
+                }
+
+                try
+                {
+                    auto hook_result = vmt_it->second.vmt_hook().hook_method(method_index, destination);
+
+                    if (!hook_result)
+                    {
+                        return {std::unexpected(HookError::SafetyHookError),
+                                {{std::format("HookManager: Failed to hook VMT '{}' method index {}.", vmt_name, method_index), LogLevel::Error}}};
+                    }
+
+                    vmt_it->second.add_method_hook(method_index, std::move(hook_result.value()));
+
+                    return {method_index,
+                            {{std::format("HookManager: Successfully hooked VMT '{}' method index {}.", vmt_name, method_index), LogLevel::Info}}};
+                }
+                catch (const std::exception &e)
+                {
+                    return {std::unexpected(HookError::UnknownError),
+                            {{std::format("HookManager: Exception hooking VMT '{}' method index {}: {}", vmt_name, method_index, e.what()), LogLevel::Error}}};
+                }
+                catch (...)
+                {
+                    return {std::unexpected(HookError::UnknownError),
+                            {{std::format("HookManager: Unknown exception hooking VMT '{}' method index {}.", vmt_name, method_index), LogLevel::Error}}};
+                }
+            }();
+
+            for (const auto &entry : deferred_logs)
+            {
+                m_logger.log(entry.level, entry.msg);
+            }
+            return result;
+        }
+
+        /**
+         * @brief Removes an entire VMT hook, restoring the original vtable on all applied objects.
+         * @param vmt_name The name of the VMT hook to remove.
+         * @return true if found and removed, false otherwise.
+         */
+        [[nodiscard]] bool remove_vmt_hook(std::string_view vmt_name);
+
+        /**
+         * @brief Removes a single method hook from a VMT, restoring the original method.
+         * @param vmt_name The name of the VMT hook.
+         * @param method_index The vtable index of the method to unhook.
+         * @return true if found and removed, false otherwise.
+         */
+        [[nodiscard]] bool remove_vmt_method(std::string_view vmt_name, size_t method_index);
+
+        /**
+         * @brief Applies the cloned (hooked) vtable to an additional object.
+         * @param vmt_name The name of the VMT hook.
+         * @param object The object to apply the hooked vtable to.
+         * @return true if the VMT hook was found and applied, false otherwise.
+         */
+        [[nodiscard]] bool apply_vmt_hook(std::string_view vmt_name, void *object);
+
+        /**
+         * @brief Removes the hooked vtable from a specific object, restoring its original vptr.
+         * @param vmt_name The name of the VMT hook.
+         * @param object The object to restore.
+         * @return true if the VMT hook was found and the object was restored, false otherwise.
+         */
+        [[nodiscard]] bool remove_vmt_from_object(std::string_view vmt_name, void *object);
+
+        /**
+         * @brief Removes all VMT hooks, restoring original vtables on all applied objects.
+         */
+        void remove_all_vmt_hooks();
+
+        /**
+         * @brief Returns the names of all active VMT hooks.
+         * @return std::vector<std::string> Vector containing the names of the VMT hooks.
+         */
+        std::vector<std::string> get_vmt_hook_names() const;
+
+        /**
+         * @brief Safely accesses a VmHook (method hook) within a named VMT hook.
+         * @details The callback is invoked while the shared_mutex is held as a reader.
+         * @tparam F Callable type accepting (safetyhook::VmHook&) and returning a value.
+         * @param vmt_name The name of the VMT hook.
+         * @param method_index The vtable index of the method hook.
+         * @param fn The callback to invoke with the VmHook reference.
+         * @return std::optional<R> The callback's return value, or std::nullopt if not found.
+         */
+        template <typename F>
+            requires std::invocable<F, safetyhook::VmHook &> &&
+                     (!std::is_void_v<std::invoke_result_t<F, safetyhook::VmHook &>>) &&
+                     (!std::is_reference_v<std::invoke_result_t<F, safetyhook::VmHook &>>)
+        [[nodiscard]] auto with_vmt_method(std::string_view vmt_name, size_t method_index, F &&fn)
+            -> std::optional<std::invoke_result_t<F, safetyhook::VmHook &>>
+        {
+            if (get_reentrancy_guard() > 0)
+            {
+                m_logger.error("HookManager: Reentrant callback detected in with_vmt_method('{}'/{})!", vmt_name, method_index);
+                return std::nullopt;
+            }
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ReentrancyGuard guard(get_reentrancy_guard());
+            auto vmt_it = m_vmt_hooks.find(vmt_name);
+            if (vmt_it != m_vmt_hooks.end())
+            {
+                auto *vm_hook = vmt_it->second.get_method_hook(method_index);
+                if (vm_hook)
+                {
+                    return std::invoke(std::forward<F>(fn), *vm_hook);
+                }
+            }
+            return std::nullopt;
+        }
+
+        /**
+         * @brief Safely accesses a VmHook for a void-returning callback.
+         * @details Same locking and reentrancy semantics as the value-returning overload.
+         * @param vmt_name The name of the VMT hook.
+         * @param method_index The vtable index of the method hook.
+         * @param fn The void-returning callback to invoke with the VmHook reference.
+         * @return true if the method hook was found and the callback was invoked, false otherwise.
+         */
+        template <typename F>
+            requires std::invocable<F, safetyhook::VmHook &> &&
+                     std::is_void_v<std::invoke_result_t<F, safetyhook::VmHook &>>
+        [[nodiscard]] bool with_vmt_method(std::string_view vmt_name, size_t method_index, F &&fn)
+        {
+            if (get_reentrancy_guard() > 0)
+            {
+                m_logger.error("HookManager: Reentrant callback detected in with_vmt_method('{}'/{})!", vmt_name, method_index);
+                return false;
+            }
+            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            ReentrancyGuard guard(get_reentrancy_guard());
+            auto vmt_it = m_vmt_hooks.find(vmt_name);
+            if (vmt_it != m_vmt_hooks.end())
+            {
+                auto *vm_hook = vmt_it->second.get_method_hook(method_index);
+                if (vm_hook)
+                {
+                    std::invoke(std::forward<F>(fn), *vm_hook);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // --- End VMT Hook API ---
 
         /**
          * @brief Removes a hook identified by its name.
@@ -656,6 +921,7 @@ namespace DetourModKit
 
         mutable std::shared_mutex m_hooks_mutex;
         std::unordered_map<std::string, std::unique_ptr<Hook>, TransparentStringHash, std::equal_to<>> m_hooks;
+        std::unordered_map<std::string, VmtHookEntry, TransparentStringHash, std::equal_to<>> m_vmt_hooks;
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
@@ -683,6 +949,11 @@ namespace DetourModKit
         bool hook_id_exists_locked(std::string_view hook_id) const
         {
             return m_hooks.find(hook_id) != m_hooks.end();
+        }
+
+        bool vmt_hook_exists_locked(std::string_view name) const
+        {
+            return m_vmt_hooks.find(name) != m_vmt_hooks.end();
         }
     };
 } // namespace DetourModKit

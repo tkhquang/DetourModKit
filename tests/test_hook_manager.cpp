@@ -1530,3 +1530,321 @@ TEST_F(HookManagerTest, WithMidHook_VoidCallback_NotFound)
     EXPECT_FALSE(found);
     EXPECT_FALSE(callback_executed);
 }
+
+class VmtTestInterface
+{
+public:
+    virtual ~VmtTestInterface() = default;
+    virtual int compute(int a, int b) = 0;
+    virtual int transform(int x) = 0;
+};
+
+class VmtTestTarget : public VmtTestInterface
+{
+public:
+    int compute(int a, int b) override { return a + b; }
+    int transform(int x) override { return x * 2; }
+};
+
+// Vtable layout differs between MSVC (single destructor slot) and
+// Itanium ABI (two destructor slots used by GCC/MinGW).
+#if defined(_MSC_VER)
+static constexpr size_t VMT_COMPUTE_INDEX = 1;
+static constexpr size_t VMT_TRANSFORM_INDEX = 2;
+#else
+static constexpr size_t VMT_COMPUTE_INDEX = 2;
+static constexpr size_t VMT_TRANSFORM_INDEX = 3;
+#endif
+
+static safetyhook::VmHook *g_compute_vm_hook = nullptr;
+
+class VmtTestHook : public VmtTestTarget
+{
+public:
+    int hooked_compute(int a, int b)
+    {
+        return g_compute_vm_hook->thiscall<int>(this, a, b) + 1000;
+    }
+};
+
+TEST_F(HookManagerTest, VmtHook_CreateSuccess)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    auto result = hook_manager_->create_vmt_hook("TestVmt", target.get());
+    ASSERT_TRUE(result.has_value()) << "VMT hook creation should succeed";
+    EXPECT_EQ(*result, "TestVmt");
+
+    auto names = hook_manager_->get_vmt_hook_names();
+    EXPECT_EQ(names.size(), 1u);
+    EXPECT_EQ(names[0], "TestVmt");
+}
+
+TEST_F(HookManagerTest, VmtHook_CreateNullObject)
+{
+    auto result = hook_manager_->create_vmt_hook("NullVmt", nullptr);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::InvalidObject);
+}
+
+TEST_F(HookManagerTest, VmtHook_CreateDuplicate)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    auto r1 = hook_manager_->create_vmt_hook("DupVmt", target.get());
+    ASSERT_TRUE(r1.has_value());
+
+    auto r2 = hook_manager_->create_vmt_hook("DupVmt", target.get());
+    ASSERT_FALSE(r2.has_value());
+    EXPECT_EQ(r2.error(), HookError::HookAlreadyExists);
+}
+
+TEST_F(HookManagerTest, VmtHook_HookMethod)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    EXPECT_EQ(target->compute(3, 4), 7);
+
+    auto vmt_result = hook_manager_->create_vmt_hook("MethodVmt", target.get());
+    ASSERT_TRUE(vmt_result.has_value());
+
+    auto method_result = hook_manager_->hook_vmt_method(
+        "MethodVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute);
+    ASSERT_TRUE(method_result.has_value()) << "Method hook should succeed";
+    EXPECT_EQ(*method_result, VMT_COMPUTE_INDEX);
+
+    ASSERT_TRUE(hook_manager_->with_vmt_method(
+        "MethodVmt", VMT_COMPUTE_INDEX,
+        [](safetyhook::VmHook &hook)
+        { g_compute_vm_hook = &hook; }));
+
+    EXPECT_EQ(target->compute(3, 4), 1007);
+
+    g_compute_vm_hook = nullptr;
+}
+
+TEST_F(HookManagerTest, VmtHook_HookMethodDuplicate)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    auto vmt_result = hook_manager_->create_vmt_hook("DupMethodVmt", target.get());
+    ASSERT_TRUE(vmt_result.has_value());
+
+    auto r1 = hook_manager_->hook_vmt_method(
+        "DupMethodVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute);
+    ASSERT_TRUE(r1.has_value());
+
+    auto r2 = hook_manager_->hook_vmt_method(
+        "DupMethodVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute);
+    ASSERT_FALSE(r2.has_value());
+    EXPECT_EQ(r2.error(), HookError::MethodAlreadyHooked);
+
+    g_compute_vm_hook = nullptr;
+}
+
+TEST_F(HookManagerTest, VmtHook_HookMethodNotFound)
+{
+    auto result = hook_manager_->hook_vmt_method(
+        "NonExistentVmt", 0, &VmtTestHook::hooked_compute);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::VmtHookNotFound);
+}
+
+TEST_F(HookManagerTest, VmtHook_RemoveMethod)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    auto vmt_result = hook_manager_->create_vmt_hook("RemMethodVmt", target.get());
+    ASSERT_TRUE(vmt_result.has_value());
+
+    auto method_result = hook_manager_->hook_vmt_method(
+        "RemMethodVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute);
+    ASSERT_TRUE(method_result.has_value());
+
+    ASSERT_TRUE(hook_manager_->with_vmt_method(
+        "RemMethodVmt", VMT_COMPUTE_INDEX,
+        [](safetyhook::VmHook &hook)
+        { g_compute_vm_hook = &hook; }));
+
+    EXPECT_EQ(target->compute(5, 5), 1010);
+
+    g_compute_vm_hook = nullptr;
+    EXPECT_TRUE(hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX));
+
+    EXPECT_EQ(target->compute(5, 5), 10);
+
+    EXPECT_FALSE(hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX));
+}
+
+TEST_F(HookManagerTest, VmtHook_RemoveEntireHook)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    EXPECT_EQ(target->compute(1, 2), 3);
+
+    auto vmt_result = hook_manager_->create_vmt_hook("RemVmt", target.get());
+    ASSERT_TRUE(vmt_result.has_value());
+
+    auto method_result = hook_manager_->hook_vmt_method(
+        "RemVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute);
+    ASSERT_TRUE(method_result.has_value());
+
+    ASSERT_TRUE(hook_manager_->with_vmt_method(
+        "RemVmt", VMT_COMPUTE_INDEX,
+        [](safetyhook::VmHook &hook)
+        { g_compute_vm_hook = &hook; }));
+
+    EXPECT_EQ(target->compute(1, 2), 1003);
+
+    g_compute_vm_hook = nullptr;
+    EXPECT_TRUE(hook_manager_->remove_vmt_hook("RemVmt"));
+
+    EXPECT_EQ(target->compute(1, 2), 3);
+    EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
+}
+
+TEST_F(HookManagerTest, VmtHook_RemoveNotFound)
+{
+    EXPECT_FALSE(hook_manager_->remove_vmt_hook("NonExistent"));
+}
+
+TEST_F(HookManagerTest, VmtHook_ApplyToMultipleObjects)
+{
+    auto target1 = std::make_unique<VmtTestTarget>();
+    auto target2 = std::make_unique<VmtTestTarget>();
+
+    auto vmt_result = hook_manager_->create_vmt_hook("MultiVmt", target1.get());
+    ASSERT_TRUE(vmt_result.has_value());
+
+    auto method_result = hook_manager_->hook_vmt_method(
+        "MultiVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute);
+    ASSERT_TRUE(method_result.has_value());
+
+    ASSERT_TRUE(hook_manager_->with_vmt_method(
+        "MultiVmt", VMT_COMPUTE_INDEX,
+        [](safetyhook::VmHook &hook)
+        { g_compute_vm_hook = &hook; }));
+
+    EXPECT_EQ(target1->compute(1, 1), 1002);
+    EXPECT_EQ(target2->compute(1, 1), 2);
+
+    EXPECT_TRUE(hook_manager_->apply_vmt_hook("MultiVmt", target2.get()));
+    EXPECT_EQ(target2->compute(1, 1), 1002);
+
+    EXPECT_TRUE(hook_manager_->remove_vmt_from_object("MultiVmt", target2.get()));
+    EXPECT_EQ(target2->compute(1, 1), 2);
+    EXPECT_EQ(target1->compute(1, 1), 1002);
+
+    g_compute_vm_hook = nullptr;
+}
+
+TEST_F(HookManagerTest, VmtHook_RemoveAllVmt)
+{
+    auto target1 = std::make_unique<VmtTestTarget>();
+    auto target2 = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("Vmt1", target1.get()).has_value());
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("Vmt2", target2.get()).has_value());
+
+    EXPECT_EQ(hook_manager_->get_vmt_hook_names().size(), 2u);
+
+    hook_manager_->remove_all_vmt_hooks();
+    EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
+}
+
+TEST_F(HookManagerTest, VmtHook_RemoveAllHooksClearsVmt)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("VmtCleared", target.get()).has_value());
+    EXPECT_EQ(hook_manager_->get_vmt_hook_names().size(), 1u);
+
+    hook_manager_->remove_all_hooks();
+    EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
+}
+
+TEST_F(HookManagerTest, VmtHook_ShutdownClearsVmt)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("VmtShutdown", target.get()).has_value());
+
+    hook_manager_->shutdown();
+    EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
+
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("VmtPostShutdown", target.get()).has_value());
+}
+
+TEST_F(HookManagerTest, VmtHook_WithVmtMethod_ValueCallback)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("CbVmt", target.get()).has_value());
+    ASSERT_TRUE(hook_manager_->hook_vmt_method(
+                                 "CbVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute)
+                    .has_value());
+
+    auto result = hook_manager_->with_vmt_method(
+        "CbVmt", VMT_COMPUTE_INDEX,
+        [](safetyhook::VmHook &hook) -> bool
+        {
+            return hook.original<void *>() != nullptr;
+        });
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_TRUE(*result);
+
+    g_compute_vm_hook = nullptr;
+}
+
+TEST_F(HookManagerTest, VmtHook_WithVmtMethod_NotFound)
+{
+    auto result = hook_manager_->with_vmt_method(
+        "NonExistentVmt", 0,
+        [](safetyhook::VmHook &) -> bool
+        { return true; });
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(HookManagerTest, VmtHook_WithVmtMethod_MethodNotFound)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("NoMethodVmt", target.get()).has_value());
+
+    auto result = hook_manager_->with_vmt_method(
+        "NoMethodVmt", 99,
+        [](safetyhook::VmHook &) -> bool
+        { return true; });
+
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(HookManagerTest, VmtHook_WithVmtMethod_VoidCallback)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("VoidCbVmt", target.get()).has_value());
+    ASSERT_TRUE(hook_manager_->hook_vmt_method(
+                                 "VoidCbVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute)
+                    .has_value());
+
+    bool callback_executed = false;
+    bool found = hook_manager_->with_vmt_method(
+        "VoidCbVmt", VMT_COMPUTE_INDEX,
+        [&callback_executed](safetyhook::VmHook &)
+        {
+            callback_executed = true;
+        });
+
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(callback_executed);
+
+    g_compute_vm_hook = nullptr;
+}
+
+TEST_F(HookManagerTest, VmtHook_ErrorStrings)
+{
+    EXPECT_EQ(Hook::error_to_string(HookError::InvalidObject), "Invalid object pointer");
+    EXPECT_EQ(Hook::error_to_string(HookError::VmtHookNotFound), "VMT hook not found");
+    EXPECT_EQ(Hook::error_to_string(HookError::MethodAlreadyHooked), "VMT method already hooked");
+}
