@@ -902,7 +902,9 @@ TEST_F(ScannerRipTest, find_and_resolve_jmp_rel32)
 
 TEST_F(ScannerRipTest, find_and_resolve_prefix_not_found)
 {
+    // Region large enough for prefix + disp32 but contains no matching prefix
     std::vector<std::byte> code = {
+        std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
         std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
         std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
 
@@ -911,6 +913,7 @@ TEST_F(ScannerRipTest, find_and_resolve_prefix_not_found)
         Scanner::PREFIX_MOV_RAX_RIP, 7);
 
     EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::PrefixNotFound);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_null_start)
@@ -920,6 +923,7 @@ TEST_F(ScannerRipTest, find_and_resolve_null_start)
         Scanner::PREFIX_MOV_RAX_RIP, 7);
 
     EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::NullInput);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_region_too_small)
@@ -933,6 +937,7 @@ TEST_F(ScannerRipTest, find_and_resolve_region_too_small)
         Scanner::PREFIX_MOV_RAX_RIP, 7);
 
     EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::RegionTooSmall);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
@@ -994,6 +999,23 @@ TEST_F(ScannerRipTest, find_and_resolve_empty_prefix)
         code.data(), code.size(), empty, 5);
 
     EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+}
+
+TEST_F(ScannerRipTest, resolve_rip_relative_null_input)
+{
+    auto result = Scanner::resolve_rip_relative(nullptr, 3, 7);
+
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+}
+
+TEST_F(ScannerRipTest, rip_resolve_error_to_string_coverage)
+{
+    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::NullInput).empty());
+    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::PrefixNotFound).empty());
+    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::RegionTooSmall).empty());
+    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::UnreadableDisplacement).empty());
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
