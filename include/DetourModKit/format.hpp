@@ -9,7 +9,6 @@
  *          and virtual key codes.
  */
 
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <format>

@@ -1441,10 +1441,9 @@ TEST_F(HookManagerTest, CreateInlineHook_TrampolineNotSetOnFailure)
 
 TEST_F(HookManagerTest, ShutdownResetsFlag)
 {
-    // After shutdown(), the manager accepts new hook creation requests
-    // (returns validation errors, not ShutdownInProgress).
-    // Use a real target address so the test depends on the shutdown flag
-    // rather than the validation ordering of target_address == 0.
+    // After shutdown(), the manager resets its flag and accepts new hook
+    // creation requests. A null detour should yield InvalidDetourFunction,
+    // not ShutdownInProgress.
     hook_manager_->shutdown();
 
     void *tramp = nullptr;
@@ -1883,4 +1882,37 @@ TEST_F(HookManagerTest, VmtHook_RemoveFromNullObject)
     EXPECT_FALSE(hook_manager_->remove_vmt_from_object("RemNullVmt", nullptr));
 
     hook_manager_->remove_all_vmt_hooks();
+}
+
+TEST(HookErrorStringTest, ErrorToString_ShutdownInProgress)
+{
+    EXPECT_EQ(Hook::error_to_string(HookError::ShutdownInProgress), "Shutdown in progress");
+}
+
+TEST(HookErrorStringTest, StatusToString_Constexpr)
+{
+    static_assert(Hook::status_to_string(HookStatus::Active) == "Active");
+    static_assert(Hook::status_to_string(HookStatus::Disabled) == "Disabled");
+}
+
+TEST(HookErrorStringTest, ErrorToString_Constexpr)
+{
+    static_assert(Hook::error_to_string(HookError::InvalidTargetAddress) == "Invalid target address");
+    static_assert(Hook::error_to_string(HookError::ShutdownInProgress) == "Shutdown in progress");
+}
+
+TEST_F(HookManagerTest, Shutdown_AllowsNewHooksAfterReset)
+{
+    hook_manager_->shutdown();
+
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "AfterShutdownHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "AfterShutdownHook");
+    EXPECT_NE(tramp, nullptr);
 }

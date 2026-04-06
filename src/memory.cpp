@@ -83,12 +83,13 @@ namespace
         uintptr_t baseAddress;
         size_t regionSize;
         DWORD protection;
+        DWORD state;
         uint64_t timestamp_ns;
         uint64_t lru_key;
         bool valid;
 
         CachedMemoryRegionInfo()
-            : baseAddress(0), regionSize(0), protection(0), timestamp_ns(0), lru_key(0), valid(false)
+            : baseAddress(0), regionSize(0), protection(0), state(0), timestamp_ns(0), lru_key(0), valid(false)
         {
         }
     };
@@ -373,6 +374,7 @@ namespace MemoryUtilsCacheInternal
             old_entry.baseAddress = base_addr;
             old_entry.regionSize = mbi.RegionSize;
             old_entry.protection = mbi.Protect;
+            old_entry.state = mbi.State;
             old_entry.timestamp_ns = current_time_ns;
             old_entry.lru_key = new_lru_key;
             old_entry.valid = true;
@@ -401,6 +403,7 @@ namespace MemoryUtilsCacheInternal
             new_entry.baseAddress = base_addr;
             new_entry.regionSize = mbi.RegionSize;
             new_entry.protection = mbi.Protect;
+            new_entry.state = mbi.State;
             new_entry.timestamp_ns = current_time_ns;
             new_entry.lru_key = new_lru_key;
             new_entry.valid = true;
@@ -564,7 +567,8 @@ namespace MemoryUtilsCacheInternal
         if (s_cacheShards.empty() || size == 0)
             return;
 
-        const uintptr_t endAddress = address + size;
+        // Guard against address + size wrapping around the address space
+        const uintptr_t endAddress = (address + size < address) ? UINTPTR_MAX : address + size;
         const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
 
         const uintptr_t start_page = address >> 12;
@@ -730,7 +734,7 @@ namespace MemoryUtilsCacheInternal
                         mbi_out.BaseAddress = reinterpret_cast<PVOID>(cached->baseAddress);
                         mbi_out.RegionSize = cached->regionSize;
                         mbi_out.Protect = cached->protection;
-                        mbi_out.State = MEM_COMMIT;
+                        mbi_out.State = cached->state;
                         return true;
                     }
                     // Cache not populated, break to retry as leader

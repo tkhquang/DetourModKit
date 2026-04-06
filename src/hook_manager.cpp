@@ -46,7 +46,7 @@ HookManager::~HookManager() noexcept
         m_vmt_hooks.clear();
         for (auto &[name, hook] : m_hooks)
         {
-            hook->disable();
+            (void)hook->disable();
         }
         m_hooks.clear();
     }
@@ -63,13 +63,21 @@ void HookManager::shutdown()
         m_vmt_hooks.clear();
         for (auto &[name, hook] : m_hooks)
         {
-            hook->disable();
+            (void)hook->disable();
         }
         m_hooks.clear();
 
         // Reset under the lock so concurrent create_*_hook calls cannot
         // observe the flag as true (rejected) and then immediately see it
         // as false (accepted) before the map is fully cleared.
+        //
+        // This intentionally allows reuse after shutdown (hot-reload).
+        // The exclusive lock serializes the entire clear-and-reset sequence,
+        // so there is no window where a concurrent create_*_hook can slip
+        // through against a half-cleared map. Making shutdown permanent
+        // would break the documented hot-reload workflow without adding
+        // safety, since callers that destroy detour functions after shutdown
+        // have a caller-side lifetime bug regardless of the flag state.
         m_shutdown_called.store(false, std::memory_order_release);
     }
 }
@@ -452,8 +460,9 @@ void HookManager::remove_all_hooks()
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 
-    // Reset shutdown flag to allow reuse after a full reset.
-    // Safe because all hooks have been cleared -- no double-free risk.
+    // Both shutdown() and remove_all_hooks() reset m_shutdown_called to false
+    // under the exclusive lock, allowing subsequent create_*_hook() calls to
+    // succeed. See the comment in shutdown() for the serialization rationale.
     m_shutdown_called.store(false, std::memory_order_release);
 }
 

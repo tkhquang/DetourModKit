@@ -35,7 +35,7 @@ namespace DetourModKit
      * @param mode The InputMode enum value.
      * @return std::string_view String representation of the mode.
      */
-    constexpr std::string_view input_mode_to_string(InputMode mode)
+    constexpr std::string_view input_mode_to_string(InputMode mode) noexcept
     {
         switch (mode)
         {

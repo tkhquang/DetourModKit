@@ -1599,3 +1599,15 @@ TEST_F(InputManagerTest, ThumbstickAndButtonMixed)
 
     mgr.shutdown();
 }
+
+TEST(InputStringTest, InputModeToString_IsNoexcept)
+{
+    static_assert(noexcept(input_mode_to_string(InputMode::Press)));
+    static_assert(noexcept(input_mode_to_string(InputMode::Hold)));
+}
+
+TEST(InputStringTest, InputSourceToString_IsNoexcept)
+{
+    static_assert(noexcept(input_source_to_string(InputSource::Keyboard)));
+    static_assert(noexcept(input_source_to_string(InputSource::Gamepad)));
+}

@@ -28,7 +28,7 @@ namespace DetourModKit
      * @param error The error code.
      * @return A string view describing the error.
      */
-    constexpr std::string_view memory_error_to_string(MemoryError error)
+    constexpr std::string_view memory_error_to_string(MemoryError error) noexcept
     {
         switch (error)
         {
@@ -66,7 +66,7 @@ namespace DetourModKit
          *       To reconfigure, call shutdown_cache() first.
          * @note Starts a background cleanup thread that runs periodically.
          */
-        bool init_cache(size_t cache_size = DEFAULT_CACHE_SIZE,
+        [[nodiscard]] bool init_cache(size_t cache_size = DEFAULT_CACHE_SIZE,
                         unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS,
                         size_t shard_count = DEFAULT_CACHE_SHARD_COUNT);
 
@@ -145,22 +145,25 @@ namespace DetourModKit
         uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
 
         /**
-         * @brief Inline pointer dereference with a low-address validity guard.
-         * @details Reads a pointer-sized value at (base + offset) and rejects values
-         *          at or below min_valid. Addresses below 0x10000 are never valid
-         *          usermode pointers on Windows (null page + guard pages), so this
-         *          check terminates stale/dangling pointer chain traversals early.
-         *          No SEH frame is set up — callers must provide their own outer
-         *          exception guard when the target memory may be unmapped.
+         * @brief Inline pointer dereference with low-address validity guards.
+         * @details Validates the source address (base + offset) before dereferencing,
+         *          then rejects result values at or below min_valid. Addresses below
+         *          0x10000 are never valid usermode pointers on Windows (null page +
+         *          guard pages), so both checks terminate stale/dangling pointer chain
+         *          traversals early without requiring an SEH frame.
          * @param base The base address to read from.
          * @param offset Byte offset added to base before dereferencing.
          * @param min_valid Minimum address value to accept (default 0x10000).
-         * @return The pointer-sized value at the address, or 0 if the value <= min_valid.
+         * @return The pointer-sized value at the address, or 0 if either the source
+         *         address or the dereferenced value is at or below min_valid.
          */
         inline uintptr_t read_ptr_checked(uintptr_t base, ptrdiff_t offset,
                                           uintptr_t min_valid = 0x10000) noexcept
         {
-            const auto addr = *reinterpret_cast<const uintptr_t *>(base + offset);
+            const auto src = base + static_cast<uintptr_t>(offset);
+            if (src <= min_valid)
+                return 0;
+            const auto addr = *reinterpret_cast<const uintptr_t *>(src);
             return (addr > min_valid) ? addr : 0;
         }
 
