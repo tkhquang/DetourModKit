@@ -11,7 +11,6 @@
 #include <windows.h>
 #include <vector>
 #include <string>
-#include <sstream>
 #include <cctype>
 #include <stdexcept>
 #include <cstddef>
@@ -67,12 +66,39 @@ namespace
     }
 } // anonymous namespace
 
+namespace
+{
+    /**
+     * @brief Converts a single hex character to its numeric value.
+     * @return The value 0-15, or -1 if not a valid hex digit.
+     */
+    constexpr int hex_char_to_int(char c) noexcept
+    {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        return -1;
+    }
+} // anonymous namespace
+
 std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::string_view aob_str)
 {
     Logger &logger = Logger::get_instance();
 
-    std::string trimmed_aob = trim(std::string(aob_str));
-    if (trimmed_aob.empty())
+    auto is_ws = [](char c) noexcept
+    { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+
+    // Trim leading/trailing whitespace without allocating
+    std::string_view input = aob_str;
+    while (!input.empty() && is_ws(input.front()))
+        input.remove_prefix(1);
+    while (!input.empty() && is_ws(input.back()))
+        input.remove_suffix(1);
+
+    if (input.empty())
     {
         if (!aob_str.empty())
         {
@@ -82,14 +108,24 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
     }
 
     CompiledPattern result;
-    std::istringstream iss(trimmed_aob);
-    std::string token;
     size_t token_idx = 0;
-
     bool offset_set = false;
 
-    while (iss >> token)
+    size_t pos = 0;
+    while (pos < input.size())
     {
+        // Skip whitespace between tokens
+        while (pos < input.size() && is_ws(input[pos]))
+            ++pos;
+        if (pos >= input.size())
+            break;
+
+        // Find token end
+        const size_t token_start = pos;
+        while (pos < input.size() && !is_ws(input[pos]))
+            ++pos;
+        const std::string_view token = input.substr(token_start, pos - token_start);
+
         token_idx++;
         if (token == "|")
         {
@@ -106,35 +142,28 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
             result.bytes.push_back(std::byte{0x00});
             result.mask.push_back(std::byte{0x00});
         }
-        else if (token.length() == 2 && std::isxdigit(static_cast<unsigned char>(token[0])) && std::isxdigit(static_cast<unsigned char>(token[1])))
+        else if (token.length() == 2)
         {
-            try
+            const int hi = hex_char_to_int(token[0]);
+            const int lo = hex_char_to_int(token[1]);
+            if (hi >= 0 && lo >= 0)
             {
-                unsigned long ulong_val = std::stoul(token, nullptr, 16);
-                if (ulong_val > 0xFF)
-                {
-                    throw std::out_of_range("Value parsed exceeds byte range (0xFF).");
-                }
-                result.bytes.push_back(static_cast<std::byte>(ulong_val));
+                result.bytes.push_back(static_cast<std::byte>((hi << 4) | lo));
                 result.mask.push_back(std::byte{0xFF});
             }
-            catch (const std::out_of_range &oor)
+            else
             {
-                logger.error("AOB Parser: Hex conversion out of range for '{}' (Pos {}): {}", token, token_idx, oor.what());
-                return std::nullopt;
-            }
-            catch (const std::invalid_argument &ia)
-            {
-                logger.error("AOB Parser: Invalid argument for hex conversion '{}' (Pos {}): {}", token, token_idx, ia.what());
+                logger.error("AOB Parser: Invalid token '{}' at position {}."
+                             " Expected hex byte (e.g., FF), '?' or '?\?'.",
+                             token, token_idx);
                 return std::nullopt;
             }
         }
         else
         {
-            std::ostringstream oss_err;
-            oss_err << "AOB Parser: Invalid token '" << token << "' at position " << token_idx
-                    << ". Expected hex byte (e.g., FF), '?' or '?\?'.";
-            logger.log(LogLevel::Error, oss_err.str());
+            logger.error("AOB Parser: Invalid token '{}' at position {}."
+                         " Expected hex byte (e.g., FF), '?' or '?\?'.",
+                         token, token_idx);
             return std::nullopt;
         }
     }
@@ -145,7 +174,7 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
         {
             logger.error("AOB Parser: Processed tokens but resulting pattern is empty.");
         }
-        else if (!trimmed_aob.empty())
+        else if (!input.empty())
         {
             logger.warning("AOB: Parsing AOB string '{}' resulted in an empty pattern.", aob_str);
         }

@@ -110,20 +110,20 @@ namespace DetourModKit
         log_file_name_ = file_name;
         timestamp_format_ = timestamp_fmt;
 
-        std::string log_file_full_path = generate_log_file_path();
+        std::wstring log_file_full_path = generate_log_file_path();
         log_file_stream_ptr_->open(log_file_full_path, std::ios::out | std::ios::trunc);
 
         if (!log_file_stream_ptr_->is_open())
         {
             std::cerr << "[" << log_prefix_ << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file at: " << log_file_full_path
-                      << ". Subsequent logs to file will fail." << '\n';
+                      << "Failed to open log file."
+                      << " Subsequent logs to file will fail." << '\n';
         }
         else
         {
             *log_file_stream_ptr_ << "[" << get_timestamp() << "] "
                                   << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                                  << "Logger reconfigured. Now logging to: " << log_file_full_path << '\n';
+                                  << "Logger reconfigured. Now logging to: " << file_name << '\n';
         }
     }
 
@@ -138,20 +138,20 @@ namespace DetourModKit
             timestamp_format_ = config->timestamp_format;
         }
 
-        const std::string log_file_full_path = generate_log_file_path();
+        const std::wstring log_file_full_path = generate_log_file_path();
         log_file_stream_ptr_->open(log_file_full_path, std::ios::out | std::ios::trunc);
 
         if (!log_file_stream_ptr_->is_open())
         {
             std::cerr << "[" << log_prefix_ << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file at: " << log_file_full_path
-                      << ". Subsequent logs to file will fail." << '\n';
+                      << "Failed to open log file."
+                      << " Subsequent logs to file will fail." << '\n';
         }
         else
         {
             *log_file_stream_ptr_ << "[" << get_timestamp() << "] ["
                                   << std::setw(7) << std::left << "INFO"
-                                  << "] :: Logger initialized. Logging to: " << log_file_full_path << '\n';
+                                  << "] :: Logger initialized. Logging to: " << log_file_name_ << '\n';
         }
     }
 
@@ -317,38 +317,38 @@ namespace DetourModKit
         }
     }
 
-    std::string Logger::generate_log_file_path() const
+    std::wstring Logger::generate_log_file_path() const
     {
         std::filesystem::path log_file_path_obj(log_file_name_);
         if (log_file_path_obj.is_absolute())
         {
-            return log_file_name_;
+            return log_file_path_obj.wstring();
         }
 
         try
         {
-            std::string module_dir = Filesystem::get_runtime_directory();
-            if (module_dir.empty() || module_dir == ".")
+            std::wstring module_dir = Filesystem::get_runtime_directory();
+            if (module_dir.empty() || module_dir == L".")
             {
                 std::cerr << "[" << log_prefix_ << " Logger PATH_WARNING] "
                           << "Could not determine module directory. Using relative path: " << log_file_name_ << '\n';
-                return log_file_name_;
+                return log_file_path_obj.wstring();
             }
 
             const std::filesystem::path final_log_path = std::filesystem::path(module_dir) / log_file_name_;
-            return final_log_path.lexically_normal().string();
+            return final_log_path.lexically_normal().wstring();
         }
         catch (const std::exception &e)
         {
             std::cerr << "[" << log_prefix_ << " Logger PATH_WARNING] Failed to determine module directory for log file: "
                       << e.what() << ". Using relative path for log file: " << log_file_name_ << '\n';
-            return log_file_name_;
+            return log_file_path_obj.wstring();
         }
         catch (...)
         {
             std::cerr << "[" << log_prefix_ << " Logger PATH_WARNING] Unknown exception while determining module directory for log file."
                       << " Using relative path: " << log_file_name_ << '\n';
-            return log_file_name_;
+            return log_file_path_obj.wstring();
         }
     }
 

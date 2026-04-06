@@ -36,7 +36,7 @@ TEST(FilesystemTest, GetRuntimeDirectory_PathFormat)
 TEST(FilesystemTest, GetRuntimeDirectory_ThreadSafety)
 {
     const int num_threads = 4;
-    std::vector<std::string> results(num_threads);
+    std::vector<std::wstring> results(num_threads);
     std::vector<std::thread> threads;
 
     for (int i = 0; i < num_threads; ++i)
@@ -71,9 +71,9 @@ TEST(FilesystemTest, GetRuntimeDirectory_NoTrailingSeparator)
 {
     auto dir = Filesystem::get_runtime_directory();
     ASSERT_FALSE(dir.empty());
-    char last = dir.back();
-    EXPECT_NE(last, '/');
-    EXPECT_NE(last, '\\');
+    wchar_t last = dir.back();
+    EXPECT_NE(last, L'/');
+    EXPECT_NE(last, L'\\');
 }
 
 TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)

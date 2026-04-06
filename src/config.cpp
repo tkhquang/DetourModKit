@@ -449,9 +449,9 @@ namespace
      */
     std::string getIniFilePath(const std::string &ini_filename, Logger &logger)
     {
-        std::string module_dir = get_runtime_directory();
+        std::wstring module_dir = get_runtime_directory();
 
-        if (module_dir.empty() || module_dir == ".")
+        if (module_dir.empty() || module_dir == L".")
         {
             logger.warning("Config: Could not reliably determine module directory or it's current working directory. Using relative path for INI: {}", ini_filename);
             return ini_filename; // Fallback to relative path
@@ -460,7 +460,7 @@ namespace
         try
         {
             std::filesystem::path ini_path_obj = std::filesystem::path(module_dir) / ini_filename;
-            std::string full_path = ini_path_obj.lexically_normal().string(); // Normalize (e.g., C:/path/./file -> C:/path/file)
+            std::string full_path = ini_path_obj.lexically_normal().string();
             logger.debug("Config: Determined INI file path: {}", full_path);
             return full_path;
         }
@@ -468,7 +468,7 @@ namespace
         {
             logger.warning("Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}", fs_err.what(), ini_filename);
         }
-        catch (const std::exception &e) // Catch other potential exceptions
+        catch (const std::exception &e)
         {
             logger.warning("Config: General error constructing INI path: {}. Using relative path for INI: {}", e.what(), ini_filename);
         }

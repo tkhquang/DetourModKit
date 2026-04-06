@@ -10,11 +10,7 @@ using namespace DetourModKit::Scanner;
 
 namespace
 {
-    struct DeferredLog
-    {
-        std::string msg;
-        LogLevel level;
-    };
+    using DeferredLog = HookManager::DeferredLogEntry;
 } // anonymous namespace
 
 HookManager &HookManager::get_instance()

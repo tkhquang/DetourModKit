@@ -268,9 +268,9 @@ namespace DetourModKit
 
         /**
          * @brief Determines the full path for the log file.
-         * @return std::string The absolute path to the log file.
+         * @return std::wstring The absolute path as a wide string for Unicode fidelity.
          */
-        std::string generate_log_file_path() const;
+        std::wstring generate_log_file_path() const;
 
         static std::shared_ptr<const StaticConfig> get_static_config();
         static void set_static_config(std::shared_ptr<const StaticConfig> config);

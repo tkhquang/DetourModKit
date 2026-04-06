@@ -8,6 +8,9 @@
 
 namespace DetourModKit
 {
+    /// Opaque Win32 HANDLE type to avoid including <windows.h> in headers.
+    using win_handle_t = void *;
+
     /**
      * @class WinFileStreamBuf
      * @brief Custom stream buffer using Win32 CreateFile with shared access flags.
@@ -29,6 +32,7 @@ namespace DetourModKit
         WinFileStreamBuf &operator=(WinFileStreamBuf &&) = delete;
 
         bool open(const std::string &path, std::ios_base::openmode mode);
+        bool open(const std::wstring &path, std::ios_base::openmode mode);
         [[nodiscard]] bool is_open() const noexcept;
         void close();
 
@@ -40,7 +44,7 @@ namespace DetourModKit
     private:
         bool flush_buffer();
 
-        void *handle_; // Win32 HANDLE
+        win_handle_t handle_;
         std::array<char, BUFFER_SIZE> buffer_;
     };
 
@@ -65,6 +69,7 @@ namespace DetourModKit
         WinFileStream &operator=(WinFileStream &&) = delete;
 
         void open(const std::string &path, std::ios_base::openmode mode = std::ios_base::out);
+        void open(const std::wstring &path, std::ios_base::openmode mode = std::ios_base::out);
         [[nodiscard]] bool is_open() const noexcept;
         void close();
 
