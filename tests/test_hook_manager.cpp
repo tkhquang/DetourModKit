@@ -1844,7 +1844,24 @@ TEST_F(HookManagerTest, VmtHook_WithVmtMethod_VoidCallback)
 
 TEST_F(HookManagerTest, VmtHook_ErrorStrings)
 {
+    EXPECT_EQ(Hook::error_to_string(HookError::ShutdownInProgress), "Shutdown in progress");
     EXPECT_EQ(Hook::error_to_string(HookError::InvalidObject), "Invalid object pointer");
     EXPECT_EQ(Hook::error_to_string(HookError::VmtHookNotFound), "VMT hook not found");
     EXPECT_EQ(Hook::error_to_string(HookError::MethodAlreadyHooked), "VMT method already hooked");
+}
+
+TEST_F(HookManagerTest, VmtHook_ApplyNullObject)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("ApplyNullVmt", target.get()).has_value());
+
+    EXPECT_FALSE(hook_manager_->apply_vmt_hook("ApplyNullVmt", nullptr));
+}
+
+TEST_F(HookManagerTest, VmtHook_RemoveFromNullObject)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    ASSERT_TRUE(hook_manager_->create_vmt_hook("RemNullVmt", target.get()).has_value());
+
+    EXPECT_FALSE(hook_manager_->remove_vmt_from_object("RemNullVmt", nullptr));
 }

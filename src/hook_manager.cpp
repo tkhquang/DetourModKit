@@ -566,8 +566,6 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
     return ids;
 }
 
-// --- VMT Hook Implementation ---
-
 std::expected<std::string, HookError> HookManager::create_vmt_hook(
     std::string_view name, void *object)
 {
@@ -675,6 +673,12 @@ bool HookManager::remove_vmt_method(std::string_view vmt_name, size_t method_ind
 
 bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
 {
+    if (object == nullptr)
+    {
+        m_logger.warning("HookManager: Cannot apply VMT hook '{}' to null object.", vmt_name);
+        return false;
+    }
+
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
     if (it == m_vmt_hooks.end())
@@ -691,6 +695,12 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
 
 bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object)
 {
+    if (object == nullptr)
+    {
+        m_logger.warning("HookManager: Cannot remove VMT hook '{}' from null object.", vmt_name);
+        return false;
+    }
+
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
     if (it == m_vmt_hooks.end())

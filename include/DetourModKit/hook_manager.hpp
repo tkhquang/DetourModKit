@@ -189,6 +189,8 @@ namespace DetourModKit
                 return "Invalid trampoline pointer";
             case HookError::HookAlreadyExists:
                 return "Hook already exists";
+            case HookError::ShutdownInProgress:
+                return "Shutdown in progress";
             case HookError::SafetyHookError:
                 return "SafetyHook error";
             case HookError::InvalidObject:
@@ -464,8 +466,6 @@ namespace DetourModKit
             safetyhook::MidHookFn detour_function,
             const HookConfig &config = HookConfig());
 
-        // --- VMT Hook API ---
-
         /**
          * @brief Creates a VMT hook for the given object, cloning its vtable.
          * @param name A unique, descriptive name for the VMT hook.
@@ -659,8 +659,6 @@ namespace DetourModKit
             }
             return false;
         }
-
-        // --- End VMT Hook API ---
 
         /**
          * @brief Removes a hook identified by its name.
