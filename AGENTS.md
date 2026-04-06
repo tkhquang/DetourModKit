@@ -127,10 +127,10 @@ CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/releas
 ### Example -- good hook callback pattern
 
 ```cpp
-hook_manager.with_inline_hook("camera_update", [](const safetyhook::InlineHook &hook) {
+hook_manager.with_inline_hook("camera_update", [](InlineHook &hook) {
     // shared_lock held -- safe to read hook state
     // Do NOT call create_hook/remove_hook from here (deadlock)
-    auto original = hook.original<CameraUpdateFn>();
+    auto original = hook.get_original<CameraUpdateFn>();
     original(camera_ptr);
 });
 ```
