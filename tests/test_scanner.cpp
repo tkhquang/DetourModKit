@@ -764,7 +764,7 @@ class ScannerRipTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        Memory::init_cache();
+        ASSERT_TRUE(Memory::init_cache());
     }
 
     void TearDown() override
@@ -1226,4 +1226,12 @@ TEST(ScannerExecRegionTest, SkipsGuardPages)
     EXPECT_EQ(result, nullptr);
 
     VirtualFree(exec_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerStringTest, RipResolveErrorToString_IsNoexcept)
+{
+    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::NullInput)));
+    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::PrefixNotFound)));
+    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::RegionTooSmall)));
+    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::UnreadableDisplacement)));
 }

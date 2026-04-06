@@ -29,7 +29,7 @@ namespace DetourModKit
      * @param error The error code.
      * @return A string view describing the error.
      */
-    constexpr std::string_view rip_resolve_error_to_string(RipResolveError error)
+    constexpr std::string_view rip_resolve_error_to_string(RipResolveError error) noexcept
     {
         switch (error)
         {

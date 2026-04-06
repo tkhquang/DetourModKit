@@ -5,6 +5,7 @@
 #include <cassert>
 #include <climits>
 #include <cstring>
+#include <memory>
 
 namespace DetourModKit
 {
@@ -34,8 +35,26 @@ namespace DetourModKit
             creation = OPEN_ALWAYS;
         }
 
-        handle_ = CreateFileA(
-            path.c_str(),
+        // Convert to wide string for Unicode path support.
+        // Try UTF-8 first; fall back to the active code page (ACP) for callers
+        // that provide ACP-encoded paths (e.g. Filesystem::get_runtime_directory).
+        int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1, nullptr, 0);
+        UINT code_page = CP_UTF8;
+        if (wide_len <= 0)
+        {
+            code_page = CP_ACP;
+            wide_len = MultiByteToWideChar(CP_ACP, 0, path.c_str(), -1, nullptr, 0);
+        }
+        if (wide_len <= 0)
+        {
+            return false;
+        }
+
+        auto wide_path = std::make_unique<wchar_t[]>(static_cast<size_t>(wide_len));
+        MultiByteToWideChar(code_page, 0, path.c_str(), -1, wide_path.get(), wide_len);
+
+        handle_ = CreateFileW(
+            wide_path.get(),
             GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr,

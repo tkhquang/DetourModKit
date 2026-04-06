@@ -189,7 +189,7 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, loc
 - `Memory::is_readable()` -- sharded SRWLOCK reader + cache lookup
 - `Memory::is_readable_nonblocking()` -- try_lock_shared + cache lookup (returns Unknown on contention)
 - `Memory::read_ptr_unsafe()` -- SEH-protected raw dereference, zero cache overhead
-- `Memory::read_ptr_checked()` -- inline pointer dereference with low-address validity guard, no SEH (caller provides outer frame)
+- `Memory::read_ptr_checked()` -- inline pointer dereference with source and result low-address guards, no SEH (caller provides outer frame)
 - `Logger::is_enabled()` -- single atomic load (gate expensive trace-only work)
 
 ## Boundaries

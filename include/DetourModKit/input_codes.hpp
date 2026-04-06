@@ -33,7 +33,7 @@ namespace DetourModKit
      * @param source The InputSource enum value.
      * @return std::string_view String representation of the source.
      */
-    constexpr std::string_view input_source_to_string(InputSource source)
+    constexpr std::string_view input_source_to_string(InputSource source) noexcept
     {
         switch (source)
         {

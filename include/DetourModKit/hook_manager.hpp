@@ -110,7 +110,7 @@ namespace DetourModKit
          *       to prevent other threads from observing a speculative terminal state
          *       while the SafetyHook enable call is in progress.
          */
-        bool enable()
+        [[nodiscard]] bool enable()
         {
             if (!is_impl_valid())
                 return false;
@@ -137,7 +137,7 @@ namespace DetourModKit
          *       to prevent other threads from observing a speculative terminal state
          *       while the SafetyHook disable call is in progress.
          */
-        bool disable()
+        [[nodiscard]] bool disable()
         {
             if (!is_impl_valid())
                 return false;
@@ -158,7 +158,7 @@ namespace DetourModKit
 
         bool is_enabled() const noexcept { return m_status.load(std::memory_order_acquire) == HookStatus::Active; }
 
-        static std::string_view status_to_string(HookStatus status)
+        static constexpr std::string_view status_to_string(HookStatus status) noexcept
         {
             switch (status)
             {
@@ -175,7 +175,7 @@ namespace DetourModKit
             }
         }
 
-        static std::string_view error_to_string(HookError error)
+        static constexpr std::string_view error_to_string(HookError error) noexcept
         {
             switch (error)
             {

@@ -30,7 +30,6 @@ namespace
     std::string resolve_module_directory()
     {
         HMODULE h_self_module = nullptr;
-        wchar_t module_path_buffer[MAX_PATH] = {0};
         std::string result_directory_path;
 
         try
@@ -45,15 +44,32 @@ namespace
                 throw std::runtime_error("GetModuleHandleExW failed to retrieve module handle. Error: " + std::to_string(last_error));
             }
 
-            const DWORD path_length = GetModuleFileNameW(h_self_module, module_path_buffer, MAX_PATH);
-            if (path_length == 0)
+            // Dynamic buffer to support paths longer than MAX_PATH
+            DWORD buf_size = MAX_PATH;
+            std::wstring module_path_buffer(buf_size, L'\0');
+
+            constexpr DWORD MAX_MODULE_PATH = 32768;
+
+            for (;;)
             {
-                const DWORD last_error = GetLastError();
-                throw std::runtime_error("GetModuleFileNameW failed to retrieve module path. Error: " + std::to_string(last_error));
-            }
-            if (path_length >= MAX_PATH)
-            {
-                throw std::runtime_error("GetModuleFileNameW failed: Path buffer was too small.");
+                const DWORD path_length = GetModuleFileNameW(h_self_module, module_path_buffer.data(), buf_size);
+                if (path_length == 0)
+                {
+                    const DWORD last_error = GetLastError();
+                    throw std::runtime_error("GetModuleFileNameW failed to retrieve module path. Error: " + std::to_string(last_error));
+                }
+                if (path_length < buf_size)
+                {
+                    module_path_buffer.resize(path_length);
+                    break;
+                }
+                if (buf_size >= MAX_MODULE_PATH)
+                {
+                    throw std::runtime_error("GetModuleFileNameW: path exceeds maximum supported length.");
+                }
+                // Buffer was too small, double and retry
+                buf_size = (buf_size <= MAX_MODULE_PATH / 2) ? buf_size * 2 : MAX_MODULE_PATH;
+                module_path_buffer.resize(buf_size, L'\0');
             }
 
             const std::filesystem::path module_full_path(module_path_buffer);
@@ -72,8 +88,31 @@ namespace
 
         if (result_directory_path.empty())
         {
-            wchar_t current_dir_buffer[MAX_PATH] = {0};
-            if (GetCurrentDirectoryW(MAX_PATH, current_dir_buffer) > 0)
+            DWORD cwd_len = GetCurrentDirectoryW(0, nullptr);
+            std::wstring current_dir_buffer;
+
+            if (cwd_len > 0)
+            {
+                current_dir_buffer.resize(cwd_len, L'\0');
+                const DWORD written = GetCurrentDirectoryW(cwd_len, current_dir_buffer.data());
+                if (written > 0 && written < cwd_len)
+                {
+                    current_dir_buffer.resize(written);
+                }
+                else if (written >= cwd_len)
+                {
+                    // Directory changed between calls, retry with new size
+                    current_dir_buffer.resize(static_cast<size_t>(written) + 1, L'\0');
+                    const DWORD retry = GetCurrentDirectoryW(written + 1, current_dir_buffer.data());
+                    current_dir_buffer.resize(retry > 0 ? retry : 0);
+                }
+                else
+                {
+                    current_dir_buffer.clear();
+                }
+            }
+
+            if (!current_dir_buffer.empty())
             {
                 result_directory_path = std::filesystem::path(current_dir_buffer).string();
                 std::cerr << "[DMK Filesystem WARNING] Using current working directory as fallback: "
