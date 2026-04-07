@@ -89,7 +89,7 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
     Logger &logger = Logger::get_instance();
 
     auto is_ws = [](char c) noexcept
-    { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+    { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v'; };
 
     // Trim leading/trailing whitespace without allocating
     std::string_view input = aob_str;
