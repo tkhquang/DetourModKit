@@ -8,8 +8,6 @@
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
 
-// DeferredLogEntryEntry alias is defined inside each member function scope
-// since the type is private to HookManager.
 
 HookManager &HookManager::get_instance()
 {
