@@ -394,6 +394,10 @@ namespace DetourModKit
      * @brief Manages the lifecycle of all hooks (Inline, Mid, and VMT) using SafetyHook.
      * @details Provides a centralized API for creating, removing, enabling, and disabling hooks.
      *          Thread-safe for all public methods. Uses std::expected for explicit error handling.
+     * @note Lock ordering: 1. m_mutator_gate (shared or exclusive) then 2. m_hooks_mutex (shared or exclusive).
+     *          Mutators (create_*_hook, enable, disable, remove) acquire shared m_mutator_gate first,
+     *          then shared or exclusive m_hooks_mutex. Shutdown and remove_all_hooks acquire exclusive
+     *          m_mutator_gate first to block new mutators, then proceed with two-phase cleanup.
      */
     class HookManager
     {
@@ -955,7 +959,7 @@ namespace DetourModKit
         }
 
     private:
-        /// @brief Internal log entry used to defer logging outside held locks.
+        /** @brief Internal log entry used to defer logging outside held locks. */
         struct DeferredLogEntry
         {
             std::string msg;
@@ -969,6 +973,16 @@ namespace DetourModKit
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
+
+        /** @brief Serializes shutdown and remove_all_hooks to prevent concurrent teardowns.
+         *  Uses compare_exchange_strong on m_shutdown_called to ensure only one owner proceeds.
+         */
+        std::mutex m_teardown_mutex;
+
+        /** @brief Gate that mutators (create_*_hook, enable_hook, disable_hook, remove_hook)
+         *  acquire shared on entry, allowing shutdown to acquire exclusive to block new work.
+         */
+        mutable std::shared_mutex m_mutator_gate;
 
         [[nodiscard]] int &get_reentrancy_guard() noexcept
         {
