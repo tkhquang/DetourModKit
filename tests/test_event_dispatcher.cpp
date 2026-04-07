@@ -412,7 +412,7 @@ TEST(EventDispatcherTest, UnsubscribeMiddle_PreservesOrder)
 
     dispatcher.emit(SimpleEvent{1});
 
-    // Order must be preserved: [1, 3], not [1, 3] or [3, 1]
+    // Order must be preserved: [1, 3], not [3, 1]
     ASSERT_EQ(order.size(), 2u);
     EXPECT_EQ(order[0], 1);
     EXPECT_EQ(order[1], 3);

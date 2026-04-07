@@ -75,6 +75,12 @@ namespace DetourModKit
         int64_t start_ticks{0};            ///< QPC tick count at scope entry.
         uint32_t duration_us{0};           ///< Duration in microseconds (max ~71 minutes).
         uint32_t thread_id{0};             ///< Win32 thread ID of the recording thread.
+
+        ProfileSample() noexcept = default;
+        ProfileSample(const ProfileSample &) = delete;
+        ProfileSample &operator=(const ProfileSample &) = delete;
+        ProfileSample(ProfileSample &&) = delete;
+        ProfileSample &operator=(ProfileSample &&) = delete;
     };
 
     /**

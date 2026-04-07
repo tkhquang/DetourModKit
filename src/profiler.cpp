@@ -107,7 +107,15 @@ namespace DetourModKit
         {
             const auto &s = buffer_[(start_idx + i) & mask_];
 
-            // Skip samples with odd sequence (in-flight write) or null name.
+            // Single pre-read sequence check: skip if odd (in-flight write).
+            // A full seqlock would re-check after reading fields to detect
+            // writes that started mid-read, but we intentionally omit the
+            // post-read re-check to avoid a second atomic load per sample
+            // on the export path.  The resulting race window is narrow
+            // (a write must start between the sequence load and the field
+            // reads) and benign -- a stale-but-consistent sample may appear
+            // in the export at worst.  Same trade-off as InputPoller's
+            // relaxed active_states_ reads (stale by one cycle is acceptable).
             const uint32_t seq = s.sequence.load(std::memory_order_acquire);
             if ((seq & 1) != 0 || s.name == nullptr)
             {

@@ -457,6 +457,14 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
 void HookManager::remove_all_hooks()
 {
+    // Publish teardown-in-progress before phase 1 so that concurrent
+    // create_*_hook() and enable_hook() calls observe the flag and
+    // reject rather than sneaking a new hook between the two phases.
+    // Without this, a hook created after phase 1 would be destroyed in
+    // phase 2 while its trampoline may still be active, reintroducing
+    // the deadlock that two-phase removal is designed to prevent.
+    m_shutdown_called.store(true, std::memory_order_release);
+
     // Two-phase removal: disable hooks under shared lock first so that
     // in-flight trampoline callers (which may hold shared_lock via
     // with_inline_hook) can drain before we take the exclusive lock
@@ -492,15 +500,21 @@ void HookManager::remove_all_hooks()
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 
-    // Both shutdown() and remove_all_hooks() reset m_shutdown_called to false
-    // under the exclusive lock, allowing subsequent create_*_hook() calls to
-    // succeed. See the comment in shutdown() for the serialization rationale.
+    // Reset under the exclusive lock so concurrent create_*_hook calls
+    // cannot observe the flag as true (rejected) and then immediately
+    // see it as false (accepted) before the map is fully cleared.
+    // See the comment in shutdown() for the serialization rationale.
     m_shutdown_called.store(false, std::memory_order_release);
 }
 
 std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
     auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
@@ -531,6 +545,11 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
 std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
     auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
