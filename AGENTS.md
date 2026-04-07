@@ -194,7 +194,8 @@ hook_manager.with_inline_hook("camera_update", [](InlineHook &hook) {
 
 - **Framework:** GoogleTest. Test entry point is `tests/main.cpp`.
 - **One test file per module:** `tests/test_<module>.cpp` mirrors `src/<module>.cpp`.
-- **Integration tests:** `tests/test_hook_integration.cpp` tests cross-module hooking against `tests/fixtures/hook_target_lib.cpp` (built as a DLL). The DLL exports `extern "C"` functions with volatile magic constants for stable AOB patterns.
+- **Integration tests:** `tests/test_hook_integration.cpp` tests cross-module hooking against `tests/fixtures/hook_target_lib.cpp` (built as a DLL). The DLL exports `extern "C"` functions with volatile magic constants for stable AOB patterns. Includes hot-reload integration tests that exercise full hook/teardown/re-hook cycles, multi-type reload, enable/disable toggling, and repeated cycle stress.
+- **Platform tests:** `tests/test_platform.cpp` tests internal loader-lock detection and module pinning utilities from `src/platform.hpp`.
 - **Test fixture pattern:** Each suite uses a `::testing::Test` subclass with `SetUp()`/`TearDown()` for temp file cleanup. Temp file paths must include the process ID (`_getpid()`) and a counter to avoid collisions when CTest runs tests in parallel as separate processes.
 - **VMT hook test lifetime:** GoogleTest destroys test-body locals *before* calling `TearDown()`. VMT tests must explicitly call `remove_all_vmt_hooks()` (or `remove_vmt_hook`) before target objects go out of scope. Do not rely on `TearDown()` for VMT cleanup when the hooked object is a test-body local.
 - **Coverage gate:** 80% minimum line coverage enforced in CI. All PRs must pass.

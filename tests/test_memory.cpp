@@ -1612,7 +1612,114 @@ TEST_F(MemoryTest, InvalidateRange_WraparoundAddress)
     EXPECT_NO_THROW(Memory::invalidate_range(reinterpret_cast<const void *>(near_max), large_size));
 }
 
+TEST_F(MemoryTest, WriteBytesToReadOnlyMemory_ExercisesVirtualProtect)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem, nullptr);
+
+    std::byte data[] = {std::byte{0xDE}, std::byte{0xAD}};
+    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+
+    // write_bytes changes protection temporarily; this should succeed
+    if (result.has_value())
+    {
+        EXPECT_EQ(std::memcmp(mem, data, sizeof(data)), 0);
+    }
+    else
+    {
+        EXPECT_EQ(result.error(), MemoryError::ProtectionChangeFailed);
+    }
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, WriteBytesToExecuteReadPage_ExercisesFlushCache)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    std::byte data[] = {std::byte{0x90}, std::byte{0x90}, std::byte{0xC3}};
+    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(std::memcmp(mem, data, sizeof(data)), 0);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_LargeValidRegion)
+{
+    void *mem = VirtualAlloc(nullptr, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    // First call populates cache
+    auto status1 = Memory::is_readable_nonblocking(mem, 0x10000);
+    EXPECT_NE(status1, Memory::ReadableStatus::NotReadable);
+
+    // Second call should hit cache
+    auto status2 = Memory::is_readable_nonblocking(mem, 0x10000);
+    EXPECT_NE(status2, Memory::ReadableStatus::NotReadable);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_CacheHitPath)
+{
+    uintptr_t value = 0xDEADBEEF;
+    auto addr = reinterpret_cast<uintptr_t>(&value);
+
+    // Prime the cache with a readable check
+    EXPECT_TRUE(Memory::is_readable(&value, sizeof(uintptr_t)));
+
+    // read_ptr_unsafe should use the cached entry
+    uintptr_t result = Memory::read_ptr_unsafe(addr, 0);
+    EXPECT_EQ(result, value);
+}
+
+TEST_F(MemoryTest, CacheStats_FormatContainsExpectedFields)
+{
+    // Access some memory to generate stats
+    int dummy = 42;
+    EXPECT_TRUE(Memory::is_readable(&dummy, sizeof(dummy)));
+    EXPECT_TRUE(Memory::is_readable(&dummy, sizeof(dummy)));
+
+    std::string stats = Memory::get_cache_stats();
+    EXPECT_FALSE(stats.empty());
+    EXPECT_TRUE(stats.find("hit") != std::string::npos ||
+                stats.find("Hit") != std::string::npos ||
+                stats.find("miss") != std::string::npos ||
+                stats.find("Miss") != std::string::npos);
+}
+
+TEST_F(MemoryTest, WriteBytesInvalidatesAndRevalidates)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    // Prime the cache
+    EXPECT_TRUE(Memory::is_readable(mem, 4));
+
+    // Write invalidates cached region
+    std::byte data[] = {std::byte{0xAA}, std::byte{0xBB}};
+    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+    ASSERT_TRUE(result.has_value());
+
+    // Subsequent check should still work (re-fetches into cache)
+    EXPECT_TRUE(Memory::is_readable(mem, 4));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
 TEST(MemoryErrorTest, MemoryErrorToString_IsNoexcept)
 {
     static_assert(noexcept(memory_error_to_string(MemoryError::NullTargetAddress)));
+}
+
+TEST(MemoryErrorTest, MemoryErrorToString_AllValues)
+{
+    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::NullTargetAddress)).empty());
+    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::NullSourceBytes)).empty());
+    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::SizeTooLarge)).empty());
+    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::ProtectionChangeFailed)).empty());
+    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::ProtectionRestoreFailed)).empty());
 }

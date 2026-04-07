@@ -1320,3 +1320,71 @@ TEST_F(LoggerTest, IsEnabled_ConsistentWithGetLogLevel)
         }
     }
 }
+
+TEST_F(LoggerTest, Reconfigure_SameParams_SkipsReopen)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    auto first_file = test_log_file_;
+    Logger::configure("TEST", first_file.string(), "%Y-%m-%d %H:%M:%S");
+    logger.info("Before reconfigure");
+    logger.flush();
+
+    // Reconfigure with identical params should be a no-op (stream stays open)
+    Logger::configure("TEST", first_file.string(), "%Y-%m-%d %H:%M:%S");
+    logger.info("After reconfigure");
+    logger.flush();
+
+    std::ifstream in(first_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_TRUE(content.find("After reconfigure") != std::string::npos);
+}
+
+TEST_F(LoggerTest, Reconfigure_AfterShutdown_Succeeds)
+{
+    Logger &logger = Logger::get_instance();
+    logger.shutdown();
+
+    // Reconfigure after shutdown should reopen and work
+    Logger::configure("TEST", test_log_file_.string(), "%Y-%m-%d %H:%M:%S");
+    logger.set_log_level(LogLevel::Trace);
+    logger.info("Post-shutdown message");
+    logger.flush();
+
+    std::ifstream in(test_log_file_);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    EXPECT_TRUE(content.find("Post-shutdown message") != std::string::npos);
+}
+
+TEST_F(LoggerTest, Log_ErrorLevel_WhenFileClosed_WritesToStderr)
+{
+    Logger &logger = Logger::get_instance();
+    logger.shutdown();
+
+    // Reconfigure to an invalid path so the file stream fails to open
+    Logger::configure("STDERR_TEST", "Z:\\nonexistent_dir_12345\\impossible.log", "%H:%M:%S");
+
+    // Error-level log with closed stream should go to stderr
+    testing::internal::CaptureStderr();
+    logger.error("Stderr fallback test");
+    std::string stderr_output = testing::internal::GetCapturedStderr();
+
+    EXPECT_TRUE(stderr_output.find("LOG_FILE_WRITE_ERROR") != std::string::npos ||
+                stderr_output.find("CRITICAL ERROR") != std::string::npos);
+}
+
+TEST_F(LoggerTest, Log_InfoLevel_WhenFileClosed_SilentlyDropped)
+{
+    Logger &logger = Logger::get_instance();
+    logger.shutdown();
+    Logger::configure("DROP_TEST", "Z:\\nonexistent_dir_12345\\impossible.log", "%H:%M:%S");
+
+    // Info-level log with closed stream should be silently dropped
+    testing::internal::CaptureStderr();
+    logger.info("This should be dropped");
+    std::string stderr_output = testing::internal::GetCapturedStderr();
+
+    // stderr should NOT contain LOG_FILE_WRITE_ERROR for info-level
+    EXPECT_EQ(stderr_output.find("LOG_FILE_WRITE_ERROR"), std::string::npos);
+}
