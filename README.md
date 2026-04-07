@@ -15,6 +15,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 * **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios, **format string placeholders** for concise log messages, **concurrent file access** via Win32 shared-access file handles (log files can be read by external tools while logging is active), and `is_enabled(LogLevel)` for gating expensive trace-only work.
 * **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation, inline buffer optimization for messages of size <= 512 bytes (inclusive), and message size validation with truncation for messages larger than 16 MB (messages > 16 MB are truncated to 16 MB rather than rejected).
 * **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache with sharded SRWLOCK concurrency, LRU eviction, and stampede coalescing. Provides `is_readable_nonblocking()` (tri-state: readable/not-readable/unknown) for latency-sensitive threads, `read_ptr_unsafe()` for safe pointer reads in hot paths (SEH-protected on MSVC, cache-accelerated with VirtualQuery fallback on MinGW), and `read_ptr_unchecked()` -- an inline header-only variant with a configurable low-address validity guard for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity).
+* **Profiler:** Opt-in scoped timing instrumentation with zero overhead when disabled. Compile-time gated via `DMK_ENABLE_PROFILING`. When enabled, records lock-free timing samples (~50 ns per scope) into a fixed-size ring buffer (64K samples, ~1.5 MB). Exports to [Chrome Tracing JSON](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview) format viewable in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev). Use `DMK_PROFILE_SCOPE("name")` or `DMK_PROFILE_FUNCTION()` macros to instrument code paths; use `Profiler::export_to_file()` to dump results after a profiling session.
 * **String Utilities:** Whitespace trimming for string cleanup.
 * **Format Utilities:** Inline formatting helpers for memory addresses, byte values, VK codes, and hex integer vectors using `std::format`.
 * **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
@@ -204,6 +205,17 @@ To treat compiler warnings as errors (enabled by default in CI):
 cmake --preset mingw-debug -DDMK_WARNINGS_AS_ERRORS=ON
 cmake --build --preset mingw-debug --parallel
 ```
+
+### Enabling Profiling
+
+To enable the opt-in profiler instrumentation (`DMK_PROFILE_SCOPE` / `DMK_PROFILE_FUNCTION` macros):
+
+```bash
+cmake --preset mingw-debug -DDMK_ENABLE_PROFILING=ON
+cmake --build --preset mingw-debug --parallel
+```
+
+When `DMK_ENABLE_PROFILING` is OFF (the default), all profiling macros expand to `((void)0)` with zero overhead. The `Profiler` class and `ScopedProfile` are still compiled into the library (so tests always work), but the macros that instrument user code are no-ops.
 
 ### Enabling Sanitizers
 
