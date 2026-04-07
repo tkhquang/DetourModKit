@@ -326,6 +326,15 @@ namespace DetourModKit
          */
         void flush() noexcept;
 
+        /**
+         * @brief Stops the writer thread and drains remaining queued messages.
+         * @details Sets shutdown_requested_, joins the writer thread, then drains
+         *          any messages that arrived between the stop signal and thread exit.
+         * @note A producer that already passed the shutdown_requested_ check but has
+         *       not yet completed try_push() can enqueue at most one message after the
+         *       final drain. This is an accepted trade-off to avoid adding atomic
+         *       overhead (producers_in_flight counter) to every enqueue() call.
+         */
         void shutdown() noexcept;
 
         [[nodiscard]] bool is_running() const noexcept;
@@ -345,6 +354,14 @@ namespace DetourModKit
 
     private:
         void writer_thread_func() noexcept;
+
+        /**
+         * @brief Drains any messages remaining in the queue after the writer thread exits.
+         * @details Called during shutdown to flush late-enqueued messages that arrived
+         *          between running_=false and the writer thread observing an empty queue.
+         *          No external lock is required; the writer thread has already been joined.
+         */
+        void drain_remaining() noexcept;
 
         void write_batch(std::span<LogMessage> messages) noexcept;
 

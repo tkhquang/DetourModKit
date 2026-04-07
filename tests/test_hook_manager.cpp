@@ -1106,14 +1106,18 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
         &tramp);
     ASSERT_TRUE(result.has_value());
 
-    constexpr int num_threads = 4;
-    constexpr int iterations = 50;
+    constexpr int num_toggling_threads = 4;
+    constexpr int iterations = 200;
+    // +1 for the dedicated observer thread that only reads status
+    constexpr int total_threads = num_toggling_threads + 1;
     std::vector<std::thread> threads;
-    std::latch start_latch(num_threads);
+    std::latch start_latch(total_threads);
     std::atomic<bool> saw_active{false};
     std::atomic<bool> saw_disabled{false};
+    std::atomic<bool> done{false};
 
-    for (int i = 0; i < num_threads; ++i)
+    // Toggling threads: concurrently enable/disable the hook
+    for (int i = 0; i < num_toggling_threads; ++i)
     {
         threads.emplace_back([this, i, &start_latch, &saw_active, &saw_disabled]()
                              {
@@ -1139,10 +1143,30 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
             } });
     }
 
-    for (auto &t : threads)
+    // Dedicated observer thread: polls status without toggling to reliably
+    // catch both terminal states between concurrent enable/disable transitions
+    threads.emplace_back([this, &start_latch, &saw_active, &saw_disabled, &done]()
+                         {
+        start_latch.arrive_and_wait();
+        while (!done.load(std::memory_order_acquire))
+        {
+            auto s = hook_manager_->get_hook_status("ConcurrentHook");
+            if (s.has_value())
+            {
+                if (*s == HookStatus::Active)
+                    saw_active.store(true, std::memory_order_relaxed);
+                else if (*s == HookStatus::Disabled)
+                    saw_disabled.store(true, std::memory_order_relaxed);
+            }
+        } });
+
+    // Wait for toggling threads first, then signal the observer to stop
+    for (int i = 0; i < num_toggling_threads; ++i)
     {
-        t.join();
+        threads[i].join();
     }
+    done.store(true, std::memory_order_release);
+    threads[num_toggling_threads].join();
 
     EXPECT_TRUE(saw_active.load()) << "Expected Active to be observed during concurrent toggling";
     EXPECT_TRUE(saw_disabled.load()) << "Expected Disabled to be observed during concurrent toggling";

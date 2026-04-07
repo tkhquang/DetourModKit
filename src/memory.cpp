@@ -147,11 +147,10 @@ namespace
     }
 }
 
-/**
- * @namespace MemoryUtilsCacheInternal
- * @brief Encapsulates internal static variables and helper functions for memory cache.
- */
-namespace MemoryUtilsCacheInternal
+// Internal static variables and helper functions for memory cache.
+// Anonymous namespace ensures internal linkage, preventing ODR violations
+// if this translation unit's declarations were ever duplicated.
+namespace
 {
     std::vector<CacheShard> s_cacheShards;
     std::vector<std::unique_ptr<SrwSharedMutex>> s_shardMutexes;
@@ -818,56 +817,38 @@ namespace MemoryUtilsCacheInternal
         }
     }
 
-    /**
-     * @brief Shuts down the cleanup thread.
-     * @note Background cleanup thread is disabled on mingw due to pthreads compatibility issues.
-     *       On-demand cleanup timer handles expiration in this case.
-     */
-    void shutdown_cleanup_thread() noexcept
-    {
-        // Signal cleanup thread to stop
-        s_cleanupThreadRunning.store(false, std::memory_order_release);
-        s_cleanupCv.notify_one();
-
-        // Wait for cleanup thread to finish if it was started
-        if (s_cleanupThread.joinable())
-        {
-            s_cleanupThread.join();
-        }
-    }
-
-} // namespace MemoryUtilsCacheInternal
+} // anonymous namespace (cache internals)
 
 bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
 {
     // Hold state mutex to prevent concurrent clear_cache or shutdown_cache
     // This serializes init/clear/shutdown transitions to ensure vectors are not accessed while being resized or cleared
-    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
+    std::lock_guard<std::mutex> state_lock(s_cacheStateMutex);
 
     // Fast path: already initialized
-    if (MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    if (s_cacheInitialized.load(std::memory_order_acquire))
         return true;
 
     // Try to initialize
     bool expected = false;
-    if (MemoryUtilsCacheInternal::s_cacheInitialized.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+    if (s_cacheInitialized.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
     {
-        if (!MemoryUtilsCacheInternal::perform_cache_initialization(cache_size, expiry_ms, shard_count))
+        if (!perform_cache_initialization(cache_size, expiry_ms, shard_count))
         {
             // Initialization failed - s_cacheInitialized already reset to false in perform_cache_initialization
             return false;
         }
 
         // Try to start background cleanup thread (may fail silently on MinGW)
-        MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(true, std::memory_order_release);
+        s_cleanupThreadRunning.store(true, std::memory_order_release);
         try
         {
-            MemoryUtilsCacheInternal::s_cleanupThread = std::thread(MemoryUtilsCacheInternal::cleanup_thread_func);
+            s_cleanupThread = std::thread(cleanup_thread_func);
         }
         catch (const std::system_error &)
         {
             // Background thread creation failed (MinGW pthreads issue) - use on-demand cleanup
-            MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(false, std::memory_order_release);
+            s_cleanupThreadRunning.store(false, std::memory_order_release);
             Logger::get_instance().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
         }
 
@@ -879,7 +860,7 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
         {
             std::atexit([]()
                         {
-                if (MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+                if (s_cacheInitialized.load(std::memory_order_acquire))
                 {
                     Memory::shutdown_cache();
                 } });
@@ -896,12 +877,12 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
 void DetourModKit::Memory::clear_cache()
 {
     // Hold state mutex to serialize with shutdown and cleanup thread
-    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
+    std::lock_guard<std::mutex> state_lock(s_cacheStateMutex);
 
-    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    if (!s_cacheInitialized.load(std::memory_order_acquire))
         return;
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
         return;
 
@@ -911,24 +892,24 @@ void DetourModKit::Memory::clear_cache()
     // so it will skip shards we hold without deadlocking.
     for (size_t i = 0; i < shard_count; ++i)
     {
-        auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
+        auto &mutex_ptr = s_shardMutexes[i];
         if (mutex_ptr)
         {
             std::unique_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
-            MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
-            MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
-            MemoryUtilsCacheInternal::s_cacheShards[i].sorted_ranges.clear();
-            MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
+            s_cacheShards[i].entries.clear();
+            s_cacheShards[i].lru_index.clear();
+            s_cacheShards[i].sorted_ranges.clear();
+            s_inFlight[i].store(0, std::memory_order_relaxed);
         }
     }
 
-    MemoryUtilsCacheInternal::s_stats.cacheHits.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.cacheMisses.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.invalidations.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
+    s_stats.cacheHits.store(0, std::memory_order_relaxed);
+    s_stats.cacheMisses.store(0, std::memory_order_relaxed);
+    s_stats.invalidations.store(0, std::memory_order_relaxed);
+    s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
+    s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
 
-    MemoryUtilsCacheInternal::s_lastCleanupTimeNs.store(current_time_ns(), std::memory_order_relaxed);
+    s_lastCleanupTimeNs.store(current_time_ns(), std::memory_order_relaxed);
 
     Logger::get_instance().debug("MemoryCache: All entries cleared.");
 }
@@ -938,24 +919,24 @@ void DetourModKit::Memory::shutdown_cache()
     // Signal and join cleanup thread BEFORE acquiring state mutex.
     // The cleanup thread acquires s_cacheStateMutex in cleanup_expired_entries(force=true),
     // so joining while holding the state mutex would deadlock.
-    MemoryUtilsCacheInternal::s_cleanupThreadRunning.store(false, std::memory_order_release);
-    MemoryUtilsCacheInternal::s_cleanupCv.notify_one();
+    s_cleanupThreadRunning.store(false, std::memory_order_release);
+    s_cleanupCv.notify_one();
 
-    if (MemoryUtilsCacheInternal::s_cleanupThread.joinable())
+    if (s_cleanupThread.joinable())
     {
-        MemoryUtilsCacheInternal::s_cleanupThread.join();
+        s_cleanupThread.join();
     }
 
     // Acquire state mutex to serialize with clear_cache and protect data teardown
-    std::lock_guard<std::mutex> state_lock(MemoryUtilsCacheInternal::s_cacheStateMutex);
+    std::lock_guard<std::mutex> state_lock(s_cacheStateMutex);
 
     // Mark as not initialized and zero shard count.
     // This prevents new readers from entering the critical section.
     // acquire/release is sufficient here because the state mutex provides the
     // cross-thread ordering guarantee. Readers that observe shard_count == 0
     // immediately exit without touching data structures.
-    MemoryUtilsCacheInternal::s_cacheInitialized.store(false, std::memory_order_release);
-    MemoryUtilsCacheInternal::s_shardCount.store(0, std::memory_order_release);
+    s_cacheInitialized.store(false, std::memory_order_release);
+    s_shardCount.store(0, std::memory_order_release);
 
     // Wait for in-flight readers to finish before destroying data structures.
     // Readers increment s_activeReaders on entry and decrement on exit.
@@ -965,7 +946,7 @@ void DetourModKit::Memory::shutdown_cache()
     // preempted by the OS scheduler.
     constexpr int yield_spins = 4096;
     int spins = 0;
-    while (MemoryUtilsCacheInternal::s_activeReaders.load(std::memory_order_acquire) > 0)
+    while (s_activeReaders.load(std::memory_order_acquire) > 0)
     {
         if (spins < yield_spins)
         {
@@ -979,64 +960,64 @@ void DetourModKit::Memory::shutdown_cache()
     }
 
     // All readers have exited - safe to destroy data structures
-    const size_t shard_count = MemoryUtilsCacheInternal::s_cacheShards.size();
+    const size_t shard_count = s_cacheShards.size();
     for (size_t i = 0; i < shard_count; ++i)
     {
-        if (MemoryUtilsCacheInternal::s_shardMutexes[i])
+        if (s_shardMutexes[i])
         {
-            std::unique_lock<SrwSharedMutex> shard_lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
-            MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
-            MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
-            MemoryUtilsCacheInternal::s_cacheShards[i].sorted_ranges.clear();
+            std::unique_lock<SrwSharedMutex> shard_lock(*s_shardMutexes[i]);
+            s_cacheShards[i].entries.clear();
+            s_cacheShards[i].lru_index.clear();
+            s_cacheShards[i].sorted_ranges.clear();
         }
     }
 
-    MemoryUtilsCacheInternal::s_cacheShards.clear();
-    MemoryUtilsCacheInternal::s_shardMutexes.clear();
-    MemoryUtilsCacheInternal::s_inFlight.reset();
+    s_cacheShards.clear();
+    s_shardMutexes.clear();
+    s_inFlight.reset();
 
     // Reset all stats and config so a subsequent init_cache starts from a clean state
-    MemoryUtilsCacheInternal::s_stats.cacheHits.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.cacheMisses.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.invalidations.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_lastCleanupTimeNs.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_configuredExpiryMs.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_maxEntriesPerShard.store(0, std::memory_order_relaxed);
-    MemoryUtilsCacheInternal::s_cleanupRequested.store(false, std::memory_order_relaxed);
+    s_stats.cacheHits.store(0, std::memory_order_relaxed);
+    s_stats.cacheMisses.store(0, std::memory_order_relaxed);
+    s_stats.invalidations.store(0, std::memory_order_relaxed);
+    s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
+    s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
+    s_lastCleanupTimeNs.store(0, std::memory_order_relaxed);
+    s_configuredExpiryMs.store(0, std::memory_order_relaxed);
+    s_maxEntriesPerShard.store(0, std::memory_order_relaxed);
+    s_cleanupRequested.store(false, std::memory_order_relaxed);
 
     Logger::get_instance().debug("MemoryCache: Shutdown complete.");
 }
 
 std::string DetourModKit::Memory::get_cache_stats()
 {
-    const uint64_t hits = MemoryUtilsCacheInternal::s_stats.cacheHits.load(std::memory_order_relaxed);
-    const uint64_t misses = MemoryUtilsCacheInternal::s_stats.cacheMisses.load(std::memory_order_relaxed);
-    const uint64_t invalidations = MemoryUtilsCacheInternal::s_stats.invalidations.load(std::memory_order_relaxed);
-    const uint64_t coalesced = MemoryUtilsCacheInternal::s_stats.coalescedQueries.load(std::memory_order_relaxed);
-    const uint64_t on_demand_cleanups = MemoryUtilsCacheInternal::s_stats.onDemandCleanups.load(std::memory_order_relaxed);
+    const uint64_t hits = s_stats.cacheHits.load(std::memory_order_relaxed);
+    const uint64_t misses = s_stats.cacheMisses.load(std::memory_order_relaxed);
+    const uint64_t invalidations = s_stats.invalidations.load(std::memory_order_relaxed);
+    const uint64_t coalesced = s_stats.coalescedQueries.load(std::memory_order_relaxed);
+    const uint64_t on_demand_cleanups = s_stats.onDemandCleanups.load(std::memory_order_relaxed);
     const uint64_t total_queries = hits + misses;
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
-    const size_t max_entries_per_shard = MemoryUtilsCacheInternal::s_maxEntriesPerShard.load(std::memory_order_acquire);
-    const unsigned int expiry_ms = MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire);
+    const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
+    const size_t max_entries_per_shard = s_maxEntriesPerShard.load(std::memory_order_acquire);
+    const unsigned int expiry_ms = s_configuredExpiryMs.load(std::memory_order_acquire);
 
     // Calculate total entries and hard max with reader guard
     size_t total_entries = 0;
     size_t total_hard_max = 0;
 
     {
-        MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
-        const size_t active_shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+        ActiveReaderGuard reader_guard;
+        const size_t active_shard_count = s_shardCount.load(std::memory_order_acquire);
         for (size_t i = 0; i < active_shard_count; ++i)
         {
-            auto &mutex_ptr = MemoryUtilsCacheInternal::s_shardMutexes[i];
+            auto &mutex_ptr = s_shardMutexes[i];
             if (mutex_ptr)
             {
                 std::shared_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
-                total_entries += MemoryUtilsCacheInternal::s_cacheShards[i].entries.size();
-                total_hard_max += MemoryUtilsCacheInternal::s_cacheShards[i].max_capacity;
+                total_entries += s_cacheShards[i].entries.size();
+                total_hard_max += s_cacheShards[i].max_capacity;
             }
         }
     }
@@ -1069,22 +1050,24 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     if (!address || size == 0)
         return;
 
-    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    // Construct reader guard BEFORE checking s_cacheInitialized to prevent
+    // shutdown_cache from destroying data structures between the check and access.
+    ActiveReaderGuard reader_guard;
+
+    if (!s_cacheInitialized.load(std::memory_order_acquire))
         return;
 
-    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
-
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
         return;
 
     const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
-    MemoryUtilsCacheInternal::invalidate_range_internal(addr_val, size);
+    invalidate_range_internal(addr_val, size);
 
     // request_cleanup may trigger on-demand cleanup_expired_entries(force=false)
     // which iterates shards without s_cacheStateMutex. Keep s_activeReaders > 0
     // so shutdown_cache cannot destroy shards during the cleanup pass.
-    MemoryUtilsCacheInternal::request_cleanup();
+    request_cleanup();
 }
 
 namespace
@@ -1106,9 +1089,9 @@ namespace
 
         // Construct reader guard BEFORE checking s_cacheInitialized to prevent
         // shutdown_cache from destroying data structures between the check and access.
-        MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+        ActiveReaderGuard reader_guard;
 
-        if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+        if (!s_cacheInitialized.load(std::memory_order_acquire))
         {
             // Cache not initialized -- fall back to direct VirtualQuery
             MEMORY_BASIC_INFORMATION mbi;
@@ -1128,33 +1111,33 @@ namespace
 
         // Reader guard already active -- safe to access cache data structures
 
-        const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+        const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
         if (shard_count == 0)
             return false;
 
         const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
         const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
         const uint64_t now_ns = current_time_ns();
-        const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+        const uint64_t expiry_ns = static_cast<uint64_t>(s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
 
         // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
         {
-            std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
-            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
-                MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+            std::shared_lock<SrwSharedMutex> lock(*s_shardMutexes[shard_idx]);
+            CachedMemoryRegionInfo *cached_info = find_in_shard(
+                s_cacheShards[shard_idx],
                 query_addr_val, size, now_ns, expiry_ns);
             if (cached_info)
             {
-                MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+                s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
                 return check_permission(cached_info->protection);
             }
         }
 
-        MemoryUtilsCacheInternal::s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
+        s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
 
         // Cache miss: call VirtualQuery with stampede coalescing
         MEMORY_BASIC_INFORMATION mbi;
-        if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
+        if (!query_and_update_cache(shard_idx, address, mbi))
             return false;
 
         if (mbi.State != MEM_COMMIT)
@@ -1176,12 +1159,12 @@ namespace
 
 bool DetourModKit::Memory::is_readable(const void *address, size_t size)
 {
-    return check_memory_permission(address, size, MemoryUtilsCacheInternal::check_read_permission);
+    return check_memory_permission(address, size, check_read_permission);
 }
 
 bool DetourModKit::Memory::is_writable(void *address, size_t size)
 {
-    return check_memory_permission(address, size, MemoryUtilsCacheInternal::check_write_permission);
+    return check_memory_permission(address, size, check_write_permission);
 }
 
 std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
@@ -1239,9 +1222,9 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
     if (!address || size == 0)
         return ReadableStatus::NotReadable;
 
-    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+    ActiveReaderGuard reader_guard;
 
-    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    if (!s_cacheInitialized.load(std::memory_order_acquire))
     {
         // Cache not initialized - fall back to direct VirtualQuery (blocking)
         MEMORY_BASIC_INFORMATION mbi;
@@ -1249,7 +1232,7 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
             return ReadableStatus::NotReadable;
         if (mbi.State != MEM_COMMIT)
             return ReadableStatus::NotReadable;
-        if (!MemoryUtilsCacheInternal::check_read_permission(mbi.Protect))
+        if (!check_read_permission(mbi.Protect))
             return ReadableStatus::NotReadable;
         const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
         const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
@@ -1261,27 +1244,27 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
         return ReadableStatus::NotReadable;
     }
 
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+    const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
     if (shard_count == 0)
         return ReadableStatus::Unknown;
 
     const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
     const uint64_t now_ns = current_time_ns();
-    const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+    const uint64_t expiry_ns = static_cast<uint64_t>(s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
 
     // Non-blocking: try_lock_shared to avoid stalling latency-sensitive threads
-    std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
+    std::shared_lock<SrwSharedMutex> lock(*s_shardMutexes[shard_idx], std::try_to_lock);
     if (!lock.owns_lock())
         return ReadableStatus::Unknown;
 
-    CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
-        MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+    CachedMemoryRegionInfo *cached_info = find_in_shard(
+        s_cacheShards[shard_idx],
         query_addr_val, size, now_ns, expiry_ns);
     if (cached_info)
     {
-        MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
-        return MemoryUtilsCacheInternal::check_read_permission(cached_info->protection)
+        s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+        return check_read_permission(cached_info->protection)
                    ? ReadableStatus::Readable
                    : ReadableStatus::NotReadable;
     }
@@ -1313,26 +1296,26 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
     const auto src = base + static_cast<uintptr_t>(offset);
 
     {
-        MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+        ActiveReaderGuard reader_guard;
 
-        if (MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+        if (s_cacheInitialized.load(std::memory_order_acquire))
         {
-            const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+            const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
             if (shard_count != 0)
             {
                 const size_t shard_idx = compute_shard_index(src, shard_count);
-                std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
+                std::shared_lock<SrwSharedMutex> lock(*s_shardMutexes[shard_idx], std::try_to_lock);
                 if (lock.owns_lock())
                 {
                     const uint64_t now_ns = current_time_ns();
                     const uint64_t expiry_ns = static_cast<uint64_t>(
-                        MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
-                    CachedMemoryRegionInfo *cached = MemoryUtilsCacheInternal::find_in_shard(
-                        MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+                        s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+                    CachedMemoryRegionInfo *cached = find_in_shard(
+                        s_cacheShards[shard_idx],
                         src, sizeof(uintptr_t), now_ns, expiry_ns);
                     if (cached)
                     {
-                        if (MemoryUtilsCacheInternal::check_read_permission(cached->protection))
+                        if (check_read_permission(cached->protection))
                             return *reinterpret_cast<const uintptr_t *>(src);
                         return 0;
                     }
