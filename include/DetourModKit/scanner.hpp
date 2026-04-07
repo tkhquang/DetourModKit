@@ -167,6 +167,24 @@ namespace DetourModKit
          */
         [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
+        /**
+         * @enum SimdLevel
+         * @brief Reports the highest SIMD tier available for pattern verification.
+         */
+        enum class SimdLevel
+        {
+            Scalar, ///< No SIMD (byte-by-byte verification)
+            Sse2,   ///< SSE2 (16 bytes per iteration)
+            Avx2    ///< AVX2 (32 bytes per iteration, with SSE2 + scalar tail)
+        };
+
+        /**
+         * @brief Returns the SIMD tier that find_pattern() will use at runtime.
+         * @details Reflects both compile-time support (intrinsics available) and
+         *          runtime CPU detection (CPUID + OS XGETBV for AVX2).
+         */
+        [[nodiscard]] SimdLevel active_simd_level() noexcept;
+
     } // namespace Scanner
 } // namespace DetourModKit
 

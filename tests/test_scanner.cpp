@@ -1271,3 +1271,179 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[2]);
 }
+
+// --- SIMD level detection ---
+
+TEST(ScannerTest, active_simd_level_returns_valid_tier)
+{
+    const auto level = Scanner::active_simd_level();
+    // Must be one of the three defined tiers
+    EXPECT_TRUE(level == Scanner::SimdLevel::Scalar ||
+                level == Scanner::SimdLevel::Sse2 ||
+                level == Scanner::SimdLevel::Avx2);
+
+    // On x86-64, SSE2 is guaranteed at minimum
+#if defined(__x86_64__) || defined(_M_X64)
+    EXPECT_GE(static_cast<int>(level), static_cast<int>(Scanner::SimdLevel::Sse2));
+#endif
+}
+
+TEST(ScannerTest, active_simd_level_is_deterministic)
+{
+    // Runtime detection is cached; repeated calls must return the same value
+    const auto a = Scanner::active_simd_level();
+    const auto b = Scanner::active_simd_level();
+    EXPECT_EQ(a, b);
+}
+
+TEST(ScannerTest, active_simd_level_print)
+{
+    // Diagnostic: prints the active tier so CI logs confirm which path ran.
+    // Not a correctness assertion -- purely informational.
+    const auto level = Scanner::active_simd_level();
+    const char *names[] = {"Scalar", "SSE2", "AVX2"};
+    std::printf("[  DIAG   ] Scanner SIMD level: %s\n", names[static_cast<int>(level)]);
+}
+
+// --- AVX2 path tests (32+ byte patterns) ---
+// Correctness tests for patterns that exercise the AVX2 verification tier.
+// active_simd_level() above confirms whether AVX2 is actually in use.
+
+TEST(ScannerTest, find_pattern_avx2_path_exact_32_bytes)
+{
+    // 32-byte pattern: one full AVX2 iteration, no SSE2/scalar tail
+    std::vector<std::byte> data(64, std::byte{0x00});
+    for (size_t i = 16; i < 48; ++i)
+        data[i] = static_cast<std::byte>(i & 0xFF);
+
+    std::string aob;
+    for (size_t i = 16; i < 48; ++i)
+    {
+        if (!aob.empty()) aob += ' ';
+        aob += std::format("{:02X}", i & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 32u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[16]);
+}
+
+TEST(ScannerTest, find_pattern_avx2_path_48_bytes)
+{
+    // 48-byte pattern: one AVX2 iteration (32B) + one SSE2 iteration (16B)
+    std::vector<std::byte> data(80, std::byte{0xAA});
+    for (size_t i = 8; i < 56; ++i)
+        data[i] = static_cast<std::byte>((i * 7) & 0xFF);
+
+    std::string aob;
+    for (size_t i = 8; i < 56; ++i)
+    {
+        if (!aob.empty()) aob += ' ';
+        aob += std::format("{:02X}", (i * 7) & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 48u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[8]);
+}
+
+TEST(ScannerTest, find_pattern_avx2_path_64_bytes)
+{
+    // 64-byte pattern: two full AVX2 iterations
+    std::vector<std::byte> data(128, std::byte{0x00});
+    for (size_t i = 32; i < 96; ++i)
+        data[i] = static_cast<std::byte>(i & 0xFF);
+
+    std::string aob;
+    for (size_t i = 32; i < 96; ++i)
+    {
+        if (!aob.empty()) aob += ' ';
+        aob += std::format("{:02X}", i & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 64u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[32]);
+}
+
+TEST(ScannerTest, find_pattern_avx2_path_with_wildcards)
+{
+    // 32-byte pattern with wildcards at AVX2-significant positions
+    std::vector<std::byte> data(64, std::byte{0x00});
+    for (size_t i = 0; i < 64; ++i)
+        data[i] = static_cast<std::byte>(i & 0xFF);
+
+    // Pattern: first 32 bytes with wildcards at positions 4, 12, 20, 28
+    std::string aob;
+    for (size_t i = 16; i < 48; ++i)
+    {
+        if (!aob.empty()) aob += ' ';
+        if ((i - 16) % 8 == 4)
+            aob += "??";
+        else
+            aob += std::format("{:02X}", i & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 32u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[16]);
+}
+
+TEST(ScannerTest, find_pattern_avx2_path_mismatch_in_second_chunk)
+{
+    // 64-byte pattern where the first 32 bytes match but the second 32 don't
+    std::vector<std::byte> data(128, std::byte{0x00});
+    for (size_t i = 0; i < 128; ++i)
+        data[i] = static_cast<std::byte>(i & 0xFF);
+
+    std::string aob;
+    for (size_t i = 32; i < 96; ++i)
+    {
+        if (!aob.empty()) aob += ' ';
+        aob += std::format("{:02X}", i & 0xFF);
+    }
+
+    // Corrupt byte 65 in the data so second AVX2 chunk fails
+    data[65] = std::byte{0xFE};
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(ScannerTest, find_pattern_avx2_path_not_found)
+{
+    // 32-byte pattern not present in the data
+    std::vector<std::byte> data(128, std::byte{0xBB});
+
+    std::string aob;
+    for (int i = 0; i < 32; ++i)
+    {
+        if (!aob.empty()) aob += ' ';
+        aob += std::format("{:02X}", i);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    EXPECT_EQ(result, nullptr);
+}

@@ -23,11 +23,110 @@
 #include <emmintrin.h>
 #endif
 
+// AVX2 support: compile-time header + runtime CPUID detection.
+// On GCC/Clang, AVX2 intrinsics require either -mavx2 globally or
+// __attribute__((target("avx2"))) per function. We use the latter so
+// the rest of the TU stays SSE2-only and runs on any x86-64 CPU.
+// On MSVC, intrinsics are always available; runtime CPUID gates usage.
+#if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+#define DMK_HAS_AVX2 1
+#include <immintrin.h>
+#include <cpuid.h>
+#define DMK_AVX2_TARGET __attribute__((target("avx2")))
+#elif defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#define DMK_HAS_AVX2 1
+#include <immintrin.h>
+#include <intrin.h>
+#define DMK_AVX2_TARGET
+#endif
+
 using namespace DetourModKit;
 using namespace DetourModKit::String;
 
 namespace
 {
+#ifdef DMK_HAS_AVX2
+    /**
+     * @brief Detects AVX2 support at runtime via CPUID.
+     * @details Checks CPUID leaf 7 subleaf 0, EBX bit 5 (AVX2) and also
+     *          verifies that the OS has enabled AVX state saving (XGETBV).
+     *          Result is cached in a function-local static for zero-cost
+     *          repeated queries.
+     */
+    bool cpu_has_avx2() noexcept
+    {
+        static const bool result = []() -> bool {
+#if defined(__GNUC__) || defined(__clang__)
+            // Check CPUID is supported and query leaf 7
+            unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+            if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+                return false;
+            const bool avx2_flag = (ebx & (1u << 5)) != 0;
+
+            // Verify OS has enabled AVX state saving via XGETBV (ECX=0, bit 2)
+            unsigned int xcr0_lo = 0, xcr0_hi = 0;
+            __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+            const bool os_avx = (xcr0_lo & 0x06) == 0x06; // SSE + AVX state
+
+            return avx2_flag && os_avx;
+#elif defined(_MSC_VER)
+            int cpui[4]{};
+            __cpuidex(cpui, 7, 0);
+            const bool avx2_flag = (cpui[1] & (1 << 5)) != 0;
+
+            // Verify OS has enabled AVX state saving
+            const unsigned long long xcr0 = _xgetbv(0);
+            const bool os_avx = (xcr0 & 0x06) == 0x06;
+
+            return avx2_flag && os_avx;
+#else
+            return false;
+#endif
+        }();
+        return result;
+    }
+    /**
+     * @brief Verifies a pattern match using AVX2 (32 bytes per iteration).
+     * @param pattern_start Start of the candidate region in memory.
+     * @param pattern The compiled pattern to verify against.
+     * @param start_offset Byte offset to start verification from (may be non-zero
+     *                     if a previous tier partially verified).
+     * @return The byte offset where verification stopped. If equal to pattern size,
+     *         the AVX2 tier found no mismatches in its range.
+     * @note This function is compiled with AVX2 codegen via target attribute on
+     *       GCC/Clang. On MSVC, intrinsics are always available.
+     */
+    DMK_AVX2_TARGET
+    size_t verify_pattern_avx2(const std::byte *pattern_start,
+                               const Scanner::CompiledPattern &pattern,
+                               size_t start_offset) noexcept
+    {
+        const size_t pattern_size = pattern.size();
+        size_t j = start_offset;
+
+        for (; j + 32 <= pattern_size; j += 32)
+        {
+            const __m256i mem = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i *>(pattern_start + j));
+            const __m256i pat = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i *>(pattern.bytes.data() + j));
+            const __m256i msk = _mm256_loadu_si256(
+                reinterpret_cast<const __m256i *>(pattern.mask.data() + j));
+
+            const __m256i xored = _mm256_xor_si256(mem, pat);
+            const __m256i masked = _mm256_and_si256(xored, msk);
+            const __m256i cmp = _mm256_cmpeq_epi8(masked, _mm256_setzero_si256());
+
+            if (static_cast<unsigned int>(_mm256_movemask_epi8(cmp)) != 0xFFFFFFFFu)
+            {
+                return 0; // Mismatch sentinel
+            }
+        }
+
+        return j;
+    }
+#endif // DMK_HAS_AVX2
+
     /**
      * @brief Returns a commonality score for a byte value in typical x64 PE code sections.
      * @details Higher scores indicate bytes that appear more frequently, making them
@@ -248,20 +347,36 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
         const std::byte *current_scan_ptr = static_cast<const std::byte *>(found);
         const std::byte *pattern_start = current_scan_ptr - best_anchor;
 
-        // Verify the full pattern at this position
+        // Verify the full pattern at this position.
+        // Three-tier SIMD: AVX2 (32B) -> SSE2 (16B) -> scalar (1B).
         bool match_found = true;
         size_t j = 0;
 
-#ifdef DMK_HAS_SSE2
-        for (; j + 16 <= pattern_size; j += 16)
+#ifdef DMK_HAS_AVX2
+        if (cpu_has_avx2())
         {
-            __m128i mem = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern_start + j));
-            __m128i pat = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern.bytes.data() + j));
-            __m128i msk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern.mask.data() + j));
+            j = verify_pattern_avx2(pattern_start, pattern, 0);
+            if (j == 0 && pattern_size >= 32)
+            {
+                // Mismatch in AVX2 range
+                match_found = false;
+            }
+        }
+#endif // DMK_HAS_AVX2
 
-            __m128i xored = _mm_xor_si128(mem, pat);
-            __m128i masked = _mm_and_si128(xored, msk);
-            __m128i cmp = _mm_cmpeq_epi8(masked, _mm_setzero_si128());
+#ifdef DMK_HAS_SSE2
+        for (; match_found && j + 16 <= pattern_size; j += 16)
+        {
+            const __m128i mem = _mm_loadu_si128(
+                reinterpret_cast<const __m128i *>(pattern_start + j));
+            const __m128i pat = _mm_loadu_si128(
+                reinterpret_cast<const __m128i *>(pattern.bytes.data() + j));
+            const __m128i msk = _mm_loadu_si128(
+                reinterpret_cast<const __m128i *>(pattern.mask.data() + j));
+
+            const __m128i xored = _mm_xor_si128(mem, pat);
+            const __m128i masked = _mm_and_si128(xored, msk);
+            const __m128i cmp = _mm_cmpeq_epi8(masked, _mm_setzero_si128());
 
             if (_mm_movemask_epi8(cmp) != 0xFFFF)
             {
@@ -426,4 +541,17 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
     }
 
     return nullptr;
+}
+
+Scanner::SimdLevel DetourModKit::Scanner::active_simd_level() noexcept
+{
+#ifdef DMK_HAS_AVX2
+    if (cpu_has_avx2())
+        return SimdLevel::Avx2;
+#endif
+#ifdef DMK_HAS_SSE2
+    return SimdLevel::Sse2;
+#else
+    return SimdLevel::Scalar;
+#endif
 }
