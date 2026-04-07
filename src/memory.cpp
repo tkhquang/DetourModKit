@@ -111,6 +111,8 @@ namespace
         // Map from monotonic counter -> baseAddress for O(log n) oldest-entry lookup (LRU)
         // Monotonic counter guarantees insertion-order uniqueness for correct eviction
         std::map<uint64_t, uintptr_t> lru_index;
+        // Sorted by base address for O(log n) containment lookup
+        std::vector<std::pair<uintptr_t, uintptr_t>> sorted_ranges; // {base, base+size}
         uint64_t entry_counter{0};
         size_t capacity;
         size_t max_capacity;
@@ -118,6 +120,7 @@ namespace
         CacheShard() : capacity(0), max_capacity(0)
         {
             entries.reserve(64);
+            sorted_ranges.reserve(64);
         }
     };
 
@@ -267,6 +270,31 @@ namespace MemoryUtilsCacheInternal
     }
 
     /**
+     * @brief Inserts a range into the shard's sorted auxiliary vector.
+     * @note Must be called with shard mutex held (exclusive).
+     */
+    void insert_sorted_range(CacheShard &shard, uintptr_t base_addr, size_t region_size) noexcept
+    {
+        auto range = std::make_pair(base_addr, base_addr + region_size);
+        auto pos = std::lower_bound(shard.sorted_ranges.begin(),
+                                     shard.sorted_ranges.end(), range);
+        shard.sorted_ranges.insert(pos, range);
+    }
+
+    /**
+     * @brief Removes a range from the shard's sorted auxiliary vector.
+     * @note Must be called with shard mutex held (exclusive).
+     */
+    void remove_sorted_range(CacheShard &shard, uintptr_t base_addr) noexcept
+    {
+        auto it = std::lower_bound(shard.sorted_ranges.begin(),
+                                    shard.sorted_ranges.end(),
+                                    std::make_pair(base_addr, uintptr_t{0}));
+        if (it != shard.sorted_ranges.end() && it->first == base_addr)
+            shard.sorted_ranges.erase(it);
+    }
+
+    /**
      * @brief Finds and validates a cache entry in a shard by scanning for range containment.
      * @param shard The cache shard to search.
      * @param address Address to look up.
@@ -276,7 +304,8 @@ namespace MemoryUtilsCacheInternal
      * @return Pointer to the matching entry, or nullptr if not found or expired.
      * @note Must be called with shard mutex held (shared or exclusive).
      * @note First attempts direct lookup by page-aligned base address for O(1) fast path,
-     *       then falls back to linear scan for addresses within larger regions.
+     *       then falls back to O(log n) binary search via sorted_ranges for addresses
+     *       within larger regions.
      */
     CachedMemoryRegionInfo *find_in_shard(CacheShard &shard,
                                           uintptr_t address,
@@ -296,15 +325,26 @@ namespace MemoryUtilsCacheInternal
             }
         }
 
-        // Slow path: scan all entries for a region that contains the queried range.
-        // This handles addresses that fall within a larger region whose base address
-        // differs from the queried page. Shard sizes are bounded so this is fast.
-        for (auto &pair : shard.entries)
+        // Slow path: O(log n) containment lookup via sorted ranges.
+        // Finds the last range starting at or before the queried address,
+        // then verifies containment and entry validity.
+        auto range_it = std::upper_bound(shard.sorted_ranges.begin(),
+                                          shard.sorted_ranges.end(),
+                                          std::make_pair(address, UINTPTR_MAX));
+        if (range_it != shard.sorted_ranges.begin())
         {
-            CachedMemoryRegionInfo &entry = pair.second;
-            if (is_entry_valid_and_covers(entry, address, size, current_time_ns, expiry_ns))
+            --range_it;
+            if (address >= range_it->first && address < range_it->second)
             {
-                return &entry;
+                auto entry_it = shard.entries.find(range_it->first);
+                if (entry_it != shard.entries.end())
+                {
+                    CachedMemoryRegionInfo &entry = entry_it->second;
+                    if (is_entry_valid_and_covers(entry, address, size, current_time_ns, expiry_ns))
+                    {
+                        return &entry;
+                    }
+                }
             }
         }
 
@@ -330,6 +370,7 @@ namespace MemoryUtilsCacheInternal
         if (entry_it != shard.entries.end())
         {
             shard.entries.erase(entry_it);
+            remove_sorted_range(shard, oldest_base);
             return true;
         }
         return false;
@@ -368,6 +409,13 @@ namespace MemoryUtilsCacheInternal
             if (lru_it != shard.lru_index.end() && lru_it->second == base_addr)
             {
                 shard.lru_index.erase(lru_it);
+            }
+
+            // Update sorted range if region size changed
+            if (old_entry.regionSize != mbi.RegionSize)
+            {
+                remove_sorted_range(shard, base_addr);
+                insert_sorted_range(shard, base_addr, mbi.RegionSize);
             }
 
             // Update existing entry with new monotonic LRU key
@@ -411,6 +459,7 @@ namespace MemoryUtilsCacheInternal
 
             shard.entries.insert_or_assign(base_addr, std::move(new_entry));
             shard.lru_index.emplace(new_lru_key, base_addr);
+            insert_sorted_range(shard, base_addr, mbi.RegionSize);
         }
     }
 
@@ -439,6 +488,7 @@ namespace MemoryUtilsCacheInternal
                     shard.lru_index.erase(lru_it);
                 }
 
+                remove_sorted_range(shard, entry.baseAddress);
                 it = shard.entries.erase(it);
                 ++removed;
             }
@@ -619,6 +669,7 @@ namespace MemoryUtilsCacheInternal
                             shard.lru_index.erase(lru_it);
                         }
                         // Erase entry immediately instead of leaving tombstone
+                        remove_sorted_range(shard, entry.baseAddress);
                         shard.entries.erase(it);
                         s_stats.invalidations.fetch_add(1, std::memory_order_relaxed);
                         invalidated = true;
@@ -656,6 +707,7 @@ namespace MemoryUtilsCacheInternal
             for (size_t i = 0; i < shard_count; ++i)
             {
                 s_cacheShards[i].entries.reserve(entries_per_shard * 2);
+                s_cacheShards[i].sorted_ranges.reserve(entries_per_shard * 2);
                 s_cacheShards[i].capacity = entries_per_shard;
                 s_cacheShards[i].max_capacity = hard_max_per_shard;
                 s_shardMutexes[i] = std::make_unique<SrwSharedMutex>();
@@ -865,6 +917,7 @@ void DetourModKit::Memory::clear_cache()
             std::unique_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
             MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
             MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
+            MemoryUtilsCacheInternal::s_cacheShards[i].sorted_ranges.clear();
             MemoryUtilsCacheInternal::s_inFlight[i].store(0, std::memory_order_relaxed);
         }
     }
@@ -934,6 +987,7 @@ void DetourModKit::Memory::shutdown_cache()
             std::unique_lock<SrwSharedMutex> shard_lock(*MemoryUtilsCacheInternal::s_shardMutexes[i]);
             MemoryUtilsCacheInternal::s_cacheShards[i].entries.clear();
             MemoryUtilsCacheInternal::s_cacheShards[i].lru_index.clear();
+            MemoryUtilsCacheInternal::s_cacheShards[i].sorted_ranges.clear();
         }
     }
 
