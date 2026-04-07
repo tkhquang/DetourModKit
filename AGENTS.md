@@ -246,8 +246,8 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 | InputManager | `mutex` for lifecycle, `atomic<InputPoller*>` for reads | Lock-free `is_binding_active()` |
 | Memory cache | Sharded `SRWLOCK` + epoch-based shutdown | Shared reader locks per shard |
 | Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config) | N/A (startup only) |
-| EventDispatcher | `shared_mutex` -- shared lock for `emit()`, exclusive lock for subscribe/unsubscribe | `shared_lock` + contiguous vector iteration |
-| Profiler | Lock-free ring buffer via atomic `fetch_add` on write position | Single atomic increment + array write per sample |
+| EventDispatcher | `shared_mutex` -- shared lock for `emit()`, exclusive lock for subscribe/unsubscribe; thread-local reentrancy guard rejects subscribe/unsubscribe from within handlers | `shared_lock` + contiguous vector iteration in subscription order |
+| Profiler | Lock-free ring buffer via atomic `fetch_add` on write position; odd/even sequence counter per sample slot prevents torn reads during concurrent export | Single atomic increment + sequence-guarded field writes per sample |
 
 ### Performance-critical paths
 

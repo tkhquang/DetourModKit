@@ -331,6 +331,93 @@ TEST(EventDispatcherTest, ConcurrentEmitAndSubscribe_NoDataRace)
     (void)emit_count;
 }
 
+// --- Reentrancy guard ---
+
+TEST(EventDispatcherTest, SubscribeInsideHandler_IsRejected)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    Subscription inner_sub;
+    bool handler_ran = false;
+
+    auto sub = dispatcher.subscribe([&](const SimpleEvent &) {
+        // Attempting to subscribe from within a handler must be rejected
+        // to prevent deadlock (exclusive lock inside shared lock).
+        inner_sub = dispatcher.subscribe([&](const SimpleEvent &) {
+            handler_ran = true;
+        });
+    });
+
+    dispatcher.emit(SimpleEvent{1});
+
+    // The inner subscription must be inactive (rejected)
+    EXPECT_FALSE(inner_sub.active());
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+
+    // Emit again to confirm inner handler was never registered
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_FALSE(handler_ran);
+}
+
+TEST(EventDispatcherTest, UnsubscribeInsideHandler_IsRejected)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    int call_count = 0;
+
+    Subscription held_sub;
+    held_sub = dispatcher.subscribe([&](const SimpleEvent &) {
+        ++call_count;
+        // Attempting to unsubscribe from within a handler is silently
+        // skipped to prevent deadlock.
+        held_sub.reset();
+    });
+
+    dispatcher.emit(SimpleEvent{1});
+    EXPECT_EQ(call_count, 1);
+    // The subscription should still be active because reset() was
+    // rejected inside the handler.
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+
+    // Now unsubscribe outside the handler (must work)
+    held_sub.reset();
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+}
+
+TEST(EventDispatcherTest, EmitSafe_ReentrancyGuardAlsoApplies)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    Subscription inner_sub;
+
+    auto sub = dispatcher.subscribe([&](const SimpleEvent &) {
+        inner_sub = dispatcher.subscribe([](const SimpleEvent &) {});
+    });
+
+    dispatcher.emit_safe(SimpleEvent{1});
+    EXPECT_FALSE(inner_sub.active());
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+}
+
+// --- Subscription order preserved after unsubscribe ---
+
+TEST(EventDispatcherTest, UnsubscribeMiddle_PreservesOrder)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    std::vector<int> order;
+
+    auto sub_a = dispatcher.subscribe([&order](const SimpleEvent &) { order.push_back(1); });
+    auto sub_b = dispatcher.subscribe([&order](const SimpleEvent &) { order.push_back(2); });
+    auto sub_c = dispatcher.subscribe([&order](const SimpleEvent &) { order.push_back(3); });
+
+    // Remove the middle subscriber
+    sub_b.reset();
+
+    dispatcher.emit(SimpleEvent{1});
+
+    // Order must be preserved: [1, 3], not [1, 3] or [3, 1]
+    ASSERT_EQ(order.size(), 2u);
+    EXPECT_EQ(order[0], 1);
+    EXPECT_EQ(order[1], 3);
+}
+
 // --- Subscription vector in container ---
 
 TEST(EventDispatcherTest, SubscriptionsInVector_CleanupOnClear)

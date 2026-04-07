@@ -691,10 +691,14 @@ namespace DetourModKit
 
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
-         * @details Clears all inline, mid, and VMT hooks, then resets the internal
-         *          shutdown flag to false. This allows subsequent create_*_hook() calls
-         *          to succeed, enabling hot-reload workflows where all hooks are torn
-         *          down and recreated without restarting the process.
+         * @details Uses two-phase removal: disables all hooks under a shared lock
+         *          first so that in-flight trampoline callers can drain, then clears
+         *          the maps under an exclusive lock. This prevents deadlock when a
+         *          hooked thread is blocked on m_hooks_mutex via with_inline_hook().
+         *
+         *          After clearing, resets the internal shutdown flag to false,
+         *          allowing subsequent create_*_hook() calls to succeed for
+         *          hot-reload workflows.
          */
         void remove_all_hooks();
 

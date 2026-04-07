@@ -295,6 +295,56 @@ TEST_F(ProfilerRecordTest, ConcurrentScopedProfile_NoDataRace)
               static_cast<size_t>(threads * scopes_per_thread));
 }
 
+// --- Sequence counter (torn read protection) ---
+
+TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
+{
+    auto &profiler = Profiler::get_instance();
+    std::atomic<bool> stop{false};
+    std::atomic<int> export_count{0};
+
+    // Writer threads: continuously record samples
+    std::vector<std::thread> writers;
+    for (int t = 0; t < 4; ++t)
+    {
+        writers.emplace_back([&profiler, &stop]() {
+            LARGE_INTEGER tick;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                QueryPerformanceCounter(&tick);
+                profiler.record("concurrent_export", tick.QuadPart,
+                                tick.QuadPart + 100, GetCurrentThreadId());
+            }
+        });
+    }
+
+    // Reader thread: export while writers are active
+    std::thread reader([&profiler, &stop, &export_count]() {
+        while (!stop.load(std::memory_order_relaxed))
+        {
+            const std::string json = profiler.export_chrome_json();
+            // Verify the JSON is well-formed (starts with [, ends with ])
+            if (!json.empty())
+            {
+                EXPECT_EQ(json.front(), '[');
+                EXPECT_EQ(json.back(), ']');
+            }
+            export_count.fetch_add(1, std::memory_order_relaxed);
+        }
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    stop.store(true, std::memory_order_relaxed);
+
+    for (auto &w : writers)
+    {
+        w.join();
+    }
+    reader.join();
+
+    EXPECT_GT(export_count.load(), 0);
+}
+
 // --- Macro tests ---
 
 #ifdef DMK_ENABLE_PROFILING

@@ -457,6 +457,20 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
 void HookManager::remove_all_hooks()
 {
+    // Two-phase removal: disable hooks under shared lock first so that
+    // in-flight trampoline callers (which may hold shared_lock via
+    // with_inline_hook) can drain before we take the exclusive lock
+    // to erase. Without this, SafetyHook's destructor waiting for
+    // trampoline threads while holding the exclusive lock would
+    // deadlock against those threads.
+    {
+        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        for (auto &[name, hook] : m_hooks)
+        {
+            (void)hook->disable();
+        }
+    }
+
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
     size_t num_vmt = m_vmt_hooks.size();

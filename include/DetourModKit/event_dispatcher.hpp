@@ -98,12 +98,18 @@ namespace DetourModKit
 
         /**
          * @brief Manually unsubscribes. Safe to call multiple times.
+         * @details If called from within a handler on the same dispatcher,
+         *          the unsubscribe is rejected and the subscription remains
+         *          active. Retry after the handler returns.
          */
         void reset() noexcept
         {
             if (unsubscribe_ && !alive_.expired())
             {
-                unsubscribe_();
+                if (!unsubscribe_())
+                {
+                    return;
+                }
             }
             unsubscribe_ = nullptr;
             alive_.reset();
@@ -119,13 +125,13 @@ namespace DetourModKit
         template <typename E>
         friend class EventDispatcher;
 
-        Subscription(std::weak_ptr<void> alive, std::function<void()> unsub) noexcept
+        Subscription(std::weak_ptr<void> alive, std::function<bool()> unsub) noexcept
             : alive_(std::move(alive)), unsubscribe_(std::move(unsub))
         {
         }
 
         std::weak_ptr<void> alive_;
-        std::function<void()> unsubscribe_;
+        std::function<bool()> unsubscribe_;
     };
 
     /**
@@ -147,9 +153,16 @@ namespace DetourModKit
      * **Thread safety:**
      * - `emit()`: shared_lock (multiple concurrent emitters OK)
      * - `subscribe()` / `unsubscribe()`: exclusive_lock
-     * - Handlers are invoked under shared_lock. Handlers must NOT call
-     *   subscribe/unsubscribe on the same dispatcher (deadlock). Use deferred
-     *   patterns if needed.
+     * - Handlers are invoked under shared_lock. A thread-local reentrancy
+     *   guard detects and rejects subscribe/unsubscribe calls from within
+     *   a handler, returning a default-constructed Subscription instead of
+     *   deadlocking.
+     *
+     * **Reentrancy guard scope:** The guard is per-template-instantiation,
+     * not per-instance. Two dispatchers of the same Event type share the
+     * same thread-local counter. Subscribing to a second dispatcher of
+     * the same type from within a handler on the first will be rejected.
+     * Use distinct event types to avoid this (the typical usage pattern).
      */
     template <typename Event>
     class EventDispatcher
@@ -180,6 +193,11 @@ namespace DetourModKit
          */
         [[nodiscard]] Subscription subscribe(Handler handler)
         {
+            if (emitting_depth() > 0)
+            {
+                return {};
+            }
+
             const auto id = static_cast<SubscriptionId>(
                 this->next_id_.fetch_add(1, std::memory_order_relaxed));
 
@@ -191,7 +209,7 @@ namespace DetourModKit
             std::weak_ptr<void> weak = this->alive_;
             return Subscription(
                 std::move(weak),
-                [this, id]() noexcept { this->unsubscribe(id); });
+                [this, id]() noexcept -> bool { return this->unsubscribe(id); });
         }
 
         /**
@@ -203,7 +221,8 @@ namespace DetourModKit
          */
         void emit(const Event &event) const
         {
-            auto guard = std::shared_lock{this->mutex_};
+            auto lock = std::shared_lock{this->mutex_};
+            EmitGuard guard{emitting_depth()};
             for (const auto &entry : this->handlers_)
             {
                 entry.callback(event);
@@ -218,7 +237,8 @@ namespace DetourModKit
          */
         void emit_safe(const Event &event) const noexcept
         {
-            auto guard = std::shared_lock{this->mutex_};
+            auto lock = std::shared_lock{this->mutex_};
+            EmitGuard guard{emitting_depth()};
             for (const auto &entry : this->handlers_)
             {
                 try
@@ -262,20 +282,42 @@ namespace DetourModKit
             Handler callback;
         };
 
-        void unsubscribe(SubscriptionId id) noexcept
+        bool unsubscribe(SubscriptionId id) noexcept
         {
+            if (emitting_depth() > 0)
+            {
+                return false;
+            }
+
             auto guard = std::unique_lock{this->mutex_};
             auto it = std::find_if(this->handlers_.begin(), this->handlers_.end(),
                                    [id](const Entry &e) { return e.id == id; });
             if (it != this->handlers_.end())
             {
-                if (it != this->handlers_.end() - 1)
-                {
-                    *it = std::move(this->handlers_.back());
-                }
-                this->handlers_.pop_back();
+                this->handlers_.erase(it);
+                return true;
             }
+            return true;
         }
+
+        /// Thread-local emit depth counter for this dispatcher instance.
+        [[nodiscard]] int &emitting_depth() const noexcept
+        {
+            thread_local int depth{0};
+            return depth;
+        }
+
+        /// RAII guard that increments/decrements the emit depth counter.
+        struct EmitGuard
+        {
+            int &depth;
+            explicit EmitGuard(int &d) noexcept : depth(d) { ++depth; }
+            ~EmitGuard() noexcept { --depth; }
+            EmitGuard(const EmitGuard &) = delete;
+            EmitGuard &operator=(const EmitGuard &) = delete;
+            EmitGuard(EmitGuard &&) = delete;
+            EmitGuard &operator=(EmitGuard &&) = delete;
+        };
 
         mutable std::shared_mutex mutex_;
         std::vector<Entry> handlers_;
