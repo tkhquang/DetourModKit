@@ -1296,6 +1296,11 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
     if ((mbi.Protect & CachePermissions::READ_PERMISSION_FLAGS) == 0 ||
         (mbi.Protect & CachePermissions::NOACCESS_GUARD_FLAGS) != 0)
         return 0;
+    // Verify the full read fits within the committed region
+    const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+    const uintptr_t region_end = region_start + mbi.RegionSize;
+    if (src < region_start || src + sizeof(uintptr_t) > region_end)
+        return 0;
     return *reinterpret_cast<const uintptr_t *>(src);
 #endif
 }
