@@ -219,6 +219,11 @@ cmake --preset mingw-debug -DDMK_ENABLE_SANITIZERS=ON
 cmake --build --preset mingw-debug --parallel
 ```
 
+> [!NOTE]
+> Sanitizer support on MinGW requires `libasan` and `libubsan` runtime libraries.
+> Not all MSYS2 MinGW GCC builds ship these. If linking fails with
+> `cannot find -lasan`, install the sanitizer package or use Clang instead.
+
 ### Enabling Code Coverage
 
 To generate code coverage reports (requires GCC/Clang), pass the coverage option when configuring:
