@@ -414,7 +414,7 @@ TEST_F(HookManagerTest, RealInlineHook_DuplicateName)
         reinterpret_cast<uintptr_t>(&real_hook_target_add),
         reinterpret_cast<void *>(&real_hook_detour_add),
         &tramp2);
-    EXPECT_FALSE(result2.has_value());
+    ASSERT_FALSE(result2.has_value());
     EXPECT_EQ(result2.error(), HookError::HookAlreadyExists);
 }
 
@@ -614,7 +614,7 @@ TEST_F(HookManagerTest, CreateMidHook_NullAddress)
     auto detour_fn = [](safetyhook::Context &) {};
 
     auto result = hook_manager_->create_mid_hook("MidNullAddr", 0, detour_fn);
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
 }
 
@@ -634,7 +634,7 @@ TEST_F(HookManagerTest, CreateMidHook_DuplicateName)
         "DupMidName",
         reinterpret_cast<uintptr_t>(&real_hook_target_add),
         detour_fn);
-    EXPECT_FALSE(result2.has_value());
+    ASSERT_FALSE(result2.has_value());
     EXPECT_EQ(result2.error(), HookError::HookAlreadyExists);
 }
 
@@ -651,7 +651,7 @@ TEST_F(HookManagerTest, CreateInlineHookAOB_InvalidPattern)
         0,
         detour_fn,
         &tramp);
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
     EXPECT_EQ(tramp, nullptr);
 }
@@ -669,7 +669,7 @@ TEST_F(HookManagerTest, CreateInlineHookAOB_PatternNotFound)
         0,
         detour_fn,
         &tramp);
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
     EXPECT_EQ(tramp, nullptr);
 }
@@ -685,7 +685,7 @@ TEST_F(HookManagerTest, CreateMidHookAOB_InvalidPattern)
         "ZZ XX INVALID",
         0,
         detour_fn);
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
 }
 
@@ -700,7 +700,7 @@ TEST_F(HookManagerTest, CreateMidHookAOB_PatternNotFound)
         "FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF",
         0,
         detour_fn);
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
 }
 
