@@ -193,9 +193,11 @@ namespace DetourModKit
          * @details Handles changing memory protection, performs the write operation,
          *          and restores original protection. Also flushes instruction cache.
          *          Automatically invalidates the affected cache range.
+         *          If numBytes exceeds MAX_WRITE_SIZE the function performs no write
+         *          and returns MemoryError::SizeTooLarge.
          * @param targetAddress Destination memory address.
          * @param sourceBytes Pointer to the source buffer containing data to write.
-         * @param numBytes Number of bytes to write (capped at MAX_WRITE_SIZE).
+         * @param numBytes Number of bytes to write. Must not exceed MAX_WRITE_SIZE.
          * @return std::expected<void, MemoryError> on success, or the specific error on failure.
          */
         [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes);

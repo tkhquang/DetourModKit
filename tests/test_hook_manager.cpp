@@ -84,7 +84,7 @@ TEST_F(HookManagerTest, CreateInlineHook_InvalidAddress)
         detour_fn,
         &original_trampoline);
 
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
 }
 
@@ -98,7 +98,7 @@ TEST_F(HookManagerTest, CreateInlineHook_NullDetour)
         nullptr,
         &original_trampoline);
 
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidDetourFunction);
 }
 
@@ -112,7 +112,7 @@ TEST_F(HookManagerTest, CreateInlineHook_NullTrampoline)
         detour_fn,
         nullptr);
 
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTrampolinePointer);
 }
 
@@ -126,21 +126,21 @@ TEST_F(HookManagerTest, GetHookStatus_NonExistent)
 TEST_F(HookManagerTest, EnableHook_NonExistent)
 {
     auto result = hook_manager_->enable_hook("NonExistentHook");
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, DisableHook_NonExistent)
 {
     auto result = hook_manager_->disable_hook("NonExistentHook");
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, RemoveHook_NonExistent)
 {
     auto result = hook_manager_->remove_hook("NonExistentHook");
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
@@ -211,7 +211,7 @@ TEST_F(HookManagerTest, CreateMidHook_InvalidAddress)
         0,
         detour_fn);
 
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
 }
 
@@ -222,7 +222,7 @@ TEST_F(HookManagerTest, CreateMidHook_NullDetour)
         0x12345678,
         nullptr);
 
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::InvalidDetourFunction);
 }
 
@@ -851,21 +851,21 @@ TEST_F(HookManagerTest, StatusToString_AllValues)
 TEST_F(HookManagerTest, EnableHook_NotFound)
 {
     auto result = hook_manager_->enable_hook("NonExistent");
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, DisableHook_NotFound)
 {
     auto result = hook_manager_->disable_hook("NonExistent");
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, RemoveHook_NotFound)
 {
     auto result = hook_manager_->remove_hook("NonExistent");
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
@@ -1711,7 +1711,7 @@ TEST_F(HookManagerTest, VmtHook_RemoveMethod)
     EXPECT_EQ(target->compute(5, 5), 10);
 
     auto re_remove = hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX);
-    EXPECT_FALSE(re_remove.has_value());
+    ASSERT_FALSE(re_remove.has_value());
     EXPECT_EQ(re_remove.error(), HookError::MethodNotFound);
 
     hook_manager_->remove_all_vmt_hooks();
@@ -1746,7 +1746,7 @@ TEST_F(HookManagerTest, VmtHook_RemoveEntireHook)
 TEST_F(HookManagerTest, VmtHook_RemoveNotFound)
 {
     auto result = hook_manager_->remove_vmt_hook("NonExistent");
-    EXPECT_FALSE(result.has_value());
+    ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), HookError::VmtHookNotFound);
 }
 

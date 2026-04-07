@@ -14,6 +14,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/logger.hpp"
+#include "platform.hpp"
 
 #include <windows.h>
 #include <shared_mutex>
@@ -43,35 +44,12 @@ namespace CachePermissions
     constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
 }
 
+using DetourModKit::detail::is_loader_lock_held;
+using DetourModKit::detail::pin_current_module;
+
 // Anonymous namespace for internal helpers and storage
 namespace
 {
-    /**
-     * @brief Checks if the current thread holds the Windows loader lock.
-     * @details Uses the PEB LoaderLock critical section at a well-known offset
-     *          that has been stable across all Windows versions from XP through 11.
-     *          Thread joins are unsafe while the loader lock is held (DllMain context).
-     */
-    bool is_loader_lock_held() noexcept
-    {
-#ifdef _WIN64
-        auto *peb = reinterpret_cast<char *>(__readgsqword(0x60));
-        constexpr size_t kLoaderLockOffset = 0x110;
-#else
-        auto *peb = reinterpret_cast<char *>(__readfsdword(0x30));
-        constexpr size_t kLoaderLockOffset = 0xA0;
-#endif
-        if (!peb)
-            return false;
-
-        auto *cs = *reinterpret_cast<PCRITICAL_SECTION *>(peb + kLoaderLockOffset);
-        if (!cs)
-            return false;
-
-        return cs->OwningThread ==
-               reinterpret_cast<HANDLE>(static_cast<uintptr_t>(GetCurrentThreadId()));
-    }
-
     /**
      * @class SrwSharedMutex
      * @brief Shared mutex backed by Windows SRWLOCK instead of pthread_rwlock_t.
@@ -892,13 +870,16 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
                 {
                     if (is_loader_lock_held())
                     {
-                        // Under loader lock (FreeLibrary path): signal the cleanup
-                        // thread to stop and detach it instead of joining.
-                        // The OS will terminate it during process/DLL teardown.
+                        // Under loader lock (FreeLibrary path): pin the module
+                        // so code pages remain valid for the detached thread,
+                        // then signal it to stop and detach.
                         s_cleanupThreadRunning.store(false, std::memory_order_release);
                         s_cleanupCv.notify_one();
                         if (s_cleanupThread.joinable())
+                        {
+                            pin_current_module();
                             s_cleanupThread.detach();
+                        }
                         s_cacheInitialized.store(false, std::memory_order_release);
                         return;
                     }
@@ -968,8 +949,10 @@ void DetourModKit::Memory::shutdown_cache()
         {
             // Under loader lock (DllMain / FreeLibrary): thread join would
             // deadlock because the cleanup thread cannot exit while the
-            // loader lock is held. Detach instead; the OS will terminate
-            // the thread during process/DLL teardown.
+            // loader lock is held. Pin the module so code and static data
+            // remain valid, then detach. The thread will observe the stop
+            // flag and exit on its own.
+            pin_current_module();
             s_cleanupThread.detach();
         }
         else

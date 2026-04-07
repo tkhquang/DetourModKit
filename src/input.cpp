@@ -12,35 +12,16 @@
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "platform.hpp"
+
 #include <windows.h>
 #include <Xinput.h>
 #include <algorithm>
 #include <exception>
 #include <unordered_set>
 
-namespace
-{
-    /// Checks if the current thread holds the Windows loader lock.
-    bool is_loader_lock_held() noexcept
-    {
-#ifdef _WIN64
-        auto *peb = reinterpret_cast<char *>(__readgsqword(0x60));
-        constexpr size_t kLoaderLockOffset = 0x110;
-#else
-        auto *peb = reinterpret_cast<char *>(__readfsdword(0x30));
-        constexpr size_t kLoaderLockOffset = 0xA0;
-#endif
-        if (!peb)
-            return false;
-
-        auto *cs = *reinterpret_cast<PCRITICAL_SECTION *>(peb + kLoaderLockOffset);
-        if (!cs)
-            return false;
-
-        return cs->OwningThread ==
-               reinterpret_cast<HANDLE>(static_cast<uintptr_t>(GetCurrentThreadId()));
-    }
-} // anonymous namespace
+using DetourModKit::detail::is_loader_lock_held;
+using DetourModKit::detail::pin_current_module;
 
 namespace DetourModKit
 {
@@ -302,6 +283,7 @@ namespace DetourModKit
 
         if (is_loader_lock_held())
         {
+            pin_current_module();
             poll_thread_.detach();
         }
         else

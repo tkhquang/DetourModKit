@@ -426,6 +426,22 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
 
 std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id)
 {
+    // Two-phase removal: disable under shared lock first so that in-flight
+    // trampoline callers (which may acquire shared_lock via with_inline_hook)
+    // can drain before we take the exclusive lock to erase. Without this,
+    // SafetyHook's destructor waiting for trampoline threads while holding
+    // the exclusive lock would deadlock against those threads.
+    {
+        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        auto it = m_hooks.find(hook_id);
+        if (it == m_hooks.end())
+        {
+            m_logger.warning("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id);
+            return std::unexpected(HookError::HookNotFound);
+        }
+        (void)it->second->disable();
+    }
+
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
@@ -435,10 +451,8 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
         m_hooks.erase(it);
         m_logger.info("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
                       name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
-        return {};
     }
-    m_logger.warning("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id);
-    return std::unexpected(HookError::HookNotFound);
+    return {};
 }
 
 void HookManager::remove_all_hooks()

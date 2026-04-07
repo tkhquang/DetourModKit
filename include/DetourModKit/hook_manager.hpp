@@ -700,15 +700,25 @@ namespace DetourModKit
 
         /**
          * @brief Enables a previously disabled hook.
+         * @details Idempotent: enabling an already-active hook returns success.
+         *          Returns HookError::InvalidHookState only when the hook is in
+         *          a transitional state (Enabling or Disabling). Other HookError
+         *          values indicate lookup or SafetyHook failures.
          * @param hook_id The name of the hook to enable.
-         * @return Success if enabled, or a HookError describing the failure.
+         * @return Success if the hook is now active (or was already active),
+         *         or a HookError describing the failure.
          */
         [[nodiscard]] std::expected<void, HookError> enable_hook(std::string_view hook_id);
 
         /**
          * @brief Disables an active hook temporarily without removing it.
+         * @details Idempotent: disabling an already-disabled hook returns success.
+         *          Returns HookError::InvalidHookState only when the hook is in
+         *          a transitional state (Enabling or Disabling). Other HookError
+         *          values indicate lookup or SafetyHook failures.
          * @param hook_id The name of the hook to disable.
-         * @return Success if disabled, or a HookError describing the failure.
+         * @return Success if the hook is now disabled (or was already disabled),
+         *         or a HookError describing the failure.
          */
         [[nodiscard]] std::expected<void, HookError> disable_hook(std::string_view hook_id);
 
