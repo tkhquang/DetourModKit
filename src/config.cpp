@@ -587,7 +587,7 @@ void DetourModKit::Config::load(std::string_view ini_filename)
 
         Logger &logger = Logger::get_instance();
         std::filesystem::path ini_path = getIniFilePath(std::string(ini_filename), logger);
-        std::string ini_path_str = ini_path.string(); // narrow for logging only
+        std::string ini_path_str = ini_path.string(); // convert to narrow string for logger formatting
         CSimpleIniA ini;
         ini.SetUnicode(false);  // Assume ASCII/MBCS INI
         ini.SetMultiKey(false); // Disallow duplicate keys in a section
