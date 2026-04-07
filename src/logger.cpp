@@ -116,8 +116,9 @@ namespace DetourModKit
         if (!log_file_stream_ptr_->is_open())
         {
             std::cerr << "[" << log_prefix_ << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file."
-                      << " Subsequent logs to file will fail." << '\n';
+                      << "Failed to open log file: "
+                      << std::filesystem::path(log_file_full_path).string()
+                      << ". Subsequent logs to file will fail." << '\n';
         }
         else
         {
@@ -144,8 +145,9 @@ namespace DetourModKit
         if (!log_file_stream_ptr_->is_open())
         {
             std::cerr << "[" << log_prefix_ << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file."
-                      << " Subsequent logs to file will fail." << '\n';
+                      << "Failed to open log file: "
+                      << std::filesystem::path(log_file_full_path).string()
+                      << ". Subsequent logs to file will fail." << '\n';
         }
         else
         {

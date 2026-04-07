@@ -116,8 +116,8 @@ namespace
             if (!current_dir_buffer.empty())
             {
                 result_directory_path = std::filesystem::path(current_dir_buffer).wstring();
-                std::cerr << "[DMK Filesystem WARNING] Using current working directory as fallback."
-                          << '\n';
+                std::cerr << "[DMK Filesystem WARNING] Using current working directory as fallback: "
+                          << std::filesystem::path(result_directory_path).string() << '\n';
             }
             else
             {

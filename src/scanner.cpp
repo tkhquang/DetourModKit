@@ -174,10 +174,6 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
         {
             logger.error("AOB Parser: Processed tokens but resulting pattern is empty.");
         }
-        else if (!input.empty())
-        {
-            logger.warning("AOB: Parsing AOB string '{}' resulted in an empty pattern.", aob_str);
-        }
         return std::nullopt;
     }
 

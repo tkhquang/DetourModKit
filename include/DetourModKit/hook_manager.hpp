@@ -912,14 +912,13 @@ namespace DetourModKit
             return std::nullopt;
         }
 
+    private:
         /// @brief Internal log entry used to defer logging outside held locks.
         struct DeferredLogEntry
         {
             std::string msg;
             LogLevel level;
         };
-
-    private:
         explicit HookManager(Logger &logger = Logger::get_instance());
 
         mutable std::shared_mutex m_hooks_mutex;
