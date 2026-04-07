@@ -51,6 +51,11 @@ ctest --preset msvc-debug
 ### Sanitizers and coverage (MinGW only)
 
 ```bash
+# Dedicated sanitizer preset (ASan + UBSan)
+cmake --preset mingw-debug-asan
+cmake --build --preset mingw-debug-asan --parallel
+
+# Or manually
 cmake --preset mingw-debug -DDMK_ENABLE_SANITIZERS=ON
 cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 ```
@@ -87,7 +92,7 @@ tests/                   # GoogleTest suites (one test_*.cpp per module)
   fixtures/              # Test support files (hook_target_lib DLL source)
 external/                # Git submodules (safetyhook, DirectXMath, simpleini)
 CMakeLists.txt           # Single CMakeLists -- static library target
-CMakePresets.json        # Build presets (mingw-debug/release, msvc-debug/release)
+CMakePresets.json        # Build presets (mingw-debug/release, mingw-debug-asan, msvc-debug/release)
 ```
 
 ## Code style
@@ -231,7 +236,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 | InputPoller | Atomic `active_states_[]` array | `memory_order_relaxed` load per binding |
 | InputManager | `mutex` for lifecycle, `atomic<InputPoller*>` for reads | Lock-free `is_binding_active()` |
 | Memory cache | Sharded `SRWLOCK` + epoch-based shutdown | Shared reader locks per shard |
-| Config | `mutex` for registration, deferred setter invocation | N/A (startup only) |
+| Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config) | N/A (startup only) |
 
 ### Performance-critical paths
 

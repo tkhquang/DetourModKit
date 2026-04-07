@@ -95,12 +95,13 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
 
    ### Available presets
 
-    | Preset | Compiler | Build Type | Tests |
-    | --- | --- | --- | --- |
-    | `mingw-debug` | GCC (MinGW) | Debug | ON |
-    | `mingw-release` | GCC (MinGW) | Release | OFF |
-    | `msvc-debug` | MSVC (cl) | Debug | ON |
-    | `msvc-release` | MSVC (cl) | Release | OFF |
+    | Preset | Compiler | Build Type | Tests | Notes |
+    | --- | --- | --- | --- | --- |
+    | `mingw-debug` | GCC (MinGW) | Debug | ON | |
+    | `mingw-debug-asan` | GCC (MinGW) | Debug | ON | ASan + UBSan enabled |
+    | `mingw-release` | GCC (MinGW) | Release | OFF | |
+    | `msvc-debug` | MSVC (cl) | Debug | ON | |
+    | `msvc-release` | MSVC (cl) | Release | OFF | |
 
 > [!NOTE]
 > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
@@ -209,9 +210,19 @@ cmake --build --preset mingw-debug --parallel
 To enable AddressSanitizer and UndefinedBehaviorSanitizer (requires GCC/Clang):
 
 ```bash
+# Using the dedicated preset
+cmake --preset mingw-debug-asan
+cmake --build --preset mingw-debug-asan --parallel
+
+# Or manually with any debug preset
 cmake --preset mingw-debug -DDMK_ENABLE_SANITIZERS=ON
 cmake --build --preset mingw-debug --parallel
 ```
+
+> [!NOTE]
+> Sanitizer support on MinGW requires `libasan` and `libubsan` runtime libraries.
+> Not all MSYS2 MinGW GCC builds ship these. If linking fails with
+> `cannot find -lasan`, install the sanitizer package or use Clang instead.
 
 ### Enabling Code Coverage
 

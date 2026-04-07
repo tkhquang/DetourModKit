@@ -86,7 +86,7 @@ namespace DetourModKit
          * @param aob_str The AOB pattern string.
          * @return std::optional<CompiledPattern> The compiled pattern, or std::nullopt on parse failure.
          */
-        std::optional<CompiledPattern> parse_aob(std::string_view aob_str);
+        [[nodiscard]] std::optional<CompiledPattern> parse_aob(std::string_view aob_str);
 
         /**
          * @brief Scans a specified memory region for a given byte pattern.
@@ -98,8 +98,8 @@ namespace DetourModKit
          * @return const std::byte* Pointer to the first occurrence of the pattern within
          *         the specified region. Returns nullptr if pattern not found.
          */
-        const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
-                                      const CompiledPattern &pattern);
+        [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
+                                                     const CompiledPattern &pattern);
 
         /**
          * @brief Scans a memory region for the Nth occurrence of a byte pattern.
@@ -111,8 +111,8 @@ namespace DetourModKit
          * @return const std::byte* Pointer to the Nth occurrence, or nullptr if fewer
          *         than N matches exist.
          */
-        const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
-                                      const CompiledPattern &pattern, size_t occurrence);
+        [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
+                                                     const CompiledPattern &pattern, size_t occurrence);
         // Common x86-64 RIP-relative opcode prefixes (bytes preceding the disp32 field)
         inline constexpr std::byte PREFIX_MOV_RAX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
         inline constexpr std::byte PREFIX_MOV_RCX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}};
@@ -165,7 +165,7 @@ namespace DetourModKit
          * @param occurrence Which occurrence to return (1-based). 1 = first match.
          * @return Pointer to the match (adjusted by pattern offset), or nullptr if not found.
          */
-        const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
+        [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
     } // namespace Scanner
 } // namespace DetourModKit

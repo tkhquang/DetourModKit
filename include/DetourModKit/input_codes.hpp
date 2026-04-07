@@ -157,7 +157,7 @@ namespace DetourModKit
      * @param name The input name to resolve.
      * @return std::optional<InputCode> The resolved code, or std::nullopt if unrecognized.
      */
-    std::optional<InputCode> parse_input_name(std::string_view name);
+    [[nodiscard]] std::optional<InputCode> parse_input_name(std::string_view name);
 
     /**
      * @brief Returns a human-readable name for an InputCode, if one exists.

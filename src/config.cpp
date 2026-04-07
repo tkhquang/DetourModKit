@@ -476,6 +476,10 @@ namespace
 
 } // anonymous namespace
 
+// All register_* functions use the deferred callback pattern: state is
+// mutated under getConfigMutex(), but the setter callback is invoked after
+// the lock is released.  This allows setters to call back into the Config
+// API without deadlocking (no reentrancy guard needed).
 void DetourModKit::Config::register_int(std::string_view section, std::string_view ini_key,
                                                std::string_view log_key_name, std::function<void(int)> setter,
                                                int default_value)
@@ -616,7 +620,8 @@ void DetourModKit::Config::load(std::string_view ini_filename)
         logger.info("Config: Loaded {} items from {}", getRegisteredConfigItems().size(), ini_path_str);
     }
 
-    // Invoke setter callbacks outside the config mutex to prevent deadlocks
+    // Invoke setter callbacks outside the config mutex -- same deferred
+    // pattern as register_*().  Setters may safely call back into Config.
     for (auto &cb : deferred_callbacks)
     {
         cb();
