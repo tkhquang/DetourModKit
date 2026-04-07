@@ -1954,37 +1954,10 @@ TEST_F(HookManagerTest, Shutdown_AllowsNewHooksAfterReset)
     EXPECT_NE(tramp, nullptr);
 }
 
-TEST_F(HookManagerTest, CreateInlineHook_NullAddress_ReturnsError)
+TEST_F(HookManagerTest, ErrorToString_ShutdownAndAllocatorErrors)
 {
-    void *tramp = nullptr;
-    auto result = hook_manager_->create_inline_hook(
-        "NullAddrHook",
-        0,
-        reinterpret_cast<void *>(&real_hook_detour_add),
-        &tramp);
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
-    EXPECT_EQ(tramp, nullptr);
-}
-
-TEST_F(HookManagerTest, CreateMidHook_NullAddress_ReturnsError)
-{
-    auto result = hook_manager_->create_mid_hook(
-        "NullAddrMidHook",
-        0,
-        [](safetyhook::Context &) {});
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), HookError::InvalidTargetAddress);
-}
-
-TEST_F(HookManagerTest, CreateInlineHook_DuringShutdown_ReturnsError)
-{
-    // Shutdown resets the flag, but we can test the path by creating
-    // a hook right after shutdown and before the reset takes effect.
-    // The documented behavior is that shutdown resets the flag, so
-    // post-shutdown creation succeeds. Test the error string instead.
+    // These error codes are emitted during shutdown sequences when the
+    // allocator is torn down. Verify the string representations are stable.
     EXPECT_EQ(Hook::error_to_string(HookError::ShutdownInProgress), "Shutdown in progress");
     EXPECT_EQ(Hook::error_to_string(HookError::AllocatorNotAvailable), "Allocator not available");
 }

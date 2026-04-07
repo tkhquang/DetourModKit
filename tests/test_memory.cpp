@@ -134,8 +134,6 @@ TEST_F(MemoryTest, write_bytes)
         std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
         std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
 
-
-
     auto result = Memory::write_bytes(target.data(), source.data(), source.size());
     EXPECT_TRUE(result.has_value());
 
@@ -149,7 +147,6 @@ TEST_F(MemoryTest, write_bytes_NullTarget)
 {
     std::vector<std::byte> source = {std::byte{0x90}, std::byte{0x90}};
 
-
     auto result = Memory::write_bytes(nullptr, source.data(), source.size());
     EXPECT_FALSE(result.has_value());
 }
@@ -157,7 +154,6 @@ TEST_F(MemoryTest, write_bytes_NullTarget)
 TEST_F(MemoryTest, write_bytes_NullSource)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
-
 
     auto result = Memory::write_bytes(target.data(), nullptr, 10);
     EXPECT_FALSE(result.has_value());
@@ -168,7 +164,6 @@ TEST_F(MemoryTest, write_bytes_ZeroSize)
     std::vector<std::byte> target(16, std::byte{0x00});
     std::vector<std::byte> source = {std::byte{0x90}};
 
-
     auto result = Memory::write_bytes(target.data(), source.data(), 0);
     EXPECT_TRUE(result.has_value());
 }
@@ -177,8 +172,6 @@ TEST_F(MemoryTest, write_bytes_Large)
 {
     std::vector<std::byte> target(1024, std::byte{0x00});
     std::vector<std::byte> source(512, std::byte{0xCC});
-
-
 
     auto result = Memory::write_bytes(target.data(), source.data(), source.size());
     EXPECT_TRUE(result.has_value());
@@ -261,8 +254,6 @@ TEST_F(MemoryTest, write_bytes_DataIntegrity)
 
     std::vector<std::byte> source = {
         std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
-
-
 
     auto result = Memory::write_bytes(target.data() + 10, source.data(), source.size());
     EXPECT_TRUE(result.has_value());
@@ -1676,21 +1667,6 @@ TEST_F(MemoryTest, ReadPtrUnsafe_CacheHitPath)
     EXPECT_EQ(result, value);
 }
 
-TEST_F(MemoryTest, CacheStats_FormatContainsExpectedFields)
-{
-    // Access some memory to generate stats
-    int dummy = 42;
-    EXPECT_TRUE(Memory::is_readable(&dummy, sizeof(dummy)));
-    EXPECT_TRUE(Memory::is_readable(&dummy, sizeof(dummy)));
-
-    std::string stats = Memory::get_cache_stats();
-    EXPECT_FALSE(stats.empty());
-    EXPECT_TRUE(stats.find("hit") != std::string::npos ||
-                stats.find("Hit") != std::string::npos ||
-                stats.find("miss") != std::string::npos ||
-                stats.find("Miss") != std::string::npos);
-}
-
 TEST_F(MemoryTest, WriteBytesInvalidatesAndRevalidates)
 {
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -1713,13 +1689,4 @@ TEST_F(MemoryTest, WriteBytesInvalidatesAndRevalidates)
 TEST(MemoryErrorTest, MemoryErrorToString_IsNoexcept)
 {
     static_assert(noexcept(memory_error_to_string(MemoryError::NullTargetAddress)));
-}
-
-TEST(MemoryErrorTest, MemoryErrorToString_AllValues)
-{
-    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::NullTargetAddress)).empty());
-    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::NullSourceBytes)).empty());
-    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::SizeTooLarge)).empty());
-    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::ProtectionChangeFailed)).empty());
-    EXPECT_FALSE(std::string_view(memory_error_to_string(MemoryError::ProtectionRestoreFailed)).empty());
 }

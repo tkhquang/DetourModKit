@@ -1241,7 +1241,7 @@ TEST(ScannerTest, find_pattern_common_byte_anchoring)
     // Patterns containing common x64 opcodes (0x00, 0xCC, 0x90, 0xFF, 0x48,
     // 0x8B, 0x89, 0x0F, 0xE8, 0xE9, 0x83, 0xC3) exercise byte-frequency
     // scoring in the anchor selection path.
-    std::byte data[] = {
+    const std::byte data[] = {
         std::byte{0xCC}, std::byte{0xCC}, std::byte{0x48}, std::byte{0x8B},
         std::byte{0x05}, std::byte{0xAB}, std::byte{0xCD}, std::byte{0xEF},
         std::byte{0x90}, std::byte{0x90}, std::byte{0xC3}, std::byte{0x00},
@@ -1249,7 +1249,7 @@ TEST(ScannerTest, find_pattern_common_byte_anchoring)
         std::byte{0xE9}, std::byte{0x89}, std::byte{0x42}, std::byte{0x10}};
 
     // Search for a rare anchor byte (0x42) surrounded by common bytes
-    auto pattern = Scanner::parse_aob("89 42 10");
+    const auto pattern = Scanner::parse_aob("89 42 10");
     ASSERT_TRUE(pattern.has_value());
 
     const auto *result = Scanner::find_pattern(data, sizeof(data), pattern.value());
@@ -1260,11 +1260,11 @@ TEST(ScannerTest, find_pattern_common_byte_anchoring)
 TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
 {
     // Pattern made entirely of common opcodes (high frequency scores)
-    std::byte data[] = {
+    const std::byte data[] = {
         std::byte{0x00}, std::byte{0x00}, std::byte{0xCC}, std::byte{0x90},
         std::byte{0xFF}, std::byte{0x48}, std::byte{0x8B}, std::byte{0x00}};
 
-    auto pattern = Scanner::parse_aob("CC 90 FF 48 8B");
+    const auto pattern = Scanner::parse_aob("CC 90 FF 48 8B");
     ASSERT_TRUE(pattern.has_value());
 
     const auto *result = Scanner::find_pattern(data, sizeof(data), pattern.value());
@@ -1274,9 +1274,9 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
 
 TEST(ScannerTest, find_pattern_zero_size_region)
 {
-    std::byte data[] = {std::byte{0x48}};
+    const std::byte data[] = {std::byte{0x48}};
 
-    auto pattern = Scanner::parse_aob("48");
+    const auto pattern = Scanner::parse_aob("48");
     ASSERT_TRUE(pattern.has_value());
 
     const auto *result = Scanner::find_pattern(data, 0, pattern.value());
@@ -1285,9 +1285,9 @@ TEST(ScannerTest, find_pattern_zero_size_region)
 
 TEST(ScannerTest, find_pattern_pattern_exceeds_region)
 {
-    std::byte data[] = {std::byte{0x48}, std::byte{0x8B}};
+    const std::byte data[] = {std::byte{0x48}, std::byte{0x8B}};
 
-    auto pattern = Scanner::parse_aob("48 8B 05 AA BB CC DD");
+    const auto pattern = Scanner::parse_aob("48 8B 05 AA BB CC DD");
     ASSERT_TRUE(pattern.has_value());
 
     // Pattern is 7 bytes but region is only 2 bytes
