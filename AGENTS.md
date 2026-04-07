@@ -48,6 +48,13 @@ cmake --build build/msvc-debug --parallel
 ctest --preset msvc-debug
 ```
 
+### Profiling
+
+```bash
+cmake --preset mingw-debug -DDMK_ENABLE_PROFILING=ON
+cmake --build build/mingw-debug --parallel
+```
+
 ### Sanitizers and coverage (MinGW only)
 
 ```bash
@@ -83,6 +90,7 @@ include/DetourModKit/    # Public headers -- one per module
   input.hpp              # Input polling (keyboard/mouse/XInput)
   input_codes.hpp        # Unified InputCode type and named key tables
   memory.hpp             # Memory read/write, sharded region cache
+  profiler.hpp           # Opt-in scoped timing (zero-cost when disabled)
   format.hpp             # std::format utilities (header-only)
   math.hpp               # Angle conversions (header-only)
   filesystem.hpp         # Module directory resolution (wide-string API)
@@ -237,6 +245,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 | InputManager | `mutex` for lifecycle, `atomic<InputPoller*>` for reads | Lock-free `is_binding_active()` |
 | Memory cache | Sharded `SRWLOCK` + epoch-based shutdown | Shared reader locks per shard |
 | Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config) | N/A (startup only) |
+| Profiler | Lock-free ring buffer via atomic `fetch_add` on write position | Single atomic increment + array write per sample |
 
 ### Performance-critical paths
 

@@ -394,6 +394,14 @@ message(STATUS "  Install Docs Dir:            ${CMAKE_INSTALL_DOCDIR} (standard
 message(STATUS "  DirectXMath Include Dir:    ${DIRECTXMATH_INCLUDE_DIR}")
 message(STATUS "---------------------------------------------------------------------")
 
+# --- Profiling ---
+option(DMK_ENABLE_PROFILING "Enable profiling instrumentation (opt-in, zero cost when OFF)" OFF)
+
+if(DMK_ENABLE_PROFILING)
+  target_compile_definitions(DetourModKit PUBLIC DMK_ENABLE_PROFILING)
+  message(STATUS "Profiling instrumentation enabled")
+endif()
+
 # --- Sanitizers ---
 option(DMK_ENABLE_SANITIZERS "Enable ASan and UBSan (GCC/Clang only)" OFF)
 

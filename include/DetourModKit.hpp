@@ -22,6 +22,7 @@
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/math.hpp"
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/profiler.hpp"
 #include "DetourModKit/scanner.hpp"
 
 /**
@@ -61,6 +62,9 @@ using DMKInputCode = DetourModKit::InputCode;
 using DMKKeyCombo = DetourModKit::Config::KeyCombo;
 using DMKKeyComboList = DetourModKit::Config::KeyComboList;
 using DMKInputBinding = DetourModKit::InputBinding;
+using DMKProfiler = DetourModKit::Profiler;
+using DMKScopedProfile = DetourModKit::ScopedProfile;
+using DMKProfileSample = DetourModKit::ProfileSample;
 #endif // DMK_NO_SHORT_NAMES
 
 /**
