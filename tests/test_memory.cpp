@@ -134,8 +134,6 @@ TEST_F(MemoryTest, write_bytes)
         std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
         std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
 
-
-
     auto result = Memory::write_bytes(target.data(), source.data(), source.size());
     EXPECT_TRUE(result.has_value());
 
@@ -149,7 +147,6 @@ TEST_F(MemoryTest, write_bytes_NullTarget)
 {
     std::vector<std::byte> source = {std::byte{0x90}, std::byte{0x90}};
 
-
     auto result = Memory::write_bytes(nullptr, source.data(), source.size());
     EXPECT_FALSE(result.has_value());
 }
@@ -157,7 +154,6 @@ TEST_F(MemoryTest, write_bytes_NullTarget)
 TEST_F(MemoryTest, write_bytes_NullSource)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
-
 
     auto result = Memory::write_bytes(target.data(), nullptr, 10);
     EXPECT_FALSE(result.has_value());
@@ -168,7 +164,6 @@ TEST_F(MemoryTest, write_bytes_ZeroSize)
     std::vector<std::byte> target(16, std::byte{0x00});
     std::vector<std::byte> source = {std::byte{0x90}};
 
-
     auto result = Memory::write_bytes(target.data(), source.data(), 0);
     EXPECT_TRUE(result.has_value());
 }
@@ -177,8 +172,6 @@ TEST_F(MemoryTest, write_bytes_Large)
 {
     std::vector<std::byte> target(1024, std::byte{0x00});
     std::vector<std::byte> source(512, std::byte{0xCC});
-
-
 
     auto result = Memory::write_bytes(target.data(), source.data(), source.size());
     EXPECT_TRUE(result.has_value());
@@ -261,8 +254,6 @@ TEST_F(MemoryTest, write_bytes_DataIntegrity)
 
     std::vector<std::byte> source = {
         std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
-
-
 
     auto result = Memory::write_bytes(target.data() + 10, source.data(), source.size());
     EXPECT_TRUE(result.has_value());
@@ -1610,6 +1601,89 @@ TEST_F(MemoryTest, InvalidateRange_WraparoundAddress)
     size_t large_size = 0x100;
 
     EXPECT_NO_THROW(Memory::invalidate_range(reinterpret_cast<const void *>(near_max), large_size));
+}
+
+TEST_F(MemoryTest, WriteBytesToReadOnlyMemory_ExercisesVirtualProtect)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem, nullptr);
+
+    std::byte data[] = {std::byte{0xDE}, std::byte{0xAD}};
+    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+
+    // write_bytes changes protection temporarily; this should succeed
+    if (result.has_value())
+    {
+        EXPECT_EQ(std::memcmp(mem, data, sizeof(data)), 0);
+    }
+    else
+    {
+        EXPECT_EQ(result.error(), MemoryError::ProtectionChangeFailed);
+    }
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, WriteBytesToExecuteReadPage_ExercisesFlushCache)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    std::byte data[] = {std::byte{0x90}, std::byte{0x90}, std::byte{0xC3}};
+    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(std::memcmp(mem, data, sizeof(data)), 0);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, IsReadableNonblocking_LargeValidRegion)
+{
+    void *mem = VirtualAlloc(nullptr, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    // First call populates cache
+    auto status1 = Memory::is_readable_nonblocking(mem, 0x10000);
+    EXPECT_NE(status1, Memory::ReadableStatus::NotReadable);
+
+    // Second call should hit cache
+    auto status2 = Memory::is_readable_nonblocking(mem, 0x10000);
+    EXPECT_NE(status2, Memory::ReadableStatus::NotReadable);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ReadPtrUnsafe_CacheHitPath)
+{
+    uintptr_t value = 0xDEADBEEF;
+    auto addr = reinterpret_cast<uintptr_t>(&value);
+
+    // Prime the cache with a readable check
+    EXPECT_TRUE(Memory::is_readable(&value, sizeof(uintptr_t)));
+
+    // read_ptr_unsafe should use the cached entry
+    uintptr_t result = Memory::read_ptr_unsafe(addr, 0);
+    EXPECT_EQ(result, value);
+}
+
+TEST_F(MemoryTest, WriteBytesInvalidatesAndRevalidates)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    // Prime the cache
+    EXPECT_TRUE(Memory::is_readable(mem, 4));
+
+    // Write invalidates cached region
+    std::byte data[] = {std::byte{0xAA}, std::byte{0xBB}};
+    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+    ASSERT_TRUE(result.has_value());
+
+    // Subsequent check should still work (re-fetches into cache)
+    EXPECT_TRUE(Memory::is_readable(mem, 4));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST(MemoryErrorTest, MemoryErrorToString_IsNoexcept)

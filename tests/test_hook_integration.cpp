@@ -317,3 +317,213 @@ TEST_F(HookIntegrationTest, AOBScan_HookManager_EndToEnd)
 
     EXPECT_EQ(m_fn_compute_damage(8, 2), 10);
 }
+
+TEST_F(HookIntegrationTest, HotReload_FullCycle)
+{
+    EXPECT_EQ(m_fn_compute_damage(10, 5), 15);
+
+    // --- Cycle 1: hook, verify, teardown ---
+    void *tramp1 = nullptr;
+    auto r1 = m_hook_manager->create_inline_hook(
+        "HotReloadDamage",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp1);
+    ASSERT_TRUE(r1.has_value());
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp1);
+
+    EXPECT_EQ(m_fn_compute_damage(10, 5), 30);
+
+    m_hook_manager->remove_all_hooks();
+    s_original_compute_damage = nullptr;
+
+    EXPECT_EQ(m_fn_compute_damage(10, 5), 15);
+
+    // --- Cycle 2: re-hook same function, verify, teardown ---
+    void *tramp2 = nullptr;
+    auto r2 = m_hook_manager->create_inline_hook(
+        "HotReloadDamage",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp2);
+    ASSERT_TRUE(r2.has_value()) << "Re-hook after remove_all must succeed";
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp2);
+
+    EXPECT_EQ(m_fn_compute_damage(10, 5), 30);
+
+    m_hook_manager->remove_all_hooks();
+    s_original_compute_damage = nullptr;
+
+    EXPECT_EQ(m_fn_compute_damage(10, 5), 15);
+}
+
+TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
+{
+    EXPECT_EQ(m_fn_compute_damage(4, 6), 10);
+
+    void *tramp = nullptr;
+    auto r1 = m_hook_manager->create_inline_hook(
+        "ShutdownRecreateDmg",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp);
+    ASSERT_TRUE(r1.has_value());
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
+
+    EXPECT_EQ(m_fn_compute_damage(4, 6), 20);
+
+    // Simulate DMK_Shutdown sequence
+    m_hook_manager->shutdown();
+    s_original_compute_damage = nullptr;
+
+    EXPECT_EQ(m_fn_compute_damage(4, 6), 10);
+    EXPECT_TRUE(m_hook_manager->get_hook_ids().empty());
+
+    // Simulate re-initialization after hot-reload
+    tramp = nullptr;
+    auto r2 = m_hook_manager->create_inline_hook(
+        "ShutdownRecreateDmg",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp);
+    ASSERT_TRUE(r2.has_value()) << "Hook recreation after shutdown must succeed";
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
+
+    EXPECT_EQ(m_fn_compute_damage(4, 6), 20);
+}
+
+TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
+{
+#if !defined(__x86_64__) && !defined(_M_X64)
+    GTEST_SKIP() << "Mid hook test requires x86-64 calling convention";
+#endif
+
+    EXPECT_EQ(m_fn_compute_damage(3, 7), 10);
+    EXPECT_EQ(m_fn_compute_armor(5, 10), 50);
+
+    // --- Cycle 1: inline + mid hooks ---
+    void *tramp = nullptr;
+    auto r1 = m_hook_manager->create_inline_hook(
+        "ReloadInline",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp);
+    ASSERT_TRUE(r1.has_value());
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
+
+    auto mid_detour = [](safetyhook::Context &ctx)
+    {
+        ctx.rcx = 100;
+        ctx.rdx = 1;
+    };
+
+    auto r2 = m_hook_manager->create_mid_hook(
+        "ReloadMid",
+        reinterpret_cast<uintptr_t>(m_fn_compute_armor),
+        mid_detour);
+    ASSERT_TRUE(r2.has_value());
+
+    EXPECT_EQ(m_fn_compute_damage(3, 7), 20);
+    EXPECT_EQ(m_fn_compute_armor(5, 10), 100);
+
+    auto counts = m_hook_manager->get_hook_counts();
+    EXPECT_EQ(counts[HookStatus::Active], 2u);
+
+    // --- Teardown ---
+    m_hook_manager->remove_all_hooks();
+    s_original_compute_damage = nullptr;
+
+    EXPECT_EQ(m_fn_compute_damage(3, 7), 10);
+    EXPECT_EQ(m_fn_compute_armor(5, 10), 50);
+    EXPECT_TRUE(m_hook_manager->get_hook_ids().empty());
+
+    // --- Cycle 2: recreate both ---
+    tramp = nullptr;
+    auto r3 = m_hook_manager->create_inline_hook(
+        "ReloadInline",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp);
+    ASSERT_TRUE(r3.has_value());
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
+
+    auto r4 = m_hook_manager->create_mid_hook(
+        "ReloadMid",
+        reinterpret_cast<uintptr_t>(m_fn_compute_armor),
+        mid_detour);
+    ASSERT_TRUE(r4.has_value());
+
+    EXPECT_EQ(m_fn_compute_damage(3, 7), 20);
+    EXPECT_EQ(m_fn_compute_armor(5, 10), 100);
+}
+
+TEST_F(HookIntegrationTest, HotReload_EnableDisableCycle)
+{
+    EXPECT_EQ(m_fn_compute_damage(2, 3), 5);
+
+    void *tramp = nullptr;
+    auto r1 = m_hook_manager->create_inline_hook(
+        "ToggleHook",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp);
+    ASSERT_TRUE(r1.has_value());
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
+
+    EXPECT_EQ(m_fn_compute_damage(2, 3), 10);
+
+    // Disable
+    EXPECT_TRUE(m_hook_manager->disable_hook("ToggleHook").has_value());
+    EXPECT_EQ(m_fn_compute_damage(2, 3), 5);
+
+    // Re-enable
+    EXPECT_TRUE(m_hook_manager->enable_hook("ToggleHook").has_value());
+    EXPECT_EQ(m_fn_compute_damage(2, 3), 10);
+
+    // Disable again, remove, recreate (simulating config reload)
+    EXPECT_TRUE(m_hook_manager->disable_hook("ToggleHook").has_value());
+    EXPECT_TRUE(m_hook_manager->remove_hook("ToggleHook").has_value());
+    s_original_compute_damage = nullptr;
+
+    EXPECT_EQ(m_fn_compute_damage(2, 3), 5);
+
+    tramp = nullptr;
+    auto r2 = m_hook_manager->create_inline_hook(
+        "ToggleHook",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &tramp);
+    ASSERT_TRUE(r2.has_value());
+    s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
+
+    EXPECT_EQ(m_fn_compute_damage(2, 3), 10);
+}
+
+TEST_F(HookIntegrationTest, HotReload_MultipleCycles)
+{
+    constexpr int num_cycles = 5;
+
+    for (int cycle = 0; cycle < num_cycles; ++cycle)
+    {
+        EXPECT_EQ(m_fn_compute_damage(1, 1), 2)
+            << "Original behavior broken before cycle " << cycle;
+
+        void *tramp = nullptr;
+        auto result = m_hook_manager->create_inline_hook(
+            "CycleHook",
+            reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+            reinterpret_cast<void *>(&detour_compute_damage),
+            &tramp);
+        ASSERT_TRUE(result.has_value())
+            << "Hook creation failed on cycle " << cycle;
+        s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
+
+        EXPECT_EQ(m_fn_compute_damage(1, 1), 4)
+            << "Hooked behavior wrong on cycle " << cycle;
+
+        m_hook_manager->remove_all_hooks();
+        s_original_compute_damage = nullptr;
+    }
+
+    EXPECT_EQ(m_fn_compute_damage(1, 1), 2);
+}

@@ -287,10 +287,12 @@ tests/
 ├── test_format.cpp             # Format utilities tests
 ├── test_math.cpp               # Math utilities tests
 ├── test_filesystem.cpp         # Filesystem tests
-└── test_string.cpp             # String utilities tests
+├── test_platform.cpp           # Platform-specific tests (loader lock, module pinning)
+├── test_string.cpp             # String utilities tests
+└── test_win_file_stream.cpp    # Win32 file stream tests
 
 docs/tests/
-├── test_coverage_guide.md      # This guide
+├── README.md                   # This guide
 ├── parse_coverage.py           # Coverage JSON parser script
 ├── test_compile.cpp            # Minimal toolchain verification stub
 └── coverage/                   # Generated HTML reports (gitignored)

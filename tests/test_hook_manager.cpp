@@ -1953,3 +1953,73 @@ TEST_F(HookManagerTest, Shutdown_AllowsNewHooksAfterReset)
     EXPECT_EQ(*result, "AfterShutdownHook");
     EXPECT_NE(tramp, nullptr);
 }
+
+TEST_F(HookManagerTest, ErrorToString_ShutdownAndAllocatorErrors)
+{
+    // These error codes are emitted during shutdown sequences when the
+    // allocator is torn down. Verify the string representations are stable.
+    EXPECT_EQ(Hook::error_to_string(HookError::ShutdownInProgress), "Shutdown in progress");
+    EXPECT_EQ(Hook::error_to_string(HookError::AllocatorNotAvailable), "Allocator not available");
+}
+
+TEST_F(HookManagerTest, ErrorToString_AllErrorValues)
+{
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::AllocatorNotAvailable)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::InvalidTargetAddress)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::InvalidDetourFunction)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::InvalidTrampolinePointer)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::HookAlreadyExists)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::HookNotFound)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::ShutdownInProgress)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::SafetyHookError)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::EnableFailed)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::DisableFailed)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::InvalidHookState)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::InvalidObject)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::VmtHookNotFound)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::MethodAlreadyHooked)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::MethodNotFound)).empty());
+    EXPECT_FALSE(std::string_view(Hook::error_to_string(HookError::UnknownError)).empty());
+}
+
+TEST_F(HookManagerTest, CreateInlineHookAob_NullStartAddress)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook_aob(
+        "AobNullBase",
+        0,
+        0x1000,
+        "48 8B 05",
+        0,
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+
+    ASSERT_FALSE(result.has_value());
+}
+
+TEST_F(HookManagerTest, CreateMidHookAob_NullStartAddress)
+{
+    auto result = hook_manager_->create_mid_hook_aob(
+        "MidAobNullBase",
+        0,
+        0x1000,
+        "48 8B 05",
+        0,
+        [](safetyhook::Context &) {});
+
+    ASSERT_FALSE(result.has_value());
+}
+
+TEST_F(HookManagerTest, GetHookCounts_AfterCreation)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "CountTestHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    auto counts = hook_manager_->get_hook_counts();
+    EXPECT_GE(counts[HookStatus::Active], 1u);
+}
