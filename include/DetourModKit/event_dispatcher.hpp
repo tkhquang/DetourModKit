@@ -163,7 +163,7 @@ namespace DetourModKit
         {
         }
 
-        ~EventDispatcher() = default;
+        ~EventDispatcher() noexcept = default;
 
         EventDispatcher(const EventDispatcher &) = delete;
         EventDispatcher &operator=(const EventDispatcher &) = delete;
