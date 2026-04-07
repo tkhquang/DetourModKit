@@ -14,6 +14,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/logger.hpp"
+#include "platform.hpp"
 
 #include <windows.h>
 #include <shared_mutex>
@@ -42,6 +43,9 @@ namespace CachePermissions
                                              PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
 }
+
+using DetourModKit::detail::is_loader_lock_held;
+using DetourModKit::detail::pin_current_module;
 
 // Anonymous namespace for internal helpers and storage
 namespace
@@ -855,6 +859,8 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
         // Register atexit handler as a last-resort safety net in case the
         // consumer forgets to call shutdown_cache() / DMK_Shutdown().
         // Prevents std::terminate from the joinable std::thread destructor.
+        // The handler detects loader-lock context (FreeLibrary) and skips
+        // the thread join to avoid deadlock.
         static bool atexit_registered = false;
         if (!atexit_registered)
         {
@@ -862,6 +868,21 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
                         {
                 if (s_cacheInitialized.load(std::memory_order_acquire))
                 {
+                    if (is_loader_lock_held())
+                    {
+                        // Under loader lock (FreeLibrary path): pin the module
+                        // so code pages remain valid for the detached thread,
+                        // then signal it to stop and detach.
+                        s_cleanupThreadRunning.store(false, std::memory_order_release);
+                        s_cleanupCv.notify_one();
+                        if (s_cleanupThread.joinable())
+                        {
+                            pin_current_module();
+                            s_cleanupThread.detach();
+                        }
+                        s_cacheInitialized.store(false, std::memory_order_release);
+                        return;
+                    }
                     Memory::shutdown_cache();
                 } });
             atexit_registered = true;
@@ -924,7 +945,20 @@ void DetourModKit::Memory::shutdown_cache()
 
     if (s_cleanupThread.joinable())
     {
-        s_cleanupThread.join();
+        if (is_loader_lock_held())
+        {
+            // Under loader lock (DllMain / FreeLibrary): thread join would
+            // deadlock because the cleanup thread cannot exit while the
+            // loader lock is held. Pin the module so code and static data
+            // remain valid, then detach. The thread will observe the stop
+            // flag and exit on its own.
+            pin_current_module();
+            s_cleanupThread.detach();
+        }
+        else
+        {
+            s_cleanupThread.join();
+        }
     }
 
     // Acquire state mutex to serialize with clear_cache and protect data teardown
@@ -1167,8 +1201,10 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     return check_memory_permission(address, size, check_write_permission);
 }
 
-std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
+std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes)
 {
+    auto &logger = Logger::get_instance();
+
     if (!targetAddress)
     {
         logger.error("write_bytes: Target address is null.");
@@ -1183,6 +1219,11 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
     {
         logger.warning("write_bytes: Number of bytes to write is zero. Operation has no effect.");
         return {};
+    }
+    if (numBytes > MAX_WRITE_SIZE)
+    {
+        logger.error("write_bytes: Requested size {} exceeds MAX_WRITE_SIZE ({}).", numBytes, MAX_WRITE_SIZE);
+        return std::unexpected(MemoryError::SizeTooLarge);
     }
 
     DWORD old_protection_flags;

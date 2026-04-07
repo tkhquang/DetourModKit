@@ -729,10 +729,9 @@ void apply_patch(std::byte* addr, const std::byte* new_bytes, size_t len)
     patch.original_bytes.resize(len);
     std::copy_n(addr, len, patch.original_bytes.data());
 
-    auto& logger = DMKLogger::get_instance();
-    auto result = DMKMemory::write_bytes(addr, new_bytes, len, logger);
+    auto result = DMKMemory::write_bytes(addr, new_bytes, len);
     if (!result) {
-        logger.error("apply_patch: write_bytes failed");
+        DMKLogger::get_instance().error("apply_patch: write_bytes failed");
         return;
     }
     s_active_patches.push_back(std::move(patch));
@@ -740,13 +739,12 @@ void apply_patch(std::byte* addr, const std::byte* new_bytes, size_t len)
 
 void revert_all_patches()
 {
-    auto& logger = DMKLogger::get_instance();
     for (auto it = s_active_patches.rbegin(); it != s_active_patches.rend(); ++it)
     {
         auto result = DMKMemory::write_bytes(
-            it->address, it->original_bytes.data(), it->original_bytes.size(), logger);
+            it->address, it->original_bytes.data(), it->original_bytes.size());
         if (!result) {
-            logger.error("revert_all_patches: write_bytes failed");
+            DMKLogger::get_instance().error("revert_all_patches: write_bytes failed");
         }
     }
     s_active_patches.clear();

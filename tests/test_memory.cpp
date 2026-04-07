@@ -7,7 +7,6 @@
 #include <windows.h>
 
 #include "DetourModKit/memory.hpp"
-#include "DetourModKit/logger.hpp"
 
 using namespace DetourModKit;
 
@@ -135,9 +134,9 @@ TEST_F(MemoryTest, write_bytes)
         std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
         std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
 
-    Logger &logger = Logger::get_instance();
 
-    auto result = Memory::write_bytes(target.data(), source.data(), source.size(), logger);
+
+    auto result = Memory::write_bytes(target.data(), source.data(), source.size());
     EXPECT_TRUE(result.has_value());
 
     for (size_t i = 0; i < source.size(); ++i)
@@ -149,18 +148,18 @@ TEST_F(MemoryTest, write_bytes)
 TEST_F(MemoryTest, write_bytes_NullTarget)
 {
     std::vector<std::byte> source = {std::byte{0x90}, std::byte{0x90}};
-    Logger &logger = Logger::get_instance();
 
-    auto result = Memory::write_bytes(nullptr, source.data(), source.size(), logger);
+
+    auto result = Memory::write_bytes(nullptr, source.data(), source.size());
     EXPECT_FALSE(result.has_value());
 }
 
 TEST_F(MemoryTest, write_bytes_NullSource)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
-    Logger &logger = Logger::get_instance();
 
-    auto result = Memory::write_bytes(target.data(), nullptr, 10, logger);
+
+    auto result = Memory::write_bytes(target.data(), nullptr, 10);
     EXPECT_FALSE(result.has_value());
 }
 
@@ -168,9 +167,9 @@ TEST_F(MemoryTest, write_bytes_ZeroSize)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
     std::vector<std::byte> source = {std::byte{0x90}};
-    Logger &logger = Logger::get_instance();
 
-    auto result = Memory::write_bytes(target.data(), source.data(), 0, logger);
+
+    auto result = Memory::write_bytes(target.data(), source.data(), 0);
     EXPECT_TRUE(result.has_value());
 }
 
@@ -179,9 +178,9 @@ TEST_F(MemoryTest, write_bytes_Large)
     std::vector<std::byte> target(1024, std::byte{0x00});
     std::vector<std::byte> source(512, std::byte{0xCC});
 
-    Logger &logger = Logger::get_instance();
 
-    auto result = Memory::write_bytes(target.data(), source.data(), source.size(), logger);
+
+    auto result = Memory::write_bytes(target.data(), source.data(), source.size());
     EXPECT_TRUE(result.has_value());
 
     for (size_t i = 0; i < source.size(); ++i)
@@ -263,9 +262,9 @@ TEST_F(MemoryTest, write_bytes_DataIntegrity)
     std::vector<std::byte> source = {
         std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
 
-    Logger &logger = Logger::get_instance();
 
-    auto result = Memory::write_bytes(target.data() + 10, source.data(), source.size(), logger);
+
+    auto result = Memory::write_bytes(target.data() + 10, source.data(), source.size());
     EXPECT_TRUE(result.has_value());
 
     for (size_t i = 0; i < 10; ++i)
@@ -297,6 +296,7 @@ TEST(MemoryErrorTest, ErrorToString)
     EXPECT_FALSE(memory_error_to_string(MemoryError::NullSourceBytes).empty());
     EXPECT_FALSE(memory_error_to_string(MemoryError::ProtectionChangeFailed).empty());
     EXPECT_FALSE(memory_error_to_string(MemoryError::ProtectionRestoreFailed).empty());
+    EXPECT_FALSE(memory_error_to_string(MemoryError::SizeTooLarge).empty());
     EXPECT_FALSE(memory_error_to_string(static_cast<MemoryError>(999)).empty());
 }
 
@@ -442,26 +442,34 @@ TEST_F(MemoryTest, IsMemoryWritable_SizeOverflow)
 
 TEST_F(MemoryTest, write_bytes_ErrorTypes)
 {
-    Logger &logger = Logger::get_instance();
     std::byte source[] = {std::byte{0x90}};
 
-    auto r1 = Memory::write_bytes(nullptr, source, 1, logger);
+    auto r1 = Memory::write_bytes(nullptr, source, 1);
     EXPECT_FALSE(r1.has_value());
     EXPECT_EQ(r1.error(), MemoryError::NullTargetAddress);
 
     std::byte target[1] = {std::byte{0}};
-    auto r2 = Memory::write_bytes(target, nullptr, 1, logger);
+    auto r2 = Memory::write_bytes(target, nullptr, 1);
     EXPECT_FALSE(r2.has_value());
     EXPECT_EQ(r2.error(), MemoryError::NullSourceBytes);
 }
 
+TEST_F(MemoryTest, write_bytes_SizeTooLarge)
+{
+    std::byte target[1] = {std::byte{0x00}};
+    std::byte source[1] = {std::byte{0x90}};
+
+    auto result = Memory::write_bytes(target, source, MAX_WRITE_SIZE + 1);
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), MemoryError::SizeTooLarge);
+}
+
 TEST_F(MemoryTest, write_bytes_ZeroBytes)
 {
-    Logger &logger = Logger::get_instance();
     std::byte target[4] = {std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC}, std::byte{0xDD}};
     std::byte source[1] = {std::byte{0x00}};
 
-    auto result = Memory::write_bytes(target, source, 0, logger);
+    auto result = Memory::write_bytes(target, source, 0);
     EXPECT_TRUE(result.has_value());
 
     EXPECT_EQ(target[0], std::byte{0xAA});
@@ -469,15 +477,13 @@ TEST_F(MemoryTest, write_bytes_ZeroBytes)
 
 TEST_F(MemoryTest, write_bytes_Success)
 {
-    Logger &logger = Logger::get_instance();
-
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
     std::byte *target = reinterpret_cast<std::byte *>(mem);
     std::byte source[] = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
 
-    auto result = Memory::write_bytes(target, source, 3, logger);
+    auto result = Memory::write_bytes(target, source, 3);
     EXPECT_TRUE(result.has_value());
 
     EXPECT_EQ(target[0], std::byte{0x90});
@@ -509,9 +515,8 @@ TEST_F(MemoryTest, write_bytes_PageReadOnly)
 
     std::byte *target = reinterpret_cast<std::byte *>(mem);
     std::byte source[] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
-    Logger &logger = Logger::get_instance();
 
-    auto result = Memory::write_bytes(target, source, sizeof(source), logger);
+    auto result = Memory::write_bytes(target, source, sizeof(source));
     EXPECT_TRUE(result.has_value());
 
     if (result.has_value())
@@ -614,9 +619,8 @@ TEST_F(MemoryTest, WriteBytesInvalidatesCache)
     EXPECT_TRUE(Memory::is_readable(target, 64));
     EXPECT_TRUE(Memory::is_writable(target, 64));
 
-    Logger &logger = Logger::get_instance();
     std::byte source[] = {std::byte{0x90}, std::byte{0x91}, std::byte{0x92}};
-    auto result = Memory::write_bytes(target, source, sizeof(source), logger);
+    auto result = Memory::write_bytes(target, source, sizeof(source));
     EXPECT_TRUE(result.has_value());
 
     EXPECT_TRUE(Memory::is_readable(target, 64));

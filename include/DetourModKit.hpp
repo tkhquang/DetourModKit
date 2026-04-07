@@ -72,8 +72,11 @@ using DMKInputBinding = DetourModKit::InputBinding;
  *          state for destruction.
  *
  * @note This function is idempotent - calling it multiple times is safe.
- * @warning Must be called before DLL_PROCESS_DETACH. Calling from DllMain risks
- *          deadlock because background threads cannot exit while the loader lock is held.
+ * @note Each subsystem detects if it is running under the Windows loader lock
+ *       (e.g. from DllMain/DLL_PROCESS_DETACH or FreeLibrary) and will detach
+ *       background threads instead of joining them to avoid deadlock. However,
+ *       calling DMK_Shutdown() before DLL_PROCESS_DETACH is still the recommended
+ *       practice for a clean orderly shutdown.
  */
 inline void DMK_Shutdown()
 {

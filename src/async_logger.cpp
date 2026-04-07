@@ -1,4 +1,5 @@
 #include "DetourModKit/async_logger.hpp"
+#include "platform.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -8,6 +9,9 @@
 
 namespace DetourModKit
 {
+    using detail::is_loader_lock_held;
+    using detail::pin_current_module;
+
     StringPool::StringPool()
     {
         std::lock_guard<std::mutex> lock(pool_mutex_);
@@ -514,7 +518,15 @@ namespace DetourModKit
 
         if (writer_thread_.joinable())
         {
-            writer_thread_.join();
+            if (is_loader_lock_held())
+            {
+                pin_current_module();
+                writer_thread_.detach();
+            }
+            else
+            {
+                writer_thread_.join();
+            }
         }
 
         // Drain any messages enqueued between running_=false and the writer

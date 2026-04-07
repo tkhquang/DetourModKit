@@ -9,8 +9,6 @@
 
 namespace DetourModKit
 {
-    class Logger;
-
     /**
      * @enum MemoryError
      * @brief Error codes for memory operation failures.
@@ -19,6 +17,7 @@ namespace DetourModKit
     {
         NullTargetAddress,
         NullSourceBytes,
+        SizeTooLarge,
         ProtectionChangeFailed,
         ProtectionRestoreFailed
     };
@@ -36,6 +35,8 @@ namespace DetourModKit
             return "Target address is null";
         case MemoryError::NullSourceBytes:
             return "Source bytes pointer is null";
+        case MemoryError::SizeTooLarge:
+            return "Write size exceeds maximum allowed";
         case MemoryError::ProtectionChangeFailed:
             return "Failed to change memory protection";
         case MemoryError::ProtectionRestoreFailed:
@@ -44,6 +45,9 @@ namespace DetourModKit
             return "Unknown memory error";
         }
     }
+
+    // Maximum write size for write_bytes (64 MiB)
+    inline constexpr size_t MAX_WRITE_SIZE = 64 * 1024 * 1024;
 
     // Memory cache configuration defaults
     inline constexpr size_t DEFAULT_CACHE_SIZE = 256;
@@ -189,13 +193,14 @@ namespace DetourModKit
          * @details Handles changing memory protection, performs the write operation,
          *          and restores original protection. Also flushes instruction cache.
          *          Automatically invalidates the affected cache range.
+         *          If numBytes exceeds MAX_WRITE_SIZE the function performs no write
+         *          and returns MemoryError::SizeTooLarge.
          * @param targetAddress Destination memory address.
          * @param sourceBytes Pointer to the source buffer containing data to write.
-         * @param numBytes Number of bytes to write.
-         * @param logger Reference to a Logger instance for error reporting.
+         * @param numBytes Number of bytes to write. Must not exceed MAX_WRITE_SIZE.
          * @return std::expected<void, MemoryError> on success, or the specific error on failure.
          */
-        [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger);
+        [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes);
     } // namespace Memory
 } // namespace DetourModKit
 

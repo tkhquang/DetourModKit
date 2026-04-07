@@ -12,11 +12,16 @@
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/logger.hpp"
 
+#include "platform.hpp"
+
 #include <windows.h>
 #include <Xinput.h>
 #include <algorithm>
 #include <exception>
 #include <unordered_set>
+
+using DetourModKit::detail::is_loader_lock_held;
+using DetourModKit::detail::pin_current_module;
 
 namespace DetourModKit
 {
@@ -275,7 +280,16 @@ namespace DetourModKit
 
         poll_thread_.request_stop();
         cv_.notify_all();
-        poll_thread_.join();
+
+        if (is_loader_lock_held())
+        {
+            pin_current_module();
+            poll_thread_.detach();
+        }
+        else
+        {
+            poll_thread_.join();
+        }
 
         running_.store(false, std::memory_order_release);
         release_active_holds();

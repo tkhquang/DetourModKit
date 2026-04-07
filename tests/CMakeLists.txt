@@ -72,6 +72,7 @@ target_link_libraries(DetourModKit_tests
 # Include directories
 target_include_directories(DetourModKit_tests PRIVATE
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src
 )
 
 # External dependency headers as SYSTEM to suppress their warnings

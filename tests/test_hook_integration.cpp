@@ -171,7 +171,7 @@ TEST_F(HookIntegrationTest, InlineHook_RemoveRestoresOriginal)
 
     EXPECT_EQ(m_fn_compute_damage(20, 10), 60);
 
-    EXPECT_TRUE(m_hook_manager->remove_hook("DamageHookRemove"));
+    EXPECT_TRUE(m_hook_manager->remove_hook("DamageHookRemove").has_value());
     s_original_compute_damage = nullptr;
 
     EXPECT_EQ(m_fn_compute_damage(20, 10), 30);
@@ -312,7 +312,7 @@ TEST_F(HookIntegrationTest, AOBScan_HookManager_EndToEnd)
 
     EXPECT_EQ(m_fn_compute_damage(8, 2), 20);
 
-    EXPECT_TRUE(m_hook_manager->remove_hook("AOBEndToEnd"));
+    EXPECT_TRUE(m_hook_manager->remove_hook("AOBEndToEnd").has_value());
     s_original_compute_damage = nullptr;
 
     EXPECT_EQ(m_fn_compute_damage(8, 2), 10);

@@ -24,15 +24,18 @@
 
 namespace DetourModKit
 {
-    /**
-     * @brief Transparent hash functor for heterogeneous lookup in string-keyed maps.
-     * @details Allows std::string_view lookups without constructing a temporary std::string.
-     */
-    struct TransparentStringHash
+    namespace detail
     {
-        using is_transparent = void;
-        size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
-    };
+        /**
+         * @brief Transparent hash functor for heterogeneous lookup in string-keyed maps.
+         * @details Allows std::string_view lookups without constructing a temporary std::string.
+         */
+        struct TransparentStringHash
+        {
+            using is_transparent = void;
+            size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+        };
+    } // namespace detail
 
     /**
      * @enum HookType
@@ -68,11 +71,16 @@ namespace DetourModKit
         InvalidDetourFunction,
         InvalidTrampolinePointer,
         HookAlreadyExists,
+        HookNotFound,
         ShutdownInProgress,
         SafetyHookError,
+        EnableFailed,
+        DisableFailed,
+        InvalidHookState,
         InvalidObject,
         VmtHookNotFound,
         MethodAlreadyHooked,
+        MethodNotFound,
         UnknownError
     };
 
@@ -104,56 +112,66 @@ namespace DetourModKit
 
         /**
          * @brief Enables the hook.
-         * @return true if the hook was successfully enabled or already active, false otherwise.
+         * @return Success if the hook was enabled or already active. On failure, the
+         *         HookError indicates the reason (SafetyHookError, EnableFailed, InvalidHookState).
          * @note Uses atomic CAS for lock-free status transitions. Thread-safe without
          *       requiring external synchronization. Uses an intermediate Enabling state
          *       to prevent other threads from observing a speculative terminal state
          *       while the SafetyHook enable call is in progress.
          */
-        [[nodiscard]] bool enable()
+        [[nodiscard]] std::expected<void, HookError> enable()
         {
             if (!is_impl_valid())
-                return false;
+                return std::unexpected(HookError::SafetyHookError);
 
             HookStatus expected = HookStatus::Disabled;
             if (!m_status.compare_exchange_strong(expected, HookStatus::Enabling, std::memory_order_acq_rel))
-                return expected == HookStatus::Active;
+            {
+                if (expected == HookStatus::Active)
+                    return {};
+                return std::unexpected(HookError::InvalidHookState);
+            }
 
             if (do_enable())
             {
                 m_status.store(HookStatus::Active, std::memory_order_release);
-                return true;
+                return {};
             }
 
             m_status.store(HookStatus::Disabled, std::memory_order_release);
-            return false;
+            return std::unexpected(HookError::EnableFailed);
         }
 
         /**
          * @brief Disables the hook.
-         * @return true if the hook was successfully disabled or already disabled, false otherwise.
+         * @return Success if the hook was disabled or already disabled. On failure, the
+         *         HookError indicates the reason (SafetyHookError, DisableFailed, InvalidHookState).
          * @note Uses atomic CAS for lock-free status transitions. Thread-safe without
          *       requiring external synchronization. Uses an intermediate Disabling state
          *       to prevent other threads from observing a speculative terminal state
          *       while the SafetyHook disable call is in progress.
          */
-        [[nodiscard]] bool disable()
+        [[nodiscard]] std::expected<void, HookError> disable()
         {
             if (!is_impl_valid())
-                return false;
+                return std::unexpected(HookError::SafetyHookError);
 
             HookStatus expected = HookStatus::Active;
             if (!m_status.compare_exchange_strong(expected, HookStatus::Disabling, std::memory_order_acq_rel))
-                return expected == HookStatus::Disabled;
+            {
+                if (expected == HookStatus::Disabled)
+                    return {};
+                return std::unexpected(HookError::InvalidHookState);
+            }
 
             if (do_disable())
             {
                 m_status.store(HookStatus::Disabled, std::memory_order_release);
-                return true;
+                return {};
             }
 
             m_status.store(HookStatus::Active, std::memory_order_release);
-            return false;
+            return std::unexpected(HookError::DisableFailed);
         }
 
         bool is_enabled() const noexcept { return m_status.load(std::memory_order_acquire) == HookStatus::Active; }
@@ -189,16 +207,26 @@ namespace DetourModKit
                 return "Invalid trampoline pointer";
             case HookError::HookAlreadyExists:
                 return "Hook already exists";
+            case HookError::HookNotFound:
+                return "Hook not found";
             case HookError::ShutdownInProgress:
                 return "Shutdown in progress";
             case HookError::SafetyHookError:
                 return "SafetyHook error";
+            case HookError::EnableFailed:
+                return "Hook enable failed";
+            case HookError::DisableFailed:
+                return "Hook disable failed";
+            case HookError::InvalidHookState:
+                return "Hook is in a transitional state";
             case HookError::InvalidObject:
                 return "Invalid object pointer";
             case HookError::VmtHookNotFound:
                 return "VMT hook not found";
             case HookError::MethodAlreadyHooked:
                 return "VMT method already hooked";
+            case HookError::MethodNotFound:
+                return "VMT method hook not found";
             case HookError::UnknownError:
                 return "Unknown error";
             default:
@@ -547,17 +575,17 @@ namespace DetourModKit
         /**
          * @brief Removes an entire VMT hook, restoring the original vtable on all applied objects.
          * @param vmt_name The name of the VMT hook to remove.
-         * @return true if found and removed, false otherwise.
+         * @return Success if removed, or HookError::VmtHookNotFound.
          */
-        [[nodiscard]] bool remove_vmt_hook(std::string_view vmt_name);
+        [[nodiscard]] std::expected<void, HookError> remove_vmt_hook(std::string_view vmt_name);
 
         /**
          * @brief Removes a single method hook from a VMT, restoring the original method.
          * @param vmt_name The name of the VMT hook.
          * @param method_index The vtable index of the method to unhook.
-         * @return true if found and removed, false otherwise.
+         * @return Success if removed, or a HookError describing the failure.
          */
-        [[nodiscard]] bool remove_vmt_method(std::string_view vmt_name, size_t method_index);
+        [[nodiscard]] std::expected<void, HookError> remove_vmt_method(std::string_view vmt_name, size_t method_index);
 
         /**
          * @brief Applies the cloned (hooked) vtable to an additional object.
@@ -657,9 +685,9 @@ namespace DetourModKit
         /**
          * @brief Removes a hook identified by its name.
          * @param hook_id The name of the hook to remove.
-         * @return true if the hook was found and successfully removed, false otherwise.
+         * @return Success if removed, or HookError::HookNotFound.
          */
-        [[nodiscard]] bool remove_hook(std::string_view hook_id);
+        [[nodiscard]] std::expected<void, HookError> remove_hook(std::string_view hook_id);
 
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
@@ -672,17 +700,27 @@ namespace DetourModKit
 
         /**
          * @brief Enables a previously disabled hook.
+         * @details Idempotent: enabling an already-active hook returns success.
+         *          Returns HookError::InvalidHookState only when the hook is in
+         *          a transitional state (Enabling or Disabling). Other HookError
+         *          values indicate lookup or SafetyHook failures.
          * @param hook_id The name of the hook to enable.
-         * @return true if the hook was found and successfully enabled, false otherwise.
+         * @return Success if the hook is now active (or was already active),
+         *         or a HookError describing the failure.
          */
-        [[nodiscard]] bool enable_hook(std::string_view hook_id);
+        [[nodiscard]] std::expected<void, HookError> enable_hook(std::string_view hook_id);
 
         /**
          * @brief Disables an active hook temporarily without removing it.
+         * @details Idempotent: disabling an already-disabled hook returns success.
+         *          Returns HookError::InvalidHookState only when the hook is in
+         *          a transitional state (Enabling or Disabling). Other HookError
+         *          values indicate lookup or SafetyHook failures.
          * @param hook_id The name of the hook to disable.
-         * @return true if the hook was found and successfully disabled, false otherwise.
+         * @return Success if the hook is now disabled (or was already disabled),
+         *         or a HookError describing the failure.
          */
-        [[nodiscard]] bool disable_hook(std::string_view hook_id);
+        [[nodiscard]] std::expected<void, HookError> disable_hook(std::string_view hook_id);
 
         /**
          * @brief Retrieves the current status of a hook.
@@ -922,8 +960,8 @@ namespace DetourModKit
         explicit HookManager(Logger &logger = Logger::get_instance());
 
         mutable std::shared_mutex m_hooks_mutex;
-        std::unordered_map<std::string, std::unique_ptr<Hook>, TransparentStringHash, std::equal_to<>> m_hooks;
-        std::unordered_map<std::string, VmtHookEntry, TransparentStringHash, std::equal_to<>> m_vmt_hooks;
+        std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>> m_hooks;
+        std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>> m_vmt_hooks;
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};

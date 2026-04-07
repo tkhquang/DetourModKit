@@ -2,6 +2,7 @@
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
+#include "platform.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -193,6 +194,20 @@ namespace DetourModKit
                 {
                     local_logger->shutdown();
                 }
+            }
+        }
+
+        // If the writer thread was detached under loader lock, it may still
+        // be accessing AsyncLogger members (queue_, flush_mutex_, etc.).
+        // Transfer ownership to a static so the object outlives the detached
+        // thread. The pinned module keeps code pages valid; this keeps the
+        // heap-allocated state valid.
+        if (local_logger && local_logger.use_count() == 1)
+        {
+            if (detail::is_loader_lock_held())
+            {
+                static std::shared_ptr<AsyncLogger> s_leaked_logger;
+                s_leaked_logger = std::move(local_logger);
             }
         }
 

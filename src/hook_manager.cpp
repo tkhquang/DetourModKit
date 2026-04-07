@@ -424,8 +424,24 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     return create_mid_hook(name, target_address, detour_function, config);
 }
 
-bool HookManager::remove_hook(std::string_view hook_id)
+std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id)
 {
+    // Two-phase removal: disable under shared lock first so that in-flight
+    // trampoline callers (which may acquire shared_lock via with_inline_hook)
+    // can drain before we take the exclusive lock to erase. Without this,
+    // SafetyHook's destructor waiting for trampoline threads while holding
+    // the exclusive lock would deadlock against those threads.
+    {
+        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        auto it = m_hooks.find(hook_id);
+        if (it == m_hooks.end())
+        {
+            m_logger.warning("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id);
+            return std::unexpected(HookError::HookNotFound);
+        }
+        (void)it->second->disable();
+    }
+
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
@@ -435,10 +451,8 @@ bool HookManager::remove_hook(std::string_view hook_id)
         m_hooks.erase(it);
         m_logger.info("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
                       name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
-        return true;
     }
-    m_logger.warning("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id);
-    return false;
+    return {};
 }
 
 void HookManager::remove_all_hooks()
@@ -470,74 +484,64 @@ void HookManager::remove_all_hooks()
     m_shutdown_called.store(false, std::memory_order_release);
 }
 
-bool HookManager::enable_hook(std::string_view hook_id)
+std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
         m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
-        return false;
+        return std::unexpected(HookError::HookNotFound);
     }
 
     Hook *hook = it->second.get();
-    if (hook->enable())
+    auto result = hook->enable();
+    if (result)
     {
         m_logger.info("HookManager: Hook '{}' successfully enabled.", hook_id);
-        return true;
+        return {};
     }
 
-    const auto status = hook->get_status();
-    if (status == HookStatus::Active)
+    const auto error = result.error();
+    if (error == HookError::InvalidHookState)
     {
-        m_logger.debug("HookManager: Hook '{}' is already active. Enable request ignored.", hook_id);
-        return true;
-    }
-
-    if (status == HookStatus::Disabled)
-    {
-        m_logger.error("HookManager: Failed to enable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
+        m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
     }
     else
     {
-        m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(status));
+        m_logger.error("HookManager: Failed to enable hook '{}': {}", hook_id, Hook::error_to_string(error));
     }
-    return false;
+    return std::unexpected(error);
 }
 
-bool HookManager::disable_hook(std::string_view hook_id)
+std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_id)
 {
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
         m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
-        return false;
+        return std::unexpected(HookError::HookNotFound);
     }
 
     Hook *hook = it->second.get();
-    if (hook->disable())
+    auto result = hook->disable();
+    if (result)
     {
         m_logger.info("HookManager: Hook '{}' successfully disabled.", hook_id);
-        return true;
+        return {};
     }
 
-    const auto status = hook->get_status();
-    if (status == HookStatus::Disabled)
+    const auto error = result.error();
+    if (error == HookError::InvalidHookState)
     {
-        m_logger.debug("HookManager: Hook '{}' is already disabled. Disable request ignored.", hook_id);
-        return true;
-    }
-
-    if (status == HookStatus::Active)
-    {
-        m_logger.error("HookManager: Failed to disable hook '{}'. Underlying SafetyHook call may have failed.", hook_id);
+        m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
     }
     else
     {
-        m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(status));
+        m_logger.error("HookManager: Failed to disable hook '{}': {}", hook_id, Hook::error_to_string(error));
     }
-    return false;
+    return std::unexpected(error);
 }
 
 std::optional<HookStatus> HookManager::get_hook_status(std::string_view hook_id) const
@@ -649,7 +653,7 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
     return result;
 }
 
-bool HookManager::remove_vmt_hook(std::string_view vmt_name)
+std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt_name)
 {
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
@@ -658,30 +662,30 @@ bool HookManager::remove_vmt_hook(std::string_view vmt_name)
         std::string removed_name = it->second.get_name();
         m_vmt_hooks.erase(it);
         m_logger.info("HookManager: VMT hook '{}' has been removed.", removed_name);
-        return true;
+        return {};
     }
     m_logger.warning("HookManager: Attempted to remove VMT hook '{}', but it was not found.", vmt_name);
-    return false;
+    return std::unexpected(HookError::VmtHookNotFound);
 }
 
-bool HookManager::remove_vmt_method(std::string_view vmt_name, size_t method_index)
+std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view vmt_name, size_t method_index)
 {
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
     if (it == m_vmt_hooks.end())
     {
         m_logger.warning("HookManager: VMT hook '{}' not found for method removal.", vmt_name);
-        return false;
+        return std::unexpected(HookError::VmtHookNotFound);
     }
 
     if (it->second.remove_method_hook(method_index))
     {
         m_logger.info("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index);
-        return true;
+        return {};
     }
 
     m_logger.warning("HookManager: VMT '{}' has no hooked method at index {}.", vmt_name, method_index);
-    return false;
+    return std::unexpected(HookError::MethodNotFound);
 }
 
 bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
