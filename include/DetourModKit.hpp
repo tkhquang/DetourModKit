@@ -38,7 +38,6 @@ namespace DMKFormat = DetourModKit::Format;
 namespace DMKFilesystem = DetourModKit::Filesystem;
 namespace DMKMemory = DetourModKit::Memory;
 namespace DMKMath = DetourModKit::Math;
-namespace DMKProfiler = DetourModKit;
 
 #ifndef DMK_NO_SHORT_NAMES
 /**

@@ -40,13 +40,17 @@
 
 #ifdef DMK_ENABLE_PROFILING
 
+// Two-level indirection so __LINE__ expands before token pasting.
+#define DMK_CONCAT_IMPL(a, b) a##b
+#define DMK_CONCAT(a, b) DMK_CONCAT_IMPL(a, b)
+
 // Scoped timing measurement. Name must be a string literal.
 #define DMK_PROFILE_SCOPE(name) \
-    ::DetourModKit::ScopedProfile dmk_scoped_profile_##__LINE__{name}
+    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__){name}
 
 // Scoped timing using the enclosing function name.
 #define DMK_PROFILE_FUNCTION() \
-    ::DetourModKit::ScopedProfile dmk_scoped_profile_func_{__FUNCTION__}
+    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__){__FUNCTION__}
 
 #else
 

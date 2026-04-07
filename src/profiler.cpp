@@ -53,6 +53,10 @@ namespace DetourModKit
         sample.thread_id = thread_id;
     }
 
+    // Caller must ensure no concurrent record() calls are in flight.
+    // There is no runtime guard because adding an atomic "recording active"
+    // counter would penalize every record() call on the hot path for a
+    // contract that is only relevant during session boundaries.
     void Profiler::reset() noexcept
     {
         write_pos_.store(0, std::memory_order_relaxed);
@@ -111,13 +115,15 @@ namespace DetourModKit
     {
         const std::string json = export_chrome_json();
         const std::string path_str(path);
-        std::FILE *fp = std::fopen(path_str.c_str(), "wb");
-        if (fp == nullptr)
+
+        const auto closer = [](std::FILE *f) { std::fclose(f); };
+        std::unique_ptr<std::FILE, decltype(closer)> fp(
+            std::fopen(path_str.c_str(), "wb"), closer);
+        if (!fp)
         {
             return false;
         }
-        const size_t written = std::fwrite(json.data(), 1, json.size(), fp);
-        std::fclose(fp);
+        const size_t written = std::fwrite(json.data(), 1, json.size(), fp.get());
         return written == json.size();
     }
 

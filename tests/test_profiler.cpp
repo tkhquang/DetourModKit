@@ -216,6 +216,7 @@ TEST_F(ProfilerRecordTest, ExportToFile_WritesValidFile)
     ASSERT_NE(fp, nullptr);
     std::fseek(fp, 0, SEEK_END);
     const long size = std::ftell(fp);
+    ASSERT_GE(size, 0L) << "ftell failed";
     std::fseek(fp, 0, SEEK_SET);
     std::string content(static_cast<size_t>(size), '\0');
     (void)std::fread(content.data(), 1, static_cast<size_t>(size), fp);
