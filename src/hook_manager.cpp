@@ -34,12 +34,18 @@ HookManager::~HookManager() noexcept
 {
     if (!m_shutdown_called.load(std::memory_order_acquire))
     {
+        // Disable hooks before acquiring the exclusive lock to avoid deadlock.
+        // A hooked thread blocked on m_hooks_mutex (e.g. via with_inline_hook)
+        // cannot drain from SafetyHook::disable() if we hold the lock first.
+        {
+            std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+            for (auto &[name, hook] : m_hooks)
+            {
+                (void)hook->disable();
+            }
+        }
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
         m_vmt_hooks.clear();
-        for (auto &[name, hook] : m_hooks)
-        {
-            (void)hook->disable();
-        }
         m_hooks.clear();
     }
 }
@@ -50,13 +56,19 @@ void HookManager::shutdown()
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
+    // Two-phase shutdown: disable hooks under a shared lock first so that
+    // hooked threads blocked on m_hooks_mutex can drain from SafetyHook's
+    // disable() without deadlock, then clear the maps under exclusive lock.
     {
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-        m_vmt_hooks.clear();
+        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
         for (auto &[name, hook] : m_hooks)
         {
             (void)hook->disable();
         }
+    }
+    {
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        m_vmt_hooks.clear();
         m_hooks.clear();
 
         // Reset under the lock so concurrent create_*_hook calls cannot

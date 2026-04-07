@@ -86,7 +86,12 @@ namespace DetourModKit
 
     StringPool &StringPool::instance() noexcept
     {
-        static StringPool pool;
+        // Intentionally leaked to avoid the static destruction order fiasco.
+        // LogMessage destructors may run after a Meyers singleton would be
+        // destroyed (e.g. thread-local or global LogMessage instances),
+        // causing use-after-free in deallocate(). The leak is bounded:
+        // at most MEMORY_POOL_BLOCK_COUNT blocks of MEMORY_POOL_BLOCK_SIZE bytes.
+        static StringPool &pool = *new StringPool();
         return pool;
     }
 
@@ -512,6 +517,20 @@ namespace DetourModKit
             writer_thread_.join();
         }
 
+        // Drain any messages enqueued between running_=false and the writer
+        // thread exiting. Without this, late-arriving messages would be silently
+        // lost and the force-zero below would mask the discrepancy.
+        //
+        // A narrow race remains: a producer that already passed the
+        // shutdown_requested_ check (line 440) but has not yet called
+        // try_push() can enqueue one message after this drain completes.
+        // This is an accepted trade-off -- closing it would require a
+        // producers_in_flight atomic counter on every enqueue() call,
+        // adding two atomic RMW operations to the hot path. At most one
+        // message per producer thread can be lost, and only during the
+        // nanosecond window between the drain and the force-zero below.
+        drain_remaining();
+
         {
             std::lock_guard<std::mutex> lock(flush_mutex_);
             pending_messages_.store(0, std::memory_order_release);
@@ -597,6 +616,17 @@ namespace DetourModKit
         }
     }
 
+    void AsyncLogger::drain_remaining() noexcept
+    {
+        std::vector<LogMessage> remaining;
+        remaining.reserve(config_.batch_size);
+        while (queue_.try_pop_batch(remaining, config_.batch_size) > 0)
+        {
+            write_batch(remaining);
+            remaining.clear();
+        }
+    }
+
     void AsyncLogger::write_batch(std::span<LogMessage> messages) noexcept
     {
         std::lock_guard<std::mutex> lock(*log_mutex_);
@@ -606,22 +636,30 @@ namespace DetourModKit
             return;
         }
 
+        // Cache the localtime result across consecutive messages that share the
+        // same second to avoid repeated CRT lock acquisition inside localtime_s.
+        std::time_t cached_second{-1};
+        std::tm cached_tm{};
+
         for (const auto &msg : messages)
         {
             const auto time_t = std::chrono::system_clock::to_time_t(msg.timestamp);
-            std::tm tm_buf{};
 
+            if (time_t != cached_second)
+            {
+                cached_second = time_t;
 #if defined(_WIN32) || defined(_MSC_VER)
-            localtime_s(&tm_buf, &time_t);
+                localtime_s(&cached_tm, &time_t);
 #else
-            localtime_r(&time_t, &tm_buf);
+                localtime_r(&time_t, &cached_tm);
 #endif
+            }
 
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 msg.timestamp.time_since_epoch()) %
                             1000;
 
-            *file_stream_ << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
+            *file_stream_ << "[" << std::put_time(&cached_tm, "%Y-%m-%d %H:%M:%S")
                           << "." << std::setfill('0') << std::setw(3) << ms.count()
                           << std::setfill(' ') << "] "
                           << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
