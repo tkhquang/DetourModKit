@@ -38,14 +38,21 @@ namespace DetourModKit::detail
      *          module reference count. Safe to call from DllMain. This ensures
      *          that code pages and static data remain valid for detached threads
      *          during the FreeLibrary path.
+     * @return true if the module was successfully pinned, false on failure.
      */
-    inline void pin_current_module() noexcept
+    inline bool pin_current_module() noexcept
     {
         HMODULE pin = nullptr;
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(&pin_current_module),
-            &pin);
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+                reinterpret_cast<LPCWSTR>(&pin_current_module),
+                &pin))
+        {
+            OutputDebugStringA("DetourModKit: pin_current_module failed; "
+                               "detached threads may access unmapped code.\n");
+            return false;
+        }
+        return true;
     }
 
 } // namespace DetourModKit::detail
