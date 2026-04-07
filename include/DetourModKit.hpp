@@ -18,6 +18,7 @@
 #include "DetourModKit/input.hpp"
 
 // Module headers
+#include "DetourModKit/event_dispatcher.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/math.hpp"

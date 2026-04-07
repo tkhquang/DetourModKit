@@ -90,6 +90,7 @@ include/DetourModKit/    # Public headers -- one per module
   input.hpp              # Input polling (keyboard/mouse/XInput)
   input_codes.hpp        # Unified InputCode type and named key tables
   memory.hpp             # Memory read/write, sharded region cache
+  event_dispatcher.hpp   # Typed pub/sub with RAII subscriptions (header-only)
   profiler.hpp           # Opt-in scoped timing (zero-cost when disabled)
   format.hpp             # std::format utilities (header-only)
   math.hpp               # Angle conversions (header-only)
@@ -245,6 +246,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 | InputManager | `mutex` for lifecycle, `atomic<InputPoller*>` for reads | Lock-free `is_binding_active()` |
 | Memory cache | Sharded `SRWLOCK` + epoch-based shutdown | Shared reader locks per shard |
 | Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config) | N/A (startup only) |
+| EventDispatcher | `shared_mutex` -- shared lock for `emit()`, exclusive lock for subscribe/unsubscribe | `shared_lock` + contiguous vector iteration |
 | Profiler | Lock-free ring buffer via atomic `fetch_add` on write position | Single atomic increment + array write per sample |
 
 ### Performance-critical paths
