@@ -47,6 +47,32 @@ namespace CachePermissions
 namespace
 {
     /**
+     * @brief Checks if the current thread holds the Windows loader lock.
+     * @details Uses the PEB LoaderLock critical section at a well-known offset
+     *          that has been stable across all Windows versions from XP through 11.
+     *          Thread joins are unsafe while the loader lock is held (DllMain context).
+     */
+    bool is_loader_lock_held() noexcept
+    {
+#ifdef _WIN64
+        auto *peb = reinterpret_cast<char *>(__readgsqword(0x60));
+        constexpr size_t kLoaderLockOffset = 0x110;
+#else
+        auto *peb = reinterpret_cast<char *>(__readfsdword(0x30));
+        constexpr size_t kLoaderLockOffset = 0xA0;
+#endif
+        if (!peb)
+            return false;
+
+        auto *cs = *reinterpret_cast<PCRITICAL_SECTION *>(peb + kLoaderLockOffset);
+        if (!cs)
+            return false;
+
+        return cs->OwningThread ==
+               reinterpret_cast<HANDLE>(static_cast<uintptr_t>(GetCurrentThreadId()));
+    }
+
+    /**
      * @class SrwSharedMutex
      * @brief Shared mutex backed by Windows SRWLOCK instead of pthread_rwlock_t.
      * @details MinGW/winpthreads' pthread_rwlock_t corrupts internal state under
@@ -855,6 +881,8 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
         // Register atexit handler as a last-resort safety net in case the
         // consumer forgets to call shutdown_cache() / DMK_Shutdown().
         // Prevents std::terminate from the joinable std::thread destructor.
+        // The handler detects loader-lock context (FreeLibrary) and skips
+        // the thread join to avoid deadlock.
         static bool atexit_registered = false;
         if (!atexit_registered)
         {
@@ -862,6 +890,18 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
                         {
                 if (s_cacheInitialized.load(std::memory_order_acquire))
                 {
+                    if (is_loader_lock_held())
+                    {
+                        // Under loader lock (FreeLibrary path): signal the cleanup
+                        // thread to stop and detach it instead of joining.
+                        // The OS will terminate it during process/DLL teardown.
+                        s_cleanupThreadRunning.store(false, std::memory_order_release);
+                        s_cleanupCv.notify_one();
+                        if (s_cleanupThread.joinable())
+                            s_cleanupThread.detach();
+                        s_cacheInitialized.store(false, std::memory_order_release);
+                        return;
+                    }
                     Memory::shutdown_cache();
                 } });
             atexit_registered = true;
@@ -924,7 +964,18 @@ void DetourModKit::Memory::shutdown_cache()
 
     if (s_cleanupThread.joinable())
     {
-        s_cleanupThread.join();
+        if (is_loader_lock_held())
+        {
+            // Under loader lock (DllMain / FreeLibrary): thread join would
+            // deadlock because the cleanup thread cannot exit while the
+            // loader lock is held. Detach instead; the OS will terminate
+            // the thread during process/DLL teardown.
+            s_cleanupThread.detach();
+        }
+        else
+        {
+            s_cleanupThread.join();
+        }
     }
 
     // Acquire state mutex to serialize with clear_cache and protect data teardown
@@ -1167,8 +1218,10 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     return check_memory_permission(address, size, check_write_permission);
 }
 
-std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
+std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes)
 {
+    auto &logger = Logger::get_instance();
+
     if (!targetAddress)
     {
         logger.error("write_bytes: Target address is null.");
@@ -1183,6 +1236,11 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
     {
         logger.warning("write_bytes: Number of bytes to write is zero. Operation has no effect.");
         return {};
+    }
+    if (numBytes > MAX_WRITE_SIZE)
+    {
+        logger.error("write_bytes: Requested size {} exceeds MAX_WRITE_SIZE ({}).", numBytes, MAX_WRITE_SIZE);
+        return std::unexpected(MemoryError::SizeTooLarge);
     }
 
     DWORD old_protection_flags;

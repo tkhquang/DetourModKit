@@ -18,6 +18,30 @@
 #include <exception>
 #include <unordered_set>
 
+namespace
+{
+    /// Checks if the current thread holds the Windows loader lock.
+    bool is_loader_lock_held() noexcept
+    {
+#ifdef _WIN64
+        auto *peb = reinterpret_cast<char *>(__readgsqword(0x60));
+        constexpr size_t kLoaderLockOffset = 0x110;
+#else
+        auto *peb = reinterpret_cast<char *>(__readfsdword(0x30));
+        constexpr size_t kLoaderLockOffset = 0xA0;
+#endif
+        if (!peb)
+            return false;
+
+        auto *cs = *reinterpret_cast<PCRITICAL_SECTION *>(peb + kLoaderLockOffset);
+        if (!cs)
+            return false;
+
+        return cs->OwningThread ==
+               reinterpret_cast<HANDLE>(static_cast<uintptr_t>(GetCurrentThreadId()));
+    }
+} // anonymous namespace
+
 namespace DetourModKit
 {
     namespace
@@ -275,7 +299,15 @@ namespace DetourModKit
 
         poll_thread_.request_stop();
         cv_.notify_all();
-        poll_thread_.join();
+
+        if (is_loader_lock_held())
+        {
+            poll_thread_.detach();
+        }
+        else
+        {
+            poll_thread_.join();
+        }
 
         running_.store(false, std::memory_order_release);
         release_active_holds();

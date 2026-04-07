@@ -125,20 +125,23 @@ TEST_F(HookManagerTest, GetHookStatus_NonExistent)
 
 TEST_F(HookManagerTest, EnableHook_NonExistent)
 {
-    bool result = hook_manager_->enable_hook("NonExistentHook");
-    EXPECT_FALSE(result);
+    auto result = hook_manager_->enable_hook("NonExistentHook");
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, DisableHook_NonExistent)
 {
-    bool result = hook_manager_->disable_hook("NonExistentHook");
-    EXPECT_FALSE(result);
+    auto result = hook_manager_->disable_hook("NonExistentHook");
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, RemoveHook_NonExistent)
 {
-    bool result = hook_manager_->remove_hook("NonExistentHook");
-    EXPECT_FALSE(result);
+    auto result = hook_manager_->remove_hook("NonExistentHook");
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, GetHookIds)
@@ -426,14 +429,14 @@ TEST_F(HookManagerTest, RealInlineHook_EnableDisable)
         &original_trampoline);
     ASSERT_TRUE(result.has_value());
 
-    EXPECT_TRUE(hook_manager_->enable_hook("RealEnDisHook"));
+    EXPECT_TRUE(hook_manager_->enable_hook("RealEnDisHook").has_value());
 
-    EXPECT_TRUE(hook_manager_->disable_hook("RealEnDisHook"));
+    EXPECT_TRUE(hook_manager_->disable_hook("RealEnDisHook").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("RealEnDisHook"), HookStatus::Disabled);
 
-    EXPECT_TRUE(hook_manager_->disable_hook("RealEnDisHook"));
+    EXPECT_TRUE(hook_manager_->disable_hook("RealEnDisHook").has_value());
 
-    EXPECT_TRUE(hook_manager_->enable_hook("RealEnDisHook"));
+    EXPECT_TRUE(hook_manager_->enable_hook("RealEnDisHook").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("RealEnDisHook"), HookStatus::Active);
 }
 
@@ -448,7 +451,7 @@ TEST_F(HookManagerTest, RealInlineHook_Remove)
         &original_trampoline);
     ASSERT_TRUE(result.has_value());
 
-    EXPECT_TRUE(hook_manager_->remove_hook("RealRemoveHook"));
+    EXPECT_TRUE(hook_manager_->remove_hook("RealRemoveHook").has_value());
     EXPECT_FALSE(hook_manager_->get_hook_status("RealRemoveHook").has_value());
 }
 
@@ -565,10 +568,10 @@ TEST_F(HookManagerTest, RealMidHook_EnableDisable)
         detour_fn);
     ASSERT_TRUE(result.has_value());
 
-    EXPECT_TRUE(hook_manager_->disable_hook("RealMidEnDis"));
+    EXPECT_TRUE(hook_manager_->disable_hook("RealMidEnDis").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("RealMidEnDis"), HookStatus::Disabled);
 
-    EXPECT_TRUE(hook_manager_->enable_hook("RealMidEnDis"));
+    EXPECT_TRUE(hook_manager_->enable_hook("RealMidEnDis").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("RealMidEnDis"), HookStatus::Active);
 }
 
@@ -586,7 +589,7 @@ TEST_F(HookManagerTest, InlineHook_WindowsApiAddress)
 
     if (result.has_value())
     {
-        EXPECT_TRUE(hook_manager_->remove_hook("WindowsApiHook"));
+        EXPECT_TRUE(hook_manager_->remove_hook("WindowsApiHook").has_value());
     }
 }
 
@@ -602,7 +605,7 @@ TEST_F(HookManagerTest, MidHook_WindowsApiAddress)
 
     if (result.has_value())
     {
-        EXPECT_TRUE(hook_manager_->remove_hook("MidWindowsApiHook"));
+        EXPECT_TRUE(hook_manager_->remove_hook("MidWindowsApiHook").has_value());
     }
 }
 
@@ -847,17 +850,23 @@ TEST_F(HookManagerTest, StatusToString_AllValues)
 
 TEST_F(HookManagerTest, EnableHook_NotFound)
 {
-    EXPECT_FALSE(hook_manager_->enable_hook("NonExistent"));
+    auto result = hook_manager_->enable_hook("NonExistent");
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, DisableHook_NotFound)
 {
-    EXPECT_FALSE(hook_manager_->disable_hook("NonExistent"));
+    auto result = hook_manager_->disable_hook("NonExistent");
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, RemoveHook_NotFound)
 {
-    EXPECT_FALSE(hook_manager_->remove_hook("NonExistent"));
+    auto result = hook_manager_->remove_hook("NonExistent");
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::HookNotFound);
 }
 
 TEST_F(HookManagerTest, RemoveAllHooks_Empty)
@@ -903,7 +912,7 @@ TEST_F(HookManagerTest, RealMidHook_Remove)
         detour_fn);
     ASSERT_TRUE(result.has_value());
 
-    EXPECT_TRUE(hook_manager_->remove_hook("MidRemoveHook"));
+    EXPECT_TRUE(hook_manager_->remove_hook("MidRemoveHook").has_value());
     EXPECT_FALSE(hook_manager_->get_hook_status("MidRemoveHook").has_value());
 }
 
@@ -934,7 +943,7 @@ TEST_F(HookManagerTest, CreateInlineHookAOB_Success)
     if (result.has_value())
     {
         EXPECT_NE(tramp, nullptr);
-        EXPECT_TRUE(hook_manager_->remove_hook("AOBSuccessHook"));
+        EXPECT_TRUE(hook_manager_->remove_hook("AOBSuccessHook").has_value());
     }
 }
 
@@ -962,7 +971,7 @@ TEST_F(HookManagerTest, CreateMidHookAOB_Success)
 
     if (result.has_value())
     {
-        EXPECT_TRUE(hook_manager_->remove_hook("MidAOBSuccess"));
+        EXPECT_TRUE(hook_manager_->remove_hook("MidAOBSuccess").has_value());
     }
 }
 
@@ -984,7 +993,7 @@ TEST_F(HookManagerTest, WithInlineHook_SuccessCallback)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithInlineCB");
 
-    EXPECT_TRUE(hook_manager_->remove_hook("WithInlineCB"));
+    EXPECT_TRUE(hook_manager_->remove_hook("WithInlineCB").has_value());
 }
 
 TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
@@ -1005,7 +1014,7 @@ TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "WithMidCB");
 
-    EXPECT_TRUE(hook_manager_->remove_hook("WithMidCB"));
+    EXPECT_TRUE(hook_manager_->remove_hook("WithMidCB").has_value());
 }
 
 TEST_F(HookManagerTest, TryWithInlineHook_Success)
@@ -1027,7 +1036,7 @@ TEST_F(HookManagerTest, TryWithInlineHook_Success)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "TryInlineCB");
 
-    EXPECT_TRUE(hook_manager_->remove_hook("TryInlineCB"));
+    EXPECT_TRUE(hook_manager_->remove_hook("TryInlineCB").has_value());
 }
 
 TEST_F(HookManagerTest, TryWithInlineHook_NotFound)
@@ -1058,7 +1067,7 @@ TEST_F(HookManagerTest, TryWithMidHook_Success)
     ASSERT_TRUE(name_opt.has_value());
     EXPECT_EQ(*name_opt, "TryMidCB");
 
-    EXPECT_TRUE(hook_manager_->remove_hook("TryMidCB"));
+    EXPECT_TRUE(hook_manager_->remove_hook("TryMidCB").has_value());
 }
 
 TEST_F(HookManagerTest, TryWithMidHook_NotFound)
@@ -1087,13 +1096,13 @@ TEST_F(HookManagerTest, RealMidHook_CreateDisabledAutoEnable)
     ASSERT_TRUE(status.has_value());
     EXPECT_EQ(*status, HookStatus::Disabled);
 
-    EXPECT_TRUE(hook_manager_->enable_hook("MidDisabledAE"));
+    EXPECT_TRUE(hook_manager_->enable_hook("MidDisabledAE").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("MidDisabledAE"), HookStatus::Active);
 
-    EXPECT_TRUE(hook_manager_->disable_hook("MidDisabledAE"));
+    EXPECT_TRUE(hook_manager_->disable_hook("MidDisabledAE").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("MidDisabledAE"), HookStatus::Disabled);
 
-    EXPECT_TRUE(hook_manager_->remove_hook("MidDisabledAE"));
+    EXPECT_TRUE(hook_manager_->remove_hook("MidDisabledAE").has_value());
 }
 
 TEST_F(HookManagerTest, ConcurrentEnableDisable)
@@ -1171,12 +1180,12 @@ TEST_F(HookManagerTest, ConcurrentEnableDisable)
     EXPECT_TRUE(saw_active.load()) << "Expected Active to be observed during concurrent toggling";
     EXPECT_TRUE(saw_disabled.load()) << "Expected Disabled to be observed during concurrent toggling";
 
-    EXPECT_TRUE(hook_manager_->disable_hook("ConcurrentHook"));
+    EXPECT_TRUE(hook_manager_->disable_hook("ConcurrentHook").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("ConcurrentHook"), HookStatus::Disabled);
     int disabled_result = real_hook_target_add(2, 3);
     EXPECT_EQ(disabled_result, 5);
 
-    EXPECT_TRUE(hook_manager_->enable_hook("ConcurrentHook"));
+    EXPECT_TRUE(hook_manager_->enable_hook("ConcurrentHook").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("ConcurrentHook"), HookStatus::Active);
     int enabled_result = real_hook_target_add(2, 3);
     EXPECT_NE(enabled_result, 5);
@@ -1198,13 +1207,13 @@ TEST_F(HookManagerTest, WithInlineHook_DirectEnableDisable)
         {
             EXPECT_EQ(hook.get_status(), HookStatus::Active);
 
-            EXPECT_TRUE(hook.disable());
+            EXPECT_TRUE(hook.disable().has_value());
             EXPECT_EQ(hook.get_status(), HookStatus::Disabled);
 
-            EXPECT_TRUE(hook.enable());
+            EXPECT_TRUE(hook.enable().has_value());
             EXPECT_EQ(hook.get_status(), HookStatus::Active);
 
-            EXPECT_TRUE(hook.enable());
+            EXPECT_TRUE(hook.enable().has_value());
 
             return true;
         });
@@ -1229,13 +1238,13 @@ TEST_F(HookManagerTest, WithMidHook_DirectEnableDisable)
         {
             EXPECT_EQ(hook.get_status(), HookStatus::Active);
 
-            EXPECT_TRUE(hook.disable());
+            EXPECT_TRUE(hook.disable().has_value());
             EXPECT_EQ(hook.get_status(), HookStatus::Disabled);
 
-            EXPECT_TRUE(hook.enable());
+            EXPECT_TRUE(hook.enable().has_value());
             EXPECT_EQ(hook.get_status(), HookStatus::Active);
 
-            EXPECT_TRUE(hook.disable());
+            EXPECT_TRUE(hook.disable().has_value());
 
             return true;
         });
@@ -1285,14 +1294,14 @@ TEST_F(HookManagerTest, RealInlineHook_DisabledEnableDisableCycle)
     ASSERT_TRUE(status.has_value());
     EXPECT_EQ(*status, HookStatus::Disabled);
 
-    EXPECT_TRUE(hook_manager_->enable_hook("InlineDisabled"));
+    EXPECT_TRUE(hook_manager_->enable_hook("InlineDisabled").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("InlineDisabled"), HookStatus::Active);
 
-    EXPECT_TRUE(hook_manager_->disable_hook("InlineDisabled"));
+    EXPECT_TRUE(hook_manager_->disable_hook("InlineDisabled").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("InlineDisabled"), HookStatus::Disabled);
 
-    [[maybe_unused]] bool removed = hook_manager_->remove_hook("InlineDisabled");
-    EXPECT_TRUE(removed);
+    auto removed = hook_manager_->remove_hook("InlineDisabled");
+    EXPECT_TRUE(removed.has_value());
 }
 
 TEST_F(HookManagerTest, WithInlineHook_CallbackExecutesSuccessfully)
@@ -1697,11 +1706,13 @@ TEST_F(HookManagerTest, VmtHook_RemoveMethod)
     EXPECT_EQ(target->compute(5, 5), 1010);
 
     g_compute_vm_hook = nullptr;
-    EXPECT_TRUE(hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX));
+    EXPECT_TRUE(hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX).has_value());
 
     EXPECT_EQ(target->compute(5, 5), 10);
 
-    EXPECT_FALSE(hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX));
+    auto re_remove = hook_manager_->remove_vmt_method("RemMethodVmt", VMT_COMPUTE_INDEX);
+    EXPECT_FALSE(re_remove.has_value());
+    EXPECT_EQ(re_remove.error(), HookError::MethodNotFound);
 
     hook_manager_->remove_all_vmt_hooks();
 }
@@ -1726,7 +1737,7 @@ TEST_F(HookManagerTest, VmtHook_RemoveEntireHook)
     EXPECT_EQ(target->compute(1, 2), 1003);
 
     g_compute_vm_hook = nullptr;
-    EXPECT_TRUE(hook_manager_->remove_vmt_hook("RemVmt"));
+    EXPECT_TRUE(hook_manager_->remove_vmt_hook("RemVmt").has_value());
 
     EXPECT_EQ(target->compute(1, 2), 3);
     EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
@@ -1734,7 +1745,9 @@ TEST_F(HookManagerTest, VmtHook_RemoveEntireHook)
 
 TEST_F(HookManagerTest, VmtHook_RemoveNotFound)
 {
-    EXPECT_FALSE(hook_manager_->remove_vmt_hook("NonExistent"));
+    auto result = hook_manager_->remove_vmt_hook("NonExistent");
+    EXPECT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::VmtHookNotFound);
 }
 
 TEST_F(HookManagerTest, VmtHook_ApplyToMultipleObjects)

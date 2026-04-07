@@ -1,5 +1,6 @@
 #include "DetourModKit/async_logger.hpp"
 
+#include <windows.h>
 #include <algorithm>
 #include <cstring>
 #include <iomanip>
@@ -8,6 +9,30 @@
 
 namespace DetourModKit
 {
+    namespace
+    {
+        /// Checks if the current thread holds the Windows loader lock.
+        bool is_loader_lock_held() noexcept
+        {
+#ifdef _WIN64
+            auto *peb = reinterpret_cast<char *>(__readgsqword(0x60));
+            constexpr size_t kLoaderLockOffset = 0x110;
+#else
+            auto *peb = reinterpret_cast<char *>(__readfsdword(0x30));
+            constexpr size_t kLoaderLockOffset = 0xA0;
+#endif
+            if (!peb)
+                return false;
+
+            auto *cs = *reinterpret_cast<PCRITICAL_SECTION *>(peb + kLoaderLockOffset);
+            if (!cs)
+                return false;
+
+            return cs->OwningThread ==
+                   reinterpret_cast<HANDLE>(static_cast<uintptr_t>(GetCurrentThreadId()));
+        }
+    } // anonymous namespace
+
     StringPool::StringPool()
     {
         std::lock_guard<std::mutex> lock(pool_mutex_);
@@ -514,7 +539,14 @@ namespace DetourModKit
 
         if (writer_thread_.joinable())
         {
-            writer_thread_.join();
+            if (is_loader_lock_held())
+            {
+                writer_thread_.detach();
+            }
+            else
+            {
+                writer_thread_.join();
+            }
         }
 
         // Drain any messages enqueued between running_=false and the writer
