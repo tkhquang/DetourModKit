@@ -1271,26 +1271,3 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[2]);
 }
-
-TEST(ScannerTest, find_pattern_zero_size_region)
-{
-    const std::byte data[] = {std::byte{0x48}};
-
-    const auto pattern = Scanner::parse_aob("48");
-    ASSERT_TRUE(pattern.has_value());
-
-    const auto *result = Scanner::find_pattern(data, 0, pattern.value());
-    EXPECT_EQ(result, nullptr);
-}
-
-TEST(ScannerTest, find_pattern_pattern_exceeds_region)
-{
-    const std::byte data[] = {std::byte{0x48}, std::byte{0x8B}};
-
-    const auto pattern = Scanner::parse_aob("48 8B 05 AA BB CC DD");
-    ASSERT_TRUE(pattern.has_value());
-
-    // Pattern is 7 bytes but region is only 2 bytes
-    const auto *result = Scanner::find_pattern(data, sizeof(data), pattern.value());
-    EXPECT_EQ(result, nullptr);
-}

@@ -44,7 +44,7 @@ if(MSVC)
 # add_compile_options(/wd4275) # non dll-interface class 'type' used as base...
 else()
   # GCC/Clang specific flags
-  add_compile_options(-Wall -Wextra -Wpedantic)
+  add_compile_options(-Wall -Wextra -Wpedantic -Wshadow)
   if(DMK_WARNINGS_AS_ERRORS)
     add_compile_options(-Werror)
   endif()

@@ -247,6 +247,10 @@ namespace DetourModKit
         {
             return false;
         }
+        // relaxed is sufficient: the poll thread writes and game-loop threads
+        // read active_states_[] independently.  Atomicity of the load is all
+        // that matters -- no cross-variable ordering is required.  A stale
+        // read at worst delays the state change by one poll cycle (~5 ms).
         return active_states_[index].load(std::memory_order_relaxed) != 0;
     }
 

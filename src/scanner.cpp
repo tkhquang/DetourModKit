@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <cstddef>
 #include <cstdint>
+#include <cassert>
 #include <cstring>
 
 #if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
@@ -418,6 +419,7 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
         }
 
         const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        assert(next > addr && "VirtualQuery returned a non-advancing region");
         if (next <= addr)
             break; // Overflow guard
         addr = next;

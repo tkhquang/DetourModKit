@@ -29,6 +29,14 @@
       }
     },
     {
+      "name": "mingw-debug-asan",
+      "inherits": "mingw-debug",
+      "displayName": "MinGW Debug + Sanitizers",
+      "cacheVariables": {
+        "DMK_ENABLE_SANITIZERS": "ON"
+      }
+    },
+    {
       "name": "mingw-release",
       "inherits": "base",
       "displayName": "MinGW Release",
@@ -72,6 +80,10 @@
       "configurePreset": "mingw-release"
     },
     {
+      "name": "mingw-debug-asan",
+      "configurePreset": "mingw-debug-asan"
+    },
+    {
       "name": "msvc-debug",
       "configurePreset": "msvc-debug"
     },
@@ -84,6 +96,13 @@
     {
       "name": "mingw-debug",
       "configurePreset": "mingw-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "mingw-debug-asan",
+      "configurePreset": "mingw-debug-asan",
       "output": {
         "outputOnFailure": true
       }

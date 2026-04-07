@@ -27,8 +27,16 @@ namespace DetourModKit
      *
      * @note Setter callbacks are invoked at two points: immediately during registration
      *       (with the default value) and again during load() (with the INI or default value).
-     *       Consumers that accumulate state (e.g. building a lookup map) must be idempotent —
+     *       Consumers that accumulate state (e.g. building a lookup map) must be idempotent --
      *       clear accumulated state before applying the new value to avoid stale entries.
+     *
+     * **Thread safety:** All `register_*` and `load()` functions use a deferred callback
+     * pattern: state is read/written under the config mutex, but setter callbacks are
+     * invoked *after* the mutex is released.  This means setter callbacks may safely call
+     * back into the Config API (e.g. `register_*`, `load`, `log_all`) without deadlocking.
+     * A reentrancy guard is therefore unnecessary.  `log_all()` and `clear_registered_items()`
+     * hold the mutex for the entire call but only invoke Logger methods, which use an
+     * independent lock hierarchy.
      */
     namespace Config
     {
