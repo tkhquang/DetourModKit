@@ -22,15 +22,12 @@ namespace DetourModKit
          *          the full path of the current module and extracts its parent directory using
          *          std::filesystem. The result is cached after the first successful resolution,
          *          making subsequent calls zero-cost. Falls back to the current working directory
-         *          if module path detection fails for any reason. Logs details of its operation
-         *          and any fallbacks using the Logger.
-         * @return std::string The absolute directory path of the current module, encoded in the
-         *         system's active code page (ACP). If
-         *         detection fails, it returns the current working directory. In case of further
-         *         failure, it might return ".", representing the current directory in a relative
-         *         sense.
+         *          if module path detection fails for any reason.
+         * @return std::wstring The absolute directory path of the current module as a wide
+         *         string, preserving full Unicode fidelity for paths with non-ASCII characters
+         *         (e.g. CJK/Cyrillic usernames). Returns L"." on total failure.
          */
-        std::string get_runtime_directory();
+        std::wstring get_runtime_directory();
     } // namespace Filesystem
 } // namespace DetourModKit
 

@@ -22,6 +22,7 @@
 #include <vector>
 #include <chrono>
 #include <atomic>
+#include <cstdlib>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -818,6 +819,21 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
             Logger::get_instance().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
         }
 
+        // Register atexit handler as a last-resort safety net in case the
+        // consumer forgets to call shutdown_cache() / DMK_Shutdown().
+        // Prevents std::terminate from the joinable std::thread destructor.
+        static bool atexit_registered = false;
+        if (!atexit_registered)
+        {
+            std::atexit([]()
+                        {
+                if (MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+                {
+                    Memory::shutdown_cache();
+                } });
+            atexit_registered = true;
+        }
+
         return true;
     }
 
@@ -1017,151 +1033,101 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     MemoryUtilsCacheInternal::request_cleanup();
 }
 
-bool DetourModKit::Memory::is_readable(const void *address, size_t size)
+namespace
 {
-    if (!address || size == 0)
-        return false;
-
-    // Construct reader guard BEFORE checking s_cacheInitialized to prevent
-    // shutdown_cache from destroying data structures between the check and access.
-    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
-
-    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+    /**
+     * @brief Unified permission check for is_readable/is_writable.
+     * @details Parameterized by permission checker to avoid duplicating the
+     *          cache lookup, VirtualQuery fallback, and range validation logic.
+     * @param address Starting address of the memory region.
+     * @param size Number of bytes in the memory region to check.
+     * @param check_permission Function that validates protection flags.
+     * @return true if the entire region has the requested permission.
+     */
+    bool check_memory_permission(const void *address, size_t size,
+                                 bool (*check_permission)(DWORD) noexcept) noexcept
     {
-        // Cache not initialized - fall back to direct VirtualQuery
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(address, &mbi, sizeof(mbi)))
+        if (!address || size == 0)
             return false;
+
+        // Construct reader guard BEFORE checking s_cacheInitialized to prevent
+        // shutdown_cache from destroying data structures between the check and access.
+        MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+
+        if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+        {
+            // Cache not initialized -- fall back to direct VirtualQuery
+            MEMORY_BASIC_INFORMATION mbi;
+            if (!VirtualQuery(address, &mbi, sizeof(mbi)))
+                return false;
+            if (mbi.State != MEM_COMMIT)
+                return false;
+            if (!check_permission(mbi.Protect))
+                return false;
+            const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+            const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            const uintptr_t query_end = query_addr_val + size;
+            if (query_end < query_addr_val)
+                return false;
+            return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
+        }
+
+        // Reader guard already active -- safe to access cache data structures
+
+        const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+        if (shard_count == 0)
+            return false;
+
+        const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
+        const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
+        const uint64_t now_ns = current_time_ns();
+        const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+
+        // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
+        {
+            std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
+            CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
+                MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+                query_addr_val, size, now_ns, expiry_ns);
+            if (cached_info)
+            {
+                MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+                return check_permission(cached_info->protection);
+            }
+        }
+
+        MemoryUtilsCacheInternal::s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
+
+        // Cache miss: call VirtualQuery with stampede coalescing
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
+            return false;
+
         if (mbi.State != MEM_COMMIT)
             return false;
-        if (!MemoryUtilsCacheInternal::check_read_permission(mbi.Protect))
+
+        if (!check_permission(mbi.Protect))
             return false;
-        const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
-        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-        const uintptr_t query_end = query_addr_val + size;
-        if (query_end < query_addr_val)
+
+        const uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
+        const uintptr_t query_end_addr = query_addr_val + size;
+
+        if (query_end_addr < query_addr_val)
             return false;
-        return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
+
+        return query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
     }
+} // anonymous namespace
 
-    // Reader guard already active — safe to access cache data structures
-
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
-    if (shard_count == 0)
-        return false;
-
-    const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
-    const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
-    const uint64_t now_ns = current_time_ns();
-    const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
-
-    // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
-    {
-        std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
-        CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
-            MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
-            query_addr_val, size, now_ns, expiry_ns);
-        if (cached_info)
-        {
-            MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
-            return MemoryUtilsCacheInternal::check_read_permission(cached_info->protection);
-        }
-    }
-
-    MemoryUtilsCacheInternal::s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
-
-    // Cache miss: call VirtualQuery with stampede coalescing
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
-        return false;
-
-    if (mbi.State != MEM_COMMIT)
-        return false;
-
-    if (!MemoryUtilsCacheInternal::check_read_permission(mbi.Protect))
-        return false;
-
-    const uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    const uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
-    const uintptr_t query_end_addr = query_addr_val + size;
-
-    if (query_end_addr < query_addr_val)
-        return false;
-
-    return query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
+bool DetourModKit::Memory::is_readable(const void *address, size_t size)
+{
+    return check_memory_permission(address, size, MemoryUtilsCacheInternal::check_read_permission);
 }
 
 bool DetourModKit::Memory::is_writable(void *address, size_t size)
 {
-    if (!address || size == 0)
-        return false;
-
-    // Construct reader guard BEFORE checking s_cacheInitialized to prevent
-    // shutdown_cache from destroying data structures between the check and access.
-    MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
-
-    if (!MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
-    {
-        // Cache not initialized - fall back to direct VirtualQuery
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(address, &mbi, sizeof(mbi)))
-            return false;
-        if (mbi.State != MEM_COMMIT)
-            return false;
-        if (!MemoryUtilsCacheInternal::check_write_permission(mbi.Protect))
-            return false;
-        const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
-        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-        const uintptr_t query_end = query_addr_val + size;
-        if (query_end < query_addr_val)
-            return false;
-        return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
-    }
-
-    // Reader guard already active — safe to access cache data structures
-
-    const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
-    if (shard_count == 0)
-        return false;
-
-    const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
-    const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
-    const uint64_t now_ns = current_time_ns();
-    const uint64_t expiry_ns = static_cast<uint64_t>(MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
-
-    // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
-    {
-        std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx]);
-        CachedMemoryRegionInfo *cached_info = MemoryUtilsCacheInternal::find_in_shard(
-            MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
-            query_addr_val, size, now_ns, expiry_ns);
-        if (cached_info)
-        {
-            MemoryUtilsCacheInternal::s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
-            return MemoryUtilsCacheInternal::check_write_permission(cached_info->protection);
-        }
-    }
-
-    MemoryUtilsCacheInternal::s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
-
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!MemoryUtilsCacheInternal::query_and_update_cache(shard_idx, address, mbi))
-        return false;
-
-    if (mbi.State != MEM_COMMIT)
-        return false;
-
-    if (!MemoryUtilsCacheInternal::check_write_permission(mbi.Protect))
-        return false;
-
-    const uintptr_t region_start_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    const uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
-    const uintptr_t query_end_addr = query_addr_val + size;
-
-    if (query_end_addr < query_addr_val)
-        return false;
-
-    return query_addr_val >= region_start_addr && query_end_addr <= region_end_addr;
+    return check_memory_permission(address, size, MemoryUtilsCacheInternal::check_write_permission);
 }
 
 std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes, Logger &logger)
@@ -1285,18 +1251,57 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
         return 0;
     }
 #else
-    // MinGW/GCC lacks __try/__except. Use VirtualQuery as a lightweight
-    // guard before the raw dereference. This is still faster than
-    // is_readable() because it bypasses the entire cache machinery.
-    const void *addr = reinterpret_cast<const void *>(base + offset);
+    // MinGW/GCC lacks __try/__except. Probe the cache with a trylock
+    // to avoid a VirtualQuery syscall when the region is already cached.
+    // Falls back to VirtualQuery on cache miss or when cache is off.
+    // ActiveReaderGuard is required to prevent shutdown_cache() from
+    // destroying shard vectors between our check and access.
+    const auto src = base + static_cast<uintptr_t>(offset);
+
+    {
+        MemoryUtilsCacheInternal::ActiveReaderGuard reader_guard;
+
+        if (MemoryUtilsCacheInternal::s_cacheInitialized.load(std::memory_order_acquire))
+        {
+            const size_t shard_count = MemoryUtilsCacheInternal::s_shardCount.load(std::memory_order_acquire);
+            if (shard_count != 0)
+            {
+                const size_t shard_idx = compute_shard_index(src, shard_count);
+                std::shared_lock<SrwSharedMutex> lock(*MemoryUtilsCacheInternal::s_shardMutexes[shard_idx], std::try_to_lock);
+                if (lock.owns_lock())
+                {
+                    const uint64_t now_ns = current_time_ns();
+                    const uint64_t expiry_ns = static_cast<uint64_t>(
+                        MemoryUtilsCacheInternal::s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+                    CachedMemoryRegionInfo *cached = MemoryUtilsCacheInternal::find_in_shard(
+                        MemoryUtilsCacheInternal::s_cacheShards[shard_idx],
+                        src, sizeof(uintptr_t), now_ns, expiry_ns);
+                    if (cached)
+                    {
+                        if (MemoryUtilsCacheInternal::check_read_permission(cached->protection))
+                            return *reinterpret_cast<const uintptr_t *>(src);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // Cache miss, lock contention, or cache not initialized
     MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(addr, &mbi, sizeof(mbi)))
+    if (!VirtualQuery(reinterpret_cast<const void *>(src), &mbi, sizeof(mbi)))
         return 0;
     if (mbi.State != MEM_COMMIT)
         return 0;
     if ((mbi.Protect & CachePermissions::READ_PERMISSION_FLAGS) == 0 ||
         (mbi.Protect & CachePermissions::NOACCESS_GUARD_FLAGS) != 0)
         return 0;
-    return *reinterpret_cast<const uintptr_t *>(base + offset);
+    // Verify the full read fits within the committed region (overflow-safe)
+    const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+    const uintptr_t region_end = region_start + mbi.RegionSize;
+    const uintptr_t read_end = src + sizeof(uintptr_t);
+    if (read_end < src || src < region_start || read_end > region_end)
+        return 0;
+    return *reinterpret_cast<const uintptr_t *>(src);
 #endif
 }

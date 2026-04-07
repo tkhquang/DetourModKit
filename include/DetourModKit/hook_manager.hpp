@@ -487,12 +487,6 @@ namespace DetourModKit
         [[nodiscard]] std::expected<size_t, HookError> hook_vmt_method(
             std::string_view vmt_name, size_t method_index, T destination)
         {
-            struct DeferredLogEntry
-            {
-                std::string msg;
-                LogLevel level;
-            };
-
             auto [result, deferred_logs] = [&]() -> std::pair<std::expected<size_t, HookError>, std::vector<DeferredLogEntry>>
             {
                 std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
@@ -669,6 +663,10 @@ namespace DetourModKit
 
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
+         * @details Clears all inline, mid, and VMT hooks, then resets the internal
+         *          shutdown flag to false. This allows subsequent create_*_hook() calls
+         *          to succeed, enabling hot-reload workflows where all hooks are torn
+         *          down and recreated without restarting the process.
          */
         void remove_all_hooks();
 
@@ -915,6 +913,12 @@ namespace DetourModKit
         }
 
     private:
+        /// @brief Internal log entry used to defer logging outside held locks.
+        struct DeferredLogEntry
+        {
+            std::string msg;
+            LogLevel level;
+        };
         explicit HookManager(Logger &logger = Logger::get_instance());
 
         mutable std::shared_mutex m_hooks_mutex;

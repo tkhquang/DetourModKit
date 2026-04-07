@@ -80,7 +80,7 @@ include/DetourModKit/    # Public headers -- one per module
   memory.hpp             # Memory read/write, sharded region cache
   format.hpp             # std::format utilities (header-only)
   math.hpp               # Angle conversions (header-only)
-  filesystem.hpp         # Module directory resolution
+  filesystem.hpp         # Module directory resolution (wide-string API)
   string.hpp             # String trim (header-only)
 src/                     # Implementation files (one .cpp per module)
 tests/                   # GoogleTest suites (one test_*.cpp per module)
@@ -188,8 +188,8 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, loc
 - `Logger::log()` async enqueue -- atomic shared_ptr load + lock-free queue push
 - `Memory::is_readable()` -- sharded SRWLOCK reader + cache lookup
 - `Memory::is_readable_nonblocking()` -- try_lock_shared + cache lookup (returns Unknown on contention)
-- `Memory::read_ptr_unsafe()` -- SEH-protected raw dereference, zero cache overhead
-- `Memory::read_ptr_checked()` -- inline pointer dereference with source and result low-address guards, no SEH (caller provides outer frame)
+- `Memory::read_ptr_unsafe()` -- SEH-protected raw dereference (MSVC), cache-accelerated with VirtualQuery fallback (MinGW)
+- `Memory::read_ptr_unchecked()` -- inline pointer dereference with source and result low-address guards, no SEH (caller must guarantee structural pointer validity)
 - `Logger::is_enabled()` -- single atomic load (gate expensive trace-only work)
 
 ## Boundaries

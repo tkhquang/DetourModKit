@@ -447,32 +447,31 @@ namespace
     /**
      * @brief Determines the full absolute path for the INI configuration file.
      */
-    std::string getIniFilePath(const std::string &ini_filename, Logger &logger)
+    std::filesystem::path getIniFilePath(const std::string &ini_filename, Logger &logger)
     {
-        std::string module_dir = get_runtime_directory();
+        std::wstring module_dir = get_runtime_directory();
 
-        if (module_dir.empty() || module_dir == ".")
+        if (module_dir.empty() || module_dir == L".")
         {
             logger.warning("Config: Could not reliably determine module directory or it's current working directory. Using relative path for INI: {}", ini_filename);
-            return ini_filename; // Fallback to relative path
+            return std::filesystem::path(ini_filename); // Fallback to relative path
         }
 
         try
         {
-            std::filesystem::path ini_path_obj = std::filesystem::path(module_dir) / ini_filename;
-            std::string full_path = ini_path_obj.lexically_normal().string(); // Normalize (e.g., C:/path/./file -> C:/path/file)
-            logger.debug("Config: Determined INI file path: {}", full_path);
-            return full_path;
+            std::filesystem::path ini_path_obj = (std::filesystem::path(module_dir) / ini_filename).lexically_normal();
+            logger.debug("Config: Determined INI file path: {}", ini_path_obj.string());
+            return ini_path_obj;
         }
         catch (const std::filesystem::filesystem_error &fs_err)
         {
             logger.warning("Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}", fs_err.what(), ini_filename);
         }
-        catch (const std::exception &e) // Catch other potential exceptions
+        catch (const std::exception &e)
         {
             logger.warning("Config: General error constructing INI path: {}. Using relative path for INI: {}", e.what(), ini_filename);
         }
-        return ini_filename; // Fallback
+        return std::filesystem::path(ini_filename); // Fallback
     }
 
 } // anonymous namespace
@@ -587,19 +586,20 @@ void DetourModKit::Config::load(std::string_view ini_filename)
         std::lock_guard<std::mutex> lock(getConfigMutex());
 
         Logger &logger = Logger::get_instance();
-        std::string ini_path = getIniFilePath(std::string(ini_filename), logger);
+        std::filesystem::path ini_path = getIniFilePath(std::string(ini_filename), logger);
+        std::string ini_path_str = ini_path.string(); // convert to narrow string for logger formatting
         CSimpleIniA ini;
         ini.SetUnicode(false);  // Assume ASCII/MBCS INI
         ini.SetMultiKey(false); // Disallow duplicate keys in a section
 
-        SI_Error rc = ini.LoadFile(ini_path.c_str());
+        SI_Error rc = ini.LoadFile(ini_path.wstring().c_str()); // wide path for Unicode-safe file open
         if (rc < 0)
         {
-            logger.error("Config: Failed to open '{}' (error {}). Using defaults.", ini_path, rc);
+            logger.error("Config: Failed to open '{}' (error {}). Using defaults.", ini_path_str, rc);
         }
         else
         {
-            logger.debug("Config: Opened {}", ini_path);
+            logger.debug("Config: Opened {}", ini_path_str);
         }
 
         // Read all values under lock, but defer setter callbacks
@@ -613,7 +613,7 @@ void DetourModKit::Config::load(std::string_view ini_filename)
             }
         }
 
-        logger.info("Config: Loaded {} items from {}", getRegisteredConfigItems().size(), ini_path);
+        logger.info("Config: Loaded {} items from {}", getRegisteredConfigItems().size(), ini_path_str);
     }
 
     // Invoke setter callbacks outside the config mutex to prevent deadlocks

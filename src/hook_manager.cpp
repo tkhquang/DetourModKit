@@ -8,14 +8,6 @@
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
 
-namespace
-{
-    struct DeferredLog
-    {
-        std::string msg;
-        LogLevel level;
-    };
-} // anonymous namespace
 
 HookManager &HookManager::get_instance()
 {
@@ -139,7 +131,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     void **original_trampoline,
     const HookConfig &config)
 {
-    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
@@ -204,7 +196,7 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
             // Pre-build log entries before committing to m_hooks so that
             // allocation failures in std::format cannot leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
-            std::vector<DeferredLog> logs;
+            std::vector<DeferredLogEntry> logs;
             logs.reserve(2);
             logs.push_back({std::format("HookManager: Successfully created {} inline hook '{}' targeting {}.",
                                         status_message, name, DetourModKit::Format::format_address(target_address)),
@@ -289,7 +281,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
-    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
@@ -347,7 +339,7 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
             // Pre-build log entries before committing to m_hooks so that
             // allocation failures in std::format cannot leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
-            std::vector<DeferredLog> logs;
+            std::vector<DeferredLogEntry> logs;
             logs.reserve(2);
             logs.push_back({std::format("HookManager: Successfully created {} mid hook '{}' targeting {}.",
                                         status_message, name, DetourModKit::Format::format_address(target_address)),
@@ -578,7 +570,7 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
 std::expected<std::string, HookError> HookManager::create_vmt_hook(
     std::string_view name, void *object)
 {
-    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLog>>
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
@@ -612,7 +604,7 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
 
             std::string name_str{name};
 
-            std::vector<DeferredLog> logs;
+            std::vector<DeferredLogEntry> logs;
             logs.push_back({std::format("HookManager: Successfully created VMT hook '{}' on object {}.",
                                         name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                             LogLevel::Info});

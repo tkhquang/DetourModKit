@@ -145,20 +145,28 @@ namespace DetourModKit
         uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
 
         /**
-         * @brief Inline pointer dereference with low-address validity guards.
+         * @brief Unchecked inline pointer dereference with low-address validity guards only.
          * @details Validates the source address (base + offset) before dereferencing,
          *          then rejects result values at or below min_valid. Addresses below
          *          0x10000 are never valid usermode pointers on Windows (null page +
          *          guard pages), so both checks terminate stale/dangling pointer chain
          *          traversals early without requiring an SEH frame.
+         *
+         *          This function does NOT provide fault protection against unmapped or
+         *          freed memory above min_valid. If the pointer chain may reference
+         *          deallocated heap memory or unmapped regions, use read_ptr_unsafe()
+         *          instead (SEH-protected on MSVC, VirtualQuery-guarded on MinGW).
+         *
+         *          Intended for hot paths where the caller can guarantee structural
+         *          pointer validity (e.g. game objects known to be alive this frame).
          * @param base The base address to read from.
          * @param offset Byte offset added to base before dereferencing.
          * @param min_valid Minimum address value to accept (default 0x10000).
          * @return The pointer-sized value at the address, or 0 if either the source
          *         address or the dereferenced value is at or below min_valid.
          */
-        inline uintptr_t read_ptr_checked(uintptr_t base, ptrdiff_t offset,
-                                          uintptr_t min_valid = 0x10000) noexcept
+        inline uintptr_t read_ptr_unchecked(uintptr_t base, ptrdiff_t offset,
+                                            uintptr_t min_valid = 0x10000) noexcept
         {
             const auto src = base + static_cast<uintptr_t>(offset);
             if (src <= min_valid)

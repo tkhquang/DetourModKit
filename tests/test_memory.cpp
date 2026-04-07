@@ -1428,61 +1428,61 @@ TEST_F(MemoryTest, ReadPtrUnsafe_NegativeOffset)
     EXPECT_EQ(result, 0xBBBBBBBB);
 }
 
-// --- Tests for read_ptr_checked (inline hot-path variant) ---
+// --- Tests for read_ptr_unchecked (inline hot-path pointer dereference) ---
 
-TEST_F(MemoryTest, ReadPtrChecked_ValidHighPointer)
+TEST_F(MemoryTest, ReadPtrUnchecked_ValidHighPointer)
 {
     uintptr_t value = 0x00007FF700000000;
-    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0x00007FF700000000);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_RejectsNullValue)
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsNullValue)
 {
     uintptr_t value = 0;
-    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0u);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_RejectsLowPointer)
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsLowPointer)
 {
     uintptr_t value = 0x1000;
-    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0u);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_RejectsBoundaryValue)
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsBoundaryValue)
 {
     uintptr_t value = 0x10000;
-    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0u);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_AcceptsAboveBoundary)
+TEST_F(MemoryTest, ReadPtrUnchecked_AcceptsAboveBoundary)
 {
     uintptr_t value = 0x10001;
-    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0x10001);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_WithOffset)
+TEST_F(MemoryTest, ReadPtrUnchecked_WithOffset)
 {
     uintptr_t values[2] = {0x1000, 0x00007FF700001234};
-    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
     EXPECT_EQ(result, 0x00007FF700001234);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_CustomThreshold)
+TEST_F(MemoryTest, ReadPtrUnchecked_CustomThreshold)
 {
     uintptr_t value = 0x500;
-    EXPECT_EQ(Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0, 0x1000), 0u);
-    EXPECT_EQ(Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0, 0x100), 0x500);
+    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0, 0x1000), 0u);
+    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0, 0x100), 0x500);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_ZeroThreshold)
+TEST_F(MemoryTest, ReadPtrUnchecked_ZeroThreshold)
 {
     uintptr_t value = 1;
-    uintptr_t result = Memory::read_ptr_checked(reinterpret_cast<uintptr_t>(&value), 0, 0);
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0, 0);
     EXPECT_EQ(result, 1u);
 }
 
@@ -1558,45 +1558,45 @@ TEST_F(MemoryTest, ReadableStatus_EnumValues)
     EXPECT_NE(Memory::ReadableStatus::NotReadable, Memory::ReadableStatus::Unknown);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_SourceInLowAddressRange)
+TEST_F(MemoryTest, ReadPtrUnchecked_SourceInLowAddressRange)
 {
     uintptr_t base = 0x100;
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_checked(base, offset, min_valid);
+    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
     EXPECT_EQ(result, 0u);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_SourceAtMinValid)
+TEST_F(MemoryTest, ReadPtrUnchecked_SourceAtMinValid)
 {
     uintptr_t base = 0x10000;
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_checked(base, offset, min_valid);
+    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
     EXPECT_EQ(result, 0u);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_ValidSourceLowResult)
+TEST_F(MemoryTest, ReadPtrUnchecked_ValidSourceLowResult)
 {
     uintptr_t low_value = 0x100;
     uintptr_t base = reinterpret_cast<uintptr_t>(&low_value);
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_checked(base, offset, min_valid);
+    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
     EXPECT_EQ(result, 0u);
 }
 
-TEST_F(MemoryTest, ReadPtrChecked_ValidSourceValidResult)
+TEST_F(MemoryTest, ReadPtrUnchecked_ValidSourceValidResult)
 {
     uintptr_t high_value = 0x7FFE0000;
     uintptr_t base = reinterpret_cast<uintptr_t>(&high_value);
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_checked(base, offset, min_valid);
+    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
     EXPECT_EQ(result, high_value);
 }
 
