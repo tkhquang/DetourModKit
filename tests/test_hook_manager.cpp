@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <format>
 #include <functional>
 #include <thread>
 #include <chrono>
@@ -2022,4 +2023,70 @@ TEST_F(HookManagerTest, GetHookCounts_AfterCreation)
 
     auto counts = hook_manager_->get_hook_counts();
     EXPECT_GE(counts[HookStatus::Active], 1u);
+}
+
+TEST_F(HookManagerTest, VmtHook_CreateAfterShutdownSucceeds)
+{
+    // shutdown() resets the shutdown flag for hot-reload, so subsequent
+    // create calls succeed against a clean HookManager.
+    auto target = std::make_unique<VmtTestTarget>();
+
+    hook_manager_->shutdown();
+
+    auto result = hook_manager_->create_vmt_hook("VmtAfterShutdown", target.get());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "VmtAfterShutdown");
+
+    hook_manager_->remove_all_vmt_hooks();
+}
+
+TEST_F(HookManagerTest, VmtHook_MethodHookAfterShutdownNotFound)
+{
+    // shutdown() clears all VMT hooks, so hook_vmt_method returns VmtHookNotFound.
+    auto target = std::make_unique<VmtTestTarget>();
+
+    auto vmt_result = hook_manager_->create_vmt_hook("MethodShutdownVmt", target.get());
+    ASSERT_TRUE(vmt_result.has_value());
+
+    hook_manager_->shutdown();
+
+    auto method_result = hook_manager_->hook_vmt_method(
+        "MethodShutdownVmt", VMT_COMPUTE_INDEX, &VmtTestHook::hooked_compute);
+    ASSERT_FALSE(method_result.has_value());
+    EXPECT_EQ(method_result.error(), HookError::VmtHookNotFound);
+}
+
+TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
+{
+    constexpr int kThreads = 8;
+    std::latch start_latch(kThreads + 1);
+    std::atomic<int> success_count{0};
+    std::atomic<int> rejected_count{0};
+
+    std::vector<std::unique_ptr<VmtTestTarget>> targets;
+    for (int i = 0; i < kThreads; ++i)
+        targets.push_back(std::make_unique<VmtTestTarget>());
+
+    std::vector<std::jthread> threads;
+    for (int i = 0; i < kThreads; ++i)
+    {
+        threads.emplace_back([&, i]
+        {
+            start_latch.arrive_and_wait();
+            auto result = hook_manager_->create_vmt_hook(
+                std::format("ConcVmt{}", i), targets[i].get());
+            if (result.has_value())
+                success_count.fetch_add(1, std::memory_order_relaxed);
+            else
+                rejected_count.fetch_add(1, std::memory_order_relaxed);
+        });
+    }
+
+    start_latch.arrive_and_wait();
+    hook_manager_->shutdown();
+
+    for (auto &t : threads)
+        t.join();
+
+    EXPECT_EQ(success_count.load() + rejected_count.load(), kThreads);
 }

@@ -519,8 +519,15 @@ namespace DetourModKit
         [[nodiscard]] std::expected<size_t, HookError> hook_vmt_method(
             std::string_view vmt_name, size_t method_index, T destination)
         {
+            if (m_shutdown_called.load(std::memory_order_acquire))
+            {
+                m_logger.error("HookManager: Shutdown in progress. Cannot hook VMT method on '{}'.", vmt_name);
+                return std::unexpected(HookError::ShutdownInProgress);
+            }
+
             auto [result, deferred_logs] = [&]() -> std::pair<std::expected<size_t, HookError>, std::vector<DeferredLogEntry>>
             {
+                std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
                 std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
                 if (m_shutdown_called.load(std::memory_order_acquire))

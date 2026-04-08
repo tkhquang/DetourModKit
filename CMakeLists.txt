@@ -112,6 +112,13 @@ else()
     "'git submodule update --init --recursive'")
 endif()
 
+# --- Version Header Generation ---
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit/version.hpp.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
+  @ONLY
+)
+
 # --- Compile Definitions for DetourModKit and potentially for headers it includes ---
 if(WIN32)
   add_compile_definitions(
@@ -205,6 +212,9 @@ target_include_directories(DetourModKit
   # For consumers using DetourModKit as a subdirectory (BUILD_INTERFACE):
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 
+  # Generated headers (version.hpp)
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
+
   # DirectXMath headers for both build and install interfaces
   $<BUILD_INTERFACE:${DIRECTXMATH_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include/DirectXMath>
@@ -285,6 +295,12 @@ if(_dmk_module_headers_for_install)
 else()
   message(WARNING "No module headers found in 'include/DetourModKit/*.hpp' to install.")
 endif()
+
+# Install generated version header
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit"
+  COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+)
 
 # Install the centralized DetourModKit.hpp header
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp")
