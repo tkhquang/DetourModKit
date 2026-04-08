@@ -51,13 +51,15 @@ namespace DetourModKit
         // Odd sequence signals an in-progress write. Readers that observe
         // an odd value skip this sample to avoid reading torn fields.
         //
-        // Design note: if two writers land on the same slot (write_pos_
-        // wraps the entire buffer between adjacent fetch_add calls), the
-        // second writer can clobber the first's in-flight data. This
-        // requires 65536 concurrent writes to overtake an active writer,
-        // which is unreachable at game-modding thread counts and frame
-        // rates. We accept this theoretical imprecision to keep the hot
-        // path to a single fetch_add + two stores with no CAS retry loop.
+        // Design note: if a writer is stalled between its fetch_add and
+        // its final sequence store, and 65536 intervening record() calls
+        // advance write_pos_ past a full buffer wrap, a new writer will
+        // land on the same slot and clobber the stalled writer's data.
+        // This requires the stalled writer to be preempted for the
+        // duration of an entire ring buffer cycle, which is unreachable
+        // at game-modding thread counts and frame rates. We accept this
+        // theoretical imprecision to keep the hot path to a single
+        // fetch_add + two stores with no CAS retry loop.
         const uint32_t seq = sample.sequence.load(std::memory_order_relaxed);
         sample.sequence.store(seq | 1, std::memory_order_release);
 

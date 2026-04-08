@@ -657,7 +657,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **The `CALLBACK_DRAIN_MS` sleep** after `Shutdown()` in the loader provides additional margin for any callbacks that were past the hook entry check but haven't returned yet.
 
-**EventDispatcher subscriptions:** Any `EventDispatcher` subscriptions created by the logic DLL are destroyed when `FreeLibrary` unloads the DLL, since the RAII `ScopedSubscription` handles live in the DLL's memory. Ensure that all subscriptions are explicitly cancelled in `Shutdown()` before `DMK_Shutdown()` to avoid dangling callback pointers during the window between `Shutdown()` and `FreeLibrary`.
+**EventDispatcher subscriptions:** Any `EventDispatcher` subscriptions created by the logic DLL are destroyed when `FreeLibrary` unloads the DLL, since the RAII `Subscription` handles live in the DLL's memory. Ensure that all `Subscription` objects are explicitly reset in `Shutdown()` before `DMK_Shutdown()` to avoid dangling callback pointers during the window between `Shutdown()` and `FreeLibrary`.
 
 ### 2. Global State Reset
 
@@ -675,7 +675,7 @@ Reset to initial values on reload. This is expected - design for it.
 **Config file on disk:**
 **Persists** across reloads. Edit the INI, press reload, and new values take effect.
 
-**Profiler ring buffer:** The `Profiler` stores timing samples in a ring buffer that lives in the logic DLL's memory. This data is lost when `FreeLibrary` unloads the DLL. If you need the profiling data, export it (e.g., via `Profiler::dump()` or your own serialization) before calling `Shutdown()`.
+**Profiler ring buffer:** The `Profiler` stores timing samples in a ring buffer that lives in the logic DLL's memory. This data is lost when `FreeLibrary` unloads the DLL. If you need the profiling data, call `Profiler::get_instance().export_to_file("profile.json")` or `Profiler::get_instance().export_chrome_json()` before calling `Shutdown()`.
 
 **If you need state to survive reloads** (e.g., a toggle that should stay on), store it in the loader:
 
@@ -854,23 +854,30 @@ If your logic DLL spawns background threads (e.g., for deferred scanning, period
 // In Shutdown():
 void Shutdown()
 {
-    // 1. Signal threads to stop
-    s_scan_thread_running.store(false, std::memory_order_release);
+    // 1. Signal the background thread to stop via its shared atomic flag,
+    //    then wake it from any condition_variable wait.
+    s_scan_stop_requested.store(true, std::memory_order_release);
     s_scan_cv.notify_one();
 
-    // 2. Join with a bounded timeout to avoid blocking the reload indefinitely
+    // 2. Join with a bounded spin-wait. The background thread checks
+    //    s_scan_stop_requested and exits cooperatively within its scan
+    //    interval. Avoid std::async+join/detach racing on the same
+    //    std::thread (undefined behavior).
     if (s_scan_thread.joinable())
     {
-        // Use a future to implement a timed join (std::thread has no native timeout)
-        auto join_future = std::async(std::launch::async, [&] { s_scan_thread.join(); });
-        if (join_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout)
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline)
         {
-            Logger::get_instance().warning("Shutdown: background thread did not exit within 2s");
-            // Thread is stuck - detach as last resort so FreeLibrary can proceed.
-            // The thread will crash when it touches unmapped code, but that is
-            // preferable to deadlocking the reload cycle.
-            s_scan_thread.detach();
+            // If the thread has exited, native handle wait returns immediately.
+            // On Windows, use WaitForSingleObject on the native handle.
+            DWORD wait_result = WaitForSingleObject(
+                s_scan_thread.native_handle(), 100 /* ms */);
+            if (wait_result == WAIT_OBJECT_0)
+                break;
         }
+        // Thread should have exited by now. join() will return immediately
+        // if the thread has already terminated.
+        s_scan_thread.join();
     }
 
     // 3. Now safe to tear down DMK

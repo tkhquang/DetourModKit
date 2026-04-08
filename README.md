@@ -121,7 +121,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 - When enabled, records lock-free timing samples (~50 ns per scope) into a fixed-size ring buffer (64K samples, ~1.5 MB)
 - Odd/even sequence counter per sample slot so `export_chrome_json()` can safely skip in-flight writes without torn reads
 - Exports to [Chrome Tracing JSON](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview) format viewable in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev)
-- Instrument with `DMK_PROFILE_SCOPE("name")` or `DMK_PROFILE_FUNCTION()` macros; export via `Profiler::export_to_file()`
+- Instrument with `DMK_PROFILE_SCOPE("name")` or `DMK_PROFILE_FUNCTION()` macros; export via `Profiler::get_instance().export_to_file()`
 
 </details>
 
