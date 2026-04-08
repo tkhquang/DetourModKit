@@ -11,9 +11,69 @@
 #include <format>
 #include <memory>
 #include <string>
+#include <string_view>
 
 namespace DetourModKit
 {
+    namespace
+    {
+        /**
+         * @brief Escapes a string for safe embedding in a JSON value.
+         * @details Handles the characters that are special in JSON strings:
+         *          backslash, double quote, and control characters (U+0000..U+001F).
+         *          Forward slash is NOT escaped (legal unescaped in JSON per RFC 8259).
+         * @param input The raw string to escape.
+         * @return A JSON-safe escaped string (without surrounding quotes).
+         */
+        std::string escape_json_string(std::string_view input)
+        {
+            std::string out;
+            out.reserve(input.size());
+            for (const char c : input)
+            {
+                switch (c)
+                {
+                case '"':
+                    out += "\\\"";
+                    break;
+                case '\\':
+                    out += "\\\\";
+                    break;
+                case '\b':
+                    out += "\\b";
+                    break;
+                case '\f':
+                    out += "\\f";
+                    break;
+                case '\n':
+                    out += "\\n";
+                    break;
+                case '\r':
+                    out += "\\r";
+                    break;
+                case '\t':
+                    out += "\\t";
+                    break;
+                default:
+                    if (static_cast<unsigned char>(c) < 0x20)
+                    {
+                        // Control characters U+0000..U+001F require \uXXXX encoding
+                        char buf[8];
+                        std::snprintf(buf, sizeof(buf), "\\u%04x",
+                                      static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                        out += buf;
+                    }
+                    else
+                    {
+                        out += c;
+                    }
+                    break;
+                }
+            }
+            return out;
+        }
+    } // namespace
+
     // --- Profiler ---
 
     Profiler::Profiler()
@@ -138,11 +198,14 @@ namespace DetourModKit
             }
             first = false;
 
-            // Chrome Trace Event Format: "X" = complete event (has duration)
+            // Chrome Trace Event Format: "X" = complete event (has duration).
+            // Escape the name to produce valid JSON even if the caller
+            // passes a string containing quotes or backslashes.
             const double ts = static_cast<double>(s.start_ticks) * ticks_to_us;
+            const std::string escaped_name = escape_json_string(s.name);
             json += std::format(
                 R"({{"name":"{}","ph":"X","ts":{:.1f},"dur":{},"pid":1,"tid":{}}})",
-                s.name, ts, s.duration_us, s.thread_id);
+                escaped_name, ts, s.duration_us, s.thread_id);
         }
 
         json += "\n]";

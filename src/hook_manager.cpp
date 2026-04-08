@@ -33,6 +33,10 @@ HookManager::~HookManager() noexcept
 {
     if (!m_shutdown_called.load(std::memory_order_acquire))
     {
+        // Fallback cleanup: if the caller failed to call DMK_Shutdown()
+        // (or HookManager::shutdown()), the destructor still disables and
+        // removes all hooks to prevent dangling detours.
+        //
         // m_mutator_gate is intentionally NOT acquired here. This destructor
         // only runs during static destruction (Meyers singleton), when no
         // other thread should be calling create_*_hook. Acquiring the gate
@@ -40,9 +44,10 @@ HookManager::~HookManager() noexcept
         // triggers a hook operation. The documented contract requires calling
         // DMK_Shutdown() before DLL unload, which does the gated teardown.
         //
-        // Disable hooks before acquiring the exclusive lock to avoid deadlock.
-        // A hooked thread blocked on m_hooks_mutex (e.g. via with_inline_hook)
-        // cannot drain from SafetyHook::disable() if we hold the lock first.
+        // Two-phase teardown (same pattern as shutdown()):
+        // 1. Disable hooks under shared lock so hooked threads blocked on
+        //    m_hooks_mutex can drain from SafetyHook::disable().
+        // 2. Clear maps under exclusive lock.
         {
             std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
             for (auto &[name, hook] : m_hooks)

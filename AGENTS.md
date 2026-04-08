@@ -204,6 +204,15 @@ hook_manager.with_inline_hook("camera_update", [](InlineHook &hook) {
 });
 ```
 
+### Example -- emitting events from hook callbacks
+
+```cpp
+// Use emit_safe() from hook callbacks to prevent unhandled handler
+// exceptions from crashing the host process. emit() propagates
+// exceptions directly, which terminates the game if uncaught.
+dispatcher.emit_safe(PlayerStateChanged{.health = player->health});
+```
+
 ## Testing
 
 - **Framework:** GoogleTest. Test entry point is `tests/main.cpp`.
@@ -249,7 +258,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 | InputManager | `mutex` for lifecycle, `atomic<InputPoller*>` for reads | Lock-free `is_binding_active()` |
 | Memory cache | Sharded `SRWLOCK` + epoch-based shutdown | Shared reader locks per shard |
 | Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config) | N/A (startup only) |
-| EventDispatcher | `shared_mutex` -- shared lock for `emit()`, exclusive lock for subscribe/unsubscribe; thread-local reentrancy guard rejects subscribe/unsubscribe from within handlers | `shared_lock` + contiguous vector iteration in subscription order |
+| EventDispatcher | `shared_mutex` -- shared lock for `emit()`/`emit_safe()`, exclusive lock for subscribe/unsubscribe; thread-local reentrancy guard rejects subscribe/unsubscribe from within handlers; `emit()` propagates handler exceptions, `emit_safe()` catches and skips them | `shared_lock` + contiguous vector iteration in subscription order |
 | Profiler | Lock-free ring buffer via atomic `fetch_add` on write position; odd/even sequence counter per sample slot prevents torn reads during concurrent export | Single atomic increment + sequence-guarded field writes per sample |
 
 ### Performance-critical paths
@@ -288,3 +297,4 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, loc
 - **Do not add** uninitialized variables -- always initialize at declaration with brace syntax or assignment.
 - **Do not use** `std::endl` -- use `'\n'`. `std::endl` forces a flush.
 - **Do not use** `#pragma once` -- use `#ifndef`/`#define`/`#endif` include guards.
+- **Do not use** `EventDispatcher::emit()` from hook callbacks -- use `emit_safe()` instead to prevent unhandled handler exceptions from crashing the host process.

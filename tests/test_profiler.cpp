@@ -407,6 +407,78 @@ TEST_F(ProfilerRecordTest, AvailableSamples_MatchesRecordCount)
     EXPECT_EQ(profiler.available_samples(), 5u);
 }
 
+// --- JSON escaping ---
+
+TEST_F(ProfilerRecordTest, ExportChromeJson_EscapesQuotesInName)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+
+    // Name contains characters that must be escaped in JSON
+    profiler.record("scope\"with\\special\tchars", tick.QuadPart, tick.QuadPart + 100, 1);
+
+    const std::string json = profiler.export_chrome_json();
+
+    // Quotes and backslashes must be escaped in the JSON output
+    EXPECT_NE(json.find("scope\\\"with\\\\special\\tchars"), std::string::npos)
+        << "JSON output must escape special characters. Got: " << json;
+
+    // Verify the JSON is still well-formed (starts with [, ends with ])
+    EXPECT_EQ(json.front(), '[');
+    EXPECT_EQ(json.back(), ']');
+}
+
+TEST_F(ProfilerRecordTest, ExportChromeJson_EscapesControlCharacters)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+
+    // Name with a newline and carriage return
+    profiler.record("line1\nline2\r", tick.QuadPart, tick.QuadPart + 100, 1);
+
+    const std::string json = profiler.export_chrome_json();
+
+    // Newline and CR must be escaped
+    EXPECT_NE(json.find("line1\\nline2\\r"), std::string::npos)
+        << "JSON output must escape control characters. Got: " << json;
+}
+
+TEST_F(ProfilerRecordTest, ExportChromeJson_EscapesBackspaceFormFeedAndRawControl)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+
+    // Name with backspace, form-feed, and a raw control byte (SOH = 0x01).
+    // String concatenation separates \x01 from the trailing 'd' to prevent
+    // the compiler from parsing "\x01d" as a single hex escape (0x1D).
+    const char name[] = "a\bb\fc" "\x01" "d";
+    profiler.record(name, tick.QuadPart, tick.QuadPart + 100, 1);
+
+    const std::string json = profiler.export_chrome_json();
+
+    EXPECT_NE(json.find("a\\bb\\fc\\u0001d"), std::string::npos)
+        << "JSON output must escape \\b, \\f, and raw control bytes. Got: " << json;
+}
+
+TEST_F(ProfilerRecordTest, ExportChromeJson_PlainNameUnchanged)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+
+    profiler.record("plain_name", tick.QuadPart, tick.QuadPart + 100, 1);
+
+    const std::string json = profiler.export_chrome_json();
+    EXPECT_NE(json.find("\"name\":\"plain_name\""), std::string::npos);
+}
+
 TEST_F(ProfilerRecordTest, Capacity_MatchesDefaultCapacity)
 {
     const auto &profiler = Profiler::get_instance();

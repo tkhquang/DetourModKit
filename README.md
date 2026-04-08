@@ -108,7 +108,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 - Handlers invoked in subscription order (preserved across unsubscribe)
 - Thread-local reentrancy guard detects and rejects subscribe/unsubscribe calls from within a handler, preventing deadlock
 - Compose multiple dispatchers for multi-event architectures
-- `emit_safe()` for exception-tolerant dispatch
+- `emit_safe()` for exception-tolerant dispatch (recommended for hook callbacks)
 - Safe when the dispatcher is destroyed before its subscriptions (weak_ptr guard)
 
 </details>
