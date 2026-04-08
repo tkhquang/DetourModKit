@@ -386,3 +386,56 @@ TEST_F(ProfilerRecordTest, ProfileScopeMacro_IsNoOpWhenDisabled)
 }
 
 #endif // DMK_ENABLE_PROFILING
+
+TEST_F(ProfilerRecordTest, AvailableSamples_InitiallyZero)
+{
+    const auto &profiler = Profiler::get_instance();
+    EXPECT_EQ(profiler.available_samples(), 0u);
+}
+
+TEST_F(ProfilerRecordTest, AvailableSamples_MatchesRecordCount)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+
+    for (int i = 0; i < 5; ++i)
+    {
+        profiler.record("sample", tick.QuadPart, tick.QuadPart + 100, 1);
+    }
+    EXPECT_EQ(profiler.available_samples(), 5u);
+}
+
+TEST_F(ProfilerRecordTest, Capacity_MatchesDefaultCapacity)
+{
+    const auto &profiler = Profiler::get_instance();
+    EXPECT_EQ(profiler.capacity(), Profiler::DEFAULT_CAPACITY);
+}
+
+TEST_F(ProfilerRecordTest, ExportToFile_ContentMatchesChromeJson)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+    profiler.record("match_test", tick.QuadPart, tick.QuadPart + 5000, 1);
+
+    const std::string expected = profiler.export_chrome_json();
+
+    const std::string path = std::format("dmk_profiler_match_test_{}.json", _getpid());
+    ASSERT_TRUE(profiler.export_to_file(path));
+
+    std::FILE *fp = std::fopen(path.c_str(), "rb");
+    ASSERT_NE(fp, nullptr);
+    std::fseek(fp, 0, SEEK_END);
+    const long size = std::ftell(fp);
+    ASSERT_GE(size, 0L);
+    std::fseek(fp, 0, SEEK_SET);
+    std::string content(static_cast<size_t>(size), '\0');
+    (void)std::fread(content.data(), 1, static_cast<size_t>(size), fp);
+    std::fclose(fp);
+    std::remove(path.c_str());
+
+    EXPECT_EQ(content, expected);
+}

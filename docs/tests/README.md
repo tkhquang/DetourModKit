@@ -277,19 +277,20 @@ tests/
 ├── fixtures/
 │   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
 ├── test_async_logger.cpp       # Async logger tests
-├── test_hook_manager.cpp       # Hook manager unit tests
-├── test_hook_integration.cpp   # Cross-module hook integration tests
-├── test_input.cpp              # Input system tests
-├── test_memory.cpp             # Memory utilities tests
-├── test_scanner.cpp            # AOB scanner tests
-├── test_logger.cpp             # Logger tests
 ├── test_config.cpp             # Configuration tests
 ├── test_event_dispatcher.cpp   # Event dispatcher tests
-├── test_format.cpp             # Format utilities tests
 ├── test_filesystem.cpp         # Filesystem tests
+├── test_format.cpp             # Format utilities tests
+├── test_hook_integration.cpp   # Cross-module hook integration tests
+├── test_hook_manager.cpp       # Hook manager unit tests
+├── test_input.cpp              # Input system and input code tests
+├── test_logger.cpp             # Logger tests
 ├── test_math.cpp               # Math utilities tests
-├── test_platform.cpp           # Platform-specific tests (loader lock, module pinning)
+├── test_memory.cpp             # Memory utilities tests
+├── test_platform.cpp           # Platform detection and version macro tests
 ├── test_profiler.cpp           # Profiler tests
+├── test_scanner.cpp            # AOB scanner tests
+├── test_shutdown.cpp           # DMK_Shutdown orchestration tests
 ├── test_string.cpp             # String utilities tests
 └── test_win_file_stream.cpp    # Win32 file stream tests
 
@@ -335,10 +336,3 @@ g++ -o test_compile.exe docs/tests/test_compile.cpp
 5. **Guard platform-specific tests**: Use `GTEST_SKIP()` for architecture-dependent logic.
 6. **Clean rebuild for coverage**: After major changes, delete `.gcda` files or rebuild from scratch.
 7. **Follow naming conventions**: `s_` for file-scope statics, `m_` for members, `snake_case` for functions.
-
----
-
-## Related Documentation
-
-- [Project README](../../README.md) - Overview, build instructions, and API reference
-- [Hot-Reload Guide](../hot-reload/README.md) - Two-DLL hot-reload architecture for iterative mod development
