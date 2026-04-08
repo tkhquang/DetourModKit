@@ -239,15 +239,15 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 | Module | Thread safety | Hot-path mechanism |
 |--------|--------------|-------------------|
 | Scanner | Stateless -- inherently safe | N/A (startup only) |
-| HookManager | `shared_mutex` (readers) / `unique_lock` (writers); two-phase shutdown (disable under shared lock, clear under exclusive lock) | `shared_lock` for `with_inline_hook()` |
+| HookManager | `shared_mutex` (readers) / `unique_lock` (writers); two-phase shutdown (disable under shared lock, clear under exclusive lock); `m_mutator_gate` (shared_mutex) blocks new mutators during teardown; CAS on `m_shutdown_called` serializes shutdown/remove_all_hooks; double-checked fast-fail on `m_shutdown_called` in all mutators | `shared_lock` for `with_inline_hook()` |
 | Logger | `atomic<shared_ptr>` for lock-free async reads | Single atomic load on log level check |
 | AsyncLogger | Lock-free MPMC queue (Vyukov-style); post-join drain on shutdown (at most one message per producer can be lost in the nanosecond race between drain and force-zero -- accepted trade-off to avoid atomic overhead on every enqueue); timestamp caching in write batches | Atomic sequence numbers per slot |
 | InputPoller | Atomic `active_states_[]` array | `memory_order_relaxed` load per binding |
 | InputManager | `mutex` for lifecycle, `atomic<InputPoller*>` for reads | Lock-free `is_binding_active()` |
 | Memory cache | Sharded `SRWLOCK` + epoch-based shutdown | Shared reader locks per shard |
 | Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config) | N/A (startup only) |
-| EventDispatcher | `shared_mutex` -- shared lock for `emit()`, exclusive lock for subscribe/unsubscribe | `shared_lock` + contiguous vector iteration |
-| Profiler | Lock-free ring buffer via atomic `fetch_add` on write position | Single atomic increment + array write per sample |
+| EventDispatcher | `shared_mutex` -- shared lock for `emit()`, exclusive lock for subscribe/unsubscribe; thread-local reentrancy guard rejects subscribe/unsubscribe from within handlers | `shared_lock` + contiguous vector iteration in subscription order |
+| Profiler | Lock-free ring buffer via atomic `fetch_add` on write position; odd/even sequence counter per sample slot prevents torn reads during concurrent export | Single atomic increment + sequence-guarded field writes per sample |
 
 ### Performance-critical paths
 

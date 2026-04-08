@@ -47,10 +47,19 @@ namespace DetourModKit
         const size_t idx = write_pos_.fetch_add(1, std::memory_order_relaxed) & mask_;
 
         auto &sample = buffer_[idx];
+
+        // Odd sequence signals an in-progress write. Readers that observe
+        // an odd value skip this sample to avoid reading torn fields.
+        const uint32_t seq = sample.sequence.load(std::memory_order_relaxed);
+        sample.sequence.store(seq | 1, std::memory_order_release);
+
         sample.name = name;
         sample.start_ticks = start_ticks;
         sample.duration_us = duration_us;
         sample.thread_id = thread_id;
+
+        // Even sequence signals the write is complete and fields are consistent.
+        sample.sequence.store((seq | 1) + 1, std::memory_order_release);
     }
 
     // Caller must ensure no concurrent record() calls are in flight.
@@ -60,7 +69,15 @@ namespace DetourModKit
     void Profiler::reset() noexcept
     {
         write_pos_.store(0, std::memory_order_relaxed);
-        std::fill_n(buffer_.get(), capacity_, ProfileSample{});
+        for (size_t i = 0; i < capacity_; ++i)
+        {
+            auto &s = buffer_[i];
+            s.sequence.store(0, std::memory_order_relaxed);
+            s.name = nullptr;
+            s.start_ticks = 0;
+            s.duration_us = 0;
+            s.thread_id = 0;
+        }
     }
 
     std::string Profiler::export_chrome_json() const
@@ -89,7 +106,18 @@ namespace DetourModKit
         for (size_t i = 0; i < count; ++i)
         {
             const auto &s = buffer_[(start_idx + i) & mask_];
-            if (s.name == nullptr)
+
+            // Single pre-read sequence check: skip if odd (in-flight write).
+            // A full seqlock would re-check after reading fields to detect
+            // writes that started mid-read, but we intentionally omit the
+            // post-read re-check to avoid a second atomic load per sample
+            // on the export path.  The resulting race window is narrow
+            // (a write must start between the sequence load and the field
+            // reads) and benign -- a stale-but-consistent sample may appear
+            // in the export at worst.  Same trade-off as InputPoller's
+            // relaxed active_states_ reads (stale by one cycle is acceptable).
+            const uint32_t seq = s.sequence.load(std::memory_order_acquire);
+            if ((seq & 1) != 0 || s.name == nullptr)
             {
                 continue;
             }

@@ -63,15 +63,24 @@ namespace DetourModKit
 {
     /**
      * @brief A single timing sample recorded by the profiler.
-     * @details Packed to 24 bytes for cache-friendly storage. The ring buffer
-     *          holds contiguous ProfileSample arrays for predictable access patterns.
+     * @details The sequence field uses odd/even protocol to detect in-flight
+     *          writes: record() stores an odd sequence before writing fields
+     *          and an even sequence after. Readers skip samples with odd
+     *          sequence values (torn/in-progress writes).
      */
     struct ProfileSample
     {
-        const char *name{nullptr}; ///< Non-owning pointer to a string literal.
-        int64_t start_ticks{0};    ///< QPC tick count at scope entry.
-        uint32_t duration_us{0};   ///< Duration in microseconds (max ~71 minutes).
-        uint32_t thread_id{0};     ///< Win32 thread ID of the recording thread.
+        std::atomic<uint32_t> sequence{0}; ///< Odd = write in progress, even = committed.
+        const char *name{nullptr};         ///< Non-owning pointer to a string literal.
+        int64_t start_ticks{0};            ///< QPC tick count at scope entry.
+        uint32_t duration_us{0};           ///< Duration in microseconds (max ~71 minutes).
+        uint32_t thread_id{0};             ///< Win32 thread ID of the recording thread.
+
+        ProfileSample() noexcept = default;
+        ProfileSample(const ProfileSample &) = delete;
+        ProfileSample &operator=(const ProfileSample &) = delete;
+        ProfileSample(ProfileSample &&) = delete;
+        ProfileSample &operator=(ProfileSample &&) = delete;
     };
 
     /**
@@ -86,11 +95,11 @@ namespace DetourModKit
      *          the current write position and walking backwards.
      *
      * **Thread safety:**
-     * - `record()`: lock-free (atomic fetch_add)
+     * - `record()`: lock-free (atomic fetch_add + sequence counter)
      * - `reset()`: safe when no concurrent `record()` calls are in flight
      * - `export_chrome_json()` / `export_to_file()`: safe to call concurrently
-     *   with `record()` (snapshot-based); exported data may include partial
-     *   samples from in-flight scopes
+     *   with `record()`. Uses odd/even sequence protocol to skip in-flight
+     *   writes, preventing torn reads in the exported data
      */
     class Profiler
     {

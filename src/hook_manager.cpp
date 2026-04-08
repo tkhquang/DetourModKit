@@ -8,7 +8,6 @@
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
 
-
 HookManager &HookManager::get_instance()
 {
     static HookManager instance;
@@ -52,9 +51,16 @@ HookManager::~HookManager() noexcept
 
 void HookManager::shutdown()
 {
+    // Serialize with remove_all_hooks() via compare_exchange_strong.
+    // Only one teardown owner proceeds.
     bool expected = false;
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
+
+    // Block all mutators (create_*_hook, enable, disable, remove) before
+    // entering phase 1. They hold shared on m_mutator_gate, so acquiring
+    // exclusive here waits for active mutators and blocks new ones.
+    std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
     // Two-phase shutdown: disable hooks under a shared lock first so that
     // hooked threads blocked on m_hooks_mutex can drain from SafetyHook's
@@ -76,12 +82,11 @@ void HookManager::shutdown()
         // as false (accepted) before the map is fully cleared.
         //
         // This intentionally allows reuse after shutdown (hot-reload).
-        // The exclusive lock serializes the entire clear-and-reset sequence,
-        // so there is no window where a concurrent create_*_hook can slip
-        // through against a half-cleared map. Making shutdown permanent
-        // would break the documented hot-reload workflow without adding
-        // safety, since callers that destroy detour functions after shutdown
-        // have a caller-side lifetime bug regardless of the flag state.
+        // The exclusive lock on m_mutator_gate serializes the entire
+        // clear-and-reset sequence, so there is no window where a
+        // concurrent create_*_hook can slip through against a half-cleared
+        // map. The mutator_gate exclusive lock is released here, allowing
+        // new mutators to proceed with a fresh m_shutdown_called=false.
         m_shutdown_called.store(false, std::memory_order_release);
     }
 }
@@ -143,10 +148,22 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     void **original_trampoline,
     const HookConfig &config)
 {
+    // Non-locking fast-fail: avoid acquiring mutator_gate when shutdown
+    // is already in progress.
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        if (original_trampoline)
+            *original_trampoline = nullptr;
+        m_logger.error("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
+        // Re-check after acquiring locks (double-checked pattern).
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
@@ -293,8 +310,15 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.error("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
         if (m_shutdown_called.load(std::memory_order_acquire))
@@ -426,6 +450,14 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
 
 std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot remove hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+
     // Two-phase removal: disable under shared lock first so that in-flight
     // trampoline callers (which may acquire shared_lock via with_inline_hook)
     // can drain before we take the exclusive lock to erase. Without this,
@@ -457,6 +489,31 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
 void HookManager::remove_all_hooks()
 {
+    // Serialize with shutdown() via compare_exchange_strong.
+    // Only one teardown owner proceeds.
+    bool expected = false;
+    if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+        return;
+
+    // Block all mutators (create_*_hook, enable, disable, remove) before
+    // entering phase 1. They hold shared on m_mutator_gate, so acquiring
+    // exclusive here waits for active mutators and blocks new ones.
+    std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+
+    // Two-phase removal: disable hooks under shared lock first so that
+    // in-flight trampoline callers (which may hold shared_lock via
+    // with_inline_hook) can drain before we take the exclusive lock
+    // to erase. Without this, SafetyHook's destructor waiting for
+    // trampoline threads while holding the exclusive lock would
+    // deadlock against those threads.
+    {
+        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        for (auto &[name, hook] : m_hooks)
+        {
+            (void)hook->disable();
+        }
+    }
+
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
     size_t num_vmt = m_vmt_hooks.size();
@@ -478,15 +535,29 @@ void HookManager::remove_all_hooks()
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 
-    // Both shutdown() and remove_all_hooks() reset m_shutdown_called to false
-    // under the exclusive lock, allowing subsequent create_*_hook() calls to
-    // succeed. See the comment in shutdown() for the serialization rationale.
+    // Reset under the lock so concurrent create_*_hook calls cannot
+    // observe the flag as true (rejected) and then immediately see it
+    // as false (accepted) before the map is fully cleared.
+    // The mutator_gate exclusive lock is released here, allowing new
+    // mutators to proceed with a fresh m_shutdown_called=false.
     m_shutdown_called.store(false, std::memory_order_release);
 }
 
 std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
     auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
@@ -516,7 +587,19 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
 
 std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_id)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
     auto it = m_hooks.find(hook_id);
     if (it == m_hooks.end())
     {
@@ -586,6 +669,12 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
 std::expected<std::string, HookError> HookManager::create_vmt_hook(
     std::string_view name, void *object)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.error("HookManager: Shutdown in progress. Cannot create VMT hook '{}'.", name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);

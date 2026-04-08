@@ -394,6 +394,10 @@ namespace DetourModKit
      * @brief Manages the lifecycle of all hooks (Inline, Mid, and VMT) using SafetyHook.
      * @details Provides a centralized API for creating, removing, enabling, and disabling hooks.
      *          Thread-safe for all public methods. Uses std::expected for explicit error handling.
+     * @note Lock ordering: 1. m_mutator_gate (shared or exclusive) then 2. m_hooks_mutex (shared or exclusive).
+     *          Mutators (create_*_hook, enable, disable, remove) acquire shared m_mutator_gate first,
+     *          then shared or exclusive m_hooks_mutex. Shutdown and remove_all_hooks acquire exclusive
+     *          m_mutator_gate first to block new mutators, then proceed with two-phase cleanup.
      */
     class HookManager
     {
@@ -691,10 +695,14 @@ namespace DetourModKit
 
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
-         * @details Clears all inline, mid, and VMT hooks, then resets the internal
-         *          shutdown flag to false. This allows subsequent create_*_hook() calls
-         *          to succeed, enabling hot-reload workflows where all hooks are torn
-         *          down and recreated without restarting the process.
+         * @details Uses two-phase removal: disables all hooks under a shared lock
+         *          first so that in-flight trampoline callers can drain, then clears
+         *          the maps under an exclusive lock. This prevents deadlock when a
+         *          hooked thread is blocked on m_hooks_mutex via with_inline_hook().
+         *
+         *          After clearing, resets the internal shutdown flag to false,
+         *          allowing subsequent create_*_hook() calls to succeed for
+         *          hot-reload workflows.
          */
         void remove_all_hooks();
 
@@ -951,7 +959,7 @@ namespace DetourModKit
         }
 
     private:
-        /// @brief Internal log entry used to defer logging outside held locks.
+        /** @brief Internal log entry used to defer logging outside held locks. */
         struct DeferredLogEntry
         {
             std::string msg;
@@ -965,6 +973,13 @@ namespace DetourModKit
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
+
+        /** @brief Gate that mutators (create_*_hook, enable_hook, disable_hook, remove_hook)
+         *  acquire shared on entry, allowing shutdown/remove_all_hooks to acquire exclusive
+         *  to block new work. Teardown serialization uses compare_exchange_strong on
+         *  m_shutdown_called rather than a separate mutex.
+         */
+        mutable std::shared_mutex m_mutator_gate;
 
         [[nodiscard]] int &get_reentrancy_guard() noexcept
         {
