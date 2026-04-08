@@ -438,3 +438,62 @@ TEST(EventDispatcherTest, SubscriptionsInVector_CleanupOnClear)
     subs.clear();
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
 }
+
+TEST(EventDispatcherTest, Emit_PropagatesHandlerException)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    auto sub = dispatcher.subscribe([](const SimpleEvent &) {
+        throw std::runtime_error("handler error");
+    });
+
+    EXPECT_THROW(dispatcher.emit(SimpleEvent{1}), std::runtime_error);
+}
+
+TEST(EventDispatcherTest, EmitSafe_AllHandlersRunDespiteMultipleExceptions)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+    int success_count = 0;
+
+    auto sub1 = dispatcher.subscribe([](const SimpleEvent &) {
+        throw std::runtime_error("error 1");
+    });
+    auto sub2 = dispatcher.subscribe([&success_count](const SimpleEvent &) {
+        ++success_count;
+    });
+    auto sub3 = dispatcher.subscribe([](const SimpleEvent &) {
+        throw std::logic_error("error 2");
+    });
+    auto sub4 = dispatcher.subscribe([&success_count](const SimpleEvent &) {
+        ++success_count;
+    });
+
+    // emit_safe must not propagate; all non-throwing handlers must execute
+    dispatcher.emit_safe(SimpleEvent{1});
+    EXPECT_EQ(success_count, 2);
+}
+
+TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
+{
+    // Verifies that a subscription whose reset() was deferred during emit
+    // is properly cleaned up when the Subscription object is destroyed.
+    EventDispatcher<SimpleEvent> dispatcher;
+    int call_count = 0;
+
+    {
+        Subscription held_sub;
+        held_sub = dispatcher.subscribe([&](const SimpleEvent &) {
+            ++call_count;
+            // Deferred: reset() inside handler is silently skipped
+            held_sub.reset();
+        });
+
+        dispatcher.emit(SimpleEvent{1});
+        EXPECT_EQ(call_count, 1);
+        EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+        // held_sub destroyed here -- destructor retries reset() outside handler
+    }
+
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+}
+

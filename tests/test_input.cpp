@@ -3,6 +3,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "DetourModKit/input.hpp"
@@ -1610,4 +1611,75 @@ TEST(InputStringTest, InputSourceToString_IsNoexcept)
 {
     static_assert(noexcept(input_source_to_string(InputSource::Keyboard)));
     static_assert(noexcept(input_source_to_string(InputSource::Gamepad)));
+}
+
+// --- InputCodeHash ---
+
+TEST(InputCodeHashTest, DifferentCodesProduceDifferentHashes)
+{
+    InputCodeHash hasher;
+
+    InputCode kb_a = keyboard_key(0x41);
+    InputCode kb_b = keyboard_key(0x42);
+    InputCode mouse_1 = mouse_button(0x01);
+    InputCode gp_a = gamepad_button(GamepadCode::A);
+
+    std::size_t h1 = hasher(kb_a);
+    std::size_t h2 = hasher(kb_b);
+    std::size_t h3 = hasher(mouse_1);
+    std::size_t h4 = hasher(gp_a);
+
+    EXPECT_NE(h1, h2);
+    EXPECT_NE(h1, h3);
+    EXPECT_NE(h1, h4);
+    EXPECT_NE(h2, h3);
+    EXPECT_NE(h2, h4);
+    EXPECT_NE(h3, h4);
+}
+
+TEST(InputCodeHashTest, SameCodeProducesSameHash)
+{
+    InputCodeHash hasher;
+
+    InputCode a1 = keyboard_key(0x41);
+    InputCode a2 = keyboard_key(0x41);
+
+    EXPECT_EQ(hasher(a1), hasher(a2));
+}
+
+TEST(InputCodeHashTest, UsableInUnorderedSet)
+{
+    std::unordered_set<InputCode, InputCodeHash> codes;
+
+    codes.insert(keyboard_key(0x41));
+    codes.insert(keyboard_key(0x42));
+    codes.insert(mouse_button(0x01));
+    codes.insert(gamepad_button(GamepadCode::A));
+    codes.insert(keyboard_key(0x41));
+
+    EXPECT_EQ(codes.size(), 4u);
+    EXPECT_EQ(codes.count(keyboard_key(0x41)), 1u);
+    EXPECT_EQ(codes.count(keyboard_key(0x42)), 1u);
+    EXPECT_EQ(codes.count(mouse_button(0x01)), 1u);
+    EXPECT_EQ(codes.count(gamepad_button(GamepadCode::A)), 1u);
+    EXPECT_NE(codes.find(keyboard_key(0x41)), codes.end());
+    EXPECT_EQ(codes.find(keyboard_key(0x99)), codes.end());
+}
+
+TEST(InputCodeNameTest, FormatInputCode_UnknownMouseCode_FallsBackToHex)
+{
+    InputCode unknown_mouse = mouse_button(0xFE);
+    EXPECT_EQ(format_input_code(unknown_mouse), "0xFE");
+}
+
+TEST(InputSourceTest, UnknownSourceToString)
+{
+    auto unknown = static_cast<InputSource>(999);
+    EXPECT_EQ(input_source_to_string(unknown), "Unknown");
+}
+
+TEST(InputModeTest, UnknownModeToString)
+{
+    auto unknown = static_cast<InputMode>(999);
+    EXPECT_EQ(input_mode_to_string(unknown), "Unknown");
 }

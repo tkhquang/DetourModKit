@@ -939,6 +939,131 @@ TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
     SUCCEED();
 }
 
+TEST_F(LoggerTest, Reconfigure_InvalidPath_KeepsOldFile)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.info("BEFORE_INVALID_RECONFIG_3k7m");
+    logger.flush();
+
+    logger.reconfigure("BAD", "Z:\\nonexistent\\dir\\test.log", "%Y-%m-%d %H:%M:%S");
+
+    logger.info("AFTER_INVALID_RECONFIG_9p2x");
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("BEFORE_INVALID_RECONFIG_3k7m"), std::string::npos);
+}
+
+TEST_F(LoggerTest, FlushAsync_DrainsPendingMessages)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+
+    for (int i = 0; i < 20; ++i)
+    {
+        logger.info("ASYNC_DRAIN_MSG_{}", i);
+    }
+
+    logger.flush();
+    logger.disable_async_mode();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("ASYNC_DRAIN_MSG_0"), std::string::npos);
+    EXPECT_NE(content.find("ASYNC_DRAIN_MSG_19"), std::string::npos);
+}
+
+TEST_F(LoggerTest, ShutdownWithAsyncMode_NoHang)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+
+    for (int i = 0; i < 50; ++i)
+    {
+        logger.info("SHUTDOWN_NOHANG_MSG_{}", i);
+    }
+
+    auto start = std::chrono::steady_clock::now();
+    logger.shutdown();
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    EXPECT_LT(elapsed, std::chrono::seconds(5));
+}
+
+TEST_F(LoggerTest, Configure_AbsolutePath_Works)
+{
+    static std::atomic<int> s_abs_counter{0};
+    auto abs_log_file = std::filesystem::temp_directory_path() /
+                        ("test_logger_abspath_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(s_abs_counter.fetch_add(1)) + ".log");
+
+    Logger::configure("ABS_TEST", abs_log_file.string(), "%Y-%m-%d %H:%M:%S");
+
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+    logger.info("ABS_PATH_VERIFY_2w5q");
+    logger.flush();
+
+    EXPECT_TRUE(std::filesystem::exists(abs_log_file));
+
+    std::ifstream ifs(abs_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("ABS_PATH_VERIFY_2w5q"), std::string::npos);
+
+    try
+    {
+        if (std::filesystem::exists(abs_log_file))
+            std::filesystem::remove(abs_log_file);
+    }
+    catch (const std::filesystem::filesystem_error &)
+    {
+    }
+}
+
+TEST_F(LoggerTest, Reconfigure_WhileAsyncMode_Works)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+
+    static std::atomic<int> s_reconfig_counter{0};
+    auto new_file = std::filesystem::temp_directory_path() /
+                    ("test_logger_async_reconfig_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(s_reconfig_counter.fetch_add(1)) + ".log");
+
+    logger.reconfigure("ASYNC_RECONFIG", new_file.string(), "%Y-%m-%d %H:%M:%S");
+
+    logger.info("ASYNC_RECONFIG_VERIFY_8n4j");
+    logger.flush();
+    logger.disable_async_mode();
+
+    std::ifstream ifs(new_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("ASYNC_RECONFIG_VERIFY_8n4j"), std::string::npos);
+
+    try
+    {
+        if (std::filesystem::exists(new_file))
+            std::filesystem::remove(new_file);
+    }
+    catch (const std::filesystem::filesystem_error &)
+    {
+    }
+}
+
 TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
 {
     Logger &logger = Logger::get_instance();

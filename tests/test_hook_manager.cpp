@@ -2109,3 +2109,170 @@ TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
     // the test-local targets are destroyed.
     hook_manager_->remove_all_vmt_hooks();
 }
+
+TEST_F(HookManagerTest, ApplyVmtHook_NotFoundName_ReturnsFalse)
+{
+    int dummy_object = 0;
+    EXPECT_FALSE(hook_manager_->apply_vmt_hook("NonExistentVmt", &dummy_object));
+}
+
+TEST_F(HookManagerTest, RemoveVmtFromObject_NotFoundName_ReturnsFalse)
+{
+    int dummy_object = 0;
+    EXPECT_FALSE(hook_manager_->remove_vmt_from_object("NonExistentVmt", &dummy_object));
+}
+
+TEST_F(HookManagerTest, RemoveAllVmtHooks_WhenEmpty_NoOp)
+{
+    EXPECT_NO_THROW(hook_manager_->remove_all_vmt_hooks());
+    EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
+}
+
+TEST_F(HookManagerTest, GetHookIds_FilterByActive_ReturnsMatching)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "ActiveFilterHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    auto active_ids = hook_manager_->get_hook_ids(HookStatus::Active);
+    ASSERT_FALSE(active_ids.empty());
+
+    bool found = false;
+    for (const auto &id : active_ids)
+    {
+        if (id == "ActiveFilterHook")
+        {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST_F(HookManagerTest, GetHookIds_FilterByDisabled_AfterDisable)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "DisableFilterHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_TRUE(hook_manager_->disable_hook("DisableFilterHook").has_value());
+
+    auto disabled_ids = hook_manager_->get_hook_ids(HookStatus::Disabled);
+    ASSERT_FALSE(disabled_ids.empty());
+
+    bool found = false;
+    for (const auto &id : disabled_ids)
+    {
+        if (id == "DisableFilterHook")
+        {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
+TEST_F(HookManagerTest, ShutdownThenEnable_ReturnsNotFound)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "ShutEnableHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    hook_manager_->shutdown();
+
+    auto enable_result = hook_manager_->enable_hook("ShutEnableHook");
+    ASSERT_FALSE(enable_result.has_value());
+    EXPECT_EQ(enable_result.error(), HookError::HookNotFound);
+}
+
+TEST_F(HookManagerTest, ShutdownThenDisable_ReturnsNotFound)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "ShutDisableHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    hook_manager_->shutdown();
+
+    auto disable_result = hook_manager_->disable_hook("ShutDisableHook");
+    ASSERT_FALSE(disable_result.has_value());
+    EXPECT_EQ(disable_result.error(), HookError::HookNotFound);
+}
+
+TEST_F(HookManagerTest, ShutdownThenRemove_ReturnsNotFound)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "ShutRemoveHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    hook_manager_->shutdown();
+
+    auto remove_result = hook_manager_->remove_hook("ShutRemoveHook");
+    ASSERT_FALSE(remove_result.has_value());
+    EXPECT_EQ(remove_result.error(), HookError::HookNotFound);
+}
+
+TEST_F(HookManagerTest, ShutdownThenGetStatus_ReturnsNullopt)
+{
+    void *tramp = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "ShutStatusHook",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &tramp);
+    ASSERT_TRUE(result.has_value());
+
+    hook_manager_->shutdown();
+
+    auto status = hook_manager_->get_hook_status("ShutStatusHook");
+    EXPECT_FALSE(status.has_value());
+}
+
+TEST(HookErrorStringTest, ErrorToString_InvalidEnum_ReturnsInvalidCode)
+{
+    auto result = Hook::error_to_string(static_cast<HookError>(9999));
+    EXPECT_EQ(result, "Invalid error code");
+}
+
+TEST(HookStatusStringTest, StatusToString_InvalidEnum_ReturnsUnknown)
+{
+    auto result = Hook::status_to_string(static_cast<HookStatus>(9999));
+    EXPECT_EQ(result, "Unknown");
+}
+
+TEST_F(HookManagerTest, RemoveAllHooks_WithOnlyVmtHooks)
+{
+    struct FakeVtable
+    {
+        void *methods[4]{};
+    };
+    FakeVtable vtable{};
+    void *vptr = &vtable;
+
+    auto vmt_result = hook_manager_->create_vmt_hook("VmtOnlyHook", &vptr);
+    ASSERT_TRUE(vmt_result.has_value());
+    EXPECT_FALSE(hook_manager_->get_vmt_hook_names().empty());
+
+    hook_manager_->remove_all_hooks();
+
+    EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
+}
