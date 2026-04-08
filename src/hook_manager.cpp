@@ -33,6 +33,13 @@ HookManager::~HookManager() noexcept
 {
     if (!m_shutdown_called.load(std::memory_order_acquire))
     {
+        // m_mutator_gate is intentionally NOT acquired here. This destructor
+        // only runs during static destruction (Meyers singleton), when no
+        // other thread should be calling create_*_hook. Acquiring the gate
+        // would risk deadlock if another singleton's destructor indirectly
+        // triggers a hook operation. The documented contract requires calling
+        // DMK_Shutdown() before DLL unload, which does the gated teardown.
+        //
         // Disable hooks before acquiring the exclusive lock to avoid deadlock.
         // A hooked thread blocked on m_hooks_mutex (e.g. via with_inline_hook)
         // cannot drain from SafetyHook::disable() if we hold the lock first.

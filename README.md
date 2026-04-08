@@ -3,37 +3,192 @@
 [![Coverage Report ≥ 80%](https://github.com/tkhquang/DetourModKit/actions/workflows/coverage-pages.yml/badge.svg)](https://tkhquang.github.io/DetourModKit/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
+[Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Guides](#guides) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
 
 DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, and configuration management. It is built with MinGW in mind but aims for general C++ compatibility.
 
 ## Features
 
-* **AOB Scanner:** Find array-of-bytes (signatures) in memory with wildcard support and SIMD-accelerated pattern verification: AVX2 (32 bytes/iteration, runtime-detected on Haswell+ CPUs) with SSE2 fallback (16 bytes/iteration) for patterns >= 16 bytes. Supports `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7) and nth-occurrence matching (1-based) for patterns that hit multiple locations. Includes RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `std::expected` with typed `RipResolveError` for actionable diagnostics on failure). Provides `scan_executable_regions()` for scanning all committed executable pages in the process -- useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module.
-* **Hook Manager:** A C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing inline hooks, mid-function hooks, and VMT (virtual method table) hooks. Inline and mid hooks target functions by direct address or AOB scan. VMT hooks clone an object's vtable and replace individual method slots by index, enabling per-object interception of virtual calls (e.g., D3D device methods, game AI interfaces). Supports applying a single hooked vtable to multiple objects and safe callback-based access to hooked methods via `with_vmt_method()`.
-* **Configuration System:** Load settings from INI files. Mods register their configuration variables (defined in the mod's code) and the kit handles parsing and value assignment. Supports key combos with modifier keys via `register_key_combo` (format: `modifier+trigger`, e.g., `Ctrl+Shift+F3`). Multiple independent combos can be comma-separated (e.g., `F3,Gamepad_LT+Gamepad_B`). Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats are all supported. (Powered by [SimpleIni](https://github.com/brofield/simpleini)).
-* **Logger:** A flexible singleton logger for outputting messages to a log file. Supports configurable log levels, timestamps, and prefixes. Features **async logging** for high-throughput scenarios, **format string placeholders** for concise log messages, **concurrent file access** via Win32 shared-access file handles (log files can be read by external tools while logging is active), and `is_enabled(LogLevel)` for gating expensive trace-only work.
-* **Async Logger:** A lock-free, bounded queue-based async logger that decouples log message production from file I/O. Designed for minimal latency on the producer side with batched writes on the consumer thread. Features configurable overflow policies (DropNewest/DropOldest/Block/SyncFallback), bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation, inline buffer optimization for messages of size <= 512 bytes (inclusive), and message size validation with truncation for messages larger than 16 MB (messages > 16 MB are truncated to 16 MB rather than rejected).
-* **Memory Utilities:** Functions for checking memory readability/writability and writing bytes to memory. Includes an optional memory region cache with sharded SRWLOCK concurrency, LRU eviction, and stampede coalescing. Provides `is_readable_nonblocking()` (tri-state: readable/not-readable/unknown) for latency-sensitive threads, `read_ptr_unsafe()` for safe pointer reads in hot paths (SEH-protected on MSVC, cache-accelerated with VirtualQuery fallback on MinGW), and `read_ptr_unchecked()` -- an inline header-only variant with a configurable low-address validity guard for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity).
-* **Event Dispatcher:** A typed pub/sub event system with RAII subscription management. Each `EventDispatcher<Event>` manages a single event type with `shared_mutex` concurrency (concurrent `emit()` via shared lock, exclusive lock for subscribe/unsubscribe). Subscriptions auto-unsubscribe on destruction. Handlers are invoked in subscription order (preserved across unsubscribe). A thread-local reentrancy guard detects and rejects subscribe/unsubscribe calls from within a handler, preventing deadlock. Compose multiple dispatchers for multi-event architectures. Includes `emit_safe()` for exception-tolerant dispatch. Safe when the dispatcher is destroyed before its subscriptions (weak_ptr guard).
-* **Profiler:** Opt-in scoped timing instrumentation with zero overhead when disabled. Compile-time gated via `DMK_ENABLE_PROFILING`. When enabled, records lock-free timing samples (~50 ns per scope) into a fixed-size ring buffer (64K samples, ~1.5 MB). Uses an odd/even sequence counter per sample slot so that `export_chrome_json()` can safely skip in-flight writes without torn reads, even when called concurrently with `record()`. Exports to [Chrome Tracing JSON](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview) format viewable in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev). Use `DMK_PROFILE_SCOPE("name")` or `DMK_PROFILE_FUNCTION()` macros to instrument code paths; use `Profiler::export_to_file()` to dump results after a profiling session.
-* **String Utilities:** Whitespace trimming for string cleanup.
-* **Format Utilities:** Inline formatting helpers for memory addresses, byte values, VK codes, and hex integer vectors using `std::format`.
-* **Filesystem Utilities:** Basic filesystem operations, notably getting the current module's runtime directory.
-* **Math Utilities:** Provides basic mathematical utility functions (e.g., angle conversions).
-* **Version Macros:** Compile-time version checking via `DMK_VERSION_MAJOR`, `DMK_VERSION_MINOR`, `DMK_VERSION_PATCH`, `DMK_VERSION_STRING`, and `DMK_VERSION_AT_LEAST(major, minor, patch)`. Generated from CMake's `project(VERSION)` at configure time.
-* **Input System:** Hotkey monitoring with a background polling thread.
-  * **Input sources & modes:** Supports keyboard, mouse, and XInput gamepad input via a unified `InputCode` tagged type (`InputSource` + button code). Press (edge-triggered) and hold (level-triggered) input modes with modifier combinations (AND logic for modifiers, OR logic between independent combos). **Strict modifier matching** ensures that a binding only fires when exactly its declared modifiers are held -- pressing `Shift+V` will never trigger a plain `V` binding. Multiple independent combos can share a single binding name for cross-device hotkeys (e.g., keyboard F3 OR gamepad LT+B). Gamepad analog triggers (LT/RT) and thumbstick axes are treated as digital buttons with configurable deadzone thresholds. Focus-aware by default -- input events are ignored when the process does not own the foreground window.
-  * **Threading & lifecycle:** Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton for convenience. Two-phase initialization (construct then start) for safe thread launching. `condition_variable_any` with `stop_token` for responsive cooperative shutdown. Exception-safe callback invocation. Automatic hold release on shutdown. Loader-lock-aware shutdown: background threads are safely detached instead of joined when called from `DllMain` or `FreeLibrary` context.
-  * **Performance:** Hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps). Supports multiple bindings per name for multi-combo hotkeys. Lock-free `is_running()` via atomic flag. O(1) reverse name lookup for `input_code_to_name()`.
-  * **Gamepad & polling:** XInput is polled once per cycle and skipped entirely when no gamepad bindings are registered. Reconnection attempts are throttled to every 2 seconds when no controller is connected, avoiding the per-cycle overhead of `XInputGetState` on disconnected slots.
-  * **Configuration integration:** Loading input codes from INI files (named keys, hex VK codes, or mixed). Named key resolution uses binary search for efficient lookup. `register_press` and `register_hold` accept `KeyComboList` directly for zero-boilerplate binding of config-parsed key combos.
+| Module | Description | Header |
+|--------|-------------|--------|
+| AOB Scanner | SIMD-accelerated pattern scanning with wildcards and RIP resolution | `scanner.hpp` |
+| Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook | `hook_manager.hpp` |
+| Configuration | INI-based settings with key combo support | `config.hpp` |
+| Logger | Synchronous singleton logger with format strings | `logger.hpp` |
+| Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
+| Memory Utilities | Readability checks, region cache, and safe pointer reads | `memory.hpp` |
+| Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
+| Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
+| Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
+| Filesystem Utilities | Module directory resolution (wide-string API) | `filesystem.hpp` |
+| Math Utilities | Angle conversions (header-only) | `math.hpp` |
+| Version Macros | Compile-time version checking generated from CMake | `version.hpp` |
+| Input System | Hotkey monitoring with background polling (keyboard/mouse/gamepad) | `input.hpp`, `input_codes.hpp` |
+
+<details>
+<summary><strong>AOB Scanner</strong></summary>
+
+- Find array-of-bytes (signatures) in memory with wildcard support
+- SIMD-accelerated pattern verification:
+  - AVX2 (32 bytes/iteration, runtime-detected on Haswell+ CPUs)
+  - SSE2 fallback (16 bytes/iteration) for patterns >= 16 bytes
+- `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7)
+- Nth-occurrence matching (1-based) for patterns that hit multiple locations
+- RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `std::expected` with typed `RipResolveError` for actionable diagnostics)
+- `scan_executable_regions()` for scanning all committed executable pages in the process - useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module
+
+</details>
+
+<details>
+<summary><strong>Hook Manager</strong></summary>
+
+- C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing hooks
+- **Inline hooks** and **mid-function hooks** - target functions by direct address or AOB scan
+- **VMT (virtual method table) hooks** - clone an object's vtable and replace individual method slots by index
+  - Per-object interception of virtual calls (e.g., D3D device methods, game AI interfaces)
+  - Apply a single hooked vtable to multiple objects
+  - Safe callback-based access to hooked methods via `with_vmt_method()`
+
+</details>
+
+<details>
+<summary><strong>Configuration System</strong></summary>
+
+- Load settings from INI files (powered by [SimpleIni](https://github.com/brofield/simpleini))
+- Mods register configuration variables; the kit handles parsing and value assignment
+- Key combo support via `register_key_combo`:
+  - Format: `modifier+trigger` (e.g., `Ctrl+Shift+F3`)
+  - Comma-separated independent combos (e.g., `F3,Gamepad_LT+Gamepad_B`)
+  - Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats
+
+</details>
+
+<details>
+<summary><strong>Logger</strong></summary>
+
+- Flexible singleton logger for outputting messages to a log file
+- Configurable log levels, timestamps, and prefixes
+- Async logging for high-throughput scenarios
+- Format string placeholders for concise log messages
+- Concurrent file access via Win32 shared-access file handles (log files readable by external tools while logging is active)
+- `is_enabled(LogLevel)` for gating expensive trace-only work
+
+</details>
+
+<details>
+<summary><strong>Async Logger</strong></summary>
+
+- Lock-free, bounded queue-based async logger decoupling log production from file I/O
+- Minimal latency on the producer side with batched writes on the consumer thread
+- Configurable overflow policies: DropNewest / DropOldest / Block / SyncFallback
+- Bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation
+- Inline buffer optimization for messages <= 512 bytes
+- Message size validation with truncation for messages > 16 MB
+
+</details>
+
+<details>
+<summary><strong>Memory Utilities</strong></summary>
+
+- Functions for checking memory readability/writability and writing bytes to memory
+- Optional memory region cache with sharded SRWLOCK concurrency, LRU eviction, and stampede coalescing
+- `is_readable_nonblocking()` - tri-state (readable/not-readable/unknown) for latency-sensitive threads
+- `read_ptr_unsafe()` - safe pointer reads in hot paths (SEH-protected on MSVC, cache-accelerated with VirtualQuery fallback on MinGW)
+- `read_ptr_unchecked()` - inline header-only variant with configurable low-address validity guard for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity)
+
+</details>
+
+<details>
+<summary><strong>Event Dispatcher</strong></summary>
+
+- Typed pub/sub event system with RAII subscription management
+- Each `EventDispatcher<Event>` manages a single event type
+- `shared_mutex` concurrency: concurrent `emit()` via shared lock, exclusive lock for subscribe/unsubscribe
+- Subscriptions auto-unsubscribe on destruction
+- Handlers invoked in subscription order (preserved across unsubscribe)
+- Thread-local reentrancy guard detects and rejects subscribe/unsubscribe calls from within a handler, preventing deadlock
+- Compose multiple dispatchers for multi-event architectures
+- `emit_safe()` for exception-tolerant dispatch
+- Safe when the dispatcher is destroyed before its subscriptions (weak_ptr guard)
+
+</details>
+
+<details>
+<summary><strong>Profiler</strong></summary>
+
+- Opt-in scoped timing instrumentation with zero overhead when disabled
+- Compile-time gated via `DMK_ENABLE_PROFILING`
+- When enabled, records lock-free timing samples (~50 ns per scope) into a fixed-size ring buffer (64K samples, ~1.5 MB)
+- Odd/even sequence counter per sample slot so `export_chrome_json()` can safely skip in-flight writes without torn reads
+- Exports to [Chrome Tracing JSON](https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview) format viewable in `chrome://tracing` or [Perfetto](https://ui.perfetto.dev)
+- Instrument with `DMK_PROFILE_SCOPE("name")` or `DMK_PROFILE_FUNCTION()` macros; export via `Profiler::export_to_file()`
+
+</details>
+
+<details>
+<summary><strong>Format, Filesystem, Math, and Version Utilities</strong></summary>
+
+- **Format** (`format.hpp`): Inline formatting helpers for memory addresses, byte values, VK codes, and hex integer vectors using `std::format`. Also includes string trim utilities.
+- **Filesystem** (`filesystem.hpp`): Module directory resolution (wide-string API).
+- **Math** (`math.hpp`): Angle conversions (header-only).
+- **Version** (`version.hpp`): Compile-time version checking via `DMK_VERSION_MAJOR`, `DMK_VERSION_MINOR`, `DMK_VERSION_PATCH`, `DMK_VERSION_STRING`, and `DMK_VERSION_AT_LEAST(major, minor, patch)`. Generated from CMake's `project(VERSION)` at configure time.
+
+</details>
+
+<details>
+<summary><strong>Input System</strong></summary>
+
+**Input sources and modes:**
+
+- Keyboard, mouse, and XInput gamepad input via a unified `InputCode` tagged type (`InputSource` + button code)
+- Press (edge-triggered) and hold (level-triggered) input modes with modifier combinations
+  - AND logic for modifiers, OR logic between independent combos
+- Strict modifier matching - a binding only fires when exactly its declared modifiers are held (pressing `Shift+V` will never trigger a plain `V` binding)
+- Multiple independent combos can share a single binding name for cross-device hotkeys (e.g., keyboard F3 OR gamepad LT+B)
+- Gamepad analog triggers (LT/RT) and thumbstick axes treated as digital buttons with configurable deadzone thresholds
+- Focus-aware by default - input events are ignored when the process does not own the foreground window
+
+**Threading and lifecycle:**
+
+- Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton
+- Two-phase initialization (construct then start) for safe thread launching
+- `condition_variable_any` with `stop_token` for responsive cooperative shutdown
+- Exception-safe callback invocation
+- Automatic hold release on shutdown
+- Loader-lock-aware shutdown: background threads are safely detached instead of joined when called from `DllMain` or `FreeLibrary` context
+
+**Performance:**
+
+- Hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps)
+- Multiple bindings per name for multi-combo hotkeys
+- Lock-free `is_running()` via atomic flag
+- O(1) reverse name lookup for `input_code_to_name()`
+
+**Gamepad and polling:**
+
+- XInput polled once per cycle; skipped entirely when no gamepad bindings are registered
+- Reconnection attempts throttled to every 2 seconds when no controller is connected, avoiding per-cycle overhead of `XInputGetState` on disconnected slots
+
+**Configuration integration:**
+
+- Load input codes from INI files (named keys, hex VK codes, or mixed)
+- Named key resolution uses binary search for efficient lookup
+- `register_press` and `register_hold` accept `KeyComboList` directly for zero-boilerplate binding of config-parsed key combos
+
+</details>
 
 ## Testing
 
 * **Comprehensive Test Suite:** Full unit test coverage for all modules using GoogleTest.
 * **Code Coverage:** Automated coverage analysis with 80% minimum line coverage gate in CI.
 * **Coverage Tools:** Built-in scripts for parsing and analyzing coverage reports.
+
+For detailed coverage analysis and test architecture, see the [Test Coverage Guide](docs/tests/README.md).
+
+## Guides
+
+* [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
+* [Test Coverage Guide](docs/tests/README.md) - Coverage analysis, test architecture, and module-level breakdown
 
 ## Prerequisites
 
@@ -129,9 +284,11 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── scanner.hpp           <-- AOB scanner
     │   │   ├── async_logger.hpp      <-- Async logging system
     │   │   ├── config.hpp
+    │   │   ├── event_dispatcher.hpp  <-- Typed pub/sub with RAII subscriptions
     │   │   ├── format.hpp            <-- String & format utilities
     │   │   ├── math.hpp              <-- Math utilities (angle conversions)
     │   │   ├── memory.hpp            <-- Memory utilities
+    │   │   ├── profiler.hpp          <-- Scoped timing (zero-cost when disabled)
     │   │   ├── filesystem.hpp        <-- Filesystem utilities
     │   │   ├── hook_manager.hpp      <-- Hook management
     │   │   ├── input.hpp             <-- Input/hotkey system
@@ -396,7 +553,7 @@ This method uses a pre-built and installed version of DetourModKit.
 
 ## Code Example
 
-```c++
+```cpp
 // MyMod/src/main.cpp
 #include <windows.h>
 #include <Psapi.h>
@@ -409,7 +566,8 @@ This method uses a pre-built and installed version of DetourModKit.
 #include <SimpleIni.h>
 
 // Global variables for your mod's configuration
-struct ModConfiguration {
+struct ModConfiguration
+{
     bool enable_greeting_hook = true;
     std::string log_level_setting = "INFO";
     DMKKeyComboList toggle_combo;
@@ -417,33 +575,37 @@ struct ModConfiguration {
 } g_mod_config;
 
 // Example Hook: Target function signature
-typedef void (__stdcall *OriginalGameFunction_PrintMessage_t)(const char* message, int type);
+using OriginalGameFunction_PrintMessage_t = void (__stdcall *)(const char *message, int type);
 OriginalGameFunction_PrintMessage_t original_GameFunction_PrintMessage = nullptr;
 
 // Detour function
-void __stdcall Detour_GameFunction_PrintMessage(const char* message, int type) {
-    DMKLogger& logger = DMKLogger::get_instance();
-    // Using format string placeholders for concise logging
+void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
+{
+    auto &logger = DMKLogger::get_instance();
     logger.info("Detour_GameFunction_PrintMessage CALLED! Original message: \"{}\", type: {}", message, type);
 
-    if (g_mod_config.enable_greeting_hook) {
+    if (g_mod_config.enable_greeting_hook)
+    {
         logger.debug("Modifying message because greeting hook is enabled.");
-        if (original_GameFunction_PrintMessage) {
+        if (original_GameFunction_PrintMessage)
+        {
             original_GameFunction_PrintMessage("Hello from DetourModKit! Hooked!", type + 100);
         }
         return;
     }
 
-    if (original_GameFunction_PrintMessage) {
+    if (original_GameFunction_PrintMessage)
+    {
         original_GameFunction_PrintMessage(message, type);
     }
 }
 
 // Mod Initialization Function
-void InitializeMyMod() {
+void InitializeMyMod()
+{
     // Configure the Logger
     DMKLogger::configure("MyMod", "MyMod.log", "%Y-%m-%d %H:%M:%S");
-    DMKLogger& logger = DMKLogger::get_instance();
+    auto &logger = DMKLogger::get_instance();
 
     // Enable async logging for high-throughput scenarios.
     // Optional: remove the block below if synchronous logging is preferred.
@@ -456,7 +618,7 @@ void InitializeMyMod() {
     DMKConfig::register_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
         [](bool v) { g_mod_config.enable_greeting_hook = v; }, true);
     DMKConfig::register_string("Debug", "LogLevel", "Log Level",
-        [](const std::string& v) { g_mod_config.log_level_setting = v; }, "INFO");
+        [](const std::string &v) { g_mod_config.log_level_setting = v; }, "INFO");
 
     // Register hotkey bindings from INI (modifier+trigger format)
     // Comma separates independent combos: "F3,Gamepad_LT+Gamepad_B" (F3 OR LT+B)
@@ -465,9 +627,9 @@ void InitializeMyMod() {
     // Mouse: "Mouse4", "Ctrl+Mouse1"
     // Gamepad: "Gamepad_A", "Gamepad_LB+Gamepad_A"
     DMKConfig::register_key_combo("Hotkeys", "ToggleKey", "Toggle Keys",
-        [](const DMKKeyComboList& c) { g_mod_config.toggle_combo = c; }, "F3");
+        [](const DMKKeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
     DMKConfig::register_key_combo("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
-        [](const DMKKeyComboList& c) { g_mod_config.hold_scroll_combo = c; }, "");
+        [](const DMKKeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file
     DMKConfig::load("MyMod.ini");
@@ -480,78 +642,98 @@ void InitializeMyMod() {
     DMKConfig::log_all();
 
     // Initialize Hooks
-    DMKHookManager& hook_manager = DMKHookManager::get_instance();
+    auto &hook_manager = DMKHookManager::get_instance();
 
     uintptr_t target_function_address = 0;
 
     // Example: AOB Scan
-    HMODULE game_module = GetModuleHandleA(NULL);
-    if (game_module) {
-        MODULEINFO module_info = {0};
-        if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info))) {
+    const HMODULE game_module = GetModuleHandleA(nullptr);
+    if (game_module)
+    {
+        MODULEINFO module_info{};
+        if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info)))
+        {
             logger.debug("Scanning module at {} size {}",
                          DMKFormat::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)),
                          module_info.SizeOfImage);
 
             // Replace with actual AOB pattern from your target game
-            std::string aob_sig_str = "48 89 ?? ?? 57";
-            ptrdiff_t pattern_offset = 0;
+            const std::string aob_sig_str = "48 89 ?? ?? 57";
+            const ptrdiff_t pattern_offset = 0;
 
-            auto pattern = DMKScanner::parse_aob(aob_sig_str);
-            if (pattern.has_value()) {
-                const std::byte* found_pattern = DMKScanner::find_pattern(
-                    reinterpret_cast<const std::byte*>(module_info.lpBaseOfDll),
+            const auto pattern = DMKScanner::parse_aob(aob_sig_str);
+            if (pattern.has_value())
+            {
+                const std::byte *found_pattern = DMKScanner::find_pattern(
+                    reinterpret_cast<const std::byte *>(module_info.lpBaseOfDll),
                     module_info.SizeOfImage,
                     *pattern
                 );
-                if (found_pattern) {
+                if (found_pattern)
+                {
                     target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
                     logger.info("Pattern found at: {}, target address: {}",
                                 DMKFormat::format_address(reinterpret_cast<uintptr_t>(found_pattern)),
                                 DMKFormat::format_address(target_function_address));
-                } else {
+                }
+                else
+                {
                     logger.error("AOB pattern not found in target module.");
                 }
-            } else {
+            }
+            else
+            {
                 logger.error("Failed to parse AOB pattern: {}", aob_sig_str);
             }
-        } else {
+        }
+        else
+        {
             logger.error("GetModuleInformation failed: {}", GetLastError());
         }
-    } else {
+    }
+    else
+    {
         logger.error("Failed to get game module handle.");
     }
 
-    if (target_function_address != 0) {
-        DMKHookConfig hook_cfg;
+    if (target_function_address != 0)
+    {
+        const DMKHookConfig hook_cfg;
         auto result = hook_manager.create_inline_hook(
             "GameFunction_PrintMessage_Hook",
             target_function_address,
-            reinterpret_cast<void*>(Detour_GameFunction_PrintMessage),
-            reinterpret_cast<void**>(&original_GameFunction_PrintMessage),
+            reinterpret_cast<void *>(Detour_GameFunction_PrintMessage),
+            reinterpret_cast<void **>(&original_GameFunction_PrintMessage),
             hook_cfg
         );
 
-        if (result.has_value()) {
+        if (result.has_value())
+        {
             logger.info("Successfully created hook: {}", result.value());
-        } else {
+        }
+        else
+        {
             logger.error("Failed to create hook: {}",
                          DMK::Hook::error_to_string(result.error()));
         }
-    } else {
+    }
+    else
+    {
         logger.warning("Target address is 0 or not found. Hook not created.");
     }
 
     // Register hotkey bindings with the InputManager (after hooks are ready).
-    // register_press/register_hold accept a KeyComboList directly -- one binding
+    // register_press/register_hold accept a KeyComboList directly. One binding
     // is created per combo, all sharing the same name for OR-logic queries.
-    DMKInputManager& input_mgr = DMKInputManager::get_instance();
+    auto &input_mgr = DMKInputManager::get_instance();
 
-    input_mgr.register_press("toggle_view", g_mod_config.toggle_combo, []() {
+    input_mgr.register_press("toggle_view", g_mod_config.toggle_combo, []()
+    {
         DMKLogger::get_instance().info("Toggle key pressed!");
     });
 
-    input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_combo, [](bool held) {
+    input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_combo, [](bool held)
+    {
         DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
     });
 
@@ -562,7 +744,8 @@ void InitializeMyMod() {
 }
 
 // Mod Shutdown Function
-void ShutdownMyMod() {
+void ShutdownMyMod()
+{
     DMKLogger::get_instance().info("MyMod Shutting Down...");
 
     // Shuts down all singletons in correct dependency order:
@@ -573,22 +756,29 @@ void ShutdownMyMod() {
 // IMPORTANT: Offload initialization to a worker thread so start() runs
 // outside DllMain, and call DMK_Shutdown() before DLL_PROCESS_DETACH.
 
-static DWORD WINAPI InitThread(LPVOID) {
+static DWORD WINAPI InitThread(LPVOID)
+{
     InitializeMyMod();
     return 0;
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
+{
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH)
+    {
         DisableThreadLibraryCalls(hModule);
         CloseHandle(CreateThread(nullptr, 0, InitThread, nullptr, 0, nullptr));
+    }
+    else if (ul_reason_for_call == DLL_PROCESS_DETACH)
+    {
+        ShutdownMyMod();
     }
     return TRUE;
 }
 ```
 
 > [!WARNING]
-> Calling `DMK_Shutdown()` before `DLL_PROCESS_DETACH` is the recommended practice for a clean orderly shutdown. Each subsystem detects if it is running under the Windows loader lock and will detach background threads instead of joining them to avoid deadlock, but calling shutdown early ensures all log messages are flushed and hooks are cleanly removed.
+> The example above calls `DMK_Shutdown()` from `DLL_PROCESS_DETACH` as a minimal pattern. For production mods, calling shutdown **before** detach (e.g., from a dedicated unload signal or the hot-reload pattern) is preferred because it runs outside the loader lock. Each subsystem detects if it is running under the loader lock and will detach background threads instead of joining them to avoid deadlock, but calling shutdown early ensures all log messages are flushed and hooks are cleanly removed. See the [Hot-Reload Guide](docs/hot-reload/README.md) for the recommended two-DLL architecture.
 
 ## Configuration File Example
 

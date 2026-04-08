@@ -120,6 +120,12 @@ configure_file(
 )
 
 # --- Compile Definitions for DetourModKit and potentially for headers it includes ---
+# These are intentionally global (not target-scoped) because SafetyHook's
+# public headers use these macros in #ifdef guards for DLL export/import
+# decorations. If scoped only to DetourModKit, SafetyHook's own compilation
+# would not see them, causing mismatched header expectations. WINVER and
+# _WIN32_WINNT must also be consistent across all translation units so
+# SafetyHook and Zydis target the same Windows API surface.
 if(WIN32)
   add_compile_definitions(
     WINVER=0x0A00 # Target Windows 10 or later
@@ -128,11 +134,12 @@ if(WIN32)
 endif()
 
 # Definitions for static linking against SafetyHook and Zydis/Zycore.
-# These are important if headers from these libraries use these macros.
+# Global scope is required so both DetourModKit sources and the SafetyHook
+# subdirectory see these macros during compilation.
 add_compile_definitions(
-  SAFETYHOOK_NO_DLL # Often used by libraries to adjust for static vs. shared builds
-  ZYDIS_STATIC_BUILD # Recommended by Zydis docs for static linking
-  ZYCORE_STATIC_BUILD # Assuming Zycore follows a similar pattern
+  SAFETYHOOK_NO_DLL # SafetyHook: suppress dllimport/dllexport decorations
+  ZYDIS_STATIC_BUILD # Zydis: link as static library
+  ZYCORE_STATIC_BUILD # Zycore: link as static library
 )
 
 # --- DetourModKit Library Target Definition ---
