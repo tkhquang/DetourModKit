@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(DetourModKit VERSION 2.3.0 LANGUAGES CXX)
+project(DetourModKit VERSION 3.0.0 LANGUAGES CXX)
 
 # --- Standard and Compiler Options ---
 set(CMAKE_CXX_STANDARD 23)
@@ -23,6 +23,7 @@ option(DMK_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 if(MSVC)
   add_compile_options(/W4)
+
   if(DMK_WARNINGS_AS_ERRORS)
     add_compile_options(/WX)
   endif()
@@ -45,6 +46,7 @@ if(MSVC)
 else()
   # GCC/Clang specific flags
   add_compile_options(-Wall -Wextra -Wpedantic -Wshadow)
+
   if(DMK_WARNINGS_AS_ERRORS)
     add_compile_options(-Werror)
   endif()
@@ -180,6 +182,7 @@ else()
   target_compile_options(DetourModKit PRIVATE
     $<$<CONFIG:Release>:-ffunction-sections -fdata-sections>
   )
+
   # --gc-sections is INTERFACE so consumers benefit from dead code elimination
   # of unused DetourModKit symbols. Symbol stripping (-s) is deliberately left
   # to the consumer's own build setup.
@@ -255,8 +258,8 @@ endif()
 # INTERFACE so consumers of this static library automatically resolve these
 # import libraries when linking the final DLL/EXE.
 # The XInput import library name differs between toolchains:
-#   MSVC / Windows SDK: xinput.lib  (links against xinput1_4.dll at runtime)
-#   MinGW:              -lxinput1_4 (libxinput1_4.a ships with mingw-w64)
+# MSVC / Windows SDK: xinput.lib  (links against xinput1_4.dll at runtime)
+# MinGW:              -lxinput1_4 (libxinput1_4.a ships with mingw-w64)
 if(WIN32)
   if(MSVC)
     set(_DMK_XINPUT_LIB xinput)
@@ -265,7 +268,7 @@ if(WIN32)
   endif()
 
   target_link_libraries(DetourModKit INTERFACE
-    user32          # GetAsyncKeyState, GetForegroundWindow, GetWindowThreadProcessId
+    user32 # GetAsyncKeyState, GetForegroundWindow, GetWindowThreadProcessId
     ${_DMK_XINPUT_LIB} # XInput gamepad polling (xinput1_4.dll ships with Win8+)
   )
 endif()
