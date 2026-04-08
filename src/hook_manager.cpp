@@ -677,6 +677,7 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
         if (m_shutdown_called.load(std::memory_order_acquire))
@@ -744,6 +745,13 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
 
 std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt_name)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot remove VMT hook '{}'.", vmt_name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
     if (it != m_vmt_hooks.end())
@@ -759,6 +767,13 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
 
 std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view vmt_name, size_t method_index)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot remove VMT method on '{}'.", vmt_name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
     if (it == m_vmt_hooks.end())
@@ -779,12 +794,18 @@ std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view v
 
 bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot apply VMT hook '{}'.", vmt_name);
+        return false;
+    }
     if (object == nullptr)
     {
         m_logger.warning("HookManager: Cannot apply VMT hook '{}' to null object.", vmt_name);
         return false;
     }
 
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
     if (it == m_vmt_hooks.end())
@@ -801,12 +822,18 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
 
 bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot remove VMT hook '{}' from object.", vmt_name);
+        return false;
+    }
     if (object == nullptr)
     {
         m_logger.warning("HookManager: Cannot remove VMT hook '{}' from null object.", vmt_name);
         return false;
     }
 
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     auto it = m_vmt_hooks.find(vmt_name);
     if (it == m_vmt_hooks.end())
@@ -823,6 +850,10 @@ bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object
 
 void HookManager::remove_all_vmt_hooks()
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+        return;
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (!m_vmt_hooks.empty())
     {

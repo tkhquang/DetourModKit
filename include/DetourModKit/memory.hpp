@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -175,7 +176,8 @@ namespace DetourModKit
             const auto src = base + static_cast<uintptr_t>(offset);
             if (src <= min_valid)
                 return 0;
-            const auto addr = *reinterpret_cast<const uintptr_t *>(src);
+            uintptr_t addr{0};
+            std::memcpy(&addr, reinterpret_cast<const void *>(src), sizeof(addr));
             return (addr > min_valid) ? addr : 0;
         }
 
