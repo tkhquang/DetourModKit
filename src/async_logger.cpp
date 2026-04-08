@@ -173,7 +173,13 @@ namespace DetourModKit
             }
         }
 
-        // Not a pool allocation — heap delete under lock is safe and brief.
+        // Not a pool allocation -- heap fallback. The delete is performed
+        // under pool_mutex_ to serialize with concurrent deallocate() calls
+        // that walk the block list above. Without the lock, a concurrent
+        // deallocate could see a partially updated free list. The lock does
+        // not prevent double-free of heap pointers (those are not tracked);
+        // callers must ensure each pointer is deallocated exactly once. The
+        // cost is a single free() call (or no-op for SSO-sized strings).
         delete ptr;
         if (heap_fallback_count_.load(std::memory_order_relaxed) > 0)
         {

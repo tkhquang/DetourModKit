@@ -282,6 +282,11 @@ namespace DetourModKit
             Handler callback;
         };
 
+        // Returns false when called from within a handler (reentrancy).
+        // The Subscription::reset() caller retains its unsubscribe_ lambda
+        // and will retry on the next reset() call (including the destructor)
+        // once the emit completes. This is safe because the alive_ weak_ptr
+        // prevents calling into a destroyed dispatcher.
         bool unsubscribe(SubscriptionId id) noexcept
         {
             if (emitting_depth() > 0)
@@ -300,7 +305,12 @@ namespace DetourModKit
             return true;
         }
 
-        /// Thread-local emit depth counter for this dispatcher instance.
+        // Thread-local emit depth counter. This is per-template-instantiation
+        // (not per-instance) because making it per-instance would require a
+        // thread_local map keyed by this pointer, adding a hash lookup to
+        // every emit() hot path. The typical usage is one dispatcher per
+        // event type, so the shared counter is the correct tradeoff. See
+        // the class-level doc for details.
         [[nodiscard]] int &emitting_depth() const noexcept
         {
             thread_local int depth{0};

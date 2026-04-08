@@ -5,7 +5,7 @@
 The standard game mod development cycle requires restarting the game after every DLL rebuild:
 
 ```text
-RE / Code Change → Build DLL → Kill Game → Relaunch Game → Wait for Load → Test → Repeat
+RE / Code Change -> Build DLL -> Kill Game -> Relaunch Game -> Wait for Load -> Test -> Repeat
 ```
 
 For large games with 30s-2min+ load times, this creates significant dead time. A single day of active development can involve 30-50+ restarts, wasting 1-3 hours just on loading screens.
@@ -19,64 +19,47 @@ Split your mod into two binaries:
 | `mod_loader.asi` | Thin loader stub                       | Lives for entire game session | Rarely (only when loader logic changes) |
 | `mod_logic.dll`  | All mod code (hooks, features, config) | Loaded/unloaded on demand     | Every iteration                         |
 
-The loader watches for a reload hotkey. When pressed, it tears down the logic DLL and reloads it from disk -- **no game restart required**.
+The loader watches for a reload hotkey. When pressed, it tears down the logic DLL and reloads it from disk - **no game restart required**.
 
 ### Architecture Diagram
 
-```text
-game.exe (target process)
-  │
-  ├── mod_loader.asi            ← ASI loader injects this once at startup
-  │     │
-  │     ├── DllMain()           ← Spawns init thread, then returns
-  │     ├── InitThread()        ← LoadLibrary("mod_logic.dll"), calls Init()
-  │     ├── ReloadLogic()       ← Shutdown() → FreeLibrary → LoadLibrary → Init()
-  │     └── Hotkey watcher      ← Polls for reload key (e.g., Numpad 0)
-  │           │
-  │           ▼
-  │     mod_logic.dll           ← Unloaded and reloaded without restarting game
-  │           │
-  │           ├── Init()        ← Sets up hooks, config, input bindings
-  │           ├── Shutdown()    ← Calls DMK_Shutdown(), cleans up all state
-  │           └── (mod code)    ← Your actual features, hook callbacks, etc.
-  │
-  └── game modules...
+```mermaid
+graph TD
+    Game["game.exe (target process)"]
+    Loader["mod_loader.asi<br/>ASI loader injects this once at startup"]
+    DllMain["DllMain()<br/>Spawns init thread, then returns"]
+    InitThread["InitThread()<br/>LoadLibrary('mod_logic.dll'), calls Init()"]
+    ReloadLogic["ReloadLogic()<br/>Shutdown() -> FreeLibrary -> LoadLibrary -> Init()"]
+    HotkeyWatcher["Hotkey watcher<br/>Polls for reload key (e.g., Numpad 0)"]
+    LogicDLL["mod_logic.dll<br/>Unloaded and reloaded without restarting game"]
+    Init["Init()<br/>Sets up hooks, config, input bindings"]
+    Shutdown["Shutdown()<br/>Calls DMK_Shutdown(), cleans up all state"]
+    ModCode["(mod code)<br/>Your actual features, hook callbacks, etc."]
+    GameModules["game modules..."]
+
+    Game --> Loader
+    Loader --> DllMain
+    Loader --> InitThread
+    Loader --> ReloadLogic
+    Loader --> HotkeyWatcher
+    HotkeyWatcher --> LogicDLL
+    LogicDLL --> Init
+    LogicDLL --> Shutdown
+    LogicDLL --> ModCode
+    Game --> GameModules
 ```
 
 ### Data Flow: Reload Sequence
 
-```text
-User presses Numpad 0
-        │
-        ▼
-  ┌─────────────────────┐
-  │ 1. Disable hotkey    │  Prevent double-reload
-  └─────────┬───────────┘
-            ▼
-  ┌─────────────────────┐
-  │ 2. Call Shutdown()   │  mod_logic.dll exported function
-  │    └─ DMK_Shutdown() │  InputManager → HookManager → Memory → Config → Logger
-  └─────────┬───────────┘
-            ▼
-  ┌─────────────────────┐
-  │ 3. FreeLibrary()     │  Unloads mod_logic.dll from process
-  └─────────┬───────────┘
-            ▼
-  ┌─────────────────────┐
-  │ 4. LoadLibrary()     │  Loads fresh mod_logic.dll from disk
-  └─────────┬───────────┘
-            ▼
-  ┌─────────────────────┐
-  │ 5. GetProcAddress()  │  Resolve Init / Shutdown exports
-  └─────────┬───────────┘
-            ▼
-  ┌─────────────────────┐
-  │ 6. Call Init()       │  Re-create hooks, reload config, rebind inputs
-  └─────────┬───────────┘
-            ▼
-  ┌─────────────────────┐
-  │ 7. Re-enable hotkey  │  Ready for next reload cycle
-  └─────────────────────┘
+```mermaid
+flowchart TD
+    A["User presses Numpad 0"] --> B["1. Disable hotkey<br/>Prevent double-reload"]
+    B --> C["2. Call Shutdown()<br/>mod_logic.dll exported function<br/>DMK_Shutdown(): InputManager -> HookManager -> Memory -> Config -> Logger"]
+    C --> D["3. FreeLibrary()<br/>Unloads mod_logic.dll from process"]
+    D --> E["4. LoadLibrary()<br/>Loads fresh mod_logic.dll from disk"]
+    E --> F["5. GetProcAddress()<br/>Resolve Init / Shutdown exports"]
+    F --> G["6. Call Init()<br/>Re-create hooks, reload config, rebind inputs"]
+    G --> H["7. Re-enable hotkey<br/>Ready for next reload cycle"]
 ```
 
 ---
@@ -119,16 +102,16 @@ This is where your actual mod code lives. It links against DetourModKit as a sta
 #include <DetourModKit.hpp>
 #include <windows.h>
 
-// ─── Forward declarations ───────────────────────────────────────────
+// --- Forward declarations ---
 static bool setup_hooks();
 static void setup_config();
 static void setup_input();
 
-// ─── State ──────────────────────────────────────────────────────────
+// --- State ---
 // All mod state lives here. It is reset on every reload.
 static HMODULE s_this_module = nullptr;
 
-// ─── Exported functions ─────────────────────────────────────────────
+// --- Exported functions ---
 
 extern "C" __declspec(dllexport) bool Init()
 {
@@ -143,7 +126,7 @@ extern "C" __declspec(dllexport) bool Init()
 
         if (!setup_hooks())
         {
-            logger.error("mod_logic: Hook setup failed -- rolling back");
+            logger.error("mod_logic: Hook setup failed - rolling back");
             DMK_Shutdown();
             return false;
         }
@@ -176,7 +159,7 @@ extern "C" __declspec(dllexport) void Shutdown()
     logger.info("mod_logic: Shutdown() called");
 
     // DMK_Shutdown handles the correct teardown order:
-    // InputManager → HookManager → Memory cache → Config → Logger
+    // InputManager -> HookManager -> Memory cache -> Config -> Logger
     DMK_Shutdown();
 }
 
@@ -186,12 +169,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
     {
         DisableThreadLibraryCalls(hModule);
         s_this_module = hModule;
-        // Do NOT initialize here -- Init() is called explicitly by the loader
+        // Do NOT initialize here - Init() is called explicitly by the loader
     }
     return TRUE;
 }
 
-// ─── Setup functions ────────────────────────────────────────────────
+// --- Setup functions ---
 
 static bool setup_hooks()
 {
@@ -236,9 +219,9 @@ The loader is intentionally minimal. It should almost never need rebuilding.
 #include <string>
 #include <atomic>
 
-// ─── Configuration ──────────────────────────────────────────────────
+// --- Configuration ---
 
-// Reload hotkey -- VK_NUMPAD0 (Numpad 0). Change as needed.
+// Reload hotkey - VK_NUMPAD0 (Numpad 0). Change as needed.
 // Numpad keys are unlikely to conflict with game controls or InputManager bindings.
 constexpr int RELOAD_KEY = VK_NUMPAD0;
 
@@ -252,12 +235,12 @@ constexpr DWORD POLL_INTERVAL_MS = 100;
 constexpr DWORD CALLBACK_DRAIN_MS = 100;   // After Shutdown(): let in-flight callbacks return
 constexpr DWORD FILE_SETTLE_MS    = 200;   // After FreeLibrary(): let file locks release
 
-// ─── Types ──────────────────────────────────────────────────────────
+// --- Types ---
 
 using InitFn     = bool (__cdecl *)();
 using ShutdownFn = void (__cdecl *)();
 
-// ─── State ──────────────────────────────────────────────────────────
+// --- State ---
 
 static HMODULE       s_loader_module  = nullptr;
 static HMODULE       s_logic_module   = nullptr;
@@ -267,7 +250,7 @@ static std::string   s_logic_dll_path;
 static std::atomic<bool> s_running{true};
 static std::atomic<bool> s_reloading{false};
 
-// ─── Helpers ────────────────────────────────────────────────────────
+// --- Helpers ---
 
 // Resolve the full path to mod_logic.dll relative to the loader ASI location
 static std::string resolve_logic_dll_path()
@@ -297,7 +280,7 @@ static void loader_log(const char* msg)
         OutputDebugStringA("[mod_loader] (message truncated)\n");
 }
 
-// ─── Load / Unload logic DLL ────────────────────────────────────────
+// --- Load / Unload logic DLL ---
 
 static bool load_logic_dll()
 {
@@ -392,17 +375,17 @@ static void reload_logic_dll()
     loader_log("=== HOT RELOAD COMPLETE ===");
 }
 
-// ─── Main thread ────────────────────────────────────────────────────
+// --- Main thread ---
 
 static DWORD WINAPI LoaderThread(LPVOID /*param*/)
 {
     s_logic_dll_path = resolve_logic_dll_path();
 
-    // Initial load -- do NOT exit if this fails.
+    // Initial load - do NOT exit if this fails.
     // The thread must stay alive so the reload hotkey can retry
     // (e.g., logic DLL not yet built on first launch).
     if (!load_logic_dll())
-        loader_log("Initial load failed -- press reload key to retry");
+        loader_log("Initial load failed - press reload key to retry");
 
     // Poll for reload hotkey
     while (s_running.load())
@@ -427,7 +410,7 @@ static DWORD WINAPI LoaderThread(LPVOID /*param*/)
     return 0;
 }
 
-// ─── Entry point ────────────────────────────────────────────────────
+// --- Entry point ---
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 {
@@ -450,7 +433,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         // Note: unload_logic_dll() is called by LoaderThread when it exits.
         // We do NOT call it here because DllMain(DETACH) holds the loader
         // lock, and Shutdown() may need threads to exit (which requires
-        // the loader lock → deadlock).
+        // the loader lock -> deadlock).
     }
     return TRUE;
 }
@@ -646,7 +629,7 @@ cmake --build build --parallel
 
 # Iterative: rebuild only the logic DLL
 cmake --build build --target mod_logic --parallel
-# Post-build script deploys automatically -- press Numpad 0 in-game
+# Post-build script deploys automatically - press Numpad 0 in-game
 ```
 
 The post-build deploy script handles three scenarios:
@@ -665,7 +648,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 ### 1. Thread Safety During Reload
 
-**Problem:** A hook callback may be executing on the game's thread when you trigger a reload. If the logic DLL is unloaded while a callback is mid-execution, the game crashes (code page unmapped → access violation).
+**Problem:** A hook callback may be executing on the game's thread when you trigger a reload. If the logic DLL is unloaded while a callback is mid-execution, the game crashes (code page unmapped leads to access violation).
 
 **How DMK handles this:** SafetyHook's `remove_all_hooks()` freezes all threads, patches the original bytes back, then resumes threads. Any thread that was inside a hook trampoline will now execute the original function code. This is safe as long as:
 
@@ -674,26 +657,30 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **The `CALLBACK_DRAIN_MS` sleep** after `Shutdown()` in the loader provides additional margin for any callbacks that were past the hook entry check but haven't returned yet.
 
+**EventDispatcher subscriptions:** Any `EventDispatcher` subscriptions created by the logic DLL are destroyed when `FreeLibrary` unloads the DLL, since the RAII `Subscription` handles live in the DLL's memory. Ensure that all `Subscription` objects are explicitly reset in `Shutdown()` before `DMK_Shutdown()` to avoid dangling callback pointers during the window between `Shutdown()` and `FreeLibrary`.
+
 ### 2. Global State Reset
 
 **Every `FreeLibrary` + `LoadLibrary` cycle resets all global/static variables** in the logic DLL. This is usually desirable (clean slate), but be aware:
 
 **Global variables in logic DLL:**
-Reset to initial values on reload. This is expected -- design for it.
+Reset to initial values on reload. This is expected - design for it.
 
 **DMK singletons (Logger, HookManager, etc.):**
 **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
 
 **Game memory (patched bytes, written values):**
-**Persists** -- the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `Memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
+**Persists** - the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `Memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
 
 **Config file on disk:**
 **Persists** across reloads. Edit the INI, press reload, and new values take effect.
 
+**Profiler ring buffer:** The `Profiler` stores timing samples in a ring buffer that lives in the logic DLL's memory. This data is lost when `FreeLibrary` unloads the DLL. If you need the profiling data, call `Profiler::get_instance().export_to_file("profile.json")` or `Profiler::get_instance().export_chrome_json()` before calling `Shutdown()`.
+
 **If you need state to survive reloads** (e.g., a toggle that should stay on), store it in the loader:
 
 ```cpp
-// In mod_loader -- survives reload
+// In mod_loader - survives reload
 struct PersistentState
 {
     bool camera_unlocked = false;
@@ -756,6 +743,8 @@ void revert_all_patches()
 ### 4. Logger File Handles
 
 The DMK Logger opens a file handle when the singleton is constructed (configured via `Logger::configure()`). On reload, `Shutdown()` closes the file, and the new `Init()` call to `Logger::configure()` reopens it. The logger appends by default via `WinFileStream`, so logs accumulate across reloads. If you need a clean log per session, delete the log file in `Init()` before calling `configure()`.
+
+**AsyncLogger:** If you are using the async logging backend, call `DMK_Shutdown()` to flush the async queue before `FreeLibrary` unloads the DLL. Failing to flush can lose buffered log entries or cause the background writer thread to access unmapped memory.
 
 ### 5. Build System File Locking
 
@@ -823,7 +812,7 @@ s_logic_dll_path = resolve_logic_dll_path();
 s_loader_dir = s_logic_dll_path.substr(0, s_logic_dll_path.find_last_of("\\/") + 1);
 ```
 
-1. Call `copy_from_staging()` in `load_logic_dll()`, before the `LoadLibraryA` call:
+2. Call `copy_from_staging()` in `load_logic_dll()`, before the `LoadLibraryA` call:
 
 ```cpp
 static bool load_logic_dll()
@@ -848,8 +837,8 @@ When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
 - **MSVC:** The linker locks the `.pdb` file while the DLL is loaded. Use `/pdbaltpath:%_PDB%` or the `/Fd` flag to generate uniquely-named PDBs (e.g., `mod_logic_<timestamp>.pdb`), or unload before rebuilding. The CMake configuration in Step 4 already sets `PDB_OUTPUT_DIRECTORY` to the staging directory and the post-build script handles PDB deployment alongside the DLL.
 - **PDB copy on reload:** If your loader copies the DLL from a staging directory, copy the `.pdb` alongside it. Without the matching PDB next to the loaded DLL, debuggers lose source-level mapping after a hot reload.
-- **MinGW:** Debug info is embedded in the DLL (DWARF), so no separate PDB locking issue. However, GDB/x64dbg may cache the old symbol table -- after reload, re-run `symload` or detach and reattach.
-- **After reload:** x64dbg will not automatically pick up new symbols. Use `Debug → Symbols → Reload module` or the `symload` command on the reloaded `mod_logic.dll`.
+- **MinGW:** Debug info is embedded in the DLL (DWARF), so no separate PDB locking issue. However, GDB/x64dbg may cache the old symbol table - after reload, re-run `symload` or detach and reattach.
+- **After reload:** x64dbg will not automatically pick up new symbols. Use `Debug > Symbols > Reload module` or the `symload` command on the reloaded `mod_logic.dll`.
 
 ### 8. Thread-Local Storage (TLS) and Static Constructors
 
@@ -865,23 +854,30 @@ If your logic DLL spawns background threads (e.g., for deferred scanning, period
 // In Shutdown():
 void Shutdown()
 {
-    // 1. Signal threads to stop
-    s_scan_thread_running.store(false, std::memory_order_release);
+    // 1. Signal the background thread to stop via its shared atomic flag,
+    //    then wake it from any condition_variable wait.
+    s_scan_stop_requested.store(true, std::memory_order_release);
     s_scan_cv.notify_one();
 
-    // 2. Join with a bounded timeout to avoid blocking the reload indefinitely
+    // 2. Join with a bounded spin-wait. The background thread checks
+    //    s_scan_stop_requested and exits cooperatively within its scan
+    //    interval. Avoid std::async+join/detach racing on the same
+    //    std::thread (undefined behavior).
     if (s_scan_thread.joinable())
     {
-        // Use a future to implement a timed join (std::thread has no native timeout)
-        auto join_future = std::async(std::launch::async, [&] { s_scan_thread.join(); });
-        if (join_future.wait_for(std::chrono::seconds(2)) == std::future_status::timeout)
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (std::chrono::steady_clock::now() < deadline)
         {
-            Logger::get_instance().warning("Shutdown: background thread did not exit within 2s");
-            // Thread is stuck -- detach as last resort so FreeLibrary can proceed.
-            // The thread will crash when it touches unmapped code, but that is
-            // preferable to deadlocking the reload cycle.
-            s_scan_thread.detach();
+            // If the thread has exited, native handle wait returns immediately.
+            // On Windows, use WaitForSingleObject on the native handle.
+            DWORD wait_result = WaitForSingleObject(
+                s_scan_thread.native_handle(), 100 /* ms */);
+            if (wait_result == WAIT_OBJECT_0)
+                break;
         }
+        // Thread should have exited by now. join() will return immediately
+        // if the thread has already terminated.
+        s_scan_thread.join();
     }
 
     // 3. Now safe to tear down DMK
@@ -891,7 +887,7 @@ void Shutdown()
 
 **Rules:**
 
-- Never `detach()` threads in a reloadable DLL -- detached threads cannot be joined. The `detach()` above is a last-resort fallback when a thread is stuck, not normal practice.
+- Never `detach()` threads in a reloadable DLL - detached threads cannot be joined. The `detach()` above is a last-resort fallback when a thread is stuck, not normal practice.
 - Use `std::atomic<bool>` flags and `condition_variable::notify_one()` for cooperative shutdown.
 - Prefer a bounded join timeout (as shown above) when threads perform blocking I/O or long operations. For cooperative-shutdown threads with short poll intervals (e.g., `condition_variable::wait_for` with a 1-second timeout), an unbounded `join()` is acceptable since the thread will observe the stop flag promptly.
 
@@ -927,7 +923,7 @@ This prevents double-initialization (once from `DllMain`, once from the loader's
 ### Common Crashes and Their Causes
 
 **Crash on reload (access violation at 0x00000000):**
-`GetProcAddress` returned null -- export name mismatch. Verify `extern "C"` on exports, check with `dumpbin /exports mod_logic.dll`.
+`GetProcAddress` returned null - export name mismatch. Verify `extern "C"` on exports, check with `dumpbin /exports mod_logic.dll`.
 
 **Crash during hook callback after reload:**
 Old function pointer stored somewhere. Ensure all hook callbacks reference only data within mod_logic.dll.
@@ -981,7 +977,7 @@ static DWORD WINAPI LoaderThread(LPVOID /*param*/)
 
     if (dir_handle == INVALID_HANDLE_VALUE)
     {
-        loader_log("WARNING: File watcher failed -- falling back to hotkey-only mode");
+        loader_log("WARNING: File watcher failed - falling back to hotkey-only mode");
     }
 
     while (s_running.load())
@@ -1003,7 +999,7 @@ static DWORD WINAPI LoaderThread(LPVOID /*param*/)
                 Sleep(DEBOUNCE_MS);
                 FindNextChangeNotification(dir_handle);
 
-                loader_log("File change detected -- reloading");
+                loader_log("File change detected - reloading");
                 reload_logic_dll();
             }
         }
@@ -1033,7 +1029,7 @@ struct SharedModState
     bool camera_unlocked;
     float fov;
     float position[3];
-    // Add fields as needed -- keep it POD (no pointers, no std:: types)
+    // Add fields as needed - keep it POD (no pointers, no std:: types)
 };
 
 static SharedModState* s_shared_state = nullptr;
@@ -1079,9 +1075,9 @@ For large mods, split features into separate logic DLLs that can be reloaded ind
 
 ```text
 mod_loader.asi
-  ├── mod_camera.dll    ← Reload with Numpad 0
-  ├── mod_ui.dll        ← Reload with Numpad 1
-  └── mod_gameplay.dll  ← Reload with Numpad 2
+  +-- mod_camera.dll    <- Reload with Numpad 0
+  +-- mod_ui.dll        <- Reload with Numpad 1
+  +-- mod_gameplay.dll  <- Reload with Numpad 2
 ```
 
 Each DLL exports its own `Init()` / `Shutdown()` pair. The loader manages them as an array of modules.
@@ -1090,27 +1086,16 @@ Each DLL exports its own `Init()` / `Shutdown()` pair. The loader manages them a
 
 ## Workflow Comparison
 
-### Before (Cold Restart)
-
-```text
-Time per iteration: 1-3 minutes
-  Code change:      5 seconds
-  Build:           10 seconds
-  Kill game:        5 seconds
-  Relaunch:        60-120 seconds  ← bottleneck
-  Navigate to test: 30 seconds
-  Test:            variable
-```
-
-### After (Hot Reload)
-
-```text
-Time per iteration: 15-20 seconds
-  Code change:      5 seconds
-  Build:           10 seconds
-  Press Numpad 0:   < 1 second     ← no restart
-  Test:            variable        ← game state preserved
-```
+| Step | Cold Restart | Hot Reload |
+|------|-------------|------------|
+| Code change | 5 seconds | 5 seconds |
+| Build | 10 seconds | 10 seconds |
+| Kill game | 5 seconds | N/A |
+| Relaunch | 60-120 seconds (bottleneck) | N/A |
+| Navigate to test | 30 seconds | N/A |
+| Press Numpad 0 | N/A | < 1 second (no restart) |
+| Test | variable | variable (game state preserved) |
+| **Total per iteration** | **1-3 minutes** | **15-20 seconds** |
 
 **Estimated time saved:** 70-90% reduction in iteration time. For 40 iterations/day, this saves **1-2 hours of loading screens**.
 
@@ -1127,7 +1112,7 @@ Time per iteration: 15-20 seconds
 - [ ] Direct memory patches (non-hook) are tracked and reverted in `Shutdown()`
 - [ ] Both DLLs built with same compiler toolchain
 - [ ] CMake outputs logic DLL to game directory (or staging + copy)
-- [ ] Test reload cycle: load → use mod → rebuild → Numpad 0 → verify mod works
+- [ ] Test reload cycle: load > use mod > rebuild > Numpad 0 > verify mod works
 - [ ] Test edge case: reload during active hook callback (should not crash)
 - [ ] Test edge case: reload with no logic DLL on disk (loader should log error, not crash)
 
@@ -1136,7 +1121,7 @@ Time per iteration: 15-20 seconds
 ## FAQ
 
 **Q: Can I hot-reload the loader ASI itself?**
-A: No. The ASI is loaded by the game's ASI loader at startup and cannot be unloaded. But you should rarely need to change the loader -- it's just a thin stub.
+A: No. The ASI is loaded by the game's ASI loader at startup and cannot be unloaded. But you should rarely need to change the loader - it's just a thin stub.
 
 **Q: What if the game crashes during reload?**
 A: Attach a debugger (x64dbg) and check the crash address. If it's in unmapped memory (the old logic DLL's address space), a callback was still executing during `FreeLibrary`. Increase the sleep duration or add a reference-counting mechanism to wait for all callbacks to complete.
@@ -1148,7 +1133,7 @@ A: Yes. The ASI loader loads `mod_loader.asi` normally. The loader then manages 
 A: If the game has anti-cheat that monitors `LoadLibrary` calls, hot-reload may trigger detection. This approach is intended for single-player modding and development environments only.
 
 **Q: Can I reload while a game menu/pause screen is open?**
-A: Yes -- this is actually the safest time to reload, since fewer game systems are actively calling hooked functions. The pause screen reduces the chance of a callback being mid-execution during teardown.
+A: Yes - this is actually the safest time to reload, since fewer game systems are actively calling hooked functions. The pause screen reduces the chance of a callback being mid-execution during teardown.
 
 **Q: What about C++ exceptions thrown during Init()?**
 A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw across DLL boundaries). Use `try/catch` inside `Init()` and return `false` on failure. The loader will log the error and leave the logic DLL unloaded until the next reload attempt.
@@ -1159,6 +1144,13 @@ A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw a
 
 DetourModKit's core systems are designed to be safe across DLL reload cycles:
 
-**HookManager:** `shutdown()` and `remove_all_hooks()` both use a two-phase removal pattern: hooks are disabled under a shared lock first (allowing in-flight trampoline callers to drain), then the hook maps are cleared under an exclusive lock. This prevents deadlock when a hooked thread is blocked on `m_hooks_mutex` via `with_inline_hook()`. Both methods reset internal state afterward, allowing subsequent `create_*_hook()` calls to succeed. There is no need to call both -- either one prepares the HookManager for reuse.
+**HookManager:** `shutdown()` and `remove_all_hooks()` both use a two-phase removal pattern: hooks are disabled under a shared lock first (allowing in-flight trampoline callers to drain), then the hook maps are cleared under an exclusive lock. This prevents deadlock when a hooked thread is blocked on `m_hooks_mutex` via `with_inline_hook()`. Both methods reset internal state afterward, allowing subsequent `create_*_hook()` calls to succeed. There is no need to call both - either one prepares the HookManager for reuse.
 
 **Config:** `register_*()` functions use replace-on-duplicate semantics. If a new DLL registers a config item with the same section and INI key as an existing entry, the old registration is replaced rather than appended. This prevents doubled registrations across reload cycles without requiring an explicit `clear_registered_items()` call. Calling `clear_registered_items()` before re-registration is still supported but no longer required.
+
+---
+
+## Related Documentation
+
+- [Project README](../../README.md) - Overview, build instructions, and API reference
+- [Test Coverage Guide](../tests/README.md) - Testing strategy, coverage analysis, and test architecture

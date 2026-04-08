@@ -75,6 +75,27 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   set(SAFETYHOOK_BUILD_TESTS OFF CACHE BOOL "Disable building SafetyHook's internal tests" FORCE)
   set(SAFETYHOOK_BUILD_EXAMPLES OFF CACHE BOOL "Disable building SafetyHook's examples" FORCE)
 
+  # --- Compile Definitions (before add_subdirectory so SafetyHook sees them) ---
+  # These are intentionally global (not target-scoped) because SafetyHook's
+  # public headers use these macros in #ifdef guards for DLL export/import
+  # decorations. If scoped only to DetourModKit, SafetyHook's own compilation
+  # would not see them, causing mismatched header expectations. WINVER and
+  # _WIN32_WINNT must also be consistent across all translation units so
+  # SafetyHook and Zydis target the same Windows API surface.
+  if(WIN32)
+    add_compile_definitions(
+      WINVER=0x0A00 # Target Windows 10 or later
+      _WIN32_WINNT=0x0A00 # Target Windows 10 or later
+    )
+  endif()
+
+  # Definitions for static linking against SafetyHook and Zydis/Zycore.
+  add_compile_definitions(
+    SAFETYHOOK_NO_DLL # SafetyHook: suppress dllimport/dllexport decorations
+    ZYDIS_STATIC_BUILD # Zydis: link as static library
+    ZYCORE_STATIC_BUILD # Zycore: link as static library
+  )
+
   # SafetyHook and its dependencies (Zydis, Zycore) should also be built as static libraries.
   # Setting BUILD_SHARED_LIBS to OFF globally (done above) should influence this for
   # well-behaved CMake subprojects. Explicit definitions below will reinforce this.
@@ -117,22 +138,6 @@ configure_file(
   "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit/version.hpp.in"
   "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
   @ONLY
-)
-
-# --- Compile Definitions for DetourModKit and potentially for headers it includes ---
-if(WIN32)
-  add_compile_definitions(
-    WINVER=0x0A00 # Target Windows 10 or later
-    _WIN32_WINNT=0x0A00 # Target Windows 10 or later
-  )
-endif()
-
-# Definitions for static linking against SafetyHook and Zydis/Zycore.
-# These are important if headers from these libraries use these macros.
-add_compile_definitions(
-  SAFETYHOOK_NO_DLL # Often used by libraries to adjust for static vs. shared builds
-  ZYDIS_STATIC_BUILD # Recommended by Zydis docs for static linking
-  ZYCORE_STATIC_BUILD # Assuming Zycore follows a similar pattern
 )
 
 # --- DetourModKit Library Target Definition ---
