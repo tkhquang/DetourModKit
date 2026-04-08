@@ -236,6 +236,11 @@ namespace DetourModKit
         reset();
     }
 
+    // Move transfers ownership of the overflow pointer without touching the
+    // StringPool or heap_fallback_count_. The allocation/deallocation balance
+    // is maintained because exactly one LogMessage owns the pointer at any
+    // time, and only reset() (called by the eventual owner's destructor)
+    // returns it to the pool.
     LogMessage::LogMessage(LogMessage &&other) noexcept
         : level(other.level),
           timestamp(other.timestamp),

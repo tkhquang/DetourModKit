@@ -291,6 +291,14 @@ namespace DetourModKit
         // Async logging support (forward declared).
         // async_logger_ is atomic for lock-free reads on the log() hot path.
         // async_mutex_ serializes lifecycle operations (enable/disable/shutdown).
+        //
+        // On MSVC x64, std::atomic<std::shared_ptr<T>> is lock-free (uses
+        // 128-bit compare-exchange). On MinGW/GCC, this may fall back to a
+        // global mutex, which is still correct but serializes the hot-path
+        // load. This is an accepted trade-off: the lock-free fast path
+        // benefits the primary target (MSVC), and the MinGW fallback is
+        // bounded to one mutex acquisition per log() call, which is
+        // comparable to the mutex already used by synchronous mode.
         std::atomic<std::shared_ptr<AsyncLogger>> async_logger_{};
         std::atomic<bool> async_mode_enabled_{false};
         std::mutex async_mutex_;

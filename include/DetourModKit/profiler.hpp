@@ -71,7 +71,7 @@ namespace DetourModKit
     struct ProfileSample
     {
         std::atomic<uint32_t> sequence{0}; ///< Odd = write in progress, even = committed.
-        const char *name{nullptr};         ///< Non-owning pointer to a string literal.
+        const char *name{nullptr};         ///< Non-owning pointer; must have static storage duration.
         int64_t start_ticks{0};            ///< QPC tick count at scope entry.
         uint32_t duration_us{0};           ///< Duration in microseconds (max ~71 minutes).
         uint32_t thread_id{0};             ///< Win32 thread ID of the recording thread.
@@ -117,7 +117,14 @@ namespace DetourModKit
 
         /**
          * @brief Records a completed timing sample.
-         * @param name Non-owning pointer to a string literal (must outlive the profiler).
+         * @param name Non-owning pointer that must have static storage duration
+         *        (e.g. a string literal). The pointer is stored as-is in the
+         *        ring buffer and read asynchronously by export methods. Passing
+         *        a pointer to a temporary (e.g. std::string::c_str()) causes
+         *        undefined behavior. The DMK_PROFILE_SCOPE() macro forwards its
+         *        argument directly to ScopedProfile and does not enforce static
+         *        storage at compile time; callers should pass string literals
+         *        or ensure the pointed-to string outlives the profiler.
          * @param start_ticks QPC tick count at scope entry.
          * @param end_ticks QPC tick count at scope exit.
          * @param thread_id Win32 thread ID of the recording thread.

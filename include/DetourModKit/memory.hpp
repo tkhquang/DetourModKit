@@ -150,7 +150,7 @@ namespace DetourModKit
         uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
 
         /**
-         * @brief Unchecked inline pointer dereference with low-address validity guards only.
+         * @brief Fastest pointer dereference with low-address validity guards only.
          * @details Validates the source address (base + offset) before dereferencing,
          *          then rejects result values at or below min_valid. Addresses below
          *          0x10000 are never valid usermode pointers on Windows (null page +
@@ -162,8 +162,11 @@ namespace DetourModKit
          *          deallocated heap memory or unmapped regions, use read_ptr_unsafe()
          *          instead (SEH-protected on MSVC, VirtualQuery-guarded on MinGW).
          *
-         *          Intended for hot paths where the caller can guarantee structural
-         *          pointer validity (e.g. game objects known to be alive this frame).
+         *          The "unchecked" in the name refers to the absence of OS-level
+         *          memory validation (no SEH, no VirtualQuery, no cache lookup).
+         *          Only low-address guards are applied. Intended for hot paths
+         *          where the caller can guarantee structural pointer validity
+         *          (e.g. game objects known to be alive this frame).
          * @param base The base address to read from.
          * @param offset Byte offset added to base before dereferencing.
          * @param min_valid Minimum address value to accept (default 0x10000).

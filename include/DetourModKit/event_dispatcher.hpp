@@ -98,9 +98,17 @@ namespace DetourModKit
 
         /**
          * @brief Manually unsubscribes. Safe to call multiple times.
-         * @details If called from within a handler on the same dispatcher,
-         *          the unsubscribe is rejected and the subscription remains
-         *          active. Retry after the handler returns.
+         * @details If called from within a handler on the same dispatcher
+         *          (i.e. emitting_depth > 0 on this thread), the unsubscribe
+         *          is silently skipped and the subscription remains active.
+         *          The unsubscribe_ lambda is retained so that a subsequent
+         *          reset() call outside the emit stack -- including the
+         *          Subscription destructor -- will complete the removal.
+         *          If the Subscription is also destroyed inside the same
+         *          handler scope, the destructor's reset() is likewise
+         *          skipped because emitting_depth is still positive.
+         *          This prevents deadlock from acquiring an exclusive lock
+         *          inside a shared lock held by emit().
          */
         void reset() noexcept
         {
@@ -218,6 +226,11 @@ namespace DetourModKit
          * @note Acquires shared lock. Multiple threads may emit concurrently.
          *       Handlers are invoked synchronously in subscription order.
          *       Exceptions thrown by handlers propagate to the caller.
+         * @warning If calling from a game hook callback or any context where an
+         *          unhandled exception would crash the host process, use
+         *          emit_safe() instead. emit() lets handler exceptions propagate
+         *          uncaught, which will terminate the process if no catch frame
+         *          exists above the call site.
          */
         void emit(const Event &event) const
         {
@@ -234,6 +247,9 @@ namespace DetourModKit
          * @param event The event payload.
          * @note Same locking semantics as emit(). Handlers that throw are
          *       skipped; remaining handlers still execute.
+         *       Prefer this over emit() when calling from hook callbacks or
+         *       other contexts where an unhandled exception would crash the
+         *       host process.
          */
         void emit_safe(const Event &event) const noexcept
         {

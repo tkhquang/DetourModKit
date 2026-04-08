@@ -199,7 +199,9 @@ namespace
     // Uses std::thread (not jthread) because these are namespace-scope statics:
     // jthread's auto-join destructor would run after s_cleanupCv/s_cleanupMutex
     // are destroyed (reverse declaration order), causing UB. Manual join in
-    // shutdown_cache() avoids this. DMK_Shutdown() guarantees proper teardown.
+    // shutdown_cache() avoids this. DMK_Shutdown() calls shutdown_cache()
+    // which joins this thread before any other cleanup proceeds, ensuring
+    // the thread is fully stopped before static destruction begins.
     std::atomic<bool> s_cleanupThreadRunning{false};
     std::thread s_cleanupThread;
     std::mutex s_cleanupMutex;
