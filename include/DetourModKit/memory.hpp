@@ -176,7 +176,7 @@ namespace DetourModKit
             const auto src = base + static_cast<uintptr_t>(offset);
             if (src <= min_valid)
                 return 0;
-            uintptr_t addr;
+            uintptr_t addr{0};
             std::memcpy(&addr, reinterpret_cast<const void *>(src), sizeof(addr));
             return (addr > min_valid) ? addr : 0;
         }

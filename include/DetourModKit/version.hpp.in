@@ -14,8 +14,10 @@
 
 #define DMK_VERSION_STRING "@PROJECT_VERSION@"
 
-/// Encodes major.minor.patch into a single integer for compile-time comparisons.
-/// Example: DMK_VERSION_AT_LEAST(2, 3, 0)
+/**
+ * @brief Encodes major.minor.patch into a single integer for compile-time comparisons.
+ * @details Example: DMK_VERSION_AT_LEAST(2, 3, 0)
+ */
 #define DMK_MAKE_VERSION(major, minor, patch) \
     ((major) * 10000 + (minor) * 100 + (patch))
 

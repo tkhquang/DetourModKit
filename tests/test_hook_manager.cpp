@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <format>
 #include <functional>
+#include <mutex>
 #include <thread>
 #include <chrono>
 #include <latch>
@@ -2062,6 +2063,8 @@ TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
     std::latch start_latch(kThreads + 1);
     std::atomic<int> success_count{0};
     std::atomic<int> rejected_count{0};
+    std::mutex errors_mutex;
+    std::vector<HookError> errors;
 
     std::vector<std::unique_ptr<VmtTestTarget>> targets;
     for (int i = 0; i < kThreads; ++i)
@@ -2076,9 +2079,15 @@ TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
             auto result = hook_manager_->create_vmt_hook(
                 std::format("ConcVmt{}", i), targets[i].get());
             if (result.has_value())
+            {
                 success_count.fetch_add(1, std::memory_order_relaxed);
+            }
             else
+            {
                 rejected_count.fetch_add(1, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lock(errors_mutex);
+                errors.push_back(result.error());
+            }
         });
     }
 
@@ -2089,4 +2098,14 @@ TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
         t.join();
 
     EXPECT_EQ(success_count.load() + rejected_count.load(), kThreads);
+
+    for (const auto &err : errors)
+    {
+        EXPECT_EQ(err, HookError::ShutdownInProgress);
+    }
+
+    // Clean up any VMT hooks that were created before shutdown took effect.
+    // shutdown() resets the flag, so surviving hooks must be removed before
+    // the test-local targets are destroyed.
+    hook_manager_->remove_all_vmt_hooks();
 }
