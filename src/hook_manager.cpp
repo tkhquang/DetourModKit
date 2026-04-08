@@ -148,14 +148,22 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     void **original_trampoline,
     const HookConfig &config)
 {
+    // Non-locking fast-fail: avoid acquiring mutator_gate when shutdown
+    // is already in progress.
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        if (original_trampoline)
+            *original_trampoline = nullptr;
+        m_logger.error("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
-        // Acquire shared on mutator gate so shutdown can block new work by
-        // acquiring exclusive. Must be acquired before m_hooks_mutex to respect
-        // lock ordering (mutator_gate -> hooks).
         std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
 
+        // Re-check after acquiring locks (double-checked pattern).
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
@@ -302,6 +310,12 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     safetyhook::MidHookFn detour_function,
     const HookConfig &config)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.error("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
@@ -436,6 +450,12 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
 
 std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot remove hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
     // Two-phase removal: disable under shared lock first so that in-flight
@@ -525,6 +545,12 @@ void HookManager::remove_all_hooks()
 
 std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (m_shutdown_called.load(std::memory_order_acquire))
@@ -561,6 +587,12 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
 
 std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_id)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
     std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
     if (m_shutdown_called.load(std::memory_order_acquire))
@@ -637,6 +669,12 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
 std::expected<std::string, HookError> HookManager::create_vmt_hook(
     std::string_view name, void *object)
 {
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.error("HookManager: Shutdown in progress. Cannot create VMT hook '{}'.", name);
+        return std::unexpected(HookError::ShutdownInProgress);
+    }
+
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);

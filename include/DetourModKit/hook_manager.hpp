@@ -974,13 +974,10 @@ namespace DetourModKit
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
 
-        /** @brief Serializes shutdown and remove_all_hooks to prevent concurrent teardowns.
-         *  Uses compare_exchange_strong on m_shutdown_called to ensure only one owner proceeds.
-         */
-        std::mutex m_teardown_mutex;
-
         /** @brief Gate that mutators (create_*_hook, enable_hook, disable_hook, remove_hook)
-         *  acquire shared on entry, allowing shutdown to acquire exclusive to block new work.
+         *  acquire shared on entry, allowing shutdown/remove_all_hooks to acquire exclusive
+         *  to block new work. Teardown serialization uses compare_exchange_strong on
+         *  m_shutdown_called rather than a separate mutex.
          */
         mutable std::shared_mutex m_mutator_gate;
 
