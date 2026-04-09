@@ -46,16 +46,16 @@
 
 // Scoped timing measurement. Name must be a string literal.
 #define DMK_PROFILE_SCOPE(name) \
-    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__){name}
+    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__) { name }
 
 // Scoped timing using the enclosing function name.
 #define DMK_PROFILE_FUNCTION() \
-    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__){__FUNCTION__}
+    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__) { __FUNCTION__ }
 
 #else
 
 #define DMK_PROFILE_SCOPE(name) ((void)0)
-#define DMK_PROFILE_FUNCTION()  ((void)0)
+#define DMK_PROFILE_FUNCTION() ((void)0)
 
 #endif // DMK_ENABLE_PROFILING
 
@@ -171,10 +171,12 @@ namespace DetourModKit
         Profiler();
         ~Profiler() = default;
 
+        // write_pos_ first to avoid 40 bytes of padding (alignas(64) requirement).
+        // This placement ensures cache-line alignment for the lock-free ring buffer.
+        alignas(64) std::atomic<size_t> write_pos_{0};
         std::unique_ptr<ProfileSample[]> buffer_;
         size_t capacity_;
         size_t mask_; // capacity_ - 1 for power-of-2 index wrapping
-        alignas(64) std::atomic<size_t> write_pos_{0};
         int64_t qpc_frequency_{0};
     };
 
