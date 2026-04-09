@@ -217,15 +217,32 @@ namespace DetourModKit
         const std::string json = export_chrome_json();
         const std::string path_str(path);
 
-        const auto closer = [](std::FILE *f) { std::fclose(f); };
-        std::unique_ptr<std::FILE, decltype(closer)> fp(
-            std::fopen(path_str.c_str(), "wb"), closer);
-        if (!fp)
+        const auto closer = [](std::FILE *f)
+        { std::fclose(f); };
+        std::FILE *file_ptr = nullptr;
+
+        const errno_t err = fopen_s(&file_ptr, path_str.c_str(), "wb");
+        if (err != 0 || file_ptr == nullptr)
         {
             return false;
         }
+
+        std::unique_ptr<std::FILE, decltype(closer)> fp(file_ptr, closer);
         const size_t written = std::fwrite(json.data(), 1, json.size(), fp.get());
-        return written == json.size();
+        if (written != json.size())
+        {
+            return false;
+        }
+        if (std::fflush(fp.get()) != 0)
+        {
+            return false;
+        }
+        // Release the pointer so unique_ptr does not double-close.
+        if (std::fclose(fp.release()) != 0)
+        {
+            return false;
+        }
+        return true;
     }
 
     size_t Profiler::total_samples_recorded() const noexcept
