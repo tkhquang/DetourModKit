@@ -238,7 +238,20 @@ namespace DetourModKit
 
         std::unique_ptr<std::FILE, decltype(closer)> fp(file_ptr, closer);
         const size_t written = std::fwrite(json.data(), 1, json.size(), fp.get());
-        return written == json.size();
+        if (written != json.size())
+        {
+            return false;
+        }
+        if (std::fflush(fp.get()) != 0)
+        {
+            return false;
+        }
+        // Release the pointer so unique_ptr does not double-close.
+        if (std::fclose(fp.release()) != 0)
+        {
+            return false;
+        }
+        return true;
     }
 
     size_t Profiler::total_samples_recorded() const noexcept

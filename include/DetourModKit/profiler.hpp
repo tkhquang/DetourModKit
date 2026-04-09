@@ -50,7 +50,7 @@
 
 // Scoped timing using the enclosing function name.
 #define DMK_PROFILE_FUNCTION() \
-    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__) { __FUNCTION__ }
+    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__) { __func__ }
 
 #else
 
