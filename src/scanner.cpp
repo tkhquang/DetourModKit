@@ -55,7 +55,8 @@ namespace
      */
     bool cpu_has_avx2() noexcept
     {
-        static const bool result = []() -> bool {
+        static const bool result = []() -> bool
+        {
 #if defined(__GNUC__) || defined(__clang__)
             // Check CPUID is supported and query leaf 7
             unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
@@ -202,7 +203,7 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
     {
         if (!aob_str.empty())
         {
-            logger.warning("AOB Parser: Input string became empty after trimming.");
+            logger.debug("AOB Parser: Input string became empty after trimming.");
         }
         return std::nullopt;
     }
@@ -234,7 +235,7 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
                 logger.error("AOB Parser: Multiple '|' offset markers at position {}.", token_idx);
                 return std::nullopt;
             }
-            result.offset = result.bytes.size();
+            result.offset = static_cast<std::ptrdiff_t>(result.bytes.size());
             offset_set = true;
         }
         else if (token == "??" || token == "?")
@@ -253,16 +254,21 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
             }
             else
             {
-                logger.error("AOB Parser: Invalid token '{}' at position {}."
-                             " Expected hex byte (e.g., FF), '?' or '?\?'.",
+                // Split the literal around '??' to dodge the C++ trigraph
+                // ??'  (interpreted as a `|`), which trips -Wtrigraphs on
+                // GCC and would otherwise require disabling the warning TU-wide.
+                logger.error("AOB Parser: Invalid token '{}' at position {}. "
+                             "Expected hex byte (e.g., FF), '?', or '?"
+                             "?'.",
                              token, token_idx);
                 return std::nullopt;
             }
         }
         else
         {
-            logger.error("AOB Parser: Invalid token '{}' at position {}."
-                         " Expected hex byte (e.g., FF), '?' or '?\?'.",
+            logger.error("AOB Parser: Invalid token '{}' at position {}. "
+                         "Expected hex byte (e.g., FF), '?', or '?"
+                         "?'.",
                          token, token_idx);
             return std::nullopt;
         }
@@ -280,131 +286,194 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
     return result;
 }
 
+namespace
+{
+    // Internal scan primitive: returns the match *start* without applying
+    // pattern.offset. The public find_pattern wrappers apply the offset
+    // exactly once on top of this result; scan_executable_regions also calls
+    // this directly so its own final offset-application remains correct.
+    const std::byte *find_pattern_raw(const std::byte *start_address, size_t region_size,
+                                      const Scanner::CompiledPattern &pattern) noexcept;
+
+    // Shared guard for "pattern has no literal bytes". Returning start_address
+    // preserves backwards compatibility for callers that rely on the degenerate
+    // "all wildcards matches anywhere" behaviour, but the call site is almost
+    // always a bug. Logging once per public entry (rather than per internal
+    // find_pattern_raw iteration) keeps the warning visible without flooding
+    // logs when the Nth-occurrence overload or scan_executable_regions loops.
+    bool pattern_has_literal_byte(const Scanner::CompiledPattern &pattern) noexcept
+    {
+        for (const std::byte m : pattern.mask)
+        {
+            if (m != std::byte{0x00})
+                return true;
+        }
+        return false;
+    }
+
+    // Shared precondition check for the public find_pattern overloads. Returns
+    // false when the caller must short-circuit with nullptr (empty pattern or
+    // null start_address). Emits the all-wildcard warning itself so callers
+    // do not duplicate it; in that case the caller still continues scanning.
+    bool validate_find_pattern_inputs(const std::byte *start_address,
+                                      const Scanner::CompiledPattern &pattern,
+                                      Logger &logger) noexcept
+    {
+        if (pattern.empty())
+        {
+            logger.error("find_pattern: Pattern is empty. Cannot scan.");
+            return false;
+        }
+        if (!start_address)
+        {
+            logger.error("find_pattern: Start address is null. Cannot scan.");
+            return false;
+        }
+        if (!pattern_has_literal_byte(pattern))
+        {
+            logger.warning("find_pattern: pattern contains no literal bytes "
+                           "(all wildcards); returning region start unchanged");
+        }
+        return true;
+    }
+} // anonymous namespace
+
 const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_address, size_t region_size,
                                                      const CompiledPattern &pattern)
 {
     Logger &logger = Logger::get_instance();
-    const size_t pattern_size = pattern.size();
-
-    if (pattern_size == 0)
-    {
-        logger.error("find_pattern: Pattern is empty. Cannot scan.");
-        return nullptr;
-    }
-    if (!start_address)
-    {
-        logger.error("find_pattern: Start address is null. Cannot scan.");
-        return nullptr;
-    }
-    if (region_size < pattern_size)
+    if (!validate_find_pattern_inputs(start_address, pattern, logger))
     {
         return nullptr;
     }
 
-    // Select the best anchor byte: the non-wildcard byte with the lowest frequency score.
-    // Ties are broken by first occurrence for deterministic behavior.
-    size_t best_anchor = pattern_size; // invalid = all wildcards
-    uint8_t best_score = UINT8_MAX;
-    for (size_t i = 0; i < pattern_size; ++i)
+    const std::byte *match = find_pattern_raw(start_address, region_size, pattern);
+    if (!match)
+        return nullptr;
+    return match + pattern.offset;
+}
+
+namespace
+{
+    const std::byte *find_pattern_raw(const std::byte *start_address, size_t region_size,
+                                      const Scanner::CompiledPattern &pattern) noexcept
     {
-        if (pattern.mask[i] != std::byte{0x00})
+        const size_t pattern_size = pattern.size();
+
+        if (pattern_size == 0 || !start_address || region_size < pattern_size)
         {
-            uint8_t score = byte_frequency_class(static_cast<uint8_t>(pattern.bytes[i]));
-            if (best_anchor == pattern_size || score < best_score)
+            return nullptr;
+        }
+
+        // Select the best anchor byte: the non-wildcard byte with the lowest
+        // frequency score. Ties are broken by first occurrence for deterministic
+        // behavior.
+        size_t best_anchor = pattern_size; // invalid = all wildcards
+        uint8_t best_score = UINT8_MAX;
+        for (size_t i = 0; i < pattern_size; ++i)
+        {
+            if (pattern.mask[i] != std::byte{0x00})
             {
-                best_anchor = i;
-                best_score = score;
-                if (score == 0)
+                const uint8_t score = byte_frequency_class(static_cast<uint8_t>(pattern.bytes[i]));
+                if (best_anchor == pattern_size || score < best_score)
                 {
-                    break; // Cannot improve on score 0
+                    best_anchor = i;
+                    best_score = score;
+                    if (score == 0)
+                    {
+                        break; // Cannot improve on score 0
+                    }
                 }
             }
         }
-    }
 
-    // All wildcards: matches immediately at start
-    if (best_anchor == pattern_size)
-    {
-        return start_address;
-    }
-
-    const std::byte target_byte = pattern.bytes[best_anchor];
-    const unsigned char target_val = static_cast<unsigned char>(target_byte);
-
-    const std::byte *search_start = start_address + best_anchor;
-    const std::byte *const search_end = start_address + (region_size - pattern_size) + best_anchor;
-
-    while (search_start <= search_end)
-    {
-        const void *found = memchr(search_start, static_cast<int>(target_val),
-                                   static_cast<size_t>(search_end - search_start + 1));
-
-        if (!found)
+        // All wildcards: the pattern has no literal bytes to anchor on, so the
+        // search degenerates to "always match at region start". The public
+        // wrappers log the warning exactly once per call; repeated internal
+        // iterations (Nth occurrence, per-region scans) stay quiet.
+        if (best_anchor == pattern_size)
         {
-            break;
+            return start_address;
         }
 
-        const std::byte *current_scan_ptr = static_cast<const std::byte *>(found);
-        const std::byte *pattern_start = current_scan_ptr - best_anchor;
+        const std::byte target_byte = pattern.bytes[best_anchor];
+        const unsigned char target_val = static_cast<unsigned char>(target_byte);
 
-        // Verify the full pattern at this position.
-        // Three-tier SIMD: AVX2 (32B) -> SSE2 (16B) -> scalar (1B).
-        bool match_found = true;
-        size_t j = 0;
+        const std::byte *search_start = start_address + best_anchor;
+        const std::byte *const search_end = start_address + (region_size - pattern_size) + best_anchor;
+
+        while (search_start <= search_end)
+        {
+            const void *found = memchr(search_start, static_cast<int>(target_val),
+                                       static_cast<size_t>(search_end - search_start + 1));
+
+            if (!found)
+            {
+                break;
+            }
+
+            const std::byte *current_scan_ptr = static_cast<const std::byte *>(found);
+            const std::byte *pattern_start = current_scan_ptr - best_anchor;
+
+            // Verify the full pattern at this position.
+            // Three-tier SIMD: AVX2 (32B) -> SSE2 (16B) -> scalar (1B).
+            bool match_found = true;
+            size_t j = 0;
 
 #ifdef DMK_HAS_AVX2
-        if (cpu_has_avx2())
-        {
-            j = verify_pattern_avx2(pattern_start, pattern, 0);
-            if (j == 0 && pattern_size >= 32)
+            if (cpu_has_avx2())
             {
-                // Mismatch in AVX2 range
-                match_found = false;
+                j = verify_pattern_avx2(pattern_start, pattern, 0);
+                if (j == 0 && pattern_size >= 32)
+                {
+                    // Mismatch in AVX2 range
+                    match_found = false;
+                }
             }
-        }
 #endif // DMK_HAS_AVX2
 
 #ifdef DMK_HAS_SSE2
-        for (; match_found && j + 16 <= pattern_size; j += 16)
-        {
-            const __m128i mem = _mm_loadu_si128(
-                reinterpret_cast<const __m128i *>(pattern_start + j));
-            const __m128i pat = _mm_loadu_si128(
-                reinterpret_cast<const __m128i *>(pattern.bytes.data() + j));
-            const __m128i msk = _mm_loadu_si128(
-                reinterpret_cast<const __m128i *>(pattern.mask.data() + j));
-
-            const __m128i xored = _mm_xor_si128(mem, pat);
-            const __m128i masked = _mm_and_si128(xored, msk);
-            const __m128i cmp = _mm_cmpeq_epi8(masked, _mm_setzero_si128());
-
-            if (_mm_movemask_epi8(cmp) != 0xFFFF)
+            for (; match_found && j + 16 <= pattern_size; j += 16)
             {
-                match_found = false;
-                break;
+                const __m128i mem = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i *>(pattern_start + j));
+                const __m128i pat = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i *>(pattern.bytes.data() + j));
+                const __m128i msk = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i *>(pattern.mask.data() + j));
+
+                const __m128i xored = _mm_xor_si128(mem, pat);
+                const __m128i masked = _mm_and_si128(xored, msk);
+                const __m128i cmp = _mm_cmpeq_epi8(masked, _mm_setzero_si128());
+
+                if (_mm_movemask_epi8(cmp) != 0xFFFF)
+                {
+                    match_found = false;
+                    break;
+                }
             }
-        }
 #endif // DMK_HAS_SSE2
 
-        for (; match_found && j < pattern_size; ++j)
-        {
-            if (pattern.mask[j] != std::byte{0x00} && pattern_start[j] != pattern.bytes[j])
+            for (; match_found && j < pattern_size; ++j)
             {
-                match_found = false;
+                if (pattern.mask[j] != std::byte{0x00} && pattern_start[j] != pattern.bytes[j])
+                {
+                    match_found = false;
+                }
             }
+
+            if (match_found)
+            {
+                return pattern_start;
+            }
+
+            // No match, continue searching from next position
+            search_start = current_scan_ptr + 1;
         }
 
-        if (match_found)
-        {
-            return pattern_start;
-        }
-
-        // No match, continue searching from next position
-        search_start = current_scan_ptr + 1;
+        return nullptr;
     }
-
-    return nullptr;
-}
+} // anonymous namespace
 
 const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_address, size_t region_size,
                                                      const CompiledPattern &pattern, size_t occurrence)
@@ -414,20 +483,29 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
         return nullptr;
     }
 
+    Logger &logger = Logger::get_instance();
+    if (!validate_find_pattern_inputs(start_address, pattern, logger))
+    {
+        return nullptr;
+    }
+
     const std::byte *cursor = start_address;
     size_t remaining = region_size;
     size_t found_count = 0;
 
+    // Iterate via the raw helper so the `match + 1` continuation stays
+    // correct regardless of the pattern's offset marker. Offset is applied
+    // exactly once when we return the Nth hit.
     while (remaining >= pattern.size())
     {
-        const std::byte *match = find_pattern(cursor, remaining, pattern);
+        const std::byte *match = find_pattern_raw(cursor, remaining, pattern);
         if (!match)
         {
             break;
         }
         if (++found_count == occurrence)
         {
-            return match;
+            return match + pattern.offset;
         }
         const size_t advance = static_cast<size_t>(match - cursor) + 1;
         cursor += advance;
@@ -456,8 +534,14 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::r
     int32_t displacement;
     std::memcpy(&displacement, disp_ptr, sizeof(int32_t));
 
-    auto base = reinterpret_cast<uintptr_t>(instruction_address);
-    return base + instruction_length + static_cast<uintptr_t>(static_cast<intptr_t>(displacement));
+    // Compute the target in unsigned modular arithmetic so the math stays
+    // well-defined on every input, including kernel-range instruction
+    // addresses (where intptr_t would be negative and signed overflow is UB).
+    // The displacement is sign-extended first so negative disp32 values wrap
+    // to the correct 64-bit offset.
+    const uintptr_t base = reinterpret_cast<uintptr_t>(instruction_address);
+    const uintptr_t disp_sext = static_cast<uintptr_t>(static_cast<int64_t>(displacement));
+    return base + instruction_length + disp_sext;
 }
 
 std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::find_and_resolve_rip_relative(
@@ -504,8 +588,21 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
     if (pattern.empty() || occurrence == 0)
         return nullptr;
 
-    constexpr DWORD EXEC_FLAGS = PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                                 PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    Logger &logger = Logger::get_instance();
+
+    if (!pattern_has_literal_byte(pattern))
+    {
+        logger.warning("scan_executable_regions: pattern contains no literal "
+                       "bytes (all wildcards); returning first readable region "
+                       "start unchanged");
+    }
+
+    // Only scan pages we can actually *read*. Bare PAGE_EXECUTE grants execute
+    // rights without read, so dereferencing such a page raises an access
+    // violation. Omitting it keeps find_pattern safe on all walked regions.
+    constexpr DWORD READABLE_EXEC_FLAGS = PAGE_EXECUTE_READ |
+                                          PAGE_EXECUTE_READWRITE |
+                                          PAGE_EXECUTE_WRITECOPY;
 
     size_t matches_remaining = occurrence;
     MEMORY_BASIC_INFORMATION mbi{};
@@ -513,12 +610,33 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
 
     while (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
     {
-        if (mbi.State == MEM_COMMIT && (mbi.Protect & EXEC_FLAGS) != 0 &&
-            (mbi.Protect & PAGE_GUARD) == 0 && mbi.RegionSize >= pattern.size())
+        // Skip non-readable / hostile protection states regardless of the
+        // execute bits: guard pages trigger STATUS_GUARD_PAGE_VIOLATION on
+        // access, and PAGE_NOACCESS will AV even for reads.
+        const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+        const bool execute_only = (mbi.Protect & PAGE_EXECUTE) != 0 &&
+                                  (mbi.Protect & READABLE_EXEC_FLAGS) == 0;
+
+        if (execute_only && !protection_unsafe && mbi.State == MEM_COMMIT)
+        {
+            if (logger.is_enabled(LogLevel::Trace))
+            {
+                logger.trace("scan_executable_regions: skipping pure-execute "
+                             "region at {} (size {}) - not readable",
+                             Format::format_address(reinterpret_cast<uintptr_t>(mbi.BaseAddress)),
+                             mbi.RegionSize);
+            }
+        }
+
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & READABLE_EXEC_FLAGS) != 0 &&
+            !protection_unsafe && mbi.RegionSize >= pattern.size())
         {
             const auto *region_start = reinterpret_cast<const std::byte *>(mbi.BaseAddress);
 
-            const std::byte *match = find_pattern(region_start, mbi.RegionSize, pattern);
+            // Use the raw helper so our own `+ pattern.offset` at the final
+            // return applies exactly once (the public find_pattern already
+            // applies offset; calling it here would double-apply).
+            const std::byte *match = find_pattern_raw(region_start, mbi.RegionSize, pattern);
             while (match != nullptr)
             {
                 --matches_remaining;
@@ -529,7 +647,7 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
                 const size_t consumed = static_cast<size_t>(match - region_start) + 1;
                 if (consumed >= mbi.RegionSize)
                     break;
-                match = find_pattern(match + 1, mbi.RegionSize - consumed, pattern);
+                match = find_pattern_raw(match + 1, mbi.RegionSize - consumed, pattern);
             }
         }
 

@@ -35,7 +35,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 - `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7)
 - Nth-occurrence matching (1-based) for patterns that hit multiple locations
 - RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `std::expected` with typed `RipResolveError` for actionable diagnostics)
-- `scan_executable_regions()` for scanning all committed executable pages in the process - useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module
+- `scan_executable_regions()` for scanning all committed executable pages in the process - useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module (pure-execute pages without a read bit are skipped to avoid access violations)
 
 </details>
 
@@ -187,6 +187,7 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 
 ## Guides
 
+* [AOB Signature Scanning Guide](docs/misc/aob-signatures.md) - Pattern syntax, RIP-relative resolution, and patch-proof signature practices
 * [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
 * [Test Coverage Guide](docs/tests/README.md) - Coverage analysis, test architecture, and module-level breakdown
 
@@ -865,6 +866,7 @@ For practical reference and real-world usage examples:
 * **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
 * **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
 * **CrimsonDesert-EquipHide**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide)
+* **CrimsonDesert-LiveTransmog**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertLiveTransmog](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertLiveTransmog)
 
 ## Acknowledgements
 

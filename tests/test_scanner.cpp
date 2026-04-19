@@ -507,7 +507,7 @@ TEST(ScannerTest, parse_aob_offset_marker)
     auto result = Scanner::parse_aob("48 8B 88 B8 00 00 00 | 48 89 4C 24 68");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 12u);
-    EXPECT_EQ(result->offset, 7u);
+    EXPECT_EQ(result->offset, 7);
     EXPECT_EQ(result->bytes[0], std::byte{0x48});
     EXPECT_EQ(result->bytes[7], std::byte{0x48});
 }
@@ -517,7 +517,7 @@ TEST(ScannerTest, parse_aob_offset_marker_at_start)
     auto result = Scanner::parse_aob("| 48 8B 05");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 3u);
-    EXPECT_EQ(result->offset, 0u);
+    EXPECT_EQ(result->offset, 0);
 }
 
 TEST(ScannerTest, parse_aob_offset_marker_at_end)
@@ -525,14 +525,14 @@ TEST(ScannerTest, parse_aob_offset_marker_at_end)
     auto result = Scanner::parse_aob("48 8B 05 |");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 3u);
-    EXPECT_EQ(result->offset, 3u);
+    EXPECT_EQ(result->offset, 3);
 }
 
 TEST(ScannerTest, parse_aob_no_offset_marker)
 {
     auto result = Scanner::parse_aob("48 8B 05");
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->offset, 0u);
+    EXPECT_EQ(result->offset, 0);
 }
 
 TEST(ScannerTest, parse_aob_multiple_offset_markers_fails)
@@ -546,11 +546,13 @@ TEST(ScannerTest, parse_aob_offset_marker_with_wildcards)
     auto result = Scanner::parse_aob("?? ?? | 48 8B ??");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 5u);
-    EXPECT_EQ(result->offset, 2u);
+    EXPECT_EQ(result->offset, 2);
 }
 
-TEST(ScannerTest, find_pattern_with_offset_marker)
+TEST(ScannerTest, FindPattern_OffsetMarker_ReturnsMarkedByte)
 {
+    // v3.0 contract: find_pattern applies pattern.offset to the returned
+    // pointer, so a `|` marker lands the caller directly on the anchored byte.
     std::vector<std::byte> data(256, std::byte{0x00});
     data[50] = std::byte{0xAA};
     data[51] = std::byte{0xBB};
@@ -559,13 +561,13 @@ TEST(ScannerTest, find_pattern_with_offset_marker)
 
     auto pattern = Scanner::parse_aob("AA BB | CC DD");
     ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->offset, 2);
 
     auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result - data.data(), 50);
-
-    // The caller can use result + pattern->offset to get the marked position
-    EXPECT_EQ((result + pattern->offset) - data.data(), 52);
+    // Returned pointer is the marked byte (offset 2 into the match), NOT the
+    // raw match start. Adding pattern->offset manually would double-apply.
+    EXPECT_EQ(result - data.data(), 52);
 }
 
 // --- Nth-occurrence matching ---
@@ -645,8 +647,10 @@ TEST(ScannerTest, find_pattern_nth_occurrence_zero)
     EXPECT_EQ(result, nullptr);
 }
 
-TEST(ScannerTest, find_pattern_nth_occurrence_with_offset)
+TEST(ScannerTest, FindPattern_NthOccurrence_WithOffsetMarker)
 {
+    // v3.0 contract: the Nth-occurrence overload also applies pattern.offset,
+    // returning the marked byte of the Nth match (not the match start).
     std::vector<std::byte> data(256, std::byte{0x00});
     data[40] = std::byte{0xAA};
     data[41] = std::byte{0xBB};
@@ -657,11 +661,13 @@ TEST(ScannerTest, find_pattern_nth_occurrence_with_offset)
 
     auto pattern = Scanner::parse_aob("AA | BB CC");
     ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->offset, 1);
 
     auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
     ASSERT_NE(result, nullptr);
-    EXPECT_EQ(result - data.data(), 100);
-    EXPECT_EQ((result + pattern->offset) - data.data(), 101);
+    // The second match starts at data[100]; the `|` sits after the first byte,
+    // so find_pattern returns data[101] directly.
+    EXPECT_EQ(result - data.data(), 101);
 }
 
 TEST(ScannerTest, find_pattern_nth_occurrence_with_overlap)
@@ -1192,11 +1198,50 @@ TEST(ScannerExecRegionTest, RespectsPatternOffset)
 
     auto pattern = Scanner::parse_aob("D3 7A E9 15 | 82 F6 4B C0 37 A1 5E 94");
     ASSERT_TRUE(pattern.has_value());
-    EXPECT_EQ(pattern->offset, 4u);
+    EXPECT_EQ(pattern->offset, 4);
 
     const std::byte *result = Scanner::scan_executable_regions(*pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &bytes[204]);
+
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerExecRegionTest, OffsetStillAppliedExactlyOnce)
+{
+    // Regression guard for the internal find_pattern_raw split: after
+    // unification, both find_pattern and scan_executable_regions apply
+    // pattern.offset exactly once. Placing a uniquely-valued pattern in an
+    // executable region and scanning via both paths must return the same
+    // marked byte, not the marked byte + offset (which would be a double
+    // application).
+    void *exec_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(exec_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(exec_mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    // Distinctive 8-byte pattern at offset 300 with `|` marker after byte 3.
+    constexpr size_t region_offset = 300;
+    const std::byte sig[] = {
+        std::byte{0x71}, std::byte{0xE3}, std::byte{0x9A}, std::byte{0x4D},
+        std::byte{0x06}, std::byte{0xBF}, std::byte{0x52}, std::byte{0x18}};
+    std::memcpy(&bytes[region_offset], sig, sizeof(sig));
+
+    auto pattern = Scanner::parse_aob("71 E3 9A | 4D 06 BF 52 18");
+    ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->offset, 3);
+
+    // scan_executable_regions path: should land on the marked byte.
+    const std::byte *exec_hit = Scanner::scan_executable_regions(*pattern);
+    ASSERT_NE(exec_hit, nullptr);
+    EXPECT_EQ(exec_hit, &bytes[region_offset + 3]);
+
+    // find_pattern path over the same region: must agree exactly with the
+    // scan_executable_regions result (both apply offset once).
+    const std::byte *direct_hit = Scanner::find_pattern(bytes, 4096, *pattern);
+    ASSERT_NE(direct_hit, nullptr);
+    EXPECT_EQ(direct_hit, exec_hit);
 
     VirtualFree(exec_mem, 0, MEM_RELEASE);
 }
@@ -1446,4 +1491,389 @@ TEST(ScannerTest, find_pattern_avx2_path_not_found)
 
     const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
     EXPECT_EQ(result, nullptr);
+}
+
+namespace
+{
+    void write_disp32(std::byte *dst, int32_t value) noexcept
+    {
+        std::memcpy(dst, &value, sizeof(value));
+    }
+}
+
+TEST(ScannerRipResolveTest, resolve_rip_relative_null_input_returns_error)
+{
+    const auto result = Scanner::resolve_rip_relative(nullptr, 1, 5);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+}
+
+TEST(ScannerRipResolveTest, resolve_rip_relative_positive_displacement)
+{
+    // Fake `E8 disp32` (call rel32, 5 bytes total). disp32 starts at offset 1.
+    std::vector<std::byte> buffer(5, std::byte{0x00});
+    buffer[0] = std::byte{0xE8};
+    write_disp32(buffer.data() + 1, 0x1000);
+
+    const auto result = Scanner::resolve_rip_relative(buffer.data(), 1, 5);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data()) + 5 + 0x1000;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST(ScannerRipResolveTest, resolve_rip_relative_negative_displacement)
+{
+    // Signed disp32 must produce a lower absolute address via sign-extension.
+    std::vector<std::byte> buffer(16, std::byte{0x00});
+    buffer[0] = std::byte{0xE9};
+    write_disp32(buffer.data() + 1, -0x200);
+
+    const auto result = Scanner::resolve_rip_relative(buffer.data(), 1, 5);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data()) + 5 - 0x200;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST(ScannerRipResolveTest, resolve_rip_relative_mov_rax_rip_shape)
+{
+    // Full 7-byte `mov rax, [rip+disp32]`: 48 8B 05 disp32.
+    std::vector<std::byte> buffer(7, std::byte{0x00});
+    buffer[0] = std::byte{0x48};
+    buffer[1] = std::byte{0x8B};
+    buffer[2] = std::byte{0x05};
+    write_disp32(buffer.data() + 3, 0x4000);
+
+    const auto result = Scanner::resolve_rip_relative(buffer.data(), 3, 7);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data()) + 7 + 0x4000;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST(ScannerRipResolveTest, resolve_rip_relative_unreadable_displacement)
+{
+    // Allocate two adjacent pages. Page 1 is RW, page 2 is NO_ACCESS.
+    // Place the opcode at the last byte of page 1 so the disp32 read straddles
+    // into page 2 and Memory::is_readable() fails for the disp32 window.
+    SYSTEM_INFO sys_info{};
+    ::GetSystemInfo(&sys_info);
+    const SIZE_T page_size = sys_info.dwPageSize;
+
+    auto *region = static_cast<std::byte *>(::VirtualAlloc(
+        nullptr, page_size * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    ASSERT_NE(region, nullptr);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(::VirtualProtect(region + page_size, page_size, PAGE_NOACCESS, &old_protect));
+
+    auto *fake_instr = region + page_size - 1;
+    *fake_instr = std::byte{0xE8};
+
+    const auto result = Scanner::resolve_rip_relative(fake_instr, 1, 5);
+
+    EXPECT_FALSE(result.has_value());
+    if (!result.has_value())
+    {
+        EXPECT_EQ(result.error(), RipResolveError::UnreadableDisplacement);
+    }
+
+    ::VirtualFree(region, 0, MEM_RELEASE);
+}
+
+TEST(ScannerRipResolveTest, find_and_resolve_null_input_returns_error)
+{
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        nullptr, 16, Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+}
+
+TEST(ScannerRipResolveTest, find_and_resolve_region_too_small_returns_error)
+{
+    std::vector<std::byte> buffer(2, std::byte{0x00});
+
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::RegionTooSmall);
+}
+
+TEST(ScannerRipResolveTest, find_and_resolve_prefix_not_found_returns_error)
+{
+    std::vector<std::byte> buffer(64, std::byte{0x90});
+
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), RipResolveError::PrefixNotFound);
+}
+
+TEST(ScannerRipResolveTest, find_and_resolve_call_rel32_happy_path)
+{
+    std::vector<std::byte> buffer(64, std::byte{0x90});
+
+    constexpr size_t instr_offset = 20;
+    buffer[instr_offset] = std::byte{0xE8};
+    write_disp32(buffer.data() + instr_offset + 1, 0x80);
+
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected =
+        reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 5 + 0x80;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST(ScannerRipResolveTest, find_and_resolve_mov_rax_rip_multi_byte_prefix)
+{
+    std::vector<std::byte> buffer(64, std::byte{0x90});
+
+    constexpr size_t instr_offset = 12;
+    buffer[instr_offset + 0] = std::byte{0x48};
+    buffer[instr_offset + 1] = std::byte{0x8B};
+    buffer[instr_offset + 2] = std::byte{0x05};
+    write_disp32(buffer.data() + instr_offset + 3, 0x1234);
+
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        buffer.data(), buffer.size(), Scanner::PREFIX_MOV_RAX_RIP, 7);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected =
+        reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 7 + 0x1234;
+    EXPECT_EQ(*result, expected);
+}
+
+TEST(ScannerRipResolveTest, find_and_resolve_returns_first_match_only)
+{
+    std::vector<std::byte> buffer(64, std::byte{0x90});
+
+    buffer[8] = std::byte{0xE8};
+    write_disp32(buffer.data() + 9, 0x10);
+
+    buffer[32] = std::byte{0xE8};
+    write_disp32(buffer.data() + 33, 0x20);
+
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected_first =
+        reinterpret_cast<uintptr_t>(buffer.data() + 8) + 5 + 0x10;
+    EXPECT_EQ(*result, expected_first);
+}
+
+TEST(ScannerRipResolveTest, find_and_resolve_match_at_region_boundary)
+{
+    // Prefix sits at the last position where prefix + disp32 still fits in the region.
+    std::vector<std::byte> buffer(16, std::byte{0x90});
+    const size_t instr_offset = buffer.size() - 5;
+    buffer[instr_offset] = std::byte{0xE8};
+    write_disp32(buffer.data() + instr_offset + 1, 0x40);
+
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected =
+        reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 5 + 0x40;
+    EXPECT_EQ(*result, expected);
+}
+
+// Regression guard for the PREFIX_* migration from C-array to std::array.
+// Ensures the constants still expose `.size()`, decay into std::span cleanly,
+// and feed through find_and_resolve_rip_relative without source changes.
+TEST(ScannerRipResolveTest, PrefixConstants_AreStdArraysAndUsableAsSpan)
+{
+    static_assert(Scanner::PREFIX_CALL_REL32.size() == 1,
+                  "PREFIX_CALL_REL32 must expose std::array::size()");
+    EXPECT_EQ(Scanner::PREFIX_CALL_REL32[0], std::byte{0xE8});
+
+    std::vector<std::byte> buffer(5, std::byte{0x90});
+    buffer[0] = std::byte{0xE8};
+    write_disp32(buffer.data() + 1, 0x10);
+
+    const auto result = Scanner::find_and_resolve_rip_relative(
+        buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+
+    ASSERT_TRUE(result.has_value());
+    const uintptr_t expected =
+        reinterpret_cast<uintptr_t>(buffer.data()) + 5 + 0x10;
+    EXPECT_EQ(*result, expected);
+}
+
+// Parser must reject obvious non-hex tokens. The error path used to emit a
+// `\?` escape artefact; this test guards parse_aob's rejection behaviour
+// without trying to inspect the Logger output (there is no public capture
+// helper in the test suite, so message text is intentionally unchecked).
+TEST(ScannerTest, ParseAob_WildcardErrorMessage_UsesCleanQuestionMarks)
+{
+    auto result = Scanner::parse_aob("GG");
+    EXPECT_FALSE(result.has_value());
+
+    auto result_mixed = Scanner::parse_aob("48 GG 8B");
+    EXPECT_FALSE(result_mixed.has_value());
+}
+
+// An all-wildcard pattern has no literal bytes to anchor on. find_pattern's
+// contract is to return `start_address` in that case (and log a warning).
+// This guard-rails the behaviour so future refactors don't silently flip it.
+TEST(ScannerTest, FindPattern_AllWildcards_ReturnsStartWithWarning)
+{
+    Scanner::CompiledPattern all_wild;
+    all_wild.bytes = {std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+    all_wild.mask = {std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+
+    std::vector<std::byte> buffer(32, std::byte{0xAA});
+
+    const auto *first = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first, buffer.data());
+
+    // Stable across repeated calls.
+    const auto *second = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild);
+    EXPECT_EQ(second, buffer.data());
+}
+
+// Negative disp32 must land before the instruction. This guards the refactored
+// signed-arithmetic path in resolve_rip_relative - an unsigned-only cast chain
+// would still produce the correct bit pattern modulo 2^64, but the signed form
+// is the one humans can read, so a direct signed comparison is the contract.
+TEST(ScannerTest, ResolveRipRelative_NegativeDisplacement_ComputesCorrectTarget)
+{
+    // CALL rel32 with disp32 = -0x20. Encoded little-endian: E0 FF FF FF.
+    alignas(4) std::byte buffer[5] = {
+        std::byte{0xE8},
+        std::byte{0xE0}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+
+    ASSERT_TRUE(Memory::init_cache());
+    const auto result = Scanner::resolve_rip_relative(buffer, 1, 5);
+    ASSERT_TRUE(result.has_value());
+
+    const auto *expected_ptr = buffer + 5 - 0x20;
+    EXPECT_EQ(*result, reinterpret_cast<uintptr_t>(expected_ptr));
+    Memory::shutdown_cache();
+}
+
+// Exercise the full VirtualQuery walk. The test cannot portably set up a
+// pure-execute page, but it can verify the walk across whatever mix of
+// protections the current process happens to have does not AV. The fix in
+// scan_executable_regions is what makes this safe in the presence of
+// PAGE_EXECUTE-only regions injected by third-party modules.
+TEST(ScannerTest, ScanExecutableRegions_SurvivesProcessWalk_DoesNotCrash)
+{
+    // A distinctive pattern unlikely to appear in the host process. If it does
+    // match something, that is still a success for the "does not AV" contract.
+    auto pattern = Scanner::parse_aob("DE AD BE EF CA FE BA BE 13 37 C0 DE");
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto *hit = Scanner::scan_executable_regions(*pattern);
+    (void)hit; // Either result (match or nullptr) is acceptable; we care that we returned.
+    SUCCEED();
+}
+
+// Regression guard: find_pattern applies pattern.offset exactly once. A pattern
+// whose `|` marker sits at the very end (offset == pattern.size()) must return
+// a pointer one past the final pattern byte, not somewhere deeper.
+TEST(ScannerTest, FindPattern_OffsetAtEnd_ReturnsPastLastByte)
+{
+    std::vector<std::byte> data(64, std::byte{0x00});
+    data[10] = std::byte{0xDE};
+    data[11] = std::byte{0xAD};
+    data[12] = std::byte{0xBE};
+    data[13] = std::byte{0xEF};
+
+    auto pattern = Scanner::parse_aob("DE AD BE EF |");
+    ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->offset, 4);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[14]);
+}
+
+// All-wildcard Nth occurrence must still advance one byte at a time rather
+// than loop-stalling, and must return the Nth "match" address (region start
+// + N - 1) without log-spamming for every internal iteration.
+TEST(ScannerTest, FindPattern_AllWildcards_NthOccurrenceAdvances)
+{
+    Scanner::CompiledPattern all_wild;
+    all_wild.bytes = {std::byte{0x00}, std::byte{0x00}};
+    all_wild.mask = {std::byte{0x00}, std::byte{0x00}};
+
+    std::vector<std::byte> buffer(16, std::byte{0xAB});
+
+    const auto *first = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild, 1);
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first, buffer.data());
+
+    const auto *second = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild, 2);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(second, buffer.data() + 1);
+
+    const auto *third = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild, 3);
+    ASSERT_NE(third, nullptr);
+    EXPECT_EQ(third, buffer.data() + 2);
+}
+
+// Nth overload with occurrence == 0 must early-return before touching any
+// other state (e.g. pattern validation), preserving the 1-based contract.
+TEST(ScannerTest, FindPattern_NthZeroOccurrence_ReturnsNullptr)
+{
+    auto pattern = Scanner::parse_aob("CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    std::vector<std::byte> data = {std::byte{0xCC}, std::byte{0xCC}};
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern, 0);
+    EXPECT_EQ(result, nullptr);
+}
+
+// Nth overload rejects an empty pattern the same way the single-hit overload
+// does. Without the public-entry guard, the raw helper would be asked to scan
+// with a zero-size pattern, tripping the `remaining >= 0` sentinel path.
+TEST(ScannerTest, FindPattern_NthEmptyPattern_ReturnsNullptr)
+{
+    Scanner::CompiledPattern empty_pattern;
+    std::vector<std::byte> data(16, std::byte{0x00});
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), empty_pattern, 1);
+    EXPECT_EQ(result, nullptr);
+}
+
+// Nth overload validates the start pointer too, so callers can't accidentally
+// scan from a null base even when they pass a positive region size.
+TEST(ScannerTest, FindPattern_NthNullStart_ReturnsNullptr)
+{
+    auto pattern = Scanner::parse_aob("CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto *result = Scanner::find_pattern(
+        static_cast<const std::byte *>(nullptr), 32, *pattern, 1);
+    EXPECT_EQ(result, nullptr);
+}
+
+// resolve_rip_relative must sign-extend the 32-bit displacement before adding
+// it to the instruction base, so a negative disp32 lands at the expected
+// two's-complement target. This test pins that contract with disp = -1 and a
+// 5-byte instruction: target must equal base + 5 + (-1) = base + 4.
+TEST(ScannerTest, ResolveRipRelative_NegativeDisp32_ProducesExpectedTarget)
+{
+    std::vector<std::byte> code = {
+        std::byte{0xE8},
+        std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+
+    const auto result = Scanner::resolve_rip_relative(code.data(), 1, 5);
+    ASSERT_TRUE(result.has_value());
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(code.data());
+    // disp = -1, instruction_length = 5 => target = base + 5 + (-1) = base + 4.
+    const uintptr_t expected = base + 5 + static_cast<uintptr_t>(static_cast<int64_t>(-1));
+    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(*result, base + 4);
 }

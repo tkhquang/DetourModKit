@@ -1,6 +1,7 @@
 #ifndef DETOURMODKIT_SCANNER_HPP
 #define DETOURMODKIT_SCANNER_HPP
 
+#include <array>
 #include <vector>
 #include <string>
 #include <string_view>
@@ -57,11 +58,32 @@ namespace DetourModKit
          */
         struct CompiledPattern
         {
-            std::vector<std::byte> bytes; ///< Pattern bytes (wildcard positions contain arbitrary values)
-            std::vector<std::byte> mask;  ///< 0xFF = match this byte, 0x00 = wildcard (skip)
-            size_t offset = 0;            ///< Byte offset from pattern start to the point of interest.
-                                          ///< Set by `|` marker in the AOB string, or 0 if absent.
-                                          ///< May equal bytes.size() when `|` appears at the end.
+            /**
+             * @brief Pattern bytes, one per token in the source AOB string.
+             * @details Entries at wildcard positions (mask byte == 0x00) contain
+             *          arbitrary values and must not be compared against memory.
+             */
+            std::vector<std::byte> bytes;
+
+            /**
+             * @brief Per-byte match mask paralleling @ref bytes.
+             * @details 0xFF marks a literal byte that must match exactly; 0x00
+             *          marks a wildcard slot to skip. Sized identically to
+             *          @ref bytes.
+             */
+            std::vector<std::byte> mask;
+
+            /**
+             * @brief Byte offset from pattern start to the point of interest.
+             * @details Set by the `|` marker in the AOB string, or 0 if absent.
+             *          May equal bytes.size() when `|` appears at the end of the
+             *          pattern. The offset is non-negative under the current
+             *          parser (`|` cannot precede tokens), but the type is
+             *          signed to match pointer-arithmetic conventions
+             *          (C++ Core Guidelines ES.106) and to future-proof against
+             *          negative anchors.
+             */
+            std::ptrdiff_t offset = 0;
 
             /**
              * @brief Returns the size of the pattern.
@@ -95,11 +117,26 @@ namespace DetourModKit
          * @param start_address Pointer to the beginning of the memory region to scan.
          * @param region_size The size (in bytes) of the memory region to scan.
          * @param pattern The compiled pattern to search for.
-         * @return const std::byte* Pointer to the first occurrence of the pattern within
-         *         the specified region. Returns nullptr if pattern not found.
+         * @return const std::byte* Pointer to the match within the specified region,
+         *         already adjusted by `pattern.offset`. Returns nullptr if pattern
+         *         not found.
+         * @note A pattern with zero literal bytes (every token wildcarded) returns
+         *       `start_address` (plus offset) and emits a warning through the shared
+         *       Logger. This case almost always indicates a caller bug; the behaviour
+         *       is preserved for backwards compatibility but should not be relied upon.
+         * @note `pattern.offset` (set by a `|` marker in the AOB string) is applied
+         *       exactly once. When no marker is present `offset == 0` and the returned
+         *       pointer is the match start. Callers must NOT add `pattern.offset`
+         *       manually; doing so double-applies and will miss the intended byte.
+         * @warning When `pattern.offset == pattern.size()` (a trailing `|` marker),
+         *          the returned pointer addresses one-past the matched range. Depending
+         *          on where in the region the match landed, this may also be
+         *          one-past the scanned region. The pointer is valid for arithmetic
+         *          and bounds comparisons but MUST NOT be dereferenced without an
+         *          explicit readability check (e.g. `Memory::is_readable`).
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
-                                                     const CompiledPattern &pattern);
+                                                    const CompiledPattern &pattern);
 
         /**
          * @brief Scans a memory region for the Nth occurrence of a byte pattern.
@@ -108,21 +145,26 @@ namespace DetourModKit
          * @param pattern The compiled pattern to search for.
          * @param occurrence Which occurrence to return (1-based). 1 = first match.
          *                   Passing 0 returns nullptr.
-         * @return const std::byte* Pointer to the Nth occurrence, or nullptr if fewer
-         *         than N matches exist.
+         * @return const std::byte* Pointer to the Nth occurrence (already adjusted
+         *         by `pattern.offset`), or nullptr if fewer than N matches exist.
+         * @note Like the single-occurrence overload, `pattern.offset` is applied
+         *       exactly once. Callers must NOT add it manually.
+         * @warning A trailing `|` marker produces a one-past pointer identical in
+         *          kind to the single-occurrence overload; do not dereference
+         *          without a bounds or readability check.
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
-                                                     const CompiledPattern &pattern, size_t occurrence);
+                                                    const CompiledPattern &pattern, size_t occurrence);
         // Common x86-64 RIP-relative opcode prefixes (bytes preceding the disp32 field)
-        inline constexpr std::byte PREFIX_MOV_RAX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
-        inline constexpr std::byte PREFIX_MOV_RCX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}};
-        inline constexpr std::byte PREFIX_MOV_RDX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x15}};
-        inline constexpr std::byte PREFIX_MOV_RBX_RIP[] = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x1D}};
-        inline constexpr std::byte PREFIX_LEA_RAX_RIP[] = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x05}};
-        inline constexpr std::byte PREFIX_LEA_RCX_RIP[] = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x0D}};
-        inline constexpr std::byte PREFIX_LEA_RDX_RIP[] = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x15}};
-        inline constexpr std::byte PREFIX_CALL_REL32[] = {std::byte{0xE8}};
-        inline constexpr std::byte PREFIX_JMP_REL32[] = {std::byte{0xE9}};
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RAX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RCX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}};
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RDX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x15}};
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RBX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x1D}};
+        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RAX_RIP = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x05}};
+        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RCX_RIP = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x0D}};
+        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RDX_RIP = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x15}};
+        inline constexpr std::array<std::byte, 1> PREFIX_CALL_REL32 = {std::byte{0xE8}};
+        inline constexpr std::array<std::byte, 1> PREFIX_JMP_REL32 = {std::byte{0xE9}};
 
         /**
          * @brief Resolves an absolute address from an x86-64 RIP-relative instruction.
@@ -148,6 +190,11 @@ namespace DetourModKit
          * @param opcode_prefix The opcode byte sequence to search for (disp32 must follow immediately).
          * @param instruction_length Total length of the instruction in bytes.
          * @return The resolved absolute address, or RipResolveError describing the failure.
+         * @warning For indirect-call / indirect-jump forms (`FF 15 disp32`, `FF 25 disp32`)
+         *          the returned address is the *pointer slot* (the address that stores
+         *          the final target), not the target itself. Dereference it with
+         *          `Memory::read_ptr_unsafe` (or an equivalent checked read) to obtain
+         *          the callee / jump destination.
          */
         [[nodiscard]] std::expected<uintptr_t, RipResolveError> find_and_resolve_rip_relative(
             const std::byte *search_start,
@@ -164,6 +211,22 @@ namespace DetourModKit
          * @param pattern The compiled pattern to search for.
          * @param occurrence Which occurrence to return (1-based). 1 = first match.
          * @return Pointer to the match (adjusted by pattern offset), or nullptr if not found.
+         * @note Pure-execute pages (`PAGE_EXECUTE` without any read bit) are skipped:
+         *       they are not guaranteed readable and dereferencing them raises an
+         *       access violation. Only `PAGE_EXECUTE_READ`, `PAGE_EXECUTE_READWRITE`,
+         *       and `PAGE_EXECUTE_WRITECOPY` regions are inspected. Guard and
+         *       no-access pages are skipped unconditionally.
+         * @note `pattern.offset` is applied to the returned pointer, matching
+         *       `find_pattern`. Callers must not add it manually.
+         * @warning A trailing `|` marker (offset == pattern.size()) yields a
+         *          one-past pointer; bounds-check before dereferencing.
+         * @note A pattern that straddles a region boundary (e.g. two separately
+         *       allocated `PAGE_EXECUTE_READ` regions that happen to be adjacent)
+         *       will not be found: each region is scanned independently. PE-loaded
+         *       code does not cross section boundaries so normal module scanning is
+         *       unaffected, but JIT-compiled code (Mono, Unreal AngelScript) or
+         *       heavily unpacked payloads may split contiguous bytes across VAD
+         *       entries.
          */
         [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
