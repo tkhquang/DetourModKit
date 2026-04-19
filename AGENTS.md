@@ -226,7 +226,7 @@ dispatcher.emit_safe(PlayerStateChanged{.health = player->health});
 - **Concurrency tests:** Use `std::atomic<bool> stop` flag pattern with multiple threads. See `AsyncMode_ConcurrentLogAndDisable` in `test_logger.cpp` for the reference pattern.
 - **Build flag:** Tests are enabled with `DMK_BUILD_TESTS=ON` (on by default in debug presets).
 
-For detailed coverage analysis, see [docs/tests/README.md](docs/tests/README.md). For hot-reload testing patterns, see [docs/hot-reload/README.md](docs/hot-reload/README.md).
+For detailed coverage analysis, see [docs/tests/README.md](docs/tests/README.md). For hot-reload testing patterns, see [docs/hot-reload/README.md](docs/hot-reload/README.md). For AOB signature construction, the Scanner API, and RIP-relative resolution, see [docs/misc/aob-signatures.md](docs/misc/aob-signatures.md).
 
 After any code change, build and run the full test suite before committing:
 
