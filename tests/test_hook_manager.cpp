@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <atomic>
 #include <format>
 #include <functional>
 #include <mutex>
@@ -2362,4 +2363,88 @@ TEST_F(HookManagerTest, DuplicateHook_DefaultMode_LayersOnTop)
 
     (void)hm.remove_hook("dup-layer-second");
     (void)hm.remove_hook("dup-layer-first");
+}
+
+namespace
+{
+    [[gnu::noinline]] void late_destruction_target_function() noexcept
+    {
+        volatile int x = 0;
+        x = x + 1;
+        (void)x;
+    }
+
+    void late_destruction_detour() noexcept {}
+} // namespace
+
+// Covers the destructor fallback path: a late shutdown() must serialize
+// against readers holding shared_lock via with_inline_hook() so their
+// callbacks never observe the maps being cleared under them. The
+// destructor only fires at static-destruction time, so the contract we
+// can verify in a unit test is the equivalent serialization provided by
+// shutdown(): a reader callback finishes cleanly, and a subsequent
+// shutdown() does not deadlock or crash.
+TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
+{
+    auto &hm = *hook_manager_;
+    const auto target =
+        reinterpret_cast<std::uintptr_t>(&late_destruction_target_function);
+
+    void *trampoline = nullptr;
+    auto created = hm.create_inline_hook(
+        "late-shutdown-hook",
+        target,
+        reinterpret_cast<void *>(&late_destruction_detour),
+        &trampoline);
+    ASSERT_TRUE(created.has_value());
+
+    std::atomic<bool> reader_started{false};
+    std::atomic<bool> reader_may_return{false};
+    std::atomic<bool> reader_observed_valid{false};
+
+    std::thread reader([&]() {
+        bool invoked = hm.with_inline_hook("late-shutdown-hook", [&](InlineHook &hook) {
+            reader_started.store(true, std::memory_order_release);
+            // Hold the shared_lock while the main thread races shutdown().
+            while (!reader_may_return.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            // Dereference the hook while still holding the shared_lock.
+            // If the destructor cleared the maps out from under us the
+            // name would be dangling; any UAF surfaces here under ASan.
+            reader_observed_valid.store(!hook.get_name().empty(),
+                                        std::memory_order_release);
+        });
+        EXPECT_TRUE(invoked);
+    });
+
+    while (!reader_started.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // Spawn the shutdown racer. shutdown() must block on m_mutator_gate
+    // until the reader releases the shared_lock, which proves the
+    // destructor-equivalent ordering.
+    std::atomic<bool> shutdown_returned{false};
+    std::thread killer([&]() {
+        hm.shutdown();
+        shutdown_returned.store(true, std::memory_order_release);
+    });
+
+    // Give the killer a chance to start; it must not return while the
+    // reader holds shared_lock (shutdown path acquires exclusive on
+    // m_hooks_mutex after the shared disable pass). Assert that
+    // ordering directly so a premature-return regression fails the
+    // test even if reader_observed_valid still happens to hold.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(shutdown_returned.load(std::memory_order_acquire));
+    reader_may_return.store(true, std::memory_order_release);
+
+    reader.join();
+    killer.join();
+
+    EXPECT_TRUE(reader_observed_valid.load());
+    EXPECT_TRUE(shutdown_returned.load());
 }

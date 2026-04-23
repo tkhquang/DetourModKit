@@ -13,6 +13,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <array>
+#include <vector>
 
 namespace DetourModKit
 {
@@ -202,13 +203,22 @@ namespace DetourModKit
         // Transfer ownership to a static so the object outlives the detached
         // thread. The pinned module keeps code pages valid; this keeps the
         // heap-allocated state valid.
-        if (local_logger && local_logger.use_count() == 1)
+        //
+        // The transfer is unconditional when loader lock is held: concurrent
+        // log() callers may still own temporary shared_ptrs obtained from
+        // async_logger_ before exchange(), so use_count() is not a reliable
+        // proxy for "no other owners". Dropping local_logger's ref while
+        // a temporary outlives us would let the last temporary's destructor
+        // race the detached writer thread.
+        //
+        // The storage is append-only: a process that re-attaches after a
+        // shutdown (e.g. hot-reload) and hits loader lock again must not
+        // drop the prior handle, because its writer thread may still be
+        // accessing the old AsyncLogger state.
+        if (local_logger && detail::is_loader_lock_held())
         {
-            if (detail::is_loader_lock_held())
-            {
-                static std::shared_ptr<AsyncLogger> s_leaked_logger;
-                s_leaked_logger = std::move(local_logger);
-            }
+            static std::vector<std::shared_ptr<AsyncLogger>> s_leaked_loggers;
+            s_leaked_loggers.emplace_back(std::move(local_logger));
         }
 
         {

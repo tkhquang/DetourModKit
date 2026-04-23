@@ -54,12 +54,11 @@ else()
   # Security hardening: ASLR and DEP (NX) for MinGW targets
   add_link_options(-Wl,--dynamicbase -Wl,--nxcompat)
 
-  # Override CMake's default -O3 for Release with -O2.
-  # -O2 provides a better code-size/performance tradeoff; the scanner's
-  # SSE2 intrinsics are already hand-optimized and do not benefit from
-  # -O3's aggressive loop unrolling and auto-vectorization.
-  string(REPLACE "-O3" "-O2" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
-  string(REPLACE "-O3" "-O2" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+  # The scanner's SSE2/AVX2 intrinsics are already hand-optimized and do
+  # not benefit from -O3's aggressive loop unrolling and auto-vectorization;
+  # the scanner.cpp downgrade to -O2 is applied per-source below so the
+  # rest of the tree keeps -O3 (hot paths in logger/memory integer math
+  # measurably benefit).
 
   # Suppress specific GCC/Clang warnings if they are noisy or from dependencies
   # add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers)
@@ -189,6 +188,20 @@ else()
   target_link_options(DetourModKit INTERFACE
     $<$<CONFIG:Release>:-Wl,--gc-sections>
   )
+
+  # Per-source optimization override: downgrade scanner.cpp from -O3 to -O2
+  # because its SSE2/AVX2 verifier is hand-tuned and -O3 loop unrolling has
+  # been observed to pessimize the inner loop. The rest of the library keeps
+  # the Release default (-O3 via CMAKE_CXX_FLAGS_RELEASE). Appending -O2
+  # after -O3 on the scanner's compile line is the effective flag because
+  # GCC and Clang resolve repeated -O levels by taking the last one.
+  set(_dmk_scanner_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scanner.cpp")
+  if(EXISTS "${_dmk_scanner_src}")
+    set_source_files_properties("${_dmk_scanner_src}"
+      TARGET_DIRECTORY DetourModKit
+      PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:-O2>"
+    )
+  endif()
 endif()
 
 # Set output name and prefix properties for consistency

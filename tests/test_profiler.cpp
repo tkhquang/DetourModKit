@@ -4,8 +4,12 @@
 
 #include <windows.h>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <string_view>
+#include <system_error>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace DetourModKit;
@@ -479,10 +483,117 @@ TEST_F(ProfilerRecordTest, ExportChromeJson_PlainNameUnchanged)
     EXPECT_NE(json.find("\"name\":\"plain_name\""), std::string::npos);
 }
 
+// Compile-time contract: ScopedProfile must accept string literals (array
+// references) and reject decayed `const char*` sources, because the stored
+// pointer is read asynchronously by the export path and must outlive the
+// process. The array-reference-only constructor enforces this.
+static_assert(std::is_constructible_v<ScopedProfile, const char (&)[5]>,
+              "ScopedProfile must accept string literals");
+static_assert(!std::is_constructible_v<ScopedProfile, const char *>,
+              "ScopedProfile must reject decayed const char* (would permit "
+              "std::string::c_str() with non-static lifetime)");
+static_assert(!std::is_constructible_v<ScopedProfile, char *>,
+              "ScopedProfile must reject mutable char*");
+
 TEST_F(ProfilerRecordTest, Capacity_MatchesDefaultCapacity)
 {
     const auto &profiler = Profiler::get_instance();
     EXPECT_EQ(profiler.capacity(), Profiler::DEFAULT_CAPACITY);
+}
+
+// Stress the ring-buffer wrap path under multiple concurrent producers
+// while repeatedly exporting Chrome JSON. The export path must remain
+// structurally valid (well-formed JSON envelope and plausible per-event
+// "dur" values) even when the ring buffer wraps several times mid-export.
+// This exercises the seqlock read-retry loop, not the sequence counter's
+// monotonicity property: fetch_add monotonicity is a language-level
+// guarantee per [atomics.types.operations] and is not observable by
+// test code without adding a test-only accessor, which this project
+// declines to do. A torn read here would either be skipped by the
+// seqlock or surface as a nonsensical duration, which the dur range
+// check below rejects.
+TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ExporterRemainsWellFormed)
+{
+    auto &profiler = Profiler::get_instance();
+    const size_t cap = profiler.capacity();
+    std::atomic<bool> stop{false};
+    std::atomic<bool> malformed_detected{false};
+
+    std::vector<std::thread> writers;
+    writers.reserve(8);
+    for (int t = 0; t < 8; ++t)
+    {
+        writers.emplace_back([&profiler, &stop]() {
+            LARGE_INTEGER tick;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                QueryPerformanceCounter(&tick);
+                profiler.record("wrap_race", tick.QuadPart,
+                                tick.QuadPart + 1, GetCurrentThreadId());
+            }
+        });
+    }
+
+    std::thread reader([&profiler, &stop, &malformed_detected]() {
+        // Event markers for scoped content parsing. `k_name_marker` locates
+        // an event by name; `k_dur_marker` finds the corresponding duration
+        // field within the same compact JSON object.
+        constexpr std::string_view k_name_marker{"\"name\":\"wrap_race\""};
+        constexpr std::string_view k_dur_marker{"\"dur\":"};
+        // Loose upper bound (~11.5 days in microseconds). Narrow enough to
+        // catch an open-QPC / close-QPC mismatch between different logical
+        // samples, wide enough to avoid flaking on slow CI machines.
+        constexpr long long k_dur_upper_bound = 1'000'000'000'000LL;
+
+        while (!stop.load(std::memory_order_relaxed))
+        {
+            const std::string json = profiler.export_chrome_json();
+            if (json.empty() || json.front() != '[' || json.back() != ']')
+            {
+                malformed_detected.store(true, std::memory_order_relaxed);
+                break;
+            }
+
+            const char *const data = json.data();
+            const char *const end = data + json.size();
+            size_t pos = 0;
+            while ((pos = json.find(k_name_marker, pos)) != std::string::npos)
+            {
+                const size_t dur_pos = json.find(k_dur_marker, pos);
+                if (dur_pos != std::string::npos)
+                {
+                    long long dur = 0;
+                    const auto [ptr, ec] = std::from_chars(
+                        data + dur_pos + k_dur_marker.size(), end, dur);
+                    if (ec != std::errc{} || dur < 0 || dur > k_dur_upper_bound)
+                    {
+                        malformed_detected.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                }
+                pos += k_name_marker.size();
+            }
+        }
+    });
+
+    // Run long enough for multiple full wraps (>= 3 * capacity samples).
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (std::chrono::steady_clock::now() < deadline &&
+           profiler.total_samples_recorded() < cap * 3)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stop.store(true, std::memory_order_relaxed);
+
+    for (auto &w : writers)
+    {
+        w.join();
+    }
+    reader.join();
+
+    EXPECT_FALSE(malformed_detected.load());
+    EXPECT_GE(profiler.total_samples_recorded(), cap);
 }
 
 TEST_F(ProfilerRecordTest, ExportToFile_ContentMatchesChromeJson)

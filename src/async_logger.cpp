@@ -95,6 +95,11 @@ namespace DetourModKit
         // destroyed (e.g. thread-local or global LogMessage instances),
         // causing use-after-free in deallocate(). The leak is bounded:
         // at most MEMORY_POOL_BLOCK_COUNT blocks of MEMORY_POOL_BLOCK_SIZE bytes.
+        // Neither Bootstrap::request_shutdown() nor DMK_Shutdown() reclaim
+        // this pool; the memory is released by the OS at process exit. This
+        // is intentional for correctness under DLL-unload and loader-lock
+        // scenarios, where running the pool destructor could race with
+        // late LogMessage teardown.
         static StringPool &pool = *new StringPool();
         return pool;
     }
