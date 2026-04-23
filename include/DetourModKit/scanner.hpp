@@ -231,6 +231,127 @@ namespace DetourModKit
         [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
         /**
+         * @enum ResolveMode
+         * @brief How a cascade candidate's pattern maps to a final address.
+         */
+        enum class ResolveMode : std::uint8_t
+        {
+            Direct,     ///< Returned address = match + disp_offset.
+            RipRelative ///< Read int32 displacement at (match + disp_offset), compute match + instr_end_offset + disp.
+        };
+
+        /**
+         * @struct AddrCandidate
+         * @brief One ordered attempt in a cascade.
+         * @details The cascade scans candidates in array order and returns the
+         *          first successful resolution. @p name is echoed back in the
+         *          ResolveHit on success so callers can log which candidate
+         *          won -- useful when multiple patterns cover different game
+         *          versions.
+         */
+        struct AddrCandidate
+        {
+            std::string_view name;
+            std::string_view pattern;
+            ResolveMode mode = ResolveMode::Direct;
+            std::ptrdiff_t disp_offset = 0;
+            std::ptrdiff_t instr_end_offset = 0;
+        };
+
+        /**
+         * @enum ResolveError
+         * @brief Reasons a cascade resolve may fail.
+         */
+        enum class ResolveError : std::uint8_t
+        {
+            EmptyCandidates,
+            NoMatch,
+            AllPatternsInvalid,
+            PrologueFallbackNotApplicable
+        };
+
+        /**
+         * @brief Human-readable mapping for ResolveError.
+         */
+        constexpr std::string_view resolve_error_to_string(ResolveError error) noexcept
+        {
+            switch (error)
+            {
+            case ResolveError::EmptyCandidates:
+                return "No candidates supplied";
+            case ResolveError::NoMatch:
+                return "No candidate pattern matched the scanned regions";
+            case ResolveError::AllPatternsInvalid:
+                return "Every candidate pattern failed to parse";
+            case ResolveError::PrologueFallbackNotApplicable:
+                return "Prologue fallback pattern too short to be unique";
+            default:
+                return "Unknown resolve error";
+            }
+        }
+
+        /**
+         * @struct ResolveHit
+         * @brief Successful cascade outcome.
+         * @details @p winning_name aliases the matching candidate's @c name
+         *          field. The underlying storage must outlive the ResolveHit
+         *          (AddrCandidate arrays typically live in static storage).
+         */
+        struct ResolveHit
+        {
+            std::uintptr_t address{0};
+            std::string_view winning_name;
+        };
+
+        /**
+         * @brief Try candidates in order; return the first successful address.
+         * @details Each candidate's pattern is compiled via parse_aob() and
+         *          searched via scan_executable_regions(). Direct mode returns
+         *          @c match + disp_offset. RipRelative mode treats @c match +
+         *          disp_offset as a disp32 field and resolves against
+         *          @c match + instr_end_offset. On success, the winning
+         *          candidate's name is logged and returned.
+         *
+         *          Logging:
+         *          - Info on first success: "<label> resolved via '<name>' at 0x...".
+         *          - Warning per candidate whose pattern fails to parse.
+         *          - Warning on total failure.
+         *
+         *          No per-candidate "miss" log line is produced, keeping
+         *          chatty cascades quiet at Info level. The implementation
+         *          does not log again when resolve_cascade_with_prologue_fallback()
+         *          retries, so callers see exactly one info line on success.
+         *
+         * @param candidates Ordered list of candidates. Empty -> EmptyCandidates.
+         * @param label Human-readable identifier used in log messages.
+         * @return ResolveHit on success; ResolveError on failure.
+         */
+        [[nodiscard]] std::expected<ResolveHit, ResolveError>
+        resolve_cascade(std::span<const AddrCandidate> candidates, std::string_view label);
+
+        /**
+         * @brief Cascade resolver with inline-hooked-prologue recovery.
+         * @details Equivalent to resolve_cascade() on the happy path. If every
+         *          candidate fails, rebuilds each Direct-mode candidate's
+         *          pattern with the first 5 bytes replaced by
+         *          `E9 ?? ?? ?? ??` (the near-JMP signature that SafetyHook
+         *          and MinHook write when another mod already hooked the
+         *          target) and retries. If the recovery path succeeds the
+         *          log line calls this out explicitly.
+         *
+         *          RipRelative candidates are skipped in the fallback phase
+         *          since they target instructions deeper than the 5-byte
+         *          prologue and are unaffected by the overwrite.
+         *
+         * @param candidates Ordered candidates.
+         * @param label Human-readable identifier used in log messages.
+         * @return ResolveHit on success; ResolveError on failure.
+         */
+        [[nodiscard]] std::expected<ResolveHit, ResolveError>
+        resolve_cascade_with_prologue_fallback(std::span<const AddrCandidate> candidates,
+                                               std::string_view label);
+
+        /**
          * @enum SimdLevel
          * @brief Reports the highest SIMD tier available for pattern verification.
          */

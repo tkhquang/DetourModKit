@@ -175,11 +175,16 @@ namespace DetourModKit
           require_focus_(require_focus),
           active_states_(std::make_unique<std::atomic<uint8_t>[]>(bindings_.size())),
           gamepad_index_(std::clamp(gamepad_index, 0, 3)),
-          trigger_threshold_(std::clamp(trigger_threshold, 0, 255)),
-          stick_threshold_(std::clamp(stick_threshold, 0, 32767)),
-          has_gamepad_bindings_(scan_for_gamepad_bindings(bindings_))
+          trigger_threshold_(std::clamp(trigger_threshold, 0, 255)), stick_threshold_(std::clamp(stick_threshold, 0, 32767))
     {
+        has_gamepad_bindings_.store(scan_for_gamepad_bindings(bindings_), std::memory_order_relaxed);
         name_index_.reserve(bindings_.size());
+        recompute_modifier_caches_locked();
+    }
+
+    void InputPoller::recompute_modifier_caches_locked() noexcept
+    {
+        name_index_.clear();
         std::unordered_set<InputCode, InputCodeHash> modifier_set;
         for (size_t i = 0; i < bindings_.size(); ++i)
         {
@@ -193,6 +198,7 @@ namespace DetourModKit
             }
         }
         known_modifiers_.assign(modifier_set.begin(), modifier_set.end());
+        has_gamepad_bindings_.store(scan_for_gamepad_bindings(bindings_), std::memory_order_relaxed);
     }
 
     InputPoller::~InputPoller() noexcept
@@ -256,6 +262,7 @@ namespace DetourModKit
 
     bool InputPoller::is_binding_active(std::string_view name) const noexcept
     {
+        std::shared_lock lock(bindings_rw_mutex_);
         const auto it = name_index_.find(name);
         if (it != name_index_.end())
         {
@@ -301,10 +308,8 @@ namespace DetourModKit
 
     void InputPoller::poll_loop(std::stop_token stop_token)
     {
-        const size_t count = bindings_.size();
         const int trigger_thresh = trigger_threshold_;
         const int stick_thresh = stick_threshold_;
-        const auto &known_mods = known_modifiers_;
 
         constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
         bool gamepad_was_connected = false;
@@ -320,7 +325,7 @@ namespace DetourModKit
             // the per-cycle overhead of XInputGetState on empty slots.
             XINPUT_STATE gamepad_state{};
             bool gamepad_connected = false;
-            if (has_gamepad_bindings_ && process_focused)
+            if (has_gamepad_bindings_.load(std::memory_order_relaxed) && process_focused)
             {
                 const auto now = std::chrono::steady_clock::now();
                 if (gamepad_was_connected ||
@@ -334,127 +339,133 @@ namespace DetourModKit
                 gamepad_connected = gamepad_was_connected;
             }
 
-            for (size_t i = 0; i < count; ++i)
+            // Collect callbacks to fire outside the shared lock so user code
+            // can call back into update_binding_combos() without deadlocking.
+            struct PendingCallback
             {
-                const auto &binding = bindings_[i];
-                if (binding.keys.empty())
-                {
-                    continue;
-                }
+                std::string name;
+                std::function<void()> on_press;
+                std::function<void(bool)> on_state_change;
+                bool hold_value;
+            };
+            std::vector<PendingCallback> pending;
 
-                bool any_pressed = false;
+            {
+                std::shared_lock lock(bindings_rw_mutex_);
+                const size_t count = bindings_.size();
+                const auto &known_mods = known_modifiers_;
 
-                if (process_focused)
+                for (size_t i = 0; i < count; ++i)
                 {
-                    bool modifiers_held = true;
-                    for (const auto &mod : binding.modifiers)
+                    const auto &binding = bindings_[i];
+                    if (binding.keys.empty())
                     {
-                        if (!is_code_pressed(mod, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
-                        {
-                            modifiers_held = false;
-                            break;
-                        }
+                        continue;
                     }
 
-                    if (modifiers_held)
+                    bool any_pressed = false;
+
+                    if (process_focused)
                     {
-                        // Strict matching: reject if any known modifier that is
-                        // NOT in this binding's required set is currently held.
-                        for (const auto &km : known_mods)
+                        bool modifiers_held = true;
+                        for (const auto &mod : binding.modifiers)
                         {
-                            if (!is_code_pressed(km, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
-                            {
-                                continue;
-                            }
-                            bool is_required = false;
-                            for (const auto &mod : binding.modifiers)
-                            {
-                                if (modifier_satisfies(mod, km))
-                                {
-                                    is_required = true;
-                                    break;
-                                }
-                            }
-                            if (!is_required)
+                            if (!is_code_pressed(mod, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
                             {
                                 modifiers_held = false;
                                 break;
                             }
                         }
-                    }
 
-                    if (modifiers_held)
-                    {
-                        for (const auto &key : binding.keys)
+                        if (modifiers_held)
                         {
-                            if (is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
+                            // Strict matching: reject if any known modifier that is
+                            // NOT in this binding's required set is currently held.
+                            for (const auto &km : known_mods)
                             {
-                                any_pressed = true;
-                                break;
+                                if (!is_code_pressed(km, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
+                                {
+                                    continue;
+                                }
+                                bool is_required = false;
+                                for (const auto &mod : binding.modifiers)
+                                {
+                                    if (modifier_satisfies(mod, km))
+                                    {
+                                        is_required = true;
+                                        break;
+                                    }
+                                }
+                                if (!is_required)
+                                {
+                                    modifiers_held = false;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (modifiers_held)
+                        {
+                            for (const auto &key : binding.keys)
+                            {
+                                if (is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
+                                {
+                                    any_pressed = true;
+                                    break;
+                                }
                             }
                         }
                     }
-                }
 
-                const bool was_active =
-                    active_states_[i].load(std::memory_order_relaxed) != 0;
+                    const bool was_active =
+                        active_states_[i].load(std::memory_order_relaxed) != 0;
 
-                switch (binding.mode)
-                {
-                case InputMode::Press:
-                {
-                    if (any_pressed && !was_active)
+                    switch (binding.mode)
                     {
-                        if (binding.on_press)
-                        {
-                            try
-                            {
-                                binding.on_press();
-                            }
-                            catch (const std::exception &e)
-                            {
-                                Logger::get_instance().error(
-                                    "InputPoller: Exception in press callback \"{}\": {}",
-                                    binding.name, e.what());
-                            }
-                            catch (...)
-                            {
-                                Logger::get_instance().error(
-                                    "InputPoller: Unknown exception in press callback \"{}\"",
-                                    binding.name);
-                            }
-                        }
-                    }
-                    active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
-                    break;
-                }
-                case InputMode::Hold:
-                {
-                    if (any_pressed != was_active)
+                    case InputMode::Press:
                     {
-                        if (binding.on_state_change)
+                        if (any_pressed && !was_active && binding.on_press)
                         {
-                            try
-                            {
-                                binding.on_state_change(any_pressed);
-                            }
-                            catch (const std::exception &e)
-                            {
-                                Logger::get_instance().error(
-                                    "InputPoller: Exception in hold callback \"{}\": {}",
-                                    binding.name, e.what());
-                            }
-                            catch (...)
-                            {
-                                Logger::get_instance().error(
-                                    "InputPoller: Unknown exception in hold callback \"{}\"",
-                                    binding.name);
-                            }
+                            pending.push_back({binding.name, binding.on_press, {}, false});
                         }
+                        active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
+                        break;
                     }
-                    active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
-                    break;
+                    case InputMode::Hold:
+                    {
+                        if (any_pressed != was_active && binding.on_state_change)
+                        {
+                            pending.push_back({binding.name, {}, binding.on_state_change, any_pressed});
+                        }
+                        active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
+                        break;
+                    }
+                    }
                 }
+            }
+
+            for (auto &p : pending)
+            {
+                try
+                {
+                    if (p.on_press)
+                    {
+                        p.on_press();
+                    }
+                    else if (p.on_state_change)
+                    {
+                        p.on_state_change(p.hold_value);
+                    }
+                }
+                catch (const std::exception &e)
+                {
+                    Logger::get_instance().error(
+                        "InputPoller: Exception in callback \"{}\": {}", p.name, e.what());
+                }
+                catch (...)
+                {
+                    Logger::get_instance().error(
+                        "InputPoller: Unknown exception in callback \"{}\"", p.name);
                 }
             }
 
@@ -462,6 +473,34 @@ namespace DetourModKit
             cv_.wait_for(lock, stop_token, poll_interval_, [&stop_token]()
                          { return stop_token.stop_requested(); });
         }
+    }
+
+    bool InputPoller::update_combos(std::string_view name, const Config::KeyComboList &combos) noexcept
+    {
+        std::unique_lock lock(bindings_rw_mutex_);
+        const auto it = name_index_.find(name);
+        if (it == name_index_.end())
+        {
+            Logger::get_instance().debug("InputPoller: update_combos(\"{}\") ignored: name not found", name);
+            return false;
+        }
+        const auto &indices = it->second;
+        if (indices.size() != combos.size())
+        {
+            Logger::get_instance().debug(
+                "InputPoller: update_combos(\"{}\") ignored: cardinality mismatch (registered={}, requested={})",
+                name, indices.size(), combos.size());
+            return false;
+        }
+
+        for (size_t i = 0; i < indices.size(); ++i)
+        {
+            const size_t idx = indices[i];
+            bindings_[idx].keys = combos[i].keys;
+            bindings_[idx].modifiers = combos[i].modifiers;
+        }
+        recompute_modifier_caches_locked();
+        return true;
     }
 
     void InputPoller::release_active_holds() noexcept
@@ -669,6 +708,63 @@ namespace DetourModKit
             return p->is_binding_active(name);
         }
         return false;
+    }
+
+    void InputManager::update_binding_combos(std::string_view name,
+                                             const Config::KeyComboList &combos) noexcept
+    {
+        std::shared_ptr<InputPoller> local_poller;
+        bool updated_pending = false;
+
+        {
+            std::lock_guard lock(mutex_);
+            if (poller_)
+            {
+                local_poller = poller_;
+            }
+            else
+            {
+                // Walk pending_bindings_ by name. Cardinality must match.
+                std::vector<size_t> indices;
+                indices.reserve(pending_bindings_.size());
+                for (size_t i = 0; i < pending_bindings_.size(); ++i)
+                {
+                    if (pending_bindings_[i].name == name)
+                    {
+                        indices.push_back(i);
+                    }
+                }
+                if (indices.empty())
+                {
+                    Logger::get_instance().debug(
+                        "InputManager: update_binding_combos(\"{}\") ignored: name not found", name);
+                    return;
+                }
+                if (indices.size() != combos.size())
+                {
+                    Logger::get_instance().debug(
+                        "InputManager: update_binding_combos(\"{}\") ignored: cardinality mismatch (registered={}, requested={})",
+                        name, indices.size(), combos.size());
+                    return;
+                }
+                for (size_t i = 0; i < indices.size(); ++i)
+                {
+                    pending_bindings_[indices[i]].keys = combos[i].keys;
+                    pending_bindings_[indices[i]].modifiers = combos[i].modifiers;
+                }
+                updated_pending = true;
+            }
+        }
+
+        if (local_poller)
+        {
+            (void)local_poller->update_combos(name, combos);
+        }
+        else if (updated_pending)
+        {
+            Logger::get_instance().debug(
+                "InputManager: update_binding_combos(\"{}\") applied to pending bindings", name);
+        }
     }
 
     void InputManager::shutdown() noexcept

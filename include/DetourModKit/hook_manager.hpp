@@ -81,6 +81,7 @@ namespace DetourModKit
         VmtHookNotFound,
         MethodAlreadyHooked,
         MethodNotFound,
+        TargetAlreadyHookedInProcess,
         UnknownError
     };
 
@@ -91,6 +92,17 @@ namespace DetourModKit
     struct HookConfig
     {
         bool auto_enable = true;
+
+        /**
+         * @brief When true, refuse to inline-hook a target whose first bytes
+         *        already encode a JMP outside the target's module.
+         * @details Default false preserves backwards-compatible behaviour:
+         *          a warning is logged but the hook proceeds (SafetyHook
+         *          layers trampolines on top of existing inline hooks). Set
+         *          to true for strict mods that never want to install a
+         *          second hook behind another mod's.
+         */
+        bool fail_if_already_hooked = false;
     };
 
     /**
@@ -227,6 +239,8 @@ namespace DetourModKit
                 return "VMT method already hooked";
             case HookError::MethodNotFound:
                 return "VMT method hook not found";
+            case HookError::TargetAlreadyHookedInProcess:
+                return "Target address is already inline-hooked by another module";
             case HookError::UnknownError:
                 return "Unknown error";
             default:

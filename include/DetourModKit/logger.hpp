@@ -87,7 +87,8 @@ namespace DetourModKit
          * @param file_name Default log file name.
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
          */
-        static void configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt);
+        static void configure(std::string_view prefix, std::string_view file_name,
+                              std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT);
 
         /**
          * @brief Reconfigures an existing logger instance with new settings.

@@ -11,8 +11,8 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 | Module | Description | Header |
 |--------|-------------|--------|
-| AOB Scanner | SIMD-accelerated pattern scanning with wildcards and RIP resolution | `scanner.hpp` |
-| Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook | `hook_manager.hpp` |
+| AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, and multi-candidate cascade resolver with prologue fallback | `scanner.hpp` |
+| Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
 | Configuration | INI-based settings with key combo support | `config.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
@@ -20,10 +20,12 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
-| Filesystem Utilities | Module directory resolution (wide-string API) | `filesystem.hpp` |
+| Filesystem Utilities | Module directory resolution (wide-string and UTF-8 APIs) | `filesystem.hpp` |
 | Math Utilities | Angle conversions (header-only) | `math.hpp` |
 | Version Macros | Compile-time version checking generated from CMake | `version.hpp` |
 | Input System | Hotkey monitoring with background polling (keyboard/mouse/gamepad) | `input.hpp`, `input_codes.hpp` |
+| Mod Bootstrap | DllMain scaffolding, instance mutex, process gate, lifecycle worker | `bootstrap.hpp` |
+| Stoppable Worker | RAII named `std::jthread` wrapper, loader-lock-safe teardown | `worker.hpp` |
 
 <details>
 <summary><strong>AOB Scanner</strong></summary>

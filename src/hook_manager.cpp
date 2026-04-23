@@ -1,12 +1,102 @@
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/format.hpp"
+#include "DetourModKit/memory.hpp"
+#include "x86_decode.hpp"
+
+#include <windows.h>
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <format>
+#include <optional>
 
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
+
+namespace
+{
+    enum class PrehookState
+    {
+        NotHooked,
+        HookedBySameModule,
+        HookedByOtherModule
+    };
+
+    struct PrehookDetection
+    {
+        PrehookState state{PrehookState::NotHooked};
+        std::uintptr_t jmp_destination{0};
+    };
+
+    std::optional<std::uintptr_t> decode_prehook_destination(std::uintptr_t target_address) noexcept
+    {
+        if (!Memory::is_readable(reinterpret_cast<const void *>(target_address), 2))
+        {
+            return std::nullopt;
+        }
+        const auto *bytes = reinterpret_cast<const std::uint8_t *>(target_address);
+
+        if (bytes[0] == 0xE9)
+        {
+            return detail::decode_e9_rel32(target_address);
+        }
+
+        if (bytes[0] == 0xEB)
+        {
+            return detail::decode_eb_rel8(target_address);
+        }
+
+        if (bytes[0] == 0xFF && bytes[1] == 0x25)
+        {
+            return detail::decode_ff25_indirect(target_address);
+        }
+
+        return std::nullopt;
+    }
+
+    PrehookDetection detect_existing_inline_hook(std::uintptr_t target_address) noexcept
+    {
+        PrehookDetection result;
+        if (target_address == 0)
+        {
+            return result;
+        }
+
+        const auto destination_opt = decode_prehook_destination(target_address);
+        if (!destination_opt)
+        {
+            return result;
+        }
+        const auto destination = *destination_opt;
+        result.jmp_destination = destination;
+
+        HMODULE target_module = nullptr;
+        HMODULE dest_module = nullptr;
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(target_address), &target_module))
+        {
+            target_module = nullptr;
+        }
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(destination), &dest_module))
+        {
+            dest_module = nullptr;
+        }
+
+        if (dest_module != nullptr && target_module == dest_module)
+        {
+            result.state = PrehookState::HookedBySameModule;
+        }
+        else
+        {
+            result.state = PrehookState::HookedByOtherModule;
+        }
+        return result;
+    }
+} // anonymous namespace
 
 HookManager &HookManager::get_instance()
 {
@@ -209,6 +299,17 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
                     {{std::format("HookManager: A hook with the name '{}' already exists.", name), LogLevel::Error}}};
         }
 
+        const auto prehook = detect_existing_inline_hook(target_address);
+        if (prehook.state == PrehookState::HookedByOtherModule &&
+            config.fail_if_already_hooked)
+        {
+            return {std::unexpected(HookError::TargetAlreadyHookedInProcess),
+                    {{std::format("HookManager: Target {} for inline hook '{}' is already inline-hooked by another module (JMP -> {}). Aborting under strict mode.",
+                                  DetourModKit::Format::format_address(target_address), name,
+                                  DetourModKit::Format::format_address(prehook.jmp_destination)),
+                      LogLevel::Error}}};
+        }
+
         try
         {
             auto sh_flags = config.auto_enable
@@ -238,10 +339,18 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
             // allocation failures in std::format cannot leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
             std::vector<DeferredLogEntry> logs;
-            logs.reserve(2);
+            logs.reserve(3);
             logs.push_back({std::format("HookManager: Successfully created {} inline hook '{}' targeting {}.",
                                         status_message, name, DetourModKit::Format::format_address(target_address)),
                             LogLevel::Info});
+
+            if (prehook.state == PrehookState::HookedByOtherModule)
+            {
+                logs.push_back({std::format("HookManager: Target {} for inline hook '{}' was already inline-hooked by another module (JMP -> {}); SafetyHook layered on top.",
+                                            DetourModKit::Format::format_address(target_address), name,
+                                            DetourModKit::Format::format_address(prehook.jmp_destination)),
+                                LogLevel::Warning});
+            }
 
             if (initial_status == HookStatus::Disabled && config.auto_enable)
             {

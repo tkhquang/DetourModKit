@@ -9,11 +9,17 @@ Practical reference for building, maintaining, and resolving array-of-bytes (AOB
 3. [DMK pattern syntax reference](#3-dmk-pattern-syntax-reference)
 4. [Scanner API tour](#4-scanner-api-tour)
 5. [RIP-relative resolution](#5-rip-relative-resolution)
-6. [Patch-proof patterns (cache, fallback, verify)](#6-patch-proof-patterns-cache-fallback-verify)
-7. [Worked examples](#7-worked-examples)
-8. [DOs and DON'Ts](#8-dos-and-donts)
-9. [Troubleshooting](#9-troubleshooting)
-10. [Further reading](#10-further-reading)
+6. [Cascading candidates](#6-cascading-candidates)
+    - 6.1 [Motivation](#61-motivation)
+    - 6.2 [API shape](#62-api-shape)
+    - 6.3 [Basic usage](#63-basic-usage)
+    - 6.4 [Prologue fallback variant](#64-prologue-fallback-variant)
+    - 6.5 [Ordering and logging](#65-ordering-and-logging)
+7. [Patch-proof patterns (cache, fallback, verify)](#7-patch-proof-patterns-cache-fallback-verify)
+8. [Worked examples](#8-worked-examples)
+9. [DOs and DON'Ts](#9-dos-and-donts)
+10. [Troubleshooting](#10-troubleshooting)
+11. [Further reading](#11-further-reading)
 
 ---
 
@@ -261,11 +267,108 @@ const auto resolved = sc::find_and_resolve_rip_relative(
 - Indirect calls through memory: `FF 15 disp32` and `FF 25 disp32`. The disp32 points to a **pointer**; DMK returns the pointer's address, not the final target. Dereference it yourself.
 - Instructions where the disp32 is interrupted by a SIB byte combination or a VEX/EVEX prefix boundary: supply your own longer `opcode_prefix` that covers up to the disp32 start.
 
-## 6. Patch-proof patterns (cache, fallback, verify)
+## 6. Cascading candidates
+
+### 6.1 Motivation
+
+Game binaries change across patches. A single literal AOB that locked onto a specific opcode window in one build is one compiler flag flip away from matching nothing on the next update. The cascade pattern is the standard defence: register several ordered candidates per target (most-specific first, most-generic last), let the scanner try each until one matches, and record the winner so you know which build of the game is actually running. Every long-lived modding community reinvents this eventually; DMK ships it as a first-class API so you do not have to reinvent the logging, the ordering rules, or the prologue-overwrite recovery path.
+
+### 6.2 API shape
+
+Defined in [include/DetourModKit/scanner.hpp](../../include/DetourModKit/scanner.hpp) inside `namespace DetourModKit::Scanner`:
+
+```cpp
+enum class ResolveMode : std::uint8_t
+{
+    Direct,     // Returned address = match + disp_offset
+    RipRelative // Read int32 disp at (match + disp_offset); target = match + instr_end_offset + disp
+};
+
+struct AddrCandidate
+{
+    std::string_view name;
+    std::string_view pattern;
+    ResolveMode mode = ResolveMode::Direct;
+    std::ptrdiff_t disp_offset = 0;
+    std::ptrdiff_t instr_end_offset = 0;
+};
+
+enum class ResolveError : std::uint8_t
+{
+    EmptyCandidates,
+    NoMatch,
+    AllPatternsInvalid,
+    PrologueFallbackNotApplicable
+};
+
+struct ResolveHit
+{
+    std::uintptr_t address{0};
+    std::string_view winning_name;
+};
+
+[[nodiscard]] std::expected<ResolveHit, ResolveError>
+resolve_cascade(std::span<const AddrCandidate> candidates, std::string_view label);
+
+[[nodiscard]] std::expected<ResolveHit, ResolveError>
+resolve_cascade_with_prologue_fallback(std::span<const AddrCandidate> candidates,
+                                       std::string_view label);
+```
+
+Both functions take a span so you can pass a `std::array`, `std::vector`, or any contiguous container. The `label` is the human-readable tag used when the winning candidate is logged; the `winning_name` on the returned `ResolveHit` aliases the matched candidate's `name` field, so the storage that holds those `string_view`s must outlive the hit (static string literals or an `std::array` in static storage are the usual patterns). `ResolveHit::address` is the post-resolution absolute address: for `Direct` candidates it equals `match + disp_offset`, and for `RipRelative` candidates it is the target of the displacement already resolved (not the raw match pointer), so callers can hook or call it directly.
+
+### 6.3 Basic usage
+
+```cpp
+#include <DetourModKit/scanner.hpp>
+#include <DetourModKit/logger.hpp>
+#include <array>
+
+namespace sc = DetourModKit::Scanner;
+
+constexpr std::array<sc::AddrCandidate, 3> k_weapon_fire_candidates{{
+    {"weapon_fire_v1_8_2", "48 89 5C 24 ?? 57 48 83 EC 30 48 8B D9 48 8B FA",
+     sc::ResolveMode::Direct, 0, 0},
+    {"weapon_fire_v1_9_0", "40 53 48 83 EC 20 48 8B D9 E8 ?? ?? ?? ?? 84 C0",
+     sc::ResolveMode::Direct, 0, 0},
+    {"weapon_fire_callsite", "E8 ?? ?? ?? ?? 48 8B CB 48 8B 43 20",
+     sc::ResolveMode::RipRelative, 1, 5},
+}};
+
+const auto hit = sc::resolve_cascade(k_weapon_fire_candidates, "weapon_fire");
+if (!hit)
+{
+    DetourModKit::Logger::get_instance().error(
+        "weapon_fire cascade failed: {}", sc::resolve_error_to_string(hit.error()));
+    return false;
+}
+
+DetourModKit::Logger::get_instance().info(
+    "resolved {} at {:#x}", hit->winning_name, hit->address);
+```
+
+### 6.4 Prologue fallback variant
+
+`resolve_cascade` is fine when the target function still looks the way your signature remembers it. It stops working as soon as another mod, loaded earlier in the process, inline-hooks the same function: SafetyHook, MinHook, and most hand-rolled detour libraries overwrite the first five bytes with a near-JMP (`E9 ?? ?? ?? ??`) to their trampoline. Your Direct-mode candidate that matches on a prologue byte sequence now sees `E9` instead of `48 89 5C 24 ...`, and the scan misses even though the function itself is still present.
+
+`resolve_cascade_with_prologue_fallback` handles that exact scenario. On the happy path it is identical to `resolve_cascade`. If every candidate misses, it walks the list again and, for each Direct-mode candidate, rebuilds the pattern with the first five tokens replaced by `E9 ?? ?? ?? ??` while preserving the literal tail. It scans with the rewritten pattern and then applies two guardrails before accepting a hit: the rewritten pattern must match at most four locations in `.text` (so a near-JMP into random padding does not win), and the `E9` displacement must land inside a loaded module (so the jump target is a real function, not garbage). RipRelative candidates are skipped in the fallback phase since they target instructions deeper than the 5-byte prologue and are unaffected by the overwrite.
+
+```cpp
+const auto hit = sc::resolve_cascade_with_prologue_fallback(
+    k_weapon_fire_candidates, "weapon_fire");
+```
+
+There is one guardrail callers must be aware of. The fallback refuses to scan any candidate whose literal tail after the first five tokens contains fewer than five literal bytes, and surfaces that refusal as `ResolveError::PrologueFallbackNotApplicable`. A too-short tail would produce a pattern that matches every near-JMP in the executable region and invent a false positive; rather than gamble, the cascade treats the candidate as unusable for recovery. If you see this error, extend the offending candidate's pattern so it carries at least five literal bytes past the five-byte prologue window.
+
+### 6.5 Ordering and logging
+
+Put the most-specific candidate first. The cascade returns on the first successful resolution, so an overly-generic pattern placed near the head will shadow tighter patterns further down the list. The `winning_name` on `ResolveHit` tells you which candidate fired; log it or stash it in your mod's telemetry so you can correlate a running session with a specific build of the game after the fact. The cascade also emits an Info-level log line of the form `"<label> resolved via '<name>' at 0x..."` the first time it succeeds, so you get build identification for free even without explicit caller logging.
+
+## 7. Patch-proof patterns (cache, fallback, verify)
 
 The raw Scanner API is intentionally low-level. Anything beyond a single call-site benefits from a thin layer above it. Below are patterns battle-tested in consumer projects.
 
-### 6.1 Cache the `CompiledPattern`
+### 7.1 Cache the `CompiledPattern`
 
 `parse_aob` is cheap but not free. If you scan repeatedly (hot-reload, re-scan after a level load, fallback between candidates), parse once and hold the `CompiledPattern` in a static or a class member:
 
@@ -299,7 +402,7 @@ std::vector<CompiledCandidate> compile_all(std::span<const AobCandidate> raw)
 }
 ```
 
-### 6.2 Multi-candidate fallback
+### 7.2 Multi-candidate fallback
 
 For a single logical hook, ship two or three signatures: one tight one for the current build, one wider one for the previous build, and a generic one as a safety net. Try them in order, stop on the first hit, log which one won.
 
@@ -322,7 +425,7 @@ uintptr_t resolve_first_hit(
 }
 ```
 
-### 6.3 Verify after match
+### 7.3 Verify after match
 
 A lone signature hit is necessary but not sufficient. Two lightweight checks catch the overwhelming majority of mis-hits:
 
@@ -340,7 +443,7 @@ bool looks_like_prologue(const std::byte* addr)
 }
 ```
 
-### 6.4 Negative offsets
+### 7.4 Negative offsets
 
 DMK's helpers assume you want to land *on* the match. Real-world hooks sometimes want to step backward from the match, for example to arrive at the function start after anchoring on a later landmark. Store a signed offset per candidate and apply it after the match succeeds:
 
@@ -361,13 +464,13 @@ if (!hit) return 0;
 const auto* target = hit + candidate.disp_offset; // may walk backwards
 ```
 
-### 6.5 Name every candidate
+### 7.5 Name every candidate
 
 Anonymous signatures make regressions unreadable. Attach a human-friendly label to every candidate (`"player_ctx_load_v1"`, `"fire_weapon_v2_backcompat"`). Log that label when a hit is found or when all candidates fail. It pays for itself the first time a patch breaks one of thirty signatures.
 
-## 7. Worked examples
+## 8. Worked examples
 
-### 7.1 Hook a direct `call rel32`
+### 8.1 Hook a direct `call rel32`
 
 ```cpp
 const auto pattern = sc::parse_aob("E8 ?? ?? ?? ?? 48 89 43 10");
@@ -386,7 +489,7 @@ hook_mgr.create_inline_hook("callee_hook", *target, &Detour_Callee,
 
 If your pattern embeds a `|` marker, `find_pattern` has already applied `pattern->offset` to `hit`: pass `hit` directly to `resolve_rip_relative`. Adding `pattern->offset` again would double-apply and advance past the opcode.
 
-### 7.2 Resolve a global pointer via `mov rax, [rip+disp32]`
+### 8.2 Resolve a global pointer via `mov rax, [rip+disp32]`
 
 ```cpp
 // Search 64 bytes from the match for the mov, then resolve.
@@ -406,7 +509,7 @@ auto global_ptr = dmk::Memory::read_ptr_unsafe(
 
 If `hit` came from a pattern with a `|` offset marker, `find_pattern` has already applied the offset, so `hit` already points at the marked byte: pass it directly. Adding `pattern->offset` would double-apply and start the search window past the intended opcode.
 
-### 7.3 Scan a packed binary
+### 8.3 Scan a packed binary
 
 ```cpp
 // Code decrypted into anonymous executable pages outside any loaded module.
@@ -419,7 +522,7 @@ if (!hit) return;
 // scan_executable_regions() already applied pattern->offset.
 ```
 
-### 7.4 Second occurrence with an offset marker
+### 8.4 Second occurrence with an offset marker
 
 ```cpp
 //  "48 8B 88 B8 00 00 00 | 48 89 4C 24 68"
@@ -437,7 +540,7 @@ const auto* anchor = hit;
 
 Reminder: both `find_pattern` overloads return the marked byte when a `|` marker is present (and the match start when it is absent). `pattern->offset` is applied for you; adding it manually double-applies.
 
-## 8. DOs and DON'Ts
+## 9. DOs and DON'Ts
 
 ### DO
 
@@ -462,7 +565,7 @@ Reminder: both `find_pattern` overloads return the marked byte when a `|` marker
 - **Don't** ignore a `PrefixNotFound` or `UnreadableDisplacement` error: they almost always mean the signature lost its context, not that the code simply moved.
 - **Don't** trust a single-build signature in a long-lived mod without a fallback.
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely cause | Remedy |
 | ------- | ------------ | ------ |
@@ -474,7 +577,7 @@ Reminder: both `find_pattern` overloads return the marked byte when a `|` marker
 | Works locally, fails on a different machine | Packer or anti-cheat transforming the module between load and scan | Switch to `scan_executable_regions`; add a later re-scan on first frame |
 | Multi-GB scan is slow | Patterns whose only literal bytes are common (`48 8B`, `E8`, etc.) | Broaden the anchor to include a rarer byte; the anchor selector prefers rarer bytes |
 
-## 10. Further reading
+## 11. Further reading
 
 - [C++ Core Guidelines - in-house coding standards](https://isocpp.github.io/CppCoreGuidelines/CppCoreGuidelines)
 - [omni's hackpad: Fixing Hacks When a Game Gets Patched](https://badecho.com/index.php/2021/10/05/fixing-hacks-after-patch/)

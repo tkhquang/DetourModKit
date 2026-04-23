@@ -21,6 +21,7 @@
 #include "DetourModKit/input.hpp"
 
 // Module headers
+#include "DetourModKit/bootstrap.hpp"
 #include "DetourModKit/event_dispatcher.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
@@ -28,6 +29,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/profiler.hpp"
 #include "DetourModKit/scanner.hpp"
+#include "DetourModKit/worker.hpp"
 
 /**
  * @brief Convenient namespace aliases for common DetourModKit usage patterns.
@@ -42,6 +44,7 @@ namespace DMKFormat = DetourModKit::Format;
 namespace DMKFilesystem = DetourModKit::Filesystem;
 namespace DMKMemory = DetourModKit::Memory;
 namespace DMKMath = DetourModKit::Math;
+namespace DMKBootstrap = DetourModKit::Bootstrap;
 
 #ifndef DMK_NO_SHORT_NAMES
 /**
@@ -50,6 +53,8 @@ namespace DMKMath = DetourModKit::Math;
  *          Define DMK_NO_SHORT_NAMES before including this header to disable them.
  */
 using DMKLogger = DetourModKit::Logger;
+using DMKStoppableWorker = DetourModKit::StoppableWorker;
+using DMKInputBindingGuard = DetourModKit::Config::InputBindingGuard;
 using DMKHookManager = DetourModKit::HookManager;
 using DMKLogLevel = DetourModKit::LogLevel;
 using DMKHookStatus = DetourModKit::HookStatus;

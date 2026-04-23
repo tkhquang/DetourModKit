@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -201,10 +202,27 @@ namespace DetourModKit
          */
         void shutdown() noexcept;
 
+        /**
+         * @brief Replaces the trigger combos of all bindings sharing @p name.
+         * @details The poller maps each combo passed to register_press/register_hold
+         *          to an independent binding entry with a shared name. This method
+         *          requires the new combo count to equal the number of existing
+         *          entries under that name; otherwise no change is made and false
+         *          is returned. Callbacks, binding mode, and binding name are
+         *          preserved; only keys and modifiers of each entry are overwritten.
+         *          Safe to call while the poll thread is running.
+         * @param name Binding name previously registered.
+         * @param combos Replacement combos (same cardinality as existing entries).
+         * @return true on successful swap, false if the name is unknown or the
+         *         combo cardinality differs from the registered binding count.
+         */
+        [[nodiscard]] bool update_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
+
     private:
         void poll_loop(std::stop_token stop_token);
         void release_active_holds() noexcept;
         [[nodiscard]] bool is_process_foreground() const;
+        void recompute_modifier_caches_locked() noexcept;
 
         /// Transparent hasher enabling std::string_view lookup without allocation.
         struct StringHash
@@ -216,6 +234,12 @@ namespace DetourModKit
             }
         };
 
+        // bindings_rw_mutex_ protects bindings_, name_index_, known_modifiers_,
+        // and has_gamepad_bindings_ when a live update is in flight. The poll
+        // loop holds a shared lock for the duration of one polling cycle;
+        // update_combos() holds an exclusive lock across the swap. active_states_
+        // entries are always accessed via atomic ops and need no further guard.
+        mutable std::shared_mutex bindings_rw_mutex_;
         std::vector<InputBinding> bindings_;
         std::unordered_map<std::string, std::vector<size_t>, StringHash, std::equal_to<>> name_index_;
         std::vector<InputCode> known_modifiers_;
@@ -233,7 +257,7 @@ namespace DetourModKit
         int gamepad_index_;
         int trigger_threshold_;
         int stick_threshold_;
-        bool has_gamepad_bindings_;
+        std::atomic<bool> has_gamepad_bindings_{false};
     };
 
     /**
@@ -395,6 +419,21 @@ namespace DetourModKit
          * @note Thread-safe. Can be called from any thread (e.g., render thread).
          */
         [[nodiscard]] bool is_binding_active(std::string_view name) const noexcept;
+
+        /**
+         * @brief Replaces the trigger combos of all bindings sharing @p name.
+         * @details Forwards to the active InputPoller when running, or updates
+         *          pending bindings before start(). The binding's name,
+         *          callback, and mode are preserved; only keys and modifiers
+         *          are swapped. Cardinality must match the number of combos
+         *          originally registered under @p name (one binding entry per
+         *          combo). If the name is unknown or the cardinality differs,
+         *          a warning is logged at Debug level and no change is made.
+         *          Thread-safe.
+         * @param name Binding name previously registered.
+         * @param combos Replacement combos.
+         */
+        void update_binding_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
 
         /**
          * @brief Stops the polling thread and clears all registered bindings.

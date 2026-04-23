@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
+#include <atomic>
 #include <fstream>
 #include <filesystem>
+#include <memory>
 #include <process.h>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "DetourModKit/config.hpp"
@@ -1278,4 +1281,34 @@ TEST_F(ConfigTest, SetterCalledTwice_KeyCombo)
     Config::load(test_ini_file_.string());
 
     EXPECT_EQ(call_count, 2);
+}
+
+TEST(InputBindingGuard, DefaultIsInactive)
+{
+    Config::InputBindingGuard g;
+    EXPECT_FALSE(g.is_active());
+    EXPECT_TRUE(g.name().empty());
+}
+
+TEST(InputBindingGuard, ReleaseIsIdempotent)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    Config::InputBindingGuard g("binding", flag);
+    EXPECT_TRUE(g.is_active());
+    g.release();
+    EXPECT_FALSE(g.is_active());
+    g.release();
+    EXPECT_FALSE(g.is_active());
+    EXPECT_FALSE(flag->load());
+}
+
+TEST(InputBindingGuard, MoveTransfersOwnership)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    Config::InputBindingGuard a("b", flag);
+    Config::InputBindingGuard b(std::move(a));
+    EXPECT_TRUE(b.is_active());
+    EXPECT_FALSE(a.is_active());
+    b.release();
+    EXPECT_FALSE(flag->load());
 }
