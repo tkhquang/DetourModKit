@@ -6,12 +6,38 @@
 #include <thread>
 #include <chrono>
 #include <latch>
+#include <type_traits>
 #include <windows.h>
 
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/logger.hpp"
 
 using namespace DetourModKit;
+
+// VmtHookEntry owns a safetyhook::VmtHook and must be move-only.
+// The HookManager destructor's loader-lock fallback path relies on these
+// guarantees when storing VmtHookEntry values inside an unordered_map: any
+// container operation that selects a copy fallback for VmtHookEntry would
+// fail to compile, so guard the contract here.
+static_assert(!std::is_copy_constructible_v<VmtHookEntry>,
+              "VmtHookEntry must remain non-copyable to preserve VmtHook ownership semantics.");
+static_assert(!std::is_copy_assignable_v<VmtHookEntry>,
+              "VmtHookEntry must remain non-copy-assignable to preserve VmtHook ownership semantics.");
+static_assert(std::is_move_constructible_v<VmtHookEntry>,
+              "VmtHookEntry must be move-constructible so it can live in standard containers.");
+static_assert(std::is_move_assignable_v<VmtHookEntry>,
+              "VmtHookEntry must be move-assignable so it can live in standard containers.");
+
+// The loader-lock fallback in HookManager::~HookManager heap-allocates the
+// move-constructed hook maps directly. Guard that the exact map types stay
+// move-constructible so that path keeps compiling if the hasher, comparator,
+// or value types are ever retuned.
+using VmtHookMapForAsserts = std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>;
+using HookMapForAsserts = std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>;
+static_assert(std::is_move_constructible_v<VmtHookMapForAsserts>,
+              "unordered_map<string, VmtHookEntry, ...> must be move-constructible for the loader-lock leak path.");
+static_assert(std::is_move_constructible_v<HookMapForAsserts>,
+              "unordered_map<string, unique_ptr<Hook>, ...> must be move-constructible for the loader-lock leak path.");
 
 class HookManagerTest : public ::testing::Test
 {

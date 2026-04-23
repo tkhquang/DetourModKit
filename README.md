@@ -105,13 +105,15 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 
 - Typed pub/sub event system with RAII subscription management
 - Each `EventDispatcher<Event>` manages a single event type
-- `shared_mutex` concurrency: concurrent `emit()` via shared lock, exclusive lock for subscribe/unsubscribe
+- Lock-free `emit()` / `emit_safe()`: atomic acquire-load of a `std::shared_ptr<const vector>` snapshot and iterate, no reader lock; `subscribe()` / `unsubscribe()` are copy-on-write under a small writer mutex
+- Zero-subscriber fast path: `emit()` / `emit_safe()` short-circuit on a lock-free atomic handler counter, skipping the snapshot load entirely
 - Subscriptions auto-unsubscribe on destruction
 - Handlers invoked in subscription order (preserved across unsubscribe)
-- Thread-local reentrancy guard detects and rejects subscribe/unsubscribe calls from within a handler, preventing deadlock
+- Thread-local reentrancy guard detects and rejects subscribe/unsubscribe calls from within a handler, keeping the no-mutation-during-emit invariant intact
 - Compose multiple dispatchers for multi-event architectures
 - `emit_safe()` for exception-tolerant dispatch (recommended for hook callbacks)
 - Safe when the dispatcher is destroyed before its subscriptions (weak_ptr guard)
+- Trade-off: `subscribe()` / `unsubscribe()` allocate a new handler list each call (O(n) publish). Suited for 1-10 subscribers per event and write-rarely access patterns, which matches typical mod usage
 
 </details>
 

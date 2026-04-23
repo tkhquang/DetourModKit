@@ -27,13 +27,9 @@ env:
   MINGW_BIN: C:\mingw64\bin
 
 jobs:
-  build-and-deploy:
-    name: Build, Test & Deploy Coverage
+  mingw-coverage:
+    name: MinGW Build, Test & Coverage Artifact
     runs-on: windows-latest
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
       - name: Checkout code
@@ -102,6 +98,43 @@ jobs:
         with:
           path: coverage-report
 
+  msvc-verify:
+    name: MSVC Build & Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (MSVC Debug + Tests)
+        run: cmake --preset msvc-debug
+        shell: cmd
+
+      - name: Build
+        run: cmake --build --preset msvc-debug --parallel
+        shell: cmd
+
+      - name: Run Tests
+        run: ctest --preset msvc-debug
+        shell: cmd
+
+  deploy-pages:
+    name: Deploy Coverage Report
+    runs-on: ubuntu-latest
+    needs: [mingw-coverage, msvc-verify]
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
