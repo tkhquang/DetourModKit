@@ -30,9 +30,7 @@ Verdict key:
 - **marginal**: delta is larger than spread but smaller than 1.5x spread.
 
 Run-to-run coefficient of variation was 1% to 5% per scenario. Full per-run
-TSVs live in [runs/](runs/) (5 OLD + 5 NEW). A representative single run per
-side is preserved in [before.tsv](before.tsv) and [after.tsv](after.tsv) for
-quick reference.
+TSVs live in [runs/](runs/) (5 OLD + 5 NEW).
 
 ## Interpretation
 
@@ -93,10 +91,11 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-release/tests/DetourModKit_benc
 ```
 
 For a clean before/after comparison, bench the new implementation first,
-copy the header aside, `git checkout HEAD -- include/DetourModKit/event_dispatcher.hpp`
-to restore the baseline header, rebuild the `DetourModKit_bench` target, run
-again into the baseline TSV, then restore the new header. Repeat N times
-per side and compare medians with an explicit noise-floor check.
+copy the header aside, `git checkout main -- include/DetourModKit/event_dispatcher.hpp`
+(or any pre-change commit) to restore the baseline header, rebuild the
+`DetourModKit_bench` target, run again into the baseline TSV, then restore
+the new header. Repeat N times per side and compare medians with an explicit
+noise-floor check.
 
 ## Caveat on committed TSVs
 

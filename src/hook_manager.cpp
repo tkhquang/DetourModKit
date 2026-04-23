@@ -175,6 +175,15 @@ HookManager::~HookManager() noexcept
         // valid memory.
         using HookMap = std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>;
         using VmtHookMap = std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>;
+        // If either map's move constructor could throw, the nothrow new
+        // expression above would leak its allocation and (since this
+        // destructor is noexcept) the throw would escalate to std::terminate.
+        // Pin the contract at compile time so any future change to the hash,
+        // key_equal, or mapped_type that breaks nothrow-move is caught here.
+        static_assert(std::is_nothrow_move_constructible_v<HookMap>,
+                      "HookMap move ctor must be noexcept to keep the loader-lock leak path safe.");
+        static_assert(std::is_nothrow_move_constructible_v<VmtHookMap>,
+                      "VmtHookMap move ctor must be noexcept to keep the loader-lock leak path safe.");
         [[maybe_unused]] auto *leaked_hooks = new (std::nothrow) HookMap(std::move(m_hooks));
         [[maybe_unused]] auto *leaked_vmt_hooks = new (std::nothrow) VmtHookMap(std::move(m_vmt_hooks));
         m_shutdown_called.store(true, std::memory_order_release);

@@ -38,11 +38,16 @@ namespace
 
     // Compiler barrier / value sink. Prevents the optimizer from noticing
     // that the handler result is unused and deleting the whole emit loop.
-    volatile std::uint64_t g_sink = 0;
+    // Atomic so bench_concurrent_emit can fan out across threads without a
+    // data race on the sink; relaxed order because the numeric value is
+    // never read for synchronization, only printed after join() synchronizes
+    // with the producers.
+    std::atomic<std::uint64_t> g_sink{0};
 
     void noop_handler(const BenchEvent &e) noexcept
     {
-        g_sink = g_sink + static_cast<std::uint64_t>(e.value);
+        g_sink.fetch_add(static_cast<std::uint64_t>(e.value),
+                         std::memory_order_relaxed);
     }
 
     // Runs `op` `iterations` times within a single sample, repeats the
@@ -69,7 +74,15 @@ namespace
         }
 
         std::sort(per_op.begin(), per_op.end());
-        return per_op[per_op.size() / 2];
+        // Average the two middle samples on even counts so the helper
+        // returns the true median regardless of sample parity. Current
+        // callers use 11 samples (odd), but future callers may not.
+        const std::size_t n = per_op.size();
+        if ((n % 2) == 0)
+        {
+            return (per_op[(n / 2) - 1] + per_op[n / 2]) / 2.0;
+        }
+        return per_op[n / 2];
     }
 
     void bench_emit(std::size_t subscriber_count,
@@ -246,6 +259,8 @@ int main()
     bench_reentrancy_rejection(500'000, samples);
 
     // Touch g_sink so the optimizer keeps the handler body.
-    std::printf("# sink=%llu\n", static_cast<unsigned long long>(g_sink));
+    std::printf("# sink=%llu\n",
+                static_cast<unsigned long long>(
+                    g_sink.load(std::memory_order_relaxed)));
     return 0;
 }
