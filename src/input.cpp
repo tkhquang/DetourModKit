@@ -177,7 +177,6 @@ namespace DetourModKit
           gamepad_index_(std::clamp(gamepad_index, 0, 3)),
           trigger_threshold_(std::clamp(trigger_threshold, 0, 255)), stick_threshold_(std::clamp(stick_threshold, 0, 32767))
     {
-        has_gamepad_bindings_.store(scan_for_gamepad_bindings(bindings_), std::memory_order_relaxed);
         name_index_.reserve(bindings_.size());
         recompute_modifier_caches_locked();
     }
@@ -315,8 +314,22 @@ namespace DetourModKit
         bool gamepad_was_connected = false;
         auto last_gamepad_poll = std::chrono::steady_clock::time_point{};
 
+        struct PendingCallback
+        {
+            std::string name;
+            std::function<void()> on_press;
+            std::function<void(bool)> on_state_change;
+            bool hold_value;
+        };
+        std::vector<PendingCallback> pending;
+        {
+            std::shared_lock lock(bindings_rw_mutex_);
+            pending.reserve(bindings_.size());
+        }
+
         while (!stop_token.stop_requested())
         {
+            pending.clear();
             const bool process_focused =
                 !require_focus_.load(std::memory_order_relaxed) || is_process_foreground();
 
@@ -341,15 +354,6 @@ namespace DetourModKit
 
             // Collect callbacks to fire outside the shared lock so user code
             // can call back into update_binding_combos() without deadlocking.
-            struct PendingCallback
-            {
-                std::string name;
-                std::function<void()> on_press;
-                std::function<void(bool)> on_state_change;
-                bool hold_value;
-            };
-            std::vector<PendingCallback> pending;
-
             {
                 std::shared_lock lock(bindings_rw_mutex_);
                 const size_t count = bindings_.size();

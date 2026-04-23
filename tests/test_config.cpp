@@ -1312,3 +1312,15 @@ TEST(InputBindingGuard, MoveTransfersOwnership)
     b.release();
     EXPECT_FALSE(flag->load());
 }
+
+TEST(InputBindingGuard, DestructorReleasesFlag)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    ASSERT_TRUE(flag->load());
+    {
+        Config::InputBindingGuard g("scoped", flag);
+        EXPECT_TRUE(g.is_active());
+        EXPECT_TRUE(flag->load());
+    }
+    EXPECT_FALSE(flag->load());
+}

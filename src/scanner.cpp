@@ -685,11 +685,16 @@ namespace
         {
             return match_addr + static_cast<std::uintptr_t>(c.disp_offset);
         }
-        const auto *disp_ptr = reinterpret_cast<const std::int32_t *>(match_addr +
-                                                                      static_cast<std::uintptr_t>(c.disp_offset));
+        const auto disp_addr = match_addr + static_cast<std::uintptr_t>(c.disp_offset);
+        if (!DetourModKit::Memory::is_readable(reinterpret_cast<const void *>(disp_addr), sizeof(std::int32_t)))
+        {
+            return 0;
+        }
+        std::int32_t disp = 0;
+        std::memcpy(&disp, reinterpret_cast<const void *>(disp_addr), sizeof(disp));
         return static_cast<std::uintptr_t>(
             static_cast<std::int64_t>(match_addr + static_cast<std::uintptr_t>(c.instr_end_offset)) +
-            *disp_ptr);
+            disp);
     }
 
     // Minimum number of literal (non-wildcard) bytes the tail of the pattern

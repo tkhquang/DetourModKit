@@ -68,10 +68,10 @@ namespace DetourModKit
          * @return BOOL TRUE if the worker was started, FALSE if the process
          *         gate, instance mutex, or event creation failed.
          */
-        BOOL on_dll_attach(HMODULE hMod,
-                           const ModInfo &info,
-                           std::function<bool()> init_fn,
-                           std::function<void()> shutdown_fn);
+        [[nodiscard]] BOOL on_dll_attach(HMODULE hMod,
+                                         const ModInfo &info,
+                                         std::function<bool()> init_fn,
+                                         std::function<void()> shutdown_fn);
 
         /**
          * @brief Handles DLL_PROCESS_DETACH.

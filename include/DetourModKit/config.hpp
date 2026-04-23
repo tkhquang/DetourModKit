@@ -13,8 +13,6 @@
 
 namespace DetourModKit
 {
-    class Logger;
-
     /**
      * @namespace Config
      * @brief Provides functions for registering, loading, and logging configuration settings.

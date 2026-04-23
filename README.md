@@ -131,7 +131,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 <summary><strong>Format, Filesystem, Math, and Version Utilities</strong></summary>
 
 - **Format** (`format.hpp`): Inline formatting helpers for memory addresses, byte values, VK codes, and hex integer vectors using `std::format`. Also includes string trim utilities.
-- **Filesystem** (`filesystem.hpp`): Module directory resolution (wide-string API).
+- **Filesystem** (`filesystem.hpp`): Module directory resolution via `get_runtime_directory()` (wide-string) and `get_runtime_directory_utf8()` (UTF-8).
 - **Math** (`math.hpp`): Angle conversions (header-only).
 - **Version** (`version.hpp`): Compile-time version checking via `DMK_VERSION_MAJOR`, `DMK_VERSION_MINOR`, `DMK_VERSION_PATCH`, `DMK_VERSION_STRING`, and `DMK_VERSION_AT_LEAST(major, minor, patch)`. Generated from CMake's `project(VERSION)` at configure time.
 

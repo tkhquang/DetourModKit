@@ -28,7 +28,7 @@ namespace DetourModKit::Bootstrap
                 return true;
             }
 
-            char exe_path[MAX_PATH];
+            char exe_path[MAX_PATH]{};
             const DWORD len = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
             if (len == 0 || len >= MAX_PATH)
             {
@@ -49,7 +49,7 @@ namespace DetourModKit::Bootstrap
                 return true;
             }
 
-            wchar_t mutex_name[128];
+            wchar_t mutex_name[128]{};
             std::wstring wprefix;
             wprefix.reserve(prefix.size());
             for (char c : prefix)
@@ -169,10 +169,10 @@ namespace DetourModKit::Bootstrap
         }
     } // anonymous namespace
 
-    BOOL on_dll_attach(HMODULE hMod,
-                       const ModInfo &info,
-                       std::function<bool()> init_fn,
-                       std::function<void()> shutdown_fn)
+    [[nodiscard]] BOOL on_dll_attach(HMODULE hMod,
+                                     const ModInfo &info,
+                                     std::function<bool()> init_fn,
+                                     std::function<void()> shutdown_fn)
     {
         if (g_shutdown_event || g_worker_thread)
         {

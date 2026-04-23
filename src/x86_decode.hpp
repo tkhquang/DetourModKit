@@ -44,9 +44,14 @@ namespace DetourModKit::detail
             static_cast<std::int64_t>(address) + 2 + disp);
     }
 
+    // FF 25 disp32 on x86-64 is RIP-relative: the 32-bit signed displacement
+    // is added to the address of the next instruction. On x86 (32-bit) the
+    // same encoding is absolute, which this decoder does not handle.
     [[nodiscard]] inline std::optional<std::uintptr_t>
     decode_ff25_indirect(std::uintptr_t address) noexcept
     {
+        static_assert(sizeof(void *) == 8,
+                      "decode_ff25_indirect assumes x86-64 RIP-relative semantics");
         if (!Memory::is_readable(reinterpret_cast<const void *>(address), 6))
         {
             return std::nullopt;

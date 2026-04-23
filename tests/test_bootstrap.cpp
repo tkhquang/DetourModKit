@@ -156,6 +156,7 @@ protected:
         {
             Bootstrap::request_shutdown();
             sig.wait_for_shutdown(kTestTimeout);
+            Bootstrap::on_dll_detach(FALSE);
         }
     }
 };
