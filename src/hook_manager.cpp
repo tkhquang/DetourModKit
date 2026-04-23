@@ -182,10 +182,8 @@ HookManager::~HookManager() noexcept
         // That epilogue is best-effort under loader lock, but the pinned
         // module still keeps trampoline code pages live so straggler
         // trampoline calls land on valid memory.
-        using HookMap = std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>;
-        using VmtHookMap = std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>;
-        auto *leaked_hooks = new (std::nothrow) HookMap();
-        auto *leaked_vmt_hooks = new (std::nothrow) VmtHookMap();
+        auto *leaked_hooks = new (std::nothrow) detail::HookMap();
+        auto *leaked_vmt_hooks = new (std::nothrow) detail::VmtHookMap();
         if (leaked_hooks != nullptr)
         {
             leaked_hooks->swap(m_hooks);
