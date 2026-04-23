@@ -403,6 +403,21 @@ namespace DetourModKit
         std::unordered_map<size_t, safetyhook::VmHook> m_method_hooks;
     };
 
+    namespace detail
+    {
+        /**
+         * @brief Container type for the inline / mid hook registry, keyed by hook name.
+         * @details Centralized once so every site that references this exact instantiation sees identical template arguments.
+         */
+        using HookMap = std::unordered_map<std::string, std::unique_ptr<Hook>, TransparentStringHash, std::equal_to<>>;
+
+        /**
+         * @brief Container type for the VMT hook registry, keyed by hook name.
+         * @details Centralized once so every site that references this exact instantiation sees identical template arguments.
+         */
+        using VmtHookMap = std::unordered_map<std::string, VmtHookEntry, TransparentStringHash, std::equal_to<>>;
+    } // namespace detail
+
     /**
      * @class HookManager
      * @brief Manages the lifecycle of all hooks (Inline, Mid, and VMT) using SafetyHook.
@@ -989,8 +1004,8 @@ namespace DetourModKit
         explicit HookManager(Logger &logger = Logger::get_instance());
 
         mutable std::shared_mutex m_hooks_mutex;
-        std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>> m_hooks;
-        std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>> m_vmt_hooks;
+        detail::HookMap m_hooks;
+        detail::VmtHookMap m_vmt_hooks;
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};

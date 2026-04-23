@@ -165,27 +165,33 @@ HookManager::~HookManager() noexcept
         // library to instantiate a copy-construction fallback for the element
         // type whenever the element's move constructor is not unconditionally
         // noexcept, and that copy path would try to copy a move-only member
-        // (VmtHookEntry owns a safetyhook::VmtHook). std::nothrow preserves
-        // the destructor's noexcept contract; on allocation failure the new
-        // expression returns nullptr without running the move constructor,
-        // the source maps keep their contents, and control falls through to
-        // the normal ~HookManager member destruction epilogue. That epilogue
-        // is best-effort under loader lock, but the pinned module still keeps
-        // trampoline code pages live so straggler trampoline calls land on
-        // valid memory.
-        using HookMap = std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>;
-        using VmtHookMap = std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>;
-        // If either map's move constructor could throw, the nothrow new
-        // expression above would leak its allocation and (since this
-        // destructor is noexcept) the throw would escalate to std::terminate.
-        // Pin the contract at compile time so any future change to the hash,
-        // key_equal, or mapped_type that breaks nothrow-move is caught here.
-        static_assert(std::is_nothrow_move_constructible_v<HookMap>,
-                      "HookMap move ctor must be noexcept to keep the loader-lock leak path safe.");
-        static_assert(std::is_nothrow_move_constructible_v<VmtHookMap>,
-                      "VmtHookMap move ctor must be noexcept to keep the loader-lock leak path safe.");
-        [[maybe_unused]] auto *leaked_hooks = new (std::nothrow) HookMap(std::move(m_hooks));
-        [[maybe_unused]] auto *leaked_vmt_hooks = new (std::nothrow) VmtHookMap(std::move(m_vmt_hooks));
+        // (VmtHookEntry owns a safetyhook::VmtHook).
+        //
+        // Default-construct each map on the heap, then swap content in.
+        // std::unordered_map's move constructor is not guaranteed noexcept on
+        // every standard library implementation (some mark it noexcept(false)
+        // so allocator-propagation fallbacks can allocate); invoking it from a
+        // noexcept destructor would risk std::terminate on an unexpected
+        // allocator fallback. With a default std::allocator (stateless,
+        // is_always_equal) and noexcept hasher / comparator, member swap() is
+        // specified noexcept and performs an O(1) pointer swap that allocates
+        // nothing, so it is safe to call from a noexcept context. On
+        // allocation failure the new (std::nothrow) expression returns
+        // nullptr, the source maps keep their contents, and control falls
+        // through to the normal ~HookManager member destruction epilogue.
+        // That epilogue is best-effort under loader lock, but the pinned
+        // module still keeps trampoline code pages live so straggler
+        // trampoline calls land on valid memory.
+        auto *leaked_hooks = new (std::nothrow) detail::HookMap();
+        auto *leaked_vmt_hooks = new (std::nothrow) detail::VmtHookMap();
+        if (leaked_hooks != nullptr)
+        {
+            leaked_hooks->swap(m_hooks);
+        }
+        if (leaked_vmt_hooks != nullptr)
+        {
+            leaked_vmt_hooks->swap(m_vmt_hooks);
+        }
         m_shutdown_called.store(true, std::memory_order_release);
         return;
     }
