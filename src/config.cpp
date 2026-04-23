@@ -9,11 +9,15 @@
  */
 
 #include "DetourModKit/config.hpp"
+#include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
 #include "SimpleIni.h"
+
+#include <atomic>
+#include <memory>
 
 #include <windows.h>
 #include <cerrno>
@@ -481,8 +485,8 @@ namespace
 // the lock is released.  This allows setters to call back into the Config
 // API without deadlocking (no reentrancy guard needed).
 void DetourModKit::Config::register_int(std::string_view section, std::string_view ini_key,
-                                               std::string_view log_key_name, std::function<void(int)> setter,
-                                               int default_value)
+                                        std::string_view log_key_name, std::function<void(int)> setter,
+                                        int default_value)
 {
     std::function<void()> deferred;
     {
@@ -491,7 +495,8 @@ void DetourModKit::Config::register_int(std::string_view section, std::string_vi
             std::make_unique<CallbackConfigItem<int>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, default_value]() { setter(default_value); };
+            deferred = [setter, default_value]()
+            { setter(default_value); };
         }
     }
     if (deferred)
@@ -501,8 +506,8 @@ void DetourModKit::Config::register_int(std::string_view section, std::string_vi
 }
 
 void DetourModKit::Config::register_float(std::string_view section, std::string_view ini_key,
-                                                 std::string_view log_key_name, std::function<void(float)> setter,
-                                                 float default_value)
+                                          std::string_view log_key_name, std::function<void(float)> setter,
+                                          float default_value)
 {
     std::function<void()> deferred;
     {
@@ -511,7 +516,8 @@ void DetourModKit::Config::register_float(std::string_view section, std::string_
             std::make_unique<CallbackConfigItem<float>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, default_value]() { setter(default_value); };
+            deferred = [setter, default_value]()
+            { setter(default_value); };
         }
     }
     if (deferred)
@@ -521,8 +527,8 @@ void DetourModKit::Config::register_float(std::string_view section, std::string_
 }
 
 void DetourModKit::Config::register_bool(std::string_view section, std::string_view ini_key,
-                                                std::string_view log_key_name, std::function<void(bool)> setter,
-                                                bool default_value)
+                                         std::string_view log_key_name, std::function<void(bool)> setter,
+                                         bool default_value)
 {
     std::function<void()> deferred;
     {
@@ -531,7 +537,8 @@ void DetourModKit::Config::register_bool(std::string_view section, std::string_v
             std::make_unique<CallbackConfigItem<bool>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, default_value]() { setter(default_value); };
+            deferred = [setter, default_value]()
+            { setter(default_value); };
         }
     }
     if (deferred)
@@ -541,8 +548,8 @@ void DetourModKit::Config::register_bool(std::string_view section, std::string_v
 }
 
 void DetourModKit::Config::register_string(std::string_view section, std::string_view ini_key,
-                                                  std::string_view log_key_name, std::function<void(const std::string &)> setter,
-                                                  std::string default_value)
+                                           std::string_view log_key_name, std::function<void(const std::string &)> setter,
+                                           std::string default_value)
 {
     std::function<void()> deferred;
     {
@@ -551,7 +558,8 @@ void DetourModKit::Config::register_string(std::string_view section, std::string
             std::make_unique<CallbackConfigItem<std::string>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, val = std::move(default_value)]() { setter(val); };
+            deferred = [setter, val = std::move(default_value)]()
+            { setter(val); };
         }
     }
     if (deferred)
@@ -561,8 +569,8 @@ void DetourModKit::Config::register_string(std::string_view section, std::string
 }
 
 void DetourModKit::Config::register_key_combo(std::string_view section, std::string_view ini_key,
-                                                      std::string_view log_key_name, std::function<void(const KeyComboList &)> setter,
-                                                      std::string_view default_value_str)
+                                              std::string_view log_key_name, std::function<void(const KeyComboList &)> setter,
+                                              std::string_view default_value_str)
 {
     Config::KeyComboList default_combos = parse_key_combo_list(std::string(default_value_str));
 
@@ -573,13 +581,45 @@ void DetourModKit::Config::register_key_combo(std::string_view section, std::str
             std::make_unique<CallbackConfigItem<Config::KeyComboList>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_combos));
         if (setter)
         {
-            deferred = [setter, combos = std::move(default_combos)]() { setter(combos); };
+            deferred = [setter, combos = std::move(default_combos)]()
+            { setter(combos); };
         }
     }
     if (deferred)
     {
         deferred();
     }
+}
+
+DetourModKit::Config::InputBindingGuard DetourModKit::Config::register_press_combo(
+    std::string_view section,
+    std::string_view ini_key,
+    std::string_view log_name,
+    std::string_view input_binding_name,
+    std::function<void()> on_press,
+    std::string_view default_value)
+{
+    auto enabled_flag = std::make_shared<std::atomic<bool>>(true);
+    auto current_combos = std::make_shared<KeyComboList>(parse_key_combo_list(std::string(default_value)));
+    std::string binding_name_str(input_binding_name);
+
+    register_key_combo(section, ini_key, log_name, [current_combos, binding_name_str](const KeyComboList &combos)
+                       {
+                           *current_combos = combos;
+                           InputManager::get_instance().update_binding_combos(binding_name_str, combos); }, default_value);
+
+    InputManager::get_instance().register_press(
+        binding_name_str,
+        *current_combos,
+        [enabled_flag, cb = std::move(on_press)]()
+        {
+            if (cb && enabled_flag->load(std::memory_order_acquire))
+            {
+                cb();
+            }
+        });
+
+    return InputBindingGuard{std::move(binding_name_str), std::move(enabled_flag)};
 }
 
 void DetourModKit::Config::load(std::string_view ini_filename)
@@ -648,8 +688,7 @@ void DetourModKit::Config::log_all()
                     {
                         seen.insert(item->section);
                     }
-                    return seen.size();
-                }());
+                    return seen.size(); }());
 
     std::string current_section;
     for (const auto &item : items)

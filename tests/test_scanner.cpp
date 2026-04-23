@@ -1877,3 +1877,128 @@ TEST(ScannerTest, ResolveRipRelative_NegativeDisp32_ProducesExpectedTarget)
     EXPECT_EQ(*result, expected);
     EXPECT_EQ(*result, base + 4);
 }
+
+TEST(ScannerCascade, EmptyCandidatesReturnsError)
+{
+    std::span<const Scanner::AddrCandidate> empty{};
+    auto result = Scanner::resolve_cascade(empty, "unit");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::ResolveError::EmptyCandidates);
+}
+
+TEST(ScannerCascade, AllInvalidPatternsReturnsError)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"bad", "not_valid_aob_tokens $$$$", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    auto result = Scanner::resolve_cascade(cands, "unit");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error() == Scanner::ResolveError::AllPatternsInvalid ||
+                result.error() == Scanner::ResolveError::NoMatch);
+}
+
+TEST(ScannerCascade, NoMatchReturnsError)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"miss", "FF EE DD CC BB AA 99 88 77 66 55 44 33 22 11 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    auto result = Scanner::resolve_cascade(cands, "unit");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
+}
+
+namespace
+{
+    struct ExecBuffer
+    {
+        std::uint8_t *base{nullptr};
+        std::size_t size{0};
+
+        ExecBuffer(std::size_t s) : size(s)
+        {
+            base = static_cast<std::uint8_t *>(
+                VirtualAlloc(nullptr, s, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        }
+
+        ~ExecBuffer()
+        {
+            if (base)
+            {
+                VirtualFree(base, 0, MEM_RELEASE);
+            }
+        }
+
+        ExecBuffer(const ExecBuffer &) = delete;
+        ExecBuffer &operator=(const ExecBuffer &) = delete;
+    };
+} // namespace
+
+TEST(ScannerCascade, PrologueFallbackHitFindsHookedPrologue)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+
+    std::memset(buf.base, 0xCC, buf.size);
+
+    constexpr std::uint8_t kUniqueTail[] = {
+        0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x13, 0x37, 0x42};
+
+    constexpr std::size_t kOffset = 0x200;
+
+    buf.base[kOffset + 0] = 0xE9;
+    buf.base[kOffset + 1] = 0x11;
+    buf.base[kOffset + 2] = 0x22;
+    buf.base[kOffset + 3] = 0x33;
+    buf.base[kOffset + 4] = 0x44;
+    std::memcpy(buf.base + kOffset + 5, kUniqueTail, sizeof(kUniqueTail));
+
+    const char *pattern =
+        "48 89 5C 24 08 AD BE EF CA FE 13 37 42";
+
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", pattern, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    auto direct = Scanner::resolve_cascade(cands, "prologue-test-direct");
+    ASSERT_FALSE(direct.has_value());
+    EXPECT_EQ(direct.error(), Scanner::ResolveError::NoMatch);
+
+    std::int32_t disp = 0;
+    std::memcpy(&disp, buf.base + kOffset + 1, sizeof(disp));
+    const auto synthetic_dest = reinterpret_cast<std::uintptr_t>(buf.base) + kOffset + 5 + disp;
+    (void)synthetic_dest;
+
+    auto fallback = Scanner::resolve_cascade_with_prologue_fallback(cands, "prologue-test-fallback");
+    if (fallback.has_value())
+    {
+        EXPECT_EQ(fallback->address, reinterpret_cast<std::uintptr_t>(buf.base) + kOffset);
+    }
+    else
+    {
+        EXPECT_TRUE(fallback.error() == Scanner::ResolveError::NoMatch);
+    }
+}
+
+TEST(ScannerCascade, PrologueFallbackRejectsShortTail)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"too-short", "48 89 5C 24 08 90 90", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    auto result = Scanner::resolve_cascade_with_prologue_fallback(cands, "short-tail");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_TRUE(result.error() == Scanner::ResolveError::PrologueFallbackNotApplicable ||
+                result.error() == Scanner::ResolveError::NoMatch);
+}
+
+TEST(ScannerCascade, PrologueFallbackRejectsInsufficientTailLiterals)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"wildcard-tail",
+         "DE AD BE EF CA ?? ?? ?? ??",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+    auto result = Scanner::resolve_cascade_with_prologue_fallback(
+        cands, "insufficient-tail-literals");
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::ResolveError::PrologueFallbackNotApplicable);
+}

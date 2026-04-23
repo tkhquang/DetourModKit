@@ -478,5 +478,4 @@ namespace DetourModKit
         }
     }
 
-
 } // namespace DetourModKit

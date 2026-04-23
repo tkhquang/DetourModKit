@@ -138,3 +138,39 @@ std::wstring DetourModKit::Filesystem::get_runtime_directory()
     static const std::wstring cached_directory = resolve_module_directory();
     return cached_directory;
 }
+
+namespace
+{
+    std::string to_utf8(const std::wstring &wide)
+    {
+        if (wide.empty())
+        {
+            return {};
+        }
+        if (wide.size() > static_cast<size_t>(INT_MAX))
+        {
+            return ".";
+        }
+        const int wide_len = static_cast<int>(wide.size());
+        const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len,
+                                               nullptr, 0, nullptr, nullptr);
+        if (needed <= 0)
+        {
+            return ".";
+        }
+        std::string out(static_cast<size_t>(needed), '\0');
+        const int written = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len,
+                                                out.data(), needed, nullptr, nullptr);
+        if (written <= 0)
+        {
+            return ".";
+        }
+        return out;
+    }
+} // anonymous namespace
+
+std::string DetourModKit::Filesystem::get_runtime_directory_utf8()
+{
+    static const std::string cached_directory_utf8 = to_utf8(get_runtime_directory());
+    return cached_directory_utf8;
+}

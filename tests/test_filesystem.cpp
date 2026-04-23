@@ -100,3 +100,16 @@ TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
     EXPECT_LT(elapsed_ms, 1000)
         << "Cached get_runtime_directory should be near-zero cost per call";
 }
+
+TEST(FilesystemUtf8, ReturnsNonEmpty)
+{
+    const std::string utf8 = Filesystem::get_runtime_directory_utf8();
+    EXPECT_FALSE(utf8.empty());
+}
+
+TEST(FilesystemUtf8, Cached)
+{
+    const std::string a = Filesystem::get_runtime_directory_utf8();
+    const std::string b = Filesystem::get_runtime_directory_utf8();
+    EXPECT_EQ(a, b);
+}

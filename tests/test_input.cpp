@@ -1683,3 +1683,105 @@ TEST(InputModeTest, UnknownModeToString)
     auto unknown = static_cast<InputMode>(999);
     EXPECT_EQ(input_mode_to_string(unknown), "Unknown");
 }
+
+TEST(InputManagerUpdateCombos, UnknownNameIsSilent)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    Config::KeyComboList combos;
+    combos.push_back({{keyboard_key(0x41)}, {}});
+    im.update_binding_combos("does-not-exist", combos);
+    SUCCEED();
+}
+
+TEST(InputManagerUpdateCombos, UpdatesPendingBindingBeforeStart)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
+    im.register_press("update-pending", initial, []() {});
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+
+    Config::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x42)}, {}}); // 'B'
+    im.update_binding_combos("update-pending", replacement);
+
+    // Still 1 binding after replacement; cardinality preserved.
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    im.shutdown();
+}
+
+TEST(InputManagerUpdateCombos, CardinalityMismatchIsRejected)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}});
+    im.register_press("update-mismatch", initial, []() {});
+
+    Config::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x42)}, {}});
+    replacement.push_back({{keyboard_key(0x43)}, {}});
+    im.update_binding_combos("update-mismatch", replacement);
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    im.shutdown();
+}
+
+TEST(InputManagerUpdateCombos, UpdatesRunningPollerBinding)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
+    im.register_press("update-running", initial, []() {});
+    im.start(std::chrono::milliseconds(5));
+
+    Config::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x5A)}, {}}); // 'Z'
+    im.update_binding_combos("update-running", replacement);
+
+    // Give the poller a cycle to pick up the swap, then tear down.
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    EXPECT_TRUE(im.is_running());
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
+TEST(InputManagerUpdateCombos, ConcurrentUpdateWhilePollerRunning)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
+    im.register_press("update-stress", initial, []() {});
+    im.start(std::chrono::milliseconds(1));
+
+    std::atomic<bool> stop{false};
+    constexpr int kIterations = 1000;
+
+    std::thread writer([&im, &stop]()
+                       {
+        for (int i = 0; i < kIterations && !stop.load(std::memory_order_relaxed); ++i)
+        {
+            Config::KeyComboList replacement;
+            const std::uint32_t key_code = (i % 2 == 0) ? 0x41u : 0x5Au;
+            replacement.push_back({{keyboard_key(key_code)}, {}});
+            im.update_binding_combos("update-stress", replacement);
+        } });
+
+    writer.join();
+    stop.store(true, std::memory_order_relaxed);
+
+    EXPECT_TRUE(im.is_running());
+
+    im.shutdown();
+    im.set_require_focus(true);
+    SUCCEED();
+}

@@ -2276,3 +2276,90 @@ TEST_F(HookManagerTest, RemoveAllHooks_WithOnlyVmtHooks)
 
     EXPECT_TRUE(hook_manager_->get_vmt_hook_names().empty());
 }
+
+TEST(HookDuplicateDetection, FailIfAlreadyHookedIsStoredInConfig)
+{
+    HookConfig cfg;
+    EXPECT_FALSE(cfg.fail_if_already_hooked);
+    cfg.fail_if_already_hooked = true;
+    EXPECT_TRUE(cfg.fail_if_already_hooked);
+}
+
+TEST(HookDuplicateDetection, TargetAlreadyHookedErrorStringExists)
+{
+    const std::string_view msg = Hook::error_to_string(HookError::TargetAlreadyHookedInProcess);
+    EXPECT_FALSE(msg.empty());
+    EXPECT_NE(msg.find("already"), std::string_view::npos);
+}
+
+namespace
+{
+    [[gnu::noinline]] void duplicate_hook_target_function() noexcept
+    {
+        volatile int x = 0;
+        x = x + 1;
+        (void)x;
+    }
+
+    void duplicate_hook_detour_a() noexcept {}
+    void duplicate_hook_detour_b() noexcept {}
+} // namespace
+
+TEST_F(HookManagerTest, DuplicateHook_StrictMode_ReturnsTargetAlreadyHooked)
+{
+    auto &hm = *hook_manager_;
+    const auto target =
+        reinterpret_cast<std::uintptr_t>(&duplicate_hook_target_function);
+
+    void *trampoline_a = nullptr;
+    auto first = hm.create_inline_hook(
+        "dup-first",
+        target,
+        reinterpret_cast<void *>(&duplicate_hook_detour_a),
+        &trampoline_a);
+    ASSERT_TRUE(first.has_value()) << "initial inline hook should succeed";
+
+    HookConfig strict;
+    strict.fail_if_already_hooked = true;
+
+    void *trampoline_b = nullptr;
+    auto second = hm.create_inline_hook(
+        "dup-second",
+        target,
+        reinterpret_cast<void *>(&duplicate_hook_detour_b),
+        &trampoline_b,
+        strict);
+
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error(), HookError::TargetAlreadyHookedInProcess);
+    EXPECT_EQ(trampoline_b, nullptr);
+
+    (void)hm.remove_hook("dup-first");
+}
+
+TEST_F(HookManagerTest, DuplicateHook_DefaultMode_LayersOnTop)
+{
+    auto &hm = *hook_manager_;
+    const auto target =
+        reinterpret_cast<std::uintptr_t>(&duplicate_hook_target_function);
+
+    void *trampoline_a = nullptr;
+    auto first = hm.create_inline_hook(
+        "dup-layer-first",
+        target,
+        reinterpret_cast<void *>(&duplicate_hook_detour_a),
+        &trampoline_a);
+    ASSERT_TRUE(first.has_value());
+
+    void *trampoline_b = nullptr;
+    auto second = hm.create_inline_hook(
+        "dup-layer-second",
+        target,
+        reinterpret_cast<void *>(&duplicate_hook_detour_b),
+        &trampoline_b);
+
+    EXPECT_TRUE(second.has_value());
+
+    (void)hm.remove_hook("dup-layer-second");
+    (void)hm.remove_hook("dup-layer-first");
+}

@@ -7,6 +7,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/format.hpp"
+#include "x86_decode.hpp"
 
 #include <windows.h>
 #include <vector>
@@ -672,4 +673,353 @@ Scanner::SimdLevel DetourModKit::Scanner::active_simd_level() noexcept
 #else
     return SimdLevel::Scalar;
 #endif
+}
+
+namespace
+{
+    std::uintptr_t resolve_candidate_match(std::uintptr_t match_addr,
+                                           const DetourModKit::Scanner::AddrCandidate &c) noexcept
+    {
+        using DetourModKit::Scanner::ResolveMode;
+        if (c.mode == ResolveMode::Direct)
+        {
+            return match_addr + static_cast<std::uintptr_t>(c.disp_offset);
+        }
+        const auto disp_addr = match_addr + static_cast<std::uintptr_t>(c.disp_offset);
+        if (!DetourModKit::Memory::is_readable(reinterpret_cast<const void *>(disp_addr), sizeof(std::int32_t)))
+        {
+            return 0;
+        }
+        std::int32_t disp = 0;
+        std::memcpy(&disp, reinterpret_cast<const void *>(disp_addr), sizeof(disp));
+        return static_cast<std::uintptr_t>(
+            static_cast<std::int64_t>(match_addr + static_cast<std::uintptr_t>(c.instr_end_offset)) +
+            disp);
+    }
+
+    // Minimum number of literal (non-wildcard) bytes the tail of the pattern
+    // must contain after dropping the first 5 prologue tokens. Without this
+    // floor the rebuilt pattern devolves into near-JMP-matches-everything and
+    // yields false hits in any large .text region.
+    constexpr int kPrologueFallbackMinTailLiterals = 5;
+
+    // Upper bound on hits the rebuilt fallback pattern may produce across the
+    // process's executable regions before we reject it as ambiguous.
+    constexpr std::size_t kPrologueFallbackMaxHits = 4;
+
+    bool is_wildcard_token(std::string_view token) noexcept
+    {
+        return token == "?" || token == "??";
+    }
+
+    // Walks the AOB token stream and splits it into (first 5 byte-tokens, tail).
+    // The `|` anchor marker is stripped because the rebuilt pattern targets
+    // the hooked-prologue start. Returns false if the source has fewer than
+    // 5 byte-tokens.
+    struct PrologueSplit
+    {
+        std::vector<std::string_view> tail_tokens;
+        int literal_tail_count{0};
+    };
+
+    bool split_prologue(std::string_view orig, PrologueSplit &out) noexcept
+    {
+        std::size_t i = 0;
+        int byte_tokens = 0;
+        while (i < orig.size())
+        {
+            while (i < orig.size() && (orig[i] == ' ' || orig[i] == '\t' ||
+                                       orig[i] == '\n' || orig[i] == '\r'))
+            {
+                ++i;
+            }
+            if (i >= orig.size())
+            {
+                break;
+            }
+            if (orig[i] == '|')
+            {
+                ++i;
+                continue;
+            }
+            const std::size_t tok_start = i;
+            while (i < orig.size() && orig[i] != ' ' && orig[i] != '\t' &&
+                   orig[i] != '\n' && orig[i] != '\r' && orig[i] != '|')
+            {
+                ++i;
+            }
+            const std::string_view tok = orig.substr(tok_start, i - tok_start);
+            if (tok.empty())
+            {
+                continue;
+            }
+            if (byte_tokens >= 5)
+            {
+                out.tail_tokens.push_back(tok);
+                if (!is_wildcard_token(tok))
+                {
+                    ++out.literal_tail_count;
+                }
+            }
+            ++byte_tokens;
+        }
+        return byte_tokens >= 5;
+    }
+
+    std::string build_hooked_prologue_pattern(std::string_view orig)
+    {
+        if (orig.empty())
+        {
+            return {};
+        }
+        PrologueSplit split;
+        if (!split_prologue(orig, split))
+        {
+            return {};
+        }
+        if (split.literal_tail_count < kPrologueFallbackMinTailLiterals)
+        {
+            return {};
+        }
+        std::string out = "E9 ?? ?? ?? ??";
+        for (const auto &tok : split.tail_tokens)
+        {
+            out.push_back(' ');
+            out.append(tok);
+        }
+        return out;
+    }
+
+    // Returns true if `addr` lies inside any currently loaded module's
+    // executable image range. Used to reject E9-rel32 destinations that
+    // resolve into unmapped or data-only memory.
+    bool is_address_in_module(std::uintptr_t addr) noexcept
+    {
+        if (addr == 0)
+        {
+            return false;
+        }
+        HMODULE mod = nullptr;
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(addr), &mod) ||
+            mod == nullptr)
+        {
+            return false;
+        }
+        return true;
+    }
+
+    // Counts up to (max_hits + 1) occurrences of `pattern` across executable
+    // regions. Returning max_hits+1 signals "too many to be unique".
+    std::size_t count_pattern_hits_bounded(const DetourModKit::Scanner::CompiledPattern &pattern,
+                                           std::size_t max_hits) noexcept
+    {
+        std::size_t hits = 0;
+        for (std::size_t n = 1; n <= max_hits + 1; ++n)
+        {
+            const auto *match = DetourModKit::Scanner::scan_executable_regions(pattern, n);
+            if (match == nullptr)
+            {
+                break;
+            }
+            ++hits;
+        }
+        return hits;
+    }
+
+    struct CascadeAttempt
+    {
+        std::uintptr_t address{0};
+        size_t index{0};
+        bool success{false};
+    };
+
+    CascadeAttempt scan_candidates(std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
+                                   bool &all_parse_failed,
+                                   DetourModKit::Logger &logger)
+    {
+        all_parse_failed = true;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            const auto &c = candidates[i];
+            auto compiled = DetourModKit::Scanner::parse_aob(c.pattern);
+            if (!compiled)
+            {
+                logger.warning("Scanner: Failed to parse AOB for candidate '{}'.",
+                               c.name.empty() ? std::string_view{"<unnamed>"} : c.name);
+                continue;
+            }
+            all_parse_failed = false;
+            const auto *match = DetourModKit::Scanner::scan_executable_regions(*compiled);
+            if (match != nullptr)
+            {
+                const auto addr = resolve_candidate_match(
+                    reinterpret_cast<std::uintptr_t>(match), c);
+                return CascadeAttempt{addr, i, true};
+            }
+        }
+        return CascadeAttempt{0, 0, false};
+    }
+
+    struct PrologueFallbackResult
+    {
+        CascadeAttempt attempt{};
+        bool not_applicable{true};
+    };
+
+    PrologueFallbackResult scan_candidates_hooked_prologue(
+        std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
+        DetourModKit::Logger &logger)
+    {
+        using DetourModKit::Scanner::ResolveMode;
+        PrologueFallbackResult out;
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            const auto &c = candidates[i];
+            if (c.mode != ResolveMode::Direct)
+            {
+                continue;
+            }
+            auto hooked = build_hooked_prologue_pattern(c.pattern);
+            if (hooked.empty())
+            {
+                logger.debug("Scanner: prologue fallback skipped for '{}' (insufficient literal tail bytes)",
+                             c.name.empty() ? std::string_view{"<unnamed>"} : c.name);
+                continue;
+            }
+            auto compiled = DetourModKit::Scanner::parse_aob(hooked);
+            if (!compiled)
+            {
+                continue;
+            }
+            out.not_applicable = false;
+            const std::size_t hits =
+                count_pattern_hits_bounded(*compiled, kPrologueFallbackMaxHits);
+            if (hits == 0)
+            {
+                continue;
+            }
+            if (hits > kPrologueFallbackMaxHits)
+            {
+                logger.debug(
+                    "Scanner: prologue fallback rejected for '{}': {} hits exceed uniqueness ceiling ({})",
+                    c.name.empty() ? std::string_view{"<unnamed>"} : c.name,
+                    hits, kPrologueFallbackMaxHits);
+                continue;
+            }
+            const auto *match = DetourModKit::Scanner::scan_executable_regions(*compiled);
+            if (match == nullptr)
+            {
+                continue;
+            }
+
+            const auto match_addr = reinterpret_cast<std::uintptr_t>(match);
+            const auto decoded = DetourModKit::detail::decode_e9_rel32(match_addr);
+            if (!decoded)
+            {
+                continue;
+            }
+            const auto jmp_destination = *decoded;
+            if (!is_address_in_module(jmp_destination))
+            {
+                logger.debug(
+                    "Scanner: prologue fallback rejected for '{}': E9 destination {} not in any module",
+                    c.name.empty() ? std::string_view{"<unnamed>"} : c.name,
+                    jmp_destination);
+                continue;
+            }
+
+            const auto addr = resolve_candidate_match(match_addr, c);
+            out.attempt = CascadeAttempt{addr, i, true};
+            return out;
+        }
+        return out;
+    }
+} // anonymous namespace
+
+std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
+DetourModKit::Scanner::resolve_cascade(std::span<const AddrCandidate> candidates,
+                                       std::string_view label)
+{
+    auto &logger = Logger::get_instance();
+
+    if (candidates.empty())
+    {
+        logger.warning("Scanner: resolve_cascade for '{}' called with no candidates.", label);
+        return std::unexpected(ResolveError::EmptyCandidates);
+    }
+
+    bool all_parse_failed = true;
+    const auto attempt = scan_candidates(candidates, all_parse_failed, logger);
+    if (attempt.success)
+    {
+        const auto &winner = candidates[attempt.index];
+        logger.info("{} resolved via '{}' at {}", label,
+                    winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+                    Format::format_address(attempt.address));
+        return ResolveHit{attempt.address, winner.name};
+    }
+
+    if (all_parse_failed)
+    {
+        logger.error("{}: every candidate pattern failed to parse.", label);
+        return std::unexpected(ResolveError::AllPatternsInvalid);
+    }
+
+    logger.warning("{}: cascade AOB scan failed (no candidate matched).", label);
+    return std::unexpected(ResolveError::NoMatch);
+}
+
+std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
+DetourModKit::Scanner::resolve_cascade_with_prologue_fallback(
+    std::span<const AddrCandidate> candidates, std::string_view label)
+{
+    auto &logger = Logger::get_instance();
+
+    if (candidates.empty())
+    {
+        logger.warning("Scanner: resolve_cascade_with_prologue_fallback for '{}' called with no candidates.", label);
+        return std::unexpected(ResolveError::EmptyCandidates);
+    }
+
+    bool all_parse_failed = true;
+    auto attempt = scan_candidates(candidates, all_parse_failed, logger);
+    if (attempt.success)
+    {
+        const auto &winner = candidates[attempt.index];
+        logger.info("{} resolved via '{}' at {}", label,
+                    winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+                    Format::format_address(attempt.address));
+        return ResolveHit{attempt.address, winner.name};
+    }
+
+    const auto hooked = scan_candidates_hooked_prologue(candidates, logger);
+    if (hooked.attempt.success)
+    {
+        const auto &winner = candidates[hooked.attempt.index];
+        logger.info(
+            "{} resolved via '{}' at {} (pre-hooked prologue; reusing target)",
+            label,
+            winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+            Format::format_address(hooked.attempt.address));
+        return ResolveHit{hooked.attempt.address, winner.name};
+    }
+
+    if (all_parse_failed)
+    {
+        logger.error("{}: every candidate pattern failed to parse.", label);
+        return std::unexpected(ResolveError::AllPatternsInvalid);
+    }
+
+    if (hooked.not_applicable)
+    {
+        logger.warning("{}: cascade AOB scan failed; prologue fallback not applicable (insufficient literal tail bytes).",
+                       label);
+        return std::unexpected(ResolveError::PrologueFallbackNotApplicable);
+    }
+
+    logger.warning("{}: cascade AOB scan failed (including prologue fallback).", label);
+    return std::unexpected(ResolveError::NoMatch);
 }

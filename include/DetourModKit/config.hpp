@@ -2,16 +2,17 @@
 #define DETOURMODKIT_CONFIG_HPP
 
 #include "DetourModKit/input_codes.hpp"
+#include "DetourModKit/logger.hpp"
 
+#include <atomic>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace DetourModKit
 {
-    class Logger;
-
     /**
      * @namespace Config
      * @brief Provides functions for registering, loading, and logging configuration settings.
@@ -72,25 +73,95 @@ namespace DetourModKit
         /// A list of alternative key combinations (OR logic between combos).
         using KeyComboList = std::vector<KeyCombo>;
 
+        /**
+         * @class InputBindingGuard
+         * @brief RAII cancellation token for bindings registered via
+         *        register_press_combo().
+         * @details The guard owns a shared atomic flag that gates the user
+         *          callback. On destruction (or explicit release()) the flag
+         *          is cleared and subsequent key events become no-ops. The
+         *          underlying InputManager binding remains registered; it is
+         *          only torn down by InputManager::shutdown() or
+         *          DMK_Shutdown().
+         *
+         *          Non-copyable, movable. Moving transfers ownership of the
+         *          cancellation flag; the moved-from guard becomes inert.
+         */
+        class InputBindingGuard
+        {
+        public:
+            InputBindingGuard() = default;
+            InputBindingGuard(std::string name, std::shared_ptr<std::atomic<bool>> enabled) noexcept
+                : name_(std::move(name)), enabled_(std::move(enabled)) {}
+
+            ~InputBindingGuard() noexcept { release(); }
+
+            InputBindingGuard(const InputBindingGuard &) = delete;
+            InputBindingGuard &operator=(const InputBindingGuard &) = delete;
+
+            InputBindingGuard(InputBindingGuard &&other) noexcept
+                : name_(std::move(other.name_)), enabled_(std::move(other.enabled_)) {}
+
+            InputBindingGuard &operator=(InputBindingGuard &&other) noexcept
+            {
+                if (this != &other)
+                {
+                    release();
+                    name_ = std::move(other.name_);
+                    enabled_ = std::move(other.enabled_);
+                }
+                return *this;
+            }
+
+            /**
+             * @brief Disables the binding's callback. Idempotent.
+             */
+            void release() noexcept
+            {
+                if (enabled_)
+                {
+                    enabled_->store(false, std::memory_order_release);
+                    enabled_.reset();
+                }
+            }
+
+            /**
+             * @brief Returns the binding's InputManager name.
+             */
+            [[nodiscard]] const std::string &name() const noexcept { return name_; }
+
+            /**
+             * @brief Returns true while the binding's callback is still live.
+             */
+            [[nodiscard]] bool is_active() const noexcept
+            {
+                return enabled_ && enabled_->load(std::memory_order_acquire);
+            }
+
+        private:
+            std::string name_;
+            std::shared_ptr<std::atomic<bool>> enabled_;
+        };
+
         /// Registers an integer configuration item.
         /// @note The setter is called immediately with default_value and again on load().
         void register_int(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                         std::function<void(int)> setter, int default_value);
+                          std::function<void(int)> setter, int default_value);
 
         /// Registers a floating-point configuration item.
         /// @note The setter is called immediately with default_value and again on load().
         void register_float(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                           std::function<void(float)> setter, float default_value);
+                            std::function<void(float)> setter, float default_value);
 
         /// Registers a boolean configuration item.
         /// @note The setter is called immediately with default_value and again on load().
         void register_bool(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                          std::function<void(bool)> setter, bool default_value);
+                           std::function<void(bool)> setter, bool default_value);
 
         /// Registers a string configuration item.
         /// @note The setter is called immediately with default_value and again on load().
         void register_string(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                            std::function<void(const std::string &)> setter, std::string default_value);
+                             std::function<void(const std::string &)> setter, std::string default_value);
 
         /**
          * @brief Registers a key combo configuration item.
@@ -107,7 +178,46 @@ namespace DetourModKit
          * @note The setter is called immediately with the parsed default and again on load().
          */
         void register_key_combo(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                               std::function<void(const KeyComboList &)> setter, std::string_view default_value_str);
+                                std::function<void(const KeyComboList &)> setter, std::string_view default_value_str);
+
+        /**
+         * @brief Registers a key combo INI item and wires it to InputManager.
+         * @details Fuses register_key_combo() with InputManager::register_press().
+         *          On registration the InputManager binding is created with the
+         *          parsed default combo. On each subsequent load() the setter
+         *          invokes InputManager::update_binding_combos() so the bound
+         *          keys and modifiers pick up the INI-sourced value without
+         *          re-registering the binding. Live updates require the new
+         *          combo list to have the same number of alternatives as the
+         *          default (one binding entry per combo); if the cardinality
+         *          differs, the update is skipped with a Debug-level warning.
+         *
+         *          The returned guard holds a cancellation flag that
+         *          short-circuits the user callback when released, because
+         *          InputManager does not support per-binding removal
+         *          post-start().
+         *
+         *          Must be called before InputManager::start() for the
+         *          binding to be picked up by the poller. Call sites that
+         *          register after start() should also call
+         *          InputManager::shutdown() then start() again, or accept
+         *          that only the INI value is tracked and the callback
+         *          never fires.
+         *
+         * @param section INI section name.
+         * @param ini_key INI key name.
+         * @param log_name Human-readable name echoed by the config logger.
+         * @param input_binding_name InputManager binding name (must be unique).
+         * @param on_press User callback fired on key-down edge.
+         * @param default_value Default combo string (same format as register_key_combo).
+         * @return InputBindingGuard RAII cancellation token for the callback.
+         */
+        [[nodiscard]] InputBindingGuard register_press_combo(std::string_view section,
+                                                             std::string_view ini_key,
+                                                             std::string_view log_name,
+                                                             std::string_view input_binding_name,
+                                                             std::function<void()> on_press,
+                                                             std::string_view default_value);
 
         /**
          * @brief Loads all registered configuration settings from the specified INI file.

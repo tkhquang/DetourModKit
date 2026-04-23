@@ -1513,3 +1513,25 @@ TEST_F(LoggerTest, Log_InfoLevel_WhenFileClosed_SilentlyDropped)
     // stderr should NOT contain LOG_FILE_WRITE_ERROR for info-level
     EXPECT_EQ(stderr_output.find("LOG_FILE_WRITE_ERROR"), std::string::npos);
 }
+
+namespace
+{
+    std::filesystem::path make_logger_overload_path()
+    {
+        static std::atomic<int> counter{0};
+        return std::filesystem::temp_directory_path() /
+               ("test_logger_overload_" + std::to_string(GetCurrentProcessId()) + "_" +
+                std::to_string(counter.fetch_add(1)) + ".log");
+    }
+}
+
+TEST(LoggerConfigureOverload, TwoArgConfigureUsesDefaultTimestamp)
+{
+    const auto path = make_logger_overload_path();
+    Logger::configure("PFX", path.string());
+    Logger::get_instance().info("hello");
+    Logger::get_instance().flush();
+    EXPECT_TRUE(std::filesystem::exists(path));
+    std::filesystem::remove(path);
+}
+
