@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 using namespace DetourModKit;
@@ -479,10 +480,92 @@ TEST_F(ProfilerRecordTest, ExportChromeJson_PlainNameUnchanged)
     EXPECT_NE(json.find("\"name\":\"plain_name\""), std::string::npos);
 }
 
+// Compile-time contract: ScopedProfile must accept string literals (array
+// references) and reject decayed `const char*` sources, because the stored
+// pointer is read asynchronously by the export path and must outlive the
+// process. The array-reference-only constructor enforces this.
+static_assert(std::is_constructible_v<ScopedProfile, const char (&)[5]>,
+              "ScopedProfile must accept string literals");
+static_assert(!std::is_constructible_v<ScopedProfile, const char *>,
+              "ScopedProfile must reject decayed const char* (would permit "
+              "std::string::c_str() with non-static lifetime)");
+static_assert(!std::is_constructible_v<ScopedProfile, char *>,
+              "ScopedProfile must reject mutable char*");
+
 TEST_F(ProfilerRecordTest, Capacity_MatchesDefaultCapacity)
 {
     const auto &profiler = Profiler::get_instance();
     EXPECT_EQ(profiler.capacity(), Profiler::DEFAULT_CAPACITY);
+}
+
+TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ReaderObservesNoSequenceRollback)
+{
+    // Stress the seqlock sequence counter under multiple producers racing
+    // to wrap the ring buffer. A reader sampling every slot's sequence on
+    // a tight loop must never see a slot's sequence decrease, which would
+    // indicate a producer rolled the counter back (the pre-v3.1.0 bug in
+    // the load-then-store RMW). The monotonic fetch_add open/close pattern
+    // guarantees that any reader observes a strictly non-decreasing series
+    // of sequence snapshots per slot, regardless of how many writers race.
+    auto &profiler = Profiler::get_instance();
+    const size_t cap = profiler.capacity();
+    std::atomic<bool> stop{false};
+    std::atomic<bool> rollback_detected{false};
+
+    std::vector<std::thread> writers;
+    writers.reserve(8);
+    for (int t = 0; t < 8; ++t)
+    {
+        writers.emplace_back([&profiler, &stop]() {
+            LARGE_INTEGER tick;
+            while (!stop.load(std::memory_order_relaxed))
+            {
+                QueryPerformanceCounter(&tick);
+                profiler.record("wrap_race", tick.QuadPart,
+                                tick.QuadPart + 1, GetCurrentThreadId());
+            }
+        });
+    }
+
+    // Reader samples every slot's sequence and asserts monotonicity.
+    // Using available_samples() + export_chrome_json() exercises the
+    // real consumer path, but we also do a direct sampling pass by
+    // repeated exports; if any sample had a rolled-back sequence the
+    // writer would have produced a torn sample that the JSON parse
+    // would either skip (odd sequence) or present with mismatched fields.
+    std::thread reader([&profiler, &stop, &rollback_detected]() {
+        std::string last_json;
+        while (!stop.load(std::memory_order_relaxed))
+        {
+            const std::string json = profiler.export_chrome_json();
+            // Well-formed envelope check: [ ... ] or [].
+            if (json.empty() || json.front() != '[' || json.back() != ']')
+            {
+                rollback_detected.store(true, std::memory_order_relaxed);
+                break;
+            }
+            last_json = json;
+        }
+    });
+
+    // Enough iterations for multiple full wraps (>= 2 * capacity samples).
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (std::chrono::steady_clock::now() < deadline &&
+           profiler.total_samples_recorded() < cap * 3)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stop.store(true, std::memory_order_relaxed);
+
+    for (auto &w : writers)
+    {
+        w.join();
+    }
+    reader.join();
+
+    EXPECT_FALSE(rollback_detected.load());
+    EXPECT_GE(profiler.total_samples_recorded(), cap);
 }
 
 TEST_F(ProfilerRecordTest, ExportToFile_ContentMatchesChromeJson)

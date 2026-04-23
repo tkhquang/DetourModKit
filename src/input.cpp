@@ -491,7 +491,7 @@ namespace DetourModKit
         const auto &indices = it->second;
         if (indices.size() != combos.size())
         {
-            Logger::get_instance().debug(
+            Logger::get_instance().warning(
                 "InputPoller: update_combos(\"{}\") ignored: cardinality mismatch (registered={}, requested={})",
                 name, indices.size(), combos.size());
             return false;
@@ -746,7 +746,7 @@ namespace DetourModKit
                 }
                 if (indices.size() != combos.size())
                 {
-                    Logger::get_instance().debug(
+                    Logger::get_instance().warning(
                         "InputManager: update_binding_combos(\"{}\") ignored: cardinality mismatch (registered={}, requested={})",
                         name, indices.size(), combos.size());
                     return;

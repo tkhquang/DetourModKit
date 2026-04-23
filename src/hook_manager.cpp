@@ -1,6 +1,7 @@
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/memory.hpp"
+#include "platform.hpp"
 #include "x86_decode.hpp"
 
 #include <windows.h>
@@ -9,7 +10,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <memory>
 #include <optional>
+#include <vector>
 
 using namespace DetourModKit;
 using namespace DetourModKit::Scanner;
@@ -121,34 +124,55 @@ HookManager::HookManager(Logger &logger)
 
 HookManager::~HookManager() noexcept
 {
-    if (!m_shutdown_called.load(std::memory_order_acquire))
+    if (m_shutdown_called.load(std::memory_order_acquire))
     {
-        // Fallback cleanup: if the caller failed to call DMK_Shutdown()
-        // (or HookManager::shutdown()), the destructor still disables and
-        // removes all hooks to prevent dangling detours.
-        //
-        // m_mutator_gate is intentionally NOT acquired here. This destructor
-        // only runs during static destruction (Meyers singleton), when no
-        // other thread should be calling create_*_hook. Acquiring the gate
-        // would risk deadlock if another singleton's destructor indirectly
-        // triggers a hook operation. The documented contract requires calling
-        // DMK_Shutdown() before DLL unload, which does the gated teardown.
-        //
-        // Two-phase teardown (same pattern as shutdown()):
-        // 1. Disable hooks under shared lock so hooked threads blocked on
-        //    m_hooks_mutex can drain from SafetyHook::disable().
-        // 2. Clear maps under exclusive lock.
-        {
-            std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
-            for (auto &[name, hook] : m_hooks)
-            {
-                (void)hook->disable();
-            }
-        }
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-        m_vmt_hooks.clear();
-        m_hooks.clear();
+        return;
     }
+
+    // Fallback teardown path. Reached only when the process did not call
+    // DMK_Shutdown() / HookManager::shutdown() before static destruction
+    // (abnormal exit, FreeLibrary race, host crash).
+    //
+    // Ordering (matches the shutdown() contract so readers see one story):
+    //   1. Flip m_shutdown_called under m_mutator_gate (exclusive) to
+    //      block new mutators and serialize with a late shutdown() call.
+    //   2. Disable all hooks under shared m_hooks_mutex so that in-flight
+    //      trampoline callers can drain from SafetyHook::disable().
+    //   3. Acquire exclusive m_hooks_mutex to wait out any shared_lock
+    //      holder still inside a with_* callback. Only then clear the
+    //      maps -- destroying the Hook objects would UAF a live reader.
+    //
+    // Loader-lock fallback: if the destructor is fired with the OS loader
+    // lock held (e.g. during abnormal DLL unload), acquiring m_mutator_gate
+    // or blocking readers can deadlock against another thread waiting on a
+    // loader callback. Leak the maps in that case; the pinned module keeps
+    // the hooks' code pages live so SafetyHook trampolines do not dangle.
+    // Mirrors the pattern used in Logger::shutdown_internal().
+    if (detail::is_loader_lock_held())
+    {
+        detail::pin_current_module();
+        static std::vector<std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>> s_leaked_hooks;
+        static std::vector<std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>> s_leaked_vmt_hooks;
+        s_leaked_hooks.emplace_back(std::move(m_hooks));
+        s_leaked_vmt_hooks.emplace_back(std::move(m_vmt_hooks));
+        m_shutdown_called.store(true, std::memory_order_release);
+        return;
+    }
+
+    std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+    m_shutdown_called.store(true, std::memory_order_release);
+
+    {
+        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        for (auto &[name, hook] : m_hooks)
+        {
+            (void)hook->disable();
+        }
+    }
+
+    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    m_vmt_hooks.clear();
+    m_hooks.clear();
 }
 
 void HookManager::shutdown()

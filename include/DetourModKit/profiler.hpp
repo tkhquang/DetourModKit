@@ -44,11 +44,17 @@
 #define DMK_CONCAT_IMPL(a, b) a##b
 #define DMK_CONCAT(a, b) DMK_CONCAT_IMPL(a, b)
 
-// Scoped timing measurement. Name must be a string literal.
+// Scoped timing measurement. The `name` argument must be a string literal
+// (a reference to an array of `const char`). The ScopedProfile constructor
+// that accepts `const char (&)[N]` enforces this at compile time, rejecting
+// `std::string::c_str()`, function-local `char[]`, or any pointer decay that
+// would leave the profiler holding a dangling pointer across export.
 #define DMK_PROFILE_SCOPE(name) \
     ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__) { name }
 
-// Scoped timing using the enclosing function name.
+// Scoped timing using the enclosing function name. `__func__` is an implicit
+// static-storage array per the standard, so the same literal-only constructor
+// accepts it without overload resolution gymnastics.
 #define DMK_PROFILE_FUNCTION() \
     ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__) { __func__ }
 
@@ -195,9 +201,24 @@ namespace DetourModKit
     public:
         /**
          * @brief Begins a profiling scope.
-         * @param name Non-owning pointer to a string literal. Must outlive this object.
+         * @tparam N Deduced length of the string literal (including the
+         *         trailing null terminator).
+         * @param name Reference to a string literal. The array-reference
+         *        parameter forces callers to pass literals (or other arrays
+         *        with static storage); `const char*` sources such as
+         *        `std::string::c_str()` or function-local buffers fail to
+         *        bind and produce a compile error. The underlying pointer
+         *        stored in the profiler ring buffer therefore always points
+         *        at read-only program memory that outlives the process.
+         * @note The hot-path cost is unchanged: two pointer-sized stores
+         *       (name pointer and thread id) plus the QPC read, same as
+         *       the previous `const char*` signature.
          */
-        explicit ScopedProfile(const char *name) noexcept;
+        template <size_t N>
+        explicit ScopedProfile(const char (&name)[N]) noexcept
+            : ScopedProfile(static_cast<const char *>(name), literal_tag{})
+        {
+        }
         ~ScopedProfile() noexcept;
 
         ScopedProfile(const ScopedProfile &) = delete;
@@ -206,6 +227,12 @@ namespace DetourModKit
         ScopedProfile &operator=(ScopedProfile &&) = delete;
 
     private:
+        struct literal_tag
+        {
+        };
+
+        ScopedProfile(const char *name, literal_tag) noexcept;
+
         const char *name_;
         int64_t start_ticks_;
         uint32_t thread_id_;

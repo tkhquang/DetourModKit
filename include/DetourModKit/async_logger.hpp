@@ -45,6 +45,13 @@ namespace DetourModKit
      * @details Uses a free-list approach for O(1) allocation/deallocation.
      *          Blocks are allocated on-demand up to MEMORY_POOL_BLOCK_COUNT.
      *          Each block is cache-line aligned to prevent false sharing.
+     *
+     * @note The singleton returned by instance() is intentionally leaked to
+     *       avoid the static destruction order fiasco with late LogMessage
+     *       teardown. Neither Bootstrap::request_shutdown() nor DMK_Shutdown()
+     *       reclaim it; the OS releases the memory at process exit. The leak
+     *       is bounded to MEMORY_POOL_BLOCK_COUNT blocks of
+     *       MEMORY_POOL_BLOCK_SIZE bytes.
      */
     class StringPool
     {

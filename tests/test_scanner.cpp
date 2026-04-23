@@ -2002,3 +2002,68 @@ TEST(ScannerCascade, PrologueFallbackRejectsInsufficientTailLiterals)
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), Scanner::ResolveError::PrologueFallbackNotApplicable);
 }
+
+// The prologue fallback rebuilds a pattern as `E9 ?? ?? ?? ??` followed
+// by the original pattern's tail bytes. If the tail is ambiguous across
+// the process's executable regions (more than kPrologueFallbackMaxHits
+// matches), the guard in scan_candidates_hooked_prologue must reject it
+// rather than return an arbitrary first hit. This test seeds five
+// identical trampoline-shaped sequences into a PAGE_EXECUTE_READ buffer
+// so the rebuilt pattern matches >= 5 times, exceeding the uniqueness
+// ceiling (4) and triggering the guard.
+TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
+{
+    constexpr std::size_t kBufSize = 0x2000;
+    auto *raw = static_cast<std::uint8_t *>(
+        VirtualAlloc(nullptr, kBufSize, MEM_COMMIT | MEM_RESERVE,
+                     PAGE_READWRITE));
+    ASSERT_NE(raw, nullptr);
+
+    std::memset(raw, 0xCC, kBufSize);
+
+    // Tail chosen to be literal-heavy so split_prologue accepts it
+    // (>= kPrologueFallbackMinTailLiterals non-wildcard tokens), and
+    // generic enough to be synthesised at multiple offsets. Bytes must
+    // NOT collide with any other test's pattern, because residue in
+    // freed-but-still-mapped memory could influence subsequent tests
+    // that run in the same process. `A5 B6 C7 D8 E9 FA 0B 1C` is a
+    // fresh 8-byte sequence not used elsewhere in this TU.
+    constexpr std::uint8_t kAmbiguousTemplate[] = {
+        0xE9, 0x00, 0x00, 0x00, 0x00,                   // JMP rel32
+        0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, // unique tail
+    };
+
+    // Seed five copies so the rebuilt fallback pattern tallies >= 5 hits
+    // in this buffer alone. scan_executable_regions walks every readable
+    // executable page in the process, so we only need > kPrologueFallbackMaxHits
+    // inside regions it can see.
+    for (std::size_t i = 0; i < 5; ++i)
+    {
+        std::memcpy(raw + i * 0x100, kAmbiguousTemplate, sizeof(kAmbiguousTemplate));
+    }
+
+    DWORD old_prot = 0;
+    ASSERT_TRUE(VirtualProtect(raw, kBufSize, PAGE_EXECUTE_READ, &old_prot));
+
+    Scanner::AddrCandidate cands[] = {
+        // Original prologue is five arbitrary REX-prefixed bytes followed
+        // by the ambiguous literal tail. resolve_cascade's direct pass
+        // will not match (the buffer starts with E9 not 48 89 ...), so
+        // the prologue-fallback path is taken.
+        {"ambiguous",
+         "48 89 5C 24 08 A5 B6 C7 D8 E9 FA 0B 1C",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    auto result = Scanner::resolve_cascade_with_prologue_fallback(
+        cands, "ambiguous-tail");
+
+    // The guard rejects ambiguity -> NoMatch (fallback applicable but
+    // all candidates exceeded the uniqueness ceiling).
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
+
+    // Restore and free.
+    VirtualProtect(raw, kBufSize, old_prot, &old_prot);
+    VirtualFree(raw, 0, MEM_RELEASE);
+}

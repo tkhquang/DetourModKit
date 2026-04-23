@@ -190,7 +190,10 @@ namespace DetourModKit
          *          re-registering the binding. Live updates require the new
          *          combo list to have the same number of alternatives as the
          *          default (one binding entry per combo); if the cardinality
-         *          differs, the update is skipped with a Debug-level warning.
+         *          differs the update is rejected and a Warning-level log
+         *          message is emitted. Callers that need to change cardinality
+         *          at runtime must fully stop and restart InputManager so the
+         *          underlying bindings can be re-registered.
          *
          *          The returned guard holds a cancellation flag that
          *          short-circuits the user callback when released, because

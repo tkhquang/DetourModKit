@@ -108,8 +108,14 @@ namespace DetourModKit
 
         auto &sample = buffer_[idx];
 
-        // Odd sequence signals an in-progress write. Readers that observe
-        // an odd value skip this sample to avoid reading torn fields.
+        // Open the write window with a monotonic increment. The result is
+        // guaranteed odd because every closed sequence is even (sequence
+        // starts at 0 in the constructor and reset(), and each record()
+        // contributes exactly +2). Using fetch_add avoids the load-then-
+        // store RMW pattern: a producer preempted between a relaxed load
+        // and its first store could otherwise roll the slot's sequence
+        // backwards if another producer completed a full write on the
+        // same slot in the interim. fetch_add forbids that rollback.
         //
         // Design note: if a writer is stalled between its fetch_add and
         // its final sequence store, and 65536 intervening record() calls
@@ -120,16 +126,18 @@ namespace DetourModKit
         // at game-modding thread counts and frame rates. We accept this
         // theoretical imprecision to keep the hot path to a single
         // fetch_add + two stores with no CAS retry loop.
-        const uint32_t seq = sample.sequence.load(std::memory_order_relaxed);
-        sample.sequence.store(seq | 1, std::memory_order_release);
+        (void)sample.sequence.fetch_add(1, std::memory_order_acq_rel);
 
         sample.name = name;
         sample.start_ticks = start_ticks;
         sample.duration_us = duration_us;
         sample.thread_id = thread_id;
 
-        // Even sequence signals the write is complete and fields are consistent.
-        sample.sequence.store((seq | 1) + 1, std::memory_order_release);
+        // Close the write window. Another +1 keeps the slot's sequence
+        // monotonic and lands it on an even value, signalling a fully
+        // committed sample. Readers that observe an odd value skip this
+        // slot to avoid reading torn fields.
+        (void)sample.sequence.fetch_add(1, std::memory_order_release);
     }
 
     // Caller must ensure no concurrent record() calls are in flight.
@@ -267,7 +275,7 @@ namespace DetourModKit
 
     // --- ScopedProfile ---
 
-    ScopedProfile::ScopedProfile(const char *name) noexcept
+    ScopedProfile::ScopedProfile(const char *name, literal_tag) noexcept
         : name_(name), thread_id_(GetCurrentThreadId())
     {
         LARGE_INTEGER ticks;
