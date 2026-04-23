@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <format>
 #include <memory>
+#include <new>
 #include <optional>
 #include <vector>
 
@@ -151,10 +152,40 @@ HookManager::~HookManager() noexcept
     if (detail::is_loader_lock_held())
     {
         detail::pin_current_module();
-        static std::vector<std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>> s_leaked_hooks;
-        static std::vector<std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>> s_leaked_vmt_hooks;
-        s_leaked_hooks.emplace_back(std::move(m_hooks));
-        s_leaked_vmt_hooks.emplace_back(std::move(m_vmt_hooks));
+        // Intentional leak under loader lock: draining readers or destroying
+        // Hook / VmtHookEntry values here can deadlock against another thread
+        // waiting on a loader callback. The pinned module keeps the SafetyHook
+        // trampoline pages live for the remainder of the process, so the leaked
+        // maps and their contents stay valid storage even though no one will
+        // ever observe them again. HookManager is a singleton so this branch
+        // runs at most once per process.
+        //
+        // Heap-allocate each map directly rather than nesting them inside an
+        // outer container. A container of containers would force the standard
+        // library to instantiate a copy-construction fallback for the element
+        // type whenever the element's move constructor is not unconditionally
+        // noexcept, and that copy path would try to copy a move-only member
+        // (VmtHookEntry owns a safetyhook::VmtHook). std::nothrow preserves
+        // the destructor's noexcept contract; on allocation failure the new
+        // expression returns nullptr without running the move constructor,
+        // the source maps keep their contents, and control falls through to
+        // the normal ~HookManager member destruction epilogue. That epilogue
+        // is best-effort under loader lock, but the pinned module still keeps
+        // trampoline code pages live so straggler trampoline calls land on
+        // valid memory.
+        using HookMap = std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>;
+        using VmtHookMap = std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>;
+        // If either map's move constructor could throw, the nothrow new
+        // expression above would leak its allocation and (since this
+        // destructor is noexcept) the throw would escalate to std::terminate.
+        // Pin the contract at compile time so any future change to the hash,
+        // key_equal, or mapped_type that breaks nothrow-move is caught here.
+        static_assert(std::is_nothrow_move_constructible_v<HookMap>,
+                      "HookMap move ctor must be noexcept to keep the loader-lock leak path safe.");
+        static_assert(std::is_nothrow_move_constructible_v<VmtHookMap>,
+                      "VmtHookMap move ctor must be noexcept to keep the loader-lock leak path safe.");
+        [[maybe_unused]] auto *leaked_hooks = new (std::nothrow) HookMap(std::move(m_hooks));
+        [[maybe_unused]] auto *leaked_vmt_hooks = new (std::nothrow) VmtHookMap(std::move(m_vmt_hooks));
         m_shutdown_called.store(true, std::memory_order_release);
         return;
     }

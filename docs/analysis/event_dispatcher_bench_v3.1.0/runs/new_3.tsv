@@ -1,0 +1,13 @@
+scenario	subscribers	iterations	median_ns_per_op	total_ms
+emit	0	10000000	6.08	675
+emit	1	5000000	94.44	5200
+emit	8	1000000	215.45	2394
+emit	64	200000	1092.06	2412
+emit_safe	0	10000000	5.79	641
+emit_safe	1	5000000	96.42	5376
+emit_safe	8	1000000	216.73	2395
+emit_safe	64	200000	1099.84	2487
+subscribe_unsub_roundtrip	0	100000	1150.42	1277
+emit_concurrent_4_threads	8	4000000	257.35	1029
+reentrancy_rejection	1	500000	192.65	1081
+# sink=23936874150

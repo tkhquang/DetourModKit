@@ -1,9 +1,16 @@
 #include <gtest/gtest.h>
 
+// Enables the test-only debug_snapshot_use_count() diagnostic on the
+// dispatcher. Defined here (before the header include) so it affects only
+// this translation unit.
+#define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1
+
 #include "DetourModKit/event_dispatcher.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -495,5 +502,129 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
     }
 
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+}
+
+// --- Lock-free empty fast path ---
+
+TEST(EventDispatcherTest, EmptyFastPath_SkipsLock)
+{
+    // A freshly-constructed dispatcher holds exactly one snapshot reference
+    // internally. With no subscribers, emit() must be observably a no-op
+    // and subscriber_count()/empty() must report zero without mutating state.
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    EXPECT_TRUE(dispatcher.empty());
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+
+    // Record the dispatcher's own reference to its handler snapshot before
+    // any emit. If the fast path really skips the snapshot load, emit()
+    // should not leave any residual references alive afterwards.
+    const long use_count_before = dispatcher.debug_snapshot_use_count();
+    EXPECT_EQ(use_count_before, 1);
+
+    for (int i = 0; i < 1000; ++i)
+    {
+        dispatcher.emit(SimpleEvent{i});
+        dispatcher.emit_safe(SimpleEvent{i});
+    }
+
+    EXPECT_TRUE(dispatcher.empty());
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+    EXPECT_EQ(dispatcher.debug_snapshot_use_count(), use_count_before);
+}
+
+// --- Snapshot stability: in-flight emit sees pre-subscribe snapshot ---
+
+TEST(EventDispatcherTest, SnapshotStability_DuringEmit)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    std::mutex gate_mtx;
+    std::condition_variable handler_started;
+    std::condition_variable handler_may_finish;
+    bool started{false};
+    bool may_finish{false};
+
+    std::atomic<int> old_calls{0};
+    std::atomic<int> new_calls{0};
+
+    // Pre-subscribed handler signals when the emit has begun, then blocks
+    // until the main thread allows it to continue.
+    auto old_sub = dispatcher.subscribe([&](const SimpleEvent &) {
+        {
+            std::lock_guard lk{gate_mtx};
+            started = true;
+        }
+        handler_started.notify_one();
+
+        std::unique_lock lk{gate_mtx};
+        handler_may_finish.wait(lk, [&] { return may_finish; });
+        old_calls.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    // Launch an emitter thread; it will block inside the pre-subscribed
+    // handler holding a shared_ptr snapshot of the current handler list.
+    std::thread emitter([&] {
+        dispatcher.emit(SimpleEvent{0});
+    });
+
+    {
+        std::unique_lock lk{gate_mtx};
+        handler_started.wait(lk, [&] { return started; });
+    }
+
+    // Subscribe a new handler while the emit is still in flight.
+    auto new_sub = dispatcher.subscribe([&](const SimpleEvent &) {
+        new_calls.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    // The freshly-subscribed handler must not be visible to the in-flight
+    // emit, which captured its snapshot before new_sub was published.
+    EXPECT_EQ(new_calls.load(), 0);
+
+    // Release the blocked handler and let the emit complete.
+    {
+        std::lock_guard lk{gate_mtx};
+        may_finish = true;
+    }
+    handler_may_finish.notify_one();
+    emitter.join();
+
+    EXPECT_EQ(old_calls.load(), 1);
+    EXPECT_EQ(new_calls.load(), 0);
+
+    // The next emit publishes a snapshot that includes both handlers.
+    dispatcher.emit(SimpleEvent{1});
+    EXPECT_EQ(old_calls.load(), 2);
+    EXPECT_EQ(new_calls.load(), 1);
+}
+
+// --- Snapshot reclamation: no leaked shared_ptr references after churn ---
+
+TEST(EventDispatcherTest, SnapshotReclamation_NoLeak)
+{
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    // Heavy subscribe + unsubscribe churn with interleaved emits. Each
+    // subscribe allocates a new snapshot; each unsubscribe does the same.
+    // Once every subscription's RAII guard is destroyed and no emit is in
+    // flight, only the dispatcher's own reference to the latest (empty)
+    // snapshot should remain.
+    constexpr int iterations = 10000;
+    for (int i = 0; i < iterations; ++i)
+    {
+        auto sub = dispatcher.subscribe([](const SimpleEvent &) {});
+        if ((i & 0xFF) == 0)
+        {
+            dispatcher.emit(SimpleEvent{i});
+        }
+        // sub destroyed here -- handler removed, new snapshot published
+    }
+
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+    EXPECT_TRUE(dispatcher.empty());
+    EXPECT_EQ(dispatcher.debug_snapshot_use_count(), 1)
+        << "Dispatcher should hold exactly one reference to its snapshot "
+           "after all subscriptions are released";
 }
 

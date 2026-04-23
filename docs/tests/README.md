@@ -268,17 +268,50 @@ This is expected when casting `FARPROC` from `GetProcAddress` to a typed functio
 | 90% | Hard | Integration tests, edge cases in threading |
 | 95%+ | Very Hard | Requires mocking Windows API or refactoring |
 
+## Event Dispatcher Tests
+
+`tests/test_event_dispatcher.cpp` exercises the lock-free copy-on-write dispatcher. Beyond the basic subscribe/emit/RAII coverage, three tests target the optimized hot path specifically:
+
+| Test | What it proves |
+| ---- | -------------- |
+| `EmptyFastPath_SkipsLock` | With zero subscribers, `emit()` / `emit_safe()` return via the atomic handler-count check without touching the snapshot `shared_ptr`. Asserted by `debug_snapshot_use_count()` remaining at 1 (dispatcher-only) after 1000 emits. |
+| `SnapshotStability_DuringEmit` | An in-flight emit holds its own snapshot reference. A concurrent `subscribe()` publishes a new snapshot via CAS; the emitter's iteration continues over the old snapshot and the newly subscribed handler is not invoked. Next emit sees both. Exercises the COW publish invariant. |
+| `SnapshotReclamation_NoLeak` | After 10,000 subscribe/unsubscribe churn iterations with interleaved emits, `debug_snapshot_use_count()` returns to 1, proving no leaked `shared_ptr` references to stale snapshots. |
+
+These tests enable the test-only `debug_snapshot_use_count()` accessor via `#define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1` at the top of the translation unit. The macro is not part of the public API and must not be defined in consumer code.
+
+## Benchmark Harness
+
+`tests/bench_event_dispatcher.cpp` is a standalone microbenchmark executable. It is deliberately not a gtest binary so it can run under any build configuration (release, release+PGO, ASAN, etc.) without dragging in the gtest runtime.
+
+Build it by adding `-DDMK_BUILD_BENCHMARKS=ON` to the configure step:
+
+```bash
+PATH="/c/msys64/mingw64/bin:$PATH"
+cmake --preset mingw-release -DDMK_BUILD_BENCHMARKS=ON
+cmake --build build/mingw-release --parallel
+./build/mingw-release/tests/DetourModKit_bench.exe > bench.tsv
+```
+
+The option is independent of `DMK_BUILD_TESTS`, so you can build the bench alone. Output is a tab-separated table on stdout with columns `scenario, subscribers, iterations, median_ns_per_op, total_ms`. Covered scenarios:
+
+- `emit` / `emit_safe` at 0, 1, 8, 64 subscribers (the 0-subscriber rows measure the fast path).
+- `subscribe_unsub_roundtrip` (single-thread RAII churn).
+- `emit_concurrent_4_threads` (contention stress on the lock-free read path).
+- `reentrancy_rejection` (cost of the guard's reject-during-handler path).
+
 ## Project Structure
 
 ```text
 tests/
-├── CMakeLists.txt              # Test discovery, fixture DLL build
+├── CMakeLists.txt              # Test discovery, fixture DLL build, bench wiring
 ├── main.cpp                    # GoogleTest entry point
+├── bench_event_dispatcher.cpp  # Standalone microbench (DMK_BUILD_BENCHMARKS)
 ├── fixtures/
 │   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
 ├── test_async_logger.cpp       # Async logger tests
 ├── test_config.cpp             # Configuration tests
-├── test_event_dispatcher.cpp   # Event dispatcher tests
+├── test_event_dispatcher.cpp   # Event dispatcher tests (incl. fast-path and snapshot stability)
 ├── test_filesystem.cpp         # Filesystem tests
 ├── test_format.cpp             # Format utilities tests
 ├── test_hook_integration.cpp   # Cross-module hook integration tests

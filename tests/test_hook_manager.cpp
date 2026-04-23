@@ -6,12 +6,38 @@
 #include <thread>
 #include <chrono>
 #include <latch>
+#include <type_traits>
 #include <windows.h>
 
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/logger.hpp"
 
 using namespace DetourModKit;
+
+// VmtHookEntry owns a safetyhook::VmtHook and must be move-only.
+// The HookManager destructor's loader-lock fallback path relies on these
+// guarantees when storing VmtHookEntry values inside an unordered_map: any
+// container operation that selects a copy fallback for VmtHookEntry would
+// fail to compile, so guard the contract here.
+static_assert(!std::is_copy_constructible_v<VmtHookEntry>,
+              "VmtHookEntry must remain non-copyable to preserve VmtHook ownership semantics.");
+static_assert(!std::is_copy_assignable_v<VmtHookEntry>,
+              "VmtHookEntry must remain non-copy-assignable to preserve VmtHook ownership semantics.");
+static_assert(std::is_move_constructible_v<VmtHookEntry>,
+              "VmtHookEntry must be move-constructible so it can live in standard containers.");
+static_assert(std::is_move_assignable_v<VmtHookEntry>,
+              "VmtHookEntry must be move-assignable so it can live in standard containers.");
+
+// The loader-lock fallback in HookManager::~HookManager heap-allocates the
+// move-constructed hook maps directly. Guard that the exact map types stay
+// move-constructible so that path keeps compiling if the hasher, comparator,
+// or value types are ever retuned.
+using VmtHookMapForAsserts = std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>;
+using HookMapForAsserts = std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>;
+static_assert(std::is_move_constructible_v<VmtHookMapForAsserts>,
+              "unordered_map<string, VmtHookEntry, ...> must be move-constructible for the loader-lock leak path.");
+static_assert(std::is_move_constructible_v<HookMapForAsserts>,
+              "unordered_map<string, unique_ptr<Hook>, ...> must be move-constructible for the loader-lock leak path.");
 
 class HookManagerTest : public ::testing::Test
 {
@@ -2427,17 +2453,28 @@ TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
     // Spawn the shutdown racer. shutdown() must block on m_mutator_gate
     // until the reader releases the shared_lock, which proves the
     // destructor-equivalent ordering.
+    std::atomic<bool> killer_started{false};
     std::atomic<bool> shutdown_returned{false};
     std::thread killer([&]() {
+        // Publish entry into hm.shutdown() before the call so the main
+        // thread can wait on this flag instead of an unconditional sleep.
+        // Without this, shutdown_returned == false could mean "blocked on
+        // the mutator gate as intended" or "killer not scheduled yet",
+        // letting a premature-return regression slip through.
+        killer_started.store(true, std::memory_order_release);
         hm.shutdown();
         shutdown_returned.store(true, std::memory_order_release);
     });
 
-    // Give the killer a chance to start; it must not return while the
-    // reader holds shared_lock (shutdown path acquires exclusive on
-    // m_hooks_mutex after the shared disable pass). Assert that
-    // ordering directly so a premature-return regression fails the
-    // test even if reader_observed_valid still happens to hold.
+    // Wait until the killer has actually entered hm.shutdown() before we
+    // assert it is blocked. After that, a short sleep lets the
+    // m_mutator_gate acquisition attempt settle so we can observe the
+    // blocked state. The final assertion proves shutdown is held off
+    // while the reader still holds the shared_lock.
+    while (!killer_started.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     EXPECT_FALSE(shutdown_returned.load(std::memory_order_acquire));
     reader_may_return.store(true, std::memory_order_release);

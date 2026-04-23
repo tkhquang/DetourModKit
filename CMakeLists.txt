@@ -467,8 +467,19 @@ endif()
 # --- Unit Tests ---
 option(DMK_BUILD_TESTS "Build unit tests" OFF)
 
-if(DMK_BUILD_TESTS)
-  message(STATUS "Building unit tests...")
-  enable_testing()
+# --- Benchmarks ---
+# Opt-in microbenchmark executables (e.g. DetourModKit_bench). Gated so that
+# normal consumer builds do not produce extra targets. The bench sources live
+# alongside tests/ and are wired up in tests/CMakeLists.txt.
+option(DMK_BUILD_BENCHMARKS "Build benchmark executables" OFF)
+
+if(DMK_BUILD_TESTS OR DMK_BUILD_BENCHMARKS)
+  if(DMK_BUILD_TESTS)
+    message(STATUS "Building unit tests...")
+    enable_testing()
+  endif()
+  if(DMK_BUILD_BENCHMARKS)
+    message(STATUS "Building benchmarks...")
+  endif()
   add_subdirectory(tests)
 endif()
