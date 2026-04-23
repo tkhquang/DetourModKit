@@ -28,16 +28,19 @@ static_assert(std::is_move_constructible_v<VmtHookEntry>,
 static_assert(std::is_move_assignable_v<VmtHookEntry>,
               "VmtHookEntry must be move-assignable so it can live in standard containers.");
 
-// The loader-lock fallback in HookManager::~HookManager heap-allocates the
-// move-constructed hook maps directly. Guard that the exact map types stay
-// move-constructible so that path keeps compiling if the hasher, comparator,
-// or value types are ever retuned.
+// The loader-lock fallback in HookManager::~HookManager heap-allocates an
+// empty map and then swaps the live map's contents into the leaked storage.
+// Guard that swap stays nothrow for these exact map types so the call cannot
+// turn a noexcept destructor into std::terminate if the hasher, comparator,
+// allocator, or value types are ever retuned. Member swap on unordered_map
+// is specified noexcept when the allocator is always-equal (std::allocator
+// is) and the hasher and key_equal are nothrow-swappable.
 using VmtHookMapForAsserts = std::unordered_map<std::string, VmtHookEntry, detail::TransparentStringHash, std::equal_to<>>;
 using HookMapForAsserts = std::unordered_map<std::string, std::unique_ptr<Hook>, detail::TransparentStringHash, std::equal_to<>>;
-static_assert(std::is_move_constructible_v<VmtHookMapForAsserts>,
-              "unordered_map<string, VmtHookEntry, ...> must be move-constructible for the loader-lock leak path.");
-static_assert(std::is_move_constructible_v<HookMapForAsserts>,
-              "unordered_map<string, unique_ptr<Hook>, ...> must be move-constructible for the loader-lock leak path.");
+static_assert(std::is_nothrow_swappable_v<VmtHookMapForAsserts>,
+              "unordered_map<string, VmtHookEntry, ...> must be nothrow-swappable for the loader-lock leak path.");
+static_assert(std::is_nothrow_swappable_v<HookMapForAsserts>,
+              "unordered_map<string, unique_ptr<Hook>, ...> must be nothrow-swappable for the loader-lock leak path.");
 
 class HookManagerTest : public ::testing::Test
 {
