@@ -126,6 +126,15 @@ namespace DetourModKit
         // at game-modding thread counts and frame rates. We accept this
         // theoretical imprecision to keep the hot path to a single
         // fetch_add + two stores with no CAS retry loop.
+        //
+        // Monotonicity is unconditionally guaranteed by fetch_add: per
+        // [atomics.types.operations] the counter cannot roll backwards
+        // regardless of how many producers race on the same slot. Do NOT
+        // replace this with a load-then-store RMW: that would re-introduce
+        // the stale-publish race on wrap collision that this protocol
+        // exists to prevent.
+        static_assert(std::atomic<uint32_t>::is_always_lock_free,
+                      "sequence counter must be lock-free for the seqlock protocol");
         (void)sample.sequence.fetch_add(1, std::memory_order_acq_rel);
 
         sample.name = name;

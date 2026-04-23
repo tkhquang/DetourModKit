@@ -44,17 +44,23 @@
 #define DMK_CONCAT_IMPL(a, b) a##b
 #define DMK_CONCAT(a, b) DMK_CONCAT_IMPL(a, b)
 
-// Scoped timing measurement. The `name` argument must be a string literal
-// (a reference to an array of `const char`). The ScopedProfile constructor
-// that accepts `const char (&)[N]` enforces this at compile time, rejecting
-// `std::string::c_str()`, function-local `char[]`, or any pointer decay that
-// would leave the profiler holding a dangling pointer across export.
+// Scoped timing measurement. The `name` argument must refer to storage that
+// outlives the process, because the pointer is stored unchanged in the ring
+// buffer and read asynchronously by export methods. String literals satisfy
+// this automatically.
+//
+// The ScopedProfile(const char (&)[N]) constructor rejects decayed `const
+// char *` / `char *` sources (see static_asserts in test_profiler.cpp), but
+// array-reference binding accepts any array, including function-local
+// `char buf[N]`. Callers remain responsible for static-storage lifetime.
+// Prefer string literals or namespace-scope `static constexpr char` arrays.
 #define DMK_PROFILE_SCOPE(name) \
     ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__) { name }
 
-// Scoped timing using the enclosing function name. `__func__` is an implicit
-// static-storage array per the standard, so the same literal-only constructor
-// accepts it without overload resolution gymnastics.
+// Scoped timing using the enclosing function name. `__func__` is a static-
+// storage array per [dcl.fct.def.general]/8, so it binds to the array-
+// reference constructor and the stored pointer remains valid for the
+// lifetime of the process.
 #define DMK_PROFILE_FUNCTION() \
     ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__) { __func__ }
 
@@ -77,10 +83,18 @@ namespace DetourModKit
     struct ProfileSample
     {
         std::atomic<uint32_t> sequence{0}; ///< Odd = write in progress, even = committed.
-        const char *name{nullptr};         ///< Non-owning pointer; must have static storage duration.
-        int64_t start_ticks{0};            ///< QPC tick count at scope entry.
-        uint32_t duration_us{0};           ///< Duration in microseconds (max ~71 minutes).
-        uint32_t thread_id{0};             ///< Win32 thread ID of the recording thread.
+        /**
+         * @brief Non-owning pointer to the sample name.
+         * @note Caller must ensure the pointed-to string outlives the
+         *       process (e.g. a string literal or a namespace-scope
+         *       `static constexpr char` array). The ScopedProfile
+         *       array-reference constructor only rejects pointer decay;
+         *       it does NOT verify static-storage.
+         */
+        const char *name{nullptr};
+        int64_t start_ticks{0};  ///< QPC tick count at scope entry.
+        uint32_t duration_us{0}; ///< Duration in microseconds (max ~71 minutes).
+        uint32_t thread_id{0};   ///< Win32 thread ID of the recording thread.
 
         ProfileSample() noexcept = default;
         ProfileSample(const ProfileSample &) = delete;
@@ -123,14 +137,17 @@ namespace DetourModKit
 
         /**
          * @brief Records a completed timing sample.
-         * @param name Non-owning pointer that must have static storage duration
-         *        (e.g. a string literal). The pointer is stored as-is in the
-         *        ring buffer and read asynchronously by export methods. Passing
-         *        a pointer to a temporary (e.g. std::string::c_str()) causes
-         *        undefined behavior. The DMK_PROFILE_SCOPE() macro forwards its
-         *        argument directly to ScopedProfile and does not enforce static
-         *        storage at compile time; callers should pass string literals
-         *        or ensure the pointed-to string outlives the profiler.
+         * @param name Non-owning pointer that must outlive the process. The
+         *        pointer is stored as-is in the ring buffer and read
+         *        asynchronously by export methods. Passing a pointer whose
+         *        storage is released before process exit (std::string::c_str(),
+         *        heap buffers, function-local arrays) is undefined behavior.
+         *        Neither this entry point nor the ScopedProfile(const char
+         *        (&)[N]) constructor enforces static-storage at compile time;
+         *        array-reference binding accepts any array, so callers remain
+         *        responsible for lifetime. Safe sources: string literals,
+         *        `static constexpr char` arrays at namespace scope, and
+         *        `__func__` (see [dcl.fct.def.general]/8).
          * @param start_ticks QPC tick count at scope entry.
          * @param end_ticks QPC tick count at scope exit.
          * @param thread_id Win32 thread ID of the recording thread.
@@ -201,15 +218,20 @@ namespace DetourModKit
     public:
         /**
          * @brief Begins a profiling scope.
-         * @tparam N Deduced length of the string literal (including the
-         *         trailing null terminator).
-         * @param name Reference to a string literal. The array-reference
-         *        parameter forces callers to pass literals (or other arrays
-         *        with static storage); `const char*` sources such as
-         *        `std::string::c_str()` or function-local buffers fail to
-         *        bind and produce a compile error. The underlying pointer
-         *        stored in the profiler ring buffer therefore always points
-         *        at read-only program memory that outlives the process.
+         * @tparam N Deduced length of the bound array (including the trailing
+         *         null terminator when the source is a string literal).
+         * @param name Reference to a `const char` array. The array-reference
+         *        parameter rejects decayed pointer sources (`std::string::
+         *        c_str()`, `const char *` function arguments, `char *`
+         *        buffers) at compile time, so those fail to bind and produce
+         *        a compile error. However, C++ reference binding also accepts
+         *        arrays with automatic storage (e.g. `char buf[N] = "...";`
+         *        inside a function), which decays to a dangling pointer once
+         *        the enclosing scope exits. This overload does NOT prove
+         *        static storage; callers must still ensure the bound array
+         *        outlives the process. Safe sources: string literals,
+         *        namespace-scope `static constexpr char` arrays, and
+         *        `__func__` (static-storage per [dcl.fct.def.general]/8).
          * @note The hot-path cost is unchanged: two pointer-sized stores
          *       (name pointer and thread id) plus the QPC read, same as
          *       the previous `const char*` signature.

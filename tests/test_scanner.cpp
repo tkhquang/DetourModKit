@@ -2008,18 +2008,20 @@ TEST(ScannerCascade, PrologueFallbackRejectsInsufficientTailLiterals)
 // the process's executable regions (more than kPrologueFallbackMaxHits
 // matches), the guard in scan_candidates_hooked_prologue must reject it
 // rather than return an arbitrary first hit. This test seeds five
-// identical trampoline-shaped sequences into a PAGE_EXECUTE_READ buffer
-// so the rebuilt pattern matches >= 5 times, exceeding the uniqueness
+// identical trampoline-shaped sequences into an executable buffer so
+// the rebuilt pattern matches >= 5 times, exceeding the uniqueness
 // ceiling (4) and triggering the guard.
 TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
 {
-    constexpr std::size_t kBufSize = 0x2000;
-    auto *raw = static_cast<std::uint8_t *>(
-        VirtualAlloc(nullptr, kBufSize, MEM_COMMIT | MEM_RESERVE,
-                     PAGE_READWRITE));
-    ASSERT_NE(raw, nullptr);
+    // ExecBuffer allocates PAGE_EXECUTE_READWRITE, so seeding and
+    // scanning both work without a mid-test VirtualProtect toggle.
+    // scan_executable_regions walks any page with the EXECUTE bit,
+    // so RX and RWX are both visible. Using RAII ensures the region
+    // is released even if a following ASSERT short-circuits the test.
+    ExecBuffer buf(0x2000);
+    ASSERT_NE(buf.base, nullptr);
 
-    std::memset(raw, 0xCC, kBufSize);
+    std::memset(buf.base, 0xCC, buf.size);
 
     // Tail chosen to be literal-heavy so split_prologue accepts it
     // (>= kPrologueFallbackMinTailLiterals non-wildcard tokens), and
@@ -2039,11 +2041,8 @@ TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
     // inside regions it can see.
     for (std::size_t i = 0; i < 5; ++i)
     {
-        std::memcpy(raw + i * 0x100, kAmbiguousTemplate, sizeof(kAmbiguousTemplate));
+        std::memcpy(buf.base + i * 0x100, kAmbiguousTemplate, sizeof(kAmbiguousTemplate));
     }
-
-    DWORD old_prot = 0;
-    ASSERT_TRUE(VirtualProtect(raw, kBufSize, PAGE_EXECUTE_READ, &old_prot));
 
     Scanner::AddrCandidate cands[] = {
         // Original prologue is five arbitrary REX-prefixed bytes followed
@@ -2062,8 +2061,4 @@ TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
     // all candidates exceeded the uniqueness ceiling).
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
-
-    // Restore and free.
-    VirtualProtect(raw, kBufSize, old_prot, &old_prot);
-    VirtualFree(raw, 0, MEM_RELEASE);
 }

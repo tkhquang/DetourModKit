@@ -2435,8 +2435,11 @@ TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
 
     // Give the killer a chance to start; it must not return while the
     // reader holds shared_lock (shutdown path acquires exclusive on
-    // m_hooks_mutex after the shared disable pass).
+    // m_hooks_mutex after the shared disable pass). Assert that
+    // ordering directly so a premature-return regression fails the
+    // test even if reader_observed_valid still happens to hold.
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_FALSE(shutdown_returned.load(std::memory_order_acquire));
     reader_may_return.store(true, std::memory_order_release);
 
     reader.join();
