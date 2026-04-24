@@ -144,6 +144,11 @@ configure_file(
 # --- DetourModKit Library Target Definition ---
 # Glob source files. CONFIGURE_DEPENDS helps CMake re-glob on CMakeLists changes.
 # For brand new files, a manual CMake re-run might still be needed.
+#
+# Notable modules picked up here (alphabetical, not exhaustive):
+#   async_logger, bootstrap, config, config_watcher, event_dispatcher,
+#   filesystem, hook_manager, input, logger, memory, profiler,
+#   scanner, win_file_stream, worker.
 file(GLOB DETOURMODKIT_SOURCE_FILES
   CONFIGURE_DEPENDS
   "src/*.cpp"

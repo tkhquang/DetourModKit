@@ -87,6 +87,7 @@ include/DetourModKit/    # Public headers -- one per module
   logger.hpp             # Synchronous singleton logger
   win_file_stream.hpp    # Win32 shared-access file stream (CreateFile backend)
   config.hpp             # INI configuration with callback setters
+  config_watcher.hpp     # Filesystem watcher (ReadDirectoryChangesW) for INI hot-reload
   input.hpp              # Input polling (keyboard/mouse/XInput)
   input_codes.hpp        # Unified InputCode type and named key tables
   memory.hpp             # Memory read/write, sharded region cache
@@ -228,7 +229,7 @@ dispatcher.emit_safe(PlayerStateChanged{.health = player->health});
 - **Concurrency tests:** Use `std::atomic<bool> stop` flag pattern with multiple threads. See `AsyncMode_ConcurrentLogAndDisable` in `test_logger.cpp` for the reference pattern.
 - **Build flag:** Tests are enabled with `DMK_BUILD_TESTS=ON` (on by default in debug presets).
 
-For detailed coverage analysis, see [docs/tests/README.md](docs/tests/README.md). For hot-reload testing patterns, see [docs/hot-reload/README.md](docs/hot-reload/README.md). For AOB signature construction, the Scanner API, and RIP-relative resolution, see [docs/misc/aob-signatures.md](docs/misc/aob-signatures.md).
+For detailed coverage analysis, see [docs/tests/README.md](docs/tests/README.md). For hot-reload testing patterns, see [docs/hot-reload/README.md](docs/hot-reload/README.md). For INI hot-reload (filesystem watcher and reload hotkey), see [docs/config-hot-reload/README.md](docs/config-hot-reload/README.md). For AOB signature construction, the Scanner API, and RIP-relative resolution, see [docs/misc/aob-signatures.md](docs/misc/aob-signatures.md).
 
 After any code change, build and run the full test suite before committing:
 
@@ -259,7 +260,8 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 | InputPoller | Atomic `active_states_[]` array | `memory_order_relaxed` load per binding |
 | InputManager | `mutex` for lifecycle, `atomic<InputPoller*>` for reads | Lock-free `is_binding_active()` |
 | Memory cache | Sharded `SRWLOCK` + epoch-based shutdown | Shared reader locks per shard |
-| Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config) | N/A (startup only) |
+| Config | `mutex` for registration; deferred setter invocation outside lock (no reentrancy guard needed -- setters may call back into Config); `reload()` re-runs the registered items against the stashed INI path using the same deferred pattern and short-circuits on FNV-1a 64 hash match of the on-disk bytes to skip no-op reloads; bytes are read once per load/reload and fed to `CSimpleIniA::LoadData`, so the cached hash and the parsed INI state are guaranteed to reflect the same file snapshot (no TOCTOU between hash and parse); `enable_auto_reload()` owns a `ConfigWatcher` behind a separate `std::mutex` so start/stop transitions do not contend with registration traffic; setters invoked by the watcher run on the watcher thread, setters invoked by the reload hotkey run on a dedicated `ReloadServicer` thread (lazily started on first `register_reload_hotkey`, torn down in `clear_registered_items()`) so the `InputManager` poll thread never blocks on INI parsing; the servicer's press-request path takes its internal `m_mutex` around the predicate store before `cv.notify_one` to close the lost-wakeup window; all setters must be reentrant and thread-safe | N/A (startup only) |
+| ConfigWatcher | One `StoppableWorker` per instance; worker opens the parent directory with `FILE_FLAG_BACKUP_SEMANTICS` and `FILE_FLAG_OVERLAPPED`, then pumps `ReadDirectoryChangesW` via `GetOverlappedResultEx` with a 100 ms timeout so `stop_token` is observed promptly; debounce uses `steady_clock`; filename match is case-insensitive; `start()` and `stop()` are idempotent and serialized by an internal `std::mutex` | 100 ms `GetOverlappedResultEx` pump; idle CPU ~0 |
 | EventDispatcher | Lock-free `emit()` / `emit_safe()` via `std::atomic<std::shared_ptr<const std::vector<Entry>>>` snapshot (copy-on-write publish, acquire-load on read); zero-subscriber fast path skips the snapshot load via an atomic handler counter; writers serialize on a small `std::mutex` that never touches the emit hot path; thread-local reentrancy guard rejects subscribe/unsubscribe from within handlers so the no-mutation-during-emit invariant holds; `emit()` propagates handler exceptions, `emit_safe()` catches and skips them | Atomic acquire-load of a `shared_ptr` snapshot plus linear iteration over a contiguous vector; no reader lock |
 | Profiler | Lock-free ring buffer via atomic `fetch_add` on write position; odd/even sequence counter per sample slot prevents torn reads during concurrent export -- the sequence is opened and closed with unconditional `fetch_add` (never a load-then-store) so concurrent producers racing on the same slot cannot roll the counter backwards; `DMK_PROFILE_SCOPE(name)` requires `name` to be a string literal, enforced at compile time by a `ScopedProfile` constructor that only binds to `const char (&)[N]` | Single atomic increment + sequence-guarded field writes per sample |
 
