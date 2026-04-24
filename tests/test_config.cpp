@@ -2126,9 +2126,12 @@ TEST_F(ConfigTest, Reload_HashResetOnLoadFailure)
     ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
 
     // Point load() at a path that cannot be opened. load() logs and
-    // keeps defaults -- and must clear the cached hash.
-    const auto missing = std::filesystem::temp_directory_path() /
-                         ("dmk_nonexistent_" + std::to_string(_getpid()) + ".ini");
+    // keeps defaults -- and must clear the cached hash. Deriving the
+    // missing-file name from test_ini_file_ inherits both the pid and
+    // the per-test counter, so uniqueness holds across parallel runs
+    // and repeated invocations in the same shell.
+    const auto missing = test_ini_file_.parent_path() /
+                         (test_ini_file_.stem().string() + "_missing.ini");
     std::filesystem::remove(missing); // ensure absence
     ASSERT_FALSE(std::filesystem::exists(missing));
     ASSERT_NO_THROW(Config::load(missing.string()));
@@ -2154,4 +2157,54 @@ TEST_F(ConfigTest, Reload_HashResetOnLoadFailure)
     EXPECT_TRUE(Config::reload());
     EXPECT_EQ(setter_hits.load(std::memory_order_relaxed), after_second_load)
         << "Post-reset re-load must re-establish a valid hash so unchanged-bytes reloads skip.";
+}
+
+TEST_F(ConfigTest, Reload_HashResetOnReadFailure)
+{
+    // Same invariant as Reload_HashResetOnLoadFailure, but exercised
+    // through the reload() path instead of load(). A prior successful
+    // load() stores a hash; if reload() then hits a read failure (file
+    // temporarily unreadable) and leaves that hash intact, a later
+    // reload() finding identical bytes would match the stale hash and
+    // hash-skip -- silently leaving in-memory state at the defaults
+    // produced by the failed reload. reload() must clear the cached
+    // hash on read failure so the recovery reload actually re-runs
+    // setters.
+    std::atomic<int> setter_hits{0};
+    Config::register_int("S", "K", "k",
+                         [&](int /*v*/)
+                         { setter_hits.fetch_add(1, std::memory_order_relaxed); },
+                         0);
+
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[S]\nK=5\n";
+    }
+    ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
+    const int after_load = setter_hits.load(std::memory_order_relaxed);
+
+    // Simulate a read failure by removing the file. reload() targets
+    // the path remembered from the last load() and will fail to open.
+    ASSERT_TRUE(std::filesystem::remove(test_ini_file_));
+    ASSERT_FALSE(std::filesystem::exists(test_ini_file_));
+    EXPECT_TRUE(Config::reload());
+    const int after_failed_reload = setter_hits.load(std::memory_order_relaxed);
+    EXPECT_GT(after_failed_reload, after_load)
+        << "reload() on a disappeared file must still run setters with defaults.";
+
+    // Recreate the file with the exact bytes from the first successful
+    // load. Without the fix, the cached hash from that first load is
+    // still in place, matches the recreated bytes, and reload() would
+    // short-circuit without re-running setters -- leaving in-memory
+    // state at the defaults set by the failed reload above. With the
+    // fix, the cached hash was cleared on read failure, so reload()
+    // adopts the new hash and actually re-runs setters.
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[S]\nK=5\n";
+    }
+    EXPECT_TRUE(Config::reload());
+    EXPECT_GT(setter_hits.load(std::memory_order_relaxed), after_failed_reload)
+        << "Recovery reload() with identical bytes must re-run setters because the "
+           "read-failure branch cleared the cached hash.";
 }

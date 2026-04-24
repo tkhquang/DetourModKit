@@ -687,18 +687,16 @@ namespace
 
             // Wake the CV when the worker is asked to stop so the blocked
             // wait exits promptly instead of waiting for the next press.
-            // The callback uses std::function to bind the lambda without
-            // deducing the closure type at declaration site of m_stop_cb.
-            std::stop_callback<std::function<void()>> stop_cb(
+            std::stop_callback stop_cb(
                 st,
-                std::function<void()>([this]()
-                                      {
-                                          {
-                                              std::lock_guard<std::mutex> lock(m_mutex);
-                                              m_shutdown.store(true, std::memory_order_release);
-                                          }
-                                          m_cv.notify_all();
-                                      }));
+                [this]() -> void
+                {
+                    {
+                        std::lock_guard<std::mutex> lock(m_mutex);
+                        m_shutdown.store(true, std::memory_order_release);
+                    }
+                    m_cv.notify_all();
+                });
 
             while (!st.stop_requested() &&
                    !m_shutdown.load(std::memory_order_acquire))
@@ -1071,9 +1069,13 @@ namespace
 
             if (!outcome.read_succeeded)
             {
-                // Read failure: leave the cached hash untouched and
-                // fall through so setters run with defaults. The next
-                // load() will resync the hash.
+                // Read failure: clear the cached hash before falling
+                // through to run setters with defaults. Leaving it in
+                // place would let a later reload find identical bytes
+                // (same as the last successful load), match the stale
+                // hash, and hash-skip -- silently leaving in-memory
+                // state at the defaults from this failed reload.
+                getLastLoadedIniHash() = std::nullopt;
                 logger.warning("Config: reload() could not open '{}'; retaining last values where setters keep state.",
                                ini_path_str);
             }
@@ -1107,6 +1109,13 @@ namespace
 
                 if (!outcome.parse_succeeded)
                 {
+                    // Asymmetry with the read-failure branch above is
+                    // intentional: we have already advanced the cached
+                    // hash to these new bytes, so a later reload with
+                    // identical bytes correctly short-circuits -- the
+                    // partial state produced by re-parsing would be the
+                    // same. The read-failure branch cannot make that
+                    // guarantee because it never observed the bytes.
                     logger.warning("Config: reload() parse error on '{}' (error {}); retaining last values where setters keep state.",
                                    ini_path_str, static_cast<int>(outcome.parse_rc));
                 }
@@ -1186,12 +1195,12 @@ DetourModKit::Config::AutoReloadStatus DetourModKit::Config::enable_auto_reload(
     std::filesystem::path ini_path = getIniFilePath(ini_filename, logger);
     std::string resolved_path = ini_path.string();
 
-    // Build + publish the watcher under the mutex, then release before
-    // calling start(). start() can block for up to 5 seconds on its
-    // handshake timeout; holding getWatcherMutex() across that would
-    // also block disable_auto_reload() -- a hostile CreateFileW hook
-    // could DoS the entire hot-reload management surface otherwise.
-    ConfigWatcher *watcher_raw = nullptr;
+    // Hold getWatcherMutex() across start() to serialize against a
+    // concurrent disable_auto_reload(). start() normally returns in
+    // milliseconds; under a pathological handshake stall it returns
+    // within the 5 s timeout, which is preferable to a use-after-free
+    // on the watcher if we released the lock and disable_auto_reload()
+    // moved the unique_ptr out and destroyed it mid-start().
     {
         std::lock_guard<std::mutex> wlock(getWatcherMutex());
 
@@ -1223,27 +1232,13 @@ DetourModKit::Config::AutoReloadStatus DetourModKit::Config::enable_auto_reload(
                     user_cb(setters_ran);
                 }
             });
-        watcher_raw = watcher.get();
-    }
 
-    const bool started = watcher_raw->start();
-    if (!started)
-    {
-        logger.error("Config: Auto-reload watcher failed to start for {}", resolved_path);
-        // Re-acquire the mutex and reset the member pointer -- but only
-        // if it still points at the watcher we just created. A
-        // concurrent disable_auto_reload() during the unlocked start()
-        // window may have already moved the unique_ptr out, and a later
-        // enable_auto_reload() may have installed a freshly-running
-        // watcher. Identity-checking the raw pointer avoids wiping
-        // someone else's work.
-        std::lock_guard<std::mutex> wlock(getWatcherMutex());
-        auto &watcher = getConfigWatcher();
-        if (watcher.get() == watcher_raw)
+        if (!watcher->start())
         {
+            logger.error("Config: Auto-reload watcher failed to start for {}", resolved_path);
             watcher.reset();
+            return AutoReloadStatus::StartFailed;
         }
-        return AutoReloadStatus::StartFailed;
     }
 
     logger.info("Config: Auto-reload enabled for {} (debounce {} ms)",
