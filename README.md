@@ -13,7 +13,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
 |--------|-------------|--------|
 | AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, and multi-candidate cascade resolver with prologue fallback | `scanner.hpp` |
 | Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
-| Configuration | INI-based settings with key combo support | `config.hpp` |
+| Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
 | Memory Utilities | Readability checks, region cache, and safe pointer reads | `memory.hpp` |
@@ -62,8 +62,39 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
   - Format: `modifier+trigger` (e.g., `Ctrl+Shift+F3`)
   - Comma-separated independent combos (e.g., `F3,Gamepad_LT+Gamepad_B`)
   - Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats
+- **Hot-reload** (see [Config Hot-Reload Guide](docs/config-hot-reload/README.md)):
+  - `Config::reload()` re-runs every registered setter against the last-loaded INI without touching registrations; skips setters when the on-disk bytes are byte-identical to the last load (FNV-1a content hash)
+  - `Config::enable_auto_reload()` starts a background `ConfigWatcher` (`config_watcher.hpp`) that debounces editor save-flurries and triggers `reload()` automatically; returns an `AutoReloadStatus` enum indicating outcome
+  - `Config::register_reload_hotkey()` wires a user-configurable key combo to `reload()` via the kit `InputManager`; the press callback hands off to a dedicated reload-servicer thread so the input poll thread never blocks on INI parsing
 
 </details>
+
+### Config hot-reload
+
+Two mechanisms share the same `Config::reload()` primitive - use either or both:
+
+```cpp
+// 1. Initial load stashes the INI path.
+Config::load("mymod.ini");
+
+// 2. Filesystem watcher: auto-reload on file change (250 ms debounce).
+//    on_reload receives true when setters actually ran, false when the
+//    content-hash short-circuit skipped the work.
+(void)Config::enable_auto_reload(std::chrono::milliseconds{250},
+                                 [](bool content_changed)
+                                 {
+                                     if (content_changed)
+                                     {
+                                         Logger::get_instance().info("Config reloaded");
+                                     }
+                                 });
+
+// 3. Hotkey: user presses Ctrl+F5 (or whatever the INI says) to force reload.
+Config::register_reload_hotkey("ReloadConfig", "Ctrl+F5");
+InputManager::get_instance().start();
+```
+
+See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thread-safety contract, debounce rationale, rename-swap-save handling, and the list of settings that are safe to hot-reload vs restart-required.
 
 <details>
 <summary><strong>Logger</strong></summary>
@@ -219,6 +250,7 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 
 * [AOB Signature Scanning Guide](docs/misc/aob-signatures.md) - Pattern syntax, RIP-relative resolution, and patch-proof signature practices
 * [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
+* [Config Hot-Reload Guide](docs/config-hot-reload/README.md) - INI filesystem watcher and hotkey-triggered `Config::reload()`
 * [Test Coverage Guide](docs/tests/README.md) - Coverage analysis, test architecture, and module-level breakdown
 
 ## Prerequisites

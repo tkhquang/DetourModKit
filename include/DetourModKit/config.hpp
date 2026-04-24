@@ -5,6 +5,7 @@
 #include "DetourModKit/logger.hpp"
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <string>
@@ -13,6 +14,10 @@
 
 namespace DetourModKit
 {
+    // Forward-declared to keep the filesystem watcher out of this header.
+    // Full definition lives in config_watcher.hpp.
+    class ConfigWatcher;
+
     /**
      * @namespace Config
      * @brief Provides functions for registering, loading, and logging configuration settings.
@@ -226,11 +231,123 @@ namespace DetourModKit
          * @brief Loads all registered configuration settings from the specified INI file.
          * @details Parses the INI file and attempts to read values for each registered item.
          *          If a key is missing or invalid, the default value provided during
-         *          registration is used.
+         *          registration is used. The INI path is remembered internally so that
+         *          subsequent reload() calls operate on the same file without needing
+         *          the caller to pass it again.
          * @param ini_filename The base filename of the INI file. Path will be resolved
          *                     relative to the mod's runtime directory.
          */
         void load(std::string_view ini_filename);
+
+        /**
+         * @brief Re-runs all registered setters against the last-loaded INI file.
+         * @details Reads the INI file previously passed to load() and re-invokes every
+         *          registered setter with the fresh value (or its default if the key is
+         *          missing). Registrations themselves are not touched: user lambdas
+         *          persist across reloads. The deferred-setter invocation pattern used
+         *          by load() applies here as well, so setters may freely call back into
+         *          the Config API without deadlocking.
+         * @return true if a previous load() path was available and the reload proceeded,
+         *         false if reload() was called before any load().
+         * @note Safe to call from any thread. Commonly wired to a filesystem watcher
+         *       (see enable_auto_reload) or a hotkey (see register_reload_hotkey).
+         * @note Only C++ exceptions are caught. Structured-exception (SEH) faults
+         *       such as access violations bypass the handler. A `noexcept`-marked
+         *       user setter that throws still invokes std::terminate.
+         */
+        [[nodiscard]] bool reload();
+
+        /**
+         * @enum AutoReloadStatus
+         * @brief Outcome of a call to enable_auto_reload().
+         */
+        enum class AutoReloadStatus
+        {
+            Started,         ///< Watcher is now running.
+            AlreadyRunning,  ///< Called twice; the existing watcher was kept.
+            NoPriorLoad,     ///< Config::load() was never called; no path to watch.
+            StartFailed      ///< Directory could not be opened or start handshake failed.
+        };
+
+        /**
+         * @brief Starts a background watcher that calls reload() when the INI changes.
+         * @details Creates a ConfigWatcher on the INI path last passed to load() and
+         *          starts its worker thread. The watcher collapses bursty editor save
+         *          events (e.g. Notepad++ atomic save) into a single reload via the
+         *          @p debounce quiet window. After the reload completes, @p on_reload
+         *          is invoked if provided, allowing the caller to refresh derived
+         *          state (e.g. rebuild caches, reformat log output).
+         *
+         *          If load() has not been called yet, or if auto-reload is already
+         *          enabled, this is a no-op and a Warning-level log message is emitted.
+         *
+         *          The watcher and any @p on_reload callback run on the watcher's
+         *          background thread. User setters invoked by reload() also run on
+         *          that thread; they must handle their own synchronization.
+         *
+         *          The @p on_reload callback receives a `bool content_changed`
+         *          argument. When the file's byte contents are identical to the
+         *          last successfully loaded version (e.g. after a `touch` or a
+         *          no-op save), setters are skipped and the flag is false; the
+         *          callback still fires so derived state can observe the event.
+         *
+         * @param debounce Quiet-window length between change detection and reload
+         *                 (default 250 ms).
+         * @param on_reload Optional callback invoked after each successful reload.
+         *                  The bool argument is true when setters ran, false when
+         *                  the content-hash skip short-circuited the reload.
+         * @return AutoReloadStatus::Started if the watcher is now running;
+         *         AutoReloadStatus::AlreadyRunning if a watcher was already installed
+         *         (no-op, existing watcher kept);
+         *         AutoReloadStatus::NoPriorLoad if load() has not been called yet
+         *         (no-op, no watcher installed);
+         *         AutoReloadStatus::StartFailed if the parent directory could not
+         *         be opened or the start handshake failed (watcher reset, error
+         *         logged).
+         */
+        [[nodiscard]] AutoReloadStatus enable_auto_reload(
+            std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
+            std::function<void(bool)> on_reload = {});
+
+        /**
+         * @brief Stops the filesystem watcher started by enable_auto_reload().
+         * @details Idempotent. Returns only once the watcher thread has exited
+         *          (or been detached under the Windows loader lock).
+         */
+        void disable_auto_reload() noexcept;
+
+        /**
+         * @brief Registers a hotkey binding that triggers reload() on press.
+         * @details Thin wrapper around register_press_combo() whose on-press
+         *          callback calls Config::reload(). Like the underlying helper,
+         *          this must be called before InputManager::start() so the
+         *          binding is picked up by the poller.
+         *
+         *          The INI-configured combo overrides @p default_combo on each
+         *          load() / reload() cycle via the standard register_press_combo
+         *          machinery.
+         *
+         * @param ini_key INI key that stores the combo string (e.g. "ReloadConfig").
+         * @param default_combo Combo string applied when the INI key is absent
+         *                      (e.g. "Ctrl+F5").
+         * @return true if the binding was registered, false if @p default_combo
+         *         is empty (register_press_combo silently no-ops on empty combo
+         *         lists, which would make the hotkey appear registered but inert).
+         * @note The on-press callback runs on the InputManager poll thread,
+         *       but the actual reload() work is deferred to a dedicated
+         *       background servicer thread. The press callback only flips
+         *       an atomic flag and notifies a condition variable, so
+         *       per-press latency on the poll thread stays in the
+         *       microsecond range regardless of INI size. Multiple presses
+         *       during a running reload coalesce into at most one follow-up.
+         *       Any exception thrown by reload() on the servicer thread is
+         *       caught and logged so the servicer stays alive.
+         * @note Only C++ exceptions are caught. Structured-exception (SEH) faults
+         *       such as access violations bypass the handler. A `noexcept`-marked
+         *       user setter that throws still invokes std::terminate.
+         */
+        [[nodiscard]] bool register_reload_hotkey(std::string_view ini_key,
+                                                  std::string_view default_combo);
 
         /**
          * @brief Logs the current values of all registered configuration settings.
