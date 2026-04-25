@@ -313,6 +313,13 @@ namespace DetourModKit
          * @brief Stops the filesystem watcher started by enable_auto_reload().
          * @details Idempotent. Returns only once the watcher thread has exited
          *          (or been detached under the Windows loader lock).
+         * @note When invoked from inside an on_reload callback (i.e. on the
+         *       watcher thread itself) this is a no-op: joining the worker
+         *       from its own thread would raise
+         *       std::system_error(resource_deadlock_would_occur). The error
+         *       is logged and the watcher remains running. Tear the watcher
+         *       down from a different thread, e.g. by posting the disable
+         *       request to a deferred shutdown hook.
          */
         void disable_auto_reload() noexcept;
 
