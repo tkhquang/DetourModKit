@@ -120,7 +120,7 @@ The `on_reload` callback passed to `enable_auto_reload` receives a `bool content
 - SafetyHook trampolines: once a hook is installed its target address is baked in. Removing a hook requires `HookManager::remove_*_hook`, which may deadlock with in-flight callers if triggered from the watcher thread. Change the "hook installed" bit only through a proper shutdown cycle.
 - Thread pool sizes and `poll_interval` for `InputManager::start()`: these are fixed at start time.
 - Log file handle and log prefix: `Logger::configure` rotates the file, which requires coordinating with in-flight async writes. Prefer reconfiguring via a full shutdown/start cycle.
-- The reload hotkey combo itself can be changed at runtime, but the binding cardinality (number of independent combos) cannot. If the INI combo string has a different number of comma-separated alternatives than the default, the update is rejected with a Warning and the old combo remains.
+- The reload hotkey combo itself can be changed at runtime; the cardinality of the new combo list does not need to match the default and the binding's combo set is rebuilt on the fly. To opt the hotkey out at runtime, set the INI value to either an empty string or the literal `NONE` (case-insensitive, whole-string only); both forms produce an unbound binding silently. A non-empty value whose every comma-separated token fails to parse is logged at WARNING level naming the binding and the offending raw string. See the [combo string syntax sub-section](../hot-reload/README.md#combo-string-syntax-opt-out-and-parse-failures) in the hot-reload guide for the complete contract (mixed-list behavior, `NONE`-in-list, and so on).
 
 ## Debounce rationale
 

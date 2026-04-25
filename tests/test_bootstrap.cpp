@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -11,6 +12,7 @@
 #include <windows.h>
 
 #include "DetourModKit/bootstrap.hpp"
+#include "DetourModKit/config.hpp"
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/input.hpp"
 
@@ -779,4 +781,63 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
         strict).has_value());
 
     HookManager::get_instance().remove_all_hooks();
+}
+
+// Verifies that on_logic_dll_unload chains Config::clear_registered_items
+// after the hook and binding teardown so registered std::function
+// setters (whose call operator and destructor live in the unloading
+// Logic DLL) cannot survive into a second attach as use-after-unload
+// hazards.
+//
+// The verification path: a registered setter captures a shared_ptr by
+// value, so the setter closure stored inside the registry holds a
+// strong reference. While the registry retains the entry, use_count
+// stays >= 2 (one local sentinel ref plus one inside the captured
+// closure). Once the helper wipes the registry, the captured closure
+// is destroyed and the local sentinel is the sole owner.
+TEST(BootstrapOnLogicDllUnload, ClearsConfigRegisteredItems)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+    Config::clear_registered_items();
+
+    auto sentinel = std::make_shared<int>(0);
+    EXPECT_EQ(sentinel.use_count(), 1L);
+
+    Config::register_string(
+        "BootstrapUnloadCfgClear", "Key", "Bootstrap unload key",
+        [sentinel](const std::string &) { /* keeps sentinel alive */ },
+        "default");
+
+    // After registration the captured-by-value shared_ptr lives inside
+    // the setter closure stored in the Config registry, so use_count
+    // includes both the local sentinel and the closure copy.
+    EXPECT_GE(sentinel.use_count(), 2L);
+
+    Bootstrap::on_logic_dll_unload({}, {});
+
+    // The unload helper must have dropped the registry entry, releasing
+    // its captured copy of the sentinel. The local variable is the
+    // only remaining owner.
+    EXPECT_EQ(sentinel.use_count(), 1L);
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, ClearsConfigRegisteredItems)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+    Config::clear_registered_items();
+
+    auto sentinel = std::make_shared<int>(0);
+    EXPECT_EQ(sentinel.use_count(), 1L);
+
+    Config::register_string(
+        "BootstrapUnloadAllCfgClear", "Key", "Bootstrap unload-all key",
+        [sentinel](const std::string &) { /* keeps sentinel alive */ },
+        "default");
+    EXPECT_GE(sentinel.use_count(), 2L);
+
+    Bootstrap::on_logic_dll_unload_all();
+
+    EXPECT_EQ(sentinel.use_count(), 1L);
 }

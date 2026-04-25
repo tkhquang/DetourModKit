@@ -2346,6 +2346,297 @@ TEST_F(ConfigTest, RegisterAtomic_IntRoundTrip)
 
 namespace
 {
+    // RAII helper that redirects the global Logger to a temporary file and
+    // exposes the captured contents for assertions. Restores the Logger to
+    // its previous file on destruction so subsequent tests see the original
+    // sink. Sync mode is forced because the tests inspect the file
+    // immediately after the logging call returns.
+    class LoggerFileCapture
+    {
+    public:
+        LoggerFileCapture()
+        {
+            static std::atomic<int> counter{0};
+            const int n = counter.fetch_add(1, std::memory_order_relaxed);
+            capture_file_ = std::filesystem::temp_directory_path() /
+                            ("dmk_capture_" + std::to_string(_getpid()) + "_" +
+                             std::to_string(n) + ".log");
+            auto &logger = DetourModKit::Logger::get_instance();
+            previous_async_ = logger.is_async_mode_enabled();
+            if (previous_async_)
+            {
+                logger.disable_async_mode();
+            }
+            logger.reconfigure("CAPTURE", capture_file_.string(), "%H:%M:%S");
+            previous_level_ = logger.get_log_level();
+            logger.set_log_level(DetourModKit::LogLevel::Trace);
+        }
+
+        ~LoggerFileCapture()
+        {
+            auto &logger = DetourModKit::Logger::get_instance();
+            logger.flush();
+            logger.set_log_level(previous_level_);
+            if (previous_async_)
+            {
+                logger.enable_async_mode();
+            }
+            std::error_code ec;
+            std::filesystem::remove(capture_file_, ec);
+        }
+
+        LoggerFileCapture(const LoggerFileCapture &) = delete;
+        LoggerFileCapture &operator=(const LoggerFileCapture &) = delete;
+
+        [[nodiscard]] std::string read_all() const
+        {
+            DetourModKit::Logger::get_instance().flush();
+            std::ifstream in(capture_file_);
+            if (!in)
+            {
+                return {};
+            }
+            return std::string(std::istreambuf_iterator<char>(in),
+                               std::istreambuf_iterator<char>());
+        }
+
+        [[nodiscard]] bool contains_warning_with(std::string_view needle) const
+        {
+            const std::string content = read_all();
+            std::size_t pos = 0;
+            while (true)
+            {
+                const std::size_t next = content.find('\n', pos);
+                const std::string_view line(
+                    content.data() + pos,
+                    (next == std::string::npos ? content.size() : next) - pos);
+                if (line.find("[WARNING]") != std::string_view::npos &&
+                    line.find(needle) != std::string_view::npos)
+                {
+                    return true;
+                }
+                if (next == std::string::npos)
+                {
+                    break;
+                }
+                pos = next + 1;
+            }
+            return false;
+        }
+
+        [[nodiscard]] std::size_t warning_count() const
+        {
+            const std::string content = read_all();
+            std::size_t count = 0;
+            std::size_t pos = 0;
+            while ((pos = content.find("[WARNING]", pos)) != std::string::npos)
+            {
+                ++count;
+                pos += 9;
+            }
+            return count;
+        }
+
+    private:
+        std::filesystem::path capture_file_;
+        DetourModKit::LogLevel previous_level_{DetourModKit::LogLevel::Info};
+        bool previous_async_{false};
+    };
+
+    // Drives parse_key_combo_list indirectly via register_key_combo, which
+    // is the only reachable entry point for the parser from outside the TU.
+    DetourModKit::Config::KeyComboList parse_via_register(
+        std::string_view default_value,
+        std::string_view log_name = "test binding")
+    {
+        DetourModKit::Config::clear_registered_items();
+        DetourModKit::Config::KeyComboList captured;
+        DetourModKit::Config::register_key_combo(
+            "ParserSec", "ParserKey", log_name,
+            [&captured](const DetourModKit::Config::KeyComboList &c)
+            { captured = c; },
+            default_value);
+        return captured;
+    }
+} // namespace
+
+TEST_F(ConfigTest, ParseKeyComboList_EmptyStringIsSilent)
+{
+    LoggerFileCapture cap;
+    auto result = parse_via_register("");
+    EXPECT_TRUE(result.empty());
+    EXPECT_EQ(cap.warning_count(), 0u)
+        << "Empty string is the explicit-empty sentinel; must not warn.";
+}
+
+TEST_F(ConfigTest, ParseKeyComboList_NoneSentinelIsSilent)
+{
+    for (std::string_view literal : {"NONE", "none", "None", "  None  ", "NoNe"})
+    {
+        LoggerFileCapture cap;
+        auto result = parse_via_register(literal);
+        EXPECT_TRUE(result.empty()) << "Failed for: \"" << literal << "\"";
+        EXPECT_EQ(cap.warning_count(), 0u)
+            << "NONE sentinel must be silent; failed for: \"" << literal << "\"";
+    }
+}
+
+TEST_F(ConfigTest, ParseKeyComboList_SingleValidComboNoWarning)
+{
+    LoggerFileCapture cap;
+    auto result = parse_via_register("F4");
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(cap.warning_count(), 0u);
+}
+
+TEST_F(ConfigTest, ParseKeyComboList_MultipleValidCombosNoWarning)
+{
+    LoggerFileCapture cap;
+    auto result = parse_via_register("F4,F5");
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(cap.warning_count(), 0u);
+}
+
+TEST_F(ConfigTest, ParseKeyComboList_TypoEmitsOneWarning)
+{
+    LoggerFileCapture cap;
+    auto result = parse_via_register("xyzzy", "press hotkey");
+    EXPECT_TRUE(result.empty());
+    EXPECT_EQ(cap.warning_count(), 1u);
+    EXPECT_TRUE(cap.contains_warning_with("xyzzy"));
+    EXPECT_TRUE(cap.contains_warning_with("press hotkey"));
+}
+
+TEST_F(ConfigTest, ParseKeyComboList_EmptyInnerTokensSkippedSilently)
+{
+    LoggerFileCapture cap;
+    auto result = parse_via_register("F4,,F5");
+    ASSERT_EQ(result.size(), 2u);
+    EXPECT_EQ(cap.warning_count(), 0u);
+}
+
+TEST_F(ConfigTest, ParseKeyComboList_AllTokensTypoEmitsOneWarning)
+{
+    LoggerFileCapture cap;
+    auto result = parse_via_register("xyzzy,blarg", "multi typo");
+    EXPECT_TRUE(result.empty());
+    EXPECT_EQ(cap.warning_count(), 1u);
+    EXPECT_TRUE(cap.contains_warning_with("multi typo"));
+}
+
+TEST_F(ConfigTest, ParseKeyComboList_PartialParseDoesNotWarn)
+{
+    // F4 parses, xyzzy does not. Result is non-empty, so no typo WARNING.
+    LoggerFileCapture cap;
+    auto result = parse_via_register("F4,xyzzy");
+    ASSERT_GE(result.size(), 1u);
+    EXPECT_EQ(cap.warning_count(), 0u);
+}
+
+TEST_F(ConfigTest, EndToEnd_EmptyDefaultThenReloadStaysSilent)
+{
+    InputManager::get_instance().shutdown();
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[Hotkeys]\n";
+    }
+    LoggerFileCapture cap;
+    auto guard = Config::register_press_combo(
+        "Hotkeys", "EmptyKey", "empty default test",
+        "endtoend-empty-default", []() {}, "");
+
+    ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
+    ASSERT_TRUE(Config::reload());
+
+    EXPECT_EQ(cap.warning_count(), 0u)
+        << "Empty default + missing INI key must produce no WARNING.";
+
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, EndToEnd_BoundEmptyBoundCycle)
+{
+    // The bound -> unbound -> bound transition must complete without losing
+    // the binding name. Closes the Risk 6 secondary observation.
+    InputManager::get_instance().shutdown();
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[Hotkeys]\nKey=F4\n";
+    }
+    auto guard = Config::register_press_combo(
+        "Hotkeys", "Key", "cycle test", "endtoend-cycle", []() {}, "F4");
+
+    ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[Hotkeys]\nKey=\n";
+    }
+    LoggerFileCapture cap;
+    ASSERT_TRUE(Config::reload());
+    EXPECT_FALSE(InputManager::get_instance().is_binding_active("endtoend-cycle"));
+    EXPECT_EQ(cap.warning_count(), 0u)
+        << "Empty INI value must unbind silently.";
+
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[Hotkeys]\nKey=F5\n";
+    }
+    ASSERT_TRUE(Config::reload());
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, EndToEnd_TypoEmitsOneWarning)
+{
+    InputManager::get_instance().shutdown();
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[Hotkeys]\nKey=F4\n";
+    }
+    auto guard = Config::register_press_combo(
+        "Hotkeys", "Key", "typo test", "endtoend-typo", []() {}, "F4");
+
+    ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    {
+        std::ofstream f(test_ini_file_);
+        f << "[Hotkeys]\nKey=xyzzy\n";
+    }
+    LoggerFileCapture cap;
+    ASSERT_TRUE(Config::reload());
+    EXPECT_EQ(cap.warning_count(), 1u);
+    EXPECT_TRUE(cap.contains_warning_with("xyzzy"));
+    EXPECT_TRUE(cap.contains_warning_with("typo test"));
+    EXPECT_FALSE(InputManager::get_instance().is_binding_active("endtoend-typo"));
+
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, EndToEnd_NoneDefaultRegistersCleanly)
+{
+    InputManager::get_instance().shutdown();
+    LoggerFileCapture cap;
+    auto guard = Config::register_press_combo(
+        "Hotkeys", "Key", "none default", "endtoend-none-default",
+        []() {}, "NONE");
+
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1))
+        << "NONE default must still reserve the binding name as a sentinel.";
+    EXPECT_EQ(cap.warning_count(), 0u)
+        << "NONE default must register without warning.";
+
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+namespace
+{
     // SFINAE probe: detects whether register_atomic<T> can be invoked. The
     // primary template is = delete, so only the explicit specialisations
     // (int, bool, float) yield a viable overload.

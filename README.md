@@ -5,7 +5,7 @@
 
 [Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Guides](#guides) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
 
-DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, and configuration management. It is built with MinGW in mind but aims for general C++ compatibility.
+DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, input handling, configuration management, and DLL lifecycle orchestration. It is built with MinGW in mind but aims for general C++ compatibility.
 
 ## Features
 
@@ -64,6 +64,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
   - Format: `modifier+trigger` (e.g., `Ctrl+Shift+F3`)
   - Comma-separated independent combos (e.g., `F3,Gamepad_LT+Gamepad_B`)
   - Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats
+  - Opt-out sentinels: an empty value or the literal `NONE` (case-insensitive, whole-string only) leaves the binding unbound silently. A non-empty value whose every token fails to parse is logged at WARNING level naming the binding and the offending raw string.
 - Convenience helpers: `register_log_level` (parses an INI string into a `Logger::set_log_level` call) and `register_atomic<T>` for `int`/`bool`/`float` (writes the parsed value into a caller-supplied `std::atomic<T>` with `memory_order_relaxed`)
 - **Hot-reload** (see [Config Hot-Reload Guide](docs/config-hot-reload/README.md)):
   - `Config::reload()` re-runs every registered setter against the last-loaded INI without touching registrations; skips setters when the on-disk bytes are byte-identical to the last load (FNV-1a content hash)
@@ -230,6 +231,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Handles the `DLL_PROCESS_DETACH` process-exit vs dynamic-unload distinction automatically via `lpvReserved`
 - `on_logic_dll_unload(hook_names, binding_names)` drops only the per-Logic-DLL hooks and bindings owned by the caller, leaving Logger and Config alive for whichever container hosts the next Logic-DLL incarnation
 - `on_logic_dll_unload_all()` is the catch-all variant for callers without an explicit name registry; in a host that loads multiple Logic DLLs sharing one DMK instance, prefer the named-list overload because the catch-all rips out every Logic DLL's state
+- Hot-reload teardown: `Bootstrap::on_logic_dll_unload` is the lighter alternative to `DMK_Shutdown` for multi-DLL or fast-iteration setups (see [docs/hot-reload/README.md](docs/hot-reload/README.md))
 
 </details>
 
@@ -886,6 +888,10 @@ GamepadTrigger=Gamepad_LT              ; Left trigger (digital, configurable dea
 ; Hex VK codes still supported
 LegacyKey=0x72               ; F3 by hex code
 LegacyCombo=0x11+0x10+0x44   ; Ctrl+Shift+D by hex codes
+
+; Opt-out sentinels (silent, no warning)
+DisabledHotkey=               ; empty value -> binding registered but unbound
+AlsoDisabled=NONE             ; literal NONE (case-insensitive) -> same effect
 ```
 
 ## Supported Input Names

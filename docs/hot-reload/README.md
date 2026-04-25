@@ -1217,6 +1217,74 @@ When choosing between the two topologies:
 
 Mixing the two in one process is not supported: pick one per host module and stay on it.
 
+### When to use `on_logic_dll_unload` vs `DMK_Shutdown`
+
+Both APIs leave the unloading Logic DLL in a state where its hooks, bindings, and Config-registered setters are gone before `FreeLibrary` reclaims the code pages. The difference is what survives on the loader side: `DMK_Shutdown` tears down Logger, ConfigWatcher, and the Memory cache; `on_logic_dll_unload(_all)` keeps them running.
+
+| Consumer shape                                         | Use                   | Why                                                                                                                                                    |
+|--------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Single Logic DLL, occasional reload (human hotkey)     | `DMK_Shutdown`        | Functionally equivalent to the lighter unload in this topology; sub-100ms speedup is invisible at human-trigger frequency, so prefer the simpler call. |
+| Multi-Logic-DLL loader, only one reloads               | `on_logic_dll_unload` | `DMK_Shutdown` would tear down Logger, ConfigWatcher, and Memory cache that the still-loaded sibling DLLs depend on.                                   |
+| Tight dev iteration (sub-second file-save cadence)     | `on_logic_dll_unload` | Skips Logger writer-thread spin-up, ConfigWatcher restart, and Memory cache rebuild on the next attach. Visible in fast inner-loop dev.                |
+| Persistent loader-side UI or state (overlay, profiler) | `on_logic_dll_unload` | Lets the overlay window, profiler session, or other loader-side state survive the reload without flicker or re-init.                                   |
+| Log continuity required across reloads                 | `on_logic_dll_unload` | Same writer thread keeps appending; one open file handle; contiguous timestamps. `DMK_Shutdown` flushes, closes, and reopens.                          |
+
+If DMK could only ship one of the two, `DMK_Shutdown` would cover ~90% of consumers. The lighter unload exists for the 10% that need it (multi-plugin loaders, sub-second dev iteration, persistent loader-side state). For single-DLL, occasional-reload setups, prefer `DMK_Shutdown` for simplicity.
+
+### Pre-unload contract: worker-thread quiescence
+
+`Bootstrap::on_logic_dll_unload(_all)` removes hooks and bindings, but it cannot prove that every consumer-owned worker thread has stopped firing those hooks. A worker thread that calls into a detoured function between `remove_hook` returning and `FreeLibrary` reclaiming the Logic DLL's `.text` pages will execute freed code; the resulting access violation often points at an address that no longer maps to anything, which is hard to triage from a crash dump. SafetyHook freezes game threads while it patches the original prologue back, but it has no visibility into worker threads spawned by the consumer.
+
+Stop and join every consumer-owned worker BEFORE you call the unload helper. The canonical Logic-DLL `Shutdown()` ordering for the persistent-host topology is:
+
+```cpp
+extern "C" __declspec(dllexport) void Shutdown()
+{
+    // 1. Stop and join your own workers first. Each StoppableWorker reset()
+    //    requests stop and joins (or detaches under loader lock, with a
+    //    pinned module to keep code pages mapped).
+    s_scan_worker.reset();
+    s_telemetry_worker.reset();
+
+    // 2. Now the only remaining callers into the hooks are game threads,
+    //    which SafetyHook will freeze inside remove_hook. Drop the
+    //    DLL-local registrations.
+    DMKBootstrap::on_logic_dll_unload(hook_names, binding_names);
+
+    // 3. Return from Shutdown(). The loader's FreeLibrary call follows.
+}
+```
+
+A common worker case to watch for: a hook callback runs on a game thread, but a separate consumer-owned thread pool *also* calls into the same detour body (e.g. an off-thread snapshot capture, a deferred re-scan, a periodic poller that touches game state through a hooked accessor). Both paths must be quiet before the unload helper runs. If a worker calls into game-side code that the host module also hooks, joining the worker before unload is sufficient; SafetyHook handles the game-thread side.
+
+---
+
+## Idempotency contract on hot-reload
+
+The persistent-host topology calls `Init()` once per Logic-DLL load. Every call into a process-wide DMK singleton from `Init()` is therefore the second-or-later call across the host's lifetime. The table below summarises what each second call does and what (if any) teardown the consumer must run first.
+
+| API                                                    | Second-call behavior                                  | Consumer action before second call               |
+|--------------------------------------------------------|-------------------------------------------------------|--------------------------------------------------|
+| `Logger::configure`                                    | Replaces existing config                              | None; safe on every `Init()`                     |
+| `HookManager::create_inline_hook` (and variants)       | Fails with `HookAlreadyExists`                        | Call `remove_hook(name)` first                   |
+| `Config::register_string` / `register_int` / etc.      | Replace-on-duplicate                                  | None; new setter overwrites stale closure        |
+| `Config::register_press_combo` / `register_hold_combo` | Replace-on-duplicate (Config); APPENDS (InputManager) | Drop prior binding via `remove_binding_by_name`  |
+| `InputManager::register_press` / `register_hold`       | APPENDS a new binding entry                           | Call `remove_binding_by_name(name)` first        |
+| `InputManager::start`                                  | No-op; logs at DEBUG                                  | None for no-op; `shutdown()` to change interval  |
+| `Bootstrap::on_dll_attach`                             | Returns `FALSE` if not detached                       | Call `on_dll_detach(...)` first                  |
+
+Notes on individual rows:
+
+- **`Logger::configure`**: If the file path differs from the previous call, the open log handle is rotated under lock; the writer thread is preserved. The internal `shutdown_called_` flag is reset on every call so the logger is usable again after a reload.
+- **`HookManager::create_inline_hook` (and `create_mid_hook`, `*_aob` variants)**: NOT replace-on-duplicate. The hook map is keyed by `name`, and a second `create_*_hook` with the same `name` fails fast with `HookAlreadyExists` so a stale detour is never silently swapped (which would leave the old detour code mapped into the trampoline). Always remove before re-installing.
+- **`Config::register_*` (string, int, float, bool, key_combo)**: If a registration with the same `(section, ini_key)` already exists, the prior `ConfigItemBase` and its setter closure are overwritten in place. Re-registering with a fresh setter from the new Logic DLL replaces the stale closure cleanly.
+- **`Config::register_press_combo` / `register_hold_combo`**: The Config item itself follows replace-on-duplicate semantics. The InputManager binding it creates does not, because `InputManager::register_press` / `register_hold` are append-only (see next row). Drop the prior binding via `InputManager::remove_binding_by_name(name)` to avoid duplicates.
+- **`InputManager::register_press` / `register_hold`**: Append-only. The InputPoller treats `name` as a label, not a key. Two registrations with the same `name` produce two `InputBinding` entries that both fire on a matching key sequence. This is the most common surprise across reloads.
+- **`InputManager::start(poll_interval)`**: No-op when the poller is already running. The new `poll_interval` is ignored; the running poller keeps its original interval. Use `shutdown()` then `start(new_interval)` if you actually need to change it (the lighter unload helpers do not stop the poller).
+- **`Bootstrap::on_dll_attach`**: Guards against double-attach by checking `g_shutdown_event || g_worker_thread` and returning `FALSE` without invoking `init_fn`. Typically not relevant in the persistent-host topology where the host module attaches exactly once for the process lifetime.
+
+`Bootstrap::on_logic_dll_unload(_all)` exists precisely to bundle the required teardown for hooks, bindings, and Config-registered setters so consumers do not have to remember the per-API rules individually. A correct persistent-host `Shutdown()` invokes one of those helpers (after draining its own workers; see the previous sub-section) and the next `Init()` lands on a clean slate for every entry above.
+
 ---
 
 ## Hot-Reload Safety Guarantees
@@ -1227,13 +1295,27 @@ DetourModKit's core systems are designed to be safe across DLL reload cycles:
 
 `HookManager::is_target_already_hooked(addr)` reports whether the local `HookManager` instance already has an inline or mid hook installed at `addr`. It is the programmatic counterpart to the install-time WARNING that fires when SafetyHook layers on top of a pre-existing JMP from another module, and it covers the common case of two cooperating modules wanting to coordinate hook ownership without grepping log output.
 
-**InputManager:** `register_press` and `register_hold` accept new bindings whether the poller is stopped, starting, or running. Live registration takes the poller's exclusive lock, appends to the binding list, and rebuilds the parallel `active_states_` array in one step, so there is no per-tick allocation in the hot loop. Surviving entries' atomic states are carried forward across every reshape (`add_binding`, `remove_bindings_by_name`, `update_binding_combos`), so a held binding never flickers through one inactive tick when an unrelated binding is added or dropped. `clear_bindings()` empties the registry without stopping the poller, and `remove_binding_by_name(name)` drops a single binding by name (used internally by `Bootstrap::on_logic_dll_unload`). `update_binding_combos(name, combos)` accepts cardinality changes (1 to N or N to 1) and replaces the registered combo list wholesale; supplying an empty list is rejected so an INI typo cannot silently disable a binding. When a cardinality change drops a held `register_hold` entry, that entry's `on_state_change(false)` release callback fires before the rebuild completes so the consumer never latches in the held state.
+**InputManager:** `register_press` and `register_hold` accept new bindings whether the poller is stopped, starting, or running. Live registration takes the poller's exclusive lock, appends to the binding list, and rebuilds the parallel `active_states_` array in one step, so there is no per-tick allocation in the hot loop. Surviving entries' atomic states are carried forward across every reshape (`add_binding`, `remove_bindings_by_name`, `update_binding_combos`), so a held binding never flickers through one inactive tick when an unrelated binding is added or dropped. `clear_bindings()` empties the registry without stopping the poller, and `remove_binding_by_name(name)` drops a single binding by name (used internally by `Bootstrap::on_logic_dll_unload`). `update_binding_combos(name, combos)` accepts cardinality changes (1 to N or N to 1) and replaces the registered combo list wholesale; an empty replacement is the explicit-unbound state and collapses the entry set to a single inert sentinel so the binding name remains addressable for a later non-empty update. When a cardinality change drops a held `register_hold` entry, that entry's `on_state_change(false)` release callback fires before the rebuild completes so the consumer never latches in the held state.
 
 **Bootstrap unload helpers:** `Bootstrap::on_logic_dll_unload(_all)` deliberately drops bindings without firing `on_state_change(false)` release callbacks, because user callbacks live in the unloading Logic DLL and running them under the Windows loader lock is the deadlock-or-crash vector that the v3.2.1 leak-on-purpose discipline forbids. Consumers that need a clean release on a planned unload (not driven by `DllMain` detach) should call `InputManager::clear_bindings()` or `remove_binding_by_name(name)` directly before invoking the unload helper.
 
 **Config:** `register_*()` functions use replace-on-duplicate semantics. If a new DLL registers a config item with the same section and INI key as an existing entry, the old registration is replaced rather than appended. This prevents doubled registrations across reload cycles without requiring an explicit `clear_registered_items()` call. Calling `clear_registered_items()` before re-registration is still supported but no longer required.
 
-`Config::register_press_combo` with an empty default registers the binding name with no keys, so a later `update_binding_combos` call (typically driven by an INI edit and `AutoReloadConfig`) can attach real combos to it. The previous behavior, where empty defaults were dropped from the registry, is gone.
+`Config::register_press_combo` with an empty default (or the `NONE` sentinel, case-insensitive whole-string only) registers the binding name with no keys, so a later `update_binding_combos` call (typically driven by an INI edit and `AutoReloadConfig`) can attach real combos to it. The same opt-out sentinels apply on every subsequent reload: setting the INI value to an empty string or `NONE` unbinds the binding silently while keeping the name addressable, so the bound -> unbound -> bound INI cycle round-trips cleanly. A non-empty INI value whose every comma-separated token fails to parse is logged at WARNING level naming the binding and the offending raw string.
+
+### Combo string syntax: opt-out and parse failures
+
+`Config::register_press_combo`, `register_hold_combo`, `register_key_combo`, and INI-driven `update_binding_combos` all share the same combo-list parser. The contract for the raw INI string value is:
+
+| Input form                                                                                           | Result                                                                                     | Log                                                              |
+|------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------|------------------------------------------------------------------|
+| Empty string (post-trim)                                                                             | Unbound binding; name stays registered for later updates                                   | None                                                             |
+| `NONE` (case-insensitive, surrounding whitespace allowed, whole-string only)                         | Unbound binding; name stays registered for later updates                                   | None                                                             |
+| Comma-separated list of valid combos (e.g. `F4,Ctrl+F4`)                                             | Binding bound to the OR of the parsed combos                                               | None                                                             |
+| Comma-separated list with one bad token (e.g. `F4,NONE`)                                             | Binding bound to the tokens that DID parse; bad tokens are dropped silently as unparseable | None                                                             |
+| Non-empty, non-`NONE` input where EVERY comma-separated token fails to parse (e.g. `Foo`, `Bar+Baz`) | Unbound binding; treated as a user typo                                                    | One WARNING line naming the binding and the offending raw string |
+
+The `NONE` sentinel is whole-string only by design: a `NONE` token nested inside a comma-separated list is not distinguishable from a key-name typo without a per-token lookup, and the OR-of-combos semantic makes "an unbound slot inside an OR-list" meaningless. Use `NONE` (or an empty value) at the whole-value level when you want to opt a binding out without removing the INI key.
 
 ---
 

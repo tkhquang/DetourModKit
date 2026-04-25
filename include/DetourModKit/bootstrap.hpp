@@ -131,14 +131,18 @@ namespace DetourModKit
          * @brief Drops the per-Logic-DLL state owned by the caller.
          * @details Composes HookManager::remove_hook for every entry in
          *          @p hook_names and InputManager::remove_binding_by_name
-         *          for every entry in @p binding_names. Names that do not
-         *          exist are skipped (logged at Debug). Idempotent: a
-         *          second call with the same names is a no-op.
+         *          for every entry in @p binding_names, then calls
+         *          Config::clear_registered_items() to drop the
+         *          registered setters because their call operators live
+         *          in the unloading DLL's .text; Logger and
+         *          ConfigWatcher are loader-side and outlive the unload.
+         *          Names that do not exist are skipped (logged at
+         *          Debug). Idempotent: a second call with the same names
+         *          is a no-op. Use DMK_Shutdown() for whole-process
+         *          teardown.
          *
-         *          Does NOT touch Logger or Config: callers that share a
-         *          host process across multiple Logic-DLL incarnations
-         *          want those subsystems to outlive the unload. Use
-         *          DMK_Shutdown() for whole-process teardown.
+         *          For guidance on choosing between this and
+         *          DMK_Shutdown(), see docs/hot-reload/README.md.
          *
          *          Safe to call from any thread except: must NOT be
          *          called from the InputPoller thread (would self-join)
@@ -151,6 +155,13 @@ namespace DetourModKit
          *          formatting) may throw; every throw site is caught and
          *          logged so no exception propagates to the caller.
          *
+         * @warning Stop and join every consumer-owned worker thread
+         *          before calling. A worker that fires a hook between
+         *          remove_hook returning and FreeLibrary reclaiming the
+         *          Logic DLL's .text pages will execute freed code. This
+         *          helper cannot prove worker quiescence; that is the
+         *          consumer's responsibility.
+         *
          * @param hook_names Names of hooks installed via HookManager.
          * @param binding_names Names of input bindings registered via
          *        InputManager (or via Config::register_press_combo).
@@ -162,26 +173,20 @@ namespace DetourModKit
          * @brief Drops every hook and binding registered through the
          *        process-wide singletons.
          * @details Composes HookManager::remove_all_hooks with
-         *          InputManager::clear_bindings under the same
-         *          loader-lock-safe, idempotent, exception-swallowing
-         *          contract as the named-list overload. Use when the
-         *          caller does not maintain an explicit registry of
-         *          hook or binding names.
+         *          InputManager::clear_bindings, then chains
+         *          Config::clear_registered_items() to drop the
+         *          registered setters because their call operators live
+         *          in the unloading DLL's .text; Logger and
+         *          ConfigWatcher are loader-side and outlive the unload.
+         *          The HookManager call is remove_all_hooks() (not
+         *          shutdown()) and the binding call is clear_bindings()
+         *          (not shutdown()) so both subsystems stay re-usable
+         *          for the next attach. Use when the caller does not
+         *          maintain an explicit registry of hook or binding
+         *          names. Use DMK_Shutdown() for whole-process teardown.
          *
-         *          Logger, Config, and the ConfigWatcher are
-         *          intentionally left running, matching the named-list
-         *          overload's partition between per-Logic-DLL state and
-         *          host-owned infrastructure. Use DMK_Shutdown() for
-         *          whole-process teardown.
-         *
-         *          The HookManager teardown call is remove_all_hooks(),
-         *          not shutdown(): both perform the same two-phase
-         *          drain, but remove_all_hooks() resets the shutdown
-         *          flag at the end so subsequent create_*_hook() calls
-         *          succeed for the next Logic-DLL incarnation. The
-         *          binding teardown call is clear_bindings(), not
-         *          shutdown(): the poller keeps running idle and is
-         *          ready to accept fresh bindings on the next attach.
+         *          For guidance on choosing between this and
+         *          DMK_Shutdown(), see docs/hot-reload/README.md.
          *
          *          Safe to call from any thread except: must NOT be
          *          called from the InputPoller thread (would self-join)
@@ -199,6 +204,13 @@ namespace DetourModKit
          *          Logic DLL's Shutdown() rips out the other Logic DLLs'
          *          hooks and bindings as well. The named-list overload
          *          is the correct choice in that topology.
+         *
+         * @warning Stop and join every consumer-owned worker thread
+         *          before calling. A worker that fires a hook between
+         *          remove_all_hooks returning and FreeLibrary reclaiming
+         *          the Logic DLL's .text pages will execute freed code.
+         *          This helper cannot prove worker quiescence; that is
+         *          the consumer's responsibility.
          */
         void on_logic_dll_unload_all() noexcept;
     } // namespace Bootstrap
