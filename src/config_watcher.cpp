@@ -20,9 +20,11 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -174,9 +176,9 @@ namespace DetourModKit
             // and tearing down Impl would invalidate the worker_thread_id
             // pointer the detached lambda still references. Pin the module
             // so trampoline and worker code pages remain mapped, request
-            // stop, then leak the entire Impl into a static vector that
-            // outlives the destructor. The same discipline as
-            // HookManager::~HookManager and Logger::shutdown_internal.
+            // stop, then leak the entire Impl onto the heap so it outlives
+            // the destructor. The same discipline as HookManager::~HookManager
+            // and Logger::shutdown_internal.
             detail::pin_current_module();
 
             if (m_impl->worker)
@@ -189,16 +191,33 @@ namespace DetourModKit
                 m_impl->worker->shutdown();
             }
 
-            // Releasing into the leak list keeps Impl alive for the rest
-            // of the process. The detached worker thread holds raw
-            // pointers and references into Impl members (worker_thread_id,
-            // captured strings); they must stay valid until the OS thread
-            // either observes the stop_token and exits or the process
-            // tears down. Either way the leaked storage is bounded:
-            // ~ConfigWatcher under loader lock runs at most once per
-            // Config-owned watcher per process.
-            static std::vector<std::unique_ptr<Impl>> s_leaked_impls;
-            s_leaked_impls.emplace_back(std::move(m_impl));
+            // Per-call heap leak: each invocation allocates its own cell,
+            // so prior leaked Impls are never overwritten and the leak is
+            // bounded by one cell per ~ConfigWatcher-under-loader-lock
+            // call. The detached worker thread holds raw pointers and
+            // references into Impl members (worker_thread_id, captured
+            // strings); they must stay valid until the OS thread either
+            // observes the stop_token and exits or the process tears down.
+            //
+            // new (std::nothrow) keeps this noexcept destructor honest by
+            // returning nullptr on OOM rather than turning a container
+            // emplace_back bad_alloc into std::terminate. On allocation
+            // failure, fall back to releasing the unique_ptr so the Impl
+            // storage is leaked directly without invoking ~Impl (which
+            // would tear down the detached StoppableWorker -- safe under
+            // a normal join, but not under loader lock).
+            static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<Impl>>,
+                          "Leak cell must be nothrow-move-constructible to keep ~ConfigWatcher noexcept honest.");
+
+            if (auto *leaked = new (std::nothrow)
+                    std::unique_ptr<Impl>(std::move(m_impl)))
+            {
+                static_cast<void>(leaked);
+            }
+            else
+            {
+                static_cast<void>(m_impl.release());
+            }
             return;
         }
 

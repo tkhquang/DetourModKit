@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
+#include <memory>
 #include <thread>
 #include <chrono>
+#include <type_traits>
 #include <windows.h>
 #include <atomic>
 
@@ -10,6 +12,15 @@
 #include "DetourModKit/async_logger.hpp"
 
 using namespace DetourModKit;
+
+// The loader-lock fallback in Logger::shutdown_internal heap-allocates a
+// std::shared_ptr<AsyncLogger> via new (std::nothrow) and leaks the cell
+// to outlive the destructor. Guard the leak cell's move constructor stays
+// noexcept so the call cannot turn the noexcept ~Logger contract into
+// std::terminate via a thrown move.
+static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
+              "std::shared_ptr<AsyncLogger> must be nothrow-move-constructible "
+              "for the Logger loader-lock leak path to keep ~Logger noexcept honest.");
 
 class LoggerTest : public ::testing::Test
 {

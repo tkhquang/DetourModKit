@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(DetourModKit VERSION 3.2.0 LANGUAGES CXX)
+project(DetourModKit VERSION 3.2.1 LANGUAGES CXX)
 
 # --- Standard and Compiler Options ---
 set(CMAKE_CXX_STANDARD 23)
@@ -146,9 +146,9 @@ configure_file(
 # For brand new files, a manual CMake re-run might still be needed.
 #
 # Notable modules picked up here (alphabetical, not exhaustive):
-#   async_logger, bootstrap, config, config_watcher, event_dispatcher,
-#   filesystem, hook_manager, input, logger, memory, profiler,
-#   scanner, win_file_stream, worker.
+# async_logger, bootstrap, config, config_watcher, event_dispatcher,
+# filesystem, hook_manager, input, logger, memory, profiler,
+# scanner, win_file_stream, worker.
 file(GLOB DETOURMODKIT_SOURCE_FILES
   CONFIGURE_DEPENDS
   "src/*.cpp"
@@ -201,6 +201,7 @@ else()
   # after -O3 on the scanner's compile line is the effective flag because
   # GCC and Clang resolve repeated -O levels by taking the last one.
   set(_dmk_scanner_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scanner.cpp")
+
   if(EXISTS "${_dmk_scanner_src}")
     set_source_files_properties("${_dmk_scanner_src}"
       TARGET_DIRECTORY DetourModKit
@@ -483,8 +484,10 @@ if(DMK_BUILD_TESTS OR DMK_BUILD_BENCHMARKS)
     message(STATUS "Building unit tests...")
     enable_testing()
   endif()
+
   if(DMK_BUILD_BENCHMARKS)
     message(STATUS "Building benchmarks...")
   endif()
+
   add_subdirectory(tests)
 endif()

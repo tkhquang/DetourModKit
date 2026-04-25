@@ -11,9 +11,10 @@
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <array>
-#include <vector>
+#include <type_traits>
 
 namespace DetourModKit
 {
@@ -200,9 +201,9 @@ namespace DetourModKit
 
         // If the writer thread was detached under loader lock, it may still
         // be accessing AsyncLogger members (queue_, flush_mutex_, etc.).
-        // Transfer ownership to a static so the object outlives the detached
-        // thread. The pinned module keeps code pages valid; this keeps the
-        // heap-allocated state valid.
+        // Transfer ownership to permanent heap storage so the object
+        // outlives the detached thread; pin the module so the code pages
+        // it executes from also remain mapped.
         //
         // The transfer is unconditional when loader lock is held: concurrent
         // log() callers may still own temporary shared_ptrs obtained from
@@ -211,14 +212,24 @@ namespace DetourModKit
         // a temporary outlives us would let the last temporary's destructor
         // race the detached writer thread.
         //
-        // The storage is append-only: a process that re-attaches after a
-        // shutdown (e.g. hot-reload) and hits loader lock again must not
-        // drop the prior handle, because its writer thread may still be
-        // accessing the old AsyncLogger state.
+        // The leak is per-call and append-only: each invocation allocates
+        // its own heap cell, so a process that re-attaches after shutdown
+        // (e.g. hot-reload) and hits loader lock again cannot drop a prior
+        // handle whose writer thread may still be running. Mirrors the
+        // HookManager loader-lock discipline: new (std::nothrow) keeps the
+        // noexcept destructor honest by returning nullptr on OOM rather
+        // than turning a std::vector::emplace_back bad_alloc into
+        // std::terminate inside this noexcept context.
         if (local_logger && detail::is_loader_lock_held())
         {
-            static std::vector<std::shared_ptr<AsyncLogger>> s_leaked_loggers;
-            s_leaked_loggers.emplace_back(std::move(local_logger));
+            static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
+                          "Leak cell must be nothrow-move-constructible to keep ~Logger noexcept honest.");
+
+            detail::pin_current_module();
+
+            auto *leaked = new (std::nothrow)
+                std::shared_ptr<AsyncLogger>(std::move(local_logger));
+            static_cast<void>(leaked);
         }
 
         {
