@@ -280,6 +280,21 @@ This is expected when casting `FARPROC` from `GetProcAddress` to a typed functio
 
 These tests enable the test-only `debug_snapshot_use_count()` accessor via `#define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1` at the top of the translation unit. The macro is not part of the public API and must not be defined in consumer code.
 
+## x86 Control-Flow Decoder Tests
+
+`tests/test_x86_decode.cpp` exercises the internal header `src/x86_decode.hpp`, which is consumed by `Scanner` for RIP-relative jump/call resolution. The decoders are small and pure, so each branch is driven by crafting a byte buffer and calling the decoder directly:
+
+| Test | What it proves |
+| ---- | -------------- |
+| `DecodeE9Rel32_WrongOpcodeRejected` / `DecodeEbRel8_WrongOpcodeRejected` | Opcode-mismatch short-circuit returns `std::nullopt` without reading the displacement. |
+| `DecodeE9Rel32_ValidForwardDisplacement` / `DecodeE9Rel32_ValidBackwardDisplacement` | `base + 5 + disp32` is computed for both positive and negative displacements. |
+| `DecodeEbRel8_NegativeDisplacementSignExtended` | `0xFE` on the displacement byte decodes as `-2`, proving the `std::int8_t` cast sign-extends correctly. |
+| `DecodeFf25Indirect_WrongFirstByteRejected` / `DecodeFf25Indirect_WrongSecondByteRejected` | Both halves of the compound `FF 25` opcode predicate are rejected independently. |
+| `DecodeFf25Indirect_UnreadableSlotRejected` | A displacement that places the indirect slot outside the user address range returns `std::nullopt`. |
+| `DecodeFf25Indirect_SlotProducesDestination` | Happy path: the slot pointer is materialised and returned verbatim. An aligned struct lays out the instruction and slot so the RIP-relative displacement is independent of padding. |
+
+The decoder header lives under `src/` (not the public include tree), so the test file adds `src/` to its include path and uses `DetourModKit::detail::` directly.
+
 ## Benchmark Harness
 
 `tests/bench_event_dispatcher.cpp` is a standalone microbenchmark executable. It is deliberately not a gtest binary so it can run under any build configuration (release, release+PGO, ASAN, etc.) without dragging in the gtest runtime.
@@ -310,7 +325,9 @@ tests/
 ├── fixtures/
 │   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
 ├── test_async_logger.cpp       # Async logger tests
+├── test_bootstrap.cpp          # DllMain lifecycle and instance-gate tests
 ├── test_config.cpp             # Configuration tests
+├── test_config_watcher.cpp     # INI hot-reload watcher tests
 ├── test_event_dispatcher.cpp   # Event dispatcher tests (incl. fast-path and snapshot stability)
 ├── test_filesystem.cpp         # Filesystem tests
 ├── test_format.cpp             # Format utilities tests
@@ -325,7 +342,9 @@ tests/
 ├── test_scanner.cpp            # AOB scanner tests
 ├── test_shutdown.cpp           # DMK_Shutdown orchestration tests
 ├── test_string.cpp             # String utilities tests
-└── test_win_file_stream.cpp    # Win32 file stream tests
+├── test_win_file_stream.cpp    # Win32 file stream tests
+├── test_worker.cpp             # StoppableWorker jthread RAII tests
+└── test_x86_decode.cpp         # x86 control-flow instruction decoders (internal)
 
 docs/tests/
 ├── README.md                   # This guide

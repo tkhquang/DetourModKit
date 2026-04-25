@@ -240,6 +240,149 @@ TEST_F(ConfigTest, KeyCombo_InvalidHex)
     EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x20));
 }
 
+TEST_F(ConfigTest, KeyCombo_CommentOnlyLineYieldsEmpty)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestKeys=   ; only a comment\n";
+    ini_file.close();
+
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
+                               [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; },
+                               "");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_TRUE(test_value.empty());
+}
+
+TEST_F(ConfigTest, KeyCombo_EmptyCommaSeparatorsAreSkipped)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestKeys=,,F3,,F4,,\n";
+    ini_file.close();
+
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
+                               [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; },
+                               "");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    ASSERT_EQ(test_value.size(), 2u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
+    EXPECT_EQ(test_value[1].keys[0], keyboard_key(0x73));
+}
+
+TEST_F(ConfigTest, KeyCombo_HexWithOnlyPrefixIsSkipped)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestKeys=0x, 0X, 0x72\n";
+    ini_file.close();
+
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
+                               [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; },
+                               "");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
+}
+
+TEST_F(ConfigTest, KeyCombo_HexValueAboveIntMaxIsSkipped)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    // 0xFFFFFFFF > INT_MAX, so the > limits check rejects it. The valid 0x10 still parses.
+    ini_file << "TestKeys=0xFFFFFFFF, 0x10\n";
+    ini_file.close();
+
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
+                               [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; },
+                               "");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
+}
+
+TEST_F(ConfigTest, KeyCombo_DoublePlusSkipsEmptySegment)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestKeys=Ctrl++F3\n";
+    ini_file.close();
+
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
+                               [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; },
+                               "");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    ASSERT_EQ(test_value.size(), 1u);
+    ASSERT_EQ(test_value[0].modifiers.size(), 1u);
+    EXPECT_EQ(test_value[0].modifiers[0], keyboard_key(0x11));
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
+}
+
+TEST_F(ConfigTest, KeyCombo_TrailingPlusParsedAsTrigger)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    // "Ctrl+" parses with Ctrl as the only non-empty segment and becomes
+    // the trigger key with no modifiers; the trailing empty segment is
+    // dropped by the !segment.empty() filter.
+    ini_file << "TestKeys=Ctrl+\n";
+    ini_file.close();
+
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
+                               [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; },
+                               "");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    ASSERT_EQ(test_value.size(), 1u);
+    EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x11));
+    EXPECT_TRUE(test_value[0].modifiers.empty());
+}
+
+TEST_F(ConfigTest, KeyCombo_OnlyPlusSignsYieldsEmpty)
+{
+    std::ofstream ini_file(test_ini_file_);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestKeys=+++\n";
+    ini_file.close();
+
+    Config::KeyComboList test_value;
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
+                               [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; },
+                               "F3");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_TRUE(test_value.empty());
+}
+
+TEST_F(ConfigTest, KeyCombo_DefaultParsesMultipleCombos)
+{
+    Config::KeyComboList captured;
+
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle",
+                               [&captured](const Config::KeyComboList &c)
+                               { captured = c; },
+                               "Ctrl+F3,Gamepad_LT+Gamepad_A");
+    EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
+
+    ASSERT_EQ(captured.size(), 2u);
+    EXPECT_EQ(captured[0].modifiers.size(), 1u);
+    EXPECT_EQ(captured[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(captured[1].modifiers.size(), 1u);
+    ASSERT_FALSE(captured[1].keys.empty());
+    EXPECT_EQ(captured[1].keys[0], DetourModKit::gamepad_button(DetourModKit::GamepadCode::A));
+}
+
 TEST_F(ConfigTest, ClearRegisteredItems)
 {
     int test_value = 0;
@@ -1113,7 +1256,7 @@ TEST_F(ConfigTest, ReRegistration_ReplacesCallback)
 
     Config::load(test_ini_file_.string());
 
-    // The old callback is replaced — only the new callback receives the loaded value.
+    // The old callback is replaced; only the new callback receives the loaded value.
     EXPECT_EQ(old_val, 10);
     EXPECT_EQ(new_val, 50);
 }
@@ -1162,7 +1305,7 @@ TEST_F(ConfigTest, ReRegistration_DifferentSectionsSameKey)
 
     Config::load(test_ini_file_.string());
 
-    // Same key name but different sections — both should be kept independently.
+    // Same key name but different sections; both should be kept independently.
     EXPECT_EQ(val1, 10);
     EXPECT_EQ(val2, 20);
 }
@@ -1180,7 +1323,7 @@ TEST_F(ConfigTest, SetterCalledOnRegistrationAndLoad)
     ASSERT_EQ(invocations.size(), 1u);
     EXPECT_EQ(invocations[0], 42);
 
-    // Load with no INI file — setter called again with default
+    // Load with no INI file: setter called again with default
     Config::load(test_ini_file_.string());
 
     ASSERT_EQ(invocations.size(), 2u);
@@ -1203,7 +1346,7 @@ TEST_F(ConfigTest, SetterCalledOnRegistrationAndLoad_WithFile)
     ASSERT_EQ(invocations.size(), 1u);
     EXPECT_EQ(invocations[0], 42);
 
-    // Load from INI — setter called with file value
+    // Load from INI: setter called with file value
     Config::load(test_ini_file_.string());
 
     ASSERT_EQ(invocations.size(), 2u);
@@ -1316,6 +1459,43 @@ TEST(InputBindingGuard, MoveTransfersOwnership)
     EXPECT_FALSE(flag->load());
 }
 
+TEST(InputBindingGuard, MoveAssignment_TransfersAndReleasesOldFlag)
+{
+    auto flag_a = std::make_shared<std::atomic<bool>>(true);
+    auto flag_b = std::make_shared<std::atomic<bool>>(true);
+
+    Config::InputBindingGuard a("a", flag_a);
+    Config::InputBindingGuard b("b", flag_b);
+
+    b = std::move(a);
+
+    EXPECT_FALSE(flag_b->load()) << "Move-assignment must release the prior flag";
+    EXPECT_TRUE(flag_a->load());
+    EXPECT_TRUE(b.is_active());
+    EXPECT_FALSE(a.is_active());
+}
+
+TEST(InputBindingGuard, MoveAssignment_SelfMoveIsNoOp)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    Config::InputBindingGuard g("self", flag);
+
+    auto &alias = g;
+    g = std::move(alias);
+
+    EXPECT_TRUE(g.is_active()) << "Self move-assign must not release the flag";
+    EXPECT_TRUE(flag->load());
+}
+
+TEST(InputBindingGuard, IsActiveReturnsFalseAfterExternalFlagFlip)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(false);
+    Config::InputBindingGuard g("flipped", flag);
+    EXPECT_FALSE(g.is_active());
+    flag->store(true, std::memory_order_release);
+    EXPECT_TRUE(g.is_active());
+}
+
 TEST(InputBindingGuard, DestructorReleasesFlag)
 {
     auto flag = std::make_shared<std::atomic<bool>>(true);
@@ -1397,10 +1577,9 @@ TEST_F(ConfigTest, Reload_SetterThrows_RemainingSettersStillRun)
                          [&first_value](int v)
                          { first_value.store(v, std::memory_order_release); },
                          0);
-    // Each register_int fires the setter once with the default value,
-    // load() fires it again with the parsed value, and reload() fires
-    // it a third time. We want the throw to happen only on the reload
-    // path, so start throwing from the third invocation onward.
+    // Setter fires once at register, once at load, once at reload; start
+    // throwing only on the third invocation so the failure lands on the
+    // reload path.
     Config::register_int("S", "Middle", "middle",
                          [&throw_count](int /*v*/)
                          {
@@ -1434,17 +1613,13 @@ TEST_F(ConfigTest, Reload_SetterThrows_RemainingSettersStillRun)
 
     EXPECT_EQ(first_value.load(std::memory_order_acquire), 10);
     EXPECT_EQ(third_value.load(std::memory_order_acquire), 30);
-    EXPECT_GE(throw_count.load(std::memory_order_relaxed), 3)
-        << "Middle setter must run at registration, load(), and reload().";
+    EXPECT_GE(throw_count.load(std::memory_order_relaxed), 3);
 }
 
 TEST_F(ConfigTest, Reload_AfterClear_ReturnsFalse_BecausePathCleared)
 {
-    // clear_registered_items() clears both the items list AND the
-    // remembered INI path. reload() returns false because it checks the
-    // remembered path first -- the fact that items are also empty is
-    // incidental. This test exercises the no-last-loaded-path branch,
-    // not a "no items" branch.
+    // clear_registered_items() also clears the remembered INI path, so
+    // reload() takes the no-last-loaded-path branch (not a no-items one).
     int value = 0;
     Config::register_int("S", "K", "k",
                          [&value](int v)
@@ -1504,17 +1679,16 @@ TEST_F(ConfigTest, ReloadHotkey_EmptyComboRejected)
 
 TEST_F(ConfigTest, ReloadHotkey_ActuallyFiresOnPress)
 {
-    // Catches NEW-BUG A: register_reload_hotkey was discarding the
-    // [[nodiscard]] InputBindingGuard, so ~InputBindingGuard fired
-    // immediately and released the enabled flag. The bound callback
-    // existed but was gated off forever.
+    // Regression guard: register_reload_hotkey() must retain the
+    // InputBindingGuard so the binding's enabled flag stays true. If the
+    // guard were discarded, ~InputBindingGuard would release the flag and
+    // the bound callback could never fire.
     //
-    // The InputManager has no in-process press-injection hook (the input
-    // poll thread only reads real OS state), so we verify the observable
-    // symptom of the bug: after register_reload_hotkey() returns, the
-    // binding must remain active. If the guard had been destructed, the
-    // binding -- even if still registered in InputManager -- would never
-    // invoke the user callback because the gate flag is clear.
+    // InputManager has no press-injection hook from user code, so we
+    // prove the callback path indirectly: after registration the
+    // binding's enabled flag must still be true. We cannot peek the flag
+    // directly, so we call Config::reload() (what the press callback
+    // does) and observe the setter fire.
     InputManager::get_instance().shutdown();
 
     int value = 0;
@@ -1532,26 +1706,15 @@ TEST_F(ConfigTest, ReloadHotkey_ActuallyFiresOnPress)
 
     ASSERT_TRUE(Config::register_reload_hotkey("ReloadConfig", "F5"));
 
-    // After registration, the binding's shared cancellation flag must
-    // still be true. If the guard had been discarded, the flag would
-    // already be false. We cannot peek the flag directly, but we can
-    // prove the callback path by calling Config::reload() (which is
-    // exactly what the hotkey's press callback does) and observing the
-    // setter fires.
     {
         std::ofstream f(test_ini_file_);
         f << "[S]\nK=77\n";
     }
     ASSERT_TRUE(Config::reload());
-    EXPECT_EQ(value, 77) << "Reload path must still fire the setter; "
-                            "this mirrors what the held hotkey guard "
-                            "enables when a real press arrives.";
+    EXPECT_EQ(value, 77);
 
-    // A second registration with the same INI key must replace the
-    // previous guard in place, not stack -- otherwise ~vector would
-    // accumulate a guard per reload cycle. Registering again with a
-    // different combo proves the in-place replacement path compiles,
-    // links, and returns true.
+    // Re-register with a different combo: the second call must replace
+    // the first guard in place rather than stacking per reload cycle.
     ASSERT_TRUE(Config::register_reload_hotkey("ReloadConfig", "F6"));
 
     InputManager::get_instance().shutdown();
@@ -1559,23 +1722,19 @@ TEST_F(ConfigTest, ReloadHotkey_ActuallyFiresOnPress)
 
 TEST_F(ConfigTest, RegisterReloadHotkey_InvalidCombo_Rejected)
 {
-    // FIX F: a non-empty but unparseable combo like "NotAKey" produces
-    // zero bindings inside register_press_combo. The hotkey would
-    // otherwise appear registered but never fire. register_reload_hotkey
-    // must reject the registration instead.
+    // Unparseable combos like "NotAKey" produce zero bindings inside
+    // register_press_combo. register_reload_hotkey must reject the
+    // registration rather than return success for a silent no-op.
     InputManager::get_instance().shutdown();
     EXPECT_FALSE(Config::register_reload_hotkey("ReloadConfig", "NotAKey"));
 }
 
 TEST_F(ConfigTest, DisableAutoReload_FromReloadCallback_DoesNotDeadlock)
 {
-    // FIX G: a setter (or on_reload callback) that fires on the watcher
-    // thread and calls disable_auto_reload() would join the worker from
-    // inside itself, raising resource_deadlock_would_occur. The fix
-    // short-circuits the self-join and logs instead. Assert the test
-    // process does not hang and the watcher remains attached (the
-    // subsequent disable_auto_reload() from the main thread must clean
-    // it up normally).
+    // A reload callback that runs on the watcher thread and itself calls
+    // disable_auto_reload() must not self-join the worker. The self-join
+    // is short-circuited and a later disable_auto_reload() from the main
+    // thread must still clean up normally.
     Config::disable_auto_reload();
 
     std::atomic<int> current_value{0};
@@ -1595,8 +1754,7 @@ TEST_F(ConfigTest, DisableAutoReload_FromReloadCallback_DoesNotDeadlock)
                                          [&](bool /*content_changed*/)
                                          {
                                              on_reload_hits.fetch_add(1, std::memory_order_relaxed);
-                                             // This self-call must be rejected rather
-                                             // than deadlocking the worker thread.
+                                             // Self-call must not deadlock the worker.
                                              Config::disable_auto_reload();
                                          }),
               Config::AutoReloadStatus::Started);
@@ -1622,8 +1780,6 @@ TEST_F(ConfigTest, DisableAutoReload_FromReloadCallback_DoesNotDeadlock)
     EXPECT_GE(on_reload_hits.load(std::memory_order_relaxed), 1)
         << "on_reload callback must have run at least once";
 
-    // The worker was not self-joined; the watcher is still attached and
-    // cleaning it up from the main thread must succeed promptly.
     EXPECT_NO_THROW(Config::disable_auto_reload());
 }
 
@@ -1698,13 +1854,8 @@ TEST_F(ConfigTest, AutoReload_EnableWithoutPriorLoadIsIgnored)
     EXPECT_NO_THROW(Config::disable_auto_reload());
 }
 
-// --- Feature 1: typed return from enable_auto_reload ---
-
 TEST_F(ConfigTest, AutoReload_Enable_ReportsNoPriorLoad)
 {
-    // Force a clean slate and assert the NoPriorLoad status before any
-    // load() call. No watcher is installed, so disable_auto_reload() is
-    // a no-op but must still be safe.
     Config::disable_auto_reload();
     Config::clear_registered_items();
 
@@ -1731,8 +1882,6 @@ TEST_F(ConfigTest, AutoReload_Enable_ReportsAlreadyRunning)
 
     EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{100}),
               Config::AutoReloadStatus::Started);
-    // Second call with a watcher already attached must return
-    // AlreadyRunning without tearing the existing watcher down.
     EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{100}),
               Config::AutoReloadStatus::AlreadyRunning);
 
@@ -1741,11 +1890,8 @@ TEST_F(ConfigTest, AutoReload_Enable_ReportsAlreadyRunning)
 
 TEST_F(ConfigTest, AutoReload_Enable_ReportsStartFailed)
 {
-    // Strategy: load() succeeds against a valid temp INI, then we
-    // remove the parent directory on disk before calling
-    // enable_auto_reload(). ConfigWatcher::start() opens the parent
-    // directory with CreateFileW; the missing directory drives the
-    // start handshake into its failure path.
+    // Remove the parent directory between load() and enable_auto_reload()
+    // so ConfigWatcher::start()'s CreateFileW call fails.
     Config::disable_auto_reload();
 
     const auto temp_dir = std::filesystem::temp_directory_path() /
@@ -1777,12 +1923,8 @@ TEST_F(ConfigTest, AutoReload_Enable_ReportsStartFailed)
 
 TEST_F(ConfigTest, AutoReload_Enable_AfterStartFailed_RecoversOnRetry)
 {
-    // Regression guard: after enable_auto_reload() returns StartFailed,
-    // a later enable_auto_reload() call must be able to establish a
-    // fresh watcher once the backing file/directory exists again. This
-    // verifies the StartFailed -> Started recovery path: a failed start
-    // must not latch the watcher slot into a state that rejects later
-    // retries as AlreadyRunning.
+    // A failed start must not latch the watcher slot as AlreadyRunning;
+    // a later retry once the backing file exists must report Started.
     Config::disable_auto_reload();
 
     const auto temp_dir = std::filesystem::temp_directory_path() /
@@ -1802,11 +1944,8 @@ TEST_F(ConfigTest, AutoReload_Enable_AfterStartFailed_RecoversOnRetry)
                          0);
     ASSERT_NO_THROW(Config::load(ini_path.string()));
 
-    // Step 1: remove the watched directory to drive enable_auto_reload()
-    // into its StartFailed branch. Fix 1 guarantees the stored INI path
-    // survives this failed start (enable_auto_reload does not call
-    // load() on failure, and the last successful load() above already
-    // stashed the path).
+    // Remove the watched directory to drive start() into StartFailed.
+    // The stored INI path survives the failed start.
     std::error_code ec;
     std::filesystem::remove_all(temp_dir, ec);
     ASSERT_FALSE(ec) << "Failed to remove temp dir: " << ec.message();
@@ -1814,18 +1953,14 @@ TEST_F(ConfigTest, AutoReload_Enable_AfterStartFailed_RecoversOnRetry)
     EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}),
               Config::AutoReloadStatus::StartFailed);
 
-    // Step 2: recreate the directory and file at the same path so the
-    // next start handshake can open it. We do not need to re-call
-    // Config::load(): the stored path is still the original ini_path
-    // because the prior enable_auto_reload() failure did not touch it.
+    // Recreate the directory; the stored path is unchanged so the
+    // retried start handshake can open it without another load().
     std::filesystem::create_directories(temp_dir);
     {
         std::ofstream f(ini_path);
         f << "[S]\nK=2\n";
     }
 
-    // Step 3: retry. Must report Started, not AlreadyRunning -- the
-    // StartFailed path resets the watcher slot so a retry is possible.
     EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}),
               Config::AutoReloadStatus::Started);
 
@@ -1833,8 +1968,6 @@ TEST_F(ConfigTest, AutoReload_Enable_AfterStartFailed_RecoversOnRetry)
 
     std::filesystem::remove_all(temp_dir, ec);
 }
-
-// --- Feature 3: content-hash skip ---
 
 TEST_F(ConfigTest, Reload_ContentUnchanged_SkipsSetters)
 {
@@ -1917,31 +2050,16 @@ TEST_F(ConfigTest, Reload_FileUnreadable_FallsBackToReload)
 
 TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
 {
-    // The ReloadServicer is private -- there is no hooked injection path
-    // into its request_reload() from the test surface without adding a
-    // test-only API. Instead, we exercise the *same underlying coalescing
-    // guarantee* from the public surface: the content-hash short-circuit
-    // ensures that N parallel reload() calls against unchanged bytes run
-    // the setters at most once (for the initial load) -- any subsequent
-    // unchanged-bytes call short-circuits. This is what makes a burst of
-    // servicer-driven reloads cheap even when presses coalesce to more
-    // than one trip through the servicer loop.
-    //
-    // Why the pure-servicer end-to-end is not tested here: hooking into
-    // the servicer's request_reload() from outside config.cpp would
-    // require exposing either a test-only namespace or a friend class,
-    // both of which the task scope forbade as "minimally needed for the
-    // test". The parallel-reload test below gives us the behavior that
-    // matters (no double work on unchanged bytes) without that intrusion.
+    // Exercise the coalescing guarantee from the public surface: N
+    // parallel reload() calls against unchanged bytes run the setter at
+    // most once; subsequent unchanged-bytes calls short-circuit on the
+    // content hash.
     std::atomic<int> setter_hits{0};
     Config::register_int("S", "K", "k",
                          [&](int /*v*/)
                          {
-                             // Simulate setter work so overlapping
-                             // reload() calls from multiple threads
-                             // actually race. The hash-skip path cuts
-                             // before the setter; a collapsing bug
-                             // would produce many invocations here.
+                             // Sleep so overlapping reload() calls from
+                             // multiple threads actually race.
                              std::this_thread::sleep_for(std::chrono::milliseconds{10});
                              setter_hits.fetch_add(1, std::memory_order_relaxed);
                          },
@@ -1954,13 +2072,8 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
     ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
     const int baseline = setter_hits.load(std::memory_order_relaxed);
 
-    // Fire 10 reload() calls in parallel against the same unchanged
-    // file. The hash-skip path must drop all but at most the first into
-    // a no-op. Note that Config::reload() itself serialises on
-    // getConfigMutex() -- so the "first" reload that wins the race may
-    // install (or confirm) the hash before the rest observe it. The
-    // expected setter-hit count delta after all threads complete is 0
-    // (all ten observed unchanged bytes).
+    // 10 parallel reload() calls against unchanged bytes. Config::reload
+    // serialises on getConfigMutex(); expected setter-hit delta is 0.
     constexpr int kThreads = 10;
     std::vector<std::thread> threads;
     threads.reserve(kThreads);
@@ -1973,9 +2086,8 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
         t.join();
     }
 
-    // Upper bound is 1: even if two threads race past the hash check in
-    // a narrow window, no thread would see mismatched bytes because the
-    // file was never rewritten. In practice we expect exactly 0.
+    // Upper bound 1 tolerates a race past the hash check in a narrow
+    // window; expected delta is 0.
     const int delta = setter_hits.load(std::memory_order_relaxed) - baseline;
     EXPECT_LE(delta, 1)
         << "Content-hash skip must collapse concurrent unchanged-bytes reloads "
@@ -1984,9 +2096,8 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
 
 TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
 {
-    // End-to-end coverage for the TOCTOU-B fix: after the content-hash
-    // skip path fires, the user-facing on_reload(content_changed) must
-    // deliver content_changed == false.
+    // After a watcher-driven hash-skip, the user-facing on_reload
+    // callback must deliver content_changed == false.
     Config::disable_auto_reload();
 
     std::atomic<int> current_value{0};
@@ -2045,16 +2156,10 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
     ASSERT_TRUE(wait_for_hit_count(1, std::chrono::seconds{3}))
         << "Watcher never observed the first (changed-bytes) write.";
 
-    // Phase 2: touch the file without changing bytes. The filesystem
-    // watcher fires on last_write_time change, but the content-hash
-    // path must suppress the setter work and deliver content_changed=false
-    // to the user callback.
+    // Phase 2: rewrite with identical bytes to bump mtime without
+    // changing the content hash. on_reload must deliver
+    // content_changed = false.
     {
-        // Bump mtime by rewriting identical bytes. (Setting
-        // last_write_time directly is also valid but trickier on Windows
-        // because FILE_NOTIFY_CHANGE_LAST_WRITE requires the write to
-        // come from a file handle; overwrite-with-same-bytes is the
-        // most reliable cross-editor simulation.)
         std::ofstream f(test_ini_file_);
         f << "[S]\nK=43\n";
     }
@@ -2064,8 +2169,6 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
 
     Config::disable_auto_reload();
 
-    // The final delivered bool must be content_changed=false, proving
-    // the hash-skip reached the on_reload boundary.
     std::lock_guard<std::mutex> lock(hits_mutex);
     ASSERT_GE(hits.size(), 2u);
     EXPECT_TRUE(hits.front())
@@ -2076,10 +2179,8 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
 
 TEST_F(ConfigTest, Reload_EmptyFile_DoesNotCrash)
 {
-    // Empty INI: SimpleIni accepts a zero-byte buffer as SI_OK with no
-    // sections, so load() must return normally and subsequent reload()
-    // calls against the still-empty bytes must short-circuit on hash
-    // match.
+    // SimpleIni treats a zero-byte buffer as SI_OK with no sections; a
+    // subsequent reload() against the same empty bytes must hash-skip.
     std::atomic<int> setter_hits{0};
     Config::register_int("S", "K", "k",
                          [&](int /*v*/)
@@ -2108,11 +2209,8 @@ TEST_F(ConfigTest, Reload_EmptyFile_DoesNotCrash)
 
 TEST_F(ConfigTest, Reload_HashResetOnLoadFailure)
 {
-    // A prior successful load() stores a hash. A subsequent load()
-    // against a nonexistent path must reset (clear) that hash, otherwise
-    // the next successful load() could spuriously hash-skip a reload
-    // because the stale hash happens to match the new file's hash by
-    // coincidence. This is a latent-bug regression guard.
+    // A load() against a missing file must clear the cached content
+    // hash so a later successful load() cannot spuriously hash-skip.
     std::atomic<int> setter_hits{0};
     Config::register_int("S", "K", "k",
                          [&](int /*v*/)
@@ -2125,35 +2223,21 @@ TEST_F(ConfigTest, Reload_HashResetOnLoadFailure)
     }
     ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
 
-    // Point load() at a path that cannot be opened. load() logs and
-    // keeps defaults -- and must clear the cached hash. Deriving the
-    // missing-file name from test_ini_file_ inherits both the pid and
-    // the per-test counter, so uniqueness holds across parallel runs
-    // and repeated invocations in the same shell.
+    // Deriving the missing path from test_ini_file_ inherits the pid +
+    // per-test counter so uniqueness holds under parallel runs.
     const auto missing = test_ini_file_.parent_path() /
                          (test_ini_file_.stem().string() + "_missing.ini");
-    std::filesystem::remove(missing); // ensure absence
+    std::filesystem::remove(missing);
     ASSERT_FALSE(std::filesystem::exists(missing));
     ASSERT_NO_THROW(Config::load(missing.string()));
 
-    // Recreate the original file with identical bytes. If the hash was
-    // *not* reset on the failed load, reload() here would see the stale
-    // hash == new hash and short-circuit, leaving the setter count
-    // unchanged. The fix resets the hash, so reload() must re-run
-    // setters.
     {
         std::ofstream f(test_ini_file_);
         f << "[S]\nK=5\n";
     }
-    // Tell reload() to target this path again by calling load() once
-    // more -- load() both re-establishes the path and recomputes the
-    // hash cleanly.
     ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
     const int after_second_load = setter_hits.load(std::memory_order_relaxed);
 
-    // Immediate reload with unchanged bytes should hash-skip (a hash
-    // exists again, recomputed from the real bytes). This verifies the
-    // hash is *resumed* correctly after the reset.
     EXPECT_TRUE(Config::reload());
     EXPECT_EQ(setter_hits.load(std::memory_order_relaxed), after_second_load)
         << "Post-reset re-load must re-establish a valid hash so unchanged-bytes reloads skip.";
@@ -2161,15 +2245,9 @@ TEST_F(ConfigTest, Reload_HashResetOnLoadFailure)
 
 TEST_F(ConfigTest, Reload_HashResetOnReadFailure)
 {
-    // Same invariant as Reload_HashResetOnLoadFailure, but exercised
-    // through the reload() path instead of load(). A prior successful
-    // load() stores a hash; if reload() then hits a read failure (file
-    // temporarily unreadable) and leaves that hash intact, a later
-    // reload() finding identical bytes would match the stale hash and
-    // hash-skip -- silently leaving in-memory state at the defaults
-    // produced by the failed reload. reload() must clear the cached
-    // hash on read failure so the recovery reload actually re-runs
-    // setters.
+    // As Reload_HashResetOnLoadFailure, but the clearing happens on a
+    // reload() read failure. A stale hash would let a subsequent
+    // identical-bytes reload hash-skip and leave state at defaults.
     std::atomic<int> setter_hits{0};
     Config::register_int("S", "K", "k",
                          [&](int /*v*/)
@@ -2183,8 +2261,8 @@ TEST_F(ConfigTest, Reload_HashResetOnReadFailure)
     ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
     const int after_load = setter_hits.load(std::memory_order_relaxed);
 
-    // Simulate a read failure by removing the file. reload() targets
-    // the path remembered from the last load() and will fail to open.
+    // Remove the file; reload() targets the path remembered from the
+    // last load() and will fail to open.
     ASSERT_TRUE(std::filesystem::remove(test_ini_file_));
     ASSERT_FALSE(std::filesystem::exists(test_ini_file_));
     EXPECT_TRUE(Config::reload());
@@ -2192,13 +2270,6 @@ TEST_F(ConfigTest, Reload_HashResetOnReadFailure)
     EXPECT_GT(after_failed_reload, after_load)
         << "reload() on a disappeared file must still run setters with defaults.";
 
-    // Recreate the file with the exact bytes from the first successful
-    // load. Without the fix, the cached hash from that first load is
-    // still in place, matches the recreated bytes, and reload() would
-    // short-circuit without re-running setters -- leaving in-memory
-    // state at the defaults set by the failed reload above. With the
-    // fix, the cached hash was cleared on read failure, so reload()
-    // adopts the new hash and actually re-runs setters.
     {
         std::ofstream f(test_ini_file_);
         f << "[S]\nK=5\n";

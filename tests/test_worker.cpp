@@ -81,3 +81,82 @@ TEST(StoppableWorker, DestructorOfRunningWorkerDoesNotThrow)
     });
     EXPECT_TRUE(saw_stop.load());
 }
+
+TEST(StoppableWorker, EmptyBodyDoesNotStartThreadAndIsNotRunning)
+{
+    StoppableWorker w("unit-worker-empty", std::function<void(std::stop_token)>{});
+    EXPECT_FALSE(w.is_running());
+    EXPECT_EQ(w.name(), "unit-worker-empty");
+
+    EXPECT_NO_THROW(w.request_stop());
+    EXPECT_NO_THROW(w.shutdown());
+    EXPECT_NO_THROW(w.shutdown());
+    EXPECT_FALSE(w.is_running());
+}
+
+TEST(StoppableWorker, UnknownExceptionFromBodyIsSwallowed)
+{
+    // Raw `throw 42` must land in the catch-all arm; escaping it would
+    // call std::terminate before the test can finish.
+    std::atomic<bool> entered{false};
+    EXPECT_NO_THROW({
+        StoppableWorker w("unit-worker-unknown-throw",
+                          [&entered](std::stop_token)
+                          {
+                              entered.store(true, std::memory_order_release);
+                              throw 42;
+                          });
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    });
+    EXPECT_TRUE(entered.load());
+}
+
+TEST(StoppableWorker, ShutdownThenRequestStopIsNoOp)
+{
+    std::atomic<int> ticks{0};
+    StoppableWorker w("unit-worker-shutdown-then-stop",
+                      [&ticks](std::stop_token st)
+                      {
+                          while (!st.stop_requested())
+                          {
+                              ticks.fetch_add(1, std::memory_order_relaxed);
+                              std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                          }
+                      });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    w.shutdown();
+    EXPECT_FALSE(w.is_running());
+    EXPECT_NO_THROW(w.request_stop());
+    EXPECT_NO_THROW(w.shutdown());
+}
+
+TEST(StoppableWorker, RequestStopIsIdempotent)
+{
+    std::atomic<bool> observed{false};
+    StoppableWorker w("unit-worker-idempotent-stop",
+                      [&observed](std::stop_token st)
+                      {
+                          while (!st.stop_requested())
+                          {
+                              std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                          }
+                          observed.store(true, std::memory_order_release);
+                      });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    w.request_stop();
+    w.request_stop();
+    w.request_stop();
+    w.shutdown();
+    EXPECT_TRUE(observed.load());
+}
+
+TEST(StoppableWorker, NameAccessorReturnsConstructionName)
+{
+    StoppableWorker w("unit-worker-named", [](std::stop_token st)
+                      {
+                          while (!st.stop_requested())
+                          {
+                              std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                          } });
+    EXPECT_EQ(w.name(), "unit-worker-named");
+}

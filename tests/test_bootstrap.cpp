@@ -71,6 +71,84 @@ TEST(BootstrapUnitTest, RequestShutdownBeforeAttachIsNoOp)
     EXPECT_NO_THROW(Bootstrap::request_shutdown());
 }
 
+TEST(BootstrapUnitTest, ModuleHandleReturnsNullBeforeAttach)
+{
+    EXPECT_EQ(Bootstrap::module_handle(), nullptr);
+}
+
+TEST(BootstrapUnitTest, NullHModuleSkipsDisableThreadLibraryCalls)
+{
+    CallbackSignals sig;
+    Bootstrap::ModInfo info{};
+    info.prefix = "BS_TEST";
+    info.log_file = "bs_test_nullmod.log";
+    info.game_process_name = "DefinitelyNotTheCurrentProcess_null.exe";
+    info.instance_mutex_prefix = "BS_Test_Mutex_NullMod_";
+
+    const BOOL result = Bootstrap::on_dll_attach(
+        nullptr,
+        info,
+        [&sig]() noexcept
+        {
+            sig.init_calls.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        },
+        [&sig]() noexcept
+        {
+            sig.shutdown_calls.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    EXPECT_EQ(result, FALSE);
+    EXPECT_EQ(sig.init_calls.load(), 0);
+    EXPECT_EQ(sig.shutdown_calls.load(), 0);
+}
+
+TEST(BootstrapUnitTest, EmptyProcessNamePassesGateButMutexCollisionStillFails)
+{
+    // Pre-own the mutex name so the attach still fails without arming the
+    // shutdown event or the worker thread.
+    const std::string_view prefix = "BS_Test_Mutex_EmptyGate_";
+
+    wchar_t expected_name[128]{};
+    std::wstring wprefix;
+    wprefix.reserve(prefix.size());
+    for (char c : prefix)
+    {
+        wprefix.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+    }
+    const int n = wsprintfW(expected_name, L"%s%lu", wprefix.c_str(),
+                            GetCurrentProcessId());
+    ASSERT_GT(n, 0);
+
+    HANDLE pre_owned = CreateMutexW(nullptr, FALSE, expected_name);
+    ASSERT_NE(pre_owned, nullptr);
+    ASSERT_EQ(GetLastError(), 0u);
+
+    CallbackSignals sig;
+    Bootstrap::ModInfo info{};
+    info.prefix = "BS_TEST";
+    info.log_file = "bs_test_emptygate.log";
+    info.game_process_name = "";
+    info.instance_mutex_prefix = prefix;
+
+    const BOOL result = Bootstrap::on_dll_attach(
+        GetModuleHandleW(nullptr),
+        info,
+        [&sig]() noexcept
+        {
+            sig.init_calls.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        },
+        [&sig]() noexcept
+        {
+            sig.shutdown_calls.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    EXPECT_EQ(result, FALSE);
+    EXPECT_EQ(sig.init_calls.load(), 0);
+    CloseHandle(pre_owned);
+}
+
 TEST(BootstrapUnitTest, ProcessGateMismatchReturnsFalse)
 {
     CallbackSignals sig;
@@ -229,4 +307,56 @@ TEST_F(BootstrapIntegrationTest, HappyPathAttachInitShutdown)
     EXPECT_LT(elapsed, 2s);
 
     attached = false;
+}
+
+TEST_F(BootstrapIntegrationTest, InitAndShutdownExceptionsAreCaught)
+{
+    // Drain any globals left set by a prior successful attach (HappyPath
+    // leaves g_shutdown_event / g_worker_thread non-null for its design);
+    // this is the first on_dll_detach call in the process and will win
+    // the CAS and clear the static handles.
+    Bootstrap::on_dll_detach(FALSE);
+
+    const std::string exe_name = current_exe_basename();
+    ASSERT_FALSE(exe_name.empty());
+
+    Bootstrap::ModInfo info{};
+    info.prefix = "BS_TEST";
+    info.log_file = "bs_test_throws.log";
+    info.game_process_name = exe_name;
+    info.instance_mutex_prefix = "BS_Test_Mutex_Throws_";
+
+    auto init_fn = [this]() -> bool
+    {
+        sig.init_calls.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard lock(sig.m);
+            sig.init_done.store(true, std::memory_order_release);
+        }
+        sig.cv.notify_all();
+        throw std::runtime_error("init failure");
+    };
+
+    auto shutdown_fn = [this]()
+    {
+        sig.shutdown_calls.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard lock(sig.m);
+            sig.shutdown_done.store(true, std::memory_order_release);
+        }
+        sig.cv.notify_all();
+        throw std::runtime_error("shutdown failure");
+    };
+
+    const BOOL result = Bootstrap::on_dll_attach(
+        GetModuleHandleW(nullptr), info, init_fn, shutdown_fn);
+    ASSERT_EQ(result, TRUE);
+    attached = true;
+
+    ASSERT_TRUE(sig.wait_for_init(kTestTimeout));
+    EXPECT_EQ(sig.init_calls.load(), 1);
+
+    Bootstrap::request_shutdown();
+    ASSERT_TRUE(sig.wait_for_shutdown(kTestTimeout));
+    EXPECT_EQ(sig.shutdown_calls.load(), 1);
 }
