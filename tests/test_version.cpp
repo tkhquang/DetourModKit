@@ -15,7 +15,7 @@ namespace
 
     TEST(VersionTest, VersionStringMatchesMacros)
     {
-        EXPECT_STREQ(DMK_VERSION_STRING, "3.2.2");
+        EXPECT_STREQ(DMK_VERSION_STRING, "3.2.3");
     }
 
     TEST(VersionTest, AtLeastComparisonsAreCorrect)
