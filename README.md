@@ -50,6 +50,8 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
   - Per-object interception of virtual calls (e.g., D3D device methods, game AI interfaces)
   - Apply a single hooked vtable to multiple objects
   - Safe callback-based access to hooked methods via `with_vmt_method()`
+- **Convenience helpers**: `try_install_inline` / `try_install_inline_aob` / `try_install_mid` / `try_install_mid_aob` fuse `create_*_hook` with single-line Error logging on failure, returning `optional<string>` of the registered name
+- **Duplicate-target query**: `HookManager::is_target_already_hooked(addr)` reports whether the local registry already inline-hooks a given address (does not see hooks installed by other statically-linked DMK consumers in the same process)
 
 </details>
 
@@ -62,6 +64,7 @@ DetourModKit is a lightweight C++ toolkit designed to simplify common tasks in g
   - Format: `modifier+trigger` (e.g., `Ctrl+Shift+F3`)
   - Comma-separated independent combos (e.g., `F3,Gamepad_LT+Gamepad_B`)
   - Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats
+- Convenience helpers: `register_log_level` (parses an INI string into a `Logger::set_log_level` call) and `register_atomic<T>` for `int`/`bool`/`float` (writes the parsed value into a caller-supplied `std::atomic<T>` with `memory_order_relaxed`)
 - **Hot-reload** (see [Config Hot-Reload Guide](docs/config-hot-reload/README.md)):
   - `Config::reload()` re-runs every registered setter against the last-loaded INI without touching registrations; skips setters when the on-disk bytes are byte-identical to the last load (FNV-1a content hash)
   - `Config::enable_auto_reload()` starts a background `ConfigWatcher` (`config_watcher.hpp`) that debounces editor save-flurries and triggers `reload()` automatically; returns an `AutoReloadStatus` enum indicating outcome
@@ -210,6 +213,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Load input codes from INI files (named keys, hex VK codes, or mixed)
 - Named key resolution uses binary search for efficient lookup
 - `register_press` and `register_hold` accept `KeyComboList` directly for zero-boilerplate binding of config-parsed key combos
+- Live registration: `register_press` / `register_hold` append bindings to a running poller, and `clear_bindings()` / `remove_binding_by_name()` drop bindings without stopping the poll thread, so consumers can re-arm input on hot-reload without a full restart
 
 </details>
 
@@ -224,6 +228,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - `DMK_Shutdown()` is invoked unconditionally after the user shutdown function, guaranteeing the correct teardown order
 - `request_shutdown()` signals the worker to drain so a mod can trigger its own unload before `FreeLibrary` and keep teardown off the loader lock (see the [Hot-Reload Guide](docs/hot-reload/README.md))
 - Handles the `DLL_PROCESS_DETACH` process-exit vs dynamic-unload distinction automatically via `lpvReserved`
+- `on_logic_dll_unload(hook_names, binding_names)` drops only the per-Logic-DLL hooks and bindings owned by the caller, leaving Logger and Config alive for whichever container hosts the next Logic-DLL incarnation
+- `on_logic_dll_unload_all()` is the catch-all variant for callers without an explicit name registry; in a host that loads multiple Logic DLLs sharing one DMK instance, prefer the named-list overload because the catch-all rips out every Logic DLL's state
 
 </details>
 

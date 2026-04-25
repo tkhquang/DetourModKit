@@ -891,6 +891,17 @@ void DetourModKit::Config::register_string(std::string_view section, std::string
     }
 }
 
+void DetourModKit::Config::register_log_level(std::string_view section, std::string_view ini_key,
+                                              std::string_view default_value)
+{
+    register_string(section, ini_key, "Log level",
+                    [](const std::string &value)
+                    {
+                        Logger::get_instance().set_log_level(Logger::string_to_log_level(value));
+                    },
+                    std::string(default_value));
+}
+
 void DetourModKit::Config::register_key_combo(std::string_view section, std::string_view ini_key,
                                               std::string_view log_key_name, std::function<void(const KeyComboList &)> setter,
                                               std::string_view default_value_str)

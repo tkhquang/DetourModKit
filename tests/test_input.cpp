@@ -584,7 +584,7 @@ TEST_F(InputManagerTest, ShutdownIdempotent)
     EXPECT_FALSE(mgr.is_running());
 }
 
-TEST_F(InputManagerTest, RegisterIgnoredWhileRunning)
+TEST_F(InputManagerTest, RegisterAppendsLiveWhileRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
@@ -594,7 +594,7 @@ TEST_F(InputManagerTest, RegisterIgnoredWhileRunning)
     EXPECT_EQ(mgr.binding_count(), 1u);
 
     mgr.register_press("after", {keyboard_key(0x42)}, []() {});
-    EXPECT_EQ(mgr.binding_count(), 1u);
+    EXPECT_EQ(mgr.binding_count(), 2u);
 
     mgr.shutdown();
 }
@@ -1183,7 +1183,7 @@ TEST_F(InputManagerTest, IsBindingActiveAfterShutdown)
     EXPECT_FALSE(mgr.is_binding_active("test"));
 }
 
-TEST_F(InputManagerTest, ModifierBindingsIgnoredWhileRunning)
+TEST_F(InputManagerTest, ModifierBindingsAppendLiveWhileRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
@@ -1193,10 +1193,10 @@ TEST_F(InputManagerTest, ModifierBindingsIgnoredWhileRunning)
     EXPECT_EQ(mgr.binding_count(), 1u);
 
     mgr.register_press("after", {keyboard_key(0x42)}, {keyboard_key(0x11)}, []() {});
-    EXPECT_EQ(mgr.binding_count(), 1u);
+    EXPECT_EQ(mgr.binding_count(), 2u);
 
     mgr.register_hold("after_hold", {keyboard_key(0x43)}, {keyboard_key(0x10)}, [](bool) {});
-    EXPECT_EQ(mgr.binding_count(), 1u);
+    EXPECT_EQ(mgr.binding_count(), 3u);
 
     mgr.shutdown();
 }
@@ -1293,7 +1293,7 @@ TEST_F(InputManagerTest, RegisterHoldFromKeyComboList)
     EXPECT_EQ(mgr.binding_count(), 2u);
 }
 
-TEST_F(InputManagerTest, RegisterPressFromEmptyKeyComboList)
+TEST_F(InputManagerTest, RegisterPressFromEmptyKeyComboListReservesName)
 {
     InputManager &mgr = InputManager::get_instance();
 
@@ -1301,10 +1301,12 @@ TEST_F(InputManagerTest, RegisterPressFromEmptyKeyComboList)
 
     mgr.register_press("empty", combos, []() {});
 
-    EXPECT_EQ(mgr.binding_count(), 0u);
+    // Empty combos still reserve the binding name so a subsequent
+    // update_binding_combos can attach a real combo list.
+    EXPECT_EQ(mgr.binding_count(), 1u);
 }
 
-TEST_F(InputManagerTest, RegisterHoldFromEmptyKeyComboList)
+TEST_F(InputManagerTest, RegisterHoldFromEmptyKeyComboListReservesName)
 {
     InputManager &mgr = InputManager::get_instance();
 
@@ -1312,7 +1314,7 @@ TEST_F(InputManagerTest, RegisterHoldFromEmptyKeyComboList)
 
     mgr.register_hold("empty", combos, [](bool) {});
 
-    EXPECT_EQ(mgr.binding_count(), 0u);
+    EXPECT_EQ(mgr.binding_count(), 1u);
 }
 
 TEST_F(InputManagerTest, RegisterPressFromSingleCombo)
@@ -1362,7 +1364,7 @@ TEST_F(InputManagerTest, KeyComboListMixedWithIndividualBindings)
     EXPECT_EQ(mgr.binding_count(), 3u);
 }
 
-TEST_F(InputManagerTest, KeyComboListIgnoredWhileRunning)
+TEST_F(InputManagerTest, KeyComboListAppendsLiveWhileRunning)
 {
     InputManager &mgr = InputManager::get_instance();
 
@@ -1375,10 +1377,10 @@ TEST_F(InputManagerTest, KeyComboListIgnoredWhileRunning)
         {.keys = {keyboard_key(0x72)}, .modifiers = {}}};
 
     mgr.register_press("after", combos, []() {});
-    EXPECT_EQ(mgr.binding_count(), 1u);
+    EXPECT_EQ(mgr.binding_count(), 2u);
 
     mgr.register_hold("after_hold", combos, [](bool) {});
-    EXPECT_EQ(mgr.binding_count(), 1u);
+    EXPECT_EQ(mgr.binding_count(), 3u);
 
     mgr.shutdown();
 }
@@ -1713,19 +1715,53 @@ TEST(InputManagerUpdateCombos, UpdatesPendingBindingBeforeStart)
     im.shutdown();
 }
 
-TEST(InputManagerUpdateCombos, CardinalityMismatchIsRejected)
+TEST(InputManagerUpdateCombos, CardinalityCanGrow)
 {
     auto &im = InputManager::get_instance();
     im.shutdown();
 
     Config::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}});
-    im.register_press("update-mismatch", initial, []() {});
+    im.register_press("update-grow", initial, []() {});
 
     Config::KeyComboList replacement;
     replacement.push_back({{keyboard_key(0x42)}, {}});
     replacement.push_back({{keyboard_key(0x43)}, {}});
-    im.update_binding_combos("update-mismatch", replacement);
+    im.update_binding_combos("update-grow", replacement);
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(2));
+    im.shutdown();
+}
+
+TEST(InputManagerUpdateCombos, CardinalityCanShrink)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}});
+    initial.push_back({{keyboard_key(0x42)}, {}});
+    initial.push_back({{keyboard_key(0x43)}, {}});
+    im.register_press("update-shrink", initial, []() {});
+
+    Config::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x44)}, {}});
+    im.update_binding_combos("update-shrink", replacement);
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    im.shutdown();
+}
+
+TEST(InputManagerUpdateCombos, EmptyReplacementIsRejected)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}});
+    im.register_press("update-empty-clear", initial, []() {});
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+
+    Config::KeyComboList replacement;
+    im.update_binding_combos("update-empty-clear", replacement);
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
     im.shutdown();
 }
@@ -1784,4 +1820,85 @@ TEST(InputManagerUpdateCombos, ConcurrentUpdateWhilePollerRunning)
     im.shutdown();
     im.set_require_focus(true);
     SUCCEED();
+}
+
+TEST(InputManagerHotReload, RegisterPressWhilePollerRunning)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    im.register_press("hr-pre", {keyboard_key(0x41)}, []() {});
+    im.start(std::chrono::milliseconds(2));
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+
+    im.register_press("hr-live", {keyboard_key(0x42)}, []() {});
+
+    // Give the poller a couple of cycles to absorb the new binding.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_TRUE(im.is_running());
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(2));
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
+TEST(InputManagerHotReload, ClearBindingsKeepsPollerRunning)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    im.register_press("hr-clear-1", {keyboard_key(0x41)}, []() {});
+    im.register_press("hr-clear-2", {keyboard_key(0x42)}, []() {});
+    im.start(std::chrono::milliseconds(2));
+    ASSERT_EQ(im.binding_count(), static_cast<size_t>(2));
+
+    im.clear_bindings();
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(0));
+    EXPECT_TRUE(im.is_running());
+
+    // Re-register after clear; poller continues without a restart.
+    im.register_press("hr-clear-after", {keyboard_key(0x43)}, []() {});
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    EXPECT_TRUE(im.is_running());
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
+TEST(InputManagerHotReload, RemoveBindingByNameLive)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    im.register_press("hr-keep", {keyboard_key(0x41)}, []() {});
+    im.register_press("hr-drop", {keyboard_key(0x42)}, []() {});
+    im.start(std::chrono::milliseconds(2));
+    ASSERT_EQ(im.binding_count(), static_cast<size_t>(2));
+
+    EXPECT_EQ(im.remove_binding_by_name("hr-drop"), static_cast<size_t>(1));
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    EXPECT_TRUE(im.is_running());
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
+TEST(InputManagerHotReload, EmptyComboListRegistersSentinelName)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+
+    Config::KeyComboList empty_combos;
+    im.register_press("sentinel", empty_combos, []() {});
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+
+    Config::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x41)}, {}});
+    im.update_binding_combos("sentinel", replacement);
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    im.shutdown();
 }

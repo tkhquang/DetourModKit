@@ -205,18 +205,53 @@ namespace DetourModKit
         /**
          * @brief Replaces the trigger combos of all bindings sharing @p name.
          * @details The poller maps each combo passed to register_press/register_hold
-         *          to an independent binding entry with a shared name. This method
-         *          requires the new combo count to equal the number of existing
-         *          entries under that name; otherwise no change is made and false
-         *          is returned. Callbacks, binding mode, and binding name are
-         *          preserved; only keys and modifiers of each entry are overwritten.
-         *          Safe to call while the poll thread is running.
+         *          to an independent binding entry with a shared name. When the
+         *          replacement count matches the existing entry count, keys and
+         *          modifiers are overwritten in place. When the count differs,
+         *          the existing entries are erased and one entry per replacement
+         *          combo is appended; callbacks, binding mode, and binding name
+         *          inherit from the first existing entry. An empty replacement
+         *          list is rejected so a blank INI value cannot silently
+         *          disable a binding's callback. Safe to call while the poll
+         *          thread is running.
          * @param name Binding name previously registered.
-         * @param combos Replacement combos (same cardinality as existing entries).
-         * @return true on successful swap, false if the name is unknown or the
-         *         combo cardinality differs from the registered binding count.
+         * @param combos Replacement combos (must be non-empty).
+         * @return true on successful swap, false if the name is unknown or
+         *         @p combos is empty.
          */
         [[nodiscard]] bool update_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
+
+        /**
+         * @brief Appends a binding to the running poller.
+         * @details Thread-safe. Takes the bindings rw mutex exclusively, so a
+         *          concurrent poll cycle blocks for at most the duration of
+         *          its current tick. The active_states_ array is reallocated
+         *          to match the new binding count; the relaxed-load contract
+         *          on is_binding_active(size_t) tolerates a one-cycle stale
+         *          read across the swap.
+         * @param binding Binding to append.
+         */
+        void add_binding(InputBinding binding) noexcept;
+
+        /**
+         * @brief Removes every binding whose name matches @p name.
+         * @details Thread-safe. Active hold bindings receive an
+         *          on_state_change(false) callback before erasure. The
+         *          active_states_ array is reallocated to match the new
+         *          binding count.
+         * @param name Binding name to remove.
+         * @return Number of bindings removed (zero if the name was not registered).
+         */
+        size_t remove_bindings_by_name(std::string_view name) noexcept;
+
+        /**
+         * @brief Drops every binding without stopping the poll thread.
+         * @details Active hold bindings receive an on_state_change(false)
+         *          callback before erasure. After the call the poller has
+         *          zero bindings and the poll thread keeps running idle.
+         *          Thread-safe.
+         */
+        void clear_bindings() noexcept;
 
     private:
         void poll_loop(std::stop_token stop_token);
@@ -290,7 +325,9 @@ namespace DetourModKit
         /**
          * @brief Registers a press-mode binding.
          * @details The callback fires once per key-down edge for any key in the list.
-         *          Must be called before start(). Ignored if the poller is already running.
+         *          Can be called either before or after start(); a binding registered
+         *          while the poller is running is appended to the live binding set
+         *          and starts firing on the next poll cycle.
          * @param name Unique, descriptive name for the binding.
          * @param keys Vector of input codes (any triggers the action).
          * @param callback Function to invoke on key press.
@@ -301,7 +338,8 @@ namespace DetourModKit
         /**
          * @brief Registers a press-mode binding with modifier keys.
          * @details The callback fires once per key-down edge for any key in the list,
-         *          but only when all modifier inputs are simultaneously held.
+         *          but only when all modifier inputs are simultaneously held. Live
+         *          registration is supported (see the no-modifier overload).
          * @param name Unique, descriptive name for the binding.
          * @param keys Vector of input codes (any triggers the action).
          * @param modifiers Vector of modifier input codes (all must be held).
@@ -314,8 +352,10 @@ namespace DetourModKit
         /**
          * @brief Registers press-mode bindings from a KeyComboList.
          * @details Registers one binding per combo in the list. All bindings share
-         *          the same name, enabling OR-logic via is_binding_active().
-         *          Must be called before start(). Ignored if the poller is already running.
+         *          the same name, enabling OR-logic via is_binding_active(). When
+         *          @p combos is empty, a single sentinel binding with no keys is
+         *          registered so the name is reachable by update_binding_combos().
+         *          Live registration is supported.
          * @param name Shared binding name for all combos.
          * @param combos List of key combinations (each combo is registered independently).
          * @param callback Function to invoke on key press.
@@ -326,8 +366,8 @@ namespace DetourModKit
         /**
          * @brief Registers a hold-mode binding.
          * @details The callback fires with true when any input in the list is pressed,
-         *          and false when all are released. Must be called before start().
-         *          Ignored if the poller is already running.
+         *          and false when all are released. Live registration is supported
+         *          (see register_press for semantics).
          * @param name Unique, descriptive name for the binding.
          * @param keys Vector of input codes (any activates the hold).
          * @param callback Function invoked with the hold state (true = held, false = released).
@@ -339,7 +379,7 @@ namespace DetourModKit
          * @brief Registers a hold-mode binding with modifier keys.
          * @details The callback fires with true when any input in the list is pressed
          *          and all modifier inputs are simultaneously held, and false when the
-         *          condition is no longer met.
+         *          condition is no longer met. Live registration is supported.
          * @param name Unique, descriptive name for the binding.
          * @param keys Vector of input codes (any activates the hold).
          * @param modifiers Vector of modifier input codes (all must be held).
@@ -352,8 +392,10 @@ namespace DetourModKit
         /**
          * @brief Registers hold-mode bindings from a KeyComboList.
          * @details Registers one binding per combo in the list. All bindings share
-         *          the same name, enabling OR-logic via is_binding_active().
-         *          Must be called before start(). Ignored if the poller is already running.
+         *          the same name, enabling OR-logic via is_binding_active(). When
+         *          @p combos is empty, a single sentinel binding with no keys is
+         *          registered so the name is reachable by update_binding_combos().
+         *          Live registration is supported.
          * @param name Shared binding name for all combos.
          * @param combos List of key combinations (each combo is registered independently).
          * @param callback Function invoked with the hold state (true = held, false = released).
@@ -434,6 +476,26 @@ namespace DetourModKit
          * @param combos Replacement combos.
          */
         void update_binding_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
+
+        /**
+         * @brief Removes every binding whose name matches @p name.
+         * @details Forwards to the active InputPoller when running, or erases
+         *          matching entries from pending bindings before start().
+         *          Thread-safe.
+         * @param name Binding name to remove.
+         * @return Number of bindings removed.
+         */
+        size_t remove_binding_by_name(std::string_view name) noexcept;
+
+        /**
+         * @brief Drops every registered binding without stopping the poller.
+         * @details Forwards to the active InputPoller when running and clears
+         *          pending bindings. Active hold bindings receive an
+         *          on_state_change(false) callback before erasure. The poll
+         *          thread keeps running and can be reseeded via subsequent
+         *          register_press / register_hold calls. Thread-safe.
+         */
+        void clear_bindings() noexcept;
 
         /**
          * @brief Stops the polling thread and clears all registered bindings.

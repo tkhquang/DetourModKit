@@ -2279,3 +2279,67 @@ TEST_F(ConfigTest, Reload_HashResetOnReadFailure)
         << "Recovery reload() with identical bytes must re-run setters because the "
            "read-failure branch cleared the cached hash.";
 }
+
+TEST_F(ConfigTest, RegisterPressCombo_EmptyDefaultRegistersName)
+{
+    InputManager::get_instance().shutdown();
+
+    std::atomic<int> press_count{0};
+    auto guard = Config::register_press_combo(
+        "Input", "EmptyDefaultKey", "binding with empty default",
+        "empty-default-binding",
+        [&]() { press_count.fetch_add(1, std::memory_order_relaxed); },
+        "");
+
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1))
+        << "Empty default must still reserve the binding name in pending_bindings_.";
+
+    Config::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x41)}, {}});
+    InputManager::get_instance().update_binding_combos("empty-default-binding", replacement);
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, RegisterLogLevel_RoundTripFromIni)
+{
+    {
+        std::ofstream ini_file(test_ini_file_);
+        ini_file << "[Logging]\nLevel=DEBUG\n";
+    }
+
+    const LogLevel original = Logger::get_instance().get_log_level();
+    Config::register_log_level("Logging", "Level", "INFO");
+    ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_EQ(Logger::get_instance().get_log_level(), LogLevel::Debug);
+
+    Logger::get_instance().set_log_level(original);
+}
+
+TEST_F(ConfigTest, RegisterAtomic_BoolRoundTrip)
+{
+    {
+        std::ofstream ini_file(test_ini_file_);
+        ini_file << "[Atom]\nFlag=true\n";
+    }
+
+    std::atomic<bool> flag{false};
+    Config::register_atomic<bool>("Atom", "Flag", "atomic bool flag", flag, false);
+    ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_TRUE(flag.load(std::memory_order_relaxed));
+}
+
+TEST_F(ConfigTest, RegisterAtomic_IntRoundTrip)
+{
+    {
+        std::ofstream ini_file(test_ini_file_);
+        ini_file << "[Atom]\nNum=7\n";
+    }
+
+    std::atomic<int> n{0};
+    Config::register_atomic<int>("Atom", "Num", "atomic int", n, -1);
+    ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
+    EXPECT_EQ(n.load(std::memory_order_relaxed), 7);
+}

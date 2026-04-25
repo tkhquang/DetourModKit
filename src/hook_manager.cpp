@@ -630,6 +630,24 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     return create_mid_hook(name, target_address, detour_function, config);
 }
 
+bool HookManager::is_target_already_hooked(uintptr_t target_address) const noexcept
+{
+    if (target_address == 0)
+    {
+        return false;
+    }
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    for (const auto &[name, hook_ptr] : m_hooks)
+    {
+        if (hook_ptr->get_type() == HookType::Inline &&
+            hook_ptr->get_target_address() == target_address)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id)
 {
     if (m_shutdown_called.load(std::memory_order_acquire))

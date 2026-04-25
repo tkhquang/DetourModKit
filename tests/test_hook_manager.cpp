@@ -2486,3 +2486,50 @@ TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
     EXPECT_TRUE(reader_observed_valid.load());
     EXPECT_TRUE(shutdown_returned.load());
 }
+
+TEST_F(HookManagerTest, IsTargetAlreadyHooked_TrueAfterInstall)
+{
+    void *trampoline = nullptr;
+    auto result = hook_manager_->create_inline_hook(
+        "TargetHookedQuery",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &trampoline);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_TRUE(hook_manager_->is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&real_hook_target_add)));
+    EXPECT_FALSE(hook_manager_->is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&real_hook_target_mul)));
+}
+
+TEST_F(HookManagerTest, IsTargetAlreadyHooked_FalseForZero)
+{
+    EXPECT_FALSE(hook_manager_->is_target_already_hooked(0));
+}
+
+TEST_F(HookManagerTest, TryInstallInline_ReturnsNameOnSuccess)
+{
+    void *trampoline = nullptr;
+    auto name = try_install_inline(
+        "TryInstallSuccess",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &trampoline);
+
+    ASSERT_TRUE(name.has_value());
+    EXPECT_EQ(*name, "TryInstallSuccess");
+    EXPECT_NE(trampoline, nullptr);
+}
+
+TEST_F(HookManagerTest, TryInstallInline_NulloptOnInvalidTarget)
+{
+    void *trampoline = nullptr;
+    auto name = try_install_inline(
+        "TryInstallFail",
+        0,
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &trampoline);
+
+    EXPECT_FALSE(name.has_value());
+}

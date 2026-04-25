@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(DetourModKit VERSION 3.2.1 LANGUAGES CXX)
+project(DetourModKit VERSION 3.2.2 LANGUAGES CXX)
 
 # --- Standard and Compiler Options ---
 set(CMAKE_CXX_STANDARD 23)

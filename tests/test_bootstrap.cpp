@@ -11,9 +11,12 @@
 #include <windows.h>
 
 #include "DetourModKit/bootstrap.hpp"
+#include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/input.hpp"
 
 using namespace DetourModKit;
 using namespace std::chrono_literals;
+using DetourModKit::keyboard_key;
 
 namespace
 {
@@ -359,4 +362,197 @@ TEST_F(BootstrapIntegrationTest, InitAndShutdownExceptionsAreCaught)
     Bootstrap::request_shutdown();
     ASSERT_TRUE(sig.wait_for_shutdown(kTestTimeout));
     EXPECT_EQ(sig.shutdown_calls.load(), 1);
+}
+
+namespace
+{
+    [[gnu::noinline]] int logic_unload_target_add(int a, int b)
+    {
+        volatile int r = a + b;
+        return r;
+    }
+
+    [[gnu::noinline]] int logic_unload_detour_add(int a, int b)
+    {
+        return a + b + 1;
+    }
+
+    // Distinct target keeps the prologue-restore assertion meaningful in the
+    // _all() tests when two hooks are installed at once.
+    [[gnu::noinline]] int logic_unload_target_sub(int a, int b)
+    {
+        volatile int r = a - b;
+        return r;
+    }
+
+    [[gnu::noinline]] int logic_unload_detour_sub(int a, int b)
+    {
+        return a - b - 1;
+    }
+} // namespace
+
+TEST(BootstrapOnLogicDllUnload, RemovesHooksAndBindings)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    void *trampoline = nullptr;
+    auto hook_result = HookManager::get_instance().create_inline_hook(
+        "logic_unload_hook",
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+        reinterpret_cast<void *>(&logic_unload_detour_add),
+        &trampoline);
+    ASSERT_TRUE(hook_result.has_value());
+
+    InputManager::get_instance().register_press(
+        "logic_unload_binding", {keyboard_key(0x41)}, []() {});
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+    EXPECT_TRUE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add)));
+
+    const std::string_view hooks[] = {"logic_unload_hook"};
+    const std::string_view bindings[] = {"logic_unload_binding"};
+    Bootstrap::on_logic_dll_unload(hooks, bindings);
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+}
+
+TEST(BootstrapOnLogicDllUnload, IsIdempotent)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    void *trampoline = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "logic_unload_idem",
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+        reinterpret_cast<void *>(&logic_unload_detour_add),
+        &trampoline).has_value());
+    InputManager::get_instance().register_press(
+        "logic_unload_idem_bind", {keyboard_key(0x42)}, []() {});
+
+    const std::string_view hooks[] = {"logic_unload_idem"};
+    const std::string_view bindings[] = {"logic_unload_idem_bind"};
+    Bootstrap::on_logic_dll_unload(hooks, bindings);
+    Bootstrap::on_logic_dll_unload(hooks, bindings);
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, RemovesAllHooksAndBindings)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    void *trampoline_add = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "logic_unload_all_add",
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+        reinterpret_cast<void *>(&logic_unload_detour_add),
+        &trampoline_add).has_value());
+
+    void *trampoline_sub = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "logic_unload_all_sub",
+        reinterpret_cast<uintptr_t>(&logic_unload_target_sub),
+        reinterpret_cast<void *>(&logic_unload_detour_sub),
+        &trampoline_sub).has_value());
+
+    InputManager::get_instance().register_press(
+        "logic_unload_all_bind_a", {keyboard_key(0x43)}, []() {});
+    InputManager::get_instance().register_press(
+        "logic_unload_all_bind_b", {keyboard_key(0x44)}, []() {});
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(2));
+    EXPECT_TRUE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add)));
+    EXPECT_TRUE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_sub)));
+
+    Bootstrap::on_logic_dll_unload_all();
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add)));
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_sub)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, IsIdempotent)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    void *trampoline = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "logic_unload_all_idem",
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+        reinterpret_cast<void *>(&logic_unload_detour_add),
+        &trampoline).has_value());
+    InputManager::get_instance().register_press(
+        "logic_unload_all_idem_bind", {keyboard_key(0x45)}, []() {});
+
+    Bootstrap::on_logic_dll_unload_all();
+    Bootstrap::on_logic_dll_unload_all();
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, EmptyRegistriesIsNoOp)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+
+    Bootstrap::on_logic_dll_unload_all();
+
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, CoexistsWithNamedOverload)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    void *trampoline_named = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "logic_unload_mixed_named",
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+        reinterpret_cast<void *>(&logic_unload_detour_add),
+        &trampoline_named).has_value());
+    void *trampoline_residual = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "logic_unload_mixed_residual",
+        reinterpret_cast<uintptr_t>(&logic_unload_target_sub),
+        reinterpret_cast<void *>(&logic_unload_detour_sub),
+        &trampoline_residual).has_value());
+
+    InputManager::get_instance().register_press(
+        "logic_unload_mixed_named_bind", {keyboard_key(0x46)}, []() {});
+    InputManager::get_instance().register_press(
+        "logic_unload_mixed_residual_bind", {keyboard_key(0x47)}, []() {});
+
+    // Named overload first peels off the explicit subset.
+    const std::string_view hooks[] = {"logic_unload_mixed_named"};
+    const std::string_view bindings[] = {"logic_unload_mixed_named_bind"};
+    Bootstrap::on_logic_dll_unload(hooks, bindings);
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_add)));
+    EXPECT_TRUE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_sub)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+
+    // Catch-all sweeps the residual hook and binding without leaks.
+    Bootstrap::on_logic_dll_unload_all();
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(&logic_unload_target_sub)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
 }
