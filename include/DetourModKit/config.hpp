@@ -418,8 +418,12 @@ namespace DetourModKit
          * @param default_combo Combo string applied when the INI key is absent
          *                      (e.g. "Ctrl+F5").
          * @return true if the binding was registered, false if @p default_combo
-         *         is empty (register_press_combo silently no-ops on empty combo
-         *         lists, which would make the hotkey appear registered but inert).
+         *         is empty or the NONE sentinel. @ref register_press_combo accepts
+         *         both as silent opt-out and registers the binding name with no
+         *         keys (addressable later by @ref update_binding_combos), but a
+         *         reload hotkey with no default keys is never useful, so this
+         *         helper rejects that case at the call site rather than ship an
+         *         inert reload binding.
          * @note The on-press callback runs on the InputManager poll thread,
          *       but the actual reload() work is deferred to a dedicated
          *       background servicer thread. The press callback only flips

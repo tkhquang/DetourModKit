@@ -10,7 +10,7 @@ namespace
     {
         EXPECT_EQ(DMK_VERSION_MAJOR, 3);
         EXPECT_EQ(DMK_VERSION_MINOR, 2);
-        EXPECT_EQ(DMK_VERSION_PATCH, 2);
+        EXPECT_EQ(DMK_VERSION_PATCH, 3);
     }
 
     TEST(VersionTest, VersionStringMatchesMacros)
@@ -20,12 +20,13 @@ namespace
 
     TEST(VersionTest, AtLeastComparisonsAreCorrect)
     {
+        EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 2, 3));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 2, 2));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 2, 1));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 2, 0));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 1, 0));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(2, 0, 0));
-        EXPECT_FALSE(DMK_VERSION_AT_LEAST(3, 2, 3));
+        EXPECT_FALSE(DMK_VERSION_AT_LEAST(3, 2, 4));
         EXPECT_FALSE(DMK_VERSION_AT_LEAST(3, 3, 0));
         EXPECT_FALSE(DMK_VERSION_AT_LEAST(4, 0, 0));
     }

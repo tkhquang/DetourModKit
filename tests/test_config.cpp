@@ -2347,10 +2347,12 @@ TEST_F(ConfigTest, RegisterAtomic_IntRoundTrip)
 namespace
 {
     // RAII helper that redirects the global Logger to a temporary file and
-    // exposes the captured contents for assertions. Restores the Logger to
-    // its previous file on destruction so subsequent tests see the original
-    // sink. Sync mode is forced because the tests inspect the file
-    // immediately after the logging call returns.
+    // exposes the captured contents for assertions. On destruction the Logger
+    // is parked on a stable per-process file so the capture file's handle is
+    // released and remove() succeeds on Windows; subsequent tests overwrite
+    // the parking sink as needed via their own reconfigure() calls. Sync mode
+    // is forced because the tests inspect the file immediately after the
+    // logging call returns.
     class LoggerFileCapture
     {
     public:
@@ -2376,6 +2378,10 @@ namespace
         {
             auto &logger = DetourModKit::Logger::get_instance();
             logger.flush();
+            const auto parking = std::filesystem::temp_directory_path() /
+                                 ("dmk_capture_parked_" +
+                                  std::to_string(_getpid()) + ".log");
+            logger.reconfigure("PARKED", parking.string(), "%H:%M:%S");
             logger.set_log_level(previous_level_);
             if (previous_async_)
             {

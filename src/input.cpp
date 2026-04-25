@@ -553,7 +553,8 @@ namespace DetourModKit
             // if the binding name persists.
             std::vector<InputBinding> rebuilt;
             std::vector<uint8_t> rebuilt_states;
-            rebuilt.reserve(bindings_.size() - indices.size() + combos.size());
+            rebuilt.reserve(bindings_.size() - indices.size() +
+                            (combos.empty() ? 1 : combos.size()));
             rebuilt_states.reserve(rebuilt.capacity());
             size_t cursor = 0;
             for (size_t skip : indices)
