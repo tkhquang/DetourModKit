@@ -1,5 +1,6 @@
 #include "DetourModKit/bootstrap.hpp"
 
+#include "DetourModKit/config.hpp"
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
@@ -400,6 +401,45 @@ namespace DetourModKit::Bootstrap
         logger.info(
             "Bootstrap: on_logic_dll_unload drained {} hook(s) and {} binding(s).",
             hooks_removed, bindings_removed);
+
+        // Wipe the Config registry last because the prior hook and
+        // binding teardown may invoke a registered setter one final
+        // time (a setter that observes a binding-driven flag, for
+        // instance). Clearing first would orphan that final-fire path
+        // mid-call. The registered std::function setters' call
+        // operators, vtables, and destructors live in the Logic DLL's
+        // .text segment; once the loader unmaps that segment, every
+        // surviving entry becomes a use-after-unload hazard. The next
+        // attach's replace_or_append destroys the stale slot before
+        // installing the fresh one, which would invoke the old
+        // setter's destructor against freed pages.
+        try
+        {
+            Config::clear_registered_items();
+        }
+        catch (const std::exception &e)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload caught exception in clear_registered_items: {}",
+                    e.what());
+            }
+            catch (...)
+            {
+            }
+        }
+        catch (...)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload caught unknown exception in clear_registered_items.");
+            }
+            catch (...)
+            {
+            }
+        }
     }
 
     void on_logic_dll_unload_all() noexcept
@@ -478,6 +518,42 @@ namespace DetourModKit::Bootstrap
         }
         catch (...)
         {
+        }
+
+        // Wipe the Config registry last for the same reason as the
+        // named-list overload: the prior remove_all_hooks /
+        // clear_bindings calls may fire a registered setter one final
+        // time, and clearing first would orphan that path. The
+        // registered std::function setters' call operators, vtables,
+        // and destructors live in the unloading Logic DLL's .text;
+        // every surviving entry becomes a use-after-unload hazard the
+        // moment the loader reclaims those pages.
+        try
+        {
+            Config::clear_registered_items();
+        }
+        catch (const std::exception &e)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload_all caught exception in clear_registered_items: {}",
+                    e.what());
+            }
+            catch (...)
+            {
+            }
+        }
+        catch (...)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload_all caught unknown exception in clear_registered_items.");
+            }
+            catch (...)
+            {
+            }
         }
     }
 } // namespace DetourModKit::Bootstrap

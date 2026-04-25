@@ -1750,8 +1750,11 @@ TEST(InputManagerUpdateCombos, CardinalityCanShrink)
     im.shutdown();
 }
 
-TEST(InputManagerUpdateCombos, EmptyReplacementIsRejected)
+TEST(InputManagerUpdateCombos, EmptyReplacementUnbindsAndPreservesName)
 {
+    // Empty replacement is the explicit-unbound state. The binding name
+    // must remain addressable so a follow-up non-empty update can rebind
+    // it; the entry count collapses to a single inert sentinel.
     auto &im = InputManager::get_instance();
     im.shutdown();
 
@@ -1762,6 +1765,13 @@ TEST(InputManagerUpdateCombos, EmptyReplacementIsRejected)
 
     Config::KeyComboList replacement;
     im.update_binding_combos("update-empty-clear", replacement);
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    EXPECT_FALSE(im.is_binding_active("update-empty-clear"));
+
+    // Rebind the same name with a real combo; the sentinel must accept it.
+    Config::KeyComboList rebind;
+    rebind.push_back({{keyboard_key(0x42)}, {}});
+    im.update_binding_combos("update-empty-clear", rebind);
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
     im.shutdown();
 }

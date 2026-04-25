@@ -22,6 +22,7 @@
 #include <memory>
 
 #include <windows.h>
+#include <cctype>
 #include <cerrno>
 #include <condition_variable>
 #include <cstdint>
@@ -179,14 +180,52 @@ namespace
     }
 
     /**
+     * @brief Returns true when @p text is the literal "NONE" sentinel
+     *        (case-insensitive ASCII, exact length match).
+     * @details The whole-string-only rule keeps the sentinel unambiguous:
+     *          a NONE token nested inside a comma-separated list cannot be
+     *          told apart from a key-name typo without a per-token lookup,
+     *          and the OR-of-combos semantic makes "an unbound slot inside
+     *          an OR-list" meaningless. Caller must pass a pre-trimmed view.
+     */
+    [[nodiscard]] bool is_none_sentinel(std::string_view text) noexcept
+    {
+        if (text.size() != 4)
+        {
+            return false;
+        }
+        constexpr char target[] = {'N', 'O', 'N', 'E'};
+        for (size_t i = 0; i < 4; ++i)
+        {
+            const auto ch = static_cast<unsigned char>(text[i]);
+            if (static_cast<char>(std::toupper(ch)) != target[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * @brief Parses a comma-separated string of key combos into a KeyComboList.
      * @details Commas at the top level separate independent combos (OR logic between
      *          combos). Each combo is parsed by parse_key_combo. Handles inline
-     *          semicolon comments, whitespace, and gracefully skips empty/invalid combos.
+     *          semicolon comments and whitespace. Two opt-out sentinels yield an
+     *          empty result silently: an empty (post-trim) input, and the literal
+     *          "NONE" (case-insensitive, whole-string only). A non-empty input
+     *          that is not the NONE sentinel and whose every comma-separated token
+     *          fails to parse is treated as a user typo and emits a single WARNING
+     *          naming the binding and the offending raw string. Empty inner tokens
+     *          (e.g. "F4,,F5") are silently skipped; the WARNING fires only when
+     *          the entire result list is empty.
      * @param input The raw string to parse.
+     * @param binding_log_name Optional human-readable binding name used in the
+     *                         typo WARNING. Defaults to an empty view, in which
+     *                         case the WARNING uses "<unnamed>".
      * @return Config::KeyComboList Parsed list of key combinations.
      */
-    Config::KeyComboList parse_key_combo_list(const std::string &input)
+    Config::KeyComboList parse_key_combo_list(const std::string &input,
+                                              std::string_view binding_log_name = {})
     {
         Config::KeyComboList result;
 
@@ -194,7 +233,16 @@ namespace
         const size_t comment_pos = input.find(';');
         const std::string effective = trim(
             (comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
+
+        // Disposition 1: explicit opt-out via empty string. Silent.
         if (effective.empty())
+        {
+            return result;
+        }
+
+        // Disposition 2: explicit opt-out via NONE sentinel (whole-string,
+        // case-insensitive, post-trim). Silent.
+        if (is_none_sentinel(effective))
         {
             return result;
         }
@@ -218,6 +266,19 @@ namespace
             {
                 result.push_back(std::move(combo));
             }
+        }
+
+        // Disposition 3: input was non-empty and not the NONE sentinel,
+        // yet every token failed to parse. Real user typo, name it.
+        if (result.empty())
+        {
+            const std::string_view name_view =
+                binding_log_name.empty() ? std::string_view{"<unnamed>"} : binding_log_name;
+            Logger::get_instance().warning(
+                "Config: combo string \"{}\" for binding '{}' did not parse to any "
+                "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
+                "out explicitly.",
+                effective, name_view);
         }
 
         return result;
@@ -402,7 +463,7 @@ namespace
         const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
         if (ini_value_str != nullptr)
         {
-            current_value = parse_key_combo_list(ini_value_str);
+            current_value = parse_key_combo_list(ini_value_str, log_key_name);
         }
         else
         {
@@ -906,7 +967,7 @@ void DetourModKit::Config::register_key_combo(std::string_view section, std::str
                                               std::string_view log_key_name, std::function<void(const KeyComboList &)> setter,
                                               std::string_view default_value_str)
 {
-    Config::KeyComboList default_combos = parse_key_combo_list(std::string(default_value_str));
+    Config::KeyComboList default_combos = parse_key_combo_list(std::string(default_value_str), log_key_name);
 
     std::function<void()> deferred;
     {
@@ -934,7 +995,7 @@ DetourModKit::Config::InputBindingGuard DetourModKit::Config::register_press_com
     std::string_view default_value)
 {
     auto enabled_flag = std::make_shared<std::atomic<bool>>(true);
-    auto current_combos = std::make_shared<KeyComboList>(parse_key_combo_list(std::string(default_value)));
+    auto current_combos = std::make_shared<KeyComboList>(parse_key_combo_list(std::string(default_value), log_name));
     std::string binding_name_str(input_binding_name);
 
     register_key_combo(section, ini_key, log_name, [current_combos, binding_name_str](const KeyComboList &combos)
@@ -1287,8 +1348,11 @@ void DetourModKit::Config::disable_auto_reload() noexcept
 bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
                                                   std::string_view default_combo)
 {
-    // An empty default causes register_press_combo to produce zero bindings,
-    // which leaves the hotkey silently inert. Fail loudly instead.
+    // An empty or explicitly-opt-out default would leave the hotkey
+    // silently inert (a binding registered without trigger keys never
+    // fires). Surface that to the caller as a false return so they can
+    // decide whether to fall back to a different combo or skip the
+    // hotkey entirely.
     if (default_combo.empty())
     {
         Logger::get_instance().warning(
@@ -1297,30 +1361,14 @@ bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
         return false;
     }
 
-    // Pre-parse the default to reject syntactically-invalid combos.
-    // register_press_combo silently no-ops on a zero-entry combo list
-    // (InputManager::register_press with empty combos registers the
-    // binding name but never fires). We detect this upstream so callers
-    // see a false return instead of a silently inert hotkey. Piggy-back
-    // on register_key_combo's parser by registering a scratch item
-    // whose setter captures the parsed list -- the real
-    // register_press_combo call below replaces this scratch entry via
-    // replace_or_append, so nothing leaks into the registry.
-    bool parse_succeeded = false;
+    // Pre-parse the default. The parser emits its own WARNING when a
+    // non-empty, non-sentinel string fails to parse, so no extra log is
+    // needed for the typo path. Explicit opt-out via the NONE sentinel
+    // still returns false because a hotkey with no keys is useless.
+    const Config::KeyComboList parsed = parse_key_combo_list(
+        std::string(default_combo), "Config reload hotkey");
+    if (parsed.empty())
     {
-        auto probe = [&parse_succeeded](const KeyComboList &combos)
-        {
-            parse_succeeded = !combos.empty();
-        };
-        register_key_combo("Input", ini_key,
-                           "Config reload hotkey (probe)",
-                           probe, default_combo);
-    }
-    if (!parse_succeeded)
-    {
-        Logger::get_instance().error(
-            "Config: register_reload_hotkey('{}', '{}'): combo string did not parse to any valid combo; hotkey not active.",
-            std::string(ini_key), std::string(default_combo));
         return false;
     }
 

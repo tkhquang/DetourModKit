@@ -236,9 +236,17 @@ namespace DetourModKit
          *          '+' separates modifier keys from the trigger key (last token). Tokens
          *          can be human-readable names (e.g., "Ctrl", "F3", "Gamepad_A") or hex
          *          VK codes (e.g., "0x72"). See KeyCombo for full parsing semantics.
+         *
+         *          Two opt-out sentinels yield an empty KeyComboList silently:
+         *          an empty string and the literal "NONE" (case-insensitive,
+         *          surrounding whitespace OK, whole-string only). A non-empty,
+         *          non-sentinel value whose every token fails to parse is
+         *          logged at WARNING level naming @p log_key_name and the
+         *          offending raw string.
          * @param section INI section name.
          * @param ini_key INI key name.
-         * @param log_key_name Human-readable name shown in log output.
+         * @param log_key_name Human-readable name shown in log output and in the
+         *                     typo WARNING described above.
          * @param setter Callback invoked with the parsed KeyComboList.
          * @param default_value_str Default value string in the same format.
          * @note The setter is called immediately with the parsed default and again on load().
@@ -253,29 +261,40 @@ namespace DetourModKit
          *          parsed default combo. On each subsequent load() the setter
          *          invokes InputManager::update_binding_combos() so the bound
          *          keys and modifiers pick up the INI-sourced value without
-         *          re-registering the binding. Live updates require the new
-         *          combo list to have the same number of alternatives as the
-         *          default (one binding entry per combo); if the cardinality
-         *          differs the update is rejected and a Warning-level log
-         *          message is emitted. Callers that need to change cardinality
-         *          at runtime must fully stop and restart InputManager so the
-         *          underlying bindings can be re-registered.
+         *          re-registering the binding. Live updates accept any
+         *          cardinality: the binding's combo set is rebuilt on the fly
+         *          and any held-state release callbacks fire before the swap
+         *          completes.
+         *
+         *          To opt a binding out at runtime (no keys bound), set the
+         *          INI value to either an empty string or the literal
+         *          "NONE" (case-insensitive, surrounding whitespace OK).
+         *          Both forms produce an unbound binding silently and the
+         *          binding name remains addressable for a future non-empty
+         *          update. The "NONE" sentinel is only recognized as the
+         *          entire trimmed value; "NONE" appearing as one token in a
+         *          comma-separated list is treated as an unparseable token
+         *          and contributes nothing.
+         *
+         *          A non-empty INI value whose every comma-separated token
+         *          fails to parse is treated as a user typo and logged at
+         *          WARNING level naming the binding and the offending raw
+         *          string; the binding becomes unbound.
          *
          *          The returned guard holds a cancellation flag that
          *          short-circuits the user callback when released, because
          *          InputManager does not support per-binding removal
          *          post-start().
          *
-         *          Must be called before InputManager::start() for the
-         *          binding to be picked up by the poller. Call sites that
-         *          register after start() should also call
-         *          InputManager::shutdown() then start() again, or accept
-         *          that only the INI value is tracked and the callback
-         *          never fires.
+         *          Safe to call before or after InputManager::start(). A
+         *          binding registered while the poller is running is
+         *          appended to the live binding set and starts firing on
+         *          the next poll cycle.
          *
          * @param section INI section name.
          * @param ini_key INI key name.
-         * @param log_name Human-readable name echoed by the config logger.
+         * @param log_name Human-readable name echoed by the config logger and
+         *                 in the typo WARNING described above.
          * @param input_binding_name InputManager binding name (must be unique).
          * @param on_press User callback fired on key-down edge.
          * @param default_value Default combo string (same format as register_key_combo).
@@ -399,8 +418,12 @@ namespace DetourModKit
          * @param default_combo Combo string applied when the INI key is absent
          *                      (e.g. "Ctrl+F5").
          * @return true if the binding was registered, false if @p default_combo
-         *         is empty (register_press_combo silently no-ops on empty combo
-         *         lists, which would make the hotkey appear registered but inert).
+         *         is empty or the NONE sentinel. @ref register_press_combo accepts
+         *         both as silent opt-out and registers the binding name with no
+         *         keys (addressable later by @ref update_binding_combos), but a
+         *         reload hotkey with no default keys is never useful, so this
+         *         helper rejects that case at the call site rather than ship an
+         *         inert reload binding.
          * @note The on-press callback runs on the InputManager poll thread,
          *       but the actual reload() work is deferred to a dedicated
          *       background servicer thread. The press callback only flips

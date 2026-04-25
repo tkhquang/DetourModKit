@@ -214,14 +214,19 @@ namespace DetourModKit
          *          modifiers are overwritten in place. When the count differs,
          *          the existing entries are erased and one entry per replacement
          *          combo is appended; callbacks, binding mode, and binding name
-         *          inherit from the first existing entry. An empty replacement
-         *          list is rejected so a blank INI value cannot silently
-         *          disable a binding's callback. Safe to call while the poll
-         *          thread is running.
+         *          inherit from the first existing entry.
+         *
+         *          An empty replacement list is a valid binding state meaning
+         *          "no keys bound": the existing entries are erased and a
+         *          single inert sentinel entry takes their place so the
+         *          binding name remains addressable for a later non-empty
+         *          update. Held bindings receive an on_state_change(false)
+         *          callback before the swap completes. Safe to call while
+         *          the poll thread is running.
          * @param name Binding name previously registered.
-         * @param combos Replacement combos (must be non-empty).
-         * @return true on successful swap, false if the name is unknown or
-         *         @p combos is empty.
+         * @param combos Replacement combos. May be empty to unbind.
+         * @return true on successful swap (including the unbind case), false
+         *         only if the name was never registered.
          */
         [[nodiscard]] bool update_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
 
@@ -506,13 +511,18 @@ namespace DetourModKit
          * @details Forwards to the active InputPoller when running, or updates
          *          pending bindings before start(). The binding's name,
          *          callback, and mode are preserved; only keys and modifiers
-         *          are swapped. Cardinality must match the number of combos
-         *          originally registered under @p name (one binding entry per
-         *          combo). If the name is unknown or the cardinality differs,
-         *          a warning is logged at Debug level and no change is made.
-         *          Thread-safe.
+         *          are swapped. Any cardinality is accepted: matching counts
+         *          rewrite in place, differing counts rebuild the entry set
+         *          carrying callback identity forward.
+         *
+         *          An empty replacement list unbinds the named binding while
+         *          keeping a single inert sentinel entry so a subsequent
+         *          non-empty update can rebind it. Held bindings receive an
+         *          on_state_change(false) callback before the swap completes.
+         *          If the name is unknown the call is a no-op logged at
+         *          Debug level. Thread-safe.
          * @param name Binding name previously registered.
-         * @param combos Replacement combos.
+         * @param combos Replacement combos. May be empty to unbind.
          */
         void update_binding_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
 

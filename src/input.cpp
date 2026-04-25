@@ -209,7 +209,7 @@ namespace DetourModKit
     {
         if (poll_thread_.joinable())
         {
-            Logger::get_instance().warning("InputPoller: start() called while already running");
+            Logger::get_instance().debug("InputPoller: start() called while already running; no-op.");
             return;
         }
 
@@ -496,17 +496,6 @@ namespace DetourModKit
                 return false;
             }
 
-            // Reject an empty replacement so a user editing the INI to a blank
-            // value cannot silently disable a callback. To clear a binding the
-            // caller must remove it explicitly.
-            if (combos.empty())
-            {
-                Logger::get_instance().warning(
-                    "InputPoller: update_combos(\"{}\") ignored: replacement combo list is empty",
-                    name);
-                return false;
-            }
-
             std::vector<size_t> indices = it->second;
             if (indices.empty())
             {
@@ -564,7 +553,8 @@ namespace DetourModKit
             // if the binding name persists.
             std::vector<InputBinding> rebuilt;
             std::vector<uint8_t> rebuilt_states;
-            rebuilt.reserve(bindings_.size() - indices.size() + combos.size());
+            rebuilt.reserve(bindings_.size() - indices.size() +
+                            (combos.empty() ? 1 : combos.size()));
             rebuilt_states.reserve(rebuilt.capacity());
             size_t cursor = 0;
             for (size_t skip : indices)
@@ -581,13 +571,30 @@ namespace DetourModKit
                 rebuilt_states.push_back(active_states_[i].load(std::memory_order_relaxed));
                 rebuilt.push_back(std::move(bindings_[i]));
             }
-            for (const auto &combo : combos)
+            if (combos.empty())
             {
+                // Empty replacement leaves one inert sentinel entry so the
+                // binding name stays addressable for a subsequent
+                // update_combos() call. Without the sentinel the name would
+                // vanish from name_index_ and a later non-empty update
+                // would be rejected as "name not found", breaking the
+                // bound -> unbound -> bound INI hot-reload cycle.
                 InputBinding b = prototype;
-                b.keys = combo.keys;
-                b.modifiers = combo.modifiers;
+                b.keys.clear();
+                b.modifiers.clear();
                 rebuilt.push_back(std::move(b));
                 rebuilt_states.push_back(0);
+            }
+            else
+            {
+                for (const auto &combo : combos)
+                {
+                    InputBinding b = prototype;
+                    b.keys = combo.keys;
+                    b.modifiers = combo.modifiers;
+                    rebuilt.push_back(std::move(b));
+                    rebuilt_states.push_back(0);
+                }
             }
             bindings_ = std::move(rebuilt);
 
@@ -993,7 +1000,7 @@ namespace DetourModKit
 
         if (poller_)
         {
-            Logger::get_instance().warning("InputManager: start() called while already running");
+            Logger::get_instance().debug("InputManager: start() called while already running; no-op.");
             return;
         }
 
@@ -1076,16 +1083,6 @@ namespace DetourModKit
                     return;
                 }
 
-                // Reject an empty replacement so a blank INI value cannot
-                // silently disable a registered binding's callback.
-                if (combos.empty())
-                {
-                    Logger::get_instance().warning(
-                        "InputManager: update_binding_combos(\"{}\") ignored: replacement combo list is empty",
-                        name);
-                    return;
-                }
-
                 if (indices.size() == combos.size())
                 {
                     for (size_t i = 0; i < indices.size(); ++i)
@@ -1100,7 +1097,8 @@ namespace DetourModKit
                     InputBinding prototype = pending_bindings_[indices.front()];
                     std::sort(indices.begin(), indices.end());
                     std::vector<InputBinding> rebuilt;
-                    rebuilt.reserve(pending_bindings_.size() - indices.size() + combos.size());
+                    rebuilt.reserve(pending_bindings_.size() - indices.size() +
+                                    (combos.empty() ? 1 : combos.size()));
                     size_t cursor = 0;
                     for (size_t skip : indices)
                     {
@@ -1114,12 +1112,25 @@ namespace DetourModKit
                     {
                         rebuilt.push_back(std::move(pending_bindings_[i]));
                     }
-                    for (const auto &combo : combos)
+                    if (combos.empty())
                     {
+                        // Preserve a sentinel entry so the binding name
+                        // remains addressable for a later non-empty
+                        // update_binding_combos() call.
                         InputBinding b = prototype;
-                        b.keys = combo.keys;
-                        b.modifiers = combo.modifiers;
+                        b.keys.clear();
+                        b.modifiers.clear();
                         rebuilt.push_back(std::move(b));
+                    }
+                    else
+                    {
+                        for (const auto &combo : combos)
+                        {
+                            InputBinding b = prototype;
+                            b.keys = combo.keys;
+                            b.modifiers = combo.modifiers;
+                            rebuilt.push_back(std::move(b));
+                        }
                     }
                     pending_bindings_ = std::move(rebuilt);
                     updated_pending = true;
