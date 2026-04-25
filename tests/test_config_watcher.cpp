@@ -4,9 +4,11 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <process.h>
 #include <string>
 #include <thread>
+#include <type_traits>
 
 #include <windows.h>
 
@@ -14,6 +16,17 @@
 
 using namespace DetourModKit;
 using namespace std::chrono_literals;
+
+// The loader-lock fallback in ~ConfigWatcher heap-allocates a
+// std::unique_ptr<Impl> via new (std::nothrow) and leaks the cell to
+// outlive the destructor. Impl is a private nested type, so this
+// assertion guards the unique_ptr leak-cell pattern at the type level
+// rather than referencing Impl directly: if std::unique_ptr ever ceased
+// to be nothrow-move-constructible, the leak cell could no longer be
+// constructed from a noexcept context without risking std::terminate.
+static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<int>>,
+              "std::unique_ptr must remain nothrow-move-constructible for the "
+              "ConfigWatcher loader-lock leak path to keep ~ConfigWatcher noexcept honest.");
 
 namespace
 {
@@ -427,8 +440,9 @@ namespace
 // process, so the runtime exposes a test-only function pointer override that
 // reports "loader lock held" on demand. These tests exercise the leak-on-
 // loader-lock branch in ~ConfigWatcher: the worker is detached instead of
-// joined, the Impl is moved into a static vector that outlives the
-// destructor, and the watcher does not deadlock.
+// joined, the Impl is moved into a per-call heap cell allocated via
+// new (std::nothrow) that outlives the destructor, and the watcher does not
+// deadlock.
 namespace DetourModKit::detail
 {
     extern bool (*g_config_watcher_loader_lock_override)() noexcept;
@@ -505,9 +519,11 @@ namespace
 
     TEST_F(ConfigWatcherLoaderLockTest, MultipleLoaderLockTeardownsAreSafe)
     {
-        // Confirms the static leak vector accepts multiple entries without
-        // tripping any single-slot overwrite hazards (the bug pattern that
-        // motivated #69's Logger::shutdown_internal fix).
+        // Confirms the per-call heap leak path accepts multiple invocations
+        // without tripping any single-slot overwrite hazards (the bug pattern
+        // that motivated #69's Logger::shutdown_internal fix). Each
+        // teardown allocates its own cell via new (std::nothrow), so prior
+        // leaked Impls are never overwritten.
         for (int i = 0; i < 3; ++i)
         {
             ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
