@@ -169,6 +169,67 @@ namespace DetourModKit
                              std::function<void(const std::string &)> setter, std::string default_value);
 
         /**
+         * @brief Registers a log-level INI item that applies directly to Logger.
+         * @details Parses @p default_value via Logger::string_to_log_level and
+         *          calls Logger::set_log_level both at registration and on each
+         *          load() / reload(). Unrecognized values fall back to
+         *          LogLevel::Info per Logger::string_to_log_level.
+         * @param section INI section name.
+         * @param ini_key INI key name.
+         * @param default_value Default level string (e.g. "INFO", "DEBUG").
+         */
+        void register_log_level(std::string_view section, std::string_view ini_key,
+                                std::string_view default_value = "INFO");
+
+        /**
+         * @brief Registers an INI item whose value is stored into a caller-supplied atomic.
+         * @details Convenience wrapper over the matching register_<T> overload that
+         *          stores the parsed value with std::memory_order_relaxed. Supported
+         *          T: int, bool, float. The reference must outlive every load() and
+         *          reload() call: the setter captures @p out by reference.
+         * @tparam T One of int, bool, float.
+         * @param section INI section name.
+         * @param ini_key INI key name.
+         * @param log_key_name Human-readable name shown in log output.
+         * @param out Atomic destination updated on every successful parse.
+         * @param default_value Value applied when the INI key is missing.
+         */
+        // Marked = delete so unsupported T (e.g. double, uint64_t) becomes a
+        // crisp compile error pointing at the call site rather than a mangled
+        // unresolved-symbol link error. The supported instantiations are the
+        // explicit specialisations below (int, bool, float).
+        template <typename T>
+        void register_atomic(std::string_view section, std::string_view ini_key,
+                             std::string_view log_key_name, std::atomic<T> &out, T default_value) = delete;
+
+        template <>
+        inline void register_atomic<int>(std::string_view section, std::string_view ini_key,
+                                         std::string_view log_key_name, std::atomic<int> &out, int default_value)
+        {
+            register_int(section, ini_key, log_key_name,
+                         [&out](int v) { out.store(v, std::memory_order_relaxed); },
+                         default_value);
+        }
+
+        template <>
+        inline void register_atomic<bool>(std::string_view section, std::string_view ini_key,
+                                          std::string_view log_key_name, std::atomic<bool> &out, bool default_value)
+        {
+            register_bool(section, ini_key, log_key_name,
+                          [&out](bool v) { out.store(v, std::memory_order_relaxed); },
+                          default_value);
+        }
+
+        template <>
+        inline void register_atomic<float>(std::string_view section, std::string_view ini_key,
+                                           std::string_view log_key_name, std::atomic<float> &out, float default_value)
+        {
+            register_float(section, ini_key, log_key_name,
+                           [&out](float v) { out.store(v, std::memory_order_relaxed); },
+                           default_value);
+        }
+
+        /**
          * @brief Registers a key combo configuration item.
          * @details Parses an INI value as one or more key combinations. Commas at the
          *          top level separate independent combos (OR logic). Within each combo,

@@ -1,5 +1,7 @@
 #include "DetourModKit/bootstrap.hpp"
 
+#include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
 
@@ -7,6 +9,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <exception>
 
 namespace DetourModKit::Bootstrap
 {
@@ -329,5 +332,152 @@ namespace DetourModKit::Bootstrap
     HMODULE module_handle() noexcept
     {
         return g_module;
+    }
+
+    void on_logic_dll_unload(std::span<const std::string_view> hook_names,
+                             std::span<const std::string_view> binding_names) noexcept
+    {
+        Logger &logger = Logger::get_instance();
+        size_t hooks_removed = 0;
+        size_t bindings_removed = 0;
+
+        for (const auto name : hook_names)
+        {
+            try
+            {
+                auto result = HookManager::get_instance().remove_hook(name);
+                if (result)
+                {
+                    ++hooks_removed;
+                }
+                else
+                {
+                    logger.debug(
+                        "Bootstrap: on_logic_dll_unload: hook '{}' not removed ({}).",
+                        name, Hook::error_to_string(result.error()));
+                }
+            }
+            catch (const std::exception &e)
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload caught exception removing hook '{}': {}",
+                    name, e.what());
+            }
+            catch (...)
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload caught unknown exception removing hook '{}'.",
+                    name);
+            }
+        }
+
+        for (const auto name : binding_names)
+        {
+            try
+            {
+                // Pass invoke_callbacks=false because this helper is documented
+                // as safe from DllMain detach paths. User on_state_change(false)
+                // callbacks for held bindings live in the unloading Logic DLL;
+                // running them under loader lock is the deadlock-or-crash
+                // vector that the v3.2.1 leak-on-purpose discipline was set
+                // up to forbid.
+                bindings_removed += InputManager::get_instance().remove_binding_by_name(name, false);
+            }
+            catch (const std::exception &e)
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload caught exception removing binding '{}': {}",
+                    name, e.what());
+            }
+            catch (...)
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload caught unknown exception removing binding '{}'.",
+                    name);
+            }
+        }
+
+        logger.info(
+            "Bootstrap: on_logic_dll_unload drained {} hook(s) and {} binding(s).",
+            hooks_removed, bindings_removed);
+    }
+
+    void on_logic_dll_unload_all() noexcept
+    {
+        Logger &logger = Logger::get_instance();
+
+        // Hooks first so the original prologue bytes are restored before
+        // the binding teardown can disturb any callback that still trampolines
+        // through SafetyHook. remove_all_hooks() resets m_shutdown_called
+        // at the end, leaving HookManager re-usable for the next attach.
+        try
+        {
+            HookManager::get_instance().remove_all_hooks();
+        }
+        catch (const std::exception &e)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload_all caught exception in remove_all_hooks: {}",
+                    e.what());
+            }
+            catch (...)
+            {
+            }
+        }
+        catch (...)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload_all caught unknown exception in remove_all_hooks.");
+            }
+            catch (...)
+            {
+            }
+        }
+
+        // clear_bindings() leaves the poll thread running and ready to accept
+        // fresh bindings, matching the "tear down per-Logic-DLL state but keep
+        // the manager re-usable" contract that the named-list overload honours.
+        // Pass invoke_callbacks=false because this helper is documented as
+        // safe from DllMain detach paths: user release callbacks live in the
+        // unloading Logic DLL and must not be invoked under loader lock.
+        try
+        {
+            InputManager::get_instance().clear_bindings(false);
+        }
+        catch (const std::exception &e)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload_all caught exception in clear_bindings: {}",
+                    e.what());
+            }
+            catch (...)
+            {
+            }
+        }
+        catch (...)
+        {
+            try
+            {
+                logger.error(
+                    "Bootstrap: on_logic_dll_unload_all caught unknown exception in clear_bindings.");
+            }
+            catch (...)
+            {
+            }
+        }
+
+        try
+        {
+            logger.info("Bootstrap: on_logic_dll_unload_all drained all hooks and bindings.");
+        }
+        catch (...)
+        {
+        }
     }
 } // namespace DetourModKit::Bootstrap

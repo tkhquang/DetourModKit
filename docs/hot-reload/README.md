@@ -1167,13 +1167,73 @@ A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw a
 
 ---
 
+## Topology Variant: Persistent Host with Swappable Logic DLLs
+
+The standard two-DLL pattern above static-links DMK into the *Logic DLL*: each reload cycle destroys and reconstructs the DMK singletons alongside the rest of the mod state. This is the recommended default and works well when a single mod owns the process.
+
+DMK also supports a second topology where DMK is static-linked into the **loader** (or a shared host module) and survives every Logic-DLL unload. This is the right choice when:
+
+- One host needs to load several Logic DLLs that all use DMK (a shared loader plus per-feature modules), or
+- A loader wants to keep `Logger`, `Config`, and the `ConfigWatcher` alive across reload cycles so log files and INI state are not torn down on every iteration, or
+- The same Logic DLL is loaded, unloaded, and reloaded many times during a session and the host wants amortized cost on shared infrastructure.
+
+In this topology, the Logic DLL must **not** call `DMK_Shutdown()` from `Shutdown()`, because doing so would tear down singletons that other Logic DLLs (or the next reload of this one) still depend on. Instead, it drops only the resources it owns:
+
+```cpp
+extern "C" __declspec(dllexport) void Shutdown()
+{
+    using namespace std::string_view_literals;
+
+    static constexpr std::string_view hook_names[] = {
+        "camera_update"sv,
+        "visual_equip_change"sv,
+    };
+    static constexpr std::string_view binding_names[] = {
+        "ToggleEquip_Chest"sv,
+        "ShowEquip_Chest"sv,
+    };
+
+    DMKBootstrap::on_logic_dll_unload(hook_names, binding_names);
+}
+```
+
+`Bootstrap::on_logic_dll_unload(hook_names, binding_names)` removes the named hooks via `HookManager::remove_hook` (which restores the original prologue bytes through SafetyHook) and clears the named input bindings via `InputManager::remove_binding_by_name`. It is `noexcept`, idempotent, and safe to call multiple times: a second call with the same names is a no-op. Logger, Config, and the ConfigWatcher are intentionally left running.
+
+`Bootstrap::on_logic_dll_unload_all()` is the catch-all variant for callers that do not maintain an explicit registry of hook or binding names. It composes `HookManager::remove_all_hooks` with `InputManager::clear_bindings` under the same `noexcept`, idempotent, exception-swallowing contract; Logger, Config, and the ConfigWatcher are again left running. The HookManager teardown call is `remove_all_hooks()` rather than `shutdown()` so the manager stays re-usable for the next attach, and the binding teardown call is `clear_bindings()` rather than `InputManager::shutdown()` so the poll thread keeps running idle. Use this overload when one Logic DLL owns the entire DMK instance and a single Logic DLL teardown should drain everything.
+
+Prefer the named-list overload when the host loads several Logic DLLs that share one DMK instance: calling `on_logic_dll_unload_all()` from one Logic DLL's `Shutdown()` rips out every other Logic DLL's hooks and bindings as well, because the singletons are process-scoped. The named-list overload keeps each Logic DLL's teardown scoped to the names it registered.
+
+`Init()` re-registers hooks and bindings as it normally would. `HookManager::create_*_hook` uses replace-on-duplicate semantics, and `InputManager::register_press` / `register_hold` insert into a live poller without restarting it (see `clear_bindings()` if a wholesale reset is preferred).
+
+When choosing between the two topologies:
+
+| Concern                     | DMK in Logic DLL (default)              | DMK in Loader (persistent host)               |
+|-----------------------------|-----------------------------------------|-----------------------------------------------|
+| Singleton lifetime          | One reload cycle                        | Process lifetime                              |
+| Logger / Config / Watcher   | Reconstructed each reload               | Outlive every Logic-DLL unload                |
+| Logic-DLL `Shutdown()` does | `DMK_Shutdown()`                        | `Bootstrap::on_logic_dll_unload(...)`         |
+| Process-exit cleanup        | `DMK_Shutdown()` from final `Shutdown()`| `DMK_Shutdown()` from the host's `DllMain`    |
+| Multiple Logic DLLs         | Each ships its own DMK copy             | One DMK instance shared by all                |
+
+Mixing the two in one process is not supported: pick one per host module and stay on it.
+
+---
+
 ## Hot-Reload Safety Guarantees
 
 DetourModKit's core systems are designed to be safe across DLL reload cycles:
 
 **HookManager:** `shutdown()` and `remove_all_hooks()` both use a two-phase removal pattern: hooks are disabled under a shared lock first (allowing in-flight trampoline callers to drain), then the hook maps are cleared under an exclusive lock. This prevents deadlock when a hooked thread is blocked on `m_hooks_mutex` via `with_inline_hook()`. Both methods reset internal state afterward, allowing subsequent `create_*_hook()` calls to succeed. There is no need to call both - either one prepares the HookManager for reuse.
 
+`HookManager::is_target_already_hooked(addr)` reports whether the local `HookManager` instance already has an inline or mid hook installed at `addr`. It is the programmatic counterpart to the install-time WARNING that fires when SafetyHook layers on top of a pre-existing JMP from another module, and it covers the common case of two cooperating modules wanting to coordinate hook ownership without grepping log output.
+
+**InputManager:** `register_press` and `register_hold` accept new bindings whether the poller is stopped, starting, or running. Live registration takes the poller's exclusive lock, appends to the binding list, and rebuilds the parallel `active_states_` array in one step, so there is no per-tick allocation in the hot loop. Surviving entries' atomic states are carried forward across every reshape (`add_binding`, `remove_bindings_by_name`, `update_binding_combos`), so a held binding never flickers through one inactive tick when an unrelated binding is added or dropped. `clear_bindings()` empties the registry without stopping the poller, and `remove_binding_by_name(name)` drops a single binding by name (used internally by `Bootstrap::on_logic_dll_unload`). `update_binding_combos(name, combos)` accepts cardinality changes (1 to N or N to 1) and replaces the registered combo list wholesale; supplying an empty list is rejected so an INI typo cannot silently disable a binding. When a cardinality change drops a held `register_hold` entry, that entry's `on_state_change(false)` release callback fires before the rebuild completes so the consumer never latches in the held state.
+
+**Bootstrap unload helpers:** `Bootstrap::on_logic_dll_unload(_all)` deliberately drops bindings without firing `on_state_change(false)` release callbacks, because user callbacks live in the unloading Logic DLL and running them under the Windows loader lock is the deadlock-or-crash vector that the v3.2.1 leak-on-purpose discipline forbids. Consumers that need a clean release on a planned unload (not driven by `DllMain` detach) should call `InputManager::clear_bindings()` or `remove_binding_by_name(name)` directly before invoking the unload helper.
+
 **Config:** `register_*()` functions use replace-on-duplicate semantics. If a new DLL registers a config item with the same section and INI key as an existing entry, the old registration is replaced rather than appended. This prevents doubled registrations across reload cycles without requiring an explicit `clear_registered_items()` call. Calling `clear_registered_items()` before re-registration is still supported but no longer required.
+
+`Config::register_press_combo` with an empty default registers the binding name with no keys, so a later `update_binding_combos` call (typically driven by an INI edit and `AutoReloadConfig`) can attach real combos to it. The previous behavior, where empty defaults were dropped from the registry, is gone.
 
 ---
 

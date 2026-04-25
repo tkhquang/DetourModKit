@@ -723,6 +723,23 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Reports whether @p target_address already carries an inline hook
+         *        installed by this HookManager instance.
+         * @details Walks the local hook registry under a shared lock. Local-only
+         *          by design: hooks installed by other statically-linked DMK
+         *          consumers in the same process are not visible.
+         *
+         *          Use this to short-circuit a redundant create_inline_hook call
+         *          without parsing the prologue bytes. To detect inline hooks
+         *          installed by code outside this HookManager (for example a
+         *          third-party JMP rel32 written into the prologue) pass
+         *          HookConfig::fail_if_already_hooked when creating the hook.
+         * @param target_address Function address to query.
+         * @return true if a managed inline hook already targets this address.
+         */
+        [[nodiscard]] bool is_target_already_hooked(uintptr_t target_address) const noexcept;
+
+        /**
          * @brief Removes a hook identified by its name.
          * @param hook_id The name of the hook to remove.
          * @return Success if removed, or HookError::HookNotFound.
@@ -1047,6 +1064,103 @@ namespace DetourModKit
             return m_vmt_hooks.find(name) != m_vmt_hooks.end();
         }
     };
+
+    /**
+     * @brief Convenience wrapper that installs an inline hook by direct address.
+     * @details Forwards every argument to HookManager::create_inline_hook.
+     *          Returns the registered hook name on success, std::nullopt on
+     *          failure. Diagnostic logging on failure is delegated to the
+     *          underlying create_inline_hook call, which already formats a
+     *          richly-detailed Error line for every failure code; this
+     *          wrapper does not emit a duplicate.
+     */
+    [[nodiscard]] inline std::optional<std::string> try_install_inline(
+        std::string_view name,
+        uintptr_t target_address,
+        void *detour_function,
+        void **original_trampoline,
+        const HookConfig &config = HookConfig())
+    {
+        auto result = HookManager::get_instance().create_inline_hook(
+            name, target_address, detour_function, original_trampoline, config);
+        if (result)
+        {
+            return *result;
+        }
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Convenience wrapper that installs an inline hook by AOB scan.
+     * @details Diagnostic logging on failure is delegated to the underlying
+     *          create_inline_hook_aob call (pattern-resolution failures and
+     *          create_inline_hook failures both emit their own Error line),
+     *          so this wrapper does not emit a duplicate.
+     */
+    [[nodiscard]] inline std::optional<std::string> try_install_inline_aob(
+        std::string_view name,
+        uintptr_t module_base,
+        size_t module_size,
+        std::string_view aob_pattern,
+        std::ptrdiff_t aob_offset,
+        void *detour_function,
+        void **original_trampoline,
+        const HookConfig &config = HookConfig())
+    {
+        auto result = HookManager::get_instance().create_inline_hook_aob(
+            name, module_base, module_size, aob_pattern, aob_offset,
+            detour_function, original_trampoline, config);
+        if (result)
+        {
+            return *result;
+        }
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Convenience wrapper that installs a mid-function hook by direct
+     *        address.
+     * @details Diagnostic logging on failure is delegated to the underlying
+     *          create_mid_hook call.
+     */
+    [[nodiscard]] inline std::optional<std::string> try_install_mid(
+        std::string_view name,
+        uintptr_t target_address,
+        safetyhook::MidHookFn detour_function,
+        const HookConfig &config = HookConfig())
+    {
+        auto result = HookManager::get_instance().create_mid_hook(
+            name, target_address, detour_function, config);
+        if (result)
+        {
+            return *result;
+        }
+        return std::nullopt;
+    }
+
+    /**
+     * @brief Convenience wrapper that installs a mid-function hook by AOB scan.
+     * @details Diagnostic logging on failure is delegated to the underlying
+     *          create_mid_hook_aob call.
+     */
+    [[nodiscard]] inline std::optional<std::string> try_install_mid_aob(
+        std::string_view name,
+        uintptr_t module_base,
+        size_t module_size,
+        std::string_view aob_pattern,
+        std::ptrdiff_t aob_offset,
+        safetyhook::MidHookFn detour_function,
+        const HookConfig &config = HookConfig())
+    {
+        auto result = HookManager::get_instance().create_mid_hook_aob(
+            name, module_base, module_size, aob_pattern, aob_offset,
+            detour_function, config);
+        if (result)
+        {
+            return *result;
+        }
+        return std::nullopt;
+    }
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_HOOK_MANAGER_HPP

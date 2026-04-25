@@ -9,6 +9,7 @@
 #include "DetourModKit/async_logger.hpp"
 
 #include <functional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -125,6 +126,81 @@ namespace DetourModKit
          *          after on_dll_detach().
          */
         [[nodiscard]] HMODULE module_handle() noexcept;
+
+        /**
+         * @brief Drops the per-Logic-DLL state owned by the caller.
+         * @details Composes HookManager::remove_hook for every entry in
+         *          @p hook_names and InputManager::remove_binding_by_name
+         *          for every entry in @p binding_names. Names that do not
+         *          exist are skipped (logged at Debug). Idempotent: a
+         *          second call with the same names is a no-op.
+         *
+         *          Does NOT touch Logger or Config: callers that share a
+         *          host process across multiple Logic-DLL incarnations
+         *          want those subsystems to outlive the unload. Use
+         *          DMK_Shutdown() for whole-process teardown.
+         *
+         *          Safe to call from any thread except: must NOT be
+         *          called from the InputPoller thread (would self-join)
+         *          and must NOT be called from a HookManager mutator
+         *          callback (would deadlock on m_mutator_gate).
+         *
+         *          Marked noexcept because consumers may invoke it from a
+         *          DllMain detach path. Internal allocations performed
+         *          while iterating the name spans (vector growth, log
+         *          formatting) may throw; every throw site is caught and
+         *          logged so no exception propagates to the caller.
+         *
+         * @param hook_names Names of hooks installed via HookManager.
+         * @param binding_names Names of input bindings registered via
+         *        InputManager (or via Config::register_press_combo).
+         */
+        void on_logic_dll_unload(std::span<const std::string_view> hook_names,
+                                 std::span<const std::string_view> binding_names) noexcept;
+
+        /**
+         * @brief Drops every hook and binding registered through the
+         *        process-wide singletons.
+         * @details Composes HookManager::remove_all_hooks with
+         *          InputManager::clear_bindings under the same
+         *          loader-lock-safe, idempotent, exception-swallowing
+         *          contract as the named-list overload. Use when the
+         *          caller does not maintain an explicit registry of
+         *          hook or binding names.
+         *
+         *          Logger, Config, and the ConfigWatcher are
+         *          intentionally left running, matching the named-list
+         *          overload's partition between per-Logic-DLL state and
+         *          host-owned infrastructure. Use DMK_Shutdown() for
+         *          whole-process teardown.
+         *
+         *          The HookManager teardown call is remove_all_hooks(),
+         *          not shutdown(): both perform the same two-phase
+         *          drain, but remove_all_hooks() resets the shutdown
+         *          flag at the end so subsequent create_*_hook() calls
+         *          succeed for the next Logic-DLL incarnation. The
+         *          binding teardown call is clear_bindings(), not
+         *          shutdown(): the poller keeps running idle and is
+         *          ready to accept fresh bindings on the next attach.
+         *
+         *          Safe to call from any thread except: must NOT be
+         *          called from the InputPoller thread (would self-join)
+         *          and must NOT be called from a HookManager mutator
+         *          callback (would deadlock on m_mutator_gate).
+         *
+         *          Marked noexcept because consumers may invoke it from
+         *          a DllMain detach path. Internal allocations performed
+         *          while logging or rebuilding active_states_ may throw;
+         *          every throw site is caught and logged so no exception
+         *          propagates to the caller.
+         *
+         * @warning In a host that loads multiple Logic DLLs sharing one
+         *          process-wide DMK instance, calling this from one
+         *          Logic DLL's Shutdown() rips out the other Logic DLLs'
+         *          hooks and bindings as well. The named-list overload
+         *          is the correct choice in that topology.
+         */
+        void on_logic_dll_unload_all() noexcept;
     } // namespace Bootstrap
 } // namespace DetourModKit
 
