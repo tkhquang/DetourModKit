@@ -470,6 +470,67 @@ TEST(AsyncLoggerConfigTest, NullMutex_Throws)
     EXPECT_THROW(AsyncLogger(config, file_stream, nullptr), std::invalid_argument);
 }
 
+TEST(AsyncLoggerConfigTest, Validate_DefaultIsValid)
+{
+    AsyncLoggerConfig config;
+    EXPECT_TRUE(config.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_RejectsNonPowerOfTwoCapacity)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 5;
+    EXPECT_FALSE(config.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_RejectsCapacityBelowTwo)
+{
+    AsyncLoggerConfig config;
+    config.queue_capacity = 1;
+    EXPECT_FALSE(config.validate());
+    config.queue_capacity = 0;
+    EXPECT_FALSE(config.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_RejectsZeroBatch)
+{
+    AsyncLoggerConfig config;
+    config.batch_size = 0;
+    EXPECT_FALSE(config.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_RejectsNonPositiveFlushInterval)
+{
+    AsyncLoggerConfig config;
+    config.flush_interval = std::chrono::milliseconds{0};
+    EXPECT_FALSE(config.validate());
+    config.flush_interval = std::chrono::milliseconds{-1};
+    EXPECT_FALSE(config.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_RejectsZeroSpinBackoff)
+{
+    AsyncLoggerConfig config;
+    config.spin_backoff_iterations = 0;
+    EXPECT_FALSE(config.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_RejectsNonPositiveBlockTimeout)
+{
+    AsyncLoggerConfig config;
+    config.block_timeout_ms = std::chrono::milliseconds{0};
+    EXPECT_FALSE(config.validate());
+    config.block_timeout_ms = std::chrono::milliseconds{-5};
+    EXPECT_FALSE(config.validate());
+}
+
+TEST(AsyncLoggerConfigTest, Validate_RejectsZeroBlockMaxSpin)
+{
+    AsyncLoggerConfig config;
+    config.block_max_spin_iterations = 0;
+    EXPECT_FALSE(config.validate());
+}
+
 TEST(DynamicMPMCQueueTest, InvalidCapacity_NotPowerOfTwo)
 {
     EXPECT_THROW(DynamicMPMCQueue(3), std::invalid_argument);
@@ -596,36 +657,6 @@ TEST(LogMessageTest, LargeMessage_HeapPath)
     EXPECT_EQ(log_msg.message().size(), LogMessage::MAX_INLINE_SIZE + 1);
     EXPECT_EQ(log_msg.message(), msg);
     EXPECT_NE(log_msg.overflow, nullptr);
-}
-
-TEST(AsyncLoggerConfigTest, Validate_AllReturnValues)
-{
-    AsyncLoggerConfig valid_config;
-    EXPECT_TRUE(valid_config.validate());
-
-    AsyncLoggerConfig zero_cap;
-    zero_cap.queue_capacity = 0;
-    EXPECT_FALSE(zero_cap.validate());
-
-    AsyncLoggerConfig cap_one;
-    cap_one.queue_capacity = 1;
-    EXPECT_FALSE(cap_one.validate());
-
-    AsyncLoggerConfig bad_cap;
-    bad_cap.queue_capacity = 100;
-    EXPECT_FALSE(bad_cap.validate());
-
-    AsyncLoggerConfig zero_batch;
-    zero_batch.batch_size = 0;
-    EXPECT_FALSE(zero_batch.validate());
-
-    AsyncLoggerConfig zero_interval;
-    zero_interval.flush_interval = std::chrono::milliseconds{0};
-    EXPECT_FALSE(zero_interval.validate());
-
-    AsyncLoggerConfig zero_spin;
-    zero_spin.spin_backoff_iterations = 0;
-    EXPECT_FALSE(zero_spin.validate());
 }
 
 TEST(AsyncLoggerConfigTest, Validate_ValidSpinBackoff)

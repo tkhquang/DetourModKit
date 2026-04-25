@@ -103,6 +103,96 @@ namespace
         EXPECT_EQ(watcher.debounce(), 173ms);
     }
 
+    TEST_F(ConfigWatcherTest, StartFailsOnEmptyIniPath)
+    {
+        ConfigWatcher watcher("", 50ms, []() {});
+        EXPECT_FALSE(watcher.start());
+        EXPECT_FALSE(watcher.is_running());
+        EXPECT_NO_THROW(watcher.stop());
+    }
+
+    TEST_F(ConfigWatcherTest, IsWorkerThreadFalseFromMainBeforeStart)
+    {
+        ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        EXPECT_FALSE(watcher.is_worker_thread(std::this_thread::get_id()));
+    }
+
+    TEST_F(ConfigWatcherTest, IsWorkerThreadTrueFromCallback)
+    {
+        std::atomic<bool> observed{false};
+        std::atomic<std::thread::id> cb_tid{};
+        ConfigWatcher watcher(m_ini_path.string(), 50ms,
+                              [&]()
+                              {
+                                  cb_tid.store(std::this_thread::get_id(),
+                                               std::memory_order_release);
+                                  observed.store(true,
+                                                 std::memory_order_release);
+                              });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]()
+                               { return watcher.is_running(); },
+                               1s));
+        std::this_thread::sleep_for(100ms);
+
+        write_ini("[S]\nK=2\n");
+
+        ASSERT_TRUE(wait_until([&]()
+                               { return observed.load(std::memory_order_acquire); },
+                               3s));
+        EXPECT_TRUE(watcher.is_worker_thread(
+            cb_tid.load(std::memory_order_acquire)));
+        EXPECT_FALSE(watcher.is_worker_thread(std::this_thread::get_id()));
+        watcher.stop();
+    }
+
+    TEST_F(ConfigWatcherTest, StopWithoutStartIsSafe)
+    {
+        ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+        EXPECT_NO_THROW(watcher.stop());
+        EXPECT_NO_THROW(watcher.stop());
+        EXPECT_FALSE(watcher.is_running());
+    }
+
+    TEST_F(ConfigWatcherTest, DestructorStopsRunningWatcher)
+    {
+        std::atomic<int> hits{0};
+        {
+            ConfigWatcher watcher(m_ini_path.string(), 50ms,
+                                  [&hits]()
+                                  { hits.fetch_add(1); });
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]()
+                                   { return watcher.is_running(); },
+                                   1s));
+            std::this_thread::sleep_for(80ms);
+        }
+        SUCCEED();
+    }
+
+    TEST_F(ConfigWatcherTest, PendingChangeFlushedOnStop)
+    {
+        std::atomic<int> hits{0};
+        ConfigWatcher watcher(m_ini_path.string(),
+                              std::chrono::seconds(2),
+                              [&hits]()
+                              { hits.fetch_add(1, std::memory_order_relaxed); });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]()
+                               { return watcher.is_running(); },
+                               1s));
+        std::this_thread::sleep_for(100ms);
+
+        write_ini("[S]\nK=9\n");
+
+        // Stop well before the 2-second debounce elapses so the pending
+        // flag must still be true when stop() cancels the I/O.
+        std::this_thread::sleep_for(200ms);
+        watcher.stop();
+
+        EXPECT_GE(hits.load(std::memory_order_relaxed), 1);
+    }
+
     // --- Basic fire ---
 
     TEST_F(ConfigWatcherTest, BasicFire_CallbackInvokedOnWrite)
@@ -235,17 +325,13 @@ namespace
 
     TEST_F(ConfigWatcherTest, Stop_WithIoInFlight_NoCrash)
     {
-        // Tight start/stop loop with no event delivery. Under ASan this
-        // catches regressions where the worker releases its OVERLAPPED or
-        // buffer before the cancelled ReadDirectoryChangesW completes.
+        // Tight start/stop loop. start() only returns once the first
+        // ReadDirectoryChangesW is posted, so I/O is in flight before
+        // every stop().
         for (int i = 0; i < 100; ++i)
         {
             ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
-            // start() returns only after the first ReadDirectoryChangesW
-            // is posted, so I/O is guaranteed to be in flight by the
-            // time stop() runs. This test exists to prove stop() handles
-            // that window cleanly every iteration.
             watcher.stop();
             EXPECT_FALSE(watcher.is_running());
         }
@@ -253,18 +339,9 @@ namespace
 
     TEST_F(ConfigWatcherTest, Overflow_ActuallyExceedsBuffer_CallbackStillFires)
     {
-        // The previous overflow test created 200 sibling files with 8-char
-        // names. Each FILE_NOTIFY_INFORMATION entry was ~50 bytes, so the
-        // burst totalled ~10 KB -- comfortably inside the 16 KB buffer,
-        // which meant the test never actually exercised the overflow path
-        // it claimed to cover.
-        //
-        // This version writes 600 siblings with long padding strings to
-        // push each entry over 100 bytes (sizeof(FILE_NOTIFY_INFORMATION) +
-        // 2 bytes per UTF-16 filename char). At 600 x 100+ = 60+ KB of
-        // events, we're well past the 16 KB buffer boundary -- both
-        // zero-byte-completion and ERROR_NOTIFY_ENUM_DIR paths should be
-        // exercised on typical Windows kernels.
+        // 600 siblings with >70-char names push each FILE_NOTIFY_INFORMATION
+        // entry past 100 bytes, overflowing the 16 KB kernel buffer and
+        // driving the ERROR_NOTIFY_ENUM_DIR / zero-byte-completion paths.
         std::atomic<int> hits{0};
         ConfigWatcher watcher(m_ini_path.string(), 100ms,
                               [&hits]()
@@ -275,8 +352,6 @@ namespace
                                1s));
         std::this_thread::sleep_for(100ms);
 
-        // 600 files with names over 70 chars each -- each
-        // FILE_NOTIFY_INFORMATION entry becomes well over 100 bytes.
         for (int i = 0; i < 600; ++i)
         {
             const std::filesystem::path sibling =
@@ -285,8 +360,8 @@ namespace
             std::ofstream out(sibling, std::ios::binary | std::ios::trunc);
             out << "x";
         }
-        // And a write to the actual target, so the callback has something
-        // to match even if every sibling event got dropped.
+        // Target write so the debounced callback fires even if every
+        // sibling event was dropped during overflow.
         write_ini("[S]\nK=999\n");
 
         EXPECT_TRUE(wait_until([&]()
@@ -301,11 +376,9 @@ namespace
 
     TEST_F(ConfigWatcherTest, ParentDirectoryRemoved_WatcherExitsCleanly)
     {
-        // The parent directory being removed surfaces as
-        // ERROR_OPERATION_ABORTED from GetOverlappedResultEx. The worker
-        // must log a warning, break out of the pump loop, and exit the
-        // thread cleanly -- no crash, no hang, is_running() must
-        // eventually go false.
+        // Parent-dir removal surfaces as ERROR_OPERATION_ABORTED from
+        // GetOverlappedResultEx. The worker must break the pump loop and
+        // the destructor must still run cleanly.
         const std::filesystem::path temp_parent =
             std::filesystem::temp_directory_path() /
             ("dmk_watcher_removetest_" + std::to_string(_getpid()) + "_" +
@@ -327,15 +400,11 @@ namespace
 
             std::error_code ec;
             std::filesystem::remove_all(temp_parent, ec);
-            // remove_all may fail because the watcher holds the
-            // directory open (FILE_LIST_DIRECTORY with SHARE_DELETE).
-            // That is acceptable here -- we just need the watcher's
-            // destructor to shut down cleanly regardless.
+            // remove_all may fail because the watcher holds the directory
+            // open with FILE_LIST_DIRECTORY + SHARE_DELETE; either outcome
+            // is acceptable.
 
             std::this_thread::sleep_for(300ms);
-
-            // Whether the kernel tore the handle down or not, the
-            // destructor (~ConfigWatcher) must run without crashing.
         }
 
         // Best-effort cleanup if the directory outlived the watcher.
@@ -343,20 +412,11 @@ namespace
         std::filesystem::remove_all(temp_parent, ec);
     }
 
-    // Optional Start_HandshakeTimeout_ReturnsFalse test intentionally
-    // omitted: there is no in-process hook for pausing CreateFileW, and
-    // the only faithful reproduction would require a dedicated mocking
-    // layer that does not exist in this codebase. The handshake-timeout
-    // path is exercised indirectly by Construct_InvalidPath_StartReturnsFalse
-    // (which takes the broken-promise exit via set_value(false)) and by
-    // code review against the 5-second wait_for boundary.
-
     TEST_F(ConfigWatcherTest, Stop_FlushesPendingDebounce)
     {
         std::atomic<int> hits{0};
-        // Deliberately long debounce: the single write below will NOT
-        // have elapsed its debounce window by the time stop() is called.
-        // The worker must still flush the pending callback on exit.
+        // 2 s debounce, stop after 200 ms: the pending callback must be
+        // flushed during stop() rather than waiting for the timer.
         ConfigWatcher watcher(m_ini_path.string(), 2000ms,
                               [&hits]()
                               { hits.fetch_add(1); });
@@ -368,8 +428,6 @@ namespace
 
         write_ini("[S]\nK=42\n");
 
-        // Short wait so the worker has time to observe the event and
-        // mark `pending = true`, but much less than the debounce window.
         std::this_thread::sleep_for(200ms);
 
         watcher.stop();
@@ -379,8 +437,6 @@ namespace
 
     TEST_F(ConfigWatcherTest, Construct_InvalidPath_StartReturnsFalse)
     {
-        // Parent directory does not exist. CreateFileW must fail and
-        // start() must return false without spawning the worker.
         const std::filesystem::path missing =
             m_temp_dir / "nonexistent_subdir" / "file.ini";
 
