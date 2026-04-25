@@ -328,7 +328,7 @@ TEST_F(ConfigTest, KeyCombo_DoublePlusSkipsEmptySegment)
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
 }
 
-TEST_F(ConfigTest, KeyCombo_TrailingPlusIsRejected)
+TEST_F(ConfigTest, KeyCombo_TrailingPlusParsedAsTrigger)
 {
     std::ofstream ini_file(test_ini_file_);
     ini_file << "[TestSection]\n";
@@ -365,7 +365,7 @@ TEST_F(ConfigTest, KeyCombo_OnlyPlusSignsYieldsEmpty)
     EXPECT_TRUE(test_value.empty());
 }
 
-TEST_F(ConfigTest, KeyCombo_FormatRoundTripsMultipleCombos)
+TEST_F(ConfigTest, KeyCombo_DefaultParsesMultipleCombos)
 {
     Config::KeyComboList captured;
 
@@ -377,8 +377,10 @@ TEST_F(ConfigTest, KeyCombo_FormatRoundTripsMultipleCombos)
 
     ASSERT_EQ(captured.size(), 2u);
     EXPECT_EQ(captured[0].modifiers.size(), 1u);
-    EXPECT_EQ(captured[1].modifiers.size(), 1u);
     EXPECT_EQ(captured[0].keys[0], keyboard_key(0x72));
+    ASSERT_EQ(captured[1].modifiers.size(), 1u);
+    ASSERT_FALSE(captured[1].keys.empty());
+    EXPECT_EQ(captured[1].keys[0], DetourModKit::gamepad_button(DetourModKit::GamepadCode::A));
 }
 
 TEST_F(ConfigTest, ClearRegisteredItems)

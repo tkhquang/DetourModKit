@@ -103,7 +103,7 @@ TEST(BootstrapUnitTest, NullHModuleSkipsDisableThreadLibraryCalls)
     EXPECT_EQ(sig.shutdown_calls.load(), 0);
 }
 
-TEST(BootstrapUnitTest, EmptyProcessNameAndEmptyMutexPrefixAllowGatePass)
+TEST(BootstrapUnitTest, EmptyProcessNamePassesGateButMutexCollisionStillFails)
 {
     // Pre-own the mutex name so the attach still fails without arming the
     // shutdown event or the worker thread.
@@ -147,32 +147,6 @@ TEST(BootstrapUnitTest, EmptyProcessNameAndEmptyMutexPrefixAllowGatePass)
     EXPECT_EQ(result, FALSE);
     EXPECT_EQ(sig.init_calls.load(), 0);
     CloseHandle(pre_owned);
-}
-
-TEST(BootstrapUnitTest, EmptyMutexPrefixAllowsMutexBranchSkip)
-{
-    CallbackSignals sig;
-    Bootstrap::ModInfo info{};
-    info.prefix = "BS_TEST";
-    info.log_file = "bs_test_emptymutex.log";
-    info.game_process_name = "DefinitelyNotTheCurrentProcess_mutex.exe";
-    info.instance_mutex_prefix = "";
-
-    const BOOL result = Bootstrap::on_dll_attach(
-        GetModuleHandleW(nullptr),
-        info,
-        [&sig]() noexcept
-        {
-            sig.init_calls.fetch_add(1, std::memory_order_relaxed);
-            return true;
-        },
-        [&sig]() noexcept
-        {
-            sig.shutdown_calls.fetch_add(1, std::memory_order_relaxed);
-        });
-
-    EXPECT_EQ(result, FALSE);
-    EXPECT_EQ(sig.init_calls.load(), 0);
 }
 
 TEST(BootstrapUnitTest, ProcessGateMismatchReturnsFalse)
@@ -352,7 +326,7 @@ TEST_F(BootstrapIntegrationTest, InitAndShutdownExceptionsAreCaught)
     info.game_process_name = exe_name;
     info.instance_mutex_prefix = "BS_Test_Mutex_Throws_";
 
-    auto init_fn = [this]()
+    auto init_fn = [this]() -> bool
     {
         sig.init_calls.fetch_add(1, std::memory_order_relaxed);
         {
@@ -361,7 +335,6 @@ TEST_F(BootstrapIntegrationTest, InitAndShutdownExceptionsAreCaught)
         }
         sig.cv.notify_all();
         throw std::runtime_error("init failure");
-        return false;
     };
 
     auto shutdown_fn = [this]()

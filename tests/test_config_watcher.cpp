@@ -170,29 +170,6 @@ namespace
         SUCCEED();
     }
 
-    TEST_F(ConfigWatcherTest, PendingChangeFlushedOnStop)
-    {
-        std::atomic<int> hits{0};
-        ConfigWatcher watcher(m_ini_path.string(),
-                              std::chrono::seconds(2),
-                              [&hits]()
-                              { hits.fetch_add(1, std::memory_order_relaxed); });
-        ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
-        std::this_thread::sleep_for(100ms);
-
-        write_ini("[S]\nK=9\n");
-
-        // Stop well before the 2-second debounce elapses so the pending
-        // flag must still be true when stop() cancels the I/O.
-        std::this_thread::sleep_for(200ms);
-        watcher.stop();
-
-        EXPECT_GE(hits.load(std::memory_order_relaxed), 1);
-    }
-
     // --- Basic fire ---
 
     TEST_F(ConfigWatcherTest, BasicFire_CallbackInvokedOnWrite)

@@ -4,6 +4,9 @@
 #include <cstdint>
 #include <cstring>
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 #include "x86_decode.hpp"
 
 using DetourModKit::detail::decode_e9_rel32;
@@ -125,17 +128,33 @@ TEST(X86DecodeTest, DecodeFf25Indirect_WrongSecondByteRejected)
 
 TEST(X86DecodeTest, DecodeFf25Indirect_UnreadableSlotRejected)
 {
-    // Instruction is readable, but the disp32 is chosen so the slot
-    // address points into kernel-reserved space that is_readable will
-    // reject. disp = INT32_MAX makes target = base + 6 + INT32_MAX,
-    // which overflows above the user address range on Win64.
-    alignas(8) std::array<std::uint8_t, 6> buf{
-        0xFF, 0x25, 0x00, 0x00, 0x00, 0x00};
-    write_le32(buf.data() + 2, 0x7FFFFFFF);
+    // Reserve two adjacent pages, commit only the first, then place the
+    // FF 25 instruction at the end of the committed page. The disp32 is
+    // chosen to point the slot into the uncommitted second page, which
+    // Memory::is_readable rejects deterministically (no reliance on
+    // ambient process layout).
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
 
-    const auto base = reinterpret_cast<std::uintptr_t>(buf.data());
+    LPVOID region = VirtualAlloc(nullptr, page * 2, MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(region, nullptr);
+    LPVOID committed = VirtualAlloc(region, page, MEM_COMMIT, PAGE_READWRITE);
+    ASSERT_EQ(committed, region);
+
+    auto *page_bytes = static_cast<std::uint8_t *>(region);
+    std::uint8_t *instr = page_bytes + page - 6;
+    instr[0] = 0xFF;
+    instr[1] = 0x25;
+    // Slot must land in the uncommitted page: any disp >= 0 puts the
+    // 8-byte slot at instr + 6 + disp == page boundary or beyond.
+    write_le32(instr + 2, 0);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(instr);
     const auto result = decode_ff25_indirect(base);
     EXPECT_FALSE(result.has_value());
+
+    VirtualFree(region, 0, MEM_RELEASE);
 }
 
 TEST(X86DecodeTest, DecodeFf25Indirect_SlotProducesDestination)

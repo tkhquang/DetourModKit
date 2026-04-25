@@ -150,7 +150,7 @@ TEST(StoppableWorker, RequestStopIsIdempotent)
     EXPECT_TRUE(observed.load());
 }
 
-TEST(StoppableWorker, NameSurvivesMoveIntoBody)
+TEST(StoppableWorker, NameAccessorReturnsConstructionName)
 {
     StoppableWorker w("unit-worker-named", [](std::stop_token st)
                       {
