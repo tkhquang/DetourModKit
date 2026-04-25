@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 #include <atomic>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <thread>
 #include <chrono>
 #include <latch>
+#include <string>
 #include <type_traits>
 #include <windows.h>
 
@@ -2524,7 +2527,13 @@ TEST_F(HookManagerTest, TryInstallInline_ReturnsNameOnSuccess)
 
 TEST_F(HookManagerTest, TryInstallInline_NulloptOnInvalidTarget)
 {
-    void *trampoline = nullptr;
+    // Seed with a non-null sentinel so a regression that erroneously writes
+    // through *trampoline on the failure path is caught. A buggy
+    // try_install_inline that copied a stale trampoline value into the
+    // output on failure would change this byte pattern; the assertion
+    // below pins the failure-path contract that no write occurs.
+    void *const sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(0xDEADBEEFu));
+    void *trampoline = sentinel;
     auto name = try_install_inline(
         "TryInstallFail",
         0,
@@ -2532,4 +2541,143 @@ TEST_F(HookManagerTest, TryInstallInline_NulloptOnInvalidTarget)
         &trampoline);
 
     EXPECT_FALSE(name.has_value());
+    // The early validation branches in create_inline_hook (target_address == 0
+    // here) return before the explicit *original_trampoline = nullptr write,
+    // so the sentinel must be observed unchanged on this failure path.
+    EXPECT_EQ(trampoline, sentinel)
+        << "Failure path must not write through original_trampoline";
 }
+
+namespace
+{
+    // Routes a single test's log lines through a dedicated file so the failing
+    // try_install_* path can be counted without interference from background
+    // tests. Restores the previous configuration on destruction so subsequent
+    // suites keep their own log target.
+    class ScopedTestLogFile
+    {
+    public:
+        ScopedTestLogFile()
+        {
+            static std::atomic<int> counter{0};
+            const int n = counter.fetch_add(1, std::memory_order_relaxed);
+            path_ = std::filesystem::temp_directory_path() /
+                    ("dmk_try_install_log_" +
+                     std::to_string(GetCurrentProcessId()) + "_" +
+                     std::to_string(n) + ".log");
+            // Force synchronous mode so the deferred Error lines from the
+            // HookManager deferred_logs flush land in the file before the
+            // count step below; async mode is opt-in and the flush ordering
+            // varies test-to-test depending on the writer thread state.
+            Logger::get_instance().disable_async_mode();
+            Logger::configure("TRY_INSTALL_TEST", path_.string(), "%Y-%m-%d %H:%M:%S");
+            Logger::get_instance().set_log_level(LogLevel::Error);
+            Logger::get_instance().flush();
+        }
+
+        ~ScopedTestLogFile()
+        {
+            Logger::get_instance().flush();
+            const auto temp = std::filesystem::temp_directory_path() /
+                              "dmk_try_install_log_restore.log";
+            Logger::configure("TEMP", temp.string(), "%Y-%m-%d %H:%M:%S");
+            Logger::get_instance().set_log_level(LogLevel::Info);
+            try
+            {
+                if (std::filesystem::exists(path_))
+                {
+                    std::filesystem::remove(path_);
+                }
+                if (std::filesystem::exists(temp))
+                {
+                    std::filesystem::remove(temp);
+                }
+            }
+            catch (const std::filesystem::filesystem_error &)
+            {
+            }
+        }
+
+        size_t count_error_lines() const
+        {
+            Logger::get_instance().flush();
+            std::ifstream in(path_);
+            size_t n = 0;
+            for (std::string line; std::getline(in, line);)
+            {
+                // Logger formats the level inside a left-padded 7-char field
+                // ("[ERROR  ] :: ..."), so match the padded token rather than
+                // a bare "[ERROR]" that never appears on disk.
+                if (line.find("[ERROR  ]") != std::string::npos)
+                {
+                    ++n;
+                }
+            }
+            return n;
+        }
+
+    private:
+        std::filesystem::path path_;
+    };
+} // namespace
+
+// The try_install_* helpers must not double-log: every failure code is
+// logged exactly once by the underlying create_*_hook path.
+TEST_F(HookManagerTest, TryInstallInline_LogsOnceOnFailure)
+{
+    ScopedTestLogFile logfile;
+    void *trampoline = nullptr;
+    auto name = try_install_inline(
+        "TryInstallInline_LogOnce",
+        0,
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &trampoline);
+    EXPECT_FALSE(name.has_value());
+    EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
+}
+
+TEST_F(HookManagerTest, TryInstallMid_LogsOnceOnFailure)
+{
+    ScopedTestLogFile logfile;
+    auto name = try_install_mid(
+        "TryInstallMid_LogOnce",
+        0,
+        +[](safetyhook::Context &) {});
+    EXPECT_FALSE(name.has_value());
+    EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
+}
+
+// AOB variants previously triple-logged when both the pattern resolved and
+// the underlying create_*_hook failed. The pattern-not-found path still emits
+// exactly one log line; the pattern-resolved-then-create-fails path is
+// covered by the direct-address try_install_* tests above.
+TEST_F(HookManagerTest, TryInstallInlineAob_LogsOnceOnPatternFailure)
+{
+    ScopedTestLogFile logfile;
+    void *trampoline = nullptr;
+    auto name = try_install_inline_aob(
+        "TryInstallInlineAob_LogOnce",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        16,
+        "FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF",
+        0,
+        reinterpret_cast<void *>(&real_hook_detour_add),
+        &trampoline);
+    EXPECT_FALSE(name.has_value());
+    EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
+}
+
+TEST_F(HookManagerTest, TryInstallMidAob_LogsOnceOnPatternFailure)
+{
+    ScopedTestLogFile logfile;
+    auto name = try_install_mid_aob(
+        "TryInstallMidAob_LogOnce",
+        reinterpret_cast<uintptr_t>(&real_hook_target_add),
+        16,
+        "FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF",
+        0,
+        +[](safetyhook::Context &) {});
+    EXPECT_FALSE(name.has_value());
+    EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
+}
+

@@ -248,14 +248,17 @@ namespace DetourModKit
 
     bool InputPoller::is_binding_active(size_t index) const noexcept
     {
+        // Acquire the shared lock so the index/array pair stays consistent
+        // across a reshape (add_binding, remove_bindings_by_name,
+        // update_combos all swap active_states_ under the writer lock and
+        // resize bindings_ alongside it). The relaxed atomic load on the
+        // element itself is still cheap; it is the unique_ptr<atomic[]>
+        // ownership swap that needs synchronisation.
+        std::shared_lock lock(bindings_rw_mutex_);
         if (index >= bindings_.size())
         {
             return false;
         }
-        // relaxed is sufficient: the poll thread writes and game-loop threads
-        // read active_states_[] independently.  Atomicity of the load is all
-        // that matters -- no cross-variable ordering is required.  A stale
-        // read at worst delays the state change by one poll cycle (~5 ms).
         return active_states_[index].load(std::memory_order_relaxed) != 0;
     }
 
@@ -481,103 +484,186 @@ namespace DetourModKit
 
     bool InputPoller::update_combos(std::string_view name, const Config::KeyComboList &combos) noexcept
     {
-        std::unique_lock lock(bindings_rw_mutex_);
-        const auto it = name_index_.find(name);
-        if (it == name_index_.end())
-        {
-            Logger::get_instance().debug("InputPoller: update_combos(\"{}\") ignored: name not found", name);
-            return false;
-        }
+        std::vector<std::function<void(bool)>> hold_release_callbacks;
+        std::vector<std::string> hold_release_names;
 
-        // Reject an empty replacement so a user editing the INI to a blank
-        // value cannot silently disable a callback. To clear a binding the
-        // caller must remove it explicitly.
-        if (combos.empty())
         {
-            Logger::get_instance().warning(
-                "InputPoller: update_combos(\"{}\") ignored: replacement combo list is empty",
-                name);
-            return false;
-        }
-
-        std::vector<size_t> indices = it->second;
-        if (indices.empty())
-        {
-            return false;
-        }
-
-        // Cardinality-preserving fast path: in-place rewrite of keys and
-        // modifiers leaves bindings_ and active_states_ in lockstep. The
-        // poll thread holds a shared_lock for the duration of one tick,
-        // so the unique_lock here serializes against it; concurrent
-        // is_binding_active(size_t) reads stay valid because the
-        // binding count and array sizes do not change.
-        if (indices.size() == combos.size())
-        {
-            for (size_t i = 0; i < indices.size(); ++i)
+            std::unique_lock lock(bindings_rw_mutex_);
+            const auto it = name_index_.find(name);
+            if (it == name_index_.end())
             {
-                const size_t idx = indices[i];
-                bindings_[idx].keys = combos[i].keys;
-                bindings_[idx].modifiers = combos[i].modifiers;
+                Logger::get_instance().debug("InputPoller: update_combos(\"{}\") ignored: name not found", name);
+                return false;
             }
-            recompute_modifier_caches_locked();
-            return true;
-        }
 
-        // Cardinality change requires rebuilding the bindings vector and
-        // the parallel active_states_ array. Capture the prototype from
-        // the first existing entry so callback identity, mode, and name
-        // stay stable across the rebuild.
-        InputBinding prototype = bindings_[indices.front()];
-
-        std::sort(indices.begin(), indices.end());
-        std::vector<InputBinding> rebuilt;
-        rebuilt.reserve(bindings_.size() - indices.size() + combos.size());
-        size_t cursor = 0;
-        for (size_t skip : indices)
-        {
-            for (size_t i = cursor; i < skip; ++i)
+            // Reject an empty replacement so a user editing the INI to a blank
+            // value cannot silently disable a callback. To clear a binding the
+            // caller must remove it explicitly.
+            if (combos.empty())
             {
+                Logger::get_instance().warning(
+                    "InputPoller: update_combos(\"{}\") ignored: replacement combo list is empty",
+                    name);
+                return false;
+            }
+
+            std::vector<size_t> indices = it->second;
+            if (indices.empty())
+            {
+                return false;
+            }
+
+            // Cardinality-preserving fast path: in-place rewrite of keys and
+            // modifiers leaves bindings_ and active_states_ in lockstep. The
+            // poll thread holds a shared_lock for the duration of one tick,
+            // so the unique_lock here serializes against it; concurrent
+            // is_binding_active(size_t) reads stay valid because the
+            // binding count and array sizes do not change.
+            if (indices.size() == combos.size())
+            {
+                for (size_t i = 0; i < indices.size(); ++i)
+                {
+                    const size_t idx = indices[i];
+                    bindings_[idx].keys = combos[i].keys;
+                    bindings_[idx].modifiers = combos[i].modifiers;
+                }
+                recompute_modifier_caches_locked();
+                return true;
+            }
+
+            // Cardinality change requires rebuilding the bindings vector and
+            // the parallel active_states_ array. Capture the prototype from
+            // the first existing entry so callback identity, mode, and name
+            // stay stable across the rebuild.
+            InputBinding prototype = bindings_[indices.front()];
+
+            // Capture release callbacks for any held entries that this update
+            // is about to drop. Without this, a register_hold consumer whose
+            // combo cardinality changes via INI hot-reload would latch in the
+            // held state forever because the underlying entry vanishes from
+            // bindings_ before the next poll tick can observe the release.
+            for (size_t idx : indices)
+            {
+                if (active_states_[idx].load(std::memory_order_relaxed) != 0 &&
+                    bindings_[idx].mode == InputMode::Hold &&
+                    bindings_[idx].on_state_change)
+                {
+                    hold_release_callbacks.push_back(bindings_[idx].on_state_change);
+                    hold_release_names.push_back(bindings_[idx].name);
+                }
+            }
+
+            std::sort(indices.begin(), indices.end());
+
+            // Build a parallel old-state vector keyed to the new bindings_
+            // order so surviving entries carry their atomic value across the
+            // swap. Newly appended combos default to zero (the genuine
+            // cardinality-grew case has no prior state to inherit). Entries
+            // that get rewritten through the prototype path also start at
+            // zero because the underlying combo is logically replaced even
+            // if the binding name persists.
+            std::vector<InputBinding> rebuilt;
+            std::vector<uint8_t> rebuilt_states;
+            rebuilt.reserve(bindings_.size() - indices.size() + combos.size());
+            rebuilt_states.reserve(rebuilt.capacity());
+            size_t cursor = 0;
+            for (size_t skip : indices)
+            {
+                for (size_t i = cursor; i < skip; ++i)
+                {
+                    rebuilt_states.push_back(active_states_[i].load(std::memory_order_relaxed));
+                    rebuilt.push_back(std::move(bindings_[i]));
+                }
+                cursor = skip + 1;
+            }
+            for (size_t i = cursor; i < bindings_.size(); ++i)
+            {
+                rebuilt_states.push_back(active_states_[i].load(std::memory_order_relaxed));
                 rebuilt.push_back(std::move(bindings_[i]));
             }
-            cursor = skip + 1;
-        }
-        for (size_t i = cursor; i < bindings_.size(); ++i)
-        {
-            rebuilt.push_back(std::move(bindings_[i]));
-        }
-        for (const auto &combo : combos)
-        {
-            InputBinding b = prototype;
-            b.keys = combo.keys;
-            b.modifiers = combo.modifiers;
-            rebuilt.push_back(std::move(b));
-        }
-        bindings_ = std::move(rebuilt);
+            for (const auto &combo : combos)
+            {
+                InputBinding b = prototype;
+                b.keys = combo.keys;
+                b.modifiers = combo.modifiers;
+                rebuilt.push_back(std::move(b));
+                rebuilt_states.push_back(0);
+            }
+            bindings_ = std::move(rebuilt);
 
-        // Reallocate active_states_ to match the new binding count. The
-        // index-based is_binding_active(size_t) reads relaxed and may
-        // observe a stale or zero entry briefly during the swap; that
-        // matches the existing contract (one-poll-cycle delay tolerance).
-        auto new_states = std::make_unique<std::atomic<uint8_t>[]>(bindings_.size());
-        active_states_ = std::move(new_states);
+            // Reallocate active_states_ to match the new binding count and
+            // seed each slot from the captured pre-rebuild value. Surviving
+            // entries keep their atomic state so a held binding does not
+            // momentarily report inactive; the writer lock serialises the
+            // swap against any concurrent is_binding_active() reader.
+            auto new_states = std::make_unique<std::atomic<uint8_t>[]>(bindings_.size());
+            for (size_t i = 0; i < rebuilt_states.size(); ++i)
+            {
+                new_states[i].store(rebuilt_states[i], std::memory_order_relaxed);
+            }
+            active_states_ = std::move(new_states);
 
-        recompute_modifier_caches_locked();
+            recompute_modifier_caches_locked();
+        }
+
+        // Fire the captured release callbacks outside the writer lock so user
+        // code may safely call back into the InputManager (matching the
+        // remove_bindings_by_name pattern). This path runs in response to a
+        // user-driven INI reshape, never from a DllMain detach, so synchronous
+        // callback dispatch is safe here.
+        for (size_t i = 0; i < hold_release_callbacks.size(); ++i)
+        {
+            try
+            {
+                hold_release_callbacks[i](false);
+            }
+            catch (const std::exception &e)
+            {
+                Logger::get_instance().error(
+                    "InputPoller: Exception in hold release callback \"{}\": {}",
+                    hold_release_names[i], e.what());
+            }
+            catch (...)
+            {
+                Logger::get_instance().error(
+                    "InputPoller: Unknown exception in hold release callback \"{}\"",
+                    hold_release_names[i]);
+            }
+        }
+
         return true;
     }
 
     void InputPoller::add_binding(InputBinding binding) noexcept
     {
         std::unique_lock lock(bindings_rw_mutex_);
+
+        // Capture the existing per-binding atomic states before the swap so
+        // surviving entries do not flicker through a one-tick "inactive" blip
+        // while the new active_states_ array is built. The relaxed load is
+        // sufficient: we already hold the writer lock, which serialises us
+        // against every other reader and writer of this array.
+        const size_t old_count = bindings_.size();
+        std::vector<uint8_t> carried;
+        carried.reserve(old_count);
+        for (size_t i = 0; i < old_count; ++i)
+        {
+            carried.push_back(active_states_[i].load(std::memory_order_relaxed));
+        }
+
         bindings_.push_back(std::move(binding));
 
         auto new_states = std::make_unique<std::atomic<uint8_t>[]>(bindings_.size());
+        for (size_t i = 0; i < carried.size(); ++i)
+        {
+            new_states[i].store(carried[i], std::memory_order_relaxed);
+        }
         active_states_ = std::move(new_states);
 
         recompute_modifier_caches_locked();
     }
 
-    size_t InputPoller::remove_bindings_by_name(std::string_view name) noexcept
+    size_t InputPoller::remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept
     {
         std::vector<std::function<void(bool)>> hold_release_callbacks;
         std::vector<std::string> hold_release_names;
@@ -596,15 +682,41 @@ namespace DetourModKit
 
             // Capture release callbacks for active hold bindings before
             // erasure; fire them after the lock is released so user code
-            // is free to call back into the InputManager.
+            // is free to call back into the InputManager. The Bootstrap
+            // unload path passes invoke_callbacks=false to skip this step
+            // because the user callbacks live in a Logic DLL whose code
+            // pages may be about to be unmapped.
+            if (invoke_callbacks)
+            {
+                for (size_t idx : indices)
+                {
+                    if (active_states_[idx].load(std::memory_order_relaxed) != 0 &&
+                        bindings_[idx].mode == InputMode::Hold &&
+                        bindings_[idx].on_state_change)
+                    {
+                        hold_release_callbacks.push_back(bindings_[idx].on_state_change);
+                        hold_release_names.push_back(bindings_[idx].name);
+                    }
+                }
+            }
+
+            // Build a flat skip-mask so the new active_states_ slot for every
+            // surviving binding inherits its prior atomic value. Without this
+            // a held binding would briefly report inactive after the
+            // reshape, breaking register_hold consumers that observe the
+            // state through is_binding_active(size_t).
+            std::vector<bool> drop(bindings_.size(), false);
             for (size_t idx : indices)
             {
-                if (active_states_[idx].load(std::memory_order_relaxed) != 0 &&
-                    bindings_[idx].mode == InputMode::Hold &&
-                    bindings_[idx].on_state_change)
+                drop[idx] = true;
+            }
+            std::vector<uint8_t> carried;
+            carried.reserve(bindings_.size() - indices.size());
+            for (size_t i = 0; i < bindings_.size(); ++i)
+            {
+                if (!drop[i])
                 {
-                    hold_release_callbacks.push_back(bindings_[idx].on_state_change);
-                    hold_release_names.push_back(bindings_[idx].name);
+                    carried.push_back(active_states_[i].load(std::memory_order_relaxed));
                 }
             }
 
@@ -615,6 +727,10 @@ namespace DetourModKit
             removed = indices.size();
 
             auto new_states = std::make_unique<std::atomic<uint8_t>[]>(bindings_.size());
+            for (size_t i = 0; i < carried.size(); ++i)
+            {
+                new_states[i].store(carried[i], std::memory_order_relaxed);
+            }
             active_states_ = std::move(new_states);
 
             recompute_modifier_caches_locked();
@@ -643,19 +759,28 @@ namespace DetourModKit
         return removed;
     }
 
-    void InputPoller::clear_bindings() noexcept
+    void InputPoller::clear_bindings(bool invoke_callbacks) noexcept
     {
         std::vector<std::pair<std::function<void(bool)>, std::string>> hold_releases;
 
         {
             std::unique_lock lock(bindings_rw_mutex_);
-            for (size_t i = 0; i < bindings_.size(); ++i)
+            // Skip the release-callback capture entirely on the loader-lock
+            // path (Bootstrap::on_logic_dll_unload_all). Running user
+            // callbacks under loader lock is unsafe because the Logic DLL
+            // hosting those callbacks may be in the middle of being
+            // unmapped, and any callback that touches Win32 LoadLibrary
+            // family or a peer DllMain's mutex would deadlock.
+            if (invoke_callbacks)
             {
-                if (active_states_[i].load(std::memory_order_relaxed) != 0 &&
-                    bindings_[i].mode == InputMode::Hold &&
-                    bindings_[i].on_state_change)
+                for (size_t i = 0; i < bindings_.size(); ++i)
                 {
-                    hold_releases.emplace_back(bindings_[i].on_state_change, bindings_[i].name);
+                    if (active_states_[i].load(std::memory_order_relaxed) != 0 &&
+                        bindings_[i].mode == InputMode::Hold &&
+                        bindings_[i].on_state_change)
+                    {
+                        hold_releases.emplace_back(bindings_[i].on_state_change, bindings_[i].name);
+                    }
                 }
             }
             bindings_.clear();
@@ -1013,7 +1138,7 @@ namespace DetourModKit
         }
     }
 
-    size_t InputManager::remove_binding_by_name(std::string_view name) noexcept
+    size_t InputManager::remove_binding_by_name(std::string_view name, bool invoke_callbacks) noexcept
     {
         std::shared_ptr<InputPoller> live_poller;
         size_t removed_pending = 0;
@@ -1037,12 +1162,12 @@ namespace DetourModKit
 
         if (live_poller)
         {
-            return live_poller->remove_bindings_by_name(name);
+            return live_poller->remove_bindings_by_name(name, invoke_callbacks);
         }
         return removed_pending;
     }
 
-    void InputManager::clear_bindings() noexcept
+    void InputManager::clear_bindings(bool invoke_callbacks) noexcept
     {
         std::shared_ptr<InputPoller> live_poller;
 
@@ -1057,7 +1182,7 @@ namespace DetourModKit
 
         if (live_poller)
         {
-            live_poller->clear_bindings();
+            live_poller->clear_bindings(invoke_callbacks);
         }
     }
 

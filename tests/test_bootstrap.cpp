@@ -556,3 +556,227 @@ TEST(BootstrapOnLogicDllUnloadAll, CoexistsWithNamedOverload)
         reinterpret_cast<uintptr_t>(&logic_unload_target_sub)));
     EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
 }
+
+TEST(BootstrapOnLogicDllUnload, SuppressesHoldReleaseCallbacks)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    auto release_count = std::make_shared<std::atomic<int>>(0);
+    auto press_count = std::make_shared<std::atomic<int>>(0);
+
+    InputManager::get_instance().register_hold(
+        "loader_lock_hold",
+        {keyboard_key(0x48)},
+        [release_count, press_count](bool pressed) noexcept
+        {
+            if (pressed)
+            {
+                press_count->fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                release_count->fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+
+    const std::string_view bindings[] = {"loader_lock_hold"};
+    Bootstrap::on_logic_dll_unload({}, bindings);
+
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(release_count->load(), 0)
+        << "Bootstrap unload helpers must not invoke user release callbacks under loader lock";
+    EXPECT_EQ(press_count->load(), 0);
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, SuppressesHoldReleaseCallbacks)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    auto release_count = std::make_shared<std::atomic<int>>(0);
+
+    InputManager::get_instance().register_hold(
+        "loader_lock_hold_all",
+        {keyboard_key(0x49)},
+        [release_count](bool pressed) noexcept
+        {
+            if (!pressed)
+            {
+                release_count->fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+
+    Bootstrap::on_logic_dll_unload_all();
+
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(release_count->load(), 0);
+}
+
+namespace
+{
+    using ComputeDamageFn = int(__cdecl *)(int, int);
+    using ComputeArmorFn = int(__cdecl *)(int, int);
+
+    struct LoadedFixtureModule
+    {
+        HMODULE handle{nullptr};
+        ComputeDamageFn compute_damage{nullptr};
+        ComputeArmorFn compute_armor{nullptr};
+
+        bool load()
+        {
+            handle = LoadLibraryA("hook_target_lib.dll");
+            if (!handle)
+            {
+                return false;
+            }
+            compute_damage = reinterpret_cast<ComputeDamageFn>(
+                reinterpret_cast<void *>(GetProcAddress(handle, "compute_damage")));
+            compute_armor = reinterpret_cast<ComputeArmorFn>(
+                reinterpret_cast<void *>(GetProcAddress(handle, "compute_armor")));
+            return compute_damage != nullptr && compute_armor != nullptr;
+        }
+
+        void unload()
+        {
+            if (handle)
+            {
+                FreeLibrary(handle);
+                handle = nullptr;
+                compute_damage = nullptr;
+                compute_armor = nullptr;
+            }
+        }
+
+        ~LoadedFixtureModule() { unload(); }
+    };
+
+    int __cdecl fixture_detour_compute_damage(int, int) { return 0xC0DE; }
+    int __cdecl fixture_detour_compute_armor(int, int) { return 0xCAFE; }
+} // namespace
+
+// Drives the Bootstrap helpers through a real LoadLibrary / FreeLibrary cycle
+// against the hook_target_lib fixture so trampoline restoration, code-page
+// lifetime, and idempotency are exercised end-to-end rather than only against
+// in-process function targets.
+TEST(BootstrapOnLogicDllUnload, FixtureDllRoundTrip)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    LoadedFixtureModule mod;
+    ASSERT_TRUE(mod.load()) << "hook_target_lib.dll must be loadable";
+
+    void *tramp_damage = nullptr;
+    void *tramp_armor = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "fixture_dll_damage",
+        reinterpret_cast<uintptr_t>(mod.compute_damage),
+        reinterpret_cast<void *>(&fixture_detour_compute_damage),
+        &tramp_damage).has_value());
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "fixture_dll_armor",
+        reinterpret_cast<uintptr_t>(mod.compute_armor),
+        reinterpret_cast<void *>(&fixture_detour_compute_armor),
+        &tramp_armor).has_value());
+
+    InputManager::get_instance().register_press(
+        "fixture_dll_bind_a", {keyboard_key(0x4A)}, []() {});
+    InputManager::get_instance().register_press(
+        "fixture_dll_bind_b", {keyboard_key(0x4B)}, []() {});
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(2));
+    EXPECT_TRUE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(mod.compute_damage)));
+    EXPECT_TRUE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(mod.compute_armor)));
+
+    const std::string_view hooks[] = {"fixture_dll_damage", "fixture_dll_armor"};
+    const std::string_view bindings[] = {"fixture_dll_bind_a", "fixture_dll_bind_b"};
+    Bootstrap::on_logic_dll_unload(hooks, bindings);
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(mod.compute_damage)));
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(mod.compute_armor)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+
+    // Idempotent: a second sweep of the same names is a no-op.
+    Bootstrap::on_logic_dll_unload(hooks, bindings);
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+
+    // Free and reload the fixture so a fresh prologue can be hooked. If the
+    // unload had failed to restore the bytes, the second create_inline_hook
+    // would return TargetAlreadyHookedInProcess against any module that
+    // happened to remap to the same address.
+    mod.unload();
+    ASSERT_TRUE(mod.load()) << "hook_target_lib.dll must reload cleanly";
+
+    void *tramp_reload = nullptr;
+    HookConfig strict;
+    strict.fail_if_already_hooked = true;
+    auto reload_result = HookManager::get_instance().create_inline_hook(
+        "fixture_dll_damage_reloaded",
+        reinterpret_cast<uintptr_t>(mod.compute_damage),
+        reinterpret_cast<void *>(&fixture_detour_compute_damage),
+        &tramp_reload,
+        strict);
+    EXPECT_TRUE(reload_result.has_value())
+        << "Fresh hook on the reloaded fixture must succeed; "
+        << "TargetAlreadyHookedInProcess would mean the prologue was not restored";
+
+    HookManager::get_instance().remove_all_hooks();
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+
+    LoadedFixtureModule mod;
+    ASSERT_TRUE(mod.load());
+
+    void *tramp_damage = nullptr;
+    void *tramp_armor = nullptr;
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "fixture_all_damage",
+        reinterpret_cast<uintptr_t>(mod.compute_damage),
+        reinterpret_cast<void *>(&fixture_detour_compute_damage),
+        &tramp_damage).has_value());
+    ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
+        "fixture_all_armor",
+        reinterpret_cast<uintptr_t>(mod.compute_armor),
+        reinterpret_cast<void *>(&fixture_detour_compute_armor),
+        &tramp_armor).has_value());
+    InputManager::get_instance().register_press(
+        "fixture_all_bind", {keyboard_key(0x4C)}, []() {});
+
+    Bootstrap::on_logic_dll_unload_all();
+
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(mod.compute_damage)));
+    EXPECT_FALSE(HookManager::get_instance().is_target_already_hooked(
+        reinterpret_cast<uintptr_t>(mod.compute_armor)));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+
+    // Idempotency.
+    Bootstrap::on_logic_dll_unload_all();
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+
+    // Reload the fixture and re-hook to confirm the restored prologue is
+    // hookable from a clean slate.
+    mod.unload();
+    ASSERT_TRUE(mod.load());
+    void *tramp_reload = nullptr;
+    HookConfig strict;
+    strict.fail_if_already_hooked = true;
+    EXPECT_TRUE(HookManager::get_instance().create_inline_hook(
+        "fixture_all_damage_reloaded",
+        reinterpret_cast<uintptr_t>(mod.compute_damage),
+        reinterpret_cast<void *>(&fixture_detour_compute_damage),
+        &tramp_reload,
+        strict).has_value());
+
+    HookManager::get_instance().remove_all_hooks();
+}

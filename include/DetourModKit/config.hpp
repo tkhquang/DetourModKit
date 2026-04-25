@@ -194,9 +194,13 @@ namespace DetourModKit
          * @param out Atomic destination updated on every successful parse.
          * @param default_value Value applied when the INI key is missing.
          */
+        // Marked = delete so unsupported T (e.g. double, uint64_t) becomes a
+        // crisp compile error pointing at the call site rather than a mangled
+        // unresolved-symbol link error. The supported instantiations are the
+        // explicit specialisations below (int, bool, float).
         template <typename T>
         void register_atomic(std::string_view section, std::string_view ini_key,
-                             std::string_view log_key_name, std::atomic<T> &out, T default_value);
+                             std::string_view log_key_name, std::atomic<T> &out, T default_value) = delete;
 
         template <>
         inline void register_atomic<int>(std::string_view section, std::string_view ini_key,

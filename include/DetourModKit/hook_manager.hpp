@@ -1066,13 +1066,13 @@ namespace DetourModKit
     };
 
     /**
-     * @brief Convenience wrapper that installs an inline hook by direct address
-     *        and logs an Error line on failure.
+     * @brief Convenience wrapper that installs an inline hook by direct address.
      * @details Forwards every argument to HookManager::create_inline_hook.
      *          Returns the registered hook name on success, std::nullopt on
-     *          failure. The failure path emits a single Error log line carrying
-     *          the HookError code so consumers do not need to format their own
-     *          diagnostic boilerplate.
+     *          failure. Diagnostic logging on failure is delegated to the
+     *          underlying create_inline_hook call, which already formats a
+     *          richly-detailed Error line for every failure code; this
+     *          wrapper does not emit a duplicate.
      */
     [[nodiscard]] inline std::optional<std::string> try_install_inline(
         std::string_view name,
@@ -1087,15 +1087,15 @@ namespace DetourModKit
         {
             return *result;
         }
-        Logger::get_instance().error(
-            "HookManager: try_install_inline('{}') failed: {}",
-            name, Hook::error_to_string(result.error()));
         return std::nullopt;
     }
 
     /**
-     * @brief Convenience wrapper that installs an inline hook by AOB scan and
-     *        logs an Error line on failure.
+     * @brief Convenience wrapper that installs an inline hook by AOB scan.
+     * @details Diagnostic logging on failure is delegated to the underlying
+     *          create_inline_hook_aob call (pattern-resolution failures and
+     *          create_inline_hook failures both emit their own Error line),
+     *          so this wrapper does not emit a duplicate.
      */
     [[nodiscard]] inline std::optional<std::string> try_install_inline_aob(
         std::string_view name,
@@ -1114,15 +1114,14 @@ namespace DetourModKit
         {
             return *result;
         }
-        Logger::get_instance().error(
-            "HookManager: try_install_inline_aob('{}') failed: {}",
-            name, Hook::error_to_string(result.error()));
         return std::nullopt;
     }
 
     /**
      * @brief Convenience wrapper that installs a mid-function hook by direct
-     *        address and logs an Error line on failure.
+     *        address.
+     * @details Diagnostic logging on failure is delegated to the underlying
+     *          create_mid_hook call.
      */
     [[nodiscard]] inline std::optional<std::string> try_install_mid(
         std::string_view name,
@@ -1136,15 +1135,13 @@ namespace DetourModKit
         {
             return *result;
         }
-        Logger::get_instance().error(
-            "HookManager: try_install_mid('{}') failed: {}",
-            name, Hook::error_to_string(result.error()));
         return std::nullopt;
     }
 
     /**
-     * @brief Convenience wrapper that installs a mid-function hook by AOB scan
-     *        and logs an Error line on failure.
+     * @brief Convenience wrapper that installs a mid-function hook by AOB scan.
+     * @details Diagnostic logging on failure is delegated to the underlying
+     *          create_mid_hook_aob call.
      */
     [[nodiscard]] inline std::optional<std::string> try_install_mid_aob(
         std::string_view name,
@@ -1162,9 +1159,6 @@ namespace DetourModKit
         {
             return *result;
         }
-        Logger::get_instance().error(
-            "HookManager: try_install_mid_aob('{}') failed: {}",
-            name, Hook::error_to_string(result.error()));
         return std::nullopt;
     }
 } // namespace DetourModKit

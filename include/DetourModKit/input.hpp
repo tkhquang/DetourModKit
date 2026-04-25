@@ -172,7 +172,11 @@ namespace DetourModKit
          * @param index Zero-based index into the bindings vector.
          * @return true if the binding's key(s) are currently pressed.
          *         Returns false for out-of-range indices.
-         * @note Thread-safe. Can be called from any thread.
+         * @note Thread-safe. Acquires bindings_rw_mutex_ as a reader so the
+         *       index/array pair stays consistent across reshape calls
+         *       (add_binding, remove_bindings_by_name, update_combos). The
+         *       fast path is the cheap shared_lock acquire when no writer
+         *       is in flight.
          */
         [[nodiscard]] bool is_binding_active(size_t index) const noexcept;
 
@@ -225,10 +229,10 @@ namespace DetourModKit
          * @brief Appends a binding to the running poller.
          * @details Thread-safe. Takes the bindings rw mutex exclusively, so a
          *          concurrent poll cycle blocks for at most the duration of
-         *          its current tick. The active_states_ array is reallocated
-         *          to match the new binding count; the relaxed-load contract
-         *          on is_binding_active(size_t) tolerates a one-cycle stale
-         *          read across the swap.
+         *          its current tick. The active_states_ array is rebuilt to
+         *          match the new binding count, with the previous atomic
+         *          value carried forward for every existing entry so a held
+         *          binding does not flicker through one inactive tick.
          * @param binding Binding to append.
          */
         void add_binding(InputBinding binding) noexcept;
@@ -237,12 +241,16 @@ namespace DetourModKit
          * @brief Removes every binding whose name matches @p name.
          * @details Thread-safe. Active hold bindings receive an
          *          on_state_change(false) callback before erasure. The
-         *          active_states_ array is reallocated to match the new
-         *          binding count.
+         *          active_states_ array is rebuilt to match the new
+         *          binding count, with the previous atomic value carried
+         *          forward for every surviving entry.
          * @param name Binding name to remove.
          * @return Number of bindings removed (zero if the name was not registered).
          */
-        size_t remove_bindings_by_name(std::string_view name) noexcept;
+        size_t remove_bindings_by_name(std::string_view name) noexcept
+        {
+            return remove_bindings_by_name(name, true);
+        }
 
         /**
          * @brief Drops every binding without stopping the poll thread.
@@ -251,7 +259,38 @@ namespace DetourModKit
          *          zero bindings and the poll thread keeps running idle.
          *          Thread-safe.
          */
-        void clear_bindings() noexcept;
+        void clear_bindings() noexcept
+        {
+            clear_bindings(true);
+        }
+
+        /**
+         * @brief Variant of remove_bindings_by_name that suppresses the
+         *        on_state_change(false) release callbacks for active holds.
+         * @details Used by the loader-lock-safe Bootstrap unload path: user
+         *          callbacks live in a Logic DLL whose code pages may be
+         *          about to be unmapped, so invoking them under the loader
+         *          lock would risk a deadlock or a use-after-unload.
+         * @param name Binding name to remove.
+         * @param invoke_callbacks When true (default for the public API),
+         *        active hold bindings receive on_state_change(false) before
+         *        erasure. When false, the release callbacks are dropped on
+         *        the floor.
+         * @return Number of bindings removed.
+         */
+        size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept;
+
+        /**
+         * @brief Variant of clear_bindings that suppresses the
+         *        on_state_change(false) release callbacks for active holds.
+         * @details See the single-argument overload of remove_bindings_by_name
+         *          for the rationale; both overloads serve the same
+         *          loader-lock-safe teardown path.
+         * @param invoke_callbacks When true (default for the public API),
+         *        active hold bindings receive on_state_change(false) before
+         *        erasure. When false, the release callbacks are dropped.
+         */
+        void clear_bindings(bool invoke_callbacks) noexcept;
 
     private:
         void poll_loop(std::stop_token stop_token);
@@ -485,7 +524,10 @@ namespace DetourModKit
          * @param name Binding name to remove.
          * @return Number of bindings removed.
          */
-        size_t remove_binding_by_name(std::string_view name) noexcept;
+        size_t remove_binding_by_name(std::string_view name) noexcept
+        {
+            return remove_binding_by_name(name, true);
+        }
 
         /**
          * @brief Drops every registered binding without stopping the poller.
@@ -495,7 +537,31 @@ namespace DetourModKit
          *          thread keeps running and can be reseeded via subsequent
          *          register_press / register_hold calls. Thread-safe.
          */
-        void clear_bindings() noexcept;
+        void clear_bindings() noexcept
+        {
+            clear_bindings(true);
+        }
+
+        /**
+         * @brief Variant of remove_binding_by_name that suppresses the
+         *        on_state_change(false) release callbacks for active holds.
+         * @details Forwarded straight to the underlying InputPoller. Loader-lock
+         *          callers use this overload because user callbacks live in a
+         *          Logic DLL whose code pages may be about to be unmapped.
+         * @param name Binding name to remove.
+         * @param invoke_callbacks When true, behaves identically to the public
+         *        single-argument overload. When false, drops release callbacks.
+         * @return Number of bindings removed.
+         */
+        size_t remove_binding_by_name(std::string_view name, bool invoke_callbacks) noexcept;
+
+        /**
+         * @brief Variant of clear_bindings that suppresses the
+         *        on_state_change(false) release callbacks for active holds.
+         * @param invoke_callbacks When true, behaves identically to the public
+         *        zero-argument overload. When false, drops release callbacks.
+         */
+        void clear_bindings(bool invoke_callbacks) noexcept;
 
         /**
          * @brief Stops the polling thread and clears all registered bindings.

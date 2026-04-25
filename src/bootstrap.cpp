@@ -375,7 +375,13 @@ namespace DetourModKit::Bootstrap
         {
             try
             {
-                bindings_removed += InputManager::get_instance().remove_binding_by_name(name);
+                // Pass invoke_callbacks=false because this helper is documented
+                // as safe from DllMain detach paths. User on_state_change(false)
+                // callbacks for held bindings live in the unloading Logic DLL;
+                // running them under loader lock is the deadlock-or-crash
+                // vector that the v3.2.1 leak-on-purpose discipline was set
+                // up to forbid.
+                bindings_removed += InputManager::get_instance().remove_binding_by_name(name, false);
             }
             catch (const std::exception &e)
             {
@@ -435,9 +441,12 @@ namespace DetourModKit::Bootstrap
         // clear_bindings() leaves the poll thread running and ready to accept
         // fresh bindings, matching the "tear down per-Logic-DLL state but keep
         // the manager re-usable" contract that the named-list overload honours.
+        // Pass invoke_callbacks=false because this helper is documented as
+        // safe from DllMain detach paths: user release callbacks live in the
+        // unloading Logic DLL and must not be invoked under loader lock.
         try
         {
-            InputManager::get_instance().clear_bindings();
+            InputManager::get_instance().clear_bindings(false);
         }
         catch (const std::exception &e)
         {

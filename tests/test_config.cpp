@@ -2343,3 +2343,40 @@ TEST_F(ConfigTest, RegisterAtomic_IntRoundTrip)
     ASSERT_NO_THROW(Config::load(test_ini_file_.string()));
     EXPECT_EQ(n.load(std::memory_order_relaxed), 7);
 }
+
+namespace
+{
+    // SFINAE probe: detects whether register_atomic<T> can be invoked. The
+    // primary template is = delete, so only the explicit specialisations
+    // (int, bool, float) yield a viable overload.
+    template <typename T, typename = void>
+    struct RegisterAtomicCallable : std::false_type
+    {
+    };
+
+    template <typename T>
+    struct RegisterAtomicCallable<
+        T,
+        std::void_t<decltype(Config::register_atomic<T>(
+            std::declval<std::string_view>(),
+            std::declval<std::string_view>(),
+            std::declval<std::string_view>(),
+            std::declval<std::atomic<T> &>(),
+            std::declval<T>()))>> : std::true_type
+    {
+    };
+} // namespace
+
+// Only the explicit specialisations are reachable. Unsupported T must be a
+// compile-time error at the call site rather than a mangled link-time error
+// in user binaries.
+static_assert(RegisterAtomicCallable<int>::value,
+              "register_atomic<int> must remain available.");
+static_assert(RegisterAtomicCallable<bool>::value,
+              "register_atomic<bool> must remain available.");
+static_assert(RegisterAtomicCallable<float>::value,
+              "register_atomic<float> must remain available.");
+static_assert(!RegisterAtomicCallable<double>::value,
+              "register_atomic<double> must be unavailable; only int, bool, and float are supported.");
+static_assert(!RegisterAtomicCallable<long>::value,
+              "register_atomic<long> must be unavailable; only int, bool, and float are supported.");

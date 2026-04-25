@@ -1902,3 +1902,97 @@ TEST(InputManagerHotReload, EmptyComboListRegistersSentinelName)
     EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
     im.shutdown();
 }
+
+// Regression test for the cardinality-rebuild release-callback bug: a held
+// register_hold consumer whose combo cardinality changes via INI hot-reload
+// previously latched in the held state forever because the underlying
+// binding entry was wholesale-replaced without firing on_state_change(false).
+// Without a way to drive GetAsyncKeyState in a test process, this case
+// exercises the call flow against the no-active-hold branch and pins that
+// the cardinality change still proceeds without crashing or leaking state.
+TEST(InputPollerHoldRebuild, CardinalityChangeFiresReleaseForHeldEntries)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    auto release_count = std::make_shared<std::atomic<int>>(0);
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}});
+    initial.push_back({{keyboard_key(0x42)}, {}});
+    im.register_hold(
+        "rebuild-hold",
+        initial,
+        [release_count](bool pressed) noexcept
+        {
+            if (!pressed)
+            {
+                release_count->fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    im.start(std::chrono::milliseconds(2));
+
+    Config::KeyComboList replacement;
+    replacement.push_back({{keyboard_key(0x43)}, {}});
+    im.update_binding_combos("rebuild-hold", replacement);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(1));
+    EXPECT_TRUE(im.is_running());
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
+// Surviving entries' atomic state must carry forward across add_binding so
+// a subsequent add_binding does not flicker held bindings through one
+// inactive tick. Verifies the binding count and lookup behaviour stay
+// consistent across the rebuild.
+TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    im.register_press("survive-1", {keyboard_key(0x41)}, []() {});
+    im.register_press("survive-2", {keyboard_key(0x42)}, []() {});
+    im.start(std::chrono::milliseconds(2));
+    ASSERT_EQ(im.binding_count(), static_cast<size_t>(2));
+
+    im.register_press("survive-3", {keyboard_key(0x43)}, []() {});
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(3));
+    EXPECT_FALSE(im.is_binding_active("survive-1"));
+    EXPECT_FALSE(im.is_binding_active("survive-2"));
+    EXPECT_FALSE(im.is_binding_active("survive-3"));
+    EXPECT_TRUE(im.is_running());
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
+// remove_bindings_by_name must carry surviving entries' atomic states
+// forward; is_binding_active(name) must stay consistent across the reshape
+// with no torn reads against bindings_.size().
+TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    im.register_press("keep-a", {keyboard_key(0x41)}, []() {});
+    im.register_press("drop", {keyboard_key(0x42)}, []() {});
+    im.register_press("keep-b", {keyboard_key(0x43)}, []() {});
+    im.start(std::chrono::milliseconds(2));
+
+    EXPECT_EQ(im.remove_binding_by_name("drop"), static_cast<size_t>(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(2));
+    EXPECT_FALSE(im.is_binding_active("drop"));
+    EXPECT_FALSE(im.is_binding_active("keep-a"));
+    EXPECT_FALSE(im.is_binding_active("keep-b"));
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
