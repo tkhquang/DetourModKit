@@ -414,11 +414,110 @@ namespace
 
     TEST_F(ConfigWatcherTest, Construct_InvalidPath_StartReturnsFalse)
     {
-        const std::filesystem::path missing =
-            m_temp_dir / "nonexistent_subdir" / "file.ini";
-
-        ConfigWatcher watcher(missing.string(), 100ms, []() {});
+        ConfigWatcher watcher(
+            (m_temp_dir / "nonexistent_subdir" / "file.ini").string(),
+            100ms, []() {});
         EXPECT_FALSE(watcher.start());
         EXPECT_FALSE(watcher.is_running());
+    }
+} // namespace
+
+// Loader-lock detach tests. The real loader-lock branch (detected by reading
+// the PEB inside DllMain) cannot be reached from user code in a normal test
+// process, so the runtime exposes a test-only function pointer override that
+// reports "loader lock held" on demand. These tests exercise the leak-on-
+// loader-lock branch in ~ConfigWatcher: the worker is detached instead of
+// joined, the Impl is moved into a static vector that outlives the
+// destructor, and the watcher does not deadlock.
+namespace DetourModKit::detail
+{
+    extern bool (*g_config_watcher_loader_lock_override)() noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    using DetourModKit::detail::g_config_watcher_loader_lock_override;
+
+    bool always_true_loader_lock() noexcept
+    {
+        return true;
+    }
+
+    class ConfigWatcherLoaderLockTest : public ConfigWatcherTest
+    {
+    protected:
+        void TearDown() override
+        {
+            g_config_watcher_loader_lock_override = nullptr;
+            ConfigWatcherTest::TearDown();
+        }
+    };
+
+    TEST_F(ConfigWatcherLoaderLockTest, DestructorWithoutLoaderLockJoinsCleanly)
+    {
+        std::atomic<int> hits{0};
+        const auto t_start = std::chrono::steady_clock::now();
+        {
+            ConfigWatcher watcher(m_ini_path.string(), 50ms,
+                                  [&hits]()
+                                  { hits.fetch_add(1); });
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]()
+                                   { return watcher.is_running(); },
+                                   1s));
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - t_start;
+
+        // Without the loader-lock override the destructor takes the normal
+        // join path. A clean join completes well under a second; a hang
+        // (e.g. a regression that joined under loader lock) would blow past
+        // the GetOverlappedResultEx pump timeout repeatedly.
+        EXPECT_LT(elapsed, std::chrono::seconds(3));
+    }
+
+    TEST_F(ConfigWatcherLoaderLockTest, DestructorUnderLoaderLockDoesNotHang)
+    {
+        std::atomic<int> hits{0};
+        const auto t_start = std::chrono::steady_clock::now();
+        {
+            ConfigWatcher watcher(m_ini_path.string(), 50ms,
+                                  [&hits]()
+                                  { hits.fetch_add(1); });
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]()
+                                   { return watcher.is_running(); },
+                                   1s));
+
+            // Flip the override on so ~ConfigWatcher takes the leak branch.
+            // The detach path must not block, must not call join(), and
+            // must keep the worker's captured pointers valid by leaking
+            // the Impl into a static vector.
+            g_config_watcher_loader_lock_override = &always_true_loader_lock;
+        }
+        const auto elapsed = std::chrono::steady_clock::now() - t_start;
+
+        // Under loader lock the destructor returns essentially immediately:
+        // request_stop on the worker, detach, leak. The OS thread continues
+        // running but no longer blocks the destructor.
+        EXPECT_LT(elapsed, std::chrono::seconds(2))
+            << "Loader-lock detach branch must not join the worker";
+    }
+
+    TEST_F(ConfigWatcherLoaderLockTest, MultipleLoaderLockTeardownsAreSafe)
+    {
+        // Confirms the static leak vector accepts multiple entries without
+        // tripping any single-slot overwrite hazards (the bug pattern that
+        // motivated #69's Logger::shutdown_internal fix).
+        for (int i = 0; i < 3; ++i)
+        {
+            ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+            ASSERT_TRUE(watcher.start());
+            ASSERT_TRUE(wait_until([&]()
+                                   { return watcher.is_running(); },
+                                   1s));
+            g_config_watcher_loader_lock_override = &always_true_loader_lock;
+            // Watcher destructor on scope exit takes the leak path.
+        }
+        SUCCEED();
     }
 } // namespace

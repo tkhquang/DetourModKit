@@ -143,6 +143,10 @@ namespace DetourModKit
          *          zero overhead on the success path. On MinGW, falls back to a single
          *          VirtualQuery guard before dereferencing (no cache interaction).
          *          Suitable for hot paths that already manage their own error recovery.
+         * @note On MinGW the implementation additionally probes the cache via a
+         *       non-blocking try_lock_shared before falling back to VirtualQuery,
+         *       so cache hits avoid a syscall. This is invisible to callers; the
+         *       function still exposes no caller-observable cache state.
          * @param base The base address to read from.
          * @param offset Byte offset added to base before dereferencing.
          * @return The pointer-sized value at the address, or 0 if the read faults.

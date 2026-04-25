@@ -478,6 +478,8 @@ namespace DetourModKit
         // the class-level doc for details.
         [[nodiscard]] int &emitting_depth() const noexcept
         {
+            // Shared across all dispatcher instances on the same thread.
+            // The reentrancy guard is per-thread (intentional), not per-dispatcher.
             thread_local int depth{0};
             return depth;
         }

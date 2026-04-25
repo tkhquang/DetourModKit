@@ -7,6 +7,7 @@
 
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/worker.hpp"
+#include "platform.hpp"
 
 #include <windows.h>
 
@@ -27,12 +28,32 @@
 
 namespace DetourModKit
 {
+    namespace detail
+    {
+        // Test-only override for is_loader_lock_held(). When non-null the
+        // ConfigWatcher destructor consults this hook instead of the real
+        // PEB-based detection, letting the test suite exercise the
+        // detach-and-leak branch from user code. Defined as a plain
+        // function pointer because the override is set/cleared on a single
+        // thread inside a test fixture.
+        bool (*g_config_watcher_loader_lock_override)() noexcept = nullptr;
+    } // namespace detail
+
     namespace
     {
         constexpr DWORD kNotifyFilter =
             FILE_NOTIFY_CHANGE_LAST_WRITE |
             FILE_NOTIFY_CHANGE_FILE_NAME |
             FILE_NOTIFY_CHANGE_SIZE;
+
+        bool loader_lock_held_for_watcher() noexcept
+        {
+            if (auto *override_fn = detail::g_config_watcher_loader_lock_override)
+            {
+                return override_fn();
+            }
+            return detail::is_loader_lock_held();
+        }
 
         // Sized so bursty editor saves do not overflow a single call while
         // still fitting comfortably on the worker's stack.
@@ -146,6 +167,41 @@ namespace DetourModKit
 
     ConfigWatcher::~ConfigWatcher() noexcept
     {
+        if (m_impl && loader_lock_held_for_watcher())
+        {
+            // Under loader lock (FreeLibrary path): joining the watcher
+            // would deadlock against ReadDirectoryChangesW's I/O completion,
+            // and tearing down Impl would invalidate the worker_thread_id
+            // pointer the detached lambda still references. Pin the module
+            // so trampoline and worker code pages remain mapped, request
+            // stop, then leak the entire Impl into a static vector that
+            // outlives the destructor. The same discipline as
+            // HookManager::~HookManager and Logger::shutdown_internal.
+            detail::pin_current_module();
+
+            if (m_impl->worker)
+            {
+                // shutdown() takes its own loader-lock branch: it requests
+                // stop and detaches the std::jthread (no join), then sets
+                // joined_ so the eventual ~StoppableWorker run during
+                // static teardown short-circuits without trying to join a
+                // detached handle.
+                m_impl->worker->shutdown();
+            }
+
+            // Releasing into the leak list keeps Impl alive for the rest
+            // of the process. The detached worker thread holds raw
+            // pointers and references into Impl members (worker_thread_id,
+            // captured strings); they must stay valid until the OS thread
+            // either observes the stop_token and exits or the process
+            // tears down. Either way the leaked storage is bounded:
+            // ~ConfigWatcher under loader lock runs at most once per
+            // Config-owned watcher per process.
+            static std::vector<std::unique_ptr<Impl>> s_leaked_impls;
+            s_leaked_impls.emplace_back(std::move(m_impl));
+            return;
+        }
+
         stop();
     }
 
