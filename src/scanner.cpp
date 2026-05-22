@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cassert>
 #include <cstring>
+#include <optional>
 
 #if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
 #define DMK_HAS_SSE2 1
@@ -93,15 +94,17 @@ namespace
      * @param pattern The compiled pattern to verify against.
      * @param start_offset Byte offset to start verification from (may be non-zero
      *                     if a previous tier partially verified).
-     * @return The byte offset where verification stopped. If equal to pattern size,
-     *         the AVX2 tier found no mismatches in its range.
+     * @return The next byte offset to resume verification from on success
+     *         (equal to pattern.size() when the AVX2 tier covered the whole
+     *         pattern), or std::nullopt when a 32-byte chunk did not match
+     *         and the caller must abandon this candidate position.
      * @note This function is compiled with AVX2 codegen via target attribute on
      *       GCC/Clang. On MSVC, intrinsics are always available.
      */
     DMK_AVX2_TARGET
-    size_t verify_pattern_avx2(const std::byte *pattern_start,
-                               const Scanner::CompiledPattern &pattern,
-                               size_t start_offset) noexcept
+    std::optional<size_t> verify_pattern_avx2(const std::byte *pattern_start,
+                                              const Scanner::CompiledPattern &pattern,
+                                              size_t start_offset) noexcept
     {
         const size_t pattern_size = pattern.size();
         size_t j = start_offset;
@@ -121,7 +124,7 @@ namespace
 
             if (static_cast<unsigned int>(_mm256_movemask_epi8(cmp)) != 0xFFFFFFFFu)
             {
-                return 0; // Mismatch sentinel
+                return std::nullopt;
             }
         }
 
@@ -166,7 +169,43 @@ namespace
             return 0; // uncommon, ideal anchor
         }
     }
+
+    /**
+     * @brief Picks the rarest literal byte's index in a compiled pattern.
+     * @return The byte index in `[0, pattern.size())` with the lowest score,
+     *         or `pattern.size()` when every position is a wildcard.
+     */
+    size_t select_pattern_anchor(const Scanner::CompiledPattern &pattern) noexcept
+    {
+        const size_t pattern_size = pattern.size();
+        size_t best = pattern_size;
+        uint8_t best_score = UINT8_MAX;
+        for (size_t i = 0; i < pattern_size; ++i)
+        {
+            if (pattern.mask[i] == std::byte{0x00})
+            {
+                continue;
+            }
+            const uint8_t score =
+                byte_frequency_class(static_cast<uint8_t>(pattern.bytes[i]));
+            if (best == pattern_size || score < best_score)
+            {
+                best = i;
+                best_score = score;
+                if (score == 0)
+                {
+                    break;
+                }
+            }
+        }
+        return best;
+    }
 } // anonymous namespace
+
+void DetourModKit::Scanner::CompiledPattern::compile_anchor() noexcept
+{
+    anchor = select_pattern_anchor(*this);
+}
 
 namespace
 {
@@ -284,6 +323,7 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
         return std::nullopt;
     }
 
+    result.compile_anchor();
     return result;
 }
 
@@ -366,27 +406,13 @@ namespace
             return nullptr;
         }
 
-        // Select the best anchor byte: the non-wildcard byte with the lowest
-        // frequency score. Ties are broken by first occurrence for deterministic
-        // behavior.
-        size_t best_anchor = pattern_size; // invalid = all wildcards
-        uint8_t best_score = UINT8_MAX;
-        for (size_t i = 0; i < pattern_size; ++i)
-        {
-            if (pattern.mask[i] != std::byte{0x00})
-            {
-                const uint8_t score = byte_frequency_class(static_cast<uint8_t>(pattern.bytes[i]));
-                if (best_anchor == pattern_size || score < best_score)
-                {
-                    best_anchor = i;
-                    best_score = score;
-                    if (score == 0)
-                    {
-                        break; // Cannot improve on score 0
-                    }
-                }
-            }
-        }
+        // Anchor selection: parse_aob() pre-populates pattern.anchor, so the
+        // common path is a single load. Manually constructed patterns fall
+        // back to inline selection without mutating the input (preserves the
+        // const-by-design contract).
+        const size_t best_anchor = (pattern.anchor <= pattern_size)
+                                       ? pattern.anchor
+                                       : select_pattern_anchor(pattern);
 
         // All wildcards: the pattern has no literal bytes to anchor on, so the
         // search degenerates to "always match at region start". The public
@@ -402,6 +428,14 @@ namespace
 
         const std::byte *search_start = start_address + best_anchor;
         const std::byte *const search_end = start_address + (region_size - pattern_size) + best_anchor;
+
+        // Hoist runtime CPU detection. The query itself is a function-local
+        // static behind a one-shot init, but reading it on every memchr hit
+        // adds an indirect load per false candidate. Caching it once here
+        // lets the per-hit branch use a register-resident bool.
+#ifdef DMK_HAS_AVX2
+        const bool use_avx2 = cpu_has_avx2();
+#endif
 
         while (search_start <= search_end)
         {
@@ -422,12 +456,15 @@ namespace
             size_t j = 0;
 
 #ifdef DMK_HAS_AVX2
-            if (cpu_has_avx2())
+            if (use_avx2)
             {
-                j = verify_pattern_avx2(pattern_start, pattern, 0);
-                if (j == 0 && pattern_size >= 32)
+                const auto next_j = verify_pattern_avx2(pattern_start, pattern, 0);
+                if (next_j.has_value())
                 {
-                    // Mismatch in AVX2 range
+                    j = *next_j;
+                }
+                else
+                {
                     match_found = false;
                 }
             }

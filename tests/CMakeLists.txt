@@ -101,9 +101,9 @@ if(DMK_BUILD_TESTS)
 endif()
 
 if(DMK_BUILD_BENCHMARKS)
-  # Standalone microbench executable. Deliberately does NOT link gtest --
-  # the benchmark is a raw main() that prints a TSV table to stdout, so it
-  # can run under any build configuration without the gtest runtime.
+  # Standalone microbench executables. Deliberately do NOT link gtest --
+  # the benchmarks are raw main()s that print a TSV table to stdout, so
+  # they can run under any build configuration without the gtest runtime.
   add_executable(DetourModKit_bench
     "${CMAKE_CURRENT_SOURCE_DIR}/bench_event_dispatcher.cpp"
   )
@@ -111,6 +111,16 @@ if(DMK_BUILD_BENCHMARKS)
   target_link_libraries(DetourModKit_bench PRIVATE DetourModKit)
 
   target_include_directories(DetourModKit_bench PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+  )
+
+  add_executable(DetourModKit_bench_scanner
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_scanner.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_scanner PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_bench_scanner PRIVATE
     ${CMAKE_SOURCE_DIR}/include
   )
 endif()

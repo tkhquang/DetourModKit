@@ -55,6 +55,26 @@ cmake --preset mingw-debug -DDMK_ENABLE_PROFILING=ON
 cmake --build build/mingw-debug --parallel
 ```
 
+### Microbenchmarks
+
+```bash
+# Configure release build with bench targets
+PATH="/c/msys64/mingw64/bin:$PATH" cmake -S . -B build/mingw-release \
+    -G Ninja -DCMAKE_BUILD_TYPE=Release \
+    -DDMK_BUILD_BENCHMARKS=ON -DDMK_BUILD_TESTS=OFF
+
+# Available bench executables (standalone, no gtest runtime):
+#   DetourModKit_bench           -- EventDispatcher emit / subscribe throughput
+#   DetourModKit_bench_scanner   -- Scanner::find_pattern, rare-byte anchor vs naive
+
+PATH="/c/msys64/mingw64/bin:$PATH" cmake --build build/mingw-release \
+    --target DetourModKit_bench_scanner --parallel
+./build/mingw-release/tests/DetourModKit_bench_scanner.exe
+```
+
+Latest scanner bench numbers and methodology live in
+[docs/analysis/scanner_bench_v3.x/README.md](docs/analysis/scanner_bench_v3.x/README.md).
+
 ### Sanitizers and coverage (MinGW only)
 
 ```bash

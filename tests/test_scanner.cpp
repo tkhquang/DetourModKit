@@ -490,6 +490,86 @@ TEST(ScannerTest, find_pattern_anchor_selection)
     EXPECT_EQ(result - data.data(), 200);
 }
 
+// parse_aob() must pre-populate CompiledPattern::anchor so find_pattern hits
+// the cached fast path on the very first scan. The chosen index must point
+// at a literal (non-wildcard) byte; the actual position is implementation
+// defined but is documented to be the rarest literal byte.
+TEST(ScannerTest, parse_aob_caches_anchor_index)
+{
+    // Every literal byte in the pattern below appears in the common-byte
+    // frequency table EXCEPT 0x37, so 0x37 is the unambiguous winner. Using
+    // a clean tie-free pattern keeps the test stable against future tweaks
+    // to the frequency table or tie-break order.
+    const auto pattern = Scanner::parse_aob("48 8B 89 37 0F E8 90 CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    ASSERT_LT(pattern->anchor, pattern->size());
+    EXPECT_EQ(pattern->mask[pattern->anchor], std::byte{0xFF});
+    EXPECT_EQ(pattern->bytes[pattern->anchor], std::byte{0x37});
+}
+
+// An all-wildcard pattern produced through parse_aob() must mark the anchor
+// as "no literal byte" (anchor == size()), short-circuiting find_pattern to
+// its degenerate path without re-scanning the mask on every call.
+TEST(ScannerTest, parse_aob_all_wildcards_anchor_equals_size)
+{
+    const auto pattern = Scanner::parse_aob("?? ?? ??");
+    ASSERT_TRUE(pattern.has_value());
+
+    EXPECT_EQ(pattern->anchor, pattern->size());
+}
+
+// compile_anchor() is the explicit hook for manually constructed patterns
+// and must be safe to call repeatedly without drifting (idempotent).
+TEST(ScannerTest, compile_anchor_is_idempotent_for_manual_patterns)
+{
+    Scanner::CompiledPattern manual;
+    manual.bytes = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x37}, std::byte{0xFF}};
+    manual.mask = {std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+
+    manual.compile_anchor();
+    const std::size_t first_anchor = manual.anchor;
+    EXPECT_EQ(manual.bytes[first_anchor], std::byte{0x37});
+
+    manual.compile_anchor();
+    EXPECT_EQ(manual.anchor, first_anchor);
+}
+
+// Manually constructed patterns without a compile_anchor() call must still
+// scan correctly: find_pattern_raw selects an anchor inline when the cached
+// value is missing (sentinel). Without this fallback, the new caching path
+// would crash on patterns built field-by-field in older consumer code.
+TEST(ScannerTest, find_pattern_uncompiled_manual_pattern_still_matches)
+{
+    Scanner::CompiledPattern manual;
+    manual.bytes = {std::byte{0x37}, std::byte{0x48}, std::byte{0x8B}};
+    manual.mask = {std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
+    // Anchor deliberately left at its sentinel value.
+    ASSERT_GT(manual.anchor, manual.size());
+
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[100] = std::byte{0x37};
+    data[101] = std::byte{0x48};
+    data[102] = std::byte{0x8B};
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), manual);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result - data.data(), 100);
+}
+
+// compile_anchor() on an empty pattern is well-defined: the selection loop
+// has nothing to walk, so the anchor collapses to `size() == 0` (the same
+// "no literal byte" encoding used for all-wildcard patterns). find_pattern
+// short-circuits on `pattern_size == 0` before consulting the anchor, so
+// this state never reaches the scan body; the test pins the boundary
+// behaviour against accidental regressions.
+TEST(ScannerTest, compile_anchor_empty_pattern_marks_no_anchor)
+{
+    Scanner::CompiledPattern empty;
+    empty.compile_anchor();
+    EXPECT_EQ(empty.anchor, empty.size());
+}
+
 TEST(ScannerTest, parse_aob_invariant)
 {
     auto result = Scanner::parse_aob("48 ?? 8B 05 ?? ??");
@@ -2189,6 +2269,36 @@ TEST(ScannerPrologueTest, PatchedJmpE9ReturnsTrue)
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0xE9;
+    EXPECT_TRUE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+// Short JMP (0xEB rel8) is the second prologue-overwrite shape the helper
+// is documented to accept. Some mid-function hookers prefer 0xEB when the
+// target lives within +/-127 bytes; the resolver must still treat it as a
+// real prologue so cascade recovery keeps working under nested hooks.
+TEST(ScannerPrologueTest, PatchedJmpEBReturnsTrue)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    buf.base[0x100] = 0xEB;
+    EXPECT_TRUE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+// Indirect JMP through memory (0xFF 0x25 disp32) is the third documented
+// prologue-overwrite shape, used by trampoline allocators that need a full
+// 64-bit reach. Only the first byte (0xFF) is examined by the helper, but
+// the test seeds both bytes so the buffer matches what a real patched
+// prologue would look like.
+TEST(ScannerPrologueTest, PatchedJmpFF25ReturnsTrue)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    buf.base[0x100] = 0xFF;
+    buf.base[0x101] = 0x25;
     EXPECT_TRUE(Scanner::is_likely_function_prologue(
         reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }

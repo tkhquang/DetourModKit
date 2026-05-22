@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <limits>
 #include <optional>
 #include <span>
 
@@ -86,6 +87,34 @@ namespace DetourModKit
             std::ptrdiff_t offset = 0;
 
             /**
+             * @brief Cached anchor index selected by compile_anchor().
+             * @details find_pattern() drives its memchr sweep on the byte at
+             *          this position. The index is the rarest literal byte in
+             *          the pattern (lowest score in a small frequency table
+             *          tuned for typical x64 .text sections), so a single
+             *          memchr pass produces far fewer false candidate hits
+             *          than anchoring on `bytes[0]` would.
+             *
+             *          Sentinel values:
+             *          - `[0, size())`            valid anchor.
+             *          - `size()`                 pattern has no literal bytes
+             *                                     (all wildcards); scan
+             *                                     degenerates to "match at start".
+             *          - `>= size() + 1`          anchor not yet selected;
+             *                                     find_pattern() will pick one
+             *                                     inline (slower path).
+             *
+             *          parse_aob() always calls compile_anchor() before
+             *          returning, so patterns produced through the public API
+             *          enter find_pattern() with the cached anchor in place.
+             *          Manually constructed patterns (assigning `bytes`/`mask`
+             *          by hand) start in the "not yet selected" state and
+             *          should call @ref compile_anchor() once after
+             *          population if they will be scanned repeatedly.
+             */
+            std::size_t anchor = std::numeric_limits<std::size_t>::max();
+
+            /**
              * @brief Returns the size of the pattern.
              * @return size_t The number of bytes in the pattern.
              */
@@ -96,6 +125,31 @@ namespace DetourModKit
              * @return true if the pattern has no bytes.
              */
             bool empty() const noexcept { return bytes.empty(); }
+
+            /**
+             * @brief Selects and stores the rarest literal byte's index as the
+             *        scan anchor.
+             * @details Walks the pattern once, scoring each literal byte
+             *          against a small byte-frequency table (`0x00`, `0xCC`,
+             *          `0x48`, ... receive high scores; uncommon bytes score
+             *          0), and stores the lowest-scoring index in @ref
+             *          anchor. Ties are broken by first occurrence for
+             *          deterministic behaviour. An all-wildcard pattern sets
+             *          @ref anchor to `size()` so find_pattern() can take its
+             *          degenerate "match at region start" path without a
+             *          second scan.
+             *
+             *          Safe to call repeatedly; the operation is idempotent
+             *          and O(size()). Callers that mutate @ref bytes or
+             *          @ref mask after a prior compile_anchor() MUST call it
+             *          again before the next scan or the cached anchor will
+             *          drift from the pattern contents.
+             *
+             *          Not thread-safe with concurrent find_pattern() calls
+             *          on the same CompiledPattern instance; sequence the
+             *          compile step before publishing the pattern to scanners.
+             */
+            void compile_anchor() noexcept;
         };
 
         /**
