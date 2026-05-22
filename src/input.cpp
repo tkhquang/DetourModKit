@@ -1015,7 +1015,7 @@ namespace DetourModKit
 
         for (const auto &binding : pending_bindings_)
         {
-            logger.debug("InputManager: Registered {} binding \"{}\" with {} key(s)",
+            logger.trace("InputManager: Registered {} binding \"{}\" with {} key(s)",
                          input_mode_to_string(binding.mode), binding.name, binding.keys.size());
         }
 
@@ -1144,7 +1144,7 @@ namespace DetourModKit
         }
         else if (updated_pending)
         {
-            Logger::get_instance().debug(
+            Logger::get_instance().trace(
                 "InputManager: update_binding_combos(\"{}\") applied to pending bindings", name);
         }
     }

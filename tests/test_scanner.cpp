@@ -2031,9 +2031,12 @@ TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
     // collide with any other test's pattern, because residue in
     // freed-but-still-mapped memory could influence subsequent tests that
     // run in the same process.
+    // Prefix mimics a SafetyHook-installed JMP rel32 over the original
+    // prologue -- the only shape the fallback recognises before rebuilding
+    // the AOB from the literal tail described above.
     constexpr std::uint8_t kAmbiguousTemplate[] = {
-        0xE9, 0x00, 0x00, 0x00, 0x00,                                     // JMP rel32
-        0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, 0x2D, 0x3E, 0x4F, // unique 11-byte tail
+        0xE9, 0x00, 0x00, 0x00, 0x00,
+        0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, 0x2D, 0x3E, 0x4F,
     };
 
     // Seed two copies so the rebuilt fallback pattern tallies >= 2 hits in
@@ -2095,9 +2098,13 @@ TEST(ScannerCascade, PrologueFallbackRejectsExactlyTwoMatches)
 
     std::memset(buf.base, 0xCC, buf.size);
 
+    // Prefix mimics a SafetyHook-installed JMP rel32 over the original
+    // prologue (the shape the fallback rebuilds around). The 11-byte
+    // tail clears kPrologueFallbackMinTailLiterals so the test reaches
+    // the uniqueness check rather than the literal-floor refusal.
     constexpr std::uint8_t kTemplate[] = {
-        0xE9, 0x00, 0x00, 0x00, 0x00,                                     // JMP rel32
-        0x71, 0x82, 0x93, 0xA4, 0xB5, 0xC6, 0xD7, 0xE8, 0xF9, 0x0A, 0x1B, // unique 11-byte tail
+        0xE9, 0x00, 0x00, 0x00, 0x00,
+        0x71, 0x82, 0x93, 0xA4, 0xB5, 0xC6, 0xD7, 0xE8, 0xF9, 0x0A, 0x1B,
     };
 
     std::memcpy(buf.base + 0x000, kTemplate, sizeof(kTemplate));

@@ -966,9 +966,9 @@ DetourModKit::Scanner::resolve_cascade(std::span<const AddrCandidate> candidates
     if (attempt.success)
     {
         const auto &winner = candidates[attempt.index];
-        logger.info("{} resolved via '{}' at {}", label,
-                    winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
-                    Format::format_address(attempt.address));
+        logger.debug("{} resolved via '{}' at {}", label,
+                     winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+                     Format::format_address(attempt.address));
         return ResolveHit{attempt.address, winner.name};
     }
 
@@ -999,9 +999,9 @@ DetourModKit::Scanner::resolve_cascade_with_prologue_fallback(
     if (attempt.success)
     {
         const auto &winner = candidates[attempt.index];
-        logger.info("{} resolved via '{}' at {}", label,
-                    winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
-                    Format::format_address(attempt.address));
+        logger.debug("{} resolved via '{}' at {}", label,
+                     winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+                     Format::format_address(attempt.address));
         return ResolveHit{attempt.address, winner.name};
     }
 
@@ -1009,7 +1009,7 @@ DetourModKit::Scanner::resolve_cascade_with_prologue_fallback(
     if (hooked.attempt.success)
     {
         const auto &winner = candidates[hooked.attempt.index];
-        logger.info(
+        logger.debug(
             "{} resolved via '{}' at {} (pre-hooked prologue; reusing target)",
             label,
             winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,

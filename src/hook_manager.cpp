@@ -118,9 +118,9 @@ HookManager::HookManager(Logger &logger)
     }
     else
     {
-        m_logger.info("HookManager: SafetyHook global allocator obtained.");
+        m_logger.debug("HookManager: SafetyHook global allocator obtained.");
     }
-    m_logger.info("HookManager: Initialized.");
+    m_logger.debug("HookManager: Initialized.");
 }
 
 HookManager::~HookManager() noexcept
@@ -479,9 +479,9 @@ std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
     }
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
-    m_logger.info("HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                  name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                  DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
+    m_logger.debug("HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
+                   name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+                   DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
 
     return create_inline_hook(name, target_address, detour_function, original_trampoline, config);
 }
@@ -623,9 +623,9 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     }
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
-    m_logger.info("HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                  name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                  DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
+    m_logger.debug("HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
+                   name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+                   DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
 
     return create_mid_hook(name, target_address, detour_function, config);
 }
@@ -681,8 +681,8 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
         std::string name_of_removed_hook = it->second->get_name();
         HookType type_of_removed_hook = it->second->get_type();
         m_hooks.erase(it);
-        m_logger.info("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
-                      name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
+        m_logger.debug("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
+                       name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
     }
     return {};
 }
@@ -719,16 +719,16 @@ void HookManager::remove_all_hooks()
     size_t num_vmt = m_vmt_hooks.size();
     if (num_vmt > 0)
     {
-        m_logger.info("HookManager: Removing all {} VMT hooks...", num_vmt);
+        m_logger.debug("HookManager: Removing all {} VMT hooks...", num_vmt);
         m_vmt_hooks.clear();
     }
 
     if (!m_hooks.empty())
     {
         size_t num_hooks = m_hooks.size();
-        m_logger.info("HookManager: Removing all {} managed hooks...", num_hooks);
+        m_logger.debug("HookManager: Removing all {} managed hooks...", num_hooks);
         m_hooks.clear();
-        m_logger.info("HookManager: All {} managed hooks have been removed and unhooked.", num_hooks);
+        m_logger.debug("HookManager: All {} managed hooks have been removed and unhooked.", num_hooks);
     }
     else if (num_vmt == 0)
     {
@@ -769,7 +769,7 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
     auto result = hook->enable();
     if (result)
     {
-        m_logger.info("HookManager: Hook '{}' successfully enabled.", hook_id);
+        m_logger.debug("HookManager: Hook '{}' successfully enabled.", hook_id);
         return {};
     }
 
@@ -811,7 +811,7 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
     auto result = hook->disable();
     if (result)
     {
-        m_logger.info("HookManager: Hook '{}' successfully disabled.", hook_id);
+        m_logger.debug("HookManager: Hook '{}' successfully disabled.", hook_id);
         return {};
     }
 
@@ -958,7 +958,7 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
     {
         std::string removed_name = it->second.get_name();
         m_vmt_hooks.erase(it);
-        m_logger.info("HookManager: VMT hook '{}' has been removed.", removed_name);
+        m_logger.debug("HookManager: VMT hook '{}' has been removed.", removed_name);
         return {};
     }
     m_logger.warning("HookManager: Attempted to remove VMT hook '{}', but it was not found.", vmt_name);
@@ -984,7 +984,7 @@ std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view v
 
     if (it->second.remove_method_hook(method_index))
     {
-        m_logger.info("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index);
+        m_logger.debug("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index);
         return {};
     }
 
@@ -1015,8 +1015,8 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
     }
 
     it->second.vmt_hook().apply(object);
-    m_logger.info("HookManager: VMT hook '{}' applied to object {}.",
-                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
+    m_logger.debug("HookManager: VMT hook '{}' applied to object {}.",
+                   vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
     return true;
 }
 
@@ -1043,8 +1043,8 @@ bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object
     }
 
     it->second.vmt_hook().remove(object);
-    m_logger.info("HookManager: VMT hook '{}' removed from object {}.",
-                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
+    m_logger.debug("HookManager: VMT hook '{}' removed from object {}.",
+                   vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
     return true;
 }
 
@@ -1058,9 +1058,9 @@ void HookManager::remove_all_vmt_hooks()
     if (!m_vmt_hooks.empty())
     {
         size_t num_hooks = m_vmt_hooks.size();
-        m_logger.info("HookManager: Removing all {} VMT hooks...", num_hooks);
+        m_logger.debug("HookManager: Removing all {} VMT hooks...", num_hooks);
         m_vmt_hooks.clear();
-        m_logger.info("HookManager: All {} VMT hooks have been removed.", num_hooks);
+        m_logger.debug("HookManager: All {} VMT hooks have been removed.", num_hooks);
     }
     else
     {
