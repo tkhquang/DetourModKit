@@ -1033,3 +1033,20 @@ DetourModKit::Scanner::resolve_cascade_with_prologue_fallback(
     logger.warning("{}: cascade AOB scan failed (including prologue fallback).", label);
     return std::unexpected(ResolveError::NoMatch);
 }
+
+bool DetourModKit::Scanner::is_likely_function_prologue(std::uintptr_t addr) noexcept
+{
+    if (addr == 0)
+    {
+        return false;
+    }
+
+    const auto *probe = reinterpret_cast<const void *>(addr);
+    if (!Memory::is_readable(probe, 1))
+    {
+        return false;
+    }
+
+    const auto b0 = *reinterpret_cast<const std::uint8_t *>(addr);
+    return b0 != 0x00 && b0 != 0xCC && b0 != 0xC2 && b0 != 0xC3;
+}

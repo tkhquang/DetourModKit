@@ -38,6 +38,7 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 - Nth-occurrence matching (1-based) for patterns that hit multiple locations
 - RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `std::expected` with typed `RipResolveError` for actionable diagnostics)
 - `scan_executable_regions()` for scanning all committed executable pages in the process - useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module (pure-execute pages without a read bit are skipped to avoid access violations)
+- `is_likely_function_prologue(addr)` heuristic that rejects scan poison (zero pages, alignment pads, bare RET stubs) while still accepting JMP-shaped patched prologues so nested-hook scenarios resolve
 
 </details>
 
@@ -73,7 +74,8 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 
 </details>
 
-### Config hot-reload
+<details>
+<summary><strong>Config Hot-Reload</strong></summary>
 
 Two mechanisms share the same `Config::reload()` primitive - use either or both:
 
@@ -99,6 +101,8 @@ InputManager::get_instance().start();
 ```
 
 See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thread-safety contract, debounce rationale, rename-swap-save handling, and the list of settings that are safe to hot-reload vs restart-required.
+
+</details>
 
 <details>
 <summary><strong>Logger</strong></summary>

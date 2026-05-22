@@ -352,6 +352,39 @@ namespace DetourModKit
                                                std::string_view label);
 
         /**
+         * @brief Cheap heuristic: does @p addr look like the first byte of a
+         *        real function body?
+         * @details Reads exactly one byte from @p addr behind a Memory::is_readable()
+         *          gate and rejects a small blacklist of bytes that are never the
+         *          first opcode of a callable x86-64 function:
+         *
+         *          - 0x00       uninitialised page / zero-fill BSS / NULL page
+         *          - 0xCC       int3 breakpoint / alignment pad / debugger trap
+         *          - 0xC2 0xC3  bare RET (stub, not a callable body)
+         *
+         *          Returns true for every other byte, including 0xE9 / 0xEB /
+         *          the 0xFF 0x25 prefix of an indirect JMP, so a target whose
+         *          prologue has already been overwritten by SafetyHook or MinHook
+         *          still passes -- the resolver must succeed for nested-hook
+         *          scenarios.
+         *
+         *          This is the negative complement to
+         *          resolve_cascade_with_prologue_fallback(), which is a positive
+         *          recovery (rebuild the hooked-prologue pattern and retry). Both
+         *          can be used together: the cascade resolves the target, then
+         *          this helper filters scan poison if the AOB happened to land on
+         *          a zero page or an alignment pad.
+         *
+         * @param addr Absolute address to probe. @p addr == 0 returns false
+         *             without reading memory. An unreadable address returns
+         *             false (the byte could not be read, so the answer is
+         *             "not a prologue").
+         * @return true if the byte at @p addr is not on the poison list and was
+         *         readable; false otherwise.
+         */
+        [[nodiscard]] bool is_likely_function_prologue(std::uintptr_t addr) noexcept;
+
+        /**
          * @enum SimdLevel
          * @brief Reports the highest SIMD tier available for pattern verification.
          */
