@@ -433,17 +433,15 @@ uintptr_t resolve_first_hit(
 
 A lone signature hit is necessary but not sufficient. Two lightweight checks catch the overwhelming majority of mis-hits:
 
-- **First-byte sanity check.** A function prologue does not start with `0x00`, `0xC2`, `0xC3`, or (usually) `0xCC`. Reject obvious garbage before you hand the address to SafetyHook.
-- **`Memory::is_readable()` guard.** Confirm the resolved address is inside a committed page with an expected protection flag before dereferencing or hooking.
+- **First-byte sanity check.** A function prologue does not start with `0x00`, `0xC2`, `0xC3`, or (usually) `0xCC`. Use `Scanner::is_likely_function_prologue(addr)` to reject scan poison before handing the address to SafetyHook. The helper accepts `0xE9` / `0xEB` / `0xFF 0x25` so a target already inline-hooked by another mod still passes.
+- **`Memory::is_readable()` guard.** Before reading more than a single byte (for example, disassembling a 5-byte trampoline or copying out an RTTI string), confirm the entire span is inside a committed page with an expected protection flag.
 
 ```cpp
-bool looks_like_prologue(const std::byte* addr)
-{
-    if (!DetourModKit::Memory::is_readable(addr, 1))
-        return false;
+using DetourModKit::Scanner::is_likely_function_prologue;
 
-    const auto b = static_cast<uint8_t>(*addr);
-    return b != 0x00 && b != 0xC2 && b != 0xC3 && b != 0xCC;
+if (!is_likely_function_prologue(resolved_addr))
+{
+    return; // scan poison: zero page, alignment pad, or bare RET
 }
 ```
 
@@ -577,7 +575,7 @@ Reminder: both `find_pattern` overloads return the marked byte when a `|` marker
 | `find_pattern` returns `nullptr` every time | Wildcards too broad, or the literal bytes include a byte the binary never has | Reduce wildcard count; print a few hex dumps around the expected site |
 | `find_pattern` hits the wrong site | Signature not unique | Pick a tighter neighbour, or use the Nth-occurrence overload with a confirmed N |
 | `resolve_rip_relative` returns `UnreadableDisplacement` | Match landed inside a guard page or at a region edge | Validate the caller's `search_length` and `instruction_length`; consider `scan_executable_regions` |
-| Hit address crashes on first call | Missing post-match verification; anchor drifted into padding on a new build | Add `looks_like_prologue` and an `is_readable` check before hooking |
+| Hit address crashes on first call | Missing post-match verification; anchor drifted into padding on a new build | Gate with `Scanner::is_likely_function_prologue(addr)` before hooking |
 | Works locally, fails on a different machine | Packer or anti-cheat transforming the module between load and scan | Switch to `scan_executable_regions`; add a later re-scan on first frame |
 | Multi-GB scan is slow | Patterns whose only literal bytes are common (`48 8B`, `E8`, etc.) | Broaden the anchor to include a rarer byte; the anchor selector prefers rarer bytes |
 

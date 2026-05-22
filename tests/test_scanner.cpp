@@ -1,7 +1,8 @@
 #include <gtest/gtest.h>
-#include <vector>
+#include <cstdint>
 #include <cstring>
 #include <span>
+#include <vector>
 
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/memory.hpp"
@@ -2121,4 +2122,83 @@ TEST(ScannerCascade, PrologueFallbackRejectsExactlyTwoMatches)
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
+}
+
+TEST(ScannerPrologueTest, NullAddrReturnsFalse)
+{
+    EXPECT_FALSE(Scanner::is_likely_function_prologue(0));
+}
+
+TEST(ScannerPrologueTest, ZeroByteReturnsFalse)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    buf.base[0x100] = 0x00;
+    EXPECT_FALSE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+TEST(ScannerPrologueTest, Int3PadReturnsFalse)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    EXPECT_FALSE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+TEST(ScannerPrologueTest, BareRetC3ReturnsFalse)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    buf.base[0x100] = 0xC3;
+    EXPECT_FALSE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+TEST(ScannerPrologueTest, BareRetC2ReturnsFalse)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    buf.base[0x100] = 0xC2;
+    EXPECT_FALSE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+TEST(ScannerPrologueTest, PushRbpReturnsTrue)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    buf.base[0x100] = 0x55; // push rbp -- canonical x86-64 prologue
+    EXPECT_TRUE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+// Load-bearing case: documents the no-interference-with-nested-hooks
+// contract. A target whose prologue has already been overwritten by
+// SafetyHook or MinHook starts with a JMP rel32 (0xE9); the helper must
+// still accept it so the resolver path stays usable when a sibling mod
+// hooked the same function first.
+TEST(ScannerPrologueTest, PatchedJmpE9ReturnsTrue)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+    buf.base[0x100] = 0xE9;
+    EXPECT_TRUE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+}
+
+TEST(ScannerPrologueTest, UnreadableAddrReturnsFalse)
+{
+    void *na = VirtualAlloc(nullptr, 0x1000,
+                            MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(na, nullptr);
+    EXPECT_FALSE(Scanner::is_likely_function_prologue(
+        reinterpret_cast<std::uintptr_t>(na)));
+    VirtualFree(na, 0, MEM_RELEASE);
 }
