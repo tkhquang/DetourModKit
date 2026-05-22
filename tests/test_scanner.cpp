@@ -1940,8 +1940,11 @@ TEST(ScannerCascade, PrologueFallbackHitFindsHookedPrologue)
 
     std::memset(buf.base, 0xCC, buf.size);
 
+    // Ten literal tail bytes satisfy kPrologueFallbackMinTailLiterals and
+    // keep the rebuilt pattern unique enough in the process's executable
+    // regions to land a single match.
     constexpr std::uint8_t kUniqueTail[] = {
-        0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x13, 0x37, 0x42};
+        0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x13, 0x37, 0x42, 0x5B, 0x6A};
 
     constexpr std::size_t kOffset = 0x200;
 
@@ -1953,7 +1956,7 @@ TEST(ScannerCascade, PrologueFallbackHitFindsHookedPrologue)
     std::memcpy(buf.base + kOffset + 5, kUniqueTail, sizeof(kUniqueTail));
 
     const char *pattern =
-        "48 89 5C 24 08 AD BE EF CA FE 13 37 42";
+        "48 89 5C 24 08 AD BE EF CA FE 13 37 42 5B 6A";
 
     Scanner::AddrCandidate cands[] = {
         {"hooked", pattern, Scanner::ResolveMode::Direct, 0, 0},
@@ -2004,13 +2007,13 @@ TEST(ScannerCascade, PrologueFallbackRejectsInsufficientTailLiterals)
 }
 
 // The prologue fallback rebuilds a pattern as `E9 ?? ?? ?? ??` followed
-// by the original pattern's tail bytes. If the tail is ambiguous across
-// the process's executable regions (more than kPrologueFallbackMaxHits
-// matches), the guard in scan_candidates_hooked_prologue must reject it
-// rather than return an arbitrary first hit. This test seeds five
-// identical trampoline-shaped sequences into an executable buffer so
-// the rebuilt pattern matches >= 5 times, exceeding the uniqueness
-// ceiling (4) and triggering the guard.
+// by the original pattern's tail bytes. The uniqueness guard in
+// scan_candidates_hooked_prologue rejects any rebuilt pattern that
+// matches more than kPrologueFallbackMaxHits locations across the
+// process's executable regions, because a legitimate sibling-mod hook
+// rewrites exactly one prologue and so a unique scan target must
+// resolve to exactly one site. This test seeds two trampoline-shaped
+// sequences with the same literal tail to force a multi-match outcome.
 TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
 {
     // ExecBuffer allocates PAGE_EXECUTE_READWRITE, so seeding and
@@ -2023,23 +2026,20 @@ TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
 
     std::memset(buf.base, 0xCC, buf.size);
 
-    // Tail chosen to be literal-heavy so split_prologue accepts it
-    // (>= kPrologueFallbackMinTailLiterals non-wildcard tokens), and
-    // generic enough to be synthesised at multiple offsets. Bytes must
-    // NOT collide with any other test's pattern, because residue in
-    // freed-but-still-mapped memory could influence subsequent tests
-    // that run in the same process. `A5 B6 C7 D8 E9 FA 0B 1C` is a
-    // fresh 8-byte sequence not used elsewhere in this TU.
+    // Tail chosen literal-heavy enough to pass kPrologueFallbackMinTailLiterals
+    // (10 non-wildcard bytes after the rewritten prologue). Bytes must NOT
+    // collide with any other test's pattern, because residue in
+    // freed-but-still-mapped memory could influence subsequent tests that
+    // run in the same process.
     constexpr std::uint8_t kAmbiguousTemplate[] = {
-        0xE9, 0x00, 0x00, 0x00, 0x00,                   // JMP rel32
-        0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, // unique tail
+        0xE9, 0x00, 0x00, 0x00, 0x00,                                     // JMP rel32
+        0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, 0x2D, 0x3E, 0x4F, // unique 11-byte tail
     };
 
-    // Seed five copies so the rebuilt fallback pattern tallies >= 5 hits
-    // in this buffer alone. scan_executable_regions walks every readable
-    // executable page in the process, so we only need > kPrologueFallbackMaxHits
-    // inside regions it can see.
-    for (std::size_t i = 0; i < 5; ++i)
+    // Seed two copies so the rebuilt fallback pattern tallies >= 2 hits in
+    // this buffer alone, which exceeds the uniqueness ceiling of 1 and
+    // forces the guard to engage.
+    for (std::size_t i = 0; i < 2; ++i)
     {
         std::memcpy(buf.base + i * 0x100, kAmbiguousTemplate, sizeof(kAmbiguousTemplate));
     }
@@ -2050,7 +2050,7 @@ TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
         // will not match (the buffer starts with E9 not 48 89 ...), so
         // the prologue-fallback path is taken.
         {"ambiguous",
-         "48 89 5C 24 08 A5 B6 C7 D8 E9 FA 0B 1C",
+         "48 89 5C 24 08 A5 B6 C7 D8 E9 FA 0B 1C 2D 3E 4F",
          Scanner::ResolveMode::Direct, 0, 0},
     };
 
@@ -2058,7 +2058,60 @@ TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
         cands, "ambiguous-tail");
 
     // The guard rejects ambiguity -> NoMatch (fallback applicable but
-    // all candidates exceeded the uniqueness ceiling).
+    // every candidate exceeded the uniqueness ceiling).
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
+}
+
+// Boundary regression: a literal tail of exactly nine bytes must be
+// rejected as PrologueFallbackNotApplicable. Under the previous
+// threshold (five) the fallback would have engaged with this candidate
+// and produced an unstable resolution; the tightened floor (ten)
+// surfaces the refusal at the API boundary instead.
+TEST(ScannerCascade, PrologueFallbackRejectsNineByteTail)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"nine-byte-tail",
+         "48 89 5C 24 08 AA BB CC DD EE 11 22 33 44",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    auto result = Scanner::resolve_cascade_with_prologue_fallback(
+        cands, "nine-byte-tail");
+
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::ResolveError::PrologueFallbackNotApplicable);
+}
+
+// Boundary regression: exactly two matches of the rebuilt pattern must
+// trip the uniqueness guard. Under the previous ceiling (four) two hits
+// were accepted and the first arbitrary site was hooked; the tightened
+// ceiling (one) demands exact uniqueness, and any duplicate must surface
+// as NoMatch.
+TEST(ScannerCascade, PrologueFallbackRejectsExactlyTwoMatches)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+
+    std::memset(buf.base, 0xCC, buf.size);
+
+    constexpr std::uint8_t kTemplate[] = {
+        0xE9, 0x00, 0x00, 0x00, 0x00,                                     // JMP rel32
+        0x71, 0x82, 0x93, 0xA4, 0xB5, 0xC6, 0xD7, 0xE8, 0xF9, 0x0A, 0x1B, // unique 11-byte tail
+    };
+
+    std::memcpy(buf.base + 0x000, kTemplate, sizeof(kTemplate));
+    std::memcpy(buf.base + 0x200, kTemplate, sizeof(kTemplate));
+
+    Scanner::AddrCandidate cands[] = {
+        {"two-match",
+         "48 89 5C 24 08 71 82 93 A4 B5 C6 D7 E8 F9 0A 1B",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    auto result = Scanner::resolve_cascade_with_prologue_fallback(
+        cands, "two-match");
+
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
 }

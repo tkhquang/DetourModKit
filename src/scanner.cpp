@@ -698,14 +698,24 @@ namespace
     }
 
     // Minimum number of literal (non-wildcard) bytes the tail of the pattern
-    // must contain after dropping the first 5 prologue tokens. Without this
-    // floor the rebuilt pattern devolves into near-JMP-matches-everything and
-    // yields false hits in any large .text region.
-    constexpr int kPrologueFallbackMinTailLiterals = 5;
+    // must contain after dropping the first 5 prologue tokens. Five literal
+    // bytes still leave the rebuilt pattern shaped like a generic near-JMP
+    // plus a short common-instruction tail, which collides with thousands of
+    // unrelated E9 sites in a multi-megabyte .text section. Ten literal bytes
+    // is roughly two to four real instructions of context and reduces the
+    // false-positive rate to near zero on real binaries while staying inside
+    // the 12 to 20 byte sweet spot documented for fallback signatures.
+    constexpr int kPrologueFallbackMinTailLiterals = 10;
 
     // Upper bound on hits the rebuilt fallback pattern may produce across the
-    // process's executable regions before we reject it as ambiguous.
-    constexpr std::size_t kPrologueFallbackMaxHits = 4;
+    // process's executable regions before we reject it as ambiguous. The
+    // fallback only exists to recover the single site where a sibling mod
+    // inline-hooked the target function, so the legitimate rewritten pattern
+    // must match exactly once: the unique JMP into that mod's trampoline.
+    // Any value above 1 admits a false positive whose blast radius (a hook
+    // installed at an unrelated function) far outweighs the benefit of
+    // tolerating duplicate matches.
+    constexpr std::size_t kPrologueFallbackMaxHits = 1;
 
     bool is_wildcard_token(std::string_view token) noexcept
     {
