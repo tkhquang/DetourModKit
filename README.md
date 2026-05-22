@@ -31,6 +31,7 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 <summary><strong>AOB Scanner</strong></summary>
 
 - Find array-of-bytes (signatures) in memory with wildcard support
+- Rare-byte anchor heuristic: `parse_aob()` scores every literal byte in the pattern against a small frequency table (`0x00`, `0xCC`, `0x48`, `0x8B`, ...) and caches the rarest byte's index on `CompiledPattern::anchor`. `find_pattern()` drives its `memchr` sweep on that byte, so a signature like `48 8B 05 37 DE AD BE EF` anchors on `0x37` rather than the very common `0x48`, cutting false candidate hits by an order of magnitude on realistic code
 - SIMD-accelerated pattern verification:
   - AVX2 (32 bytes/iteration, runtime-detected on Haswell+ CPUs)
   - SSE2 fallback (16 bytes/iteration) for patterns >= 16 bytes
