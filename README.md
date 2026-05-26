@@ -152,7 +152,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - `Rtti::vtable_is_type(vtable, expected)` performs a byte-exact NUL-terminated comparison against an expected mangled name (single SEH-guarded read of `expected.size() + 1` bytes; no allocation)
 - `Rtti::find_in_pointer_table(table, slot_count, expected, vtable_cache?, stride?)` scans a sparse pointer table for the first slot whose object has the given type; an optional caller-owned `std::atomic<uintptr_t>` cache slot lets repeated calls take a single qword-compare fast path after the first match
 - Image-base recovery via `COL.pSelf` (canonical IDA/Ghidra approach) so vtables in any loaded module resolve correctly without trusting `GetModuleHandleEx`; the loader call is used only as a fallback for the x86 signature
-- All entry points are noexcept and SEH-guarded; unreadable pages, missing COLs, and zero RVAs produce `std::nullopt` rather than faulting
+- All entry points are noexcept and SEH-guarded; unreadable pages, missing COLs, and zero RVAs never fault. Failure surfaces through the return type of each API: `std::nullopt` for the `std::optional` returns (`type_name_of`, `find_in_pointer_table`), `false` for the boolean return (`vtable_is_type`), and `0` for the size return (`type_name_into`, which additionally sets `out[0] = '\0'` on failure)
 
 </details>
 

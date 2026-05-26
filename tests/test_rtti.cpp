@@ -7,20 +7,20 @@
 #include <cstring>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <windows.h>
 
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
-using namespace DetourModKit;
+namespace Memory = DetourModKit::Memory;
+namespace Rtti = DetourModKit::Rtti;
 
 namespace
 {
-    // Fixed layout offsets shared by every SyntheticVtable instance. Picked so
-    // that the COL, TypeDescriptor, and vtable storage live well apart from
-    // each other and from page boundaries.
+    // Per-fixture layout offsets shared by every SyntheticVtable instance.
+    // Picked so the COL, TypeDescriptor, and vtable storage live well apart
+    // from each other and from 4 KiB page boundaries.
     constexpr std::size_t SYN_BUF_SIZE = 4096;
     constexpr std::size_t SYN_COL_OFFSET = 256;
     constexpr std::size_t SYN_TD_OFFSET = SYN_COL_OFFSET + 24; // COL is 24 bytes
@@ -28,48 +28,87 @@ namespace
     constexpr std::size_t SYN_COL_PTR_OFFSET = 2048;
     constexpr std::size_t SYN_VTABLE_OFFSET = SYN_COL_PTR_OFFSET + 8;
 
+    // Static buffer pool for SyntheticVtable storage. Living in the test
+    // executable's data segment ensures Memory::module_range_for resolves
+    // every synthetic address back to the test exe's PE range, which is
+    // required by the RTTI walker's bound-check guard. The pool is sized
+    // for up to 16 fixtures per test; RttiTest::SetUp resets the offset
+    // between tests so the pool never grows unbounded.
+    constexpr std::size_t SYN_POOL_FIXTURES = 16;
+    constexpr std::size_t SYN_POOL_SIZE = SYN_BUF_SIZE * SYN_POOL_FIXTURES;
+    alignas(8) std::array<std::byte, SYN_POOL_SIZE> g_syn_pool{};
+    std::size_t g_syn_offset = 0;
+
+    [[nodiscard]] std::byte *syn_alloc() noexcept
+    {
+        if (g_syn_offset + SYN_BUF_SIZE > g_syn_pool.size())
+            return nullptr;
+        std::byte *p = g_syn_pool.data() + g_syn_offset;
+        g_syn_offset += SYN_BUF_SIZE;
+        std::memset(p, 0, SYN_BUF_SIZE);
+        return p;
+    }
+
+    void syn_reset() noexcept { g_syn_offset = 0; }
+
     /**
      * @class SyntheticVtable
      * @brief In-memory MSVC x64 RTTI layout for testing Rtti primitives.
-     * @details Builds a buffer that exposes the same shape the Rtti walker
-     *          expects against a real game image: a vtable whose qword at
-     *          offset -8 points to an RTTICompleteObjectLocator whose
-     *          pTypeDescriptor RVA leads to a TypeDescriptor whose name field
-     *          contains the requested mangled string. Using pSelf == COL's
-     *          own offset makes the buffer base act as the image base, so
-     *          the Rtti walker resolves names without ever calling
-     *          GetModuleHandleEx (which would not match the synthetic buffer
-     *          anyway).
+     * @details Builds a buffer (allocated from a process-wide pool that
+     *          lives in the test executable's data segment) that exposes
+     *          the same shape the Rtti walker expects against a real game
+     *          image: a vtable whose qword at offset -8 points to an
+     *          RTTICompleteObjectLocator whose pTypeDescriptor RVA leads
+     *          to a TypeDescriptor whose name field contains the requested
+     *          mangled string. RVAs are computed relative to the test
+     *          executable's image base so the walker's bound-check guard
+     *          (module_range_for + contains) accepts them.
      */
     class SyntheticVtable
     {
     public:
         explicit SyntheticVtable(std::string_view mangled_name)
-            : m_buf(SYN_BUF_SIZE, std::byte{0})
         {
-            // The name must fit in the TypeDescriptor region with a NUL terminator.
-            const std::size_t max_name = SYN_COL_PTR_OFFSET - SYN_TD_NAME_OFFSET - 1;
-            const std::size_t name_len = std::min(mangled_name.size(), max_name);
+            m_buf = syn_alloc();
+            // syn_alloc returns nullptr when the pool is exhausted. Use
+            // gtest assertion machinery so a test that overflows the pool
+            // fails loudly instead of silently constructing a malformed
+            // fixture.
+            EXPECT_NE(m_buf, nullptr) << "SyntheticVtable pool exhausted; raise SYN_POOL_FIXTURES";
+            if (!m_buf)
+                return;
 
-            const auto buf_base = reinterpret_cast<std::uintptr_t>(m_buf.data());
+            const HMODULE exe = GetModuleHandleW(nullptr);
+            EXPECT_NE(exe, nullptr);
+            const std::uintptr_t exe_base = reinterpret_cast<std::uintptr_t>(exe);
+            const std::uintptr_t buf_base = reinterpret_cast<std::uintptr_t>(m_buf);
 
-            // COL fields (signature=1 selects x64 layout with pSelf RVA).
-            const std::uint32_t signature = 1;
-            const std::uint32_t col_offset_field = 0;
+            // The pool is a static in the test exe, so buf_base lies inside
+            // the test exe's PE image and the offset fits in a 32-bit RVA.
+            EXPECT_GE(buf_base, exe_base);
+            const std::uintptr_t buf_rva = buf_base - exe_base;
+
+            const std::uint32_t signature = 1; // x64 layout with pSelf RVA
+            const std::uint32_t col_field = 0;
             const std::uint32_t cd_offset = 0;
-            const std::uint32_t td_rva = static_cast<std::uint32_t>(SYN_TD_OFFSET);
+            const std::uint32_t td_rva = static_cast<std::uint32_t>(buf_rva + SYN_TD_OFFSET);
             const std::uint32_t class_desc_rva = 0;
-            const std::uint32_t self_rva = static_cast<std::uint32_t>(SYN_COL_OFFSET);
+            const std::uint32_t self_rva = static_cast<std::uint32_t>(buf_rva + SYN_COL_OFFSET);
 
             write_at(SYN_COL_OFFSET + 0, signature);
-            write_at(SYN_COL_OFFSET + 4, col_offset_field);
+            write_at(SYN_COL_OFFSET + 4, col_field);
             write_at(SYN_COL_OFFSET + 8, cd_offset);
             write_at(SYN_COL_OFFSET + 12, td_rva);
             write_at(SYN_COL_OFFSET + 16, class_desc_rva);
             write_at(SYN_COL_OFFSET + 20, self_rva);
 
-            // TypeDescriptor: pVFTable (8) + spare (8) + zero-terminated name.
-            std::memcpy(m_buf.data() + SYN_TD_NAME_OFFSET, mangled_name.data(), name_len);
+            // TypeDescriptor: pVFTable (8) + spare (8) + zero-terminated
+            // mangled name. The name length is bounded by the available
+            // space between SYN_TD_NAME_OFFSET and SYN_COL_PTR_OFFSET so
+            // it cannot overrun the buffer.
+            const std::size_t max_name = SYN_COL_PTR_OFFSET - SYN_TD_NAME_OFFSET - 1;
+            const std::size_t name_len = std::min(mangled_name.size(), max_name);
+            std::memcpy(m_buf + SYN_TD_NAME_OFFSET, mangled_name.data(), name_len);
             m_buf[SYN_TD_NAME_OFFSET + name_len] = std::byte{0};
 
             // COL pointer at vtable - 8.
@@ -84,15 +123,27 @@ namespace
 
         [[nodiscard]] std::uintptr_t vtable() const noexcept { return m_vtable_addr; }
 
+        /// Overwrites COL.p_type_descriptor with @p rva for poisoned-input tests.
+        void poison_type_descriptor_rva(std::uint32_t rva) noexcept
+        {
+            write_at(SYN_COL_OFFSET + 12, rva);
+        }
+
+        /// Overwrites COL.p_self with @p rva for poisoned-input tests.
+        void poison_self_rva(std::uint32_t rva) noexcept
+        {
+            write_at(SYN_COL_OFFSET + 20, rva);
+        }
+
     private:
         template <typename T>
         void write_at(std::size_t offset, const T &value) noexcept
         {
             static_assert(std::is_trivially_copyable_v<T>);
-            std::memcpy(m_buf.data() + offset, &value, sizeof(T));
+            std::memcpy(m_buf + offset, &value, sizeof(T));
         }
 
-        std::vector<std::byte> m_buf;
+        std::byte *m_buf = nullptr;
         std::uintptr_t m_vtable_addr = 0;
     };
 
@@ -100,8 +151,9 @@ namespace
      * @class SyntheticObject
      * @brief An object whose first qword is a synthetic vtable address.
      * @details Mimics a real polymorphic instance for find_in_pointer_table
-     *          tests: the object's first qword is read as the vtable pointer,
-     *          which then drives the RTTI walk through SyntheticVtable.
+     *          tests: the object's first qword is read as the vtable
+     *          pointer, which then drives the RTTI walk through
+     *          SyntheticVtable.
      */
     class SyntheticObject
     {
@@ -124,7 +176,11 @@ namespace
 class RttiTest : public ::testing::Test
 {
 protected:
-    void SetUp() override { (void)Memory::init_cache(); }
+    void SetUp() override
+    {
+        (void)Memory::init_cache();
+        syn_reset();
+    }
     void TearDown() override { Memory::shutdown_cache(); }
 };
 
@@ -388,7 +444,7 @@ TEST_F(RttiTest, FindInTable_WarmCacheRejectsForeignVtables)
 
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    // Cache points at some entirely unrelated vtable address. The single slot
+    // Cache points at an entirely unrelated vtable address. The single slot
     // does not match the cached vtable, so the warm path returns nullopt
     // without ever invoking the RTTI walker.
     std::atomic<std::uintptr_t> cache{0xDEADBEEFCAFEULL};
@@ -432,7 +488,7 @@ TEST_F(RttiTest, FindInTable_CustomStrideSkipsInterleavedMetadata)
     SyntheticVtable target(".?AVStride@@");
     SyntheticObject obj(target.vtable());
 
-    // Table is { ptr, metadata, ptr, metadata, ... } -- stride is 16 bytes,
+    // Table is { ptr, metadata, ptr, metadata, ... }; stride is 16 bytes
     // and only every other qword is a real object pointer.
     std::array<std::uintptr_t, 4> table{obj.address(), 0xAAAAAAAAu, obj.address(), 0xBBBBBBBBu};
 
@@ -469,6 +525,50 @@ TEST_F(RttiTest, FindInTable_OverflowingRangeRejected)
     EXPECT_FALSE(Rtti::find_in_pointer_table(
                      UINTPTR_MAX - 8, 4, ".?AVAnything@@", nullptr, 16)
                      .has_value());
+}
+
+// --- Bound-check guards against poisoned RTTI fields ---
+
+TEST_F(RttiTest, ResolveRejectsPoisonedTypeDescriptorRva)
+{
+    // A bogus type-descriptor RVA places the computed name buffer outside
+    // the test executable's module range; the walker must reject the read
+    // rather than dereference whatever address the bogus RVA produces.
+    SyntheticVtable v(".?AVValid@@");
+    v.poison_type_descriptor_rva(0x7FFFFFFFu);
+
+    EXPECT_FALSE(Rtti::type_name_of(v.vtable()).has_value());
+    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), ".?AVValid@@"));
+
+    char buf[64];
+    std::memset(buf, 'Z', sizeof(buf));
+    EXPECT_EQ(Rtti::type_name_into(v.vtable(), buf, sizeof(buf)), 0u);
+    EXPECT_EQ(buf[0], '\0');
+}
+
+TEST_F(RttiTest, ResolveRejectsPoisonedSelfRva)
+{
+    // A bogus pSelf recovers an image base that does not match the
+    // loader-reported module base; the walker must reject rather than
+    // trust the recovered base. self_rva == 1 makes
+    // recovered = col_addr - 1, which never equals mod_range.base.
+    SyntheticVtable v(".?AVValid@@");
+    v.poison_self_rva(1);
+
+    EXPECT_FALSE(Rtti::type_name_of(v.vtable()).has_value());
+    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), ".?AVValid@@"));
+}
+
+TEST_F(RttiTest, ResolveRejectsHeapAllocatedVtable)
+{
+    // A vtable whose address is not in any loaded module (here, a heap
+    // allocation) must be rejected at the module_range_for step.
+    auto buf = std::make_unique<std::array<std::uintptr_t, 4>>();
+    (*buf)[0] = 0; (*buf)[1] = 0; (*buf)[2] = 0; (*buf)[3] = 0;
+    const std::uintptr_t fake_vt = reinterpret_cast<std::uintptr_t>(buf->data() + 2);
+
+    EXPECT_FALSE(Rtti::type_name_of(fake_vt).has_value());
+    EXPECT_FALSE(Rtti::vtable_is_type(fake_vt, ".?AVAnything@@"));
 }
 
 // --- Default values / constants ---
