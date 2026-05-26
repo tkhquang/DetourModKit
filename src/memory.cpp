@@ -1393,7 +1393,7 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
 namespace
 {
     inline constexpr uintptr_t SEH_READ_MIN_VALID_ADDR = 0x10000;
-}
+} // anonymous namespace (seh_read internals)
 
 bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
 {
@@ -1509,7 +1509,7 @@ namespace
         static ModuleRangeCache cache;
         return cache;
     }
-}
+} // anonymous namespace (module-range internals)
 
 std::optional<DetourModKit::Memory::ModuleRange>
 DetourModKit::Memory::module_range_for(const void *address) noexcept
