@@ -1531,7 +1531,7 @@ TEST_F(MemoryTest, IsReadableNonblocking_SizeOverflow)
 {
     char buffer[1] = {0};
     auto status = Memory::is_readable_nonblocking(buffer, SIZE_MAX);
-    // Overflow in address arithmetic — should not return Readable
+    // Overflow in address arithmetic must not yield Readable.
     EXPECT_NE(status, Memory::ReadableStatus::Readable);
 }
 
@@ -1689,4 +1689,283 @@ TEST_F(MemoryTest, WriteBytesInvalidatesAndRevalidates)
 TEST(MemoryErrorTest, MemoryErrorToString_IsNoexcept)
 {
     static_assert(noexcept(memory_error_to_string(MemoryError::NullTargetAddress)));
+}
+
+// --- Tests for seh_read_bytes ---
+
+TEST_F(MemoryTest, SehReadBytes_ValidStackBuffer)
+{
+    const uint64_t source = 0xCAFEBABEDEADBEEFULL;
+    uint64_t out = 0;
+    EXPECT_TRUE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&source), &out, sizeof(out)));
+    EXPECT_EQ(out, source);
+}
+
+TEST_F(MemoryTest, SehReadBytes_ZeroBytesIsNoOp)
+{
+    char dst = 'X';
+    EXPECT_TRUE(Memory::seh_read_bytes(0x1000, &dst, 0));
+    EXPECT_EQ(dst, 'X');
+}
+
+TEST_F(MemoryTest, SehReadBytes_NullOutRejected)
+{
+    const uint32_t source = 0xDEADC0DE;
+    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&source), nullptr, sizeof(source)));
+}
+
+TEST_F(MemoryTest, SehReadBytes_LowAddressRejected)
+{
+    uint32_t out = 0xAAAAAAAA;
+    EXPECT_FALSE(Memory::seh_read_bytes(0x100, &out, sizeof(out)));
+    EXPECT_FALSE(Memory::seh_read_bytes(0xFFFF, &out, sizeof(out)));
+}
+
+TEST_F(MemoryTest, SehReadBytes_AddressWraparoundRejected)
+{
+    uint64_t out = 0;
+    const uintptr_t near_max = UINTPTR_MAX - 8;
+    EXPECT_FALSE(Memory::seh_read_bytes(near_max, &out, 64));
+}
+
+TEST_F(MemoryTest, SehReadBytes_FreedMemoryReturnsFalse)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    *reinterpret_cast<uint64_t *>(mem) = 0x1122334455667788ULL;
+    VirtualFree(mem, 0, MEM_RELEASE);
+
+    uint64_t out = 0;
+    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
+}
+
+TEST_F(MemoryTest, SehReadBytes_NoAccessReturnsFalse)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(mem, nullptr);
+
+    uint64_t out = 0;
+    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, SehReadBytes_GuardPageReturnsFalse)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    *reinterpret_cast<uint64_t *>(mem) = 0x42;
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect));
+
+    uint64_t out = 0;
+    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, SehReadBytes_LargeRangePartialUnmapped)
+{
+    // Read more bytes than are available after a committed page; the second
+    // half lives in unmapped territory and the read must fail.
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    std::vector<uint8_t> buf(8192, 0);
+    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), buf.data(), buf.size()));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// --- Tests for seh_read<T> ---
+
+TEST_F(MemoryTest, SehRead_Uintptr)
+{
+    const uintptr_t source = 0xFEEDFACEBADDCAFEULL;
+    auto value = Memory::seh_read<uintptr_t>(reinterpret_cast<uintptr_t>(&source));
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(*value, source);
+}
+
+TEST_F(MemoryTest, SehRead_Uint32)
+{
+    const uint32_t source = 0xABCDEF01u;
+    auto value = Memory::seh_read<uint32_t>(reinterpret_cast<uintptr_t>(&source));
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(*value, source);
+}
+
+TEST_F(MemoryTest, SehRead_Struct)
+{
+    struct Sample
+    {
+        uint32_t a;
+        uint32_t b;
+        uint64_t c;
+    };
+    static_assert(std::is_trivially_copyable_v<Sample>);
+    const Sample source{0x11111111u, 0x22222222u, 0x3333333344444444ULL};
+
+    auto value = Memory::seh_read<Sample>(reinterpret_cast<uintptr_t>(&source));
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(value->a, source.a);
+    EXPECT_EQ(value->b, source.b);
+    EXPECT_EQ(value->c, source.c);
+}
+
+TEST_F(MemoryTest, SehRead_NullAddressReturnsNullopt)
+{
+    auto value = Memory::seh_read<uint64_t>(0);
+    EXPECT_FALSE(value.has_value());
+}
+
+TEST_F(MemoryTest, SehRead_LowAddressReturnsNullopt)
+{
+    auto value = Memory::seh_read<uint64_t>(0x100);
+    EXPECT_FALSE(value.has_value());
+}
+
+TEST_F(MemoryTest, SehRead_FreedMemoryReturnsNullopt)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    *reinterpret_cast<uint64_t *>(mem) = 0xDEADBEEFu;
+    VirtualFree(mem, 0, MEM_RELEASE);
+
+    auto value = Memory::seh_read<uint64_t>(reinterpret_cast<uintptr_t>(mem));
+    EXPECT_FALSE(value.has_value());
+}
+
+// --- Tests for ModuleRange / module_range_for / own_module_range / host_module_range ---
+
+TEST_F(MemoryTest, ModuleRange_DefaultIsInvalid)
+{
+    Memory::ModuleRange range;
+    EXPECT_FALSE(range.valid());
+    EXPECT_EQ(range.base, 0u);
+    EXPECT_EQ(range.end, 0u);
+}
+
+TEST_F(MemoryTest, ModuleRange_ContainsRejectsInvalid)
+{
+    Memory::ModuleRange range;
+    EXPECT_FALSE(Memory::contains(range, 0x1000));
+}
+
+TEST_F(MemoryTest, ModuleRange_ContainsBoundary)
+{
+    constexpr Memory::ModuleRange range{0x10000, 0x20000};
+    EXPECT_TRUE(Memory::contains(range, 0x10000));
+    EXPECT_TRUE(Memory::contains(range, 0x1FFFF));
+    EXPECT_FALSE(Memory::contains(range, 0x20000));
+    EXPECT_FALSE(Memory::contains(range, 0xFFFF));
+}
+
+TEST_F(MemoryTest, ModuleRange_ConstexprValid)
+{
+    static_assert(Memory::ModuleRange{0x10000, 0x20000}.valid());
+    static_assert(!Memory::ModuleRange{0, 0x20000}.valid());
+    static_assert(!Memory::ModuleRange{0x20000, 0x10000}.valid());
+    static_assert(Memory::contains(Memory::ModuleRange{0x1000, 0x2000}, 0x1500));
+}
+
+TEST_F(MemoryTest, ModuleRangeFor_NullReturnsNullopt)
+{
+    EXPECT_FALSE(Memory::module_range_for(nullptr).has_value());
+}
+
+TEST_F(MemoryTest, ModuleRangeFor_OwnFunctionResolves)
+{
+    // The test exe is itself a loaded module; resolving any address in it
+    // must return a valid range that contains the queried address.
+    const auto range = Memory::module_range_for(
+        reinterpret_cast<const void *>(&Memory::module_range_for));
+    ASSERT_TRUE(range.has_value());
+    EXPECT_TRUE(range->valid());
+    EXPECT_TRUE(Memory::contains(*range,
+                                 reinterpret_cast<uintptr_t>(&Memory::module_range_for)));
+}
+
+TEST_F(MemoryTest, ModuleRangeFor_HeapAddressReturnsNullopt)
+{
+    // A heap allocation lives in committed memory that is not part of any
+    // loaded image, so GetModuleHandleEx returns nullptr and the function
+    // returns std::nullopt.
+    auto buffer = std::make_unique<int>(42);
+    const auto range = Memory::module_range_for(buffer.get());
+    EXPECT_FALSE(range.has_value());
+}
+
+TEST_F(MemoryTest, ModuleRangeFor_CacheReturnsConsistentValue)
+{
+    const void *probe = reinterpret_cast<const void *>(&Memory::own_module_range);
+    const auto first = Memory::module_range_for(probe);
+    ASSERT_TRUE(first.has_value());
+
+    const auto second = Memory::module_range_for(probe);
+    ASSERT_TRUE(second.has_value());
+
+    EXPECT_EQ(first->base, second->base);
+    EXPECT_EQ(first->end, second->end);
+}
+
+TEST_F(MemoryTest, OwnModuleRange_IsValid)
+{
+    const auto range = Memory::own_module_range();
+    EXPECT_TRUE(range.valid());
+    EXPECT_TRUE(Memory::contains(range,
+                                 reinterpret_cast<uintptr_t>(&Memory::own_module_range)));
+}
+
+TEST_F(MemoryTest, OwnModuleRange_StableAcrossCalls)
+{
+    const auto a = Memory::own_module_range();
+    const auto b = Memory::own_module_range();
+    EXPECT_EQ(a.base, b.base);
+    EXPECT_EQ(a.end, b.end);
+}
+
+TEST_F(MemoryTest, HostModuleRange_IsValid)
+{
+    const auto range = Memory::host_module_range();
+    EXPECT_TRUE(range.valid());
+
+    // The test executable's main() symbol lives inside the host EXE image.
+    HMODULE host = GetModuleHandleW(nullptr);
+    ASSERT_NE(host, nullptr);
+    EXPECT_EQ(range.base, reinterpret_cast<uintptr_t>(host));
+}
+
+TEST_F(MemoryTest, HostModuleRange_ContainsItself)
+{
+    // The test process is its own host; any code address inside the test exe
+    // must fall inside host_module_range().
+    const auto range = Memory::host_module_range();
+    ASSERT_TRUE(range.valid());
+
+    HMODULE host = GetModuleHandleW(nullptr);
+    ASSERT_NE(host, nullptr);
+    EXPECT_TRUE(Memory::contains(range, reinterpret_cast<uintptr_t>(host)));
+}
+
+TEST_F(MemoryTest, HostModuleRange_StableAcrossCalls)
+{
+    const auto a = Memory::host_module_range();
+    const auto b = Memory::host_module_range();
+    EXPECT_EQ(a.base, b.base);
+    EXPECT_EQ(a.end, b.end);
+}
+
+TEST_F(MemoryTest, ModuleRangeFor_KernelModuleResolves)
+{
+    // kernel32.dll is loaded into every Windows process; resolving any
+    // address inside it must yield a valid range.
+    HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+    ASSERT_NE(kernel, nullptr);
+
+    const auto range = Memory::module_range_for(reinterpret_cast<const void *>(kernel));
+    ASSERT_TRUE(range.has_value());
+    EXPECT_TRUE(range->valid());
+    EXPECT_EQ(range->base, reinterpret_cast<uintptr_t>(kernel));
 }

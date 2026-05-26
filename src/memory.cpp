@@ -1385,3 +1385,199 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
     return *reinterpret_cast<const uintptr_t *>(src);
 #endif
 }
+
+// Lower bound on a valid usermode pointer on x64 Windows. The null page plus
+// the standard NoAccess guard region cover [0, 0x10000); rejecting addresses
+// in this range without a memory access keeps stale or sentinel pointers from
+// raising first-chance exceptions in callers' debuggers.
+namespace
+{
+    inline constexpr uintptr_t SEH_READ_MIN_VALID_ADDR = 0x10000;
+} // anonymous namespace (seh_read internals)
+
+bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
+{
+    if (bytes == 0)
+        return true;
+    if (!out || addr < SEH_READ_MIN_VALID_ADDR)
+        return false;
+
+    // Overflow guard on (addr + bytes); a wraparound source range can never be
+    // a valid mapped image.
+    if (addr + bytes < addr)
+        return false;
+
+#ifdef _MSC_VER
+    __try
+    {
+        std::memcpy(out, reinterpret_cast<const void *>(addr), bytes);
+        return true;
+    }
+    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
+               GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH)
+    {
+        return false;
+    }
+#else
+    // MinGW lacks __try/__except. Validate every region the read spans with
+    // VirtualQuery before issuing the memcpy. The loop chains across adjacent
+    // regions so multi-region reads (which happen for any buffer that crosses
+    // an allocation boundary) succeed when every covered page is committed
+    // and readable.
+    size_t copied = 0;
+    while (copied < bytes)
+    {
+        const uintptr_t cur = addr + copied;
+        MEMORY_BASIC_INFORMATION mbi;
+        if (!VirtualQuery(reinterpret_cast<const void *>(cur), &mbi, sizeof(mbi)))
+            return false;
+        if (mbi.State != MEM_COMMIT)
+            return false;
+        if ((mbi.Protect & CachePermissions::READ_PERMISSION_FLAGS) == 0 ||
+            (mbi.Protect & CachePermissions::NOACCESS_GUARD_FLAGS) != 0)
+            return false;
+
+        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+        const uintptr_t region_end = region_start + mbi.RegionSize;
+        if (cur < region_start || cur >= region_end)
+            return false;
+
+        const size_t available = static_cast<size_t>(region_end - cur);
+        const size_t remaining = bytes - copied;
+        const size_t to_copy = (remaining < available) ? remaining : available;
+        std::memcpy(static_cast<std::byte *>(out) + copied,
+                    reinterpret_cast<const void *>(cur),
+                    to_copy);
+        copied += to_copy;
+    }
+    return true;
+#endif
+}
+
+namespace
+{
+    // PE header layout for module range resolution. Pulled into an anonymous
+    // namespace so the helper is internal to memory.cpp and shared between
+    // module_range_for, own_module_range, and host_module_range.
+    DetourModKit::Memory::ModuleRange module_range_from_handle(HMODULE mod) noexcept
+    {
+        if (!mod)
+            return {};
+
+        const uintptr_t base = reinterpret_cast<uintptr_t>(mod);
+
+        IMAGE_DOS_HEADER dos{};
+        if (!DetourModKit::Memory::seh_read_bytes(base, &dos, sizeof(dos)))
+            return {};
+        if (dos.e_magic != IMAGE_DOS_SIGNATURE)
+            return {};
+
+        // Bound e_lfanew. A genuine PE places NT headers within the first few
+        // KiB; anything beyond a generous 1 MiB cap is corrupt or hostile.
+        if (dos.e_lfanew <= 0 || static_cast<uint32_t>(dos.e_lfanew) > 0x100000U)
+            return {};
+
+        IMAGE_NT_HEADERS nt{};
+        if (!DetourModKit::Memory::seh_read_bytes(base + static_cast<uintptr_t>(dos.e_lfanew),
+                                                  &nt, sizeof(nt)))
+            return {};
+        if (nt.Signature != IMAGE_NT_SIGNATURE)
+            return {};
+
+        const uintptr_t size_of_image = nt.OptionalHeader.SizeOfImage;
+        if (size_of_image == 0)
+            return {};
+
+        return {base, base + size_of_image};
+    }
+
+    // Per-process ModuleRange cache shared by module_range_for. Constructed on
+    // first use; survives until process exit. Static-storage destruction is
+    // deliberately a non-issue here because the cache is consulted only by
+    // DetourModKit code that has already shut down its own subsystems via
+    // DMK_Shutdown() (callers do not query ranges from atexit handlers).
+    struct ModuleRangeCache
+    {
+        std::shared_mutex mtx;
+        std::unordered_map<HMODULE, DetourModKit::Memory::ModuleRange> entries;
+    };
+
+    ModuleRangeCache &get_module_range_cache() noexcept
+    {
+        static ModuleRangeCache cache;
+        return cache;
+    }
+} // anonymous namespace (module-range internals)
+
+std::optional<DetourModKit::Memory::ModuleRange>
+DetourModKit::Memory::module_range_for(const void *address) noexcept
+{
+    if (!address)
+        return std::nullopt;
+
+    HMODULE mod = nullptr;
+    if (!GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(address),
+            &mod) ||
+        mod == nullptr)
+    {
+        return std::nullopt;
+    }
+
+    auto &cache = get_module_range_cache();
+    {
+        std::shared_lock<std::shared_mutex> lk(cache.mtx);
+        const auto it = cache.entries.find(mod);
+        if (it != cache.entries.end())
+            return it->second;
+    }
+
+    const auto range = module_range_from_handle(mod);
+    if (!range.valid())
+        return std::nullopt;
+
+    {
+        std::unique_lock<std::shared_mutex> lk(cache.mtx);
+        // Another thread may have inserted between our shared/unique transition;
+        // emplace skips on collision so we keep the first-resolved entry.
+        cache.entries.emplace(mod, range);
+    }
+    return range;
+}
+
+DetourModKit::Memory::ModuleRange DetourModKit::Memory::own_module_range() noexcept
+{
+    // Magic-static initialization: the lambda runs exactly once per module,
+    // guarded by the C++23 thread-safe-initialization rules. Taking the
+    // address of own_module_range itself anchors the lookup in whichever
+    // DLL/EXE statically linked this translation unit.
+    static const ModuleRange cached = [] {
+        HMODULE mod = nullptr;
+        if (!GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                reinterpret_cast<LPCWSTR>(&DetourModKit::Memory::own_module_range),
+                &mod) ||
+            mod == nullptr)
+        {
+            return ModuleRange{};
+        }
+        return module_range_from_handle(mod);
+    }();
+    return cached;
+}
+
+DetourModKit::Memory::ModuleRange DetourModKit::Memory::host_module_range() noexcept
+{
+    static const ModuleRange cached = [] {
+        HMODULE mod = GetModuleHandleW(nullptr);
+        if (!mod)
+            return ModuleRange{};
+        return module_range_from_handle(mod);
+    }();
+    return cached;
+}

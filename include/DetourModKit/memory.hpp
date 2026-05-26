@@ -5,8 +5,10 @@
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 namespace DetourModKit
 {
@@ -210,6 +212,132 @@ namespace DetourModKit
          * @return std::expected<void, MemoryError> on success, or the specific error on failure.
          */
         [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes);
+
+        /**
+         * @struct ModuleRange
+         * @brief Mapped address range of a loaded PE image.
+         * @details A range is considered valid when @ref base is non-zero and
+         *          @ref end strictly exceeds @ref base. Default-constructed
+         *          instances (both fields zero) report @ref valid() as false
+         *          so callers can return an "absent" range without optional.
+         */
+        struct ModuleRange
+        {
+            uintptr_t base = 0; ///< Mapped base address (equal to the HMODULE value).
+            uintptr_t end = 0;  ///< Exclusive upper bound (base + SizeOfImage from the PE OptionalHeader).
+
+            /// True iff this range is populated (base != 0 && end > base).
+            [[nodiscard]] constexpr bool valid() const noexcept { return base != 0 && end > base; }
+        };
+
+        /**
+         * @brief Resolves the mapped range of the module containing @p address.
+         * @details Looks up the owning module via
+         *          GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+         *          GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, ...), then
+         *          reads SizeOfImage from the PE OptionalHeader behind a
+         *          seh_read_bytes() guard. The result is cached per HMODULE
+         *          for the process lifetime so repeated probes degenerate to
+         *          a single GetModuleHandleEx call plus a hash lookup.
+         * @note The cache assumes mapped modules do not unload at addresses
+         *       later reused by a different image. Game mods do not unload
+         *       host modules; consumers that load and free DLLs at runtime
+         *       should treat cached entries for an unloaded module's HMODULE
+         *       as stale.
+         * @param address Any address inside the target module. nullptr returns
+         *                std::nullopt without a syscall.
+         * @return The module's range, or std::nullopt if @p address does not
+         *         fall inside any loaded module or the PE headers are unreadable.
+         */
+        [[nodiscard]] std::optional<ModuleRange> module_range_for(const void *address) noexcept;
+
+        /**
+         * @brief Mapped range of the calling DLL (or EXE if DetourModKit is
+         *        statically linked into the host process).
+         * @details DetourModKit is a static library, so the link target of
+         *          @ref own_module_range itself is whichever DLL/EXE consumed
+         *          the static library. Cached on first call via a function-local
+         *          static, so subsequent calls are a single atomic load on the
+         *          fast path.
+         * @return The owning module's range, or an invalid ModuleRange if the
+         *         lookup or PE-header read failed (only possible under loader
+         *         lock teardown or on corrupted images).
+         */
+        [[nodiscard]] ModuleRange own_module_range() noexcept;
+
+        /**
+         * @brief Mapped range of the host process EXE.
+         * @details Equivalent to module_range_for(GetModuleHandleW(nullptr))
+         *          with the same per-process caching as @ref own_module_range.
+         *          Useful for sanity-checking that a freshly resolved vtable
+         *          pointer lives inside the game image rather than on the
+         *          heap or in an injected helper DLL.
+         * @return The EXE's range, or an invalid ModuleRange on lookup failure.
+         */
+        [[nodiscard]] ModuleRange host_module_range() noexcept;
+
+        /**
+         * @brief Tests whether @p p lies inside @p range.
+         * @return true iff @p range is valid and @p p is in [base, end).
+         */
+        [[nodiscard]] constexpr bool contains(ModuleRange range, uintptr_t p) noexcept
+        {
+            return range.valid() && p >= range.base && p < range.end;
+        }
+
+        /**
+         * @brief SEH-guarded raw memory copy from @p addr into @p out.
+         * @details On MSVC, the copy runs inside a __try / __except
+         *          (EXCEPTION_ACCESS_VIOLATION | STATUS_GUARD_PAGE_VIOLATION)
+         *          frame, so any access violation in the middle of the copy
+         *          unwinds cleanly and the function returns false. On MinGW
+         *          the implementation falls back to VirtualQuery-based
+         *          validation of every region the read spans before issuing
+         *          the memcpy; this is race-prone against concurrent
+         *          VirtualProtect but is the best a non-SEH toolchain can do.
+         *
+         *          The function is the underlying primitive for the typed
+         *          @ref seh_read template and is exposed directly for
+         *          callers that need to read a contiguous buffer of bytes
+         *          (for example NUL-terminated strings of unknown length).
+         * @param addr  Source address. Values below 0x10000 (the Windows
+         *              reserved low-address range) are rejected without a
+         *              read so stale or sentinel pointers cannot cause a
+         *              first-chance exception.
+         * @param out   Destination buffer. nullptr returns false.
+         * @param bytes Number of bytes to copy. Zero returns true (no-op).
+         * @return true on full success; false on any fault or invalid argument.
+         *         On failure the contents of @p out are unspecified.
+         */
+        [[nodiscard]] bool seh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept;
+
+        /**
+         * @brief SEH-guarded typed read of a trivially copyable T at @p addr.
+         * @details Forwards to @ref seh_read_bytes so the underlying __try
+         *          frame lives in the translation unit that defines it. Local
+         *          variables with non-trivial destructors are not permitted in
+         *          functions that use __try (MSVC C2712); restricting T to
+         *          trivially copyable types avoids that restriction here and
+         *          keeps the value-construction free of any side effects that
+         *          would survive the failure path.
+         *
+         *          On the success path the implementation collapses to a
+         *          single memcpy of sizeof(T) bytes; on failure the optional
+         *          carries no value and no T destructor is invoked.
+         * @tparam T A trivially copyable type. Required by C++23 concept.
+         * @param addr Source address. Values below 0x10000 are rejected
+         *             without a read; see @ref seh_read_bytes.
+         * @return The value on success, std::nullopt on any read fault.
+         */
+        template <typename T>
+            requires std::is_trivially_copyable_v<T>
+        [[nodiscard]] std::optional<T> seh_read(uintptr_t addr) noexcept
+        {
+            T value;
+            if (!seh_read_bytes(addr, &value, sizeof(T)))
+                return std::nullopt;
+            return value;
+        }
     } // namespace Memory
 } // namespace DetourModKit
 
