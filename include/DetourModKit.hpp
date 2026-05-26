@@ -28,6 +28,7 @@
 #include "DetourModKit/math.hpp"
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/profiler.hpp"
+#include "DetourModKit/rtti.hpp"
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/worker.hpp"
 
@@ -45,6 +46,7 @@ namespace DMKFilesystem = DetourModKit::Filesystem;
 namespace DMKMemory = DetourModKit::Memory;
 namespace DMKMath = DetourModKit::Math;
 namespace DMKBootstrap = DetourModKit::Bootstrap;
+namespace DMKRtti = DetourModKit::Rtti;
 
 #ifndef DMK_NO_SHORT_NAMES
 /**

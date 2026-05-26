@@ -16,7 +16,8 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 | Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
-| Memory Utilities | Readability checks, region cache, and safe pointer reads | `memory.hpp` |
+| Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads, PE module range queries | `memory.hpp` |
+| MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache | `rtti.hpp` |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
@@ -137,6 +138,21 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - `is_readable_nonblocking()` - tri-state (readable/not-readable/unknown) for latency-sensitive threads
 - `read_ptr_unsafe()` - safe pointer reads in hot paths (SEH-protected on MSVC, cache-accelerated with VirtualQuery fallback on MinGW)
 - `read_ptr_unchecked()` - inline header-only variant with configurable low-address validity guard for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity)
+- `seh_read<T>()` / `seh_read_bytes()` - typed SEH-guarded reads for arbitrary trivially copyable T (and contiguous byte ranges), used to walk torn pointer chains and parse PE headers without per-site `__try` boilerplate. Returns `std::optional<T>` / `bool` so callers can distinguish "read faulted" from "read returned zero"
+- `module_range_for(addr)` / `own_module_range()` / `host_module_range()` - PE image range queries (base + SizeOfImage) for sanity-checking that a resolved vtable or return address lives inside the game image vs the heap or an injected DLL. Per-HMODULE cache for `module_range_for`; magic-static cache for the own and host variants
+- `Memory::contains(range, p)` - constexpr point-in-range test
+
+</details>
+
+<details>
+<summary><strong>MSVC RTTI Walker</strong></summary>
+
+- Walks the MSVC x64 RTTI layout (RTTICompleteObjectLocator at `vtable - 8`, TypeDescriptor at `col + 0x0C`, mangled name at `td + 0x10`) to recover an object's concrete type without committing to a fragile vtable address
+- `Rtti::type_name_of(vtable)` returns the mangled name (e.g. `.?AVMyClass@ns@@`) as `std::optional<std::string>`; `type_name_into(vtable, buf, len)` writes into a caller buffer for zero-allocation per-frame probes
+- `Rtti::vtable_is_type(vtable, expected)` performs a byte-exact NUL-terminated comparison against an expected mangled name (single SEH-guarded read of `expected.size() + 1` bytes; no allocation)
+- `Rtti::find_in_pointer_table(table, slot_count, expected, vtable_cache?, stride?)` scans a sparse pointer table for the first slot whose object has the given type; an optional caller-owned `std::atomic<uintptr_t>` cache slot lets repeated calls take a single qword-compare fast path after the first match
+- Image-base recovery via `COL.pSelf` (canonical IDA/Ghidra approach) so vtables in any loaded module resolve correctly without trusting `GetModuleHandleEx`; the loader call is used only as a fallback for the x86 signature
+- All entry points are noexcept and SEH-guarded; unreadable pages, missing COLs, and zero RVAs produce `std::nullopt` rather than faulting
 
 </details>
 
