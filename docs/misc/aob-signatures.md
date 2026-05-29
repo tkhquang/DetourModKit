@@ -199,81 +199,42 @@ Implication: a pattern whose literal bytes are all REX prefixes / common opcodes
 
 ### 4.7 Scanning data sections (`scan_readable_regions`)
 
-`scan_executable_regions` filters to execute-readable pages, so it cannot reach
-`.rdata` / `.data`. When the thing you need to locate is data rather than code,
-use `scan_readable_regions()`. It walks the same `VirtualQuery` loop but accepts
-every committed readable region (`PAGE_READONLY`, `PAGE_READWRITE`,
-`PAGE_WRITECOPY`, and the three execute-readable variants), so it reaches C++
-vtables, RTTI type descriptors, localized string pools, and read-only metadata
-tables.
+`scan_executable_regions` filters to execute-readable pages, so it cannot reach `.rdata` / `.data`. When the thing you need to locate is data rather than code, use `scan_readable_regions()`. It walks the same `VirtualQuery` loop but accepts every committed readable region (`PAGE_READONLY`, `PAGE_READWRITE`, `PAGE_WRITECOPY`, and the three execute-readable variants), so it reaches C++ vtables, RTTI type descriptors, localized string pools, and read-only metadata tables.
 
 ```cpp
 const auto* match = sc::scan_readable_regions(*pattern);
 ```
 
-It takes the same optional `occurrence` parameter and applies `pattern.offset`
-exactly once, identically to `scan_executable_regions`. The accepted set is a
-strict superset: a pattern present in `.text` is found by both. Guard pages
-(`PAGE_GUARD`), no-access pages (`PAGE_NOACCESS`), and uncommitted regions are
-skipped and never dereferenced.
+It takes the same optional `occurrence` parameter and applies `pattern.offset` exactly once, identically to `scan_executable_regions`. The accepted set is a strict superset: a pattern present in `.text` is found by both. Guard pages (`PAGE_GUARD`), no-access pages (`PAGE_NOACCESS`), and uncommitted regions are skipped and never dereferenced.
 
-Because the compiled pattern's own `bytes` buffer lives in readable heap memory,
-a whole-process sweep would otherwise match the needle against itself. The scan
-excludes any match overlapping that buffer, so it never hands back the address of
-your own pattern storage. (`scan_executable_regions` never had this problem: the
-needle is not executable.)
+Because the compiled pattern's own `bytes` buffer lives in readable heap memory, a whole-process sweep would otherwise match the needle against itself. The scan excludes any match overlapping that buffer, so it never hands back the address of your own pattern storage. (`scan_executable_regions` never had this problem: the needle is not executable.)
 
 Two costs come with the wider reach:
 
-- **More bytes inspected.** A typical x64 game maps hundreds of MB of data
-  versus tens of MB of code, so a readable sweep can run several times longer
-  than an executable one. Resolve at startup or on a worker, never on the render
-  thread, and cache the result.
-- **Higher collision risk.** `.rdata` pointer tables and constant pools look
-  random, so a pattern that is unique in `.text` may collide in data. Supply at
-  least 8 literal bytes and confirm the hit (occurrence count, or a follow-up
-  structural check).
+- **More bytes inspected.** A typical x64 game maps hundreds of MB of data versus tens of MB of code, so a readable sweep can run several times longer than an executable one. Resolve at startup or on a worker, never on the render thread, and cache the result.
+- **Higher collision risk.** `.rdata` pointer tables and constant pools look random, so a pattern that is unique in `.text` may collide in data. Supply at least 8 literal bytes and confirm the hit (occurrence count, or a follow-up structural check).
 
 #### Prefer an RTTI name anchor over a raw vtable header
 
-The obvious data signature for a class is its vtable header: the RTTI Complete
-Object Locator pointer followed by the first few virtual-function pointers. The
-trap is that every one of those qwords is an *absolute, relocated* pointer:
-`value = image_base + RVA`. On x64 the image base is at least 64 KiB aligned, so
-only the low 2 bytes of each pointer are invariant across launches; the higher
-bytes move with the ASLR slide. A "24-byte vtable header" therefore yields only
-about 6 reliably stable literal bytes unless the module happens to load at its
-preferred base, which inflates the collision risk above.
+The obvious data signature for a class is its vtable header: the RTTI Complete Object Locator pointer followed by the first few virtual-function pointers. The trap is that every one of those qwords is an *absolute, relocated* pointer: `value = image_base + RVA`. On x64 the image base is at least 64 KiB aligned, so only the low 2 bytes of each pointer are invariant across launches; the higher bytes move with the ASLR slide. A "24-byte vtable header" therefore yields only about 6 reliably stable literal bytes unless the module happens to load at its preferred base, which inflates the collision risk above.
 
-The robust anchor is the RTTI **type-descriptor name** string itself, for
-example the mangled `.?AVClassName@ns@@`. It is plain ASCII baked into the
-binary, fully ASLR-invariant, and tens of literal bytes long, so it effectively
-never collides. The flow is:
+The robust anchor is the RTTI **type-descriptor name** string itself, for example the mangled `.?AVClassName@ns@@`. It is plain ASCII baked into the binary, fully ASLR-invariant, and tens of literal bytes long, so it effectively never collides. The flow is:
 
 1. `scan_readable_regions` for the mangled name to find the `TypeDescriptor`.
-2. Walk the MSVC RTTI structures from the descriptor to the vtable (see
-   [rtti-walker.md](rtti-walker.md), which documents the COL / TypeDescriptor /
-   self-RVA layout the `Rtti` module already encodes).
+2. Walk the MSVC RTTI structures from the descriptor to the vtable (see [rtti-walker.md](rtti-walker.md), which documents the COL / TypeDescriptor / self-RVA layout the `Rtti` module already encodes).
 
-This pairs with the `Rtti` walker's opposite direction (vtable to name): one
-finds a vtable from a known name, the other recovers a name from a known vtable.
+This pairs with the `Rtti` walker's opposite direction (vtable to name): one finds a vtable from a known name, the other recovers a name from a known vtable.
 
 #### Using the readable scanner inside a cascade
 
-`resolve_cascade` takes a trailing `ScannerKind` argument (default
-`ScannerKind::Executable`). Pass `ScannerKind::Readable` to resolve a candidate
-whose signature lives in a data section. `ResolveMode::Direct` already returns
-`match + disp_offset`, which is exactly the data address, so no new resolve mode
-is needed:
+`resolve_cascade` takes a trailing `ScannerKind` argument (default `ScannerKind::Executable`). Pass `ScannerKind::Readable` to resolve a candidate whose signature lives in a data section. `ResolveMode::Direct` already returns `match + disp_offset`, which is exactly the data address, so no new resolve mode is needed:
 
 ```cpp
 const auto hit = sc::resolve_cascade(
     k_vtable_candidates, "voice_buff_vtable", sc::ScannerKind::Readable);
 ```
 
-`resolve_cascade_with_prologue_fallback` is intentionally executable-only: its
-recovery path rebuilds a hooked near-JMP prologue, which is meaningless for a
-data match.
+`resolve_cascade_with_prologue_fallback` is intentionally executable-only: its recovery path rebuilds a hooked near-JMP prologue, which is meaningless for a data match.
 
 ## 5. RIP-relative resolution
 

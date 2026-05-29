@@ -520,8 +520,8 @@ namespace
     TEST_F(ConfigWatcherLoaderLockTest, MultipleLoaderLockTeardownsAreSafe)
     {
         // Confirms the per-call heap leak path accepts multiple invocations
-        // without tripping any single-slot overwrite hazards (the bug pattern
-        // that motivated #69's Logger::shutdown_internal fix). Each
+        // without tripping the single-slot overwrite hazard that the
+        // Logger::shutdown_internal per-call-cell discipline avoids. Each
         // teardown allocates its own cell via new (std::nothrow), so prior
         // leaked Impls are never overwritten.
         for (int i = 0; i < 3; ++i)
