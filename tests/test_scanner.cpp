@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <string>
 #include <vector>
 
 #include "DetourModKit/scanner.hpp"
@@ -1354,6 +1356,279 @@ TEST(ScannerExecRegionTest, SkipsGuardPages)
     VirtualFree(exec_mem, 0, MEM_RELEASE);
 }
 
+// --- Tests for scan_readable_regions ---
+
+namespace
+{
+    // Writes a signature into dst and returns the matching AOB string. The AOB
+    // is built as ASCII hex, a different byte sequence that cannot itself match
+    // the binary signature. The step (37) is coprime to 256, so the generated
+    // bytes are distinct for any run shorter than 256. marker_index, when
+    // non-negative, inserts a `|` offset token before that byte.
+    std::string write_signature(std::byte *dst, std::size_t count, std::uint8_t seed,
+                                std::ptrdiff_t marker_index = -1)
+    {
+        static constexpr char hex_digits[] = "0123456789ABCDEF";
+        std::string aob;
+        aob.reserve(count * 4);
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const auto value = static_cast<std::uint8_t>(
+                seed + static_cast<std::uint8_t>(i) * 37u + 11u);
+            dst[i] = static_cast<std::byte>(value);
+            if (i != 0)
+            {
+                aob.push_back(' ');
+            }
+            if (marker_index >= 0 && static_cast<std::size_t>(marker_index) == i)
+            {
+                aob.append("| ");
+            }
+            aob.push_back(hex_digits[value >> 4]);
+            aob.push_back(hex_digits[value & 0x0F]);
+        }
+        return aob;
+    }
+
+    // Enumerates the readable-memory occurrences of a pattern up to a cap.
+    // scan_readable_regions sweeps the whole process, so a signature staged by a
+    // test legitimately appears in more than one readable place: the target
+    // buffer, plus any transient copy the optimizer leaves on the stack while
+    // building it. (The compiled needle is excluded by the scanner itself.)
+    // Tests therefore assert that the target address is among the occurrences,
+    // not that it is the first one, which keeps them independent of memory
+    // layout and optimizer behaviour across toolchains.
+    std::vector<const std::byte *> collect_readable_hits(const Scanner::CompiledPattern &pattern)
+    {
+        constexpr std::size_t scan_cap = 64;
+        std::vector<const std::byte *> hits;
+        for (std::size_t occ = 1; occ <= scan_cap; ++occ)
+        {
+            const auto *hit = Scanner::scan_readable_regions(pattern, occ);
+            if (hit == nullptr)
+            {
+                break;
+            }
+            hits.push_back(hit);
+        }
+        return hits;
+    }
+
+    bool hits_contain(const std::vector<const std::byte *> &hits, const std::byte *target)
+    {
+        return std::find(hits.begin(), hits.end(), target) != hits.end();
+    }
+
+    bool any_hit_in_range(const std::vector<const std::byte *> &hits,
+                          const std::byte *lo, const std::byte *hi)
+    {
+        return std::any_of(hits.begin(), hits.end(),
+                           [lo, hi](const std::byte *h)
+                           { return h >= lo && h < hi; });
+    }
+} // namespace
+
+TEST(ScannerReadableRegionTest, FindsPatternInReadOnlyMemory)
+{
+    // .rdata is mapped PAGE_READONLY: write the signature while writable, then
+    // flip to read-only to model a real data section.
+    void *ro_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(ro_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(ro_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    const std::string aob = write_signature(&bytes[512], 16, 0x11);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto hits = collect_readable_hits(*pattern);
+    EXPECT_TRUE(hits_contain(hits, &bytes[512]));
+
+    // The scanner skips the compiled pattern's own bytes buffer (the needle),
+    // so that readable copy is never returned.
+    EXPECT_FALSE(hits_contain(hits, pattern->bytes.data()));
+
+    // The executable-only sweep must not reach a PAGE_READONLY region.
+    EXPECT_EQ(Scanner::scan_executable_regions(*pattern), nullptr);
+
+    VirtualFree(ro_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerReadableRegionTest, FindsPatternInReadWriteData)
+{
+    void *rw_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(rw_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(rw_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    const std::string aob = write_signature(&bytes[256], 16, 0x29);
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto hits = collect_readable_hits(*pattern);
+    EXPECT_TRUE(hits_contain(hits, &bytes[256]));
+
+    const std::byte *exec_hit = Scanner::scan_executable_regions(*pattern);
+    EXPECT_EQ(exec_hit, nullptr);
+
+    VirtualFree(rw_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerReadableRegionTest, SupersetIncludesExecutableReadable)
+{
+    // PAGE_EXECUTE_READ is in both masks, so a pattern in executable-readable
+    // memory must be found by the readable sweep as well as the executable one.
+    void *exec_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(exec_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(exec_mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    const std::string aob = write_signature(&bytes[128], 16, 0x3D);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(exec_mem, 4096, PAGE_EXECUTE_READ, &old_protect));
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto hits = collect_readable_hits(*pattern);
+    EXPECT_TRUE(hits_contain(hits, &bytes[128]));
+
+    // The executable buffer is the only executable copy (the needle and any
+    // transient stack copy are not executable), so it is the first exec hit.
+    const std::byte *exec_hit = Scanner::scan_executable_regions(*pattern);
+    ASSERT_NE(exec_hit, nullptr);
+    EXPECT_EQ(exec_hit, &bytes[128]);
+
+    VirtualFree(exec_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerReadableRegionTest, SkipsGuardPages)
+{
+    // A guarded read-only page reads as PAGE_READONLY | PAGE_GUARD; the guard
+    // modifier must exclude it from the readable sweep, otherwise the first
+    // touch raises STATUS_GUARD_PAGE_VIOLATION.
+    void *guard_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(guard_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(guard_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    const std::string aob = write_signature(&bytes[0], 16, 0x57);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(guard_mem, 4096, PAGE_READONLY | PAGE_GUARD, &old_protect));
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    // The guarded region must be skipped: no occurrence may fall inside it.
+    // (Transient readable copies of the signature elsewhere are allowed.)
+    const auto hits = collect_readable_hits(*pattern);
+    EXPECT_FALSE(any_hit_in_range(hits, bytes, bytes + 4096));
+
+    VirtualFree(guard_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerReadableRegionTest, SkipsNoAccessPages)
+{
+    void *na_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(na_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(na_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    const std::string aob = write_signature(&bytes[0], 16, 0x6B);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(na_mem, 4096, PAGE_NOACCESS, &old_protect));
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto hits = collect_readable_hits(*pattern);
+    EXPECT_FALSE(any_hit_in_range(hits, bytes, bytes + 4096));
+
+    VirtualFree(na_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerReadableRegionTest, NthOccurrence)
+{
+    void *ro_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(ro_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(ro_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    // Two copies of the same signature in one region (same seed -> same bytes).
+    const std::string aob = write_signature(&bytes[100], 16, 0x84);
+    (void)write_signature(&bytes[600], 16, 0x84);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+
+    // Both copies must be reachable across the enumerated occurrences.
+    const auto hits = collect_readable_hits(*pattern);
+    EXPECT_TRUE(hits_contain(hits, &bytes[100]));
+    EXPECT_TRUE(hits_contain(hits, &bytes[600]));
+
+    VirtualFree(ro_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerReadableRegionTest, RespectsPatternOffset)
+{
+    void *ro_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(ro_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(ro_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    // 8-byte signature with a `|` marker after byte 3; the returned pointer must
+    // be the marked byte, with pattern.offset applied exactly once.
+    constexpr size_t region_offset = 320;
+    const std::string aob = write_signature(&bytes[region_offset], 8, 0x9C, /*marker_index=*/3);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->offset, 3);
+
+    // The marked byte of the buffer copy is at region_offset + 3.
+    const auto hits = collect_readable_hits(*pattern);
+    EXPECT_TRUE(hits_contain(hits, &bytes[region_offset + 3]));
+
+    VirtualFree(ro_mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerReadableRegionTest, EmptyPattern)
+{
+    Scanner::CompiledPattern empty;
+    const std::byte *result = Scanner::scan_readable_regions(empty);
+    EXPECT_EQ(result, nullptr);
+}
+
+TEST(ScannerReadableRegionTest, ZeroOccurrence)
+{
+    auto pattern = Scanner::parse_aob("5E 91 C4 2A 7F 38 D6 0B E3 4C 9A 17 62 F5 8D 30");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *result = Scanner::scan_readable_regions(*pattern, 0);
+    EXPECT_EQ(result, nullptr);
+}
+
 TEST(ScannerStringTest, RipResolveErrorToString_IsNoexcept)
 {
     static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::NullInput)));
@@ -1986,6 +2261,43 @@ TEST(ScannerCascade, NoMatchReturnsError)
     auto result = Scanner::resolve_cascade(cands, "unit");
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
+}
+
+TEST(ScannerCascade, ReadableKindResolvesDataSectionMatch)
+{
+    // A Direct-mode candidate whose signature lives in PAGE_READONLY data is
+    // reachable only through ScannerKind::Readable; the executable default must
+    // miss it.
+    void *ro_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(ro_mem, nullptr);
+
+    auto *bytes = reinterpret_cast<std::byte *>(ro_mem);
+    std::memset(bytes, 0x00, 4096);
+
+    // The AOB string backs the candidate's string_view, so it must outlive the
+    // resolve_cascade calls below.
+    const std::string aob = write_signature(&bytes[384], 16, 0xC1);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
+
+    Scanner::AddrCandidate cands[] = {
+        {"data-sig", aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    // ScannerKind::Readable reaches data sections, so the cascade resolves a
+    // signature that lives in PAGE_READONLY memory; the executable default
+    // cannot see it and reports NoMatch.
+    const auto readable =
+        Scanner::resolve_cascade(cands, "data-cascade", Scanner::ScannerKind::Readable);
+    EXPECT_TRUE(readable.has_value());
+
+    const auto executable =
+        Scanner::resolve_cascade(cands, "data-cascade", Scanner::ScannerKind::Executable);
+    ASSERT_FALSE(executable.has_value());
+    EXPECT_EQ(executable.error(), Scanner::ResolveError::NoMatch);
+
+    VirtualFree(ro_mem, 0, MEM_RELEASE);
 }
 
 namespace
