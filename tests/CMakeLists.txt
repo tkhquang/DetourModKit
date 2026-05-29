@@ -123,4 +123,25 @@ if(DMK_BUILD_BENCHMARKS)
   target_include_directories(DetourModKit_bench_scanner PRIVATE
     ${CMAKE_SOURCE_DIR}/include
   )
+
+  add_executable(DetourModKit_bench_memory
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_memory.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_memory PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_bench_memory PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+  )
+
+  # Build the benchmarks with the same Release LTO as the library so each bench
+  # and the library archive it links form one LTO unit. The default mixed link
+  # (a non-LTO bench object against the LTO-only Release archive) makes GCC's
+  # linker plugin re-emit libstdc++'s C++20-constrained std::thread/std::tuple
+  # linkonce symbol twice and fail with a spurious multiple-definition; keeping
+  # the benchmarks inside the same LTO unit avoids that path.
+  if(_ipo_supported)
+    set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
+      PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+  endif()
 endif()
