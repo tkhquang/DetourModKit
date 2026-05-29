@@ -66,6 +66,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" cmake -S . -B build/mingw-release \
 # Available bench executables (standalone, no gtest runtime):
 #   DetourModKit_bench           -- EventDispatcher emit / subscribe throughput
 #   DetourModKit_bench_scanner   -- Scanner::find_pattern, rare-byte anchor vs naive
+#   DetourModKit_bench_memory    -- validation predicate vs direct SEH-guarded read / chain primitives (hot-path cost)
 
 PATH="/c/msys64/mingw64/bin:$PATH" cmake --build build/mingw-release \
     --target DetourModKit_bench_scanner --parallel
@@ -110,7 +111,7 @@ include/DetourModKit/    # Public headers -- one per module
   config_watcher.hpp     # Filesystem watcher (ReadDirectoryChangesW) for INI hot-reload
   input.hpp              # Input polling (keyboard/mouse/XInput)
   input_codes.hpp        # Unified InputCode type and named key tables
-  memory.hpp             # Memory read/write, sharded region cache, seh_read<T>, PE module range
+  memory.hpp             # Memory read/write, sharded region cache, seh_read<T>, seh_resolve_chain/seh_read_chain<T>, plausible_userspace_ptr, PE module range
   rtti.hpp               # MSVC RTTI walker (type_name_of, vtable_is_type, find_in_pointer_table)
   event_dispatcher.hpp   # Typed pub/sub with RAII subscriptions (header-only)
   profiler.hpp           # Opt-in scoped timing (zero-cost when disabled)
@@ -246,6 +247,7 @@ dispatcher.emit_safe(PlayerStateChanged{.health = player->health});
 - **Platform tests:** `tests/test_platform.cpp` tests internal loader-lock detection and module pinning utilities from `src/platform.hpp`.
 - **Decoder tests:** `tests/test_x86_decode.cpp` tests the internal header `src/x86_decode.hpp` (RIP-relative E9 / EB / FF25 resolvers consumed by `Scanner`). The test file adds `src/` to its include path and drives each decoder with hand-crafted byte buffers.
 - **Worker tests:** `tests/test_worker.cpp` covers the `StoppableWorker` RAII `std::jthread` wrapper, including the empty-body early return, swallowed `std::exception` and unknown-exception paths, and idempotent `request_stop()` / `shutdown()`. The loader-lock detach arm is untestable from user code (only reached under DllMain) and is accepted as such.
+- **Pointer-chain tests:** `tests/test_memory_chain.cpp` is a deliberate second suite for the public `memory.hpp` surface, kept separate from `test_memory.cpp` because the single-fault-frame pointer-chain primitives (`plausible_userspace_ptr`, `seh_resolve_chain`, `seh_read_chain`, `seh_read_chain_bytes`) walk in-process pointer chains and need no cache or game-memory state, whereas `test_memory.cpp` drives the sharded cache, read/write, and module-range paths. Both suites bind to the same header; this is the only same-module split and is intentional for state isolation.
 - **Test fixture pattern:** Each suite uses a `::testing::Test` subclass with `SetUp()`/`TearDown()` for temp file cleanup. Temp file paths must include the process ID (`_getpid()`) and a counter to avoid collisions when CTest runs tests in parallel as separate processes.
 - **VMT hook test lifetime:** GoogleTest destroys test-body locals *before* calling `TearDown()`. VMT tests must explicitly call `remove_all_vmt_hooks()` (or `remove_vmt_hook`) before target objects go out of scope. Do not rely on `TearDown()` for VMT cleanup when the hooked object is a test-body local.
 - **Coverage gate:** 80% minimum line coverage enforced in CI. All PRs must pass.
@@ -293,7 +295,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./build/mingw-debug/tests/DetourModKit_tests.
 These are called at 60+ fps from game hook callbacks. Never add allocations, locks, or blocking I/O to them:
 
 - `InputPoller::is_binding_active(index)` -- single atomic load
-- `InputPoller::is_binding_active(name)` -- hash lookup + atomic load per binding (typically 1–3)
+- `InputPoller::is_binding_active(name)` -- hash lookup + atomic load per binding (typically 1-3)
 - `HookManager::with_inline_hook()` -- shared_lock read
 - `Logger::log()` level check -- single atomic load
 - `Logger::log()` async enqueue -- atomic shared_ptr load + lock-free queue push
@@ -302,6 +304,8 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, loc
 - `Memory::read_ptr_unsafe()` -- SEH-protected raw dereference (MSVC), cache-accelerated with VirtualQuery fallback (MinGW)
 - `Memory::read_ptr_unchecked()` -- inline pointer dereference with source and result low-address guards, no SEH (caller must guarantee structural pointer validity)
 - `Memory::seh_read<T>()` / `seh_read_bytes()` -- typed and raw SEH-guarded reads; single `__try` frame on MSVC, VirtualQuery loop across regions on MinGW. Used by `Rtti` for chained RTTI walks
+- `Memory::seh_resolve_chain()` / `seh_read_chain<T>()` -- resolves or reads a whole multi-level pointer chain under one fault guard: one out-of-line call instead of N separate `seh_read` calls, with each intermediate link kept in a register and pre-screened by `plausible_userspace_ptr` (a faulting or implausible link aborts the walk and returns nullopt/false). VirtualQuery-guarded per link on MinGW
+- `Memory::plausible_userspace_ptr(p)` -- `inline constexpr` user-mode pointer plausibility test; pure arithmetic with no syscall and no memory access (early-rejects stale/sentinel/torn pointers before an SEH-guarded read)
 - `Memory::contains(range, p)` -- constexpr point-in-range test for module bounds checks
 - `Memory::own_module_range()` / `host_module_range()` -- magic-static cached, single atomic load on the fast path
 - `Rtti::vtable_is_type(vt, expected)` -- one batched COL read (24 bytes) plus `expected.size() + 1` bytes of name comparison; no allocation

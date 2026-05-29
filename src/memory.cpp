@@ -1458,6 +1458,133 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
 
 namespace
 {
+    // Walk a Cheat-Engine-style pointer chain inside a single fault guard.
+    // Every offset except the last is added and dereferenced to obtain the next
+    // link; the last offset is added but not dereferenced, yielding the target
+    // field address in out_addr. Each intermediate link is screened with
+    // plausible_userspace_ptr so a torn or sentinel pointer aborts the walk
+    // before the next dereference faults. Returns false on any fault or
+    // implausible intermediate link.
+    bool resolve_chain_guarded(uintptr_t base, const ptrdiff_t *offsets,
+                               size_t count, uintptr_t &out_addr) noexcept
+    {
+#ifdef _MSC_VER
+        __try
+        {
+            uintptr_t cur = base;
+            for (size_t i = 0; i + 1 < count; ++i)
+            {
+                uintptr_t next = 0;
+                std::memcpy(&next,
+                            reinterpret_cast<const void *>(cur + static_cast<uintptr_t>(offsets[i])),
+                            sizeof(next));
+                if (!Memory::plausible_userspace_ptr(next))
+                    return false;
+                cur = next;
+            }
+            out_addr = (count == 0)
+                           ? cur
+                           : cur + static_cast<uintptr_t>(offsets[count - 1]);
+            return true;
+        }
+        __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
+                   GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+                      ? EXCEPTION_EXECUTE_HANDLER
+                      : EXCEPTION_CONTINUE_SEARCH)
+        {
+            return false;
+        }
+#else
+        // MinGW lacks __try/__except. Each intermediate link is read through
+        // read_ptr_unsafe (VirtualQuery-guarded, returns 0 on fault); the
+        // plausibility screen also rejects that 0.
+        uintptr_t cur = base;
+        for (size_t i = 0; i + 1 < count; ++i)
+        {
+            const uintptr_t next = Memory::read_ptr_unsafe(cur, offsets[i]);
+            if (!Memory::plausible_userspace_ptr(next))
+                return false;
+            cur = next;
+        }
+        out_addr = (count == 0)
+                       ? cur
+                       : cur + static_cast<uintptr_t>(offsets[count - 1]);
+        return true;
+#endif
+    }
+} // anonymous namespace (pointer-chain internals)
+
+std::optional<uintptr_t> DetourModKit::Memory::seh_resolve_chain(
+    uintptr_t base, std::span<const ptrdiff_t> offsets) noexcept
+{
+    uintptr_t addr = 0;
+    if (resolve_chain_guarded(base, offsets.data(), offsets.size(), addr))
+        return addr;
+    return std::nullopt;
+}
+
+bool DetourModKit::Memory::seh_read_chain_bytes(
+    uintptr_t base, std::span<const ptrdiff_t> offsets, void *out, size_t bytes) noexcept
+{
+    if (bytes == 0)
+        return true;
+    if (!out)
+        return false;
+
+#ifdef _MSC_VER
+    // The walk is inlined here rather than reusing resolve_chain_guarded so the
+    // resolve and the terminal read sit in one __try region. On x64 the __try
+    // is table-driven and free on the no-fault path, so this is a structural
+    // choice (one uniform failure path for the whole operation) and not a
+    // measurable saving over two adjacent guarded regions.
+    const ptrdiff_t *const offs = offsets.data();
+    const size_t count = offsets.size();
+    __try
+    {
+        uintptr_t cur = base;
+        for (size_t i = 0; i + 1 < count; ++i)
+        {
+            uintptr_t next = 0;
+            std::memcpy(&next,
+                        reinterpret_cast<const void *>(cur + static_cast<uintptr_t>(offs[i])),
+                        sizeof(next));
+            if (!Memory::plausible_userspace_ptr(next))
+                return false;
+            cur = next;
+        }
+        const uintptr_t final_addr = (count == 0)
+                                         ? cur
+                                         : cur + static_cast<uintptr_t>(offs[count - 1]);
+        // Apply seh_read_bytes' own prechecks on the terminal address so a low
+        // or wrapping final address fails identically on both toolchains. The
+        // MinGW branch below already routes through seh_read_bytes, which
+        // rejects these; matching here keeps a stale or sentinel final address
+        // from raising a (benign but debugger-visible) first-chance exception.
+        if (final_addr < SEH_READ_MIN_VALID_ADDR || final_addr + bytes < final_addr)
+            return false;
+        std::memcpy(out, reinterpret_cast<const void *>(final_addr), bytes);
+        return true;
+    }
+    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
+               GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH)
+    {
+        return false;
+    }
+#else
+    // MinGW: resolve through the VirtualQuery-guarded helper, then read the
+    // terminal range with seh_read_bytes, which validates every region the
+    // read spans before copying.
+    uintptr_t final_addr = 0;
+    if (!resolve_chain_guarded(base, offsets.data(), offsets.size(), final_addr))
+        return false;
+    return Memory::seh_read_bytes(final_addr, out, bytes);
+#endif
+}
+
+namespace
+{
     // PE header layout for module range resolution. Pulled into an anonymous
     // namespace so the helper is internal to memory.cpp and shared between
     // module_range_for, own_module_range, and host_module_range.

@@ -123,4 +123,14 @@ if(DMK_BUILD_BENCHMARKS)
   target_include_directories(DetourModKit_bench_scanner PRIVATE
     ${CMAKE_SOURCE_DIR}/include
   )
+
+  add_executable(DetourModKit_bench_memory
+    "${CMAKE_CURRENT_SOURCE_DIR}/bench_memory.cpp"
+  )
+
+  target_link_libraries(DetourModKit_bench_memory PRIVATE DetourModKit)
+
+  target_include_directories(DetourModKit_bench_memory PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+  )
 endif()

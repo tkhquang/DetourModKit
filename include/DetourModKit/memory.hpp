@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstring>
 #include <expected>
+#include <initializer_list>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -114,6 +116,19 @@ namespace DetourModKit
          * @param address Starting address of the memory region.
          * @param size Number of bytes in the memory region to check.
          * @return true if the entire region is readable, false otherwise.
+         * @warning Not a per-dereference gate for hot paths. A cache hit still
+         *          takes a shard reader lock and a cache miss issues a
+         *          VirtualQuery syscall; placing this in front of every field
+         *          read on a per-frame or per-object path multiplies that cost
+         *          by the read count and is dominated by cache misses when the
+         *          target addresses change. It is also a time-of-check to
+         *          time-of-use illusion: the page state can change between the
+         *          check and the access. For hot-path reads of game-owned
+         *          pointers, drop the predicate and read directly under a single
+         *          SEH frame (@ref seh_read, @ref seh_read_chain), optionally
+         *          pre-screened by @ref plausible_userspace_ptr and a module or
+         *          heap range check. Reserve is_readable for one-shot setup
+         *          validation and diagnostics.
          */
         bool is_readable(const void *address, size_t size);
 
@@ -154,6 +169,34 @@ namespace DetourModKit
          * @return The pointer-sized value at the address, or 0 if the read faults.
          */
         uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
+
+        // Canonical x64 user-mode address window. The low 64 KiB is the
+        // reserved null-dereference region and is never a live pointer; mapped
+        // user addresses sit below the 47-bit canonical split at
+        // 0x0000'8000'0000'0000. A value outside this window cannot be a valid
+        // object pointer, so the bounds reject stale or sentinel values with no
+        // syscall and no memory access.
+        inline constexpr uintptr_t USERSPACE_PTR_MIN = 0x10000;
+        inline constexpr uintptr_t USERSPACE_PTR_MAX = 0x0000800000000000ULL;
+
+        /**
+         * @brief Structural plausibility test for an x64 user-mode pointer.
+         * @details Returns true only when @p p lies in
+         *          [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX). This is a
+         *          pure arithmetic guard with no memory access and no syscall,
+         *          intended to terminate pointer-chain traversals early on
+         *          obviously bad values (null, small enum-shaped integers,
+         *          non-canonical addresses) before paying for an SEH-guarded
+         *          read. It does not prove the pointer is mapped or that the
+         *          target object is the expected type; pair it with a module or
+         *          heap range check and an SEH-guarded read for full validation.
+         * @param p The pointer value to test.
+         * @return true if @p p is a plausible user-mode pointer, false otherwise.
+         */
+        [[nodiscard]] inline constexpr bool plausible_userspace_ptr(uintptr_t p) noexcept
+        {
+            return p >= USERSPACE_PTR_MIN && p < USERSPACE_PTR_MAX;
+        }
 
         /**
          * @brief Fastest pointer dereference with low-address validity guards only.
@@ -196,6 +239,13 @@ namespace DetourModKit
          * @param address Starting address of the memory region.
          * @param size Number of bytes in the memory region to check.
          * @return true if the entire region is writable, false otherwise.
+         * @warning Carries the same hot-path cost and time-of-check to
+         *          time-of-use caveat as @ref is_readable. When a hook receives
+         *          a pointer the engine just wrote through, that pointer is
+         *          already writable; gating the store behind this predicate adds
+         *          a lock and a periodic VirtualQuery for no safety gain. Write
+         *          directly (under SEH if the address may be stale) and reserve
+         *          is_writable for one-shot setup validation.
          */
         bool is_writable(void *address, size_t size);
 
@@ -244,6 +294,11 @@ namespace DetourModKit
          *       host modules; consumers that load and free DLLs at runtime
          *       should treat cached entries for an unloaded module's HMODULE
          *       as stale.
+         * @note Every call issues a GetModuleHandleEx lookup even on a cache
+         *       hit. For a hot path that repeatedly checks whether a pointer
+         *       lives inside one known module, capture @ref own_module_range or
+         *       @ref host_module_range once and test with @ref contains, which
+         *       is a branch-only comparison with no syscall.
          * @param address Any address inside the target module. nullptr returns
          *                std::nullopt without a syscall.
          * @return The module's range, or std::nullopt if @p address does not
@@ -324,19 +379,131 @@ namespace DetourModKit
          *          On the success path the implementation collapses to a
          *          single memcpy of sizeof(T) bytes; on failure the optional
          *          carries no value and no T destructor is invoked.
-         * @tparam T A trivially copyable type. Required by C++23 concept.
+         * @tparam T A trivially copyable, default-constructible type. Trivial
+         *           copyability avoids the MSVC C2712 restriction described
+         *           above; default-constructibility is required because the
+         *           body declares a `T value;` to receive the copied bytes.
          * @param addr Source address. Values below 0x10000 are rejected
          *             without a read; see @ref seh_read_bytes.
          * @return The value on success, std::nullopt on any read fault.
          */
         template <typename T>
-            requires std::is_trivially_copyable_v<T>
+            requires (std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T>)
         [[nodiscard]] std::optional<T> seh_read(uintptr_t addr) noexcept
         {
             T value;
             if (!seh_read_bytes(addr, &value, sizeof(T)))
                 return std::nullopt;
             return value;
+        }
+
+        /**
+         * @brief Resolves a multi-level pointer chain under a single fault guard.
+         * @details Walks Cheat-Engine-style pointer-chain semantics: starting at
+         *          @p base, every offset except the last is added and
+         *          dereferenced to obtain the next link, and the final offset is
+         *          added but not dereferenced, yielding the address of the target
+         *          field. With offsets {o0, o1, o2} the result is
+         *          (*(*(base + o0) + o1)) + o2.
+         *
+         *          The entire walk runs inside one fault guard. On x64 MSVC the
+         *          __try is table-driven (described by .pdata/.xdata emitted at
+         *          compile time) and adds no runtime setup on the no-fault path
+         *          whether the chain uses one guard or N, so the win over
+         *          calling @ref seh_read once per link is not SEH-frame setup:
+         *          it is one out-of-line call instead of N, each intermediate
+         *          link kept in a register instead of round-tripped through
+         *          std::optional, and a single argument validation. On MinGW
+         *          (no SEH) the saving is concrete: one guarded helper call
+         *          instead of N, each intermediate link read through
+         *          @ref read_ptr_unsafe (VirtualQuery-guarded) and the final
+         *          address computed without a read.
+         *
+         *          Each intermediate link is screened with
+         *          @ref plausible_userspace_ptr; a link that faults or yields an
+         *          implausible pointer aborts the walk and returns std::nullopt.
+         *          The returned address is not dereferenced and not range-checked
+         *          by this function; the caller reads it (typically via
+         *          @ref seh_read or @ref seh_read_chain).
+         * @param base Root address of the chain.
+         * @param offsets Byte offsets applied left to right. An empty span
+         *                returns @p base unchanged.
+         * @return The resolved target address, or std::nullopt if any
+         *         intermediate dereference faults or produces an implausible
+         *         pointer.
+         */
+        [[nodiscard]] std::optional<uintptr_t> seh_resolve_chain(
+            uintptr_t base, std::span<const ptrdiff_t> offsets) noexcept;
+
+        /**
+         * @brief Convenience overload accepting a braced offset list.
+         * @see seh_resolve_chain(uintptr_t, std::span<const ptrdiff_t>)
+         */
+        [[nodiscard]] inline std::optional<uintptr_t> seh_resolve_chain(
+            uintptr_t base, std::initializer_list<ptrdiff_t> offsets) noexcept
+        {
+            return seh_resolve_chain(base,
+                                     std::span<const ptrdiff_t>(offsets.begin(), offsets.size()));
+        }
+
+        /**
+         * @brief Resolves a pointer chain and reads a raw byte range at its end.
+         * @details Performs the same walk as @ref seh_resolve_chain and then
+         *          copies @p bytes from the resolved address into @p out under
+         *          one fault guard, so a fault anywhere in the resolve or the
+         *          terminal read takes the same failure path and cannot leave a
+         *          partially walked chain observable to the caller. On MinGW the
+         *          chain is resolved via @ref read_ptr_unsafe and the terminal
+         *          read uses @ref seh_read_bytes.
+         * @param base Root address of the chain.
+         * @param offsets Byte offsets applied left to right (see
+         *                @ref seh_resolve_chain). An empty span reads at @p base.
+         * @param out Destination buffer. nullptr returns false.
+         * @param bytes Number of bytes to copy. Zero returns true (no-op).
+         * @return true on a fully successful resolve and read; false if any
+         *         intermediate link faults or is implausible, or the terminal
+         *         read faults. On failure the contents of @p out are unspecified.
+         */
+        [[nodiscard]] bool seh_read_chain_bytes(uintptr_t base,
+                                                std::span<const ptrdiff_t> offsets,
+                                                void *out, size_t bytes) noexcept;
+
+        /**
+         * @brief Resolves a pointer chain and reads a typed value at its end.
+         * @details Forwards to @ref seh_read_chain_bytes, so the chain walk and
+         *          the typed read share a single fault guard. The value is
+         *          constructed by copying sizeof(T) bytes from the resolved
+         *          address into a local `T value;`.
+         * @tparam T A trivially copyable, default-constructible type (see
+         *           @ref seh_read for why both are required).
+         * @param base Root address of the chain.
+         * @param offsets Byte offsets applied left to right (see
+         *                @ref seh_resolve_chain).
+         * @return The value on success, std::nullopt if any link faults or is
+         *         implausible or the terminal read faults.
+         */
+        template <typename T>
+            requires (std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T>)
+        [[nodiscard]] std::optional<T> seh_read_chain(
+            uintptr_t base, std::span<const ptrdiff_t> offsets) noexcept
+        {
+            T value;
+            if (!seh_read_chain_bytes(base, offsets, &value, sizeof(T)))
+                return std::nullopt;
+            return value;
+        }
+
+        /**
+         * @brief Convenience overload accepting a braced offset list.
+         * @see seh_read_chain(uintptr_t, std::span<const ptrdiff_t>)
+         */
+        template <typename T>
+            requires (std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T>)
+        [[nodiscard]] std::optional<T> seh_read_chain(
+            uintptr_t base, std::initializer_list<ptrdiff_t> offsets) noexcept
+        {
+            return seh_read_chain<T>(base,
+                                     std::span<const ptrdiff_t>(offsets.begin(), offsets.size()));
         }
     } // namespace Memory
 } // namespace DetourModKit

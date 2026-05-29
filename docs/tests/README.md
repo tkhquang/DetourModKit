@@ -297,9 +297,13 @@ The decoder header lives under `src/` (not the public include tree), so the test
 
 ## Benchmark Harness
 
-`tests/bench_event_dispatcher.cpp` is a standalone microbenchmark executable. It is deliberately not a gtest binary so it can run under any build configuration (release, release+PGO, ASAN, etc.) without dragging in the gtest runtime.
+`DMK_BUILD_BENCHMARKS=ON` builds three standalone microbenchmark executables. Each is deliberately not a gtest binary, so it runs under any build configuration (release, release+PGO, ASan, etc.) without dragging in the gtest runtime, and each prints a tab-separated table on stdout:
 
-Build it by adding `-DDMK_BUILD_BENCHMARKS=ON` to the configure step:
+- `DetourModKit_bench` (`bench_event_dispatcher.cpp`) -- EventDispatcher emit / subscribe throughput.
+- `DetourModKit_bench_scanner` (`bench_scanner.cpp`) -- `Scanner::find_pattern`, rare-byte anchor vs a naive first-byte anchor.
+- `DetourModKit_bench_memory` (`bench_memory.cpp`) -- the cost of each way to read game memory from a hot path: validation predicate (warm hit / cold miss) vs direct SEH-guarded read vs the pointer-chain primitives, plus per-probe tail-latency and per-frame budget studies.
+
+The option is independent of `DMK_BUILD_TESTS`, so the benches build alone:
 
 ```bash
 PATH="/c/msys64/mingw64/bin:$PATH"
@@ -308,12 +312,14 @@ cmake --build build/mingw-release --parallel
 ./build/mingw-release/tests/DetourModKit_bench.exe > bench.tsv
 ```
 
-The option is independent of `DMK_BUILD_TESTS`, so you can build the bench alone. Output is a tab-separated table on stdout with columns `scenario, subscribers, iterations, median_ns_per_op, total_ms`. Covered scenarios:
+`DetourModKit_bench` output has columns `scenario, subscribers, iterations, median_ns_per_op, total_ms`. Covered scenarios:
 
 - `emit` / `emit_safe` at 0, 1, 8, 64 subscribers (the 0-subscriber rows measure the fast path).
 - `subscribe_unsub_roundtrip` (single-thread RAII churn).
 - `emit_concurrent_4_threads` (contention stress on the lock-free read path).
 - `reentrancy_rejection` (cost of the guard's reject-during-handler path).
+
+`DetourModKit_bench_memory` is documented in [../misc/hot-path-memory.md](../misc/hot-path-memory.md); read the `probe_gated_over_direct` TSV row for the gated-vs-direct multiplier on your machine.
 
 ## Project Structure
 
@@ -321,7 +327,9 @@ The option is independent of `DMK_BUILD_TESTS`, so you can build the bench alone
 tests/
 ├── CMakeLists.txt              # Test discovery, fixture DLL build, bench wiring
 ├── main.cpp                    # GoogleTest entry point
-├── bench_event_dispatcher.cpp  # Standalone microbench (DMK_BUILD_BENCHMARKS)
+├── bench_event_dispatcher.cpp  # EventDispatcher emit/subscribe microbench (DMK_BUILD_BENCHMARKS)
+├── bench_memory.cpp            # Hot-path memory bench: validation predicate vs SEH-guarded read / chain primitives (DMK_BUILD_BENCHMARKS)
+├── bench_scanner.cpp           # Scanner::find_pattern rare-byte-anchor bench (DMK_BUILD_BENCHMARKS)
 ├── fixtures/
 │   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
 ├── test_async_logger.cpp       # Async logger tests
@@ -336,7 +344,8 @@ tests/
 ├── test_input.cpp              # Input system and input code tests
 ├── test_logger.cpp             # Logger tests
 ├── test_math.cpp               # Math utilities tests
-├── test_memory.cpp             # Memory utilities tests
+├── test_memory.cpp             # Memory utilities tests (cache, read/write, SEH reads, module range)
+├── test_memory_chain.cpp       # Pointer-chain / plausibility primitives (seh_resolve_chain, seh_read_chain)
 ├── test_platform.cpp           # Platform detection and version macro tests
 ├── test_profiler.cpp           # Profiler tests
 ├── test_scanner.cpp            # AOB scanner tests
