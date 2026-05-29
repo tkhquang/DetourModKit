@@ -142,7 +142,9 @@ The watcher also treats a zero-byte notification buffer as a match (buffer overf
 
 ## Stopping semantics
 
-`ConfigWatcher::stop()` and `Config::disable_auto_reload()` are both idempotent and return within ~100 ms of the request. The watcher polls its stop token between `ReadDirectoryChangesW` completions with a 100 ms `GetOverlappedResultEx` timeout, so idle CPU is effectively zero.
+`ConfigWatcher::stop()` and `Config::disable_auto_reload()` are both idempotent and return within ~100 ms of the request in the common case. The watcher polls its stop token between `ReadDirectoryChangesW` completions with a 100 ms `GetOverlappedResultEx` timeout, so idle CPU is effectively zero.
+
+On stop the worker cancels its in-flight `ReadDirectoryChangesW` and waits for the kernel to release the `OVERLAPPED` and notification buffer before they are freed; per MSDN both must stay valid until the cancelled I/O has actually completed. Cancellation normally drives the read to completion in microseconds, but if the watched directory was deleted the notify IRP can be orphaned (`CancelIoEx` reports success yet no completion is ever delivered), which a blind unbounded wait would turn into a teardown hang. The drain is therefore bounded and escalates: a timed wait for the cancelled read, then closing the directory handle to force the I/O Manager to cancel and complete the outstanding IRP (which signals the worker's event), and finally -- if completion still cannot be confirmed -- leaking the I/O buffer so a late kernel write can never land in freed memory. Worst-case teardown is bounded at roughly two seconds instead of an unbounded hang, and the leak path mirrors the leak-on-teardown discipline used elsewhere under the loader lock.
 
 If the current thread holds the Windows loader lock (e.g. `stop()` is called from `DllMain`), the watcher thread is detached rather than joined, mirroring the discipline used by `Logger::shutdown_internal` and `HookManager::~HookManager`.
 

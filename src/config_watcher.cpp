@@ -66,6 +66,13 @@ namespace DetourModKit
         // stop_token; idle cost is ~10 syscalls/s per watcher (not zero).
         constexpr DWORD kPumpTimeoutMs = 100;
 
+        // Per-wait bound for the stop-path drain. Only bites when a notify IRP
+        // is genuinely stuck (a deleted/orphaned watched directory); in the
+        // normal case the cancelled read completes in microseconds and the
+        // wait returns immediately. Two waits (cancel, then handle-close) cap
+        // worst-case teardown at ~2 * this value instead of an infinite hang.
+        constexpr DWORD kDrainTimeoutMs = 1000;
+
         bool iequals_w(std::wstring_view lhs, std::wstring_view rhs) noexcept
         {
             if (lhs.size() != rhs.size())
@@ -122,6 +129,22 @@ namespace DetourModKit
                 }
                 h = INVALID_HANDLE_VALUE;
             }
+        };
+
+        // Heap-resident I/O state for the ReadDirectoryChangesW pump. Bundled
+        // so the stop-path drain can leak the entire set (directory handle,
+        // completion event, OVERLAPPED, and notification buffer) in one move
+        // when a pending notify IRP cannot be confirmed complete. The kernel
+        // may still write into the OVERLAPPED and the buffer after a
+        // cancellation that the filesystem never finishes (e.g. the watched
+        // directory was deleted), so those structures must outlive the worker
+        // rather than be freed while an IRP still references them.
+        struct WatchIoState
+        {
+            OwnedHandle dir_handle;
+            OwnedHandle event_handle;
+            std::vector<BYTE> buffer;
+            OVERLAPPED overlapped{};
         };
     } // namespace
 
@@ -306,7 +329,21 @@ namespace DetourModKit
                 // setter-invoked self-calls into disable_auto_reload().
                 worker_id_slot->store(std::this_thread::get_id(),
                                       std::memory_order_release);
-                OwnedHandle dir_handle(::CreateFileW(
+                auto io = std::make_unique<WatchIoState>();
+                io->buffer.resize(kBufferBytes);
+
+                // Reference aliases keep the pump body below unchanged while the
+                // backing storage lives on the heap, so the stop-path drain can
+                // leak the whole bundle in one move if a notify IRP cannot be
+                // confirmed complete (see the drain at worker exit for why that
+                // matters). The references stay valid even after io.release():
+                // the object is leaked, not destroyed.
+                OwnedHandle &dir_handle = io->dir_handle;
+                OwnedHandle &event_handle = io->event_handle;
+                std::vector<BYTE> &buffer = io->buffer;
+                OVERLAPPED &overlapped = io->overlapped;
+
+                dir_handle = OwnedHandle(::CreateFileW(
                     directory.c_str(),
                     FILE_LIST_DIRECTORY,
                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -324,7 +361,7 @@ namespace DetourModKit
                     return;
                 }
 
-                OwnedHandle event_handle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+                event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
                 if (!event_handle.valid())
                 {
                     Logger::get_instance().error(
@@ -334,8 +371,6 @@ namespace DetourModKit
                     return;
                 }
 
-                std::vector<BYTE> buffer(kBufferBytes);
-                OVERLAPPED overlapped{};
                 overlapped.hEvent = event_handle.h;
 
                 // Debounce bookkeeping: once we observe a matching change,
@@ -538,29 +573,63 @@ namespace DetourModKit
                     }
                 }
 
-                // Cancel any in-flight I/O and then WAIT for the kernel
-                // to finish with our OVERLAPPED and buffer. Per MSDN the
-                // OVERLAPPED structure and the backing buffer must remain
-                // valid until the cancelled I/O has actually completed;
-                // skipping the drain would let the kernel write into
-                // stack memory after it had been released. Infinite wait
-                // is safe because CancelIoEx guarantees completion.
+                // Cancel any in-flight I/O, then wait for the kernel to finish
+                // with our OVERLAPPED and notification buffer before they are
+                // freed. Per MSDN the OVERLAPPED and buffer must stay valid
+                // until the cancelled I/O has actually completed; freeing them
+                // early would let the kernel write into released memory.
+                //
+                // CancelIoEx normally drives the pending ReadDirectoryChangesW
+                // to completion, but if the watched directory was deleted the
+                // notify IRP can be orphaned: CancelIoEx reports success yet no
+                // completion is ever delivered. A blind GetOverlappedResult with
+                // bWait=TRUE would then wait forever and hang StoppableWorker's
+                // join (stalling the whole teardown). So every wait here is
+                // bounded and the drain escalates:
+                //   1. cancel + bounded wait for the normal case;
+                //   2. on timeout, close the directory handle -- dropping the
+                //      last handle to the directory forces the I/O Manager to
+                //      cancel and complete the outstanding IRP, signalling our
+                //      event (the mechanism .NET FileSystemWatcher.Dispose uses);
+                //   3. if the IRP STILL cannot be confirmed complete, leak the
+                //      entire I/O bundle instead of freeing it, so a late
+                //      completion can never write into freed memory. Bounded to
+                //      this teardown path and mirrors the leak-on-teardown
+                //      discipline in ~ConfigWatcher and Logger::shutdown_internal.
                 ::CancelIoEx(dir_handle.h, &overlapped);
+
                 DWORD drain_bytes = 0;
-                const BOOL drained = ::GetOverlappedResult(
-                    dir_handle.h, &overlapped, &drain_bytes, TRUE);
+                const BOOL drain_ok = ::GetOverlappedResultEx(
+                    dir_handle.h, &overlapped, &drain_bytes, kDrainTimeoutMs, FALSE);
+
+                // Only WAIT_TIMEOUT / WAIT_IO_COMPLETION mean the IRP is still
+                // pending; any other status (including ERROR_OPERATION_ABORTED)
+                // means the kernel is done with the OVERLAPPED and the buffer.
+                bool drained = drain_ok != FALSE;
                 if (!drained)
                 {
                     const DWORD drain_err = ::GetLastError();
-                    if (drain_err != ERROR_OPERATION_ABORTED &&
-                        drain_err != ERROR_NOTIFY_ENUM_DIR &&
-                        drain_err != ERROR_INVALID_HANDLE)
-                    {
-                        Logger::get_instance().warning(
-                            "ConfigWatcher '{}': drain GetOverlappedResult "
-                            "returned unexpected error (GLE={}).",
-                            label, drain_err);
-                    }
+                    drained = drain_err != WAIT_TIMEOUT &&
+                              drain_err != WAIT_IO_COMPLETION;
+                }
+
+                if (!drained)
+                {
+                    // Force completion by releasing the directory handle, then
+                    // wait on the event the IRP signals on its way out.
+                    dir_handle.reset();
+                    drained = ::WaitForSingleObject(event_handle.h, kDrainTimeoutMs) ==
+                              WAIT_OBJECT_0;
+                }
+
+                if (!drained)
+                {
+                    Logger::get_instance().warning(
+                        "ConfigWatcher '{}': pending directory notification did "
+                        "not drain after cancel + handle close; leaking the watch "
+                        "buffer to stay memory-safe.",
+                        label);
+                    static_cast<void>(io.release());
                 }
 
                 // Flush a final debounced callback if we are exiting
