@@ -621,6 +621,88 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::f
     return std::unexpected(RipResolveError::PrefixNotFound);
 }
 
+namespace
+{
+    // Region-walking AOB scan shared by scan_executable_regions and
+    // scan_readable_regions. Walks the committed regions of the process address
+    // space via VirtualQuery and runs find_pattern_raw against every region
+    // whose base protection is present in accept_mask, returning the Nth match
+    // (1-based, adjusted by pattern.offset) or nullptr.
+    //
+    // Guard, no-access, and uncommitted regions are always skipped: PAGE_GUARD
+    // raises STATUS_GUARD_PAGE_VIOLATION on the first touch and PAGE_NOACCESS
+    // faults even for reads, so neither is safe to dereference. The Windows base
+    // protections (PAGE_READONLY, PAGE_READWRITE, ... , PAGE_EXECUTE_WRITECOPY)
+    // are mutually exclusive single bits, so a bitwise-AND against a mask of the
+    // acceptable bases is a sound membership test. PAGE_GUARD is a modifier bit
+    // OR-ed onto a base value (a guarded read-only page reads as PAGE_READONLY |
+    // PAGE_GUARD), so it must be excluded separately or it would satisfy the
+    // mask and be scanned.
+    //
+    // Each region is scanned through the raw helper so the final
+    // `+ pattern.offset` applies exactly once (the public find_pattern already
+    // applies offset; calling it here would double-apply). A pattern straddling
+    // two adjacent VAD entries is therefore not found; PE-loaded sections are
+    // contiguous, so normal module scanning is unaffected.
+    const std::byte *scan_regions_filtered(const Scanner::CompiledPattern &pattern,
+                                           size_t occurrence, DWORD accept_mask) noexcept
+    {
+        // The compiled pattern's own bytes buffer lives in readable heap memory,
+        // so a whole-process readable sweep would match the needle against
+        // itself and could return the caller's pattern storage instead of the
+        // intended target. Exclude any match that overlaps that buffer. The
+        // executable sweep never reaches pattern.bytes (the heap is not
+        // executable), so this is a no-op there and keeps both scanners
+        // consistent: a scan never matches the needle's own storage. The needle
+        // is the caller's allocation, so no real target can share its range.
+        const auto needle_lo = reinterpret_cast<uintptr_t>(pattern.bytes.data());
+        const auto needle_hi = needle_lo + pattern.size();
+
+        size_t matches_remaining = occurrence;
+        MEMORY_BASIC_INFORMATION mbi{};
+        uintptr_t addr = 0;
+
+        while (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+        {
+            const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+
+            if (mbi.State == MEM_COMMIT && (mbi.Protect & accept_mask) != 0 &&
+                !protection_unsafe && mbi.RegionSize >= pattern.size())
+            {
+                const auto *region_start = reinterpret_cast<const std::byte *>(mbi.BaseAddress);
+
+                const std::byte *match = find_pattern_raw(region_start, mbi.RegionSize, pattern);
+                while (match != nullptr)
+                {
+                    const auto match_addr = reinterpret_cast<uintptr_t>(match);
+                    const bool self_match = match_addr < needle_hi &&
+                                            (match_addr + pattern.size()) > needle_lo;
+                    if (!self_match)
+                    {
+                        --matches_remaining;
+                        if (matches_remaining == 0)
+                            return match + pattern.offset;
+                    }
+
+                    // Continue scanning past the current match.
+                    const size_t consumed = static_cast<size_t>(match - region_start) + 1;
+                    if (consumed >= mbi.RegionSize)
+                        break;
+                    match = find_pattern_raw(match + 1, mbi.RegionSize - consumed, pattern);
+                }
+            }
+
+            const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+            assert(next > addr && "VirtualQuery returned a non-advancing region");
+            if (next <= addr)
+                break; // Overflow guard.
+            addr = next;
+        }
+
+        return nullptr;
+    }
+} // anonymous namespace
+
 const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPattern &pattern, size_t occurrence)
 {
     if (pattern.empty() || occurrence == 0)
@@ -641,62 +723,33 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
     constexpr DWORD READABLE_EXEC_FLAGS = PAGE_EXECUTE_READ |
                                           PAGE_EXECUTE_READWRITE |
                                           PAGE_EXECUTE_WRITECOPY;
+    return scan_regions_filtered(pattern, occurrence, READABLE_EXEC_FLAGS);
+}
 
-    size_t matches_remaining = occurrence;
-    MEMORY_BASIC_INFORMATION mbi{};
-    uintptr_t addr = 0;
+const std::byte *DetourModKit::Scanner::scan_readable_regions(const CompiledPattern &pattern, size_t occurrence)
+{
+    if (pattern.empty() || occurrence == 0)
+        return nullptr;
 
-    while (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+    Logger &logger = Logger::get_instance();
+
+    if (!pattern_has_literal_byte(pattern))
     {
-        // Skip non-readable / hostile protection states regardless of the
-        // execute bits: guard pages trigger STATUS_GUARD_PAGE_VIOLATION on
-        // access, and PAGE_NOACCESS will AV even for reads.
-        const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
-        const bool execute_only = (mbi.Protect & PAGE_EXECUTE) != 0 &&
-                                  (mbi.Protect & READABLE_EXEC_FLAGS) == 0;
-
-        if (execute_only && !protection_unsafe && mbi.State == MEM_COMMIT)
-        {
-            if (logger.is_enabled(LogLevel::Trace))
-            {
-                logger.trace("scan_executable_regions: skipping pure-execute "
-                             "region at {} (size {}) - not readable",
-                             Format::format_address(reinterpret_cast<uintptr_t>(mbi.BaseAddress)),
-                             mbi.RegionSize);
-            }
-        }
-
-        if (mbi.State == MEM_COMMIT && (mbi.Protect & READABLE_EXEC_FLAGS) != 0 &&
-            !protection_unsafe && mbi.RegionSize >= pattern.size())
-        {
-            const auto *region_start = reinterpret_cast<const std::byte *>(mbi.BaseAddress);
-
-            // Use the raw helper so our own `+ pattern.offset` at the final
-            // return applies exactly once (the public find_pattern already
-            // applies offset; calling it here would double-apply).
-            const std::byte *match = find_pattern_raw(region_start, mbi.RegionSize, pattern);
-            while (match != nullptr)
-            {
-                --matches_remaining;
-                if (matches_remaining == 0)
-                    return match + pattern.offset;
-
-                // Continue scanning past the current match
-                const size_t consumed = static_cast<size_t>(match - region_start) + 1;
-                if (consumed >= mbi.RegionSize)
-                    break;
-                match = find_pattern_raw(match + 1, mbi.RegionSize - consumed, pattern);
-            }
-        }
-
-        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-        assert(next > addr && "VirtualQuery returned a non-advancing region");
-        if (next <= addr)
-            break; // Overflow guard
-        addr = next;
+        logger.warning("scan_readable_regions: pattern contains no literal "
+                       "bytes (all wildcards); returning first readable region "
+                       "start unchanged");
     }
 
-    return nullptr;
+    // Superset of READABLE_EXEC_FLAGS: every committed region we can read,
+    // including .rdata / .data (PAGE_READONLY / PAGE_READWRITE / PAGE_WRITECOPY)
+    // and read-only heaps, plus the execute-readable variants. The semantic is
+    // "find this pattern anywhere readable", so execute-readable code pages are
+    // intentionally included rather than deduplicated against
+    // scan_executable_regions; callers wanting non-code matches post-filter.
+    constexpr DWORD READABLE_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                     PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                     PAGE_EXECUTE_WRITECOPY;
+    return scan_regions_filtered(pattern, occurrence, READABLE_FLAGS);
 }
 
 Scanner::SimdLevel DetourModKit::Scanner::active_simd_level() noexcept
@@ -885,7 +938,8 @@ namespace
 
     CascadeAttempt scan_candidates(std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
                                    bool &all_parse_failed,
-                                   DetourModKit::Logger &logger)
+                                   DetourModKit::Logger &logger,
+                                   DetourModKit::Scanner::ScannerKind kind)
     {
         all_parse_failed = true;
         for (size_t i = 0; i < candidates.size(); ++i)
@@ -899,7 +953,10 @@ namespace
                 continue;
             }
             all_parse_failed = false;
-            const auto *match = DetourModKit::Scanner::scan_executable_regions(*compiled);
+            const auto *match =
+                (kind == DetourModKit::Scanner::ScannerKind::Readable)
+                    ? DetourModKit::Scanner::scan_readable_regions(*compiled)
+                    : DetourModKit::Scanner::scan_executable_regions(*compiled);
             if (match != nullptr)
             {
                 const auto addr = resolve_candidate_match(
@@ -988,7 +1045,7 @@ namespace
 
 std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
 DetourModKit::Scanner::resolve_cascade(std::span<const AddrCandidate> candidates,
-                                       std::string_view label)
+                                       std::string_view label, ScannerKind kind)
 {
     auto &logger = Logger::get_instance();
 
@@ -999,7 +1056,7 @@ DetourModKit::Scanner::resolve_cascade(std::span<const AddrCandidate> candidates
     }
 
     bool all_parse_failed = true;
-    const auto attempt = scan_candidates(candidates, all_parse_failed, logger);
+    const auto attempt = scan_candidates(candidates, all_parse_failed, logger, kind);
     if (attempt.success)
     {
         const auto &winner = candidates[attempt.index];
@@ -1031,8 +1088,11 @@ DetourModKit::Scanner::resolve_cascade_with_prologue_fallback(
         return std::unexpected(ResolveError::EmptyCandidates);
     }
 
+    // Prologue recovery is a code-shape heuristic (it rebuilds a hooked
+    // near-JMP prologue), so this resolver is executable-only by construction;
+    // the readable sweep is meaningless for it.
     bool all_parse_failed = true;
-    auto attempt = scan_candidates(candidates, all_parse_failed, logger);
+    auto attempt = scan_candidates(candidates, all_parse_failed, logger, ScannerKind::Executable);
     if (attempt.success)
     {
         const auto &winner = candidates[attempt.index];

@@ -40,6 +40,7 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 - Nth-occurrence matching (1-based) for patterns that hit multiple locations
 - RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `std::expected` with typed `RipResolveError` for actionable diagnostics)
 - `scan_executable_regions()` for scanning all committed executable pages in the process - useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module (pure-execute pages without a read bit are skipped to avoid access violations)
+- `scan_readable_regions()` -- the data-section sibling of `scan_executable_regions()` -- sweeps every committed readable page (`.rdata` / `.data`, read-only heaps) to reach C++ vtables, RTTI type descriptors, and read-only metadata the executable-only sweep cannot see (guard / no-access / uncommitted pages are skipped); opt a cascade into it with `resolve_cascade(..., ScannerKind::Readable)`
 - `is_likely_function_prologue(addr)` heuristic that rejects scan poison (zero pages, alignment pads, bare RET stubs) while still accepting JMP-shaped patched prologues so nested-hook scenarios resolve
 
 </details>

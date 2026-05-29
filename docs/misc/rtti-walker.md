@@ -96,6 +96,17 @@ if (n > 0)
 
 `type_name_into` is the right choice for per-frame probes or diagnostic captures that must not allocate. The buffer is always NUL-terminated when `out_len > 0`, and the failure path sets `out[0] = '\0'` so misuse cannot leak stale stack contents.
 
+### Resolving a vtable from a type name (reverse direction)
+
+The walker runs vtable to name. The inverse, name to vtable, is the natural way to bootstrap a class marker at init: you know the mangled name but not yet the vtable address. Because the `TypeDescriptor` name string lives in `.rdata`, this direction needs a data-section scan, which the executable-only sweep cannot do. `Scanner::scan_readable_regions` (see [aob-signatures.md](aob-signatures.md), section 4.7) provides it.
+
+The flow inverts the [ABI layout](#abi-layout) above:
+
+1. `scan_readable_regions` for the mangled name string (for example `.?AVMyClass@ns@@`, including the trailing NUL) to land on `td + 0x10`. The name is plain ASCII and fully ASLR-invariant, so it is a far stronger anchor than the vtable header, whose entries are relocated pointers that shift with the ASLR slide.
+2. Subtract `0x10` to reach the `TypeDescriptor` base, then locate the COL whose `pTypeDescriptor` RVA points back at it and read `vtable = col_address + ...` via the same self-RVA / image-base arithmetic the walker uses internally.
+
+This is the recommended path for "find the one vtable for a known class" because it does not depend on a volatile constructor or on the per-launch byte values of relocated vtable pointers.
+
 ## Performance notes
 
 - The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read goes through `VirtualQuery`, which is microseconds-class; the batched ColHead read keeps the MinGW cost down to two syscalls instead of four.

@@ -285,6 +285,62 @@ namespace DetourModKit
         [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
         /**
+         * @brief Scans all committed readable memory regions for a byte pattern.
+         * @details Data-section sibling of scan_executable_regions. Walks the
+         *          process address space via VirtualQuery and scans every
+         *          committed region whose base protection is PAGE_READONLY,
+         *          PAGE_READWRITE, PAGE_WRITECOPY, or one of the three
+         *          execute-readable variants. This reaches .rdata / .data and
+         *          read-only heaps: C++ vtables, RTTI type descriptors, localized
+         *          string pools, and other read-only metadata that the
+         *          executable-only sweep cannot see.
+         * @param pattern The compiled pattern to search for.
+         * @param occurrence Which occurrence to return (1-based). 1 = first match.
+         *                   Passing 0 returns nullptr.
+         * @return Pointer to the match (adjusted by pattern offset), or nullptr if
+         *         not found.
+         * @note The accepted protection set is a strict superset of
+         *       scan_executable_regions: execute-readable code pages are included,
+         *       so a pattern present in .text is found by both. Callers that
+         *       specifically want non-code matches must post-filter (e.g. against
+         *       Memory::module_range_for).
+         * @note Guard pages (PAGE_GUARD), no-access pages (PAGE_NOACCESS), and
+         *       uncommitted regions are skipped: the first two fault on any touch
+         *       and are never dereferenced.
+         * @note `pattern.offset` is applied to the returned pointer, matching
+         *       scan_executable_regions. Callers must not add it manually.
+         * @note The compiled pattern's own `bytes` buffer is itself readable
+         *       memory and would otherwise match the needle against itself. The
+         *       scan excludes any match overlapping that buffer, so it never
+         *       returns the caller's pattern storage. (scan_executable_regions
+         *       is unaffected because that storage is not executable.)
+         * @warning The readable address space is far larger than the executable
+         *          subset (a typical x64 game process maps hundreds of MB of data
+         *          versus tens of MB of code) and .rdata pointer tables look
+         *          random, so a pattern unique in .text may collide in data.
+         *          Supply patterns with enough literal bytes (>= 8) to keep the
+         *          false-positive rate low. An RTTI mangled-name anchor is fully
+         *          ASLR-invariant and far stronger than a raw vtable-header
+         *          signature, whose relocated pointers vary per launch.
+         * @warning A trailing `|` marker (offset == pattern.size()) yields a
+         *          one-past pointer; bounds-check before dereferencing.
+         * @warning A pattern that straddles a region boundary is not found: each
+         *          region is scanned independently. PE-loaded sections are
+         *          contiguous, so normal module scanning is unaffected.
+         */
+        [[nodiscard]] const std::byte *scan_readable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
+
+        /**
+         * @enum ScannerKind
+         * @brief Selects which whole-process scanner a cascade resolves against.
+         */
+        enum class ScannerKind : std::uint8_t
+        {
+            Executable, ///< scan_executable_regions: committed execute-readable pages.
+            Readable    ///< scan_readable_regions: all committed readable pages (superset).
+        };
+
+        /**
          * @enum ResolveMode
          * @brief How a cascade candidate's pattern maps to a final address.
          */
@@ -360,7 +416,10 @@ namespace DetourModKit
         /**
          * @brief Try candidates in order; return the first successful address.
          * @details Each candidate's pattern is compiled via parse_aob() and
-         *          searched via scan_executable_regions(). Direct mode returns
+         *          searched via the scanner selected by @p kind:
+         *          scan_executable_regions() for ScannerKind::Executable (the
+         *          default) or scan_readable_regions() for ScannerKind::Readable
+         *          when the target lives in .rdata / .data. Direct mode returns
          *          @c match + disp_offset. RipRelative mode treats @c match +
          *          disp_offset as a disp32 field and resolves against
          *          @c match + instr_end_offset. On success, the winning
@@ -378,10 +437,15 @@ namespace DetourModKit
          *
          * @param candidates Ordered list of candidates. Empty -> EmptyCandidates.
          * @param label Human-readable identifier used in log messages.
+         * @param kind Which scanner to search with. Defaults to
+         *             ScannerKind::Executable so existing call sites are
+         *             unchanged; pass ScannerKind::Readable for data-section
+         *             targets.
          * @return ResolveHit on success; ResolveError on failure.
          */
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
-        resolve_cascade(std::span<const AddrCandidate> candidates, std::string_view label);
+        resolve_cascade(std::span<const AddrCandidate> candidates, std::string_view label,
+                        ScannerKind kind = ScannerKind::Executable);
 
         /**
          * @brief Cascade resolver with inline-hooked-prologue recovery.
