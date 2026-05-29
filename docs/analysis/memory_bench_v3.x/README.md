@@ -7,7 +7,7 @@ The benchmark measures:
 - **Per-call cost** of each primitive (validation warm-hit / cold-miss, raw `VirtualQuery`, `read_ptr_unchecked`, `seh_read`, direct load/store, `write_bytes`).
 - **VirtualQuery vs address-space size** (reserve N regions, re-time) to show whether a large VAD tree inflates the miss cost.
 - **`is_readable` tail latency** (p50/p99/max) under 1/2/4 threads forcing cache misses on a shared shard set. Tail latency, not average, is what a frame loop feels as a hitch.
-- **Probe model**: a hook that resolves an object and reads K dependent fields across a few distinct (cache-missing) objects, GATED (`is_readable` before every read) vs DIRECT (one fault guard, raw reads), reported per probe including the tail, plus a per-frame budget.
+- **Probe model**: a hook that resolves an object and reads K dependent fields across a few distinct (cache-missing) objects, GATED (`is_readable` before every read) vs DIRECT (raw volatile reads, no predicate or guard), reported per probe including the tail, plus a per-frame budget.
 - **Pointer chain**: a GATED per-link walk vs `seh_resolve_chain` / `seh_read_chain` (one fault guard for the whole walk).
 
 ## Hardware / configuration
@@ -81,7 +81,7 @@ The benchmark measures:
 
 A few takeaways:
 
-1. **The predicate is the wrong tool on a hot path.** It is not free even on a cache hit (a lock plus a lookup), and on a cache miss it pays a `VirtualQuery` plus an exclusive-lock rebuild. The probe model, where each object is a fresh page, is miss-dominated, so the gate runs ~69x slower per probe than reading directly under one guard.
+1. **The predicate is the wrong tool on a hot path.** It is not free even on a cache hit (a lock plus a lookup), and on a cache miss it pays a `VirtualQuery` plus an exclusive-lock rebuild. The probe model, where each object is a fresh page, is miss-dominated, so the gate runs ~69x slower per probe than a direct read.
 2. **The cost scales with probes-per-frame, and the tail is the real hazard.** At a few probes per frame the gate is imperceptible. At a few hundred per frame (an apply path touching many bound objects) it climbs to a large fraction of the frame budget, and the p99/max tail can spike a frame on its own. A single average-per-call number hides this.
 3. **A single SEH-guarded read is nearly free on MSVC.** `seh_read` is within ~2x of a raw load, and the chain primitives keep that property across a whole multi-level walk: one guard for the walk instead of N predicate calls.
 4. **`VirtualQuery` cost is flat in address-space size.** Growing the VAD tree to 12,000 reserved regions does not move the per-call cost (the kernel walks a balanced tree), so the miss cost is intrinsic, not a function of how fragmented the process is.
