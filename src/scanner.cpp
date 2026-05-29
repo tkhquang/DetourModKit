@@ -564,13 +564,15 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::r
     }
 
     const std::byte *disp_ptr = instruction_address + displacement_offset;
-    if (!Memory::is_readable(disp_ptr, sizeof(int32_t)))
+    // Read the displacement under a single SEH fault guard instead of
+    // is_readable + raw memcpy. is_readable is a time-of-check/time-of-use
+    // illusion -- the page can change protection or unmap between the check
+    // and the copy -- so an unguarded memcpy could fault the host.
+    const auto displacement = Memory::seh_read<int32_t>(reinterpret_cast<uintptr_t>(disp_ptr));
+    if (!displacement)
     {
         return std::unexpected(RipResolveError::UnreadableDisplacement);
     }
-
-    int32_t displacement;
-    std::memcpy(&displacement, disp_ptr, sizeof(int32_t));
 
     // Compute the target in unsigned modular arithmetic so the math stays
     // well-defined on every input, including kernel-range instruction
@@ -578,7 +580,7 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::r
     // The displacement is sign-extended first so negative disp32 values wrap
     // to the correct 64-bit offset.
     const uintptr_t base = reinterpret_cast<uintptr_t>(instruction_address);
-    const uintptr_t disp_sext = static_cast<uintptr_t>(static_cast<int64_t>(displacement));
+    const uintptr_t disp_sext = static_cast<uintptr_t>(static_cast<int64_t>(*displacement));
     return base + instruction_length + disp_sext;
 }
 
@@ -776,15 +778,17 @@ namespace
             return match_addr + static_cast<std::uintptr_t>(c.disp_offset);
         }
         const auto disp_addr = match_addr + static_cast<std::uintptr_t>(c.disp_offset);
-        if (!DetourModKit::Memory::is_readable(reinterpret_cast<const void *>(disp_addr), sizeof(std::int32_t)))
+        // Fault-guarded read instead of is_readable + raw memcpy: the page can
+        // change between the check and the copy (TOCTOU), so an unguarded memcpy
+        // could fault the host process. seh_read returns nullopt on any fault.
+        const auto disp = DetourModKit::Memory::seh_read<std::int32_t>(disp_addr);
+        if (!disp)
         {
             return 0;
         }
-        std::int32_t disp = 0;
-        std::memcpy(&disp, reinterpret_cast<const void *>(disp_addr), sizeof(disp));
         return static_cast<std::uintptr_t>(
             static_cast<std::int64_t>(match_addr + static_cast<std::uintptr_t>(c.instr_end_offset)) +
-            disp);
+            *disp);
     }
 
     // Minimum number of literal (non-wildcard) bytes the tail of the pattern
@@ -1138,12 +1142,22 @@ bool DetourModKit::Scanner::is_likely_function_prologue(std::uintptr_t addr) noe
         return false;
     }
 
-    const auto *probe = reinterpret_cast<const void *>(addr);
-    if (!Memory::is_readable(probe, 1))
+    // Read the first opcode byte under a fault guard rather than is_readable +
+    // a raw dereference. is_readable is a TOCTOU illusion (the page can change
+    // or unmap between the check and the read), and the bare dereference would
+    // then fault the host. seh_read returns nullopt on any fault.
+    const auto b0 = Memory::seh_read<std::uint8_t>(addr);
+    if (!b0)
     {
         return false;
     }
 
-    const auto b0 = *reinterpret_cast<const std::uint8_t *>(addr);
-    return b0 != 0x00 && b0 != 0xCC && b0 != 0xC2 && b0 != 0xC3;
+    // Reject bytes that never begin a real function prologue, so an AOB match
+    // that landed in inter-function padding or past a function's end is filtered
+    // out instead of accepted as a target:
+    //   0x00 -- zero fill / uninitialized page (decodes as `add [rax], al`)
+    //   0xCC -- INT3, the alignment padding linkers insert between functions
+    //   0xC3 -- RET (near return): a function epilogue, not a prologue
+    //   0xC2 -- RET imm16: likewise a return, not a prologue
+    return *b0 != 0x00 && *b0 != 0xCC && *b0 != 0xC2 && *b0 != 0xC3;
 }

@@ -69,7 +69,7 @@ namespace DetourModKit
 
         Logger &instance = get_instance();
 
-        // configure() is the authoritative reset path — allow reconfiguration
+        // configure() is the authoritative reset path -- allow reconfiguration
         // even after shutdown to support reuse (e.g., test fixtures).
         instance.shutdown_called_.store(false, std::memory_order_release);
 
@@ -475,7 +475,7 @@ namespace DetourModKit
         }
     }
 
-    bool Logger::is_async_mode_enabled() const
+    bool Logger::is_async_mode_enabled() const noexcept
     {
         return async_mode_enabled_.load(std::memory_order_acquire);
     }

@@ -296,14 +296,24 @@ namespace DetourModKit
 
         if (is_loader_lock_held())
         {
+            // Under loader lock (FreeLibrary / process unload) the poll thread
+            // cannot be joined without deadlocking the loader, so it is detached
+            // after pinning the module. It is still running and will exit only
+            // once it observes the stop request, so we must NOT touch shared
+            // binding state or fire hold-release callbacks here: that would race
+            // the detached thread and run user callbacks under the loader lock
+            // (a callback that enters the loader -- LoadLibrary family or a peer
+            // DllMain mutex -- would deadlock). Mirrors clear_bindings(invoke_callbacks=false).
             pin_current_module();
             poll_thread_.detach();
-        }
-        else
-        {
-            poll_thread_.join();
+            running_.store(false, std::memory_order_release);
+            return;
         }
 
+        poll_thread_.join();
+
+        // The poll thread is provably stopped here, so releasing active holds
+        // and firing their on_state_change(false) callbacks is race-free.
         running_.store(false, std::memory_order_release);
         release_active_holds();
     }
