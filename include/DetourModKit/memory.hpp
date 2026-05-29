@@ -1,6 +1,8 @@
 #ifndef DETOURMODKIT_MEMORY_HPP
 #define DETOURMODKIT_MEMORY_HPP
 
+#include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -368,33 +370,30 @@ namespace DetourModKit
 
         /**
          * @brief SEH-guarded typed read of a trivially copyable T at @p addr.
-         * @details Forwards to @ref seh_read_bytes so the underlying __try
-         *          frame lives in the translation unit that defines it. Local
-         *          variables with non-trivial destructors are not permitted in
-         *          functions that use __try (MSVC C2712); restricting T to
-         *          trivially copyable types avoids that restriction here and
-         *          keeps the value-construction free of any side effects that
-         *          would survive the failure path.
-         *
-         *          On the success path the implementation collapses to a
-         *          single memcpy of sizeof(T) bytes; on failure the optional
-         *          carries no value and no T destructor is invoked.
-         * @tparam T A trivially copyable, default-constructible type. Trivial
-         *           copyability avoids the MSVC C2712 restriction described
-         *           above; default-constructibility is required because the
-         *           body declares a `T value;` to receive the copied bytes.
+         * @details Forwards to @ref seh_read_bytes so the underlying __try frame
+         *          lives in the translation unit that defines it. The bytes are
+         *          read into untyped storage and reinterpreted with
+         *          std::bit_cast, so no T object is constructed and the failure
+         *          path runs no T constructor or destructor. On success the read
+         *          collapses to a single memcpy of sizeof(T) bytes followed by a
+         *          no-op bit_cast.
+         * @tparam T A trivially copyable type. Trivial copyability is what
+         *           std::bit_cast requires and what makes a raw byte copy a valid
+         *           reconstruction of the value. T need not be default
+         *           constructible, so non-default-constructible POD-like types
+         *           (e.g. structs with a deleted default constructor) can be read.
          * @param addr Source address. Values below 0x10000 are rejected
          *             without a read; see @ref seh_read_bytes.
          * @return The value on success, std::nullopt on any read fault.
          */
         template <typename T>
-            requires (std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T>)
+            requires std::is_trivially_copyable_v<T>
         [[nodiscard]] std::optional<T> seh_read(uintptr_t addr) noexcept
         {
-            T value;
-            if (!seh_read_bytes(addr, &value, sizeof(T)))
+            std::array<std::byte, sizeof(T)> storage;
+            if (!seh_read_bytes(addr, storage.data(), sizeof(T)))
                 return std::nullopt;
-            return value;
+            return std::bit_cast<T>(storage);
         }
 
         /**
@@ -471,11 +470,11 @@ namespace DetourModKit
         /**
          * @brief Resolves a pointer chain and reads a typed value at its end.
          * @details Forwards to @ref seh_read_chain_bytes, so the chain walk and
-         *          the typed read share a single fault guard. The value is
-         *          constructed by copying sizeof(T) bytes from the resolved
-         *          address into a local `T value;`.
-         * @tparam T A trivially copyable, default-constructible type (see
-         *           @ref seh_read for why both are required).
+         *          the typed read share a single fault guard. The bytes are read
+         *          into untyped storage and reinterpreted with std::bit_cast, so
+         *          no T object is constructed on the failure path.
+         * @tparam T A trivially copyable type (see @ref seh_read; T need not be
+         *           default constructible).
          * @param base Root address of the chain.
          * @param offsets Byte offsets applied left to right (see
          *                @ref seh_resolve_chain).
@@ -483,14 +482,14 @@ namespace DetourModKit
          *         implausible or the terminal read faults.
          */
         template <typename T>
-            requires (std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T>)
+            requires std::is_trivially_copyable_v<T>
         [[nodiscard]] std::optional<T> seh_read_chain(
             uintptr_t base, std::span<const ptrdiff_t> offsets) noexcept
         {
-            T value;
-            if (!seh_read_chain_bytes(base, offsets, &value, sizeof(T)))
+            std::array<std::byte, sizeof(T)> storage;
+            if (!seh_read_chain_bytes(base, offsets, storage.data(), sizeof(T)))
                 return std::nullopt;
-            return value;
+            return std::bit_cast<T>(storage);
         }
 
         /**
@@ -498,7 +497,7 @@ namespace DetourModKit
          * @see seh_read_chain(uintptr_t, std::span<const ptrdiff_t>)
          */
         template <typename T>
-            requires (std::is_trivially_copyable_v<T> && std::is_default_constructible_v<T>)
+            requires std::is_trivially_copyable_v<T>
         [[nodiscard]] std::optional<T> seh_read_chain(
             uintptr_t base, std::initializer_list<ptrdiff_t> offsets) noexcept
         {

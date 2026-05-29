@@ -75,6 +75,8 @@ PATH="/c/msys64/mingw64/bin:$PATH" cmake --build build/mingw-release \
 
 Latest scanner bench numbers and methodology live in
 [docs/analysis/scanner_bench_v3.x/README.md](docs/analysis/scanner_bench_v3.x/README.md).
+Memory validation-vs-direct-read numbers live in
+[docs/analysis/memory_bench_v3.x/README.md](docs/analysis/memory_bench_v3.x/README.md).
 
 ### Sanitizers and coverage (MinGW only)
 

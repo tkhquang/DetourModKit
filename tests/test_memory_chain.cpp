@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 #include "DetourModKit/memory.hpp"
 
@@ -168,4 +169,30 @@ TEST(MemorySehReadChain, EmptyChainReadsAtBase)
         std::span<const ptrdiff_t>{}, &out, sizeof(out));
     EXPECT_TRUE(ok);
     EXPECT_EQ(out, 0xCAFEBABEu);
+}
+
+TEST(MemorySehReadChain, ReadsNonDefaultConstructibleType)
+{
+    // A trivially copyable type with a deleted default constructor: the read is
+    // a raw byte copy reinterpreted with std::bit_cast, so it must work without
+    // ever default-constructing T.
+    struct NoDefault
+    {
+        uint32_t a;
+        uint32_t b;
+        NoDefault() = delete;
+        constexpr NoDefault(uint32_t x, uint32_t y) noexcept : a(x), b(y) {}
+    };
+    static_assert(std::is_trivially_copyable_v<NoDefault>);
+    static_assert(!std::is_default_constructible_v<NoDefault>);
+
+    NoDefault src{0xAABBCCDDu, 0x11223344u};
+    uintptr_t holder = reinterpret_cast<uintptr_t>(&src);
+
+    // deref(&holder) -> &src, final offset 0 not dereferenced; read sizeof bytes.
+    const auto value = Memory::seh_read_chain<NoDefault>(
+        reinterpret_cast<uintptr_t>(&holder), {0, 0});
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(value->a, 0xAABBCCDDu);
+    EXPECT_EQ(value->b, 0x11223344u);
 }

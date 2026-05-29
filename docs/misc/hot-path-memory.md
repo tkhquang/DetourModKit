@@ -43,7 +43,8 @@ CPU, Windows build, and address-space size. At a few hundred such calls per
 frame that is the difference between imperceptible and a multi-millisecond frame
 spike. Build with `-DDMK_BUILD_BENCHMARKS=ON`, run the `DetourModKit_bench_memory`
 target (Phase 6 of `tests/bench_memory.cpp`), and read the
-`probe_gated_over_direct` value to measure it on your target.
+`probe_gated_over_direct` value to measure it on your target. Recorded numbers
+and methodology are in [the memory benchmark notes](../analysis/memory_bench_v3.x/README.md).
 
 ## The pattern
 

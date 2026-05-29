@@ -181,6 +181,16 @@ namespace
             if (p)
                 pool.push_back(p);
         }
+        // An empty pool would make run_contention and run_probe divide by /
+        // index past pool.size(); fail fast on a setup error rather than later
+        // crashing inside a timed loop.
+        if (pool.empty())
+        {
+            std::fprintf(stderr,
+                         "[bench] make_churn_pool: all %zu VirtualAlloc reservations failed (%lu)\n",
+                         pages, GetLastError());
+            std::exit(1);
+        }
         return pool;
     }
 
