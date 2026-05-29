@@ -30,7 +30,8 @@
  *       benchmark guards): a hook that runs many probes per frame, each doing K
  *       dependent reads across a few DISTINCT (cache-missing) objects. Reports
  *       per-probe p50/p99/max for GATED (is_readable before each read) vs DIRECT
- *       (one __try, raw reads), then a per-frame budget vs probes-per-frame. The
+ *       (raw volatile reads, no predicate or guard), then a per-frame budget vs
+ *       probes-per-frame. The
  *       gate cost scales with the read count and the miss rate, which a single
  *       average-per-call number does not capture.
  *   (G) [Phase 8] Pointer-chain primitives: a GATED per-link walk (is_readable
@@ -246,8 +247,11 @@ namespace
     // that touches many distinct objects, those addresses are mostly cache
     // misses (one new page per object thrashes the fixed-size cache), so each
     // gated read pays a VirtualQuery plus a shard lock. DIRECT drops the
-    // predicate and reads under one __try per probe. This measures both,
-    // per-probe, including the tail.
+    // predicate and does a raw volatile dereference per read (no seh_* call, no
+    // __try frame), which isolates the predicate cost. On MSVC a guarded direct
+    // read (seh_read) costs about the same, since the SEH frame is table-driven
+    // and free on the no-fault path (Phase 3). This measures both, per-probe,
+    // including the tail.
     //
     // reads_per_obj models how many of the K reads land on the same page (same
     // object) before the walk jumps to a new object: the first read of each
@@ -429,7 +433,8 @@ int main()
     // --- Phase 6: REALISTIC probe cost + tail. A probe = K dependent reads
     // across a few distinct objects.
     // GATED = is_readable() before each read (the per-read gated pattern).
-    // DIRECT = read inside one per-probe __try (the SEH fast path).
+    // DIRECT = raw volatile read, no predicate and no __try (the direct,
+    // unchecked access path; on MSVC a guarded read is about as cheap, Phase 3).
     // Distinct objects per probe -> cache misses dominate (the real apply path).
     constexpr std::size_t K_READS = 8;       // fields per probe (~5-8 typical)
     constexpr std::size_t READS_PER_OBJ = 3; // ~3 distinct objects per probe

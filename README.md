@@ -278,6 +278,8 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 ## Guides
 
 * [AOB Signature Scanning Guide](docs/misc/aob-signatures.md) - Pattern syntax, RIP-relative resolution, and patch-proof signature practices
+* [MSVC RTTI Walker Guide](docs/misc/rtti-walker.md) - Recover concrete type names from runtime vtables across DLL boundaries without `typeid`/`dynamic_cast`
+* [Hot-Path Memory Guide](docs/misc/hot-path-memory.md) - Reading and writing game memory in per-frame hot paths with the `seh_*` and `read_ptr_*` primitives
 * [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
 * [Config Hot-Reload Guide](docs/config-hot-reload/README.md) - INI filesystem watcher and hotkey-triggered `Config::reload()`
 * [Test Coverage Guide](docs/tests/README.md) - Coverage analysis, test architecture, and module-level breakdown

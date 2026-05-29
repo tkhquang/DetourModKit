@@ -390,7 +390,7 @@ namespace DetourModKit
             requires std::is_trivially_copyable_v<T>
         [[nodiscard]] std::optional<T> seh_read(uintptr_t addr) noexcept
         {
-            std::array<std::byte, sizeof(T)> storage;
+            std::array<std::byte, sizeof(T)> storage{};
             if (!seh_read_bytes(addr, storage.data(), sizeof(T)))
                 return std::nullopt;
             return std::bit_cast<T>(storage);
@@ -486,7 +486,7 @@ namespace DetourModKit
         [[nodiscard]] std::optional<T> seh_read_chain(
             uintptr_t base, std::span<const ptrdiff_t> offsets) noexcept
         {
-            std::array<std::byte, sizeof(T)> storage;
+            std::array<std::byte, sizeof(T)> storage{};
             if (!seh_read_chain_bytes(base, offsets, storage.data(), sizeof(T)))
                 return std::nullopt;
             return std::bit_cast<T>(storage);
