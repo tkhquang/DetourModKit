@@ -119,7 +119,7 @@ namespace DetourModKit
          * @brief Checks if async logging mode is enabled.
          * @return true if async mode is enabled, false otherwise.
          */
-        bool is_async_mode_enabled() const noexcept;
+        [[nodiscard]] bool is_async_mode_enabled() const noexcept;
 
         /**
          * @brief Flushes all pending log messages.
@@ -141,7 +141,7 @@ namespace DetourModKit
          * @brief Gets the current log level.
          * @return LogLevel The current minimum log level.
          */
-        LogLevel get_log_level() const noexcept
+        [[nodiscard]] LogLevel get_log_level() const noexcept
         {
             return current_log_level_.load(std::memory_order_acquire);
         }
@@ -153,7 +153,7 @@ namespace DetourModKit
          * @param level The LogLevel to test.
          * @return true if a message at this level would pass the current filter.
          */
-        bool is_enabled(LogLevel level) const noexcept
+        [[nodiscard]] bool is_enabled(LogLevel level) const noexcept
         {
             return level >= current_log_level_.load(std::memory_order_acquire);
         }
