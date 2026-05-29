@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <functional>
 #include <memory>
 #include <string>
@@ -57,17 +58,17 @@ namespace DetourModKit
          *          Within a single combo, modifiers are separated by '+' and the last
          *          '+'-delimited token is the trigger key. Tokens can be human-readable
          *          names or hex VK codes:
-         *            - "F3"                   → keys=[F3], modifiers=[]
-         *            - "Ctrl+F3"              → keys=[F3], modifiers=[Ctrl]
-         *            - "Ctrl+Shift+F3"        → keys=[F3], modifiers=[Ctrl, Shift]
-         *            - "Mouse4"               → keys=[Mouse4], modifiers=[]
-         *            - "Gamepad_LB+Gamepad_A" → keys=[Gamepad_A], modifiers=[Gamepad_LB]
-         *            - "0x11+0x72"            → keys=[0x72], modifiers=[0x11] (hex fallback)
+         *            - "F3"                   -> keys=[F3], modifiers=[]
+         *            - "Ctrl+F3"              -> keys=[F3], modifiers=[Ctrl]
+         *            - "Ctrl+Shift+F3"        -> keys=[F3], modifiers=[Ctrl, Shift]
+         *            - "Mouse4"               -> keys=[Mouse4], modifiers=[]
+         *            - "Gamepad_LB+Gamepad_A" -> keys=[Gamepad_A], modifiers=[Gamepad_LB]
+         *            - "0x11+0x72"            -> keys=[0x72], modifiers=[0x11] (hex fallback)
          *
          *          Multiple combos are separated by commas in INI values, parsed into
          *          a KeyComboList. Each combo is independent (OR logic between combos):
-         *            - "F3,Gamepad_LT+Gamepad_B" → [{keys=[F3]}, {keys=[Gamepad_B], mods=[Gamepad_LT]}]
-         *            - "Ctrl+F3,Ctrl+F4"          → [{keys=[F3], mods=[Ctrl]}, {keys=[F4], mods=[Ctrl]}]
+         *            - "F3,Gamepad_LT+Gamepad_B" -> [{keys=[F3]}, {keys=[Gamepad_B], mods=[Gamepad_LT]}]
+         *            - "Ctrl+F3,Ctrl+F4"          -> [{keys=[F3], mods=[Ctrl]}, {keys=[F4], mods=[Ctrl]}]
          */
         struct KeyCombo
         {
@@ -194,39 +195,35 @@ namespace DetourModKit
          * @param out Atomic destination updated on every successful parse.
          * @param default_value Value applied when the INI key is missing.
          */
-        // Marked = delete so unsupported T (e.g. double, uint64_t) becomes a
-        // crisp compile error pointing at the call site rather than a mangled
-        // unresolved-symbol link error. The supported instantiations are the
-        // explicit specialisations below (int, bool, float).
+        // A single constrained template rather than explicit specializations:
+        // specializing a function template is discouraged (Core Guidelines
+        // T.144) and an in-class explicit specialization is non-standard. The
+        // requires-clause caps the supported set to int, bool, and float, so an
+        // unsupported T (e.g. double, uint64_t) is a crisp constraint error at
+        // the call site rather than a mangled unresolved-symbol link error.
         template <typename T>
+            requires(std::same_as<T, int> || std::same_as<T, bool> || std::same_as<T, float>)
         void register_atomic(std::string_view section, std::string_view ini_key,
-                             std::string_view log_key_name, std::atomic<T> &out, T default_value) = delete;
-
-        template <>
-        inline void register_atomic<int>(std::string_view section, std::string_view ini_key,
-                                         std::string_view log_key_name, std::atomic<int> &out, int default_value)
+                             std::string_view log_key_name, std::atomic<T> &out, T default_value)
         {
-            register_int(section, ini_key, log_key_name,
-                         [&out](int v) { out.store(v, std::memory_order_relaxed); },
-                         default_value);
-        }
-
-        template <>
-        inline void register_atomic<bool>(std::string_view section, std::string_view ini_key,
-                                          std::string_view log_key_name, std::atomic<bool> &out, bool default_value)
-        {
-            register_bool(section, ini_key, log_key_name,
-                          [&out](bool v) { out.store(v, std::memory_order_relaxed); },
-                          default_value);
-        }
-
-        template <>
-        inline void register_atomic<float>(std::string_view section, std::string_view ini_key,
-                                           std::string_view log_key_name, std::atomic<float> &out, float default_value)
-        {
-            register_float(section, ini_key, log_key_name,
-                           [&out](float v) { out.store(v, std::memory_order_relaxed); },
-                           default_value);
+            if constexpr (std::same_as<T, int>)
+            {
+                register_int(section, ini_key, log_key_name,
+                             [&out](int v) { out.store(v, std::memory_order_relaxed); },
+                             default_value);
+            }
+            else if constexpr (std::same_as<T, bool>)
+            {
+                register_bool(section, ini_key, log_key_name,
+                              [&out](bool v) { out.store(v, std::memory_order_relaxed); },
+                              default_value);
+            }
+            else
+            {
+                register_float(section, ini_key, log_key_name,
+                               [&out](float v) { out.store(v, std::memory_order_relaxed); },
+                               default_value);
+            }
         }
 
         /**

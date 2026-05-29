@@ -18,6 +18,7 @@
 #include <Xinput.h>
 #include <algorithm>
 #include <exception>
+#include <new>
 #include <unordered_set>
 
 using DetourModKit::detail::is_loader_lock_held;
@@ -296,14 +297,24 @@ namespace DetourModKit
 
         if (is_loader_lock_held())
         {
+            // Under loader lock (FreeLibrary / process unload) the poll thread
+            // cannot be joined without deadlocking the loader, so it is detached
+            // after pinning the module. It is still running and will exit only
+            // once it observes the stop request, so we must NOT touch shared
+            // binding state or fire hold-release callbacks here: that would race
+            // the detached thread and run user callbacks under the loader lock
+            // (a callback that enters the loader -- LoadLibrary family or a peer
+            // DllMain mutex -- would deadlock). Mirrors clear_bindings(invoke_callbacks=false).
             pin_current_module();
             poll_thread_.detach();
-        }
-        else
-        {
-            poll_thread_.join();
+            running_.store(false, std::memory_order_release);
+            return;
         }
 
+        poll_thread_.join();
+
+        // The poll thread is provably stopped here, so releasing active holds
+        // and firing their on_state_change(false) callbacks is race-free.
         running_.store(false, std::memory_order_release);
         release_active_holds();
     }
@@ -1213,7 +1224,30 @@ namespace DetourModKit
 
         if (local_poller)
         {
+            // Read loader-lock ownership once; it is stable across this call
+            // because InputPoller::shutdown() re-checks it on the same thread with
+            // no intervening lock release, so both observe the same result.
+            const bool under_loader_lock = is_loader_lock_held();
             local_poller->shutdown();
+
+            if (under_loader_lock)
+            {
+                // Under the loader lock InputPoller::shutdown() detaches its poll
+                // thread instead of joining it (a join would deadlock the loader).
+                // The detached thread keeps reading InputPoller members (cv_,
+                // cv_mutex_, poll_interval_, bindings_) until it observes the stop
+                // request, so destroying the poller now would free those members
+                // mid-access: a use-after-free. Move the last reference into a
+                // nothrow-allocated heap cell that is never freed, so the object
+                // outlives the detached thread. The module is already pinned by
+                // InputPoller::shutdown(). This mirrors the leak-on-loader-lock
+                // discipline used for the Logger and ConfigWatcher teardown paths;
+                // nothrow keeps this noexcept path honest under OOM (the poller is
+                // then destroyed -- the pre-existing hazard -- rather than throwing).
+                auto *leaked = new (std::nothrow)
+                    std::shared_ptr<InputPoller>(std::move(local_poller));
+                (void)leaked;
+            }
         }
     }
 } // namespace DetourModKit

@@ -119,7 +119,7 @@ namespace DetourModKit
          * @brief Checks if async logging mode is enabled.
          * @return true if async mode is enabled, false otherwise.
          */
-        bool is_async_mode_enabled() const;
+        [[nodiscard]] bool is_async_mode_enabled() const noexcept;
 
         /**
          * @brief Flushes all pending log messages.
@@ -141,7 +141,7 @@ namespace DetourModKit
          * @brief Gets the current log level.
          * @return LogLevel The current minimum log level.
          */
-        LogLevel get_log_level() const
+        [[nodiscard]] LogLevel get_log_level() const noexcept
         {
             return current_log_level_.load(std::memory_order_acquire);
         }
@@ -153,7 +153,7 @@ namespace DetourModKit
          * @param level The LogLevel to test.
          * @return true if a message at this level would pass the current filter.
          */
-        bool is_enabled(LogLevel level) const noexcept
+        [[nodiscard]] bool is_enabled(LogLevel level) const noexcept
         {
             return level >= current_log_level_.load(std::memory_order_acquire);
         }
@@ -277,8 +277,8 @@ namespace DetourModKit
         static void set_static_config(std::shared_ptr<const StaticConfig> config);
 
         // Lock ordering (must be acquired in this order to prevent deadlock):
-        //   1. async_mutex_      — async logger lifecycle
-        //   2. *log_mutex_ptr_   — file stream I/O
+        //   1. async_mutex_      -- async logger lifecycle
+        //   2. *log_mutex_ptr_   -- file stream I/O
 
         std::string log_prefix_;
         std::string log_file_name_;
