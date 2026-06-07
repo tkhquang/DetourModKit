@@ -567,7 +567,11 @@ namespace DetourModKit
          *          every candidate fails, it rebuilds each Direct-mode candidate's
          *          prologue as `E9 ?? ?? ?? ??` plus the original literal tail and
          *          retries, confining both the uniqueness count and the match to
-         *          [range.base, range.end).
+         *          [range.base, range.end). The fallback scan is restricted to the
+         *          image's executable pages: a hooked near-JMP overwrites a code
+         *          prologue, never data, so a match in .rdata / .data would be a
+         *          false positive (the data-capable readable sweep is only used for
+         *          the primary candidate pass).
          *
          *          The rebuilt near-JMP must be FOUND inside @p range, but its
          *          jump destination is intentionally NOT constrained to @p range.

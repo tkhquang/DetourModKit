@@ -720,37 +720,53 @@ namespace
         return nullptr;
     }
 
-    // Base protections accepted by the readable sweep and the module-scoped
-    // scan: every committed page we can actually read (.rdata / .data and
-    // read-only heaps plus the three execute-readable code variants). Bare
-    // PAGE_EXECUTE (execute without a read bit) is excluded because
-    // dereferencing it raises an access violation; PAGE_GUARD / PAGE_NOACCESS
-    // are filtered separately inside scan_regions_filtered.
-    constexpr DWORD READABLE_PAGE_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                          PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                                          PAGE_EXECUTE_WRITECOPY;
+    // Base protections accepted by the executable-only sweeps: the three page
+    // variants that grant execute *and* read. Bare PAGE_EXECUTE (execute without
+    // a read bit) is excluded because dereferencing it raises an access
+    // violation; PAGE_GUARD / PAGE_NOACCESS are filtered separately inside
+    // scan_regions_filtered. This is the scope for code-only scans: the
+    // whole-process scan_executable_regions and the prologue-recovery fallback,
+    // whose rebuilt near-JMP can only ever overwrite a code prologue.
+    constexpr DWORD EXECUTABLE_PAGE_FLAGS = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                            PAGE_EXECUTE_WRITECOPY;
+
+    // Base protections accepted by the readable sweep and the data-capable
+    // module-scoped cascade: the executable-readable set plus the non-executable
+    // readable pages (.rdata / .data and read-only heaps). This reaches C++
+    // vtables, RTTI type descriptors, and other read-only metadata the
+    // executable-only sweep cannot see.
+    constexpr DWORD READABLE_PAGE_FLAGS = EXECUTABLE_PAGE_FLAGS |
+                                          PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
 
     // Module-scoped sibling of scan_executable_regions / scan_readable_regions:
     // searches only the mapped image [range.base, range.end) and returns the Nth
     // match (1-based, adjusted by pattern.offset) or nullptr.
+    //
+    // accept_mask selects which pages inside the image are searched:
+    //   - READABLE_PAGE_FLAGS for the main in-module cascade, so a single pass
+    //     covers both .text and .rdata / .data candidates -- the reason the
+    //     *_in_module resolvers need no ScannerKind distinction.
+    //   - EXECUTABLE_PAGE_FLAGS for the prologue-recovery fallback: its rebuilt
+    //     near-JMP can only ever overwrite a code prologue, so a match in a data
+    //     page would be a false positive. This mirrors the whole-process fallback,
+    //     which counts and scans through scan_executable_regions.
     //
     // It reuses scan_regions_filtered's per-region VirtualQuery protection gate,
     // so a non-readable interior page (a section-alignment gap, a guard page, a
     // sibling VirtualProtect on part of the image) is skipped instead of
     // dereferenced. find_pattern_raw itself does an unguarded memchr / SIMD
     // compare, so that region filter is what keeps a single contiguous scan from
-    // faulting the host. The readable-page mask means one pass covers both .text
-    // and .rdata / .data candidates, so no ScannerKind distinction is needed
-    // inside one mapped PE.
+    // faulting the host.
     const std::byte *scan_module_range(const Scanner::CompiledPattern &pattern,
                                        DetourModKit::Memory::ModuleRange range,
+                                       DWORD accept_mask,
                                        size_t occurrence = 1) noexcept
     {
         if (pattern.empty() || occurrence == 0 || !range.valid())
         {
             return nullptr;
         }
-        return scan_regions_filtered(pattern, occurrence, READABLE_PAGE_FLAGS,
+        return scan_regions_filtered(pattern, occurrence, accept_mask,
                                      range.base, range.end);
     }
 } // anonymous namespace
@@ -769,16 +785,12 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
                        "start unchanged");
     }
 
-    // Only scan pages we can actually *read*. Bare PAGE_EXECUTE grants execute
-    // rights without read, so dereferencing such a page raises an access
-    // violation. Omitting it keeps find_pattern safe on all walked regions.
-    constexpr DWORD READABLE_EXEC_FLAGS = PAGE_EXECUTE_READ |
-                                          PAGE_EXECUTE_READWRITE |
-                                          PAGE_EXECUTE_WRITECOPY;
-    // Whole-process sweep: the window spans the entire user address space, so the
-    // clamp in scan_regions_filtered is a no-op and the walk stops only when
-    // VirtualQuery runs off the end of the address space.
-    return scan_regions_filtered(pattern, occurrence, READABLE_EXEC_FLAGS, 0, UINTPTR_MAX);
+    // EXECUTABLE_PAGE_FLAGS keeps the sweep to pages we can actually *read*; bare
+    // PAGE_EXECUTE grants execute without read, so dereferencing such a page would
+    // raise an access violation. Whole-process sweep: the window spans the entire
+    // user address space, so the clamp in scan_regions_filtered is a no-op and the
+    // walk stops only when VirtualQuery runs off the end of the address space.
+    return scan_regions_filtered(pattern, occurrence, EXECUTABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
 }
 
 const std::byte *DetourModKit::Scanner::scan_readable_regions(const CompiledPattern &pattern, size_t occurrence)
@@ -981,7 +993,7 @@ namespace
         for (std::size_t n = 1; n <= max_hits + 1; ++n)
         {
             const auto *match = range
-                                    ? scan_module_range(pattern, *range, n)
+                                    ? scan_module_range(pattern, *range, EXECUTABLE_PAGE_FLAGS, n)
                                     : DetourModKit::Scanner::scan_executable_regions(pattern, n);
             if (match == nullptr)
             {
@@ -1026,7 +1038,7 @@ namespace
             {
                 if (range)
                 {
-                    return scan_module_range(*compiled, *range, occurrence);
+                    return scan_module_range(*compiled, *range, READABLE_PAGE_FLAGS, occurrence);
                 }
                 return (kind == DetourModKit::Scanner::ScannerKind::Readable)
                            ? DetourModKit::Scanner::scan_readable_regions(*compiled, occurrence)
@@ -1123,7 +1135,7 @@ namespace
                 continue;
             }
             const auto *match = range
-                                    ? scan_module_range(*compiled, *range)
+                                    ? scan_module_range(*compiled, *range, EXECUTABLE_PAGE_FLAGS)
                                     : DetourModKit::Scanner::scan_executable_regions(*compiled);
             if (match == nullptr)
             {

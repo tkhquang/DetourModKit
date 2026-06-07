@@ -2991,6 +2991,63 @@ TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideModule)
     VirtualFree(region, 0, MEM_RELEASE);
 }
 
+// Page-scope regression guard for the module-scoped prologue fallback: a hooked
+// near-JMP only ever overwrites a code prologue, so the fallback must search the
+// image's executable pages only -- matching the whole-process fallback, which
+// counts and scans through scan_executable_regions. Here the E9 + literal tail is
+// planted in a READ-ONLY data page (the execute bit is stripped after seeding)
+// inside the range, with a rel32 that resolves into a loaded module. The fallback
+// must NOT resolve it: a hit would mean it scanned a non-code page. (Under the
+// earlier readable-page mask this resolved to the data-page address.)
+TEST(ScannerModuleCascade, PrologueFallbackIgnoresNonExecutableDataPage)
+{
+    const auto dest = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+
+    std::uint8_t *region = alloc_exec_near(dest, 0x1000);
+    if (region == nullptr)
+    {
+        GTEST_SKIP() << "no free region within rel32 of the test image";
+    }
+    std::memset(region, 0xCC, 0x1000);
+
+    constexpr std::size_t kOffset = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region) + kOffset;
+    const std::int64_t rel =
+        static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    // Distinct from the trampoline test's tail so freed-but-mapped residue cannot
+    // cross-contaminate; ten literals clear kPrologueFallbackMinTailLiterals.
+    constexpr std::uint8_t kTail[] = {
+        0x6C, 0x5D, 0x4E, 0x3F, 0x20, 0x11, 0x02, 0xF3, 0xE4, 0xD5};
+
+    region[kOffset + 0] = 0xE9;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region + kOffset + 1, &disp, sizeof(disp));
+    std::memcpy(region + kOffset + 5, kTail, sizeof(kTail));
+
+    // Strip execute: the planted bytes now live in a readable, non-executable page.
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(region, 0x1000, PAGE_READONLY, &old_protect));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region),
+                                    reinterpret_cast<std::uintptr_t>(region) + 0x1000};
+
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 6C 5D 4E 3F 20 11 02 F3 E4 D5",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(
+        cands, "data-page-fallback", range);
+    ASSERT_FALSE(hit.has_value())
+        << "module fallback matched an E9 prologue in a non-executable data page";
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
 // require_unique: an ambiguous primary (matches more than once in the module) is
 // skipped so the cascade falls through to the next candidate, instead of
 // silently committing to the lowest-address match. Here P2 is provably unique
