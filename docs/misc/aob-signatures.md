@@ -236,6 +236,53 @@ const auto hit = sc::resolve_cascade(
 
 `resolve_cascade_with_prologue_fallback` is intentionally executable-only: its recovery path rebuilds a hooked near-JMP prologue, which is meaningless for a data match.
 
+#### Module-scoped cascade (single unpacked PE)
+
+When every hook target lives inside one unpacked module (a normal game DLL/EXE), prefer `resolve_cascade_in_module`. It scans only the mapped image `[range.base, range.end)` and rejects any candidate whose resolved address falls outside that range, so a generic-shaped candidate (a stock compiler prologue, a `mov reg,[rip]; ...; ret` epilogue) that also appears in another injected module (a graphics overlay, a sibling mod) cannot shadow the correct in-module match. Because the cascade is first-match-wins, that bounds check has to live inside the loop: a post-resolution check by the caller runs after the cascade already committed and can only disable the feature, not fall through to the correct candidate.
+
+```cpp
+const auto range = DMK::Memory::module_range_for(
+    reinterpret_cast<void *>(module_base)); // or {base, base + size}, or own_module_range()
+if (range)
+{
+    const auto hit = sc::resolve_cascade_in_module(k_candidates, "frustum", *range);
+}
+```
+
+One range scan covers both `.text` and `.rdata` / `.data` candidates, so there is no `ScannerKind` parameter. An invalid range returns `ResolveError::InvalidRange` and never falls back to a whole-process scan (which would re-introduce the cross-module shadowing the overload exists to prevent). `resolve_cascade_in_module_with_prologue_fallback` is the module-scoped counterpart of the prologue-fallback resolver: the rewritten near-JMP must be found inside the range, but its jump destination may still point at a sibling mod's trampoline outside the module, so the destination is validated only against "lies in some loaded module".
+
+> Use `resolve_cascade_in_module` only for a single contiguous mapped image. For packed or protected targets whose code is unpacked into separate `VirtualAlloc` regions, use the whole-process `resolve_cascade` (which `scan_executable_regions` walks for exactly that reason).
+
+#### Requiring a unique match (`require_unique`)
+
+A cascade returns the first candidate that resolves, and a single scan returns the lowest-address match. A loose pattern that matches several functions therefore wins on whichever address sorts first -- usually not the intended one, and impossible to recover from after the fact (the resolver has already committed). Scoping the scan to a module removes *cross-module* collisions, but two functions inside the same module can still share a generic prologue: that is an authoring problem (write a more specific signature), not something the scan window can fix.
+
+By default (`require_unique = true`) the resolver verifies a candidate matches exactly once in the scanned scope (the module image for the `*_in_module` resolvers, the whole process otherwise). If a second match exists the candidate is ambiguous and the cascade falls through to the next one, turning a silent wrong hit into a clean fall-through -- and, when no candidate is provably unique, a `NoMatch` the caller can surface as "the binary changed, update the signatures" rather than a confidently wrong hook.
+
+Set `require_unique = false` only for a candidate you have deliberately made non-unique and separately verified -- for example a last-resort broad net whose first in-scope match you confirm with your own post-resolution check. It is an eyes-open escape hatch for an author who takes responsibility for the ambiguity, not a way to tolerate a loose signature: prefer tightening the pattern so it is unique. The flag is per-candidate, so a strict primary anchor keeps the default while such a verified broad fallback opts out:
+
+```cpp
+inline constexpr std::array<sc::AddrCandidate, 3> k_frustum = {{
+    // Strict (default require_unique): a unique mid-body anchor. If a build
+    // update makes it match twice, do not guess -- fall through.
+    {.name = "Frustum_P1_MatrixGlobalRef",
+     .pattern = "48 8B 05 ?? ?? ?? ?? 0F 28 00 | 0F 29 41 10",
+     .mode = sc::ResolveMode::RipRelative, .disp_offset = 3, .instr_end_offset = 7},
+    // Strict (default): a 16-byte prologue+mid-body run, also expected singular.
+    {.name = "Frustum_P2_PrologueMatrixRead",
+     .pattern = "40 53 48 83 EC 20 48 8B D9 0F 10 02 0F 11 41 10"},
+    // Broad safety net: collides with other functions, but the author has
+    // verified the first in-scope hit is the target -- opt OUT of the guard.
+    {.name = "Frustum_P3_GenericPrologueFirst",
+     .pattern = "40 53 48 83 EC 20",
+     .require_unique = false},
+}};
+```
+
+The uniqueness scan runs once per candidate that matches; set `require_unique = false` to skip it for a candidate whose first match you accept.
+
+> Behavior note: the default is uniqueness-required in every scope, including the whole-process `resolve_cascade`. A signature that matches more than once is almost always one that needs tightening, not a target to guess at, so the default surfaces the ambiguity as a `NoMatch` you can act on rather than hooking an arbitrary match. The default whole-process scan looks at executable pages only (`ScannerKind::Executable`), where a real code signature is normally unique. Only set `require_unique = false` on a candidate you have intentionally made non-unique and verified yourself.
+
 ## 5. RIP-relative resolution
 
 x86-64 code uses RIP-relative addressing heavily. The 4-byte displacement stored inside the instruction is relative to the address of the *next* instruction: `target = instruction_address + instruction_length + disp32`. DMK exposes two helpers and a set of prefix constants.
@@ -336,6 +383,7 @@ struct AddrCandidate
     ResolveMode mode = ResolveMode::Direct;
     std::ptrdiff_t disp_offset = 0;
     std::ptrdiff_t instr_end_offset = 0;
+    bool require_unique = true;     // default: skip this candidate if it matches >1 time
 };
 
 enum class ResolveError : std::uint8_t
@@ -343,7 +391,8 @@ enum class ResolveError : std::uint8_t
     EmptyCandidates,
     NoMatch,
     AllPatternsInvalid,
-    PrologueFallbackNotApplicable
+    PrologueFallbackNotApplicable,
+    InvalidRange
 };
 
 struct ResolveHit
@@ -359,9 +408,18 @@ resolve_cascade(std::span<const AddrCandidate> candidates, std::string_view labe
 [[nodiscard]] std::expected<ResolveHit, ResolveError>
 resolve_cascade_with_prologue_fallback(std::span<const AddrCandidate> candidates,
                                        std::string_view label);
+
+[[nodiscard]] std::expected<ResolveHit, ResolveError>
+resolve_cascade_in_module(std::span<const AddrCandidate> candidates,
+                          std::string_view label, Memory::ModuleRange range);
+
+[[nodiscard]] std::expected<ResolveHit, ResolveError>
+resolve_cascade_in_module_with_prologue_fallback(
+    std::span<const AddrCandidate> candidates, std::string_view label,
+    Memory::ModuleRange range);
 ```
 
-Both functions take a span so you can pass a `std::array`, `std::vector`, or any contiguous container. `resolve_cascade` searches with `scan_executable_regions` by default; pass `ScannerKind::Readable` to resolve data-section candidates with `scan_readable_regions` (see [4.7](#47-scanning-data-sections-scan_readable_regions)). `resolve_cascade_with_prologue_fallback` is executable-only by construction. The `label` is the human-readable tag used when the winning candidate is logged; the `winning_name` on the returned `ResolveHit` aliases the matched candidate's `name` field, so the storage that holds those `string_view`s must outlive the hit (static string literals or an `std::array` in static storage are the usual patterns). `ResolveHit::address` is the post-resolution absolute address: for `Direct` candidates it equals `match + disp_offset`, and for `RipRelative` candidates it is the target of the displacement already resolved (not the raw match pointer), so callers can hook or call it directly.
+All four functions take a span so you can pass a `std::array`, `std::vector`, or any contiguous container. `resolve_cascade` searches with `scan_executable_regions` by default; pass `ScannerKind::Readable` to resolve data-section candidates with `scan_readable_regions` (see [4.7](#47-scanning-data-sections-scan_readable_regions)). `resolve_cascade_with_prologue_fallback` is executable-only by construction. The `_in_module` variants scope the scan to a single mapped image and reject out-of-range resolutions (see [Module-scoped cascade](#module-scoped-cascade-single-unpacked-pe)); an invalid `range` yields `ResolveError::InvalidRange`. The `label` is the human-readable tag used when the winning candidate is logged; the `winning_name` on the returned `ResolveHit` aliases the matched candidate's `name` field, so the storage that holds those `string_view`s must outlive the hit (static string literals or an `std::array` in static storage are the usual patterns). `ResolveHit::address` is the post-resolution absolute address: for `Direct` candidates it equals `match + disp_offset`, and for `RipRelative` candidates it is the target of the displacement already resolved (not the raw match pointer), so callers can hook or call it directly.
 
 ### 6.3 Basic usage
 
@@ -412,7 +470,7 @@ There is one guardrail callers must be aware of. The fallback refuses to scan an
 
 ### 6.5 Ordering and logging
 
-Put the most-specific candidate first. The cascade returns on the first successful resolution, so an overly-generic pattern placed near the head will shadow tighter patterns further down the list. The `winning_name` on `ResolveHit` tells you which candidate fired; log it or stash it in your mod's telemetry so you can correlate a running session with a specific build of the game after the fact. The cascade also emits an Info-level log line of the form `"<label> resolved via '<name>' at 0x..."` the first time it succeeds, so you get build identification for free even without explicit caller logging.
+Put the most-specific candidate first. The cascade returns on the first successful resolution, so an overly-generic pattern placed near the head will shadow tighter patterns further down the list. The `winning_name` on `ResolveHit` tells you which candidate fired; log it or stash it in your mod's telemetry so you can correlate a running session with a specific build of the game after the fact. The cascade also emits a Debug-level log line of the form `"<label> resolved via '<name>' at 0x..."` the first time it succeeds; raise your log level to Debug to capture it for build identification even without explicit caller logging.
 
 ## 7. Patch-proof patterns (cache, fallback, verify)
 

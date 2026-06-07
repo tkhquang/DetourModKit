@@ -1,6 +1,8 @@
 #ifndef DETOURMODKIT_SCANNER_HPP
 #define DETOURMODKIT_SCANNER_HPP
 
+#include "DetourModKit/memory.hpp"
+
 #include <array>
 #include <vector>
 #include <string>
@@ -366,6 +368,36 @@ namespace DetourModKit
             ResolveMode mode = ResolveMode::Direct;
             std::ptrdiff_t disp_offset = 0;
             std::ptrdiff_t instr_end_offset = 0;
+
+            /**
+             * @brief Require the candidate to match exactly once in the scanned
+             *        scope; defaults to true. A second match makes the candidate
+             *        ambiguous and it is skipped.
+             * @details A cascade returns the first candidate that resolves, and a
+             *          single scan returns the lowest-address match. A loose
+             *          pattern that matches several functions would therefore win
+             *          on whichever address sorts first -- usually not the
+             *          intended one, and impossible to recover from after the fact
+             *          (the resolver has already committed). Defaulting this to
+             *          true makes the resolver count the candidate's matches
+             *          within the scanned scope (the module image for the @c
+             *          *_in_module resolvers, the whole process otherwise); if a
+             *          second match exists the candidate falls through to the next
+             *          one. That converts a silent wrong resolution into a clean
+             *          fall-through, and -- when no candidate is provably unique --
+             *          a NoMatch the caller can act on (a signal that the target
+             *          binary changed enough to need new signatures) rather than a
+             *          confidently wrong hit.
+             *
+             *          Set this to false for a candidate that is deliberately
+             *          non-unique and whose first match is the intended one (e.g.
+             *          "first occurrence of a common instruction", or a
+             *          last-resort broad net). The flag is per-candidate, so a
+             *          strict primary anchor keeps the default while a broad
+             *          fallback opts out. The uniqueness scan runs once per
+             *          candidate that already matched; opt out to skip it.
+             */
+            bool require_unique = true;
         };
 
         /**
@@ -377,7 +409,8 @@ namespace DetourModKit
             EmptyCandidates,
             NoMatch,
             AllPatternsInvalid,
-            PrologueFallbackNotApplicable
+            PrologueFallbackNotApplicable,
+            InvalidRange
         };
 
         /**
@@ -395,6 +428,8 @@ namespace DetourModKit
                 return "Every candidate pattern failed to parse";
             case ResolveError::PrologueFallbackNotApplicable:
                 return "Prologue fallback pattern too short to be unique";
+            case ResolveError::InvalidRange:
+                return "Supplied module range is invalid";
             default:
                 return "Unknown resolve error";
             }
@@ -426,14 +461,18 @@ namespace DetourModKit
          *          candidate's name is logged and returned.
          *
          *          Logging:
-         *          - Info on first success: "<label> resolved via '<name>' at 0x...".
+         *          - Debug on first success: "<label> resolved via '<name>' at 0x...".
          *          - Warning per candidate whose pattern fails to parse.
          *          - Warning on total failure.
          *
-         *          No per-candidate "miss" log line is produced, keeping
-         *          chatty cascades quiet at Info level. The implementation
-         *          does not log again when resolve_cascade_with_prologue_fallback()
-         *          retries, so callers see exactly one info line on success.
+         *          The success line is Debug-level, consistent with the other
+         *          resolution diagnostics, so it stays silent at the default
+         *          Info threshold; raise the log level to Debug to surface it
+         *          for build identification. No per-candidate "miss" line is
+         *          produced, so even a long cascade stays quiet at Info and
+         *          above. The implementation does not log again when
+         *          resolve_cascade_with_prologue_fallback() retries, so exactly
+         *          one success line is emitted per resolve.
          *
          * @param candidates Ordered list of candidates. Empty -> EmptyCandidates.
          * @param label Human-readable identifier used in log messages.
@@ -468,6 +507,87 @@ namespace DetourModKit
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
         resolve_cascade_with_prologue_fallback(std::span<const AddrCandidate> candidates,
                                                std::string_view label);
+
+        /**
+         * @brief Module-scoped cascade: like resolve_cascade(), but searches only
+         *        the mapped image [range.base, range.end) and rejects any
+         *        resolution that lands outside it.
+         * @details A whole-process scan (resolve_cascade) returns the first
+         *          candidate that matches anywhere in the address space. For an
+         *          unpacked PE whose every hook target lives inside one module
+         *          that is unsafe: a generic-shaped candidate (a stock compiler
+         *          prologue, a `mov reg,[rip]; ...; ret` epilogue) can false-match
+         *          inside another injected module (a graphics overlay, a sibling
+         *          mod). Because the cascade is first-match-wins, the wrong match
+         *          is returned and shadows the correct in-module one; a caller's
+         *          post-resolution bounds check cannot undo it, since the cascade
+         *          has already committed to the colliding candidate.
+         *
+         *          This overload moves the scope and bounds decision inside the
+         *          cascade loop. A candidate wins only when it (1) parses, (2)
+         *          matches via a scan confined to [range.base, range.end), and
+         *          (3) resolves (Direct walk or RipRelative disp read) to an
+         *          address for which Memory::contains(range, addr) is true. Any
+         *          failure at any step falls through to the next candidate, so a
+         *          P1 that resolves out of module yields to the in-module P2/P3.
+         *
+         *          One scan of the contiguous image covers both .text and
+         *          .rdata / .data candidates, so there is no ScannerKind
+         *          parameter: the section split that ScannerKind selects for
+         *          whole-process sweeps is moot inside a single mapped PE. The
+         *          scan reuses the same per-region protection filter as the
+         *          whole-process scanners, so a non-readable interior page (a
+         *          section-alignment gap, a guard page, a sibling VirtualProtect)
+         *          is skipped rather than dereferenced.
+         *
+         * @param candidates Ordered list of candidates. Empty -> EmptyCandidates.
+         * @param label Human-readable identifier used in log messages.
+         * @param range The mapped image to scan, e.g. from
+         *              Memory::module_range_for(), Memory::own_module_range(), or
+         *              an explicit {base, base + SizeOfImage}.
+         * @return ResolveHit on success; ResolveError on failure. An invalid
+         *         @p range returns ResolveError::InvalidRange and never falls
+         *         back to a whole-process scan.
+         * @note Memory::contains gates reachability, not section identity: a
+         *       RipRelative candidate resolving into .rdata / .data inside the
+         *       image is accepted. Direct candidates that must land on code
+         *       should still be paired with is_likely_function_prologue().
+         * @pre @p range must describe a single contiguous mapped image. Do not
+         *      use this overload for packed or protected targets whose code is
+         *      unpacked into separate VirtualAlloc regions outside the module
+         *      image; use resolve_cascade() for those.
+         */
+        [[nodiscard]] std::expected<ResolveHit, ResolveError>
+        resolve_cascade_in_module(std::span<const AddrCandidate> candidates,
+                                  std::string_view label, Memory::ModuleRange range);
+
+        /**
+         * @brief Module-scoped variant of resolve_cascade_with_prologue_fallback().
+         * @details Equivalent to resolve_cascade_in_module() on the happy path. If
+         *          every candidate fails, it rebuilds each Direct-mode candidate's
+         *          prologue as `E9 ?? ?? ?? ??` plus the original literal tail and
+         *          retries, confining both the uniqueness count and the match to
+         *          [range.base, range.end).
+         *
+         *          The rebuilt near-JMP must be FOUND inside @p range, but its
+         *          jump destination is intentionally NOT constrained to @p range.
+         *          When a sibling mod inline-hooks the target, its E9 jumps to a
+         *          trampoline the sibling allocated outside this image, so the
+         *          destination is validated only against "lies in some loaded
+         *          module" (which still rejects a jump into unmapped or data-only
+         *          memory). Requiring the destination in-range would reject the
+         *          very recovery this path exists to perform.
+         *
+         * @param candidates Ordered candidates.
+         * @param label Human-readable identifier used in log messages.
+         * @param range The mapped image to scan.
+         * @return ResolveHit on success; ResolveError on failure. An invalid
+         *         @p range returns ResolveError::InvalidRange.
+         */
+        [[nodiscard]] std::expected<ResolveHit, ResolveError>
+        resolve_cascade_in_module_with_prologue_fallback(
+            std::span<const AddrCandidate> candidates, std::string_view label,
+            Memory::ModuleRange range);
 
         /**
          * @brief Cheap heuristic: does @p addr look like the first byte of a

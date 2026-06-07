@@ -1107,6 +1107,18 @@ TEST_F(ScannerRipTest, rip_resolve_error_to_string_coverage)
     EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::UnreadableDisplacement).empty());
 }
 
+// Mirror of the RIP mapper coverage above for the cascade ResolveError mapper.
+// Every enumerator must map to a non-empty string, including InvalidRange, which
+// the module-scoped resolvers return for a range whose valid() check fails.
+TEST(ScannerCascade, resolve_error_to_string_coverage)
+{
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::EmptyCandidates).empty());
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::NoMatch).empty());
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::AllPatternsInvalid).empty());
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::PrologueFallbackNotApplicable).empty());
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::InvalidRange).empty());
+}
+
 TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
 {
     // Prefix starts at the last valid position
@@ -1635,6 +1647,15 @@ TEST(ScannerStringTest, RipResolveErrorToString_IsNoexcept)
     static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::PrefixNotFound)));
     static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::RegionTooSmall)));
     static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::UnreadableDisplacement)));
+}
+
+TEST(ScannerStringTest, ResolveErrorToString_IsNoexcept)
+{
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::EmptyCandidates)));
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::NoMatch)));
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::AllPatternsInvalid)));
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::PrologueFallbackNotApplicable)));
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::InvalidRange)));
 }
 
 TEST(ScannerTest, find_pattern_common_byte_anchoring)
@@ -2281,8 +2302,12 @@ TEST(ScannerCascade, ReadableKindResolvesDataSectionMatch)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
 
+    // require_unique is left false: this is a whole-process sweep and
+    // write_signature leaves transient stack copies of the bytes, so the
+    // signature is not globally unique. The test exercises ScannerKind, not the
+    // uniqueness guard.
     Scanner::AddrCandidate cands[] = {
-        {"data-sig", aob, Scanner::ResolveMode::Direct, 0, 0},
+        {"data-sig", aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
     };
 
     // ScannerKind::Readable reaches data sections, so the cascade resolves a
@@ -2514,6 +2539,553 @@ TEST(ScannerCascade, PrologueFallbackRejectsExactlyTwoMatches)
 
     ASSERT_FALSE(result.has_value());
     EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
+}
+
+// --- Tests for resolve_cascade_in_module / _with_prologue_fallback ---
+
+// A module-scoped scan must reach the read-only data section of a real mapped
+// PE with a single range scan: there is no separate Readable kind to opt into.
+// The fixture DLL exports dmk_scan_marker, a fixed signature that lands in
+// .rdata; resolving it proves both the .rdata reach and the in-range result.
+TEST(ScannerModuleCascade, ScopedHitFindsMarkerInFixtureRdata)
+{
+    HMODULE dll = LoadLibraryA("hook_target_lib.dll");
+    ASSERT_NE(dll, nullptr)
+        << "Failed to load hook_target_lib.dll. Error: " << GetLastError();
+
+    const auto *marker = reinterpret_cast<const std::byte *>(
+        reinterpret_cast<void *>(GetProcAddress(dll, "dmk_scan_marker")));
+    ASSERT_NE(marker, nullptr) << "dmk_scan_marker export not found";
+
+    const auto range = Memory::module_range_for(marker);
+    ASSERT_TRUE(range.has_value());
+    ASSERT_TRUE(range->valid());
+
+    Scanner::AddrCandidate cands[] = {
+        {"marker", "A7 3C F1 88 5E 22 D9 04 6B B0 1F 97 4A E3 7D 50",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "marker", *range);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(marker));
+    EXPECT_TRUE(Memory::contains(*range, hit->address));
+
+    FreeLibrary(dll);
+}
+
+// The same byte sequence planted in two independent "module" images: a
+// module-scoped scan must return only the copy inside the range it was given,
+// never the identical copy in the sibling region. This is the cross-module
+// collision a first-match-wins whole-process scan cannot disambiguate.
+TEST(ScannerModuleCascade, NoCrossModuleBleedReturnsInRangeCopy)
+{
+    void *mod_a = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void *mod_b = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mod_a, nullptr);
+    ASSERT_NE(mod_b, nullptr);
+
+    auto *bytes_a = reinterpret_cast<std::byte *>(mod_a);
+    auto *bytes_b = reinterpret_cast<std::byte *>(mod_b);
+    std::memset(bytes_a, 0xCC, 4096);
+    std::memset(bytes_b, 0xCC, 4096);
+
+    // Same seed and length => identical bytes in both regions, at different
+    // offsets so an address comparison can tell which copy resolved.
+    const std::string aob = write_signature(&bytes_a[256], 16, 0x6E);
+    (void)write_signature(&bytes_b[1024], 16, 0x6E);
+
+    const Memory::ModuleRange range_a{reinterpret_cast<std::uintptr_t>(mod_a),
+                                      reinterpret_cast<std::uintptr_t>(mod_a) + 4096};
+    const Memory::ModuleRange range_b{reinterpret_cast<std::uintptr_t>(mod_b),
+                                      reinterpret_cast<std::uintptr_t>(mod_b) + 4096};
+
+    Scanner::AddrCandidate cands[] = {
+        {"sig", aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit_a = Scanner::resolve_cascade_in_module(cands, "sig-a", range_a);
+    ASSERT_TRUE(hit_a.has_value());
+    EXPECT_EQ(hit_a->address, reinterpret_cast<std::uintptr_t>(&bytes_a[256]));
+
+    const auto hit_b = Scanner::resolve_cascade_in_module(cands, "sig-b", range_b);
+    ASSERT_TRUE(hit_b.has_value());
+    EXPECT_EQ(hit_b->address, reinterpret_cast<std::uintptr_t>(&bytes_b[1024]));
+
+    VirtualFree(mod_a, 0, MEM_RELEASE);
+    VirtualFree(mod_b, 0, MEM_RELEASE);
+}
+
+// A signature that exists only outside the supplied range must not be found.
+// A whole-process readable scan does find it; the module-scoped scan must not,
+// which is the entire point of scoping.
+TEST(ScannerModuleCascade, SignaturePresentOnlyOutsideRangeReturnsNoMatch)
+{
+    void *mod_a = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void *mod_b = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mod_a, nullptr);
+    ASSERT_NE(mod_b, nullptr);
+    std::memset(mod_a, 0xCC, 4096);
+    std::memset(mod_b, 0xCC, 4096);
+
+    const std::string aob =
+        write_signature(reinterpret_cast<std::byte *>(mod_b) + 128, 16, 0x33);
+
+    const auto base_a = reinterpret_cast<std::uintptr_t>(mod_a);
+    const Memory::ModuleRange range_a{base_a, base_a + 4096};
+
+    // require_unique is left false: this test exercises scope, not uniqueness,
+    // and write_signature leaves transient stack copies of the bytes that make
+    // the signature non-unique under a whole-process sweep (see
+    // collect_readable_hits). A real whole-process consumer of a non-unique
+    // pattern opts out the same way.
+    Scanner::AddrCandidate cands[] = {
+        {"elsewhere", aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
+    };
+
+    // Sanity: the readable whole-process sweep finds the copy in region B.
+    const auto whole = Scanner::resolve_cascade(cands, "whole", Scanner::ScannerKind::Readable);
+    EXPECT_TRUE(whole.has_value());
+
+    // The module-scoped scan of region A must not see region B's copy.
+    const auto scoped = Scanner::resolve_cascade_in_module(cands, "scoped", range_a);
+    ASSERT_FALSE(scoped.has_value());
+    EXPECT_EQ(scoped.error(), Scanner::ResolveError::NoMatch);
+
+    VirtualFree(mod_a, 0, MEM_RELEASE);
+    VirtualFree(mod_b, 0, MEM_RELEASE);
+}
+
+// Bounds-aware fall-through: a RipRelative P1 that matches in-module but whose
+// disp32 resolves outside the range must be skipped so the in-range Direct P2
+// wins. This is the fix a post-resolution caller check cannot express.
+TEST(ScannerModuleCascade, RipRelativeResolvingOutOfRangeFallsThroughToNextCandidate)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    auto *bytes = reinterpret_cast<std::byte *>(mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    // P1: mov rax,[rip+disp32] whose disp resolves BELOW the module base, i.e.
+    // outside the range. Target = (base + 7) - 0x1000 < base.
+    bytes[0] = std::byte{0x48};
+    bytes[1] = std::byte{0x8B};
+    bytes[2] = std::byte{0x05};
+    const std::int32_t disp = -0x1000;
+    std::memcpy(&bytes[3], &disp, sizeof(disp));
+
+    // P2: a plain in-range Direct signature.
+    const std::string p2_aob = write_signature(&bytes[256], 16, 0x4B);
+
+    Scanner::AddrCandidate cands[] = {
+        {"p1_riprel", "48 8B 05 ?? ?? ?? ??", Scanner::ResolveMode::RipRelative, 3, 7},
+        {"p2_direct", p2_aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "riprel-fallthrough", range);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->winning_name, "p2_direct");
+    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[256]));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// Bounds-aware fall-through for Direct mode: P1 matches in the scanned half of
+// the image, but its disp_offset pushes the resolved address into the second
+// half, outside the supplied range. The cascade must fall through to P2.
+TEST(ScannerModuleCascade, DirectResolvingOutOfRangeFallsThroughToNextCandidate)
+{
+    void *mem = VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    auto *bytes = reinterpret_cast<std::byte *>(mem);
+    std::memset(bytes, 0xCC, 0x2000);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    // The range covers only the first half; the second half is "out of module".
+    const Memory::ModuleRange range{base, base + 0x1000};
+
+    const std::string p1_aob = write_signature(&bytes[0], 16, 0x21);
+    const std::string p2_aob = write_signature(&bytes[512], 16, 0x77);
+
+    Scanner::AddrCandidate cands[] = {
+        // disp_offset 0x1800 pushes the resolved address past range.end.
+        {"p1_direct", p1_aob, Scanner::ResolveMode::Direct, 0x1800, 0},
+        {"p2_direct", p2_aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "direct-fallthrough", range);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->winning_name, "p2_direct");
+    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[512]));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// Positive RipRelative case: a mov reg,[rip+disp32] candidate whose
+// displacement targets data inside the same module must resolve to that
+// in-module address and win. This is the success path for a RipRelative global
+// (e.g. a context-pointer storage slot in .data): under a whole-process scan the
+// instruction could match in a sibling module and resolve out of bounds, but the
+// module-scoped scan finds the in-module instruction and resolves it in range. A
+// decoy with the same instruction shape in a sibling region is never consulted.
+TEST(ScannerModuleCascade, RipRelativeResolvingInsideRangeResolvesInModule)
+{
+    void *mod = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void *sibling = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(sibling, nullptr);
+    auto *bytes = reinterpret_cast<std::byte *>(mod);
+    auto *sib = reinterpret_cast<std::byte *>(sibling);
+    std::memset(bytes, 0xCC, 4096);
+    std::memset(sib, 0xCC, 4096);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(mod);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    // In-module instruction at offset 0: target = (base + 7) + disp = base + 0x800.
+    bytes[0] = std::byte{0x48};
+    bytes[1] = std::byte{0x8B};
+    bytes[2] = std::byte{0x05};
+    const std::int32_t disp_in = static_cast<std::int32_t>(0x800 - 7);
+    std::memcpy(&bytes[3], &disp_in, sizeof(disp_in));
+
+    // Sibling decoy with the same instruction shape; its disp is irrelevant
+    // because the module-scoped scan never inspects this region.
+    sib[0] = std::byte{0x48};
+    sib[1] = std::byte{0x8B};
+    sib[2] = std::byte{0x05};
+    const std::int32_t disp_decoy = 0;
+    std::memcpy(&sib[3], &disp_decoy, sizeof(disp_decoy));
+
+    Scanner::AddrCandidate cands[] = {
+        {"global_ptr", "48 8B 05 ?? ?? ?? ??", Scanner::ResolveMode::RipRelative, 3, 7},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "global-ptr", range);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, base + 0x800);
+    EXPECT_TRUE(Memory::contains(range, hit->address));
+
+    VirtualFree(mod, 0, MEM_RELEASE);
+    VirtualFree(sibling, 0, MEM_RELEASE);
+}
+
+// Cascade fall-through when the first candidate is absent from the image: a
+// generic prologue P1 that does not appear in this module simply does not match,
+// so the cascade falls through to the mid-body anchor P2 that does. Under a
+// whole-process scan the same P1 false-matches inside a sibling module and wins
+// (first-match-wins), shadowing the correct target -- the exact cross-module
+// shadowing this overload prevents. The test asserts both halves: the
+// whole-process cascade returns P1, the module-scoped cascade returns P2.
+TEST(ScannerModuleCascade, FirstCandidateAbsentInModuleFallsThroughToNextCandidate)
+{
+    void *mod = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void *sibling = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mod, nullptr);
+    ASSERT_NE(sibling, nullptr);
+    auto *bytes = reinterpret_cast<std::byte *>(mod);
+    auto *sib = reinterpret_cast<std::byte *>(sibling);
+    std::memset(bytes, 0xCC, 4096);
+    std::memset(sib, 0xCC, 4096);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(mod);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    // P1 (generic prologue) exists ONLY in the sibling module, not the target.
+    const std::string p1_aob = write_signature(&sib[128], 16, 0x55);
+    // P2 (mid-body anchor) exists in the target module.
+    const std::string p2_aob = write_signature(&bytes[640], 16, 0x9C);
+
+    // require_unique is left false to isolate scope from uniqueness: the
+    // whole-process contrast below would otherwise reject both candidates as
+    // ambiguous, since write_signature leaves transient stack copies of the
+    // bytes (see collect_readable_hits).
+    Scanner::AddrCandidate cands[] = {
+        {"p1_prologue", p1_aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
+        {"p2_anchor", p2_aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
+    };
+
+    // Whole-process first-match returns P1 (it matches outside this module) and
+    // shadows P2: the cross-module shadowing that produced the bug.
+    const auto whole = Scanner::resolve_cascade(cands, "anchor-whole",
+                                                Scanner::ScannerKind::Readable);
+    ASSERT_TRUE(whole.has_value());
+    EXPECT_EQ(whole->winning_name, "p1_prologue");
+
+    // Module-scoped scan does not see P1 (it lives only outside this range), so
+    // it falls through to the in-module P2.
+    const auto scoped = Scanner::resolve_cascade_in_module(cands, "anchor-scoped", range);
+    ASSERT_TRUE(scoped.has_value());
+    EXPECT_EQ(scoped->winning_name, "p2_anchor");
+    EXPECT_EQ(scoped->address, reinterpret_cast<std::uintptr_t>(&bytes[640]));
+
+    VirtualFree(mod, 0, MEM_RELEASE);
+    VirtualFree(sibling, 0, MEM_RELEASE);
+}
+
+TEST(ScannerModuleCascade, FullMissReturnsNoMatch)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    std::memset(mem, 0xCC, 4096);
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    Scanner::AddrCandidate cands[] = {
+        {"absent", "DE AD BE EF 11 22 33 44 55 66 77 88 99 AA BB 12",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "miss", range);
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// An invalid range must surface a distinct error and never silently fall back
+// to a whole-process scan, which would re-introduce the cross-module shadowing
+// the overload exists to prevent.
+TEST(ScannerModuleCascade, InvalidRangeReturnsInvalidRange)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"sig", "DE AD BE EF 11 22 33 44 55 66 77 88 99 AA BB 12",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+    const Memory::ModuleRange invalid{}; // base == end == 0 => valid() is false
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "invalid", invalid);
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::InvalidRange);
+}
+
+TEST(ScannerModuleCascade, EmptyCandidatesReturnsError)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    std::span<const Scanner::AddrCandidate> empty{};
+    const auto hit = Scanner::resolve_cascade_in_module(empty, "empty", range);
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::EmptyCandidates);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+TEST(ScannerModuleCascade, AllInvalidPatternsReturnsError)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    Scanner::AddrCandidate cands[] = {
+        {"bad", "not_valid_aob_tokens $$$$", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "bad", range);
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::AllPatternsInvalid);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+namespace
+{
+    // Allocates an executable page within an int32 rel32 displacement of
+    // `anchor`, mirroring how inline-hook trampoline allocators (MinHook,
+    // SafetyHook) place a detour close to its target so a 5-byte E9 can reach
+    // it. Returns nullptr if no free region within range is found; the caller
+    // owns a non-null result and must VirtualFree it.
+    std::uint8_t *alloc_exec_near(std::uintptr_t anchor, std::size_t size)
+    {
+        SYSTEM_INFO si{};
+        GetSystemInfo(&si);
+        const auto gran = static_cast<std::uintptr_t>(si.dwAllocationGranularity);
+        // Stay comfortably inside the +-2GB rel32 reach on either side of anchor.
+        constexpr std::uintptr_t search_radius = 0x6000'0000;
+
+        const std::uintptr_t lo = anchor > search_radius ? anchor - search_radius : gran;
+        const std::uintptr_t hi = anchor + search_radius;
+
+        std::uintptr_t probe = (lo + gran - 1) & ~(gran - 1);
+        while (probe < hi)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(probe), &mbi, sizeof(mbi)) == 0)
+            {
+                break;
+            }
+            const auto region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+            if (mbi.State == MEM_FREE)
+            {
+                const std::uintptr_t aligned = (region_base + gran - 1) & ~(gran - 1);
+                if (aligned + size <= region_base + mbi.RegionSize)
+                {
+                    void *p = VirtualAlloc(reinterpret_cast<LPVOID>(aligned), size,
+                                           MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+                    if (p != nullptr)
+                    {
+                        return static_cast<std::uint8_t *>(p);
+                    }
+                }
+            }
+            probe = region_base + mbi.RegionSize;
+        }
+        return nullptr;
+    }
+} // namespace
+
+// Regression guard for the module-scoped prologue fallback: the rewritten
+// near-JMP must be FOUND inside the module, but its destination (a sibling
+// mod's trampoline) lives OUTSIDE it. Constraining the destination to the
+// module range would reject this recovery, so the destination is validated
+// only against "lies in some loaded module". Here the trampoline target is the
+// test executable image, a different module than the scanned scratch buffer,
+// which is allocated within rel32 reach so the E9 can encode the jump.
+TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideModule)
+{
+    const auto dest = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+
+    std::uint8_t *region = alloc_exec_near(dest, 0x1000);
+    if (region == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region within rel32 of the test image";
+    }
+    std::memset(region, 0xCC, 0x1000);
+
+    constexpr std::size_t kOffset = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region) + kOffset;
+    const std::int64_t rel =
+        static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t kTail[] = {
+        0x5A, 0xB4, 0xD1, 0xE7, 0xF9, 0x2B, 0x4D, 0x6F, 0x81, 0x93};
+
+    region[kOffset + 0] = 0xE9;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region + kOffset + 1, &disp, sizeof(disp));
+    std::memcpy(region + kOffset + 5, kTail, sizeof(kTail));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region),
+                                    reinterpret_cast<std::uintptr_t>(region) + 0x1000};
+
+    // The original (unhooked) prologue starts with five REX-prefixed bytes the
+    // buffer does not contain (it starts with E9), so the direct pass misses and
+    // the fallback rebuilds E9 ?? ?? ?? ?? + tail to match the planted site.
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 5A B4 D1 E7 F9 2B 4D 6F 81 93",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(
+        cands, "trampoline-out-of-module", range);
+    ASSERT_TRUE(hit.has_value())
+        << "module-scoped fallback rejected an out-of-module trampoline destination";
+    EXPECT_EQ(hit->address, match_site);
+
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
+// require_unique: an ambiguous primary (matches more than once in the module) is
+// skipped so the cascade falls through to the next candidate, instead of
+// silently committing to the lowest-address match. Here P2 is provably unique
+// and wins.
+TEST(ScannerModuleCascade, RequireUniqueAmbiguousCandidateFallsThroughToUniqueNext)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    auto *bytes = reinterpret_cast<std::byte *>(mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    // P1 planted twice -> ambiguous. Neither candidate sets require_unique, so
+    // both rely on the default (true): the ambiguous P1 is skipped.
+    const std::string p1 = write_signature(&bytes[128], 16, 0x40);
+    (void)write_signature(&bytes[2048], 16, 0x40);
+    // P2 planted once -> unique.
+    const std::string p2 = write_signature(&bytes[512], 16, 0x8A);
+
+    Scanner::AddrCandidate cands[] = {
+        {"p1_ambiguous", p1, Scanner::ResolveMode::Direct, 0, 0},
+        {"p2_unique", p2, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "require-unique", range);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->winning_name, "p2_unique");
+    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[512]));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// require_unique is per-candidate, not a blanket per-call policy: a strict
+// primary that is ambiguous is skipped, while a deliberately broad fallback
+// (require_unique left false) accepts its first match even though it too is
+// non-unique.
+TEST(ScannerModuleCascade, RequireUniquePerCandidateStrictSkipsLooseAccepts)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    auto *bytes = reinterpret_cast<std::byte *>(mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    // P1 (strict) ambiguous -> skipped. It relies on the default (require_unique
+    // true). P2 (loose) is also ambiguous but opts out and accepts the first
+    // (lowest-address) match.
+    const std::string p1 = write_signature(&bytes[128], 16, 0x40);
+    (void)write_signature(&bytes[1024], 16, 0x40);
+    const std::string p2 = write_signature(&bytes[256], 16, 0x77);
+    (void)write_signature(&bytes[2048], 16, 0x77);
+
+    Scanner::AddrCandidate cands[] = {
+        {"p1_strict", p1, Scanner::ResolveMode::Direct, 0, 0},
+        {"p2_loose", p2, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "per-candidate", range);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->winning_name, "p2_loose");
+    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[256]));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// require_unique with no unique candidate yields a clean NoMatch -- the "binary
+// changed, update signatures" signal -- rather than a confident wrong hit.
+TEST(ScannerModuleCascade, RequireUniqueAllAmbiguousReturnsNoMatch)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    auto *bytes = reinterpret_cast<std::byte *>(mem);
+    std::memset(bytes, 0xCC, 4096);
+
+    const auto base = reinterpret_cast<std::uintptr_t>(mem);
+    const Memory::ModuleRange range{base, base + 4096};
+
+    // The single candidate relies on the default (require_unique true) and is
+    // ambiguous, so there is no provably-unique candidate to win.
+    const std::string sig = write_signature(&bytes[128], 16, 0x40);
+    (void)write_signature(&bytes[2048], 16, 0x40);
+
+    Scanner::AddrCandidate cands[] = {
+        {"ambiguous", sig, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "all-ambiguous", range);
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+
+    VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST(ScannerPrologueTest, NullAddrReturnsFalse)
