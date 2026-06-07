@@ -357,9 +357,9 @@ namespace
     // null start_address). Emits the all-wildcard warning itself so callers
     // do not duplicate it; in that case the caller still continues scanning.
     bool validate_find_pattern_inputs(const std::byte *start_address,
-                                      const Scanner::CompiledPattern &pattern,
-                                      Logger &logger) noexcept
+                                      const Scanner::CompiledPattern &pattern) noexcept
     {
+        Logger &logger = Logger::get_instance();
         if (pattern.empty())
         {
             logger.error("find_pattern: Pattern is empty. Cannot scan.");
@@ -382,8 +382,7 @@ namespace
 const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_address, size_t region_size,
                                                      const CompiledPattern &pattern)
 {
-    Logger &logger = Logger::get_instance();
-    if (!validate_find_pattern_inputs(start_address, pattern, logger))
+    if (!validate_find_pattern_inputs(start_address, pattern))
     {
         return nullptr;
     }
@@ -521,8 +520,7 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
         return nullptr;
     }
 
-    Logger &logger = Logger::get_instance();
-    if (!validate_find_pattern_inputs(start_address, pattern, logger))
+    if (!validate_find_pattern_inputs(start_address, pattern))
     {
         return nullptr;
     }
@@ -625,11 +623,13 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::f
 
 namespace
 {
-    // Region-walking AOB scan shared by scan_executable_regions and
-    // scan_readable_regions. Walks the committed regions of the process address
-    // space via VirtualQuery and runs find_pattern_raw against every region
-    // whose base protection is present in accept_mask, returning the Nth match
-    // (1-based, adjusted by pattern.offset) or nullptr.
+    // Region-walking AOB scan shared by scan_executable_regions,
+    // scan_readable_regions, and scan_module_range. Walks the committed regions
+    // of [window_lo, window_hi) via VirtualQuery and runs find_pattern_raw
+    // against every region whose base protection is present in accept_mask,
+    // returning the Nth match (1-based, adjusted by pattern.offset) or nullptr.
+    // The whole-process scanners pass [0, UINTPTR_MAX); the module-scoped scan
+    // passes the image's [base, end) so only one contiguous image is searched.
     //
     // Guard, no-access, and uncommitted regions are always skipped: PAGE_GUARD
     // raises STATUS_GUARD_PAGE_VIOLATION on the first touch and PAGE_NOACCESS
@@ -647,7 +647,8 @@ namespace
     // two adjacent VAD entries is therefore not found; PE-loaded sections are
     // contiguous, so normal module scanning is unaffected.
     const std::byte *scan_regions_filtered(const Scanner::CompiledPattern &pattern,
-                                           size_t occurrence, DWORD accept_mask) noexcept
+                                           size_t occurrence, DWORD accept_mask,
+                                           uintptr_t window_lo, uintptr_t window_hi) noexcept
     {
         // The compiled pattern's own bytes buffer lives in readable heap memory,
         // so a whole-process readable sweep would match the needle against
@@ -662,46 +663,111 @@ namespace
 
         size_t matches_remaining = occurrence;
         MEMORY_BASIC_INFORMATION mbi{};
-        uintptr_t addr = 0;
+        uintptr_t addr = window_lo;
 
-        while (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+        while (addr < window_hi && VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
         {
             const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+            const auto region_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            const uintptr_t region_end = region_base + mbi.RegionSize;
+
+            // Clamp the region to the requested window so a region that straddles
+            // window_lo / window_hi is inspected only where it intersects. For a
+            // whole-process sweep the window is [0, UINTPTR_MAX), so the clamp is
+            // a no-op and the scanned span equals the region. For a module-scoped
+            // sweep this is what keeps the scan inside [base, end) even when a
+            // VirtualQuery region (e.g. a section straddling the image boundary)
+            // extends past it.
+            const uintptr_t scan_lo = region_base < window_lo ? window_lo : region_base;
+            const uintptr_t scan_hi = region_end > window_hi ? window_hi : region_end;
 
             if (mbi.State == MEM_COMMIT && (mbi.Protect & accept_mask) != 0 &&
-                !protection_unsafe && mbi.RegionSize >= pattern.size())
+                !protection_unsafe && scan_hi > scan_lo)
             {
-                const auto *region_start = reinterpret_cast<const std::byte *>(mbi.BaseAddress);
-
-                const std::byte *match = find_pattern_raw(region_start, mbi.RegionSize, pattern);
-                while (match != nullptr)
+                const size_t scan_size = static_cast<size_t>(scan_hi - scan_lo);
+                if (scan_size >= pattern.size())
                 {
-                    const auto match_addr = reinterpret_cast<uintptr_t>(match);
-                    const bool self_match = match_addr < needle_hi &&
-                                            (match_addr + pattern.size()) > needle_lo;
-                    if (!self_match)
-                    {
-                        --matches_remaining;
-                        if (matches_remaining == 0)
-                            return match + pattern.offset;
-                    }
+                    const auto *region_start = reinterpret_cast<const std::byte *>(scan_lo);
 
-                    // Continue scanning past the current match.
-                    const size_t consumed = static_cast<size_t>(match - region_start) + 1;
-                    if (consumed >= mbi.RegionSize)
-                        break;
-                    match = find_pattern_raw(match + 1, mbi.RegionSize - consumed, pattern);
+                    const std::byte *match = find_pattern_raw(region_start, scan_size, pattern);
+                    while (match != nullptr)
+                    {
+                        const auto match_addr = reinterpret_cast<uintptr_t>(match);
+                        const bool self_match = match_addr < needle_hi &&
+                                                (match_addr + pattern.size()) > needle_lo;
+                        if (!self_match)
+                        {
+                            --matches_remaining;
+                            if (matches_remaining == 0)
+                                return match + pattern.offset;
+                        }
+
+                        // Continue scanning past the current match.
+                        const size_t consumed = static_cast<size_t>(match - region_start) + 1;
+                        if (consumed >= scan_size)
+                            break;
+                        match = find_pattern_raw(match + 1, scan_size - consumed, pattern);
+                    }
                 }
             }
 
-            const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-            assert(next > addr && "VirtualQuery returned a non-advancing region");
-            if (next <= addr)
+            assert(region_end > addr && "VirtualQuery returned a non-advancing region");
+            if (region_end <= addr)
                 break; // Overflow guard.
-            addr = next;
+            addr = region_end;
         }
 
         return nullptr;
+    }
+
+    // Base protections accepted by the executable-only sweeps: the three page
+    // variants that grant execute *and* read. Bare PAGE_EXECUTE (execute without
+    // a read bit) is excluded because dereferencing it raises an access
+    // violation; PAGE_GUARD / PAGE_NOACCESS are filtered separately inside
+    // scan_regions_filtered. This is the scope for code-only scans: the
+    // whole-process scan_executable_regions and the prologue-recovery fallback,
+    // whose rebuilt near-JMP can only ever overwrite a code prologue.
+    constexpr DWORD EXECUTABLE_PAGE_FLAGS = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                            PAGE_EXECUTE_WRITECOPY;
+
+    // Base protections accepted by the readable sweep and the data-capable
+    // module-scoped cascade: the executable-readable set plus the non-executable
+    // readable pages (.rdata / .data and read-only heaps). This reaches C++
+    // vtables, RTTI type descriptors, and other read-only metadata the
+    // executable-only sweep cannot see.
+    constexpr DWORD READABLE_PAGE_FLAGS = EXECUTABLE_PAGE_FLAGS |
+                                          PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
+
+    // Module-scoped sibling of scan_executable_regions / scan_readable_regions:
+    // searches only the mapped image [range.base, range.end) and returns the Nth
+    // match (1-based, adjusted by pattern.offset) or nullptr.
+    //
+    // accept_mask selects which pages inside the image are searched:
+    //   - READABLE_PAGE_FLAGS for the main in-module cascade, so a single pass
+    //     covers both .text and .rdata / .data candidates -- the reason the
+    //     *_in_module resolvers need no ScannerKind distinction.
+    //   - EXECUTABLE_PAGE_FLAGS for the prologue-recovery fallback: its rebuilt
+    //     near-JMP can only ever overwrite a code prologue, so a match in a data
+    //     page would be a false positive. This mirrors the whole-process fallback,
+    //     which counts and scans through scan_executable_regions.
+    //
+    // It reuses scan_regions_filtered's per-region VirtualQuery protection gate,
+    // so a non-readable interior page (a section-alignment gap, a guard page, a
+    // sibling VirtualProtect on part of the image) is skipped instead of
+    // dereferenced. find_pattern_raw itself does an unguarded memchr / SIMD
+    // compare, so that region filter is what keeps a single contiguous scan from
+    // faulting the host.
+    const std::byte *scan_module_range(const Scanner::CompiledPattern &pattern,
+                                       DetourModKit::Memory::ModuleRange range,
+                                       DWORD accept_mask,
+                                       size_t occurrence = 1) noexcept
+    {
+        if (pattern.empty() || occurrence == 0 || !range.valid())
+        {
+            return nullptr;
+        }
+        return scan_regions_filtered(pattern, occurrence, accept_mask,
+                                     range.base, range.end);
     }
 } // anonymous namespace
 
@@ -719,13 +785,12 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
                        "start unchanged");
     }
 
-    // Only scan pages we can actually *read*. Bare PAGE_EXECUTE grants execute
-    // rights without read, so dereferencing such a page raises an access
-    // violation. Omitting it keeps find_pattern safe on all walked regions.
-    constexpr DWORD READABLE_EXEC_FLAGS = PAGE_EXECUTE_READ |
-                                          PAGE_EXECUTE_READWRITE |
-                                          PAGE_EXECUTE_WRITECOPY;
-    return scan_regions_filtered(pattern, occurrence, READABLE_EXEC_FLAGS);
+    // EXECUTABLE_PAGE_FLAGS keeps the sweep to pages we can actually *read*; bare
+    // PAGE_EXECUTE grants execute without read, so dereferencing such a page would
+    // raise an access violation. Whole-process sweep: the window spans the entire
+    // user address space, so the clamp in scan_regions_filtered is a no-op and the
+    // walk stops only when VirtualQuery runs off the end of the address space.
+    return scan_regions_filtered(pattern, occurrence, EXECUTABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
 }
 
 const std::byte *DetourModKit::Scanner::scan_readable_regions(const CompiledPattern &pattern, size_t occurrence)
@@ -742,16 +807,14 @@ const std::byte *DetourModKit::Scanner::scan_readable_regions(const CompiledPatt
                        "start unchanged");
     }
 
-    // Superset of READABLE_EXEC_FLAGS: every committed region we can read,
-    // including .rdata / .data (PAGE_READONLY / PAGE_READWRITE / PAGE_WRITECOPY)
-    // and read-only heaps, plus the execute-readable variants. The semantic is
-    // "find this pattern anywhere readable", so execute-readable code pages are
-    // intentionally included rather than deduplicated against
-    // scan_executable_regions; callers wanting non-code matches post-filter.
-    constexpr DWORD READABLE_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                     PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                                     PAGE_EXECUTE_WRITECOPY;
-    return scan_regions_filtered(pattern, occurrence, READABLE_FLAGS);
+    // READABLE_PAGE_FLAGS is a superset of the executable-only mask: every
+    // committed region we can read, including .rdata / .data (PAGE_READONLY /
+    // PAGE_READWRITE / PAGE_WRITECOPY) and read-only heaps, plus the
+    // execute-readable variants. The semantic is "find this pattern anywhere
+    // readable", so execute-readable code pages are intentionally included
+    // rather than deduplicated against scan_executable_regions; callers wanting
+    // non-code matches post-filter. The window spans the whole address space.
+    return scan_regions_filtered(pattern, occurrence, READABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
 }
 
 Scanner::SimdLevel DetourModKit::Scanner::active_simd_level() noexcept
@@ -801,8 +864,9 @@ namespace
     // the 12 to 20 byte sweet spot documented for fallback signatures.
     constexpr int kPrologueFallbackMinTailLiterals = 10;
 
-    // Upper bound on hits the rebuilt fallback pattern may produce across the
-    // process's executable regions before we reject it as ambiguous. The
+    // Upper bound on hits the rebuilt fallback pattern may produce within the
+    // scanned scope (the module image when a range is supplied, the process's
+    // executable regions otherwise) before we reject it as ambiguous. The
     // fallback only exists to recover the single site where a sibling mod
     // inline-hooked the target function, so the legitimate rewritten pattern
     // must match exactly once: the unique JMP into that mod's trampoline.
@@ -915,15 +979,22 @@ namespace
         return true;
     }
 
-    // Counts up to (max_hits + 1) occurrences of `pattern` across executable
-    // regions. Returning max_hits+1 signals "too many to be unique".
+    // Counts up to (max_hits + 1) occurrences of `pattern`. When `range` is set
+    // the count is confined to that module image; otherwise it spans the whole
+    // process's executable regions. Returning max_hits+1 signals "too many to be
+    // unique". The count must use the same scope as the eventual match scan, or
+    // a pattern unique inside the target module but duplicated in a sibling
+    // overlay would be wrongly rejected (or accepted) on the wrong evidence.
     std::size_t count_pattern_hits_bounded(const DetourModKit::Scanner::CompiledPattern &pattern,
-                                           std::size_t max_hits) noexcept
+                                           std::size_t max_hits,
+                                           std::optional<DetourModKit::Memory::ModuleRange> range) noexcept
     {
         std::size_t hits = 0;
         for (std::size_t n = 1; n <= max_hits + 1; ++n)
         {
-            const auto *match = DetourModKit::Scanner::scan_executable_regions(pattern, n);
+            const auto *match = range
+                                    ? scan_module_range(pattern, *range, EXECUTABLE_PAGE_FLAGS, n)
+                                    : DetourModKit::Scanner::scan_executable_regions(pattern, n);
             if (match == nullptr)
             {
                 break;
@@ -942,9 +1013,10 @@ namespace
 
     CascadeAttempt scan_candidates(std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
                                    bool &all_parse_failed,
-                                   DetourModKit::Logger &logger,
-                                   DetourModKit::Scanner::ScannerKind kind)
+                                   DetourModKit::Scanner::ScannerKind kind,
+                                   std::optional<DetourModKit::Memory::ModuleRange> range = std::nullopt)
     {
+        DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
         all_parse_failed = true;
         for (size_t i = 0; i < candidates.size(); ++i)
         {
@@ -957,16 +1029,60 @@ namespace
                 continue;
             }
             all_parse_failed = false;
-            const auto *match =
-                (kind == DetourModKit::Scanner::ScannerKind::Readable)
-                    ? DetourModKit::Scanner::scan_readable_regions(*compiled)
-                    : DetourModKit::Scanner::scan_executable_regions(*compiled);
-            if (match != nullptr)
+
+            // Resolves the Nth occurrence in the active scope. A supplied module
+            // range takes precedence over `kind`: one scan of the contiguous
+            // image already covers both .text and .rdata / .data candidates, so
+            // the executable-vs-readable split is moot inside it.
+            const auto scan_for = [&](std::size_t occurrence) -> const std::byte *
             {
-                const auto addr = resolve_candidate_match(
-                    reinterpret_cast<std::uintptr_t>(match), c);
-                return CascadeAttempt{addr, i, true};
+                if (range)
+                {
+                    return scan_module_range(*compiled, *range, READABLE_PAGE_FLAGS, occurrence);
+                }
+                return (kind == DetourModKit::Scanner::ScannerKind::Readable)
+                           ? DetourModKit::Scanner::scan_readable_regions(*compiled, occurrence)
+                           : DetourModKit::Scanner::scan_executable_regions(*compiled, occurrence);
+            };
+
+            const auto *match = scan_for(1);
+            if (match == nullptr)
+            {
+                continue;
             }
+
+            // Per-candidate uniqueness guard. A candidate flagged require_unique
+            // must match exactly once in the scanned scope; a second occurrence
+            // means the pattern is ambiguous, so the first (lowest-address) match
+            // is not provably the intended target. Skip it so the cascade falls
+            // through to the next candidate instead of committing to an arbitrary
+            // hit -- the choice between equally-matching sites is semantic and the
+            // scanner cannot make it. The extra occurrence scan only runs for a
+            // candidate that already matched and has require_unique set (the
+            // default); set require_unique = false to accept the first match and
+            // skip it.
+            if (c.require_unique && scan_for(2) != nullptr)
+            {
+                logger.debug("Scanner: candidate '{}' skipped: matches more than once in "
+                             "the scanned scope (require_unique).",
+                             c.name.empty() ? std::string_view{"<unnamed>"} : c.name);
+                continue;
+            }
+
+            const auto addr = resolve_candidate_match(
+                reinterpret_cast<std::uintptr_t>(match), c);
+            // Module-scoped resolutions must land inside the image. The match
+            // site is already in-range (scan_module_range only searches it), but
+            // a RipRelative disp read at an in-module instruction can still
+            // resolve outside the image (e.g. an import thunk in another module).
+            // Reject that here so the cascade falls through to the next candidate
+            // instead of committing to an out-of-module address -- a decision a
+            // post-resolution check by the caller could not reverse.
+            if (range && !DetourModKit::Memory::contains(*range, addr))
+            {
+                continue;
+            }
+            return CascadeAttempt{addr, i, true};
         }
         return CascadeAttempt{0, 0, false};
     }
@@ -979,9 +1095,10 @@ namespace
 
     PrologueFallbackResult scan_candidates_hooked_prologue(
         std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
-        DetourModKit::Logger &logger)
+        std::optional<DetourModKit::Memory::ModuleRange> range = std::nullopt)
     {
         using DetourModKit::Scanner::ResolveMode;
+        DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
         PrologueFallbackResult out;
         for (size_t i = 0; i < candidates.size(); ++i)
         {
@@ -1004,7 +1121,7 @@ namespace
             }
             out.not_applicable = false;
             const std::size_t hits =
-                count_pattern_hits_bounded(*compiled, kPrologueFallbackMaxHits);
+                count_pattern_hits_bounded(*compiled, kPrologueFallbackMaxHits, range);
             if (hits == 0)
             {
                 continue;
@@ -1017,7 +1134,9 @@ namespace
                     hits, kPrologueFallbackMaxHits);
                 continue;
             }
-            const auto *match = DetourModKit::Scanner::scan_executable_regions(*compiled);
+            const auto *match = range
+                                    ? scan_module_range(*compiled, *range, EXECUTABLE_PAGE_FLAGS)
+                                    : DetourModKit::Scanner::scan_executable_regions(*compiled);
             if (match == nullptr)
             {
                 continue;
@@ -1030,6 +1149,14 @@ namespace
                 continue;
             }
             const auto jmp_destination = *decoded;
+            // The rewritten near-JMP itself was FOUND inside the target (the
+            // module image when `range` is set, the process otherwise), but its
+            // destination must NOT be constrained to that module. When a sibling
+            // mod inline-hooks the target, its E9 jumps to a trampoline the
+            // sibling allocated outside this image, so requiring the destination
+            // in-range would reject the very recovery this path performs. Gate
+            // the destination only on "lies in some loaded module", which still
+            // rejects a jump into unmapped or data-only memory.
             if (!is_address_in_module(jmp_destination))
             {
                 logger.debug(
@@ -1044,6 +1171,80 @@ namespace
             return out;
         }
         return out;
+    }
+
+    // Maps a finished non-fallback cascade attempt to the public result, emitting
+    // the single success debug line or the matching failure diagnostic. Shared by
+    // the whole-process and module-scoped resolvers so the three-way mapping
+    // (success / AllPatternsInvalid / NoMatch) stays identical across both.
+    std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
+    finalize_cascade(const CascadeAttempt &attempt, bool all_parse_failed,
+                     std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
+                     std::string_view label)
+    {
+        using DetourModKit::Scanner::ResolveError;
+        using DetourModKit::Scanner::ResolveHit;
+        DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
+        if (attempt.success)
+        {
+            const auto &winner = candidates[attempt.index];
+            logger.debug("{} resolved via '{}' at {}", label,
+                         winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+                         Format::format_address(attempt.address));
+            return ResolveHit{attempt.address, winner.name};
+        }
+        if (all_parse_failed)
+        {
+            logger.error("{}: every candidate pattern failed to parse.", label);
+            return std::unexpected(ResolveError::AllPatternsInvalid);
+        }
+        logger.warning("{}: cascade AOB scan failed (no candidate matched).", label);
+        return std::unexpected(ResolveError::NoMatch);
+    }
+
+    // Maps a finished cascade + prologue-fallback attempt to the public result.
+    // Mirrors finalize_cascade but adds the pre-hooked-prologue success line and
+    // the fallback-specific failure diagnostics (not-applicable vs no-match).
+    std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
+    finalize_cascade_with_fallback(const CascadeAttempt &attempt, bool all_parse_failed,
+                                   const PrologueFallbackResult &hooked,
+                                   std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
+                                   std::string_view label)
+    {
+        using DetourModKit::Scanner::ResolveError;
+        using DetourModKit::Scanner::ResolveHit;
+        DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
+        if (attempt.success)
+        {
+            const auto &winner = candidates[attempt.index];
+            logger.debug("{} resolved via '{}' at {}", label,
+                         winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+                         Format::format_address(attempt.address));
+            return ResolveHit{attempt.address, winner.name};
+        }
+        if (hooked.attempt.success)
+        {
+            const auto &winner = candidates[hooked.attempt.index];
+            logger.debug(
+                "{} resolved via '{}' at {} (pre-hooked prologue; reusing target)",
+                label,
+                winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
+                Format::format_address(hooked.attempt.address));
+            return ResolveHit{hooked.attempt.address, winner.name};
+        }
+        if (all_parse_failed)
+        {
+            logger.error("{}: every candidate pattern failed to parse.", label);
+            return std::unexpected(ResolveError::AllPatternsInvalid);
+        }
+        if (hooked.not_applicable)
+        {
+            logger.warning("{}: cascade AOB scan failed; prologue fallback not applicable (insufficient literal tail bytes).",
+                           label);
+            return std::unexpected(ResolveError::PrologueFallbackNotApplicable);
+        }
+        logger.warning("{}: cascade AOB scan failed (including prologue fallback).", label);
+        return std::unexpected(ResolveError::NoMatch);
     }
 } // anonymous namespace
 
@@ -1060,24 +1261,33 @@ DetourModKit::Scanner::resolve_cascade(std::span<const AddrCandidate> candidates
     }
 
     bool all_parse_failed = true;
-    const auto attempt = scan_candidates(candidates, all_parse_failed, logger, kind);
-    if (attempt.success)
+    const auto attempt = scan_candidates(candidates, all_parse_failed, kind);
+    return finalize_cascade(attempt, all_parse_failed, candidates, label);
+}
+
+std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
+DetourModKit::Scanner::resolve_cascade_in_module(std::span<const AddrCandidate> candidates,
+                                                 std::string_view label, Memory::ModuleRange range)
+{
+    auto &logger = Logger::get_instance();
+
+    if (candidates.empty())
     {
-        const auto &winner = candidates[attempt.index];
-        logger.debug("{} resolved via '{}' at {}", label,
-                     winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
-                     Format::format_address(attempt.address));
-        return ResolveHit{attempt.address, winner.name};
+        logger.warning("Scanner: resolve_cascade_in_module for '{}' called with no candidates.", label);
+        return std::unexpected(ResolveError::EmptyCandidates);
+    }
+    if (!range.valid())
+    {
+        logger.warning("Scanner: resolve_cascade_in_module for '{}' called with an invalid module range.", label);
+        return std::unexpected(ResolveError::InvalidRange);
     }
 
-    if (all_parse_failed)
-    {
-        logger.error("{}: every candidate pattern failed to parse.", label);
-        return std::unexpected(ResolveError::AllPatternsInvalid);
-    }
-
-    logger.warning("{}: cascade AOB scan failed (no candidate matched).", label);
-    return std::unexpected(ResolveError::NoMatch);
+    bool all_parse_failed = true;
+    // The ScannerKind argument is unused once a range is supplied (see
+    // scan_candidates): one module-scoped scan covers .text and .rdata together.
+    const auto attempt = scan_candidates(candidates, all_parse_failed,
+                                         ScannerKind::Executable, range);
+    return finalize_cascade(attempt, all_parse_failed, candidates, label);
 }
 
 std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
@@ -1096,43 +1306,46 @@ DetourModKit::Scanner::resolve_cascade_with_prologue_fallback(
     // near-JMP prologue), so this resolver is executable-only by construction;
     // the readable sweep is meaningless for it.
     bool all_parse_failed = true;
-    auto attempt = scan_candidates(candidates, all_parse_failed, logger, ScannerKind::Executable);
-    if (attempt.success)
+    const auto attempt = scan_candidates(candidates, all_parse_failed, ScannerKind::Executable);
+    // The prologue-recovery pass is expensive (it rescans the process), so run it
+    // only when the direct pass found nothing.
+    PrologueFallbackResult hooked;
+    if (!attempt.success)
     {
-        const auto &winner = candidates[attempt.index];
-        logger.debug("{} resolved via '{}' at {}", label,
-                     winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
-                     Format::format_address(attempt.address));
-        return ResolveHit{attempt.address, winner.name};
+        hooked = scan_candidates_hooked_prologue(candidates);
+    }
+    return finalize_cascade_with_fallback(attempt, all_parse_failed, hooked, candidates, label);
+}
+
+std::expected<DetourModKit::Scanner::ResolveHit, DetourModKit::Scanner::ResolveError>
+DetourModKit::Scanner::resolve_cascade_in_module_with_prologue_fallback(
+    std::span<const AddrCandidate> candidates, std::string_view label, Memory::ModuleRange range)
+{
+    auto &logger = Logger::get_instance();
+
+    if (candidates.empty())
+    {
+        logger.warning("Scanner: resolve_cascade_in_module_with_prologue_fallback for '{}' called with no candidates.", label);
+        return std::unexpected(ResolveError::EmptyCandidates);
+    }
+    if (!range.valid())
+    {
+        logger.warning("Scanner: resolve_cascade_in_module_with_prologue_fallback for '{}' called with an invalid module range.", label);
+        return std::unexpected(ResolveError::InvalidRange);
     }
 
-    const auto hooked = scan_candidates_hooked_prologue(candidates, logger);
-    if (hooked.attempt.success)
+    // Both the direct pass and the prologue-recovery pass confine their scans to
+    // the module image: the match site must be in-range, while a rebuilt near-JMP
+    // may still jump to a trampoline outside it (see scan_candidates_hooked_prologue).
+    bool all_parse_failed = true;
+    const auto attempt = scan_candidates(candidates, all_parse_failed,
+                                         ScannerKind::Executable, range);
+    PrologueFallbackResult hooked;
+    if (!attempt.success)
     {
-        const auto &winner = candidates[hooked.attempt.index];
-        logger.debug(
-            "{} resolved via '{}' at {} (pre-hooked prologue; reusing target)",
-            label,
-            winner.name.empty() ? std::string_view{"<unnamed>"} : winner.name,
-            Format::format_address(hooked.attempt.address));
-        return ResolveHit{hooked.attempt.address, winner.name};
+        hooked = scan_candidates_hooked_prologue(candidates, range);
     }
-
-    if (all_parse_failed)
-    {
-        logger.error("{}: every candidate pattern failed to parse.", label);
-        return std::unexpected(ResolveError::AllPatternsInvalid);
-    }
-
-    if (hooked.not_applicable)
-    {
-        logger.warning("{}: cascade AOB scan failed; prologue fallback not applicable (insufficient literal tail bytes).",
-                       label);
-        return std::unexpected(ResolveError::PrologueFallbackNotApplicable);
-    }
-
-    logger.warning("{}: cascade AOB scan failed (including prologue fallback).", label);
-    return std::unexpected(ResolveError::NoMatch);
+    return finalize_cascade_with_fallback(attempt, all_parse_failed, hooked, candidates, label);
 }
 
 bool DetourModKit::Scanner::is_likely_function_prologue(std::uintptr_t addr) noexcept

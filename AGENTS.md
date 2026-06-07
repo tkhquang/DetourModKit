@@ -104,7 +104,7 @@ make clean        # Remove all build directories
 
 ```text
 include/DetourModKit/    # Public headers -- one per module
-  scanner.hpp            # AOB pattern scanning (executable + readable/data regions) with AVX2/SSE2
+  scanner.hpp            # AOB pattern scanning (whole-process executable/readable regions + module-scoped cascade) with AVX2/SSE2
   hook_manager.hpp       # SafetyHook wrapper (inline, mid, and VMT hooks)
   async_logger.hpp       # Lock-free MPMC queue logger
   logger.hpp             # Synchronous singleton logger
