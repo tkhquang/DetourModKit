@@ -25,7 +25,8 @@ namespace DetourModKit
     {
         Keyboard,
         Mouse,
-        Gamepad
+        Gamepad,
+        MouseWheel
     };
 
     /**
@@ -43,6 +44,8 @@ namespace DetourModKit
             return "Mouse";
         case InputSource::Gamepad:
             return "Gamepad";
+        case InputSource::MouseWheel:
+            return "MouseWheel";
         }
         return "Unknown";
     }
@@ -53,6 +56,10 @@ namespace DetourModKit
      * @details For Keyboard and Mouse sources, the code is a Windows Virtual Key code
      *          (usable with GetAsyncKeyState). For Gamepad, the code is an XInput
      *          button bitmask or a synthetic trigger identifier (see GamepadCode).
+     *          For MouseWheel, the code is a WheelCode direction identifier; the
+     *          wheel is an event with no polled key state, so it is captured by the
+     *          input layer's window-procedure hook and surfaced as a momentary
+     *          per-direction pulse (trigger-only, never a held modifier).
      */
     struct InputCode
     {
@@ -94,6 +101,13 @@ namespace DetourModKit
      * @return InputCode Tagged as Gamepad.
      */
     constexpr InputCode gamepad_button(int code) noexcept { return {InputSource::Gamepad, code}; }
+
+    /**
+     * @brief Creates a mouse-wheel InputCode from a wheel direction code.
+     * @param code The wheel direction identifier (see WheelCode).
+     * @return InputCode Tagged as MouseWheel.
+     */
+    constexpr InputCode mouse_wheel(int code) noexcept { return {InputSource::MouseWheel, code}; }
 
     /**
      * @namespace GamepadCode
@@ -144,6 +158,21 @@ namespace DetourModKit
     } // namespace GamepadCode
 
     /**
+     * @namespace WheelCode
+     * @brief Mouse-wheel direction identifiers used by InputSource::MouseWheel codes.
+     * @details Values are 1-based and dense so the input layer can map a code to a
+     *          zero-based direction index with `code - WheelCode::Up`. Up/Down are
+     *          the vertical wheel; Left/Right are the horizontal (tilt) wheel.
+     */
+    namespace WheelCode
+    {
+        inline constexpr int Up = 1;
+        inline constexpr int Down = 2;
+        inline constexpr int Left = 3;
+        inline constexpr int Right = 4;
+    } // namespace WheelCode
+
+    /**
      * @brief Attempts to resolve a human-readable name to an InputCode.
      * @details Performs case-insensitive matching against a built-in table of known
      *          key, mouse button, and gamepad button names.
@@ -152,6 +181,7 @@ namespace DetourModKit
      *          - Keyboard: "A"-"Z", "0"-"9", "F1"-"F24", "Ctrl", "Shift", "Alt",
      *            "Space", "Enter", "Escape", "Tab", "Backspace", etc.
      *          - Mouse: "Mouse1" (left) through "Mouse5" (XButton2)
+     *          - Mouse wheel: "WheelUp", "WheelDown", "WheelLeft", "WheelRight"
      *          - Gamepad: "Gamepad_A", "Gamepad_B", "Gamepad_LB", "Gamepad_LT", etc.
      *
      * @param name The input name to resolve.

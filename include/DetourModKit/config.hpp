@@ -305,6 +305,31 @@ namespace DetourModKit
                                                              std::string_view default_value);
 
         /**
+         * @brief Registers a boolean INI item that toggles input suppression for a binding.
+         * @details Fuses register_bool() with InputManager::set_consume(): the INI value
+         *          (parsed as a bool) decides whether @p input_binding_name hides its
+         *          trigger from the game, applied both at registration (with the default)
+         *          and on every load() / reload(). This is the INI-driven counterpart to
+         *          calling InputManager::set_consume() directly, letting users opt
+         *          individual bindings into passthrough blocking from the config file
+         *          (for example a `SetYToggle.Consume = true` key beside the combo).
+         *
+         *          Register the binding first (via register_press_combo or
+         *          InputManager::register_press); set_consume() is a no-op for an unknown
+         *          name. Suppression is honored for digital gamepad buttons and the mouse
+         *          wheel only (analog triggers and stick directions cannot be masked; see
+         *          InputBinding::consume).
+         * @param section INI section name.
+         * @param ini_key INI key name (e.g. "SetYToggle.Consume").
+         * @param log_key_name Human-readable name shown in log output.
+         * @param input_binding_name InputManager binding name to toggle.
+         * @param default_value Suppression state applied when the INI key is missing.
+         */
+        void register_consume_flag(std::string_view section, std::string_view ini_key,
+                                   std::string_view log_key_name, std::string_view input_binding_name,
+                                   bool default_value = false);
+
+        /**
          * @brief Loads all registered configuration settings from the specified INI file.
          * @details Parses the INI file and attempts to read values for each registered item.
          *          If a key is missing or invalid, the default value provided during

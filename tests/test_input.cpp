@@ -9,6 +9,8 @@
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/config.hpp"
 
+#include "input_intercept.hpp"
+
 using namespace DetourModKit;
 using DetourModKit::keyboard_key;
 using DetourModKit::gamepad_button;
@@ -28,6 +30,11 @@ TEST(InputSourceTest, MouseToString)
 TEST(InputSourceTest, GamepadToString)
 {
     EXPECT_EQ(input_source_to_string(InputSource::Gamepad), "Gamepad");
+}
+
+TEST(InputSourceTest, MouseWheelToString)
+{
+    EXPECT_EQ(input_source_to_string(InputSource::MouseWheel), "MouseWheel");
 }
 
 // --- InputCode ---
@@ -60,6 +67,34 @@ TEST(InputCodeTest, FactoryFunctions)
     auto gp = gamepad_button(GamepadCode::A);
     EXPECT_EQ(gp.source, InputSource::Gamepad);
     EXPECT_EQ(gp.code, GamepadCode::A);
+
+    auto wheel = mouse_wheel(WheelCode::Up);
+    EXPECT_EQ(wheel.source, InputSource::MouseWheel);
+    EXPECT_EQ(wheel.code, WheelCode::Up);
+}
+
+// --- Mouse-wheel name resolution ---
+
+TEST(WheelNameTest, ParseWheelNames)
+{
+    EXPECT_EQ(parse_input_name("WheelUp"), mouse_wheel(WheelCode::Up));
+    EXPECT_EQ(parse_input_name("WheelDown"), mouse_wheel(WheelCode::Down));
+    EXPECT_EQ(parse_input_name("WheelLeft"), mouse_wheel(WheelCode::Left));
+    EXPECT_EQ(parse_input_name("WheelRight"), mouse_wheel(WheelCode::Right));
+}
+
+TEST(WheelNameTest, ParseWheelNamesCaseInsensitive)
+{
+    EXPECT_EQ(parse_input_name("wheelup"), mouse_wheel(WheelCode::Up));
+    EXPECT_EQ(parse_input_name("WHEELDOWN"), mouse_wheel(WheelCode::Down));
+}
+
+TEST(WheelNameTest, FormatWheelNames)
+{
+    EXPECT_EQ(format_input_code(mouse_wheel(WheelCode::Up)), "WheelUp");
+    EXPECT_EQ(format_input_code(mouse_wheel(WheelCode::Down)), "WheelDown");
+    EXPECT_EQ(format_input_code(mouse_wheel(WheelCode::Left)), "WheelLeft");
+    EXPECT_EQ(format_input_code(mouse_wheel(WheelCode::Right)), "WheelRight");
 }
 
 // --- InputMode string conversion ---
@@ -500,6 +535,65 @@ protected:
     }
 };
 
+TEST_F(InputManagerTest, SetConsumeBeforeStartUpdatesPendingBinding)
+{
+    auto &mgr = InputManager::get_instance();
+    // A keyboard binding never installs a hook (suppression is gamepad/wheel
+    // only), so this exercises the consume plumbing without touching real input.
+    mgr.register_press("consume_pending", {keyboard_key(0x70)}, [] {});
+    mgr.set_consume("consume_pending", true);
+    mgr.set_consume("nonexistent_binding", true); // unknown name is a no-op
+    EXPECT_EQ(mgr.binding_count(), 1u);
+}
+
+TEST_F(InputManagerTest, SetConsumeWhileRunningIsSafe)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.register_press("consume_live", {keyboard_key(0x70)}, [] {});
+    mgr.start();
+    mgr.set_consume("consume_live", true);
+    mgr.set_consume("consume_live", false);
+    EXPECT_TRUE(mgr.is_running());
+    mgr.shutdown();
+}
+
+TEST_F(InputManagerTest, RegisterConsumeFlagAppliesToBinding)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.register_press("consume_cfg", {keyboard_key(0x70)}, [] {});
+    // The fused helper fires set_consume("consume_cfg", true) at registration
+    // time, with the same setter re-applied on every load() / reload().
+    Config::register_consume_flag("Hotkeys", "ConsumeCfg.Consume", "Consume Cfg",
+                                  "consume_cfg", true);
+    EXPECT_EQ(mgr.binding_count(), 1u);
+    // Drop the registered setter so it does not fire against later tests.
+    Config::clear_registered_items();
+}
+
+TEST_F(InputManagerTest, AnalogOnlyConsumeGamepadBindingInstallsNoXInputHook)
+{
+    // A consume binding whose only trigger is an analog code (trigger/stick) can
+    // never be masked: the XInput detour clears digital wButtons bits only. The
+    // poll loop must therefore not install the hook for such a binding. Asserting
+    // "no hook installed" verifies the digital-only install gate without putting a
+    // live hook into the test process (no game window or controller is needed).
+    auto &mgr = InputManager::get_instance();
+    mgr.register_press("analog_consume", {gamepad_button(GamepadCode::LeftTrigger)}, [] {});
+    mgr.set_consume("analog_consume", true);
+    mgr.start();
+
+    // Give the poll loop several cycles to reach its lazy-install check.
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    // Confirm the poll thread is actually alive and cycling, so "no hook
+    // installed" reflects the install gate staying closed for an analog-only
+    // consume binding rather than a thread that never reached the check.
+    EXPECT_TRUE(mgr.is_running());
+    EXPECT_FALSE(detail::xinput_installed());
+
+    mgr.shutdown();
+    EXPECT_FALSE(detail::xinput_installed());
+}
+
 TEST_F(InputManagerTest, SingletonIdentity)
 {
     InputManager &a = InputManager::get_instance();
@@ -892,7 +986,7 @@ TEST_F(InputPollerTest, StrictModifierMatchingConstruction)
 
 TEST_F(InputPollerTest, StrictModifierMatchingMultipleModifiers)
 {
-    // "A", "Ctrl+A", "Ctrl+Shift+A" — three levels of modifier specificity
+    // "A", "Ctrl+A", "Ctrl+Shift+A" -- three levels of modifier specificity
     std::vector<InputBinding> bindings;
 
     InputBinding plain;
@@ -1049,7 +1143,7 @@ TEST_F(InputPollerTest, StrictModifierMatchingGamepadBindings)
 TEST_F(InputPollerTest, StrictModifierMatchingCrossFeatureIsolation)
 {
     // Modifier from unrelated binding blocks other bare bindings.
-    // Feature A: "V", Feature B: "Shift+G" — Shift is known, so
+    // Feature A: "V", Feature B: "Shift+G" -- Shift is known, so
     // plain "V" won't fire while Shift is held.
     std::vector<InputBinding> bindings;
 

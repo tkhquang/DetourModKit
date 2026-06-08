@@ -151,6 +151,12 @@ namespace DetourModKit
             {"Mouse4",     {InputSource::Mouse, 0x05}},
             {"Mouse5",     {InputSource::Mouse, 0x06}},
 
+            // --- Mouse wheel (event-only; captured via the input layer's WndProc hook) ---
+            {"WheelUp",    {InputSource::MouseWheel, WheelCode::Up}},
+            {"WheelDown",  {InputSource::MouseWheel, WheelCode::Down}},
+            {"WheelLeft",  {InputSource::MouseWheel, WheelCode::Left}},
+            {"WheelRight", {InputSource::MouseWheel, WheelCode::Right}},
+
             // --- Gamepad buttons ---
             {"Gamepad_A",          {InputSource::Gamepad, GamepadCode::A}},
             {"Gamepad_B",          {InputSource::Gamepad, GamepadCode::B}},

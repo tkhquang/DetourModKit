@@ -295,6 +295,25 @@ These tests enable the test-only `debug_snapshot_use_count()` accessor via `#def
 
 The decoder header lives under `src/` (not the public include tree), so the test file adds `src/` to its include path and uses `DetourModKit::detail::` directly.
 
+## Input Interception Tests
+
+`tests/test_input_intercept.cpp` exercises the internal header `src/input_intercept.hpp`, the opt-in active-input layer that backs mouse-wheel capture and gamepad passthrough suppression for `InputPoller`. It uses the same `src/`-on-include-path pattern as the decoder tests. The unit tests target the two pure state machines that carry no Win32 dependency, so each is driven by direct calls with hand-supplied state:
+
+| Test | What it proves |
+| ---- | -------------- |
+| `WheelPulseTest.IdleProducesNoPulse` | A wheel with no pending notches emits an all-zero mask every cycle. |
+| `WheelPulseTest.SingleNotchPulsesThenGoesLow` | One queued notch reads pressed for exactly one cycle, then is forced low so the edge detector re-arms. |
+| `WheelPulseTest.TwoNotchesProduceTwoSeparatedPulses` | Two queued notches fire as two distinct Press edges separated by a forced low cycle, never one fused press. |
+| `WheelPulseTest.DirectionsAreIndependent` | Pending notches in different directions pulse on the same cycle without interfering. |
+| `GamepadSuppressTest.BarePressIsNotSuppressed` | A trigger physically down with no active chord (`owned_now == 0`) is left untouched so the game still sees it. |
+| `GamepadSuppressTest.ActiveChordSuppressesTrigger` | A trigger claimed by an active chord is added to the clear mask. |
+| `GamepadSuppressTest.ModifierReleasedBeforeTriggerKeepsSuppressing` | Releasing the modifier a frame before the trigger does not leak a bare trigger: suppression latches to the trigger button's own lifetime. |
+| `GamepadSuppressTest.TriggerReleaseSuppressesThroughGraceThenStops` | After the trigger is released the latch keeps masking through the grace window, then disarms and returns the button to the game. |
+| `GamepadSuppressTest.RepressDuringGraceReHolds` | A re-press during the release grace re-holds the suppression and restarts the grace on the next release. |
+| `InterceptControlTest.AccessorsAndSettersWithNothingInstalled` | With no hook installed (the unit-test process), the accessors report "off" and the setters / `uninstall()` are safe no-ops over atomics. |
+
+The live `XInputGetState` inline hook and the window-procedure subclass are not exercised here: they require a real game window and a connected controller, so they are validated manually. The state-machine split keeps the logic those hooks feed fully testable in process.
+
 ## Benchmark Harness
 
 `DMK_BUILD_BENCHMARKS=ON` builds three standalone microbenchmark executables. Each is deliberately not a gtest binary, so it runs under any build configuration (release, release+PGO, ASan, etc.) without dragging in the gtest runtime, and each prints a tab-separated table on stdout:
@@ -342,6 +361,7 @@ tests/
 ├── test_hook_integration.cpp   # Cross-module hook integration tests
 ├── test_hook_manager.cpp       # Hook manager unit tests
 ├── test_input.cpp              # Input system and input code tests
+├── test_input_intercept.cpp    # Active-input layer state machines (internal)
 ├── test_logger.cpp             # Logger tests
 ├── test_math.cpp               # Math utilities tests
 ├── test_memory.cpp             # Memory utilities tests (cache, read/write, SEH reads, module range)

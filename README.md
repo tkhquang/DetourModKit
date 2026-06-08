@@ -232,6 +232,26 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - XInput polled once per cycle; skipped entirely when no gamepad bindings are registered
 - Reconnection attempts throttled to every 2 seconds when no controller is connected, avoiding per-cycle overhead of `XInputGetState` on disconnected slots
 
+**Mouse wheel and input suppression (opt-in):**
+
+- Bind the mouse wheel with `WheelUp` / `WheelDown` / `WheelLeft` / `WheelRight`. The wheel has no virtual-key code, so it is captured by a window-procedure hook the poll loop installs lazily only when a wheel binding exists; each notch fires once as a Press edge.
+- `InputManager::set_consume(name, true)` hides a binding's trigger from the game so the mod and the game do not both act on it -- applied per binding, so one binding can pass through while another is blocked. Honored for digital gamepad buttons (D-pad, face buttons, bumpers, stick clicks) via an `XInputGetState` hook, and for the mouse wheel; analog triggers, stick directions, keyboard, and mouse-button suppression are not provided (the gamepad detour clears only the digital `wButtons` bitmask). The fix targets the classic chord case (e.g. "LB + D-pad" zoom) where releasing the modifier a frame before the trigger would otherwise leak a bare trigger: suppression is latched to the trigger button's own release, plus a short grace window. Only the trigger is hidden, not the modifier.
+- `Config::register_consume_flag(section, ini_key, log_name, binding_name, default)` drives the same flag from the INI, so the choice lives next to the combo (register the binding first, then the flag):
+
+  ```ini
+  [Hotkeys]
+  SetXToggle = Gamepad_LB+Gamepad_RB    ; passes through to the game
+  SetYToggle = Gamepad_LB+Gamepad_Y     ; blocked from the game
+  SetYToggle.Consume = true
+  ```
+
+  ```cpp
+  im.register_press("set_x", cfg.set_x, []{ /* ... */ });
+  im.register_press("set_y", cfg.set_y, []{ /* ... */ });
+  DMKConfig::register_consume_flag("Hotkeys", "SetYToggle.Consume", "Set Y Consume", "set_y", false);
+  ```
+- Both hooks are opt-in: a mod that registers neither a wheel binding nor a `consume` binding installs nothing and the input system stays purely observational.
+
 **Configuration integration:**
 
 - Load input codes from INI files (named keys, hex VK codes, or mixed)
@@ -933,6 +953,7 @@ The configuration system recognizes the following named input codes (case-insens
 | **Common** | `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `CapsLock`, `NumLock`, `ScrollLock`, `PrintScreen`, `Pause` |
 | **Numpad** | `Numpad0`–`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal` |
 | **Mouse** | `Mouse1` (left), `Mouse2` (right), `Mouse3` (middle), `Mouse4`, `Mouse5` |
+| **Mouse wheel** | `WheelUp`, `WheelDown`, `WheelLeft`, `WheelRight` (trigger-only, Press mode) |
 | **Gamepad** | `Gamepad_A`, `Gamepad_B`, `Gamepad_X`, `Gamepad_Y`, `Gamepad_LB`, `Gamepad_RB`, `Gamepad_LT`, `Gamepad_RT`, `Gamepad_Start`, `Gamepad_Back`, `Gamepad_LS`, `Gamepad_RS`, `Gamepad_DpadUp`, `Gamepad_DpadDown`, `Gamepad_DpadLeft`, `Gamepad_DpadRight` |
 | **Gamepad sticks** | `Gamepad_LSUp`, `Gamepad_LSDown`, `Gamepad_LSLeft`, `Gamepad_LSRight`, `Gamepad_RSUp`, `Gamepad_RSDown`, `Gamepad_RSLeft`, `Gamepad_RSRight` |
 
