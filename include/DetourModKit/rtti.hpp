@@ -47,13 +47,13 @@ namespace DetourModKit
          * @details Walks @c vtable - 8 (RTTICompleteObjectLocator pointer),
          *          then @c col + 0x0C (TypeDescriptor RVA, base-relative),
          *          then @c td + 0x10 (zero-terminated mangled name such as
-         *          ".?AVMyClass@ns@@"). The owning module's image base is
-         *          recovered from @c col.pSelf at @c col + 0x14 (x64 only,
-         *          signature == 1) so vtables in any loaded module resolve
-         *          correctly without consulting GetModuleHandleEx; the call
-         *          is used only as a fallback when @c pSelf is zero (32-bit
-         *          signature) or when the self-RVA produces an out-of-range
-         *          base.
+         *          ".?AVMyClass@ns@@"). The owning module's image base comes
+         *          from the loader-reported module range; on x64 the
+         *          @c col.pSelf RVA at @c col + 0x14 (signature == 1) must
+         *          reconstruct that same base (@c col_addr - @c pSelf), which
+         *          cross-checks the COL against a forged or relocated
+         *          structure. Any signature other than the x64 value is
+         *          rejected.
          *
          *          Reads up to @p max_len bytes from the name buffer in
          *          page-bounded chunks via @ref Memory::seh_read_bytes; the
