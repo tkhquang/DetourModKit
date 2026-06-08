@@ -59,21 +59,20 @@ namespace DetourModKit
         if (!head_opt || head_opt->p_type_descriptor == 0)
             return false;
 
-        // x64 (signature == 1) carries pSelf, an RVA back to the COL itself.
-        // The canonical IDA/Ghidra technique computes the image base as
-        // col_addr - p_self and uses that base for every subsequent RVA
-        // resolution. Cross-check the recovered base against the
-        // loader-reported module base so a forged p_self cannot bend the walk
-        // elsewhere. The x86 signature has no pSelf field; in that case the
-        // loader-reported module base is used directly because there is nothing
-        // to cross-check against.
-        if (head_opt->signature == COL_SIGNATURE_X64)
-        {
-            if (head_opt->p_self == 0 || col_addr < head_opt->p_self)
-                return false;
-            if (col_addr - head_opt->p_self != mod_range.base)
-                return false;
-        }
+        // Scope is x64 MSVC, where the COL signature is always 1 and carries
+        // pSelf, an RVA back to the COL itself. Reject any other signature
+        // outright: a non-x64 or corrupt signature has no pSelf to cross-check,
+        // so accepting it would skip the forgery guard below and fall through
+        // to the loader base unverified. The canonical IDA/Ghidra technique
+        // computes the image base as col_addr - p_self; cross-check that
+        // recovered base against the loader-reported module base so a forged
+        // p_self cannot bend the walk to another module.
+        if (head_opt->signature != COL_SIGNATURE_X64)
+            return false;
+        if (head_opt->p_self == 0 || col_addr < head_opt->p_self)
+            return false;
+        if (col_addr - head_opt->p_self != mod_range.base)
+            return false;
 
         // Compute the TypeDescriptor and name-buffer addresses from the module
         // base plus the type-descriptor RVA. A bogus RVA that places the name

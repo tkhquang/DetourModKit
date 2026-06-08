@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -7,8 +8,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include <windows.h>
@@ -366,6 +369,11 @@ TEST_F(RttiDissectTest, Identify_RejectsNullAndLowSlot)
 TEST_F(RttiDissectTest, Identify_RejectsUnreadableSlotAddress)
 {
     const std::uintptr_t gone = unmapped_addr();
+    // Guard the precondition: if the committed-then-freed allocation ever
+    // failed, gone would be 0 and this would silently exercise the null-slot
+    // guard instead of the unmapped-read path. unmapped_addr returns a value,
+    // so the fatal assert lives here rather than inside the helper.
+    ASSERT_NE(gone, 0u);
     Rtti::PointeeType pt;
     EXPECT_FALSE(Rtti::identify_pointee_type(gone, pt));
 }
