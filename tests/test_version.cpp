@@ -10,16 +10,17 @@ namespace
     {
         EXPECT_EQ(DMK_VERSION_MAJOR, 3);
         EXPECT_EQ(DMK_VERSION_MINOR, 6);
-        EXPECT_EQ(DMK_VERSION_PATCH, 0);
+        EXPECT_EQ(DMK_VERSION_PATCH, 1);
     }
 
     TEST(VersionTest, VersionStringMatchesMacros)
     {
-        EXPECT_STREQ(DMK_VERSION_STRING, "3.6.0");
+        EXPECT_STREQ(DMK_VERSION_STRING, "3.6.1");
     }
 
     TEST(VersionTest, AtLeastComparisonsAreCorrect)
     {
+        EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 6, 1));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 6, 0));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 5, 1));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 5, 0));
@@ -29,7 +30,6 @@ namespace
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 2, 0));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 1, 0));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(2, 0, 0));
-        EXPECT_FALSE(DMK_VERSION_AT_LEAST(3, 6, 1));
         EXPECT_FALSE(DMK_VERSION_AT_LEAST(3, 7, 0));
         EXPECT_FALSE(DMK_VERSION_AT_LEAST(4, 0, 0));
     }

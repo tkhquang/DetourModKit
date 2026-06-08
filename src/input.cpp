@@ -247,6 +247,83 @@ namespace DetourModKit
             return false;
         }
 
+        /// Builds the detour-evaluable consume rule list from the current bindings.
+        /// A rule is emitted for every consume binding whose masked triggers include
+        /// a digital gamepad button, but only when every known modifier (across all
+        /// bindings) is itself a digital gamepad button. The XInput detour sees only
+        /// XINPUT_GAMEPAD.wButtons, so it cannot observe a keyboard/mouse modifier or
+        /// an analog trigger/stick used as a modifier; if any such modifier exists,
+        /// the poll loop's strict-match decision is not reproducible in the detour,
+        /// so the whole list is dropped and the reactive (poll-published) mask alone
+        /// covers the held-modifier case. For an eligible binding the rule carries:
+        ///   modifier_mask  -- all of the chord's modifier bits,
+        ///   trigger_mask   -- the chord's digital gamepad trigger bits to clear,
+        ///   forbidden_mask -- every other known modifier bit, so holding a modifier
+        ///                     that belongs to a different chord rejects this one,
+        ///                     exactly as the poll loop's strict-match check does.
+        std::vector<detail::GamepadConsumeRule>
+        build_gamepad_consume_rules(const std::vector<InputBinding> &bindings,
+                                    const std::vector<InputCode> &known_modifiers) noexcept
+        {
+            const auto is_digital_gamepad = [](const InputCode &code) noexcept
+            {
+                return code.source == InputSource::Gamepad &&
+                       code.code > 0 && code.code < GamepadCode::LeftTrigger;
+            };
+
+            // The detour can only reproduce strict matching when every known modifier
+            // is a digital gamepad button it can read in wButtons. If any is not, emit
+            // no rules (the reactive path still handles the held-modifier case).
+            uint16_t known_mod_mask = 0;
+            for (const auto &mod : known_modifiers)
+            {
+                if (!is_digital_gamepad(mod))
+                {
+                    return {};
+                }
+                known_mod_mask = static_cast<uint16_t>(known_mod_mask |
+                                                       static_cast<uint16_t>(mod.code));
+            }
+
+            std::vector<detail::GamepadConsumeRule> rules;
+            for (const auto &binding : bindings)
+            {
+                if (!binding.consume)
+                {
+                    continue;
+                }
+                uint16_t trigger_mask = 0;
+                for (const auto &key : binding.keys)
+                {
+                    if (is_digital_gamepad(key))
+                    {
+                        trigger_mask = static_cast<uint16_t>(trigger_mask |
+                                                             static_cast<uint16_t>(key.code));
+                    }
+                }
+                if (trigger_mask == 0)
+                {
+                    // No digital gamepad trigger to clear (e.g. a wheel or analog
+                    // consume binding); nothing here for the detour to mask.
+                    continue;
+                }
+                // Every modifier is a digital gamepad button here: the gate above
+                // returned an empty list if any known modifier was not, and a chord's
+                // modifiers are a subset of the known modifiers.
+                uint16_t modifier_mask = 0;
+                for (const auto &mod : binding.modifiers)
+                {
+                    modifier_mask = static_cast<uint16_t>(modifier_mask |
+                                                          static_cast<uint16_t>(mod.code));
+                }
+                const uint16_t forbidden_mask =
+                    static_cast<uint16_t>(known_mod_mask & static_cast<uint16_t>(~modifier_mask));
+                rules.push_back(
+                    detail::GamepadConsumeRule{modifier_mask, forbidden_mask, trigger_mask});
+            }
+            return rules;
+        }
+
         // Release grace for gamepad consume-until-release. Long enough to absorb
         // the modifier-released-before-trigger window (the player relaxing the
         // bumper a frame or two before the thumb leaves the D-pad) without
@@ -295,6 +372,15 @@ namespace DetourModKit
                                             std::memory_order_relaxed);
         has_wheel_consume_bindings_.store(scan_for_wheel_consume_bindings(bindings_),
                                           std::memory_order_relaxed);
+
+        // Publish the detour-side consume rule list. The XInput detour evaluates
+        // these against the exact snapshot the game reads, closing the leading-edge
+        // window the poll-published mask leaves for a modifier and trigger pressed
+        // inside one poll interval. Built from the same bindings and known modifiers
+        // as the reactive path so the two masking paths never disagree.
+        const std::vector<detail::GamepadConsumeRule> consume_rules =
+            build_gamepad_consume_rules(bindings_, known_modifiers_);
+        detail::publish_gamepad_consume_rules(consume_rules.data(), consume_rules.size());
     }
 
     InputPoller::~InputPoller() noexcept
@@ -607,23 +693,39 @@ namespace DetourModKit
                         {
                             for (const auto &key : binding.keys)
                             {
-                                if (!is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh, wheel_pulse_mask))
-                                {
-                                    continue;
-                                }
-                                any_pressed = true;
+                                const bool key_pressed = is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh, wheel_pulse_mask);
 
-                                // A consume binding claims its pressed digital
-                                // gamepad triggers so they can be masked from the
-                                // game. Keep scanning the remaining keys to collect
-                                // every owned bit; a plain (non-consume) binding
-                                // needs only one hit and stops at the first.
+                                // Pre-arm the consume bit while the binding's modifiers
+                                // are held, before the trigger button itself is pressed.
+                                // The suppression mask is published one poll cycle behind
+                                // the physical state, so claiming the bit only once the
+                                // trigger reads as pressed lets the game's own XInput poll
+                                // (an independent clock, usually faster than this loop)
+                                // catch the trigger's leading edge before the mask catches
+                                // up -- a one-frame leak of an otherwise-suppressed press.
+                                // Holding the claim to the modifier keeps the mask up
+                                // before the trigger arrives. Masking a bit whose physical
+                                // button is still up is a no-op: apply_suppress ANDs ~mask
+                                // into wButtons, and clearing an already-zero bit changes
+                                // nothing. The consume-until-release latch still trails the
+                                // trigger, so the trailing edge is unchanged. Keep scanning
+                                // the remaining keys so every owned bit is collected.
                                 if (binding.consume && key.source == InputSource::Gamepad &&
                                     key.code > 0 && key.code < GamepadCode::LeftTrigger)
                                 {
                                     gamepad_owned = static_cast<uint16_t>(gamepad_owned |
                                                                           static_cast<uint16_t>(key.code));
                                 }
+
+                                // Activation still keys off the real press: a non-consume
+                                // binding fires on the first pressed key and stops, while a
+                                // consume binding keeps scanning so the pre-arm above sees
+                                // every owned bit.
+                                if (!key_pressed)
+                                {
+                                    continue;
+                                }
+                                any_pressed = true;
                                 if (!binding.consume)
                                 {
                                     break;
@@ -673,11 +775,19 @@ namespace DetourModKit
                         gp_suppress, gamepad_owned, gamepad_state.Gamepad.wButtons,
                         GetTickCount64(), s_gamepad_suppress_grace_ms);
                     detail::publish_gamepad_suppress(suppress);
+                    // Enable the detour's rule masking only while focused and
+                    // connected. The published rule list and its time-to-live survive
+                    // focus changes, so the detour needs this explicit gate to stop
+                    // masking the foreground game's input once the mod is backgrounded,
+                    // exactly as the reactive mask is cleared below and as the
+                    // wheel-consume flag is gated.
+                    detail::set_gamepad_rule_suppress_enabled(true);
                 }
                 else
                 {
                     gp_suppress = detail::GamepadSuppressState{};
                     detail::publish_gamepad_suppress(0);
+                    detail::set_gamepad_rule_suppress_enabled(false);
                 }
             }
 
@@ -1027,6 +1137,7 @@ namespace DetourModKit
             has_wheel_bindings_.store(false, std::memory_order_relaxed);
             has_consume_gamepad_bindings_.store(false, std::memory_order_relaxed);
             has_wheel_consume_bindings_.store(false, std::memory_order_relaxed);
+            detail::publish_gamepad_consume_rules(nullptr, 0);
             active_states_ = std::make_unique<std::atomic<uint8_t>[]>(0);
         }
 

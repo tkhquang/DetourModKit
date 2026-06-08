@@ -50,6 +50,49 @@ namespace DetourModKit::detail
         std::atomic<uint16_t> s_suppress_mask{0};
         std::atomic<uint64_t> s_suppress_deadline_ms{0};
 
+        // --- Consume rule list (detour-side chord evaluation) ---
+        //
+        // A binding rebuild publishes one rule per detour-evaluable consume chord;
+        // the XInput detour reads the list against the exact button snapshot the
+        // game is about to read. Each rule is packed into a single atomic word so a
+        // reader never sees a torn rule, and the array plus its count sit behind a
+        // seqlock (s_consume_rules_seq: even = stable, odd = mid-update) so the
+        // detour gets an all-or-nothing snapshot of the whole list without locking.
+        // Single writer: whichever thread mutates the bindings, serialized by
+        // InputPoller::bindings_rw_mutex_ held in write mode while
+        // recompute_modifier_caches_locked / clear_bindings publish. This is not the
+        // poll thread, which only takes a shared lock and never writes or reads this
+        // list. Many readers: the game's XInput caller threads via the detour.
+        std::array<std::atomic<uint64_t>, MAX_GAMEPAD_CONSUME_RULES> s_consume_rules{};
+        std::atomic<uint32_t> s_consume_rule_count{0};
+        std::atomic<uint32_t> s_consume_rules_seq{0};
+
+        // Gate for detour-side rule masking, driven every poll cycle. The published
+        // rule list and its time-to-live survive focus changes, so without this gate
+        // apply_suppress would keep masking the foreground game's input while the mod
+        // is unfocused. The poll loop sets it true only while focused and connected,
+        // mirroring how the reactive mask is cleared and how s_wheel_consume is gated.
+        std::atomic<bool> s_rule_suppress_enabled{false};
+
+        /// Packs a rule into one word: modifier (bits 0-15), forbidden (16-31),
+        /// trigger (32-47). Three 16-bit masks fit a uint64 with room to spare, so a
+        /// rule is published and read as a single atomic store/load.
+        constexpr uint64_t pack_consume_rule(const GamepadConsumeRule &rule) noexcept
+        {
+            return static_cast<uint64_t>(rule.modifier_mask) |
+                   (static_cast<uint64_t>(rule.forbidden_mask) << 16) |
+                   (static_cast<uint64_t>(rule.trigger_mask) << 32);
+        }
+
+        /// Inverse of pack_consume_rule.
+        constexpr GamepadConsumeRule unpack_consume_rule(uint64_t packed) noexcept
+        {
+            return GamepadConsumeRule{
+                static_cast<uint16_t>(packed & 0xFFFFu),
+                static_cast<uint16_t>((packed >> 16) & 0xFFFFu),
+                static_cast<uint16_t>((packed >> 32) & 0xFFFFu)};
+        }
+
         // --- Mouse-wheel capture state ---
 
         std::array<std::atomic<int>, 4> s_wheel_count{};
@@ -60,11 +103,16 @@ namespace DetourModKit::detail
 
         /**
          * @brief Clears the suppressed button bits from a game-bound XINPUT_STATE.
-         * @details Only the bound controller index is masked. dwPacketNumber and
-         *          the success return are left untouched so the game still sees a
-         *          connected, advancing controller (faking a disconnect would
-         *          trigger pause/reconnect UI). A time-to-live guard drops the mask
-         *          if the poll thread stopped refreshing it.
+         * @details Only the bound controller index is masked. dwPacketNumber and the
+         *          success return are left untouched so the game still sees a
+         *          connected, advancing controller (faking a disconnect would trigger
+         *          pause/reconnect UI). The cleared bits are the union of two sources:
+         *          the reactive mask the poll thread publishes (which carries the
+         *          trailing-edge consume-until-release latch) and the consume rules
+         *          evaluated here against the exact buttons the game is about to read
+         *          (which close the leading-edge window the poll-published mask trails
+         *          by up to one cycle). A time-to-live guard drops all masking if the
+         *          poll thread stopped refreshing it.
          */
         void apply_suppress(XINPUT_STATE *state, DWORD user_index) noexcept
         {
@@ -76,22 +124,42 @@ namespace DetourModKit::detail
             {
                 return;
             }
-            const uint16_t mask = s_suppress_mask.load(std::memory_order_acquire);
+            // Acquire the reactive mask first. This load also orders the relaxed
+            // deadline read below: publish_gamepad_suppress writes the deadline before
+            // the release store on s_suppress_mask, so the acquire here establishes the
+            // happens-before even when the mask reads as 0.
+            const uint16_t reactive = s_suppress_mask.load(std::memory_order_acquire);
+
+            // raw is the true, unmasked state: this detour runs after the trampoline
+            // call. Evaluating the published chord rules against it masks a chord
+            // whose modifier and trigger were pressed inside one poll interval on the
+            // very frame the game reads it, rather than a cycle later. The focus gate
+            // suppresses this evaluation when the host window is unfocused or the
+            // controller is gone: the rule list and its deadline both survive those
+            // transitions, so the detour must not keep masking the foreground game's
+            // input (the reactive mask is already cleared by the poll loop on focus
+            // loss).
+            const uint16_t raw = state->Gamepad.wButtons;
+            const uint16_t rule_mask =
+                s_rule_suppress_enabled.load(std::memory_order_relaxed)
+                    ? evaluate_published_consume_rules(raw)
+                    : 0;
+            const uint16_t mask = static_cast<uint16_t>(reactive | rule_mask);
             if (mask == 0)
             {
                 return;
             }
-            // Relaxed is sufficient for the deadline read: publish_gamepad_suppress
-            // writes it before the release store on s_suppress_mask, so the acquire
-            // load of the mask above already established the happens-before. A
-            // non-zero mask is therefore never paired with a stale (pre-refresh)
-            // deadline.
+            // The reactive mask and the rule list are both refreshed only while the
+            // poll thread is alive: rules exist only when consume gamepad bindings do,
+            // and that is exactly when publish_gamepad_suppress refreshes this deadline
+            // every cycle. A stalled poll thread therefore lets the deadline lapse and
+            // all masking stops, so the game regains its input rather than latching off.
             if (GetTickCount64() >= s_suppress_deadline_ms.load(std::memory_order_relaxed))
             {
                 return;
             }
             state->Gamepad.wButtons =
-                static_cast<WORD>(state->Gamepad.wButtons & static_cast<WORD>(~mask));
+                static_cast<WORD>(raw & static_cast<WORD>(~mask));
         }
 
         DWORD WINAPI xinput_get_state_detour(DWORD user_index, XINPUT_STATE *state) noexcept
@@ -342,6 +410,92 @@ namespace DetourModKit::detail
         return mask;
     }
 
+    uint16_t evaluate_consume_rules(uint16_t true_buttons,
+                                    const GamepadConsumeRule *rules,
+                                    std::size_t count) noexcept
+    {
+        uint16_t mask = 0;
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            const GamepadConsumeRule &rule = rules[i];
+            // Every modifier bit held and no forbidden bit held: the exact decision
+            // the poll loop makes (chord modifiers satisfied and the strict-match
+            // check passes), evaluated against the snapshot the game is about to
+            // read. A forbidden bit is a known modifier that belongs to a different
+            // chord, so holding one means this chord is not the active gesture.
+            if ((true_buttons & rule.modifier_mask) == rule.modifier_mask &&
+                (true_buttons & rule.forbidden_mask) == 0)
+            {
+                mask = static_cast<uint16_t>(mask | rule.trigger_mask);
+            }
+        }
+        return mask;
+    }
+
+    void publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count) noexcept
+    {
+        // A list larger than the detour can hold publishes nothing rather than a
+        // silent subset: the reactive mask still covers the held-modifier case, so
+        // only the simultaneous-press protection is dropped for that (pathological)
+        // binding set, and the detour never evaluates a partial list.
+        if (count > MAX_GAMEPAD_CONSUME_RULES)
+        {
+            count = 0;
+        }
+        // Seqlock write (single writer). The odd sequence brackets the update so a
+        // concurrent detour read sees the whole new list or skips the frame. The
+        // release fence after the odd store keeps the rule stores from being observed
+        // before the bracket opens; the release store of the even sequence publishes
+        // the finished list to the detour's acquire load.
+        const uint32_t seq = s_consume_rules_seq.load(std::memory_order_relaxed);
+        s_consume_rules_seq.store(seq + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            s_consume_rules[i].store(pack_consume_rule(rules[i]), std::memory_order_relaxed);
+        }
+        s_consume_rule_count.store(static_cast<uint32_t>(count), std::memory_order_relaxed);
+        s_consume_rules_seq.store(seq + 2, std::memory_order_release);
+    }
+
+    uint16_t evaluate_published_consume_rules(uint16_t true_buttons) noexcept
+    {
+        // Seqlock read, single attempt (no spin): an odd sequence means the writer is
+        // mid-update, and a change across the copy means the snapshot tore. In either
+        // case skip rule masking for this frame (the reactive mask still applies); the
+        // next game poll, microseconds later, gets the settled list. Rules change only
+        // on a binding rebuild, so a torn read is rare and never coincides with steady
+        // gameplay input.
+        const uint32_t seq_before = s_consume_rules_seq.load(std::memory_order_acquire);
+        if ((seq_before & 1u) != 0)
+        {
+            return 0;
+        }
+        uint32_t count = s_consume_rule_count.load(std::memory_order_relaxed);
+        if (count > MAX_GAMEPAD_CONSUME_RULES)
+        {
+            count = MAX_GAMEPAD_CONSUME_RULES;
+        }
+        std::array<GamepadConsumeRule, MAX_GAMEPAD_CONSUME_RULES> snapshot{};
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            snapshot[i] = unpack_consume_rule(s_consume_rules[i].load(std::memory_order_relaxed));
+        }
+        // Order the rule loads above before the sequence re-read below, so a writer
+        // that updated mid-copy is always detected.
+        std::atomic_thread_fence(std::memory_order_acquire);
+        if (s_consume_rules_seq.load(std::memory_order_relaxed) != seq_before)
+        {
+            return 0;
+        }
+        return evaluate_consume_rules(true_buttons, snapshot.data(), count);
+    }
+
+    void set_gamepad_rule_suppress_enabled(bool enabled) noexcept
+    {
+        s_rule_suppress_enabled.store(enabled, std::memory_order_relaxed);
+    }
+
     bool install_xinput(int user_index) noexcept
     {
         s_bound_user_index.store(user_index, std::memory_order_relaxed);
@@ -511,9 +665,17 @@ namespace DetourModKit::detail
 
     void uninstall() noexcept
     {
-        // Stop masking before removing the hooks. The poll thread is already
-        // stopped when this runs, so no further publishes can occur.
+        // Stop masking before removing the hooks, with single-atomic stores only.
+        // Clearing the reactive mask stops reactive masking and clearing the rule
+        // gate stops rule masking. Do NOT seqlock-publish an empty rule list here:
+        // that is a multi-step write, and a concurrent binding mutation (set_consume
+        // / add_binding, serialized on InputPoller::bindings_rw_mutex_) is a
+        // documented thread-safe call that could race a second writer and tear the
+        // list. The published list is left as is; it is inert once the hooks are
+        // gone and the gate is false, the binding-clear path already empties it
+        // under the lock, and a later install republishes before re-enabling the gate.
         s_suppress_mask.store(0, std::memory_order_release);
+        s_rule_suppress_enabled.store(false, std::memory_order_relaxed);
         s_wheel_consume.store(false, std::memory_order_relaxed);
 
         uninstall_wndproc();

@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "input_intercept.hpp"
@@ -11,9 +13,14 @@
 #include "DetourModKit/input_codes.hpp"
 
 using namespace DetourModKit;
+using DetourModKit::detail::evaluate_consume_rules;
+using DetourModKit::detail::evaluate_published_consume_rules;
+using DetourModKit::detail::GamepadConsumeRule;
 using DetourModKit::detail::GamepadSuppressState;
 using DetourModKit::detail::install_wndproc;
 using DetourModKit::detail::install_xinput;
+using DetourModKit::detail::MAX_GAMEPAD_CONSUME_RULES;
+using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::set_wheel_consume;
 using DetourModKit::detail::step_gamepad_suppress;
@@ -34,6 +41,19 @@ namespace
     constexpr uint8_t kWheelRightBit = 1u << 3;
 
     constexpr uint64_t kGraceMs = 80;
+
+    // Builds a consume chord binding for the rule-publishing tests.
+    InputBinding make_consume_chord(std::vector<InputCode> modifiers,
+                                    std::vector<InputCode> keys)
+    {
+        InputBinding binding;
+        binding.name = "chord";
+        binding.modifiers = std::move(modifiers);
+        binding.keys = std::move(keys);
+        binding.consume = true;
+        binding.mode = InputMode::Hold;
+        return binding;
+    }
 } // namespace
 
 // --- Control API safe to call without an installed hook ---
@@ -173,6 +193,242 @@ TEST(GamepadSuppressTest, RepressDuringGraceReHolds)
     // Released again; grace restarts from this release.
     EXPECT_EQ(step_gamepad_suppress(state, 0, 0, 1060, kGraceMs), dpad);
     EXPECT_EQ(step_gamepad_suppress(state, 0, 0, 1200, kGraceMs), 0u);
+}
+
+TEST(GamepadSuppressTest, PreArmedTriggerSuppressedAtLeadingEdge)
+{
+    GamepadSuppressState state;
+    const uint16_t dpad = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+
+    // Pre-arm: the poll loop claims the consume trigger as soon as the chord's
+    // modifier is held, so owned_now carries the D-pad bit a cycle before the
+    // D-pad is physically down (true_buttons has LB only). The returned mask must
+    // already include the trigger so the game's independent, usually faster XInput
+    // poll cannot read the trigger's leading edge before the mask catches up.
+    // Masking a bit that is not yet down is a no-op for the game, but it closes
+    // the race.
+    EXPECT_EQ(step_gamepad_suppress(state, dpad, lb, 1000, kGraceMs), dpad);
+
+    // Trigger now goes down with the modifier still held: the leading edge is
+    // already covered, so it stays masked.
+    EXPECT_EQ(step_gamepad_suppress(state, dpad, static_cast<uint16_t>(lb | dpad), 1016, kGraceMs), dpad);
+}
+
+TEST(GamepadSuppressTest, PreArmAbandonedWithoutPressDisarmsAfterGrace)
+{
+    GamepadSuppressState state;
+    const uint16_t dpad = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+
+    // Modifier held, trigger pre-armed but never pressed (true_buttons has LB
+    // only): the bit is armed and masked (a no-op against the up button).
+    EXPECT_EQ(step_gamepad_suppress(state, dpad, lb, 1000, kGraceMs), dpad);
+    // Modifier released without the trigger ever being pressed: the latch must not
+    // stick. It runs the same release grace and then disarms, so a pre-arm the
+    // user abandons leaves no residual mask.
+    EXPECT_EQ(step_gamepad_suppress(state, 0, 0, 1040, kGraceMs), dpad);
+    EXPECT_EQ(step_gamepad_suppress(state, 0, 0, 1200, kGraceMs), 0u);
+}
+
+// --- evaluate_consume_rules: detour-side chord evaluation ---
+
+TEST(ConsumeRuleTest, EmptyListMasksNothing)
+{
+    const uint16_t buttons =
+        static_cast<uint16_t>(GamepadCode::LeftBumper | GamepadCode::DpadUp);
+    EXPECT_EQ(evaluate_consume_rules(buttons, nullptr, 0), 0u);
+}
+
+TEST(ConsumeRuleTest, ChordMaskedOnTheSameFrameAsASimultaneousPress)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t dpad = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const GamepadConsumeRule rule{lb, 0, dpad};
+
+    // Modifier and trigger arrive in the same snapshot (the sub-poll-interval
+    // simultaneous press the reactive pre-arm cannot cover): the rule masks the
+    // trigger on the exact frame the game reads it.
+    EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | dpad), &rule, 1), dpad);
+
+    // Modifier held, trigger not yet down: the rule still matches and returns the
+    // bit. Masking an up button is a no-op against the game, but it keeps the mask
+    // continuous so no leading edge slips through.
+    EXPECT_EQ(evaluate_consume_rules(lb, &rule, 1), dpad);
+
+    // Trigger without the modifier: a bare press must reach the game.
+    EXPECT_EQ(evaluate_consume_rules(dpad, &rule, 1), 0u);
+}
+
+TEST(ConsumeRuleTest, ForbiddenModifierRejectsChord)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t rb = static_cast<uint16_t>(GamepadCode::RightBumper);
+    const uint16_t dpad = static_cast<uint16_t>(GamepadCode::DpadUp);
+    // LB + D-pad is the chord; RB is a known modifier owned by a different chord.
+    const GamepadConsumeRule rule{lb, rb, dpad};
+
+    // LB + D-pad alone: masked.
+    EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | dpad), &rule, 1), dpad);
+    // LB + RB + D-pad: RB (a forbidden modifier) is held, so this chord is not the
+    // active gesture and the trigger reaches the game -- the same decision the poll
+    // loop's strict-match check makes.
+    EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | rb | dpad), &rule, 1), 0u);
+}
+
+TEST(ConsumeRuleTest, BareTriggerRuleGatedByForbiddenModifiers)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t dpad = static_cast<uint16_t>(GamepadCode::DpadUp);
+    // A no-modifier consume binding (modifier_mask 0) while LB is a known modifier
+    // of some other binding, so forbidden_mask carries LB.
+    const GamepadConsumeRule rule{0, lb, dpad};
+
+    // No known modifier held: the bare trigger is masked.
+    EXPECT_EQ(evaluate_consume_rules(dpad, &rule, 1), dpad);
+    // A known modifier (LB) held: strict matching rejects the bare-trigger chord.
+    EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | dpad), &rule, 1), 0u);
+}
+
+TEST(ConsumeRuleTest, MultipleRulesAccumulateMatchingTriggers)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t rb = static_cast<uint16_t>(GamepadCode::RightBumper);
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+    // Two independent chords with distinct modifiers: LB + Up and RB + Down.
+    const std::array<GamepadConsumeRule, 2> rules{
+        GamepadConsumeRule{lb, 0, up},
+        GamepadConsumeRule{rb, 0, down}};
+
+    // Both modifiers held: both rules match and their trigger masks union.
+    EXPECT_EQ(
+        evaluate_consume_rules(static_cast<uint16_t>(lb | rb | up | down), rules.data(), rules.size()),
+        static_cast<uint16_t>(up | down));
+    // Only LB held: only the LB rule contributes; the RB rule does not match.
+    EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(lb | up), rules.data(), rules.size()), up);
+    // Only RB held: only the RB rule contributes.
+    EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(rb | down), rules.data(), rules.size()), down);
+}
+
+// --- publish_gamepad_consume_rules / evaluate_published_consume_rules: seqlock ---
+
+class ConsumeRulePublishTest : public ::testing::Test
+{
+protected:
+    // The rule list is process-global; isolate each case from neighbours and from
+    // any poller-constructing test that ran earlier in the same process.
+    void SetUp() override { publish_gamepad_consume_rules(nullptr, 0); }
+    void TearDown() override { publish_gamepad_consume_rules(nullptr, 0); }
+};
+
+TEST_F(ConsumeRulePublishTest, RoundTripMatchesDirectEvaluation)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t rb = static_cast<uint16_t>(GamepadCode::RightBumper);
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+    const std::array<GamepadConsumeRule, 2> rules{
+        GamepadConsumeRule{lb, rb, up},
+        GamepadConsumeRule{rb, lb, down}};
+    publish_gamepad_consume_rules(rules.data(), rules.size());
+
+    // The packed, seqlock-guarded list must evaluate identically to the same rules
+    // read directly: this exercises pack/unpack of all three 16-bit masks and a
+    // consistent seqlock snapshot.
+    for (const uint16_t buttons : {static_cast<uint16_t>(0u),
+                                   lb,
+                                   static_cast<uint16_t>(lb | up),
+                                   static_cast<uint16_t>(lb | rb | up | down),
+                                   static_cast<uint16_t>(rb | down)})
+    {
+        EXPECT_EQ(evaluate_published_consume_rules(buttons),
+                  evaluate_consume_rules(buttons, rules.data(), rules.size()))
+            << "buttons=" << buttons;
+    }
+}
+
+TEST_F(ConsumeRulePublishTest, OverCapPublishesEmpty)
+{
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    // One past the cap, every rule a no-modifier match. If the cap truncated instead
+    // of emptying, at least one such rule would survive and mask Up.
+    std::array<GamepadConsumeRule, MAX_GAMEPAD_CONSUME_RULES + 1> rules{};
+    for (auto &rule : rules)
+    {
+        rule = GamepadConsumeRule{0, 0, up};
+    }
+    publish_gamepad_consume_rules(rules.data(), rules.size());
+    EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
+}
+
+TEST_F(ConsumeRulePublishTest, ClearPublishesEmpty)
+{
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const GamepadConsumeRule rule{0, 0, up};
+    publish_gamepad_consume_rules(&rule, 1);
+    ASSERT_EQ(evaluate_published_consume_rules(up), up);
+    publish_gamepad_consume_rules(nullptr, 0);
+    EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
+}
+
+// --- build_gamepad_consume_rules, via the InputPoller build+publish path ---
+
+class ConsumeRuleBuildTest : public ::testing::Test
+{
+protected:
+    void SetUp() override { publish_gamepad_consume_rules(nullptr, 0); }
+    void TearDown() override { publish_gamepad_consume_rules(nullptr, 0); }
+};
+
+TEST_F(ConsumeRuleBuildTest, GamepadChordPublishesMaskableRule)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    // Constructing the poller runs the same build+publish path the poll thread uses.
+    InputPoller poller({make_consume_chord({gamepad_button(GamepadCode::LeftBumper)},
+                                           {gamepad_button(GamepadCode::DpadUp)})});
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
+    EXPECT_EQ(evaluate_published_consume_rules(up), 0u); // modifier not held
+}
+
+TEST_F(ConsumeRuleBuildTest, OverlappingChordsGetCrossForbiddenMasks)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    const uint16_t rb = static_cast<uint16_t>(GamepadCode::RightBumper);
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
+    InputPoller poller({
+        make_consume_chord({gamepad_button(GamepadCode::LeftBumper)},
+                           {gamepad_button(GamepadCode::DpadUp)}),
+        make_consume_chord({gamepad_button(GamepadCode::RightBumper)},
+                           {gamepad_button(GamepadCode::DpadDown)}),
+    });
+    // Each chord's modifier becomes the other's forbidden bit (strict-match parity).
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(rb | down)), down);
+    // Holding both modifiers rejects both single-modifier chords.
+    EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | rb | up | down)), 0u);
+}
+
+TEST_F(ConsumeRuleBuildTest, KeyboardModifierDisablesAllRules)
+{
+    const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
+    // A keyboard modifier is invisible to the detour, so the eligibility gate drops
+    // the whole rule list and the reactive pre-arm path covers the chord instead.
+    InputPoller poller({make_consume_chord({keyboard_key(VK_CONTROL)},
+                                           {gamepad_button(GamepadCode::DpadUp)})});
+    EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
+}
+
+TEST_F(ConsumeRuleBuildTest, AnalogTriggerProducesNoRule)
+{
+    const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
+    // LeftTrigger is analog (not an XINPUT_GAMEPAD.wButtons bit), so there is no
+    // digital trigger to mask and no rule is emitted.
+    InputPoller poller({make_consume_chord({gamepad_button(GamepadCode::LeftBumper)},
+                                           {gamepad_button(GamepadCode::LeftTrigger)})});
+    EXPECT_EQ(evaluate_published_consume_rules(lb), 0u);
 }
 
 // --- Live-hook lifecycle: window-procedure subclass and XInput inline hook ---
