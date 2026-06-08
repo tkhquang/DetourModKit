@@ -1,12 +1,19 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <thread>
+#include <vector>
 
 #include "input_intercept.hpp"
+#include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::detail::GamepadSuppressState;
+using DetourModKit::detail::install_wndproc;
+using DetourModKit::detail::install_xinput;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::set_wheel_consume;
 using DetourModKit::detail::step_gamepad_suppress;
@@ -15,6 +22,7 @@ using DetourModKit::detail::take_wheel_counts;
 using DetourModKit::detail::uninstall;
 using DetourModKit::detail::WheelPulseState;
 using DetourModKit::detail::wndproc_installed;
+using DetourModKit::detail::XInputGetStateFn;
 using DetourModKit::detail::xinput_installed;
 using DetourModKit::detail::xinput_trampoline;
 
@@ -165,4 +173,382 @@ TEST(GamepadSuppressTest, RepressDuringGraceReHolds)
     // Released again; grace restarts from this release.
     EXPECT_EQ(step_gamepad_suppress(state, 0, 0, 1060, kGraceMs), dpad);
     EXPECT_EQ(step_gamepad_suppress(state, 0, 0, 1200, kGraceMs), 0u);
+}
+
+// --- Live-hook lifecycle: window-procedure subclass and XInput inline hook ---
+//
+// These drive the real interceptors against a throwaway top-level window (and a
+// loaded XInput runtime) owned by the test process. They exercise the
+// install/uninstall, self-heal, and message-routing branches that the pure
+// state-machine tests above cannot reach. Each is skipped (not failed) when the
+// host has no window station or no XInput runtime, so a headless runner stays
+// green while a normal desktop or CI runner gets real coverage.
+
+namespace
+{
+    // A single process-lifetime window class; registering once avoids the
+    // ERROR_CLASS_ALREADY_EXISTS that repeated per-test registration would hit.
+    // The class is intentionally never unregistered: the OS reclaims it at process
+    // exit, and a test process owns no other consumers of the atom.
+    constexpr const wchar_t *kTestWindowClass = L"DMKInterceptTestWindow";
+
+    void ensure_test_window_class_registered() noexcept
+    {
+        static const bool registered = [] {
+            WNDCLASSEXW wc{};
+            wc.cbSize = sizeof(wc);
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = GetModuleHandleW(nullptr);
+            wc.lpszClassName = kTestWindowClass;
+            return RegisterClassExW(&wc) != 0;
+        }();
+        (void)registered;
+    }
+
+    // Creates a visible, top-level, owner-less window owned by this process so
+    // find_game_window() can select it. Returns nullptr when no window station is
+    // available (headless host), which makes the dependent tests skip.
+    HWND make_test_window() noexcept
+    {
+        ensure_test_window_class_registered();
+        const HWND hwnd = CreateWindowExW(
+            0, kTestWindowClass, L"DMK Intercept Test", WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT, 200, 150, nullptr, nullptr,
+            GetModuleHandleW(nullptr), nullptr);
+        if (hwnd != nullptr)
+        {
+            // SW_SHOWNA sets WS_VISIBLE (so IsWindowVisible passes inside
+            // find_game_window) without stealing focus from the test console.
+            ShowWindow(hwnd, SW_SHOWNA);
+        }
+        return hwnd;
+    }
+
+    // Predecessor procedure the detour forwards to. Counting forwarded wheel
+    // messages makes "did the game still see this notch" observable, which is how
+    // the consume-swallow and disarm branches are checked. SendMessage to a window
+    // owned by the test thread runs this synchronously on that thread, so the
+    // counter needs no cross-thread ordering beyond being atomic.
+    std::atomic<int> g_forwarded_wheel_msgs{0};
+
+    LRESULT CALLBACK recording_wndproc(HWND h, UINT msg, WPARAM w, LPARAM l) noexcept
+    {
+        if (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL)
+        {
+            g_forwarded_wheel_msgs.fetch_add(1, std::memory_order_relaxed);
+        }
+        return DefWindowProcW(h, msg, w, l);
+    }
+
+    // Builds a wheel-message wParam whose HIWORD is a signed wheel delta of
+    // |notches| detents. Positive scrolls forward (vertical Up / horizontal Right),
+    // negative backward (Down / Left), matching the detour's sign split.
+    WPARAM wheel_wparam(int notches) noexcept
+    {
+        const short delta = static_cast<short>(notches * WHEEL_DELTA);
+        return MAKEWPARAM(0, static_cast<WORD>(delta));
+    }
+
+    // Polls a predicate until it holds or the timeout elapses. Used instead of a
+    // fixed sleep so a transition driven by the background poll thread is awaited by
+    // condition, not by guessing a duration (the project's concurrency-test style).
+    template <typename Predicate>
+    bool wait_until(Predicate pred, std::chrono::milliseconds timeout) noexcept
+    {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            if (pred())
+            {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return pred();
+    }
+} // namespace
+
+class InterceptWndProcTest : public ::testing::Test
+{
+protected:
+    HWND hwnd_ = nullptr;
+
+    void SetUp() override
+    {
+        uninstall(); // start from a known-clean interception state
+        g_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
+        (void)take_wheel_counts();
+        set_wheel_consume(false);
+        hwnd_ = make_test_window();
+        if (hwnd_ == nullptr)
+        {
+            GTEST_SKIP() << "no window station available to create a top-level window";
+        }
+    }
+
+    void TearDown() override
+    {
+        uninstall();
+        if (hwnd_ != nullptr && IsWindow(hwnd_))
+        {
+            DestroyWindow(hwnd_);
+        }
+        hwnd_ = nullptr;
+    }
+
+    // Installs the subclass and confirms it landed on our test window. Returns false
+    // when find_game_window selected a different top-level window in this desktop
+    // session (so the caller skips rather than asserting on a window it does not
+    // control).
+    [[nodiscard]] bool install_on_our_window() noexcept
+    {
+        const LONG_PTR before = GetWindowLongPtrW(hwnd_, GWLP_WNDPROC);
+        if (!install_wndproc())
+        {
+            return false;
+        }
+        return GetWindowLongPtrW(hwnd_, GWLP_WNDPROC) != before;
+    }
+};
+
+TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
+{
+    EXPECT_FALSE(wndproc_installed());
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    EXPECT_TRUE(wndproc_installed());
+    // Idempotent: a second install while already installed is a no-op success.
+    EXPECT_TRUE(install_wndproc());
+
+    (void)take_wheel_counts(); // drain any stray notch before measuring
+
+    // Vertical wheel: HIWORD sign selects Up (+) versus Down (-).
+    SendMessageW(hwnd_, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    SendMessageW(hwnd_, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    SendMessageW(hwnd_, WM_MOUSEWHEEL, wheel_wparam(-1), 0);
+    auto counts = take_wheel_counts();
+    EXPECT_EQ(counts[0], 2); // Up
+    EXPECT_EQ(counts[1], 1); // Down
+    EXPECT_EQ(counts[2], 0); // Left
+    EXPECT_EQ(counts[3], 0); // Right
+
+    // Horizontal (tilt) wheel: positive tilts Right, negative Left.
+    SendMessageW(hwnd_, WM_MOUSEHWHEEL, wheel_wparam(1), 0);
+    SendMessageW(hwnd_, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
+    SendMessageW(hwnd_, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
+    SendMessageW(hwnd_, WM_MOUSEHWHEEL, wheel_wparam(-1), 0);
+    counts = take_wheel_counts();
+    EXPECT_EQ(counts[0], 0);
+    EXPECT_EQ(counts[1], 0);
+    EXPECT_EQ(counts[2], 3); // Left
+    EXPECT_EQ(counts[3], 1); // Right
+}
+
+TEST_F(InterceptWndProcTest, ConsumeSwallowsOwnedWheelMessages)
+{
+    // Make the window's own procedure the predecessor the detour forwards to, so
+    // "was the game notified" is observable via g_forwarded_wheel_msgs.
+    SetWindowLongPtrW(hwnd_, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&recording_wndproc));
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    g_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
+    (void)take_wheel_counts();
+
+    // Not consuming: the notch is latched for the poll loop AND forwarded to the
+    // game's procedure.
+    set_wheel_consume(false);
+    SendMessageW(hwnd_, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    EXPECT_EQ(g_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1);
+    EXPECT_EQ(take_wheel_counts()[0], 1);
+
+    // Consuming: still latched for the poll loop, but swallowed so the game's
+    // procedure never sees it.
+    set_wheel_consume(true);
+    SendMessageW(hwnd_, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    EXPECT_EQ(g_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1); // unchanged
+    EXPECT_EQ(take_wheel_counts()[0], 1);
+
+    set_wheel_consume(false);
+}
+
+TEST_F(InterceptWndProcTest, WmNcDestroySelfHealsAndAllowsResubclass)
+{
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    EXPECT_TRUE(wndproc_installed());
+
+    // Destroying the subclassed window dispatches WM_NCDESTROY synchronously to the
+    // detour, which must mark the subclass uninstalled so a later poll cycle
+    // re-subclasses a recreated window (the fullscreen-toggle window-recreation case
+    // that would otherwise leave the new window unhooked).
+    DestroyWindow(hwnd_);
+    hwnd_ = nullptr;
+    EXPECT_FALSE(wndproc_installed());
+
+    // After the self-heal a freshly created window can be subclassed again.
+    hwnd_ = make_test_window();
+    if (hwnd_ == nullptr)
+    {
+        GTEST_SKIP() << "no window station available to recreate a window";
+    }
+    if (install_on_our_window())
+    {
+        EXPECT_TRUE(wndproc_installed());
+    }
+}
+
+TEST_F(InterceptWndProcTest, UninstallRestoresPredecessorAtTopOfChain)
+{
+    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
+    SetWindowLongPtrW(hwnd_, GWLP_WNDPROC, predecessor);
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    // Installed: our detour sits on top, not the predecessor.
+    EXPECT_NE(GetWindowLongPtrW(hwnd_, GWLP_WNDPROC), predecessor);
+
+    // Still top of the chain, so uninstall restores the saved predecessor exactly.
+    uninstall();
+    EXPECT_EQ(GetWindowLongPtrW(hwnd_, GWLP_WNDPROC), predecessor);
+    EXPECT_FALSE(wndproc_installed());
+}
+
+TEST(InterceptXInputTest, InstallHooksExportAndTrampolineRoundTrips)
+{
+    HMODULE xinput = nullptr;
+    for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+    {
+        xinput = LoadLibraryW(name);
+        if (xinput != nullptr)
+        {
+            break;
+        }
+    }
+    if (xinput == nullptr)
+    {
+        GTEST_SKIP() << "no XInput runtime available on this host";
+    }
+
+    uninstall();
+    EXPECT_FALSE(xinput_installed());
+
+    ASSERT_TRUE(install_xinput(0));
+    EXPECT_TRUE(xinput_installed());
+    // The poll thread reads the controller through the published trampoline so it
+    // observes the true (unmasked) state; it must be non-null once installed.
+    EXPECT_NE(xinput_trampoline(), nullptr);
+    // Idempotent while already installed.
+    EXPECT_TRUE(install_xinput(0));
+
+    // Calling the now-hooked export routes through the detour into the trampoline
+    // and returns the real result without crashing. With no controller bound the
+    // detour takes its non-success branch (apply_suppress is skipped). The wButtons
+    // masking branch is covered by the step_gamepad_suppress unit tests and
+    // validated manually with a connected controller.
+    const auto get_state = reinterpret_cast<XInputGetStateFn>(
+        reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
+    ASSERT_NE(get_state, nullptr);
+    XINPUT_STATE state{};
+    const DWORD result = get_state(0, &state);
+    EXPECT_TRUE(result == ERROR_SUCCESS || result == ERROR_DEVICE_NOT_CONNECTED);
+
+    // Teardown rewrites the patched prologue before the module is released.
+    uninstall();
+    EXPECT_FALSE(xinput_installed());
+    EXPECT_EQ(xinput_trampoline(), nullptr);
+
+    FreeLibrary(xinput);
+}
+
+TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
+{
+    // Reproduces the Logic-DLL hot-reload path: a consume wheel binding arms the
+    // wheel-swallow flag, and clear_bindings(false) (the loader-lock-safe reset
+    // Bootstrap uses) must let the poll loop disarm it on a later cycle so the game
+    // regains its wheel even though the subclass stays installed until shutdown.
+    // Observed end to end through the recording predecessor: while consuming, an
+    // owned wheel message is swallowed; once disarmed it is forwarded again.
+    uninstall();
+    g_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
+
+    HWND hwnd = make_test_window();
+    if (hwnd == nullptr)
+    {
+        GTEST_SKIP() << "no window station available to create a top-level window";
+    }
+    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+
+    // A consume mouse-wheel binding arms both the wheel-capture subclass and the
+    // wheel-swallow flag. require_focus=false keeps process_focused true so the
+    // disarm is deterministic regardless of which window owns the foreground.
+    InputBinding binding;
+    binding.name = "wheel_zoom";
+    binding.keys = {mouse_wheel(WheelCode::Up)};
+    binding.consume = true;
+    binding.mode = InputMode::Press;
+
+    std::vector<InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+    InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    poller.start();
+
+    const auto cleanup = [&]() noexcept {
+        poller.shutdown(); // routes through detail::uninstall()
+        uninstall();
+        if (IsWindow(hwnd))
+        {
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+            DestroyWindow(hwnd);
+        }
+    };
+
+    // The poll thread lazily subclasses the game window; wait until it lands on OUR
+    // window (procedure changes away from the recording predecessor).
+    const bool hooked_ours = wait_until(
+        [&] {
+            return wndproc_installed() &&
+                   GetWindowLongPtrW(hwnd, GWLP_WNDPROC) != predecessor;
+        },
+        std::chrono::seconds(5));
+    if (!hooked_ours)
+    {
+        cleanup();
+        GTEST_SKIP() << "poll thread did not subclass the test window";
+    }
+
+    // Wait until the swallow flag engages: an owned wheel message stops reaching the
+    // game's predecessor procedure.
+    const bool consume_engaged = wait_until(
+        [&] {
+            const int before = g_forwarded_wheel_msgs.load(std::memory_order_relaxed);
+            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+            return g_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before;
+        },
+        std::chrono::seconds(5));
+    EXPECT_TRUE(consume_engaged);
+
+    // The loader-lock-safe hot-reload reset: drop bindings without firing release
+    // callbacks. The subclass stays installed, so the poll loop must clear the
+    // swallow flag on a later cycle or the game loses its wheel.
+    poller.clear_bindings(false);
+
+    // Wait until the swallow flag disarms: the message is forwarded again.
+    const bool consume_disarmed = wait_until(
+        [&] {
+            const int before = g_forwarded_wheel_msgs.load(std::memory_order_relaxed);
+            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+            return g_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before + 1;
+        },
+        std::chrono::seconds(5));
+    EXPECT_TRUE(consume_disarmed);
+
+    cleanup();
 }

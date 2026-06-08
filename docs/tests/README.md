@@ -312,7 +312,18 @@ The decoder header lives under `src/` (not the public include tree), so the test
 | `GamepadSuppressTest.RepressDuringGraceReHolds` | A re-press during the release grace re-holds the suppression and restarts the grace on the next release. |
 | `InterceptControlTest.AccessorsAndSettersWithNothingInstalled` | With no hook installed (the unit-test process), the accessors report "off" and the setters / `uninstall()` are safe no-ops over atomics. |
 
-The live `XInputGetState` inline hook and the window-procedure subclass are not exercised here: they require a real game window and a connected controller, so they are validated manually. The state-machine split keeps the logic those hooks feed fully testable in process.
+The window-procedure subclass and the `XInputGetState` inline hook are exercised by integration tests that stand up a throwaway top-level window owned by the test process (and load an `xinput` runtime). Each skips itself when the host has no window station or no XInput runtime, so a headless runner stays green:
+
+| Test | What it proves |
+| ---- | -------------- |
+| `InterceptWndProcTest.InstallCapturesWheelNotchesPerDirection` | After the subclass installs, `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` notches accumulate into the correct per-direction counters (Up/Down vertical, Left/Right horizontal) by wheel-delta sign. |
+| `InterceptWndProcTest.ConsumeSwallowsOwnedWheelMessages` | With consume off the notch is latched and forwarded to the game's predecessor procedure; with consume on it is still latched but swallowed so the game never sees it. |
+| `InterceptWndProcTest.WmNcDestroySelfHealsAndAllowsResubclass` | Destroying the subclassed window marks the subclass uninstalled via `WM_NCDESTROY`, so a recreated window (the fullscreen-toggle case) can be re-subclassed. |
+| `InterceptWndProcTest.UninstallRestoresPredecessorAtTopOfChain` | When the detour is still the top of the window-procedure chain, `uninstall()` restores the exact saved predecessor. |
+| `InterceptXInputTest.InstallHooksExportAndTrampolineRoundTrips` | Installing hooks the real `XInputGetState` export, publishes a non-null trampoline, is idempotent, routes a call through the detour into the trampoline, and restores the prologue on `uninstall()`. |
+| `InterceptDisarmTest.PollerDisarmsWheelConsumeAfterClearBindings` | A standalone `InputPoller` with a consume wheel binding arms the swallow flag; `clear_bindings(false)` (the loader-lock-safe hot-reload reset) lets the poll loop disarm it on a later cycle so the game regains its wheel. |
+
+The one path still validated manually is the gamepad button masking itself: clearing `wButtons` from a live controller's state requires a physically connected controller, so `apply_suppress` is covered indirectly by the `GamepadSuppressTest` state-machine suite plus manual play-testing.
 
 ## Benchmark Harness
 
