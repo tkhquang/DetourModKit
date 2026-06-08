@@ -397,10 +397,11 @@ TEST_F(InterceptWndProcTest, WmNcDestroySelfHealsAndAllowsResubclass)
     {
         GTEST_SKIP() << "no window station available to recreate a window";
     }
-    if (install_on_our_window())
+    if (!install_on_our_window())
     {
-        EXPECT_TRUE(wndproc_installed());
+        GTEST_SKIP() << "re-subclass selected a different process window";
     }
+    EXPECT_TRUE(wndproc_installed());
 }
 
 TEST_F(InterceptWndProcTest, UninstallRestoresPredecessorAtTopOfChain)
