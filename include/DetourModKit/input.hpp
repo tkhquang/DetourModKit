@@ -69,8 +69,15 @@ namespace DetourModKit
      *          modifier. This prevents "V" from firing when "Shift+V" is pressed.
      *
      *          Each InputCode identifies both the device source (keyboard, mouse,
-     *          gamepad) and the button/key code. All codes within a binding should
-     *          be from the same device group (keyboard/mouse or gamepad).
+     *          gamepad, mouse wheel) and the button/key code. All codes within a
+     *          binding should be from the same device group (keyboard/mouse or
+     *          gamepad); mouse-wheel codes are a standalone source and should not be
+     *          mixed with other devices in one binding. Mouse-wheel codes are
+     *          trigger-only and Press-mode: the wheel has no held state, so a single
+     *          notch reads as one Press edge.
+     *
+     *          When @c consume is set, the binding's trigger is additionally hidden
+     *          from the game (see the @c consume field).
      *
      * @warning Callbacks are invoked on the polling thread. They must not capture references
      *          or pointers to objects whose lifetime may end before shutdown() completes.
@@ -82,6 +89,20 @@ namespace DetourModKit
         std::vector<InputCode> keys;
         std::vector<InputCode> modifiers;
         InputMode mode = InputMode::Press;
+
+        /**
+         * Opt-in input suppression. When true, the binding's trigger input is
+         * hidden from the game so it does not also act on it (for example an
+         * "LB + D-pad" zoom that must not open the map when released). Honored for
+         * digital gamepad buttons (D-pad, face buttons, bumpers, stick clicks) via
+         * an XInputGetState hook, and for the mouse wheel via the window-procedure
+         * hook. Analog triggers and stick directions cannot be masked (the detour
+         * clears only the digital button bitmask), and keyboard/mouse-button
+         * suppression is not provided. Default off keeps the input system purely
+         * observational.
+         */
+        bool consume = false;
+
         std::function<void()> on_press;
         std::function<void(bool)> on_state_change;
     };
@@ -104,6 +125,16 @@ namespace DetourModKit
      * @warning When used inside a DLL, shutdown() must be called before DLL_PROCESS_DETACH.
      *          Calling join() on a thread during DllMain can deadlock due to the loader lock.
      *          Use DMK_Shutdown() to ensure proper teardown ordering.
+     * @warning The opt-in interception layer (mouse-wheel capture and gamepad
+     *          passthrough suppression) is backed by process-global state and a
+     *          single set of hooks: one XInput hook bound to a single gamepad index,
+     *          one window-procedure subclass, and one suppression mask. At most one
+     *          InputPoller may therefore use those features at a time; running two
+     *          pollers that both register consume or mouse-wheel bindings is
+     *          unsupported and would have them fight over the shared mask and hooks.
+     *          The InputManager singleton is the intended single-instance owner.
+     *          Purely observational pollers (no consume, no wheel bindings) install
+     *          nothing and are unaffected.
      */
     class InputPoller
     {
@@ -196,6 +227,18 @@ namespace DetourModKit
          * @note Thread-safe. Can be called while the poller is running.
          */
         void set_require_focus(bool require_focus) noexcept;
+
+        /**
+         * @brief Sets the input-suppression flag on every binding sharing @p name.
+         * @details Updates the @c consume flag on all matching bindings and
+         *          refreshes the interception gates so the XInput / window-procedure
+         *          hooks are installed (or left uninstalled) on the next poll cycle.
+         *          A no-op if the name was never registered. Thread-safe; may be
+         *          called while the poller is running.
+         * @param name Binding name previously registered.
+         * @param consume true to hide the binding's trigger from the game.
+         */
+        void set_consume(std::string_view name, bool consume) noexcept;
 
         /**
          * @brief Stops the polling thread.
@@ -337,6 +380,13 @@ namespace DetourModKit
         int trigger_threshold_;
         int stick_threshold_;
         std::atomic<bool> has_gamepad_bindings_{false};
+
+        // Interception gates, recomputed alongside the modifier caches. Each
+        // decides whether an active-input hook is installed lazily by the poll
+        // loop, so a mod that never opts in pays no interception cost.
+        std::atomic<bool> has_wheel_bindings_{false};          // any MouseWheel trigger -> WndProc hook
+        std::atomic<bool> has_consume_gamepad_bindings_{false}; // any consume gamepad binding -> XInput hook
+        std::atomic<bool> has_wheel_consume_bindings_{false};   // any consume wheel binding -> swallow wheel messages
     };
 
     /**
@@ -454,6 +504,21 @@ namespace DetourModKit
          * @note Can be called before or after start(). Changes take effect immediately.
          */
         void set_require_focus(bool require_focus);
+
+        /**
+         * @brief Enables or disables input suppression for a named binding.
+         * @details Sets the @c consume flag on every binding sharing @p name,
+         *          forwarding to the active poller when running or updating pending
+         *          bindings before start(). When enabled, the binding's trigger is
+         *          hidden from the game: digital gamepad buttons via an XInputGetState
+         *          hook (analog triggers and stick directions cannot be masked) and
+         *          the mouse wheel via the window-procedure hook (keyboard and
+         *          mouse-button suppression are not provided). A no-op if the name is
+         *          unknown. Thread-safe.
+         * @param name Binding name previously registered.
+         * @param consume true to hide the binding's trigger from the game.
+         */
+        void set_consume(std::string_view name, bool consume) noexcept;
 
         /**
          * @brief Sets the XInput controller index to poll for gamepad bindings.

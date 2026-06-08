@@ -13,10 +13,13 @@
 #include "DetourModKit/logger.hpp"
 
 #include "platform.hpp"
+#include "input_intercept.hpp"
 
 #include <windows.h>
 #include <Xinput.h>
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <exception>
 #include <new>
 #include <unordered_set>
@@ -35,19 +38,35 @@ namespace DetourModKit
          * @param gamepad_connected Whether the gamepad is connected.
          * @param trigger_threshold Analog trigger deadzone threshold.
          * @param stick_threshold Thumbstick deadzone threshold.
+         * @param wheel_pulse Per-cycle wheel pulse mask (bit 0 = WheelUp .. bit 3 =
+         *        WheelRight), latched once per cycle by the poll loop so repeated
+         *        reads within a cycle stay consistent.
          * @return true if the input is currently pressed.
          */
         bool is_code_pressed(const InputCode &code,
                              const XINPUT_STATE &gamepad_state,
                              bool gamepad_connected,
                              int trigger_threshold,
-                             int stick_threshold) noexcept
+                             int stick_threshold,
+                             uint8_t wheel_pulse) noexcept
         {
             switch (code.source)
             {
             case InputSource::Keyboard:
             case InputSource::Mouse:
                 return code.code != 0 && (GetAsyncKeyState(code.code) & 0x8000) != 0;
+            case InputSource::MouseWheel:
+            {
+                // The wheel has no held state; the poll loop latches each notch
+                // into wheel_pulse. WheelCode values are 1-based and dense, so the
+                // direction index is code - WheelCode::Up.
+                const int dir = code.code - WheelCode::Up;
+                if (dir < 0 || dir > 3)
+                {
+                    return false;
+                }
+                return (wheel_pulse & (1u << dir)) != 0;
+            }
             case InputSource::Gamepad:
             {
                 if (!gamepad_connected)
@@ -161,6 +180,78 @@ namespace DetourModKit
             }
             return false;
         }
+
+        /**
+         * @brief Reports whether any binding uses a mouse-wheel trigger.
+         * @details Wheel codes only appear as trigger keys (never modifiers), so
+         *          modifiers are not scanned. Drives lazy installation of the
+         *          window-procedure hook that captures wheel events.
+         */
+        bool scan_for_wheel_bindings(const std::vector<InputBinding> &bindings) noexcept
+        {
+            for (const auto &binding : bindings)
+            {
+                for (const auto &key : binding.keys)
+                {
+                    if (key.source == InputSource::MouseWheel)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// Reports whether any consume binding carries a suppressible gamepad button
+        /// (gates the XInput hook). Only digital buttons gate it: the detour masks
+        /// XINPUT_GAMEPAD.wButtons, so analog triggers and stick directions (the
+        /// synthetic codes >= GamepadCode::LeftTrigger) can never be cleared and must
+        /// not install a hook that would mask nothing.
+        bool scan_for_consume_gamepad_bindings(const std::vector<InputBinding> &bindings) noexcept
+        {
+            for (const auto &binding : bindings)
+            {
+                if (!binding.consume)
+                {
+                    continue;
+                }
+                for (const auto &key : binding.keys)
+                {
+                    if (key.source == InputSource::Gamepad &&
+                        key.code > 0 && key.code < GamepadCode::LeftTrigger)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// Reports whether any consume binding carries a wheel trigger (gates wheel swallowing).
+        bool scan_for_wheel_consume_bindings(const std::vector<InputBinding> &bindings) noexcept
+        {
+            for (const auto &binding : bindings)
+            {
+                if (!binding.consume)
+                {
+                    continue;
+                }
+                for (const auto &key : binding.keys)
+                {
+                    if (key.source == InputSource::MouseWheel)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        // Release grace for gamepad consume-until-release. Long enough to absorb
+        // the modifier-released-before-trigger window (the player relaxing the
+        // bumper a frame or two before the thumb leaves the D-pad) without
+        // noticeably delaying a deliberate tap that follows.
+        constexpr uint64_t s_gamepad_suppress_grace_ms = 80;
     } // anonymous namespace
 
     // --- InputPoller ---
@@ -199,6 +290,11 @@ namespace DetourModKit
         }
         known_modifiers_.assign(modifier_set.begin(), modifier_set.end());
         has_gamepad_bindings_.store(scan_for_gamepad_bindings(bindings_), std::memory_order_relaxed);
+        has_wheel_bindings_.store(scan_for_wheel_bindings(bindings_), std::memory_order_relaxed);
+        has_consume_gamepad_bindings_.store(scan_for_consume_gamepad_bindings(bindings_),
+                                            std::memory_order_relaxed);
+        has_wheel_consume_bindings_.store(scan_for_wheel_consume_bindings(bindings_),
+                                          std::memory_order_relaxed);
     }
 
     InputPoller::~InputPoller() noexcept
@@ -285,6 +381,23 @@ namespace DetourModKit
         require_focus_.store(require_focus, std::memory_order_relaxed);
     }
 
+    void InputPoller::set_consume(std::string_view name, bool consume) noexcept
+    {
+        std::unique_lock lock(bindings_rw_mutex_);
+        const auto it = name_index_.find(name);
+        if (it == name_index_.end())
+        {
+            return;
+        }
+        for (const size_t idx : it->second)
+        {
+            bindings_[idx].consume = consume;
+        }
+        // Refresh the interception gates so the poll loop installs or skips the
+        // XInput / window-procedure hooks on its next cycle.
+        recompute_modifier_caches_locked();
+    }
+
     void InputPoller::shutdown() noexcept
     {
         if (!poll_thread_.joinable())
@@ -316,6 +429,16 @@ namespace DetourModKit
         // The poll thread is provably stopped here, so releasing active holds
         // and firing their on_state_change(false) callbacks is race-free.
         running_.store(false, std::memory_order_release);
+
+        // The poll thread is the sole publisher of the suppression mask and the
+        // sole reader of the XInput trampoline, so tearing the interception hooks
+        // down now is race-free. This is skipped on the loader-lock path above:
+        // safetyhook's hook removal VirtualProtects the patched code pages and
+        // registers a vectored exception handler to fix up any in-flight thread,
+        // which must not run under the loader lock, so the detours are intentionally
+        // left installed against the pinned module instead.
+        detail::uninstall();
+
         release_active_holds();
     }
 
@@ -327,6 +450,11 @@ namespace DetourModKit
         constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
         bool gamepad_was_connected = false;
         auto last_gamepad_poll = std::chrono::steady_clock::time_point{};
+
+        // Interception state, carried across cycles. Both are poll-thread-private:
+        // the published mask and wheel latch they feed live in input_intercept.
+        detail::WheelPulseState wheel_pulse{};
+        detail::GamepadSuppressState gp_suppress{};
 
         struct PendingCallback
         {
@@ -347,9 +475,59 @@ namespace DetourModKit
             const bool process_focused =
                 !require_focus_.load(std::memory_order_relaxed) || is_process_foreground();
 
+            // Lazily install the active-input hooks the current bindings need.
+            // Each call is idempotent and fails cheaply until its target (a loaded
+            // xinput module / the game window) becomes available, so this also
+            // handles a target that appears after the poller starts.
+            if (has_consume_gamepad_bindings_.load(std::memory_order_relaxed) &&
+                !detail::xinput_installed())
+            {
+                (void)detail::install_xinput(gamepad_index_);
+            }
+            if (has_wheel_bindings_.load(std::memory_order_relaxed) &&
+                !detail::wndproc_installed())
+            {
+                (void)detail::install_wndproc();
+            }
+
+            // Snapshot the wheel notches the window-procedure hook accumulated into
+            // a per-cycle pulse mask, so every binding this cycle reads a
+            // consistent value and each notch maps to exactly one Press edge. The
+            // counters are drained even when unfocused so a background notch is
+            // discarded rather than queued to fire on the next focus.
+            uint8_t wheel_pulse_mask = 0;
+            if (has_wheel_bindings_.load(std::memory_order_relaxed))
+            {
+                const auto taken = detail::take_wheel_counts();
+                for (int dir = 0; dir < 4; ++dir)
+                {
+                    wheel_pulse.pending[static_cast<size_t>(dir)] +=
+                        taken[static_cast<size_t>(dir)];
+                }
+                wheel_pulse_mask = detail::step_wheel_pulse(wheel_pulse);
+            }
+
+            // Drive the wheel-swallow flag every cycle, outside the wheel-binding
+            // guard above, so it disarms on the first cycle after the last consume
+            // wheel binding is removed at runtime: the window-procedure subclass
+            // stays installed until shutdown, so a stale true would keep eating the
+            // game's wheel forever (the gamepad mask self-heals via its TTL, but the
+            // wheel flag has none). Gate it on focus to mirror the gamepad mask clear
+            // below: a backgrounded mod must not swallow the focused app's wheel.
+            detail::set_wheel_consume(
+                process_focused &&
+                has_wheel_consume_bindings_.load(std::memory_order_relaxed));
+
+            // Digital gamepad button bits claimed by active consume chords this
+            // cycle, accumulated in the binding loop and published afterwards.
+            uint16_t gamepad_owned = 0;
+
             // Poll gamepad state once per cycle when connected.
             // When disconnected, throttle reconnection attempts to avoid
             // the per-cycle overhead of XInputGetState on empty slots.
+            // Read through the saved trampoline when the suppression hook is
+            // installed so the poll observes the true, unmasked controller state
+            // rather than its own published mask.
             XINPUT_STATE gamepad_state{};
             bool gamepad_connected = false;
             if (has_gamepad_bindings_.load(std::memory_order_relaxed) && process_focused)
@@ -359,9 +537,12 @@ namespace DetourModKit
                     (now - last_gamepad_poll) >= gamepad_reconnect_interval)
                 {
                     last_gamepad_poll = now;
-                    gamepad_was_connected =
-                        XInputGetState(static_cast<DWORD>(gamepad_index_),
-                                       &gamepad_state) == ERROR_SUCCESS;
+                    const detail::XInputGetStateFn xinput_original = detail::xinput_trampoline();
+                    const DWORD xinput_result =
+                        (xinput_original != nullptr)
+                            ? xinput_original(static_cast<DWORD>(gamepad_index_), &gamepad_state)
+                            : XInputGetState(static_cast<DWORD>(gamepad_index_), &gamepad_state);
+                    gamepad_was_connected = xinput_result == ERROR_SUCCESS;
                 }
                 gamepad_connected = gamepad_was_connected;
             }
@@ -388,7 +569,7 @@ namespace DetourModKit
                         bool modifiers_held = true;
                         for (const auto &mod : binding.modifiers)
                         {
-                            if (!is_code_pressed(mod, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
+                            if (!is_code_pressed(mod, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh, wheel_pulse_mask))
                             {
                                 modifiers_held = false;
                                 break;
@@ -401,7 +582,7 @@ namespace DetourModKit
                             // NOT in this binding's required set is currently held.
                             for (const auto &km : known_mods)
                             {
-                                if (!is_code_pressed(km, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
+                                if (!is_code_pressed(km, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh, wheel_pulse_mask))
                                 {
                                     continue;
                                 }
@@ -426,9 +607,25 @@ namespace DetourModKit
                         {
                             for (const auto &key : binding.keys)
                             {
-                                if (is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh))
+                                if (!is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh, wheel_pulse_mask))
                                 {
-                                    any_pressed = true;
+                                    continue;
+                                }
+                                any_pressed = true;
+
+                                // A consume binding claims its pressed digital
+                                // gamepad triggers so they can be masked from the
+                                // game. Keep scanning the remaining keys to collect
+                                // every owned bit; a plain (non-consume) binding
+                                // needs only one hit and stops at the first.
+                                if (binding.consume && key.source == InputSource::Gamepad &&
+                                    key.code > 0 && key.code < GamepadCode::LeftTrigger)
+                                {
+                                    gamepad_owned = static_cast<uint16_t>(gamepad_owned |
+                                                                          static_cast<uint16_t>(key.code));
+                                }
+                                if (!binding.consume)
+                                {
                                     break;
                                 }
                             }
@@ -459,6 +656,28 @@ namespace DetourModKit
                         break;
                     }
                     }
+                }
+            }
+
+            // Publish the gamepad suppression mask for the XInput detour. The
+            // consume-until-release latch keeps a trigger masked until the
+            // physical button is released plus a grace window, so releasing the
+            // modifier before the trigger cannot leak a bare trigger to the game.
+            // When unfocused or disconnected, clear the latch and mask so the
+            // game keeps its input while the mod is in the background.
+            if (has_consume_gamepad_bindings_.load(std::memory_order_relaxed))
+            {
+                if (process_focused && gamepad_connected)
+                {
+                    const uint16_t suppress = detail::step_gamepad_suppress(
+                        gp_suppress, gamepad_owned, gamepad_state.Gamepad.wButtons,
+                        GetTickCount64(), s_gamepad_suppress_grace_ms);
+                    detail::publish_gamepad_suppress(suppress);
+                }
+                else
+                {
+                    gp_suppress = detail::GamepadSuppressState{};
+                    detail::publish_gamepad_suppress(0);
                 }
             }
 
@@ -805,6 +1024,9 @@ namespace DetourModKit
             name_index_.clear();
             known_modifiers_.clear();
             has_gamepad_bindings_.store(false, std::memory_order_relaxed);
+            has_wheel_bindings_.store(false, std::memory_order_relaxed);
+            has_consume_gamepad_bindings_.store(false, std::memory_order_relaxed);
+            has_wheel_consume_bindings_.store(false, std::memory_order_relaxed);
             active_states_ = std::make_unique<std::atomic<uint8_t>[]>(0);
         }
 
@@ -985,6 +1207,35 @@ namespace DetourModKit
         {
             poller_->set_require_focus(require_focus);
         }
+    }
+
+    void InputManager::set_consume(std::string_view name, bool consume) noexcept
+    {
+        std::shared_ptr<InputPoller> live_poller;
+
+        {
+            std::lock_guard lock(mutex_);
+            if (poller_)
+            {
+                live_poller = poller_;
+            }
+            else
+            {
+                for (auto &binding : pending_bindings_)
+                {
+                    if (binding.name == name)
+                    {
+                        binding.consume = consume;
+                    }
+                }
+                return;
+            }
+        }
+
+        // Forward outside the InputManager mutex so the poller's exclusive
+        // bindings_rw_mutex_ acquisition cannot deadlock against a caller already
+        // holding mutex_ (matches register_press / register_hold).
+        live_poller->set_consume(name, consume);
     }
 
     void InputManager::set_gamepad_index(int index)

@@ -107,7 +107,7 @@ namespace
                 continue;
             }
 
-            // Convert via strtoul — no exception overhead on invalid input
+            // Convert via strtoul -- no exception overhead on invalid input
             errno = 0;
             char *end_ptr = nullptr;
             const unsigned long value = std::strtoul(token.c_str() + hex_start, &end_ptr, 16);
@@ -1015,6 +1015,25 @@ DetourModKit::Config::InputBindingGuard DetourModKit::Config::register_press_com
         });
 
     return InputBindingGuard{std::move(binding_name_str), std::move(enabled_flag)};
+}
+
+void DetourModKit::Config::register_consume_flag(
+    std::string_view section,
+    std::string_view ini_key,
+    std::string_view log_key_name,
+    std::string_view input_binding_name,
+    bool default_value)
+{
+    // Capture the binding name by value so the setter, which outlives this call
+    // and re-runs on every load()/reload(), stays valid. set_consume is a no-op
+    // for an unknown name, so registering this before the binding exists is safe.
+    std::string binding_name_str(input_binding_name);
+    register_bool(section, ini_key, log_key_name,
+                  [binding_name_str](bool consume)
+                  {
+                      InputManager::get_instance().set_consume(binding_name_str, consume);
+                  },
+                  default_value);
 }
 
 void DetourModKit::Config::load(std::string_view ini_filename)

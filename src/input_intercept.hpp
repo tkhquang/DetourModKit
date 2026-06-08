@@ -1,0 +1,182 @@
+#ifndef DETOURMODKIT_INPUT_INTERCEPT_HPP
+#define DETOURMODKIT_INPUT_INTERCEPT_HPP
+
+/**
+ * @file input_intercept.hpp
+ * @brief Internal active-input layer driven by InputPoller.
+ * @details Two opt-in capabilities that the observational poll loop cannot
+ *          provide on its own:
+ *            1. Gamepad passthrough suppression -- an inline hook on
+ *               XInputGetState masks owned button bits out of the state the game
+ *               reads, so a binding the mod claims is not also acted on by the
+ *               game (e.g. an "LB + D-pad" zoom that must not open the map).
+ *            2. Mouse-wheel capture -- the wheel is an event with no virtual-key
+ *               code, so it is invisible to GetAsyncKeyState. A window-procedure
+ *               subclass intercepts WM_MOUSEWHEEL / WM_MOUSEHWHEEL and latches
+ *               each notch for the poll loop to consume.
+ *
+ *          Ownership: this module owns its safetyhook InlineHook objects directly
+ *          rather than registering them with HookManager. The poll thread reads
+ *          the XInput trampoline pointer every cycle, and the hook lifetime must
+ *          be coupled to the poll thread's lifetime; routing it through the shared
+ *          HookManager registry would let remove_all_hooks() free the trampoline
+ *          underneath a live poll thread.
+ *
+ *          State the detours read lives in file-scope statics (not InputPoller
+ *          members) so that on the loader-lock teardown path -- where InputPoller
+ *          is leaked and its poll thread detached -- the still-installed detours
+ *          never dereference freed object state. The detours run on the game's
+ *          threads (XInput caller threads and the window message thread); all
+ *          shared state is atomic and every detour body is allocation-free and
+ *          non-throwing.
+ *
+ *          Windows-only internal header (mirrors platform.hpp); not installed.
+ */
+
+#include <windows.h>
+#include <Xinput.h>
+
+#include <array>
+#include <cstdint>
+
+namespace DetourModKit::detail
+{
+    /// Function-pointer type for XInputGetState and the ordinal-100 XInputGetStateEx.
+    using XInputGetStateFn = DWORD(WINAPI *)(DWORD, XINPUT_STATE *);
+
+    /**
+     * @struct WheelPulseState
+     * @brief Poll-thread-private state that turns queued wheel notches into
+     *        single-cycle pulses.
+     * @details The wheel has no released state, so the poll loop synthesizes one:
+     *          a notch reads as "pressed" for exactly one cycle, then is forced
+     *          low for one cycle so the edge detector re-arms. Without the forced
+     *          gap a continuous scroll would read as one long press and fire only
+     *          once. Indices are 0=Up, 1=Down, 2=Left, 3=Right.
+     */
+    struct WheelPulseState
+    {
+        std::array<int, 4> pending{};  ///< Unconsumed notches per direction.
+        std::array<bool, 4> pulsing{}; ///< Whether the previous cycle emitted a pulse.
+    };
+
+    /**
+     * @brief Advances the wheel pulse state machine by one poll cycle.
+     * @param state Per-direction pulse state, carried across cycles.
+     * @return Bitmask of directions pressed this cycle (bit 0 = Up .. bit 3 = Right).
+     */
+    [[nodiscard]] uint8_t step_wheel_pulse(WheelPulseState &state) noexcept;
+
+    /**
+     * @struct GamepadSuppressState
+     * @brief Poll-thread-private consume-until-release latch for suppressed
+     *        gamepad buttons.
+     */
+    struct GamepadSuppressState
+    {
+        uint16_t armed{0};                      ///< Currently suppressed XInput button bits.
+        std::array<uint64_t, 16> deadline_ms{}; ///< Per-bit release deadline; a held bit uses the sentinel.
+    };
+
+    /**
+     * @brief Advances the gamepad suppression latch by one poll cycle.
+     * @details A bit stays suppressed from the moment an active consume chord
+     *          claims it (@p owned_now) until the physical button is released
+     *          (@p true_buttons no longer has it) plus @p grace_ms. This closes
+     *          the modifier-released-before-trigger window: releasing the modifier
+     *          a frame before the trigger cannot leak a bare trigger to the game,
+     *          because suppression is latched to the trigger button's own
+     *          lifetime, not the chord's.
+     * @param state Latch state carried across cycles.
+     * @param owned_now Digital button bits the active consume chords claim this
+     *        cycle (each bit's physical button is already known pressed).
+     * @param true_buttons The unmasked XINPUT_GAMEPAD.wButtons read this cycle.
+     * @param now_ms Monotonic millisecond timestamp for this cycle.
+     * @param grace_ms Release grace window in milliseconds.
+     * @return Bitmask of button bits to clear from the game's state this cycle.
+     */
+    [[nodiscard]] uint16_t step_gamepad_suppress(GamepadSuppressState &state,
+                                                 uint16_t owned_now,
+                                                 uint16_t true_buttons,
+                                                 uint64_t now_ms,
+                                                 uint64_t grace_ms) noexcept;
+
+    // --- XInput interception (gamepad passthrough suppression) ---
+
+    /**
+     * @brief Installs the XInputGetState hook for the given controller index.
+     * @details Idempotent. Resolves the first loaded xinput DLL variant and hooks
+     *          its XInputGetState (and ordinal-100 XInputGetStateEx when present).
+     *          Returns false without side effects if no xinput module is loaded
+     *          yet, so the caller can retry on a later poll cycle.
+     * @param user_index The XInput controller index whose state may be masked.
+     * @return true if the hook is installed (or was already), false if not yet ready.
+     */
+    [[nodiscard]] bool install_xinput(int user_index) noexcept;
+
+    /// Returns whether the XInputGetState hook is currently installed.
+    [[nodiscard]] bool xinput_installed() noexcept;
+
+    /**
+     * @brief Returns the saved original XInputGetState (trampoline), or nullptr.
+     * @details The poll thread must read the controller through this trampoline so
+     *          it observes the true, unmasked state rather than its own mask.
+     */
+    [[nodiscard]] XInputGetStateFn xinput_trampoline() noexcept;
+
+    /**
+     * @brief Publishes the set of button bits the XInput detour should suppress.
+     * @details Refreshes a short time-to-live alongside the mask so that if the
+     *          poll thread stops refreshing it (crash/hang) the detour stops
+     *          masking and the game regains its input rather than latching forever.
+     * @param suppress_bits Button bits to clear; 0 disables masking.
+     */
+    void publish_gamepad_suppress(uint16_t suppress_bits) noexcept;
+
+    // --- Mouse-wheel capture (window-procedure subclass) ---
+
+    /**
+     * @brief Installs the window-procedure subclass on the game's main window.
+     * @details Idempotent. Returns false without side effects if no suitable
+     *          top-level window owned by this process is found yet, so the caller
+     *          can retry on a later poll cycle.
+     * @return true if the subclass is installed (or was already), false if not yet ready.
+     */
+    [[nodiscard]] bool install_wndproc() noexcept;
+
+    /// Returns whether the window-procedure subclass is currently installed.
+    [[nodiscard]] bool wndproc_installed() noexcept;
+
+    /**
+     * @brief Atomically takes and clears the accumulated wheel notch counts.
+     * @return Notch counts since the last call, indexed 0=Up, 1=Down, 2=Left, 3=Right.
+     */
+    [[nodiscard]] std::array<int, 4> take_wheel_counts() noexcept;
+
+    /**
+     * @brief Sets whether the wheel detour swallows owned wheel messages.
+     * @param consume When true, intercepted wheel messages are not forwarded to
+     *        the game so a binding that owns the wheel does not double-act.
+     */
+    void set_wheel_consume(bool consume) noexcept;
+
+    /**
+     * @brief Tears down both interceptors and stops all masking.
+     * @details Must be called off the Windows loader lock and only after the poll
+     *          thread has stopped. Destroying the safetyhook objects rewrites the
+     *          patched prologue pages (VirtualProtect to writable, restore the
+     *          original bytes) under a transiently registered vectored exception
+     *          handler that relocates the instruction pointer of any thread caught
+     *          executing inside the patched range -- it does not suspend threads.
+     *          Registering process-global VEH machinery and rewriting live code
+     *          pages this way must not run under the loader lock. The poll thread is
+     *          additionally the sole reader of the trampoline pointers, so it has to
+     *          be joined first. On the loader-lock teardown path this is
+     *          intentionally skipped (the detours stay installed against the pinned
+     *          module). Idempotent.
+     */
+    void uninstall() noexcept;
+
+} // namespace DetourModKit::detail
+
+#endif // DETOURMODKIT_INPUT_INTERCEPT_HPP
