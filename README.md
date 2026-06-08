@@ -18,6 +18,7 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads, PE module range queries | `memory.hpp` |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache | `rtti.hpp` |
+| RTTI Self-Heal | Reverse-identify the object behind a pointer slot; self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver | `rtti_dissect.hpp` |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
@@ -155,6 +156,19 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - `Rtti::find_in_pointer_table(table, slot_count, expected, vtable_cache?, stride?)` scans a sparse pointer table for the first slot whose object has the given type; an optional caller-owned `std::atomic<uintptr_t>` cache slot lets repeated calls take a single qword-compare fast path after the first match
 - Image-base recovery via `COL.pSelf` (canonical IDA/Ghidra approach) so vtables in any loaded module resolve correctly without trusting `GetModuleHandleEx`; the loader call is used only as a fallback for the x86 signature
 - All entry points are noexcept and SEH-guarded; unreadable pages, missing COLs, and zero RVAs never fault. Failure surfaces through the return type of each API: `std::nullopt` for the `std::optional` returns (`type_name_of`, `find_in_pointer_table`), `false` for the boolean return (`vtable_is_type`), and `0` for the size return (`type_name_into`, which additionally sets `out[0] = '\0'` on failure)
+
+</details>
+
+<details>
+<summary><strong>RTTI Self-Heal (reverse dissection + offset recovery)</strong></summary>
+
+- The reverse direction of the walker, slot-first. It reuses the same verified COL prelude (module-bound-checked, SEH-guarded) rather than duplicating it, and every entry point is noexcept and fails closed
+- `Rtti::identify_pointee_type(slot_addr, out)` reverse-identifies the object a pointer slot refers to. It accepts whichever shape resolves -- a pointer-to-object (deref once, resolve the pointee's vtable) or a direct object base (the slot is the object, its value is the vtable) -- so an object whose vtable lives in a different DLL than the struct still resolves. The reported `was_pointer` flag is a result, not a precondition
+- `Rtti::reverse_scan_block(start, slot_count, out, stride?)` RTTI-labels every pointer slot in a struct (allocating triage tool; init-time only)
+- `Rtti::heal_landmark(lm)` / `Rtti::heal_offset(lm)` -- the self-healing offset resolver. Record a landmark once (`"a field of mangled type T sits near offset O within struct S"`); after a small patch shifts the layout, it scans a `+/-` window around the nominal offset, reverse-RTTI-identifies each slot, and returns the healed field offset. The nominal offset is checked first and short-circuits, the widened scan prefers the nearest match, and an equidistant tie fails closed as `Ambiguous` -- the same `require_unique` philosophy the module-scoped cascade uses, transplanted from an AOB scan to a slot scan
+- `Rtti::solve_fingerprint(base, landmarks, window)` recovers a single uniform shift across several co-moving fields when one landmark alone would be ambiguous in a dense region
+- Consumers cache the healed **offset** (a `std::ptrdiff_t`), never an absolute address, so a cached delta stays valid across instances and sessions. The library stores nothing: no registry, no lifetimes
+- Init-time / re-heal-on-miss, not per-frame: each probe runs the syscall-heavy module-range lookup up to twice. The search window is hard-capped; the hot heal path allocates nothing
 
 </details>
 
@@ -301,6 +315,7 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 
 * [AOB Signature Scanning Guide](docs/misc/aob-signatures.md) - Pattern syntax, RIP-relative resolution, and patch-proof signature practices
 * [MSVC RTTI Walker Guide](docs/misc/rtti-walker.md) - Recover concrete type names from runtime vtables across DLL boundaries without `typeid`/`dynamic_cast`
+* [RTTI Self-Heal Guide](docs/misc/rtti-self-heal.md) - Reverse-identify objects behind pointer slots and self-heal field offsets after a game patch shifts the struct layout
 * [Hot-Path Memory Guide](docs/misc/hot-path-memory.md) - Reading and writing game memory in per-frame hot paths with the `seh_*` and `read_ptr_*` primitives
 * [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
 * [Config Hot-Reload Guide](docs/config-hot-reload/README.md) - INI filesystem watcher and hotkey-triggered `Config::reload()`

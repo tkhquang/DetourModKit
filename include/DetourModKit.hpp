@@ -29,6 +29,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/profiler.hpp"
 #include "DetourModKit/rtti.hpp"
+#include "DetourModKit/rtti_dissect.hpp"
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/worker.hpp"
 
