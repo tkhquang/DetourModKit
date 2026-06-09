@@ -25,7 +25,8 @@ namespace DetourModKit
         NullInput,
         PrefixNotFound,
         RegionTooSmall,
-        UnreadableDisplacement
+        UnreadableDisplacement,
+        ImplausibleTarget
     };
 
     /**
@@ -45,6 +46,8 @@ namespace DetourModKit
             return "Search region too small for prefix + displacement";
         case RipResolveError::UnreadableDisplacement:
             return "Displacement bytes at matched location are not readable";
+        case RipResolveError::ImplausibleTarget:
+            return "Resolved target is not a plausible user-mode address";
         default:
             return "Unknown RIP resolve error";
         }
@@ -230,6 +233,13 @@ namespace DetourModKit
          * @param displacement_offset Byte offset from instruction_address to the disp32 field.
          * @param instruction_length Total length of the instruction in bytes.
          * @return The resolved absolute address, or RipResolveError on failure.
+         * @note The displacement is read under an SEH fault guard. A resolved
+         *       address that is not a plausible user-mode pointer (a crafted or
+         *       corrupt displacement that resolves to 0, a low guard-page
+         *       address, or a kernel-range address) is rejected with
+         *       RipResolveError::ImplausibleTarget rather than returned as a
+         *       valid result. For `FF 15`/`FF 25` forms the gated value is the
+         *       pointer slot, which is itself an in-image address.
          */
         [[nodiscard]] std::expected<uintptr_t, RipResolveError> resolve_rip_relative(
             const std::byte *instruction_address,
@@ -251,6 +261,13 @@ namespace DetourModKit
          *          the final target), not the target itself. Dereference it with
          *          `Memory::read_ptr_unsafe` (or an equivalent checked read) to obtain
          *          the callee / jump destination.
+         * @note Matching is first-prefix-wins: the scan resolves the first
+         *       location whose bytes equal @p opcode_prefix and does not detect
+         *       whether the prefix occurs more than once. When a signature may
+         *       be ambiguous, anchor it through @ref resolve_cascade (which
+         *       enforces per-candidate uniqueness) instead. The resolved target
+         *       is gated by the same RipResolveError::ImplausibleTarget check as
+         *       @ref resolve_rip_relative.
          */
         [[nodiscard]] std::expected<uintptr_t, RipResolveError> find_and_resolve_rip_relative(
             const std::byte *search_start,
@@ -704,6 +721,125 @@ namespace DetourModKit
         [[nodiscard]] std::expected<std::int64_t, ResolveError>
         read_code_constant(const CodeConstant &cc,
                            Memory::ModuleRange range = Memory::host_module_range());
+
+        /**
+         * @enum StringEncoding
+         * @brief Byte encoding of an anchor string as it is stored in the image.
+         */
+        enum class StringEncoding : std::uint8_t
+        {
+            Utf8,   ///< One byte per character (char / std::string literals).
+            Utf16le ///< Two bytes per character, little-endian (wchar_t / L"" on Windows).
+        };
+
+        /**
+         * @enum XrefReturn
+         * @brief What a resolved string cross-reference returns.
+         */
+        enum class XrefReturn : std::uint8_t
+        {
+            ReferencingInstruction, ///< Exact address of the instruction that loads the string.
+            EnclosingFunction       ///< Best-effort prologue back-scan from the instruction (heuristic).
+        };
+
+        /**
+         * @enum StringXrefError
+         * @brief Typed failure of @ref find_string_xref. Fail-closed, like @ref RipResolveError.
+         */
+        enum class StringXrefError : std::uint8_t
+        {
+            EmptyQuery,         ///< The query text was empty.
+            InvalidRange,       ///< @p range was not a valid mapped image.
+            StringNotFound,     ///< The string bytes were not found in any readable page of the image.
+            StringAmbiguous,    ///< The string occurs more than once (linker-pooled or repeated).
+            NoReference,        ///< No recognized RIP-relative load in the image resolves to the string.
+            AmbiguousReference, ///< More than one instruction references the string.
+            FunctionNotFound    ///< EnclosingFunction mode: no prologue within the back-scan window.
+        };
+
+        /**
+         * @brief Converts a StringXrefError to a human-readable string.
+         * @param error The error code.
+         * @return A string view describing the error.
+         */
+        constexpr std::string_view string_xref_error_to_string(StringXrefError error) noexcept
+        {
+            switch (error)
+            {
+            case StringXrefError::EmptyQuery:
+                return "Query text was empty";
+            case StringXrefError::InvalidRange:
+                return "Module range is not a valid mapped image";
+            case StringXrefError::StringNotFound:
+                return "String bytes not found in the image";
+            case StringXrefError::StringAmbiguous:
+                return "String occurs more than once in the image";
+            case StringXrefError::NoReference:
+                return "No instruction references the string";
+            case StringXrefError::AmbiguousReference:
+                return "More than one instruction references the string";
+            case StringXrefError::FunctionNotFound:
+                return "No enclosing function prologue found in the back-scan window";
+            default:
+                return "Unknown string xref error";
+            }
+        }
+
+        /**
+         * @struct StringRefQuery
+         * @brief A string-reference anchor query.
+         * @details Anchors a target on an immutable string literal in the image's
+         *          read-only data, then resolves the unique RIP-relative load that
+         *          references it. Strings survive game updates far better than the
+         *          code bytes around them, so a string xref is the most
+         *          update-resilient anchor source. @ref text is a non-owning view
+         *          into caller storage (a static table), matching the
+         *          @ref AddrCandidate / @ref Rtti::Landmark style.
+         */
+        struct StringRefQuery
+        {
+            std::string_view text;                          ///< Literal content (no quotes).
+            StringEncoding encoding = StringEncoding::Utf8; ///< How it is stored in the image.
+            /// Match a trailing NUL so a prefix of a longer literal is not matched
+            /// (e.g. "Player" inside "PlayerController").
+            bool require_terminator = true;
+            XrefReturn return_mode = XrefReturn::ReferencingInstruction;
+        };
+
+        /**
+         * @brief Resolves a string-reference anchor inside one mapped image.
+         * @details Two fail-closed phases. Phase 1 locates the single occurrence of
+         *          @p query.text in the image's readable pages (zero ->
+         *          StringNotFound, more than one -> StringAmbiguous; the linker
+         *          pools identical literals, so a non-unique string is genuinely
+         *          ambiguous). Phase 2 scans the image's execute-readable pages for
+         *          the single RIP-relative load whose resolved absolute target is
+         *          that string (zero -> NoReference, more than one ->
+         *          AmbiguousReference). A load counts only when its resolved
+         *          target exactly equals the located string address, which is
+         *          itself a plausible in-image pointer, so the equality subsumes
+         *          the @ref Memory::plausible_userspace_ptr floor that
+         *          @ref resolve_rip_relative applies, without a separate check. The
+         *          xref is RIP-relative, so the result is ASLR-correct by
+         *          construction (no fixed address is baked in).
+         * @param query The string and how to interpret the reference.
+         * @param range Module image to search. Defaults to the host EXE.
+         * @return The referencing instruction (or enclosing function) address, or a
+         *         StringXrefError.
+         * @note v1 recognizes the dominant 64-bit string-load forms: REX.W
+         *       `lea`/`mov reg, [rip+disp32]` (opcodes 8D / 8B with a RIP ModRM).
+         *       Other reference shapes (cmp/push/indirect call through a pointer)
+         *       are not matched and report NoReference.
+         * @note Choose a string referenced exactly once (a long, specific literal
+         *       such as a format or assert message); short, common strings are
+         *       pooled and shared and will report StringAmbiguous / AmbiguousReference.
+         * @warning XrefReturn::EnclosingFunction is a bounded heuristic prologue
+         *          back-scan, not control-flow analysis; prefer the default
+         *          ReferencingInstruction when an exact site is acceptable.
+         */
+        [[nodiscard]] std::expected<std::uintptr_t, StringXrefError>
+        find_string_xref(const StringRefQuery &query,
+                         Memory::ModuleRange range = Memory::host_module_range());
 
         /**
          * @brief Cheap heuristic: does @p addr look like the first byte of a

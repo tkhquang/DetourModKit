@@ -34,22 +34,25 @@
 
 using namespace DetourModKit;
 
-// Permission flags as constexpr for compile-time constants
-namespace CachePermissions
-{
-    constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                            PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    constexpr DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
-                                             PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-    constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
-}
-
 using DetourModKit::detail::is_loader_lock_held;
 using DetourModKit::detail::pin_current_module;
 
 // Anonymous namespace for internal helpers and storage
 namespace
 {
+    // Page-protection flag groups for the cache permission checks. Grouped in a
+    // struct rather than a named namespace so the constants keep internal
+    // linkage through the enclosing anonymous namespace, per the .cpp
+    // internal-linkage convention.
+    struct CachePermissions
+    {
+        static constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+                                                       PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        static constexpr DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
+                                                        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+        static constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
+    };
+
     /**
      * @class SrwSharedMutex
      * @brief Shared mutex backed by Windows SRWLOCK instead of pthread_rwlock_t.
@@ -61,21 +64,21 @@ namespace
     class SrwSharedMutex
     {
     public:
-        SrwSharedMutex() noexcept { InitializeSRWLock(&srw_); }
+        SrwSharedMutex() noexcept { InitializeSRWLock(&m_srw); }
 
         SrwSharedMutex(const SrwSharedMutex &) = delete;
         SrwSharedMutex &operator=(const SrwSharedMutex &) = delete;
 
-        void lock() noexcept { AcquireSRWLockExclusive(&srw_); }
-        bool try_lock() noexcept { return TryAcquireSRWLockExclusive(&srw_) != 0; }
-        void unlock() noexcept { ReleaseSRWLockExclusive(&srw_); }
+        void lock() noexcept { AcquireSRWLockExclusive(&m_srw); }
+        bool try_lock() noexcept { return TryAcquireSRWLockExclusive(&m_srw) != 0; }
+        void unlock() noexcept { ReleaseSRWLockExclusive(&m_srw); }
 
-        void lock_shared() noexcept { AcquireSRWLockShared(&srw_); }
-        bool try_lock_shared() noexcept { return TryAcquireSRWLockShared(&srw_) != 0; }
-        void unlock_shared() noexcept { ReleaseSRWLockShared(&srw_); }
+        void lock_shared() noexcept { AcquireSRWLockShared(&m_srw); }
+        bool try_lock_shared() noexcept { return TryAcquireSRWLockShared(&m_srw) != 0; }
+        void unlock_shared() noexcept { ReleaseSRWLockShared(&m_srw); }
 
     private:
-        SRWLOCK srw_;
+        SRWLOCK m_srw;
     };
 
     /**
@@ -85,8 +88,8 @@ namespace
      */
     struct CachedMemoryRegionInfo
     {
-        uintptr_t baseAddress;
-        size_t regionSize;
+        uintptr_t base_address;
+        size_t region_size;
         DWORD protection;
         DWORD state;
         uint64_t timestamp_ns;
@@ -94,7 +97,7 @@ namespace
         bool valid;
 
         CachedMemoryRegionInfo()
-            : baseAddress(0), regionSize(0), protection(0), state(0), timestamp_ns(0), lru_key(0), valid(false)
+            : base_address(0), region_size(0), protection(0), state(0), timestamp_ns(0), lru_key(0), valid(false)
         {
         }
     };
@@ -110,9 +113,9 @@ namespace
      */
     struct CacheShard
     {
-        // Map from baseAddress -> CachedMemoryRegionInfo for O(1) lookup by address
+        // Map from base_address -> CachedMemoryRegionInfo for O(1) lookup by address
         std::unordered_map<uintptr_t, CachedMemoryRegionInfo> entries;
-        // Map from monotonic counter -> baseAddress for O(log n) oldest-entry lookup (LRU)
+        // Map from monotonic counter -> base_address for O(log n) oldest-entry lookup (LRU)
         // Monotonic counter guarantees insertion-order uniqueness for correct eviction
         std::map<uint64_t, uintptr_t> lru_index;
         // Sorted by base address for O(log n) containment lookup
@@ -183,7 +186,17 @@ namespace
     public:
         ActiveReaderGuard() noexcept
         {
-            s_activeReaders.fetch_add(1, std::memory_order_acq_rel);
+            // seq_cst (not acq_rel) so this increment and the reader's
+            // subsequent seq_cst load of s_cacheInitialized share the single
+            // total order that forbids the store-buffering (Dekker) outcome with
+            // shutdown_cache: shutdown stores s_cacheInitialized=false then loads
+            // s_activeReaders, while a reader increments s_activeReaders then
+            // loads s_cacheInitialized. Under seq_cst a reader that observes the
+            // cache live was necessarily counted before shutdown reads the reader
+            // count, so shutdown cannot free shard data out from under it. On
+            // x86-64 this is the same lock xadd as acq_rel, so the hot path pays
+            // nothing.
+            s_activeReaders.fetch_add(1, std::memory_order_seq_cst);
         }
 
         ~ActiveReaderGuard() noexcept
@@ -215,11 +228,11 @@ namespace
     // Always-available cache statistics
     struct CacheStats
     {
-        std::atomic<uint64_t> cacheHits{0};
-        std::atomic<uint64_t> cacheMisses{0};
+        std::atomic<uint64_t> cache_hits{0};
+        std::atomic<uint64_t> cache_misses{0};
         std::atomic<uint64_t> invalidations{0};
-        std::atomic<uint64_t> coalescedQueries{0};
-        std::atomic<uint64_t> onDemandCleanups{0};
+        std::atomic<uint64_t> coalesced_queries{0};
+        std::atomic<uint64_t> on_demand_cleanups{0};
     };
     CacheStats s_stats;
 
@@ -245,15 +258,15 @@ namespace
         if (entry_age > expiry_ns)
             return false;
 
-        const uintptr_t endAddress = address + size;
-        if (endAddress < address)
+        const uintptr_t end_address = address + size;
+        if (end_address < address)
             return false;
 
-        const uintptr_t entryEndAddress = entry.baseAddress + entry.regionSize;
-        if (entryEndAddress < entry.baseAddress)
+        const uintptr_t entry_end_address = entry.base_address + entry.region_size;
+        if (entry_end_address < entry.base_address)
             return false;
 
-        return address >= entry.baseAddress && endAddress <= entryEndAddress;
+        return address >= entry.base_address && end_address <= entry_end_address;
     }
 
     /**
@@ -417,7 +430,7 @@ namespace
             }
 
             // Update sorted range if region size changed
-            if (old_entry.regionSize != mbi.RegionSize)
+            if (old_entry.region_size != mbi.RegionSize)
             {
                 remove_sorted_range(shard, base_addr);
                 insert_sorted_range(shard, base_addr, mbi.RegionSize);
@@ -425,8 +438,8 @@ namespace
 
             // Update existing entry with new monotonic LRU key
             const uint64_t new_lru_key = shard.entry_counter++;
-            old_entry.baseAddress = base_addr;
-            old_entry.regionSize = mbi.RegionSize;
+            old_entry.base_address = base_addr;
+            old_entry.region_size = mbi.RegionSize;
             old_entry.protection = mbi.Protect;
             old_entry.state = mbi.State;
             old_entry.timestamp_ns = current_time_ns;
@@ -454,8 +467,8 @@ namespace
             const uint64_t new_lru_key = shard.entry_counter++;
 
             CachedMemoryRegionInfo new_entry;
-            new_entry.baseAddress = base_addr;
-            new_entry.regionSize = mbi.RegionSize;
+            new_entry.base_address = base_addr;
+            new_entry.region_size = mbi.RegionSize;
             new_entry.protection = mbi.Protect;
             new_entry.state = mbi.State;
             new_entry.timestamp_ns = current_time_ns;
@@ -493,7 +506,7 @@ namespace
                     shard.lru_index.erase(lru_it);
                 }
 
-                remove_sorted_range(shard, entry.baseAddress);
+                remove_sorted_range(shard, entry.base_address);
                 it = shard.entries.erase(it);
                 ++removed;
             }
@@ -553,7 +566,7 @@ namespace
      */
     bool try_trigger_on_demand_cleanup() noexcept
     {
-        if (!s_cacheInitialized.load(std::memory_order_acquire))
+        if (!s_cacheInitialized.load(std::memory_order_seq_cst))
             return false;
 
         const uint64_t now_ns = current_time_ns();
@@ -567,7 +580,7 @@ namespace
             if (s_lastCleanupTimeNs.compare_exchange_strong(expected, now_ns, std::memory_order_acq_rel))
             {
                 cleanup_expired_entries(false);
-                s_stats.onDemandCleanups.fetch_add(1, std::memory_order_relaxed);
+                s_stats.on_demand_cleanups.fetch_add(1, std::memory_order_relaxed);
                 return true;
             }
         }
@@ -624,11 +637,11 @@ namespace
             return;
 
         // Guard against address + size wrapping around the address space
-        const uintptr_t endAddress = (address + size < address) ? UINTPTR_MAX : address + size;
+        const uintptr_t end_address = (address + size < address) ? UINTPTR_MAX : address + size;
         const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
 
         const uintptr_t start_page = address >> 12;
-        const uintptr_t end_page = (endAddress == 0 ? address : endAddress - 1) >> 12;
+        const uintptr_t end_page = (end_address == 0 ? address : end_address - 1) >> 12;
 
         constexpr size_t MAX_INVALIDATION_RETRIES = 3;
 
@@ -663,8 +676,8 @@ namespace
                         continue;
                     }
 
-                    const uintptr_t entryEndAddress = entry.baseAddress + entry.regionSize;
-                    const bool overlaps = address < entryEndAddress && endAddress > entry.baseAddress;
+                    const uintptr_t entry_end_address = entry.base_address + entry.region_size;
+                    const bool overlaps = address < entry_end_address && end_address > entry.base_address;
                     if (overlaps)
                     {
                         // Remove from LRU index using stored lru_key to avoid tombstone accumulation
@@ -674,7 +687,7 @@ namespace
                             shard.lru_index.erase(lru_it);
                         }
                         // Erase entry immediately instead of leaving tombstone
-                        remove_sorted_range(shard, entry.baseAddress);
+                        remove_sorted_range(shard, entry.base_address);
                         shard.entries.erase(it);
                         s_stats.invalidations.fetch_add(1, std::memory_order_relaxed);
                         invalidated = true;
@@ -787,10 +800,10 @@ namespace
                     CachedMemoryRegionInfo *cached = find_in_shard(shard, addr_val, 1, current_time_ns(), expiry_ns);
                     if (cached)
                     {
-                        s_stats.coalescedQueries.fetch_add(1, std::memory_order_relaxed);
+                        s_stats.coalesced_queries.fetch_add(1, std::memory_order_relaxed);
                         // Copy cached info to output for consistency
-                        mbi_out.BaseAddress = reinterpret_cast<PVOID>(cached->baseAddress);
-                        mbi_out.RegionSize = cached->regionSize;
+                        mbi_out.BaseAddress = reinterpret_cast<PVOID>(cached->base_address);
+                        mbi_out.RegionSize = cached->region_size;
                         mbi_out.Protect = cached->protection;
                         mbi_out.State = cached->state;
                         return true;
@@ -832,7 +845,7 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
     std::lock_guard<std::mutex> state_lock(s_cacheStateMutex);
 
     // Fast path: already initialized
-    if (s_cacheInitialized.load(std::memory_order_acquire))
+    if (s_cacheInitialized.load(std::memory_order_seq_cst))
         return true;
 
     // Try to initialize
@@ -868,7 +881,7 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
         {
             std::atexit([]()
                         {
-                if (s_cacheInitialized.load(std::memory_order_acquire))
+                if (s_cacheInitialized.load(std::memory_order_seq_cst))
                 {
                     if (is_loader_lock_held())
                     {
@@ -902,7 +915,7 @@ void DetourModKit::Memory::clear_cache()
     // Hold state mutex to serialize with shutdown and cleanup thread
     std::lock_guard<std::mutex> state_lock(s_cacheStateMutex);
 
-    if (!s_cacheInitialized.load(std::memory_order_acquire))
+    if (!s_cacheInitialized.load(std::memory_order_seq_cst))
         return;
 
     const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
@@ -926,11 +939,11 @@ void DetourModKit::Memory::clear_cache()
         }
     }
 
-    s_stats.cacheHits.store(0, std::memory_order_relaxed);
-    s_stats.cacheMisses.store(0, std::memory_order_relaxed);
+    s_stats.cache_hits.store(0, std::memory_order_relaxed);
+    s_stats.cache_misses.store(0, std::memory_order_relaxed);
     s_stats.invalidations.store(0, std::memory_order_relaxed);
-    s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
-    s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
+    s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
+    s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
 
     s_lastCleanupTimeNs.store(current_time_ns(), std::memory_order_relaxed);
 
@@ -966,12 +979,14 @@ void DetourModKit::Memory::shutdown_cache()
     // Acquire state mutex to serialize with clear_cache and protect data teardown
     std::lock_guard<std::mutex> state_lock(s_cacheStateMutex);
 
-    // Mark as not initialized and zero shard count.
-    // This prevents new readers from entering the critical section.
-    // acquire/release is sufficient here because the state mutex provides the
-    // cross-thread ordering guarantee. Readers that observe shard_count == 0
-    // immediately exit without touching data structures.
-    s_cacheInitialized.store(false, std::memory_order_release);
+    // Mark as not initialized and zero shard count so new readers do not enter
+    // the critical section. The s_cacheInitialized store is seq_cst (not just
+    // release): it pairs with the reader's seq_cst load in the ActiveReaderGuard
+    // protocol so the store-buffering (Dekker) race against the reader-count
+    // load below is forbidden by the single total order. s_shardCount stays
+    // release because readers only read it after passing the seq_cst
+    // s_cacheInitialized gate.
+    s_cacheInitialized.store(false, std::memory_order_seq_cst);
     s_shardCount.store(0, std::memory_order_release);
 
     // Wait for in-flight readers to finish before destroying data structures.
@@ -982,7 +997,7 @@ void DetourModKit::Memory::shutdown_cache()
     // preempted by the OS scheduler.
     constexpr int yield_spins = 4096;
     int spins = 0;
-    while (s_activeReaders.load(std::memory_order_acquire) > 0)
+    while (s_activeReaders.load(std::memory_order_seq_cst) > 0)
     {
         if (spins < yield_spins)
         {
@@ -1013,11 +1028,11 @@ void DetourModKit::Memory::shutdown_cache()
     s_inFlight.reset();
 
     // Reset all stats and config so a subsequent init_cache starts from a clean state
-    s_stats.cacheHits.store(0, std::memory_order_relaxed);
-    s_stats.cacheMisses.store(0, std::memory_order_relaxed);
+    s_stats.cache_hits.store(0, std::memory_order_relaxed);
+    s_stats.cache_misses.store(0, std::memory_order_relaxed);
     s_stats.invalidations.store(0, std::memory_order_relaxed);
-    s_stats.coalescedQueries.store(0, std::memory_order_relaxed);
-    s_stats.onDemandCleanups.store(0, std::memory_order_relaxed);
+    s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
+    s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
     s_lastCleanupTimeNs.store(0, std::memory_order_relaxed);
     s_configuredExpiryMs.store(0, std::memory_order_relaxed);
     s_maxEntriesPerShard.store(0, std::memory_order_relaxed);
@@ -1028,11 +1043,11 @@ void DetourModKit::Memory::shutdown_cache()
 
 std::string DetourModKit::Memory::get_cache_stats()
 {
-    const uint64_t hits = s_stats.cacheHits.load(std::memory_order_relaxed);
-    const uint64_t misses = s_stats.cacheMisses.load(std::memory_order_relaxed);
+    const uint64_t hits = s_stats.cache_hits.load(std::memory_order_relaxed);
+    const uint64_t misses = s_stats.cache_misses.load(std::memory_order_relaxed);
     const uint64_t invalidations = s_stats.invalidations.load(std::memory_order_relaxed);
-    const uint64_t coalesced = s_stats.coalescedQueries.load(std::memory_order_relaxed);
-    const uint64_t on_demand_cleanups = s_stats.onDemandCleanups.load(std::memory_order_relaxed);
+    const uint64_t coalesced = s_stats.coalesced_queries.load(std::memory_order_relaxed);
+    const uint64_t on_demand_cleanups = s_stats.on_demand_cleanups.load(std::memory_order_relaxed);
     const uint64_t total_queries = hits + misses;
 
     const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
@@ -1090,7 +1105,7 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     // shutdown_cache from destroying data structures between the check and access.
     ActiveReaderGuard reader_guard;
 
-    if (!s_cacheInitialized.load(std::memory_order_acquire))
+    if (!s_cacheInitialized.load(std::memory_order_seq_cst))
         return;
 
     const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
@@ -1127,7 +1142,7 @@ namespace
         // shutdown_cache from destroying data structures between the check and access.
         ActiveReaderGuard reader_guard;
 
-        if (!s_cacheInitialized.load(std::memory_order_acquire))
+        if (!s_cacheInitialized.load(std::memory_order_seq_cst))
         {
             // Cache not initialized -- fall back to direct VirtualQuery
             MEMORY_BASIC_INFORMATION mbi;
@@ -1164,12 +1179,12 @@ namespace
                 query_addr_val, size, now_ns, expiry_ns);
             if (cached_info)
             {
-                s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+                s_stats.cache_hits.fetch_add(1, std::memory_order_relaxed);
                 return check_permission(cached_info->protection);
             }
         }
 
-        s_stats.cacheMisses.fetch_add(1, std::memory_order_relaxed);
+        s_stats.cache_misses.fetch_add(1, std::memory_order_relaxed);
 
         // Cache miss: call VirtualQuery with stampede coalescing
         MEMORY_BASIC_INFORMATION mbi;
@@ -1203,60 +1218,60 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     return check_memory_permission(address, size, check_write_permission);
 }
 
-std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes)
+std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *target_address, const std::byte *source_bytes, size_t num_bytes)
 {
     auto &logger = Logger::get_instance();
 
-    if (!targetAddress)
+    if (!target_address)
     {
         logger.error("write_bytes: Target address is null.");
         return std::unexpected(MemoryError::NullTargetAddress);
     }
-    if (!sourceBytes && numBytes > 0)
+    if (!source_bytes && num_bytes > 0)
     {
-        logger.error("write_bytes: Source bytes pointer is null for non-zero numBytes.");
+        logger.error("write_bytes: Source bytes pointer is null for non-zero num_bytes.");
         return std::unexpected(MemoryError::NullSourceBytes);
     }
-    if (numBytes == 0)
+    if (num_bytes == 0)
     {
         logger.warning("write_bytes: Number of bytes to write is zero. Operation has no effect.");
         return {};
     }
-    if (numBytes > MAX_WRITE_SIZE)
+    if (num_bytes > MAX_WRITE_SIZE)
     {
-        logger.error("write_bytes: Requested size {} exceeds MAX_WRITE_SIZE ({}).", numBytes, MAX_WRITE_SIZE);
+        logger.error("write_bytes: Requested size {} exceeds MAX_WRITE_SIZE ({}).", num_bytes, MAX_WRITE_SIZE);
         return std::unexpected(MemoryError::SizeTooLarge);
     }
 
     DWORD old_protection_flags;
-    if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, PAGE_EXECUTE_READWRITE, &old_protection_flags))
+    if (!VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes, PAGE_EXECUTE_READWRITE, &old_protection_flags))
     {
         logger.error("write_bytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
-                     DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+                     DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
         return std::unexpected(MemoryError::ProtectionChangeFailed);
     }
 
-    memcpy(reinterpret_cast<void *>(targetAddress), reinterpret_cast<const void *>(sourceBytes), numBytes);
+    memcpy(reinterpret_cast<void *>(target_address), reinterpret_cast<const void *>(source_bytes), num_bytes);
 
     DWORD temp_old_protect;
-    if (!VirtualProtect(reinterpret_cast<LPVOID>(targetAddress), numBytes, old_protection_flags, &temp_old_protect))
+    if (!VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes, old_protection_flags, &temp_old_protect))
     {
         logger.error("write_bytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
                      DetourModKit::Format::format_hex(static_cast<int>(old_protection_flags)),
-                     DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+                     DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
         return std::unexpected(MemoryError::ProtectionRestoreFailed);
     }
 
-    if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(targetAddress), numBytes))
+    if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(target_address), num_bytes))
     {
         logger.warning("write_bytes: FlushInstructionCache failed for address {}. Windows Error: {}",
-                       DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)), GetLastError());
+                       DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
     }
 
-    Memory::invalidate_range(targetAddress, numBytes);
+    Memory::invalidate_range(target_address, num_bytes);
 
     logger.debug("write_bytes: Successfully wrote {} bytes to address {}.",
-                 numBytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(targetAddress)));
+                 num_bytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)));
     return {};
 }
 
@@ -1267,7 +1282,7 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
 
     ActiveReaderGuard reader_guard;
 
-    if (!s_cacheInitialized.load(std::memory_order_acquire))
+    if (!s_cacheInitialized.load(std::memory_order_seq_cst))
     {
         // Cache not initialized - fall back to direct VirtualQuery (blocking)
         MEMORY_BASIC_INFORMATION mbi;
@@ -1306,7 +1321,7 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
         query_addr_val, size, now_ns, expiry_ns);
     if (cached_info)
     {
-        s_stats.cacheHits.fetch_add(1, std::memory_order_relaxed);
+        s_stats.cache_hits.fetch_add(1, std::memory_order_relaxed);
         return check_read_permission(cached_info->protection)
                    ? ReadableStatus::Readable
                    : ReadableStatus::NotReadable;
@@ -1341,7 +1356,7 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
     {
         ActiveReaderGuard reader_guard;
 
-        if (s_cacheInitialized.load(std::memory_order_acquire))
+        if (s_cacheInitialized.load(std::memory_order_seq_cst))
         {
             const size_t shard_count = s_shardCount.load(std::memory_order_acquire);
             if (shard_count != 0)
@@ -1657,7 +1672,7 @@ DetourModKit::Memory::module_range_for(const void *address) noexcept
 
     auto &cache = get_module_range_cache();
     {
-        std::shared_lock<std::shared_mutex> lk(cache.mtx);
+        std::shared_lock<std::shared_mutex> lock(cache.mtx);
         const auto it = cache.entries.find(mod);
         if (it != cache.entries.end())
             return it->second;
@@ -1668,7 +1683,7 @@ DetourModKit::Memory::module_range_for(const void *address) noexcept
         return std::nullopt;
 
     {
-        std::unique_lock<std::shared_mutex> lk(cache.mtx);
+        std::unique_lock<std::shared_mutex> lock(cache.mtx);
         // Another thread may have inserted between our shared/unique transition;
         // emplace skips on collision so we keep the first-resolved entry.
         cache.entries.emplace(mod, range);

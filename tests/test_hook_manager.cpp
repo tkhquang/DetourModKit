@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -16,6 +17,22 @@
 #include "DetourModKit/logger.hpp"
 
 using namespace DetourModKit;
+
+#if defined(_MSC_VER)
+#define DMK_TEST_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define DMK_TEST_NOINLINE [[gnu::noinline]]
+#else
+#define DMK_TEST_NOINLINE
+#endif
+
+namespace
+{
+    [[nodiscard]] void *test_pointer(std::uintptr_t value) noexcept
+    {
+        return reinterpret_cast<void *>(value);
+    }
+} // namespace
 
 // VmtHookEntry owns a safetyhook::VmtHook and must be move-only.
 // The HookManager destructor's loader-lock fallback path relies on these
@@ -108,7 +125,7 @@ TEST_F(HookManagerTest, HookConfig_Custom)
 
 TEST_F(HookManagerTest, CreateInlineHook_InvalidAddress)
 {
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
+    void *detour_fn = test_pointer(0x87654321u);
     void *original_trampoline = nullptr;
 
     auto result = hook_manager_->create_inline_hook(
@@ -137,7 +154,7 @@ TEST_F(HookManagerTest, CreateInlineHook_NullDetour)
 
 TEST_F(HookManagerTest, CreateInlineHook_NullTrampoline)
 {
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
+    void *detour_fn = test_pointer(0x87654321u);
 
     auto result = hook_manager_->create_inline_hook(
         "TestNullTrampoline",
@@ -203,7 +220,7 @@ TEST_F(HookManagerTest, RemoveAllHooks)
 
 TEST_F(HookManagerTest, CreateInlineHookAob_EmptyPattern)
 {
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
+    void *detour_fn = test_pointer(0x87654321u);
     void *original_trampoline = nullptr;
 
     auto result = hook_manager_->create_inline_hook_aob(
@@ -220,7 +237,7 @@ TEST_F(HookManagerTest, CreateInlineHookAob_EmptyPattern)
 
 TEST_F(HookManagerTest, CreateInlineHookAob_InvalidPattern)
 {
-    void *detour_fn = reinterpret_cast<void *>(0x87654321);
+    void *detour_fn = test_pointer(0x87654321u);
     void *original_trampoline = nullptr;
 
     auto result = hook_manager_->create_inline_hook_aob(
@@ -355,13 +372,13 @@ TEST_F(HookManagerTest, RemoveAllHooks_Multiple)
 
 // Real hook tests using valid function addresses in the test binary
 
-[[gnu::noinline]] static int real_hook_target_add(int a, int b)
+DMK_TEST_NOINLINE static int real_hook_target_add(int a, int b)
 {
     volatile int r = a + b;
     return r;
 }
 
-[[gnu::noinline]] static int real_hook_target_mul(int a, int b)
+DMK_TEST_NOINLINE static int real_hook_target_mul(int a, int b)
 {
     volatile int r = a * b;
     return r;
@@ -369,13 +386,13 @@ TEST_F(HookManagerTest, RemoveAllHooks_Multiple)
 
 static std::atomic<int> g_real_detour_calls{0};
 
-[[gnu::noinline]] static int real_hook_detour_add(int a, int b)
+DMK_TEST_NOINLINE static int real_hook_detour_add(int a, int b)
 {
     g_real_detour_calls.fetch_add(1, std::memory_order_relaxed);
     return a + b + 1000;
 }
 
-[[gnu::noinline]] static int real_hook_detour_mul(int a, int b)
+DMK_TEST_NOINLINE static int real_hook_detour_mul(int a, int b)
 {
     g_real_detour_calls.fetch_add(1, std::memory_order_relaxed);
     return a * b + 1000;
@@ -1493,7 +1510,7 @@ TEST_F(HookManagerTest, MidHook_GetDestination_Noexcept)
 
 TEST_F(HookManagerTest, CreateInlineHook_TrampolineNotSetOnFailure)
 {
-    void *tramp = reinterpret_cast<void *>(0xDEADBEEF);
+    void *tramp = test_pointer(0xDEADBEEFu);
     auto result = hook_manager_->create_inline_hook(
         "NullTargetHook",
         0,
@@ -1502,7 +1519,7 @@ TEST_F(HookManagerTest, CreateInlineHook_TrampolineNotSetOnFailure)
 
     ASSERT_FALSE(result.has_value());
     // Trampoline should remain unchanged on early validation failure
-    EXPECT_EQ(tramp, reinterpret_cast<void *>(0xDEADBEEF));
+    EXPECT_EQ(tramp, test_pointer(0xDEADBEEFu));
 }
 
 TEST_F(HookManagerTest, ShutdownResetsFlag)
@@ -2325,7 +2342,7 @@ TEST(HookDuplicateDetection, TargetAlreadyHookedErrorStringExists)
 
 namespace
 {
-    [[gnu::noinline]] void duplicate_hook_target_function() noexcept
+    DMK_TEST_NOINLINE void duplicate_hook_target_function() noexcept
     {
         volatile int x = 0;
         x = x + 1;
@@ -2397,7 +2414,7 @@ TEST_F(HookManagerTest, DuplicateHook_DefaultMode_LayersOnTop)
 
 namespace
 {
-    [[gnu::noinline]] void late_destruction_target_function() noexcept
+    DMK_TEST_NOINLINE void late_destruction_target_function() noexcept
     {
         volatile int x = 0;
         x = x + 1;

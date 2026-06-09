@@ -486,13 +486,13 @@ namespace
     }
 
     // --- Global storage for registered configuration items ---
-    std::mutex &getConfigMutex()
+    std::mutex &get_config_mutex()
     {
         static std::mutex mtx;
         return mtx;
     }
 
-    std::vector<std::unique_ptr<ConfigItemBase>> &getRegisteredConfigItems()
+    std::vector<std::unique_ptr<ConfigItemBase>> &get_registered_config_items()
     {
         // Function-local static to ensure controlled initialization order.
         static std::vector<std::unique_ptr<ConfigItemBase>> s_registered_items;
@@ -501,8 +501,8 @@ namespace
 
     // Holds the INI path last passed to Config::load(). Empty until the
     // first load() call -- reload() returns false in that window.
-    // Caller must hold getConfigMutex() when reading or writing.
-    std::string &getLastLoadedIniPath()
+    // Caller must hold get_config_mutex() when reading or writing.
+    std::string &get_last_loaded_ini_path()
     {
         static std::string s_last_loaded_ini_path;
         return s_last_loaded_ini_path;
@@ -511,8 +511,8 @@ namespace
     // Content hash of the bytes last successfully loaded from the INI file.
     // std::nullopt until the first successful load() (or after
     // clear_registered_items(), which wipes it alongside the path).
-    // Caller must hold getConfigMutex() when reading or writing.
-    std::optional<std::uint64_t> &getLastLoadedIniHash()
+    // Caller must hold get_config_mutex() when reading or writing.
+    std::optional<std::uint64_t> &get_last_loaded_ini_hash()
     {
         static std::optional<std::uint64_t> s_last_loaded_ini_hash;
         return s_last_loaded_ini_hash;
@@ -635,13 +635,13 @@ namespace
 
     // Filesystem watcher owned by enable_auto_reload().  Separate mutex so
     // start / stop transitions do not contend with registration traffic.
-    std::mutex &getWatcherMutex()
+    std::mutex &get_watcher_mutex()
     {
         static std::mutex mtx;
         return mtx;
     }
 
-    std::unique_ptr<ConfigWatcher> &getConfigWatcher()
+    std::unique_ptr<ConfigWatcher> &get_config_watcher()
     {
         static std::unique_ptr<ConfigWatcher> s_watcher;
         return s_watcher;
@@ -652,9 +652,9 @@ namespace
     // immediately destroy it (the call site has nowhere to store it), and
     // ~InputBindingGuard flips the binding's enabled flag to false, so the
     // press callback would silently no-op forever. Protected by
-    // getWatcherMutex() because it already serialises lifetime state that
+    // get_watcher_mutex() because it already serialises lifetime state that
     // lives alongside the watcher (both are Config-wide, not per-item).
-    std::vector<DetourModKit::Config::InputBindingGuard> &getReloadHotkeyGuards() noexcept
+    std::vector<DetourModKit::Config::InputBindingGuard> &get_reload_hotkey_guards() noexcept
     {
         static std::vector<DetourModKit::Config::InputBindingGuard> s_guards;
         return s_guards;
@@ -810,17 +810,17 @@ namespace
 
     // Shared_ptr so a press callback holding its own strong reference
     // cannot crash when clear_registered_items() resets the slot.
-    std::shared_ptr<ReloadServicer> &getReloadServicer() noexcept
+    std::shared_ptr<ReloadServicer> &get_reload_servicer() noexcept
     {
         static std::shared_ptr<ReloadServicer> s_servicer;
         return s_servicer;
     }
 
     /// Replaces an existing item with the same section+key, or appends if none found.
-    /// Caller must hold getConfigMutex().
+    /// Caller must hold get_config_mutex().
     void replace_or_append(std::unique_ptr<ConfigItemBase> item)
     {
-        auto &items = getRegisteredConfigItems();
+        auto &items = get_registered_config_items();
         for (auto &existing : items)
         {
             if (existing->section == item->section && existing->ini_key == item->ini_key)
@@ -835,7 +835,7 @@ namespace
     /**
      * @brief Determines the full absolute path for the INI configuration file.
      */
-    std::filesystem::path getIniFilePath(const std::string &ini_filename, Logger &logger)
+    std::filesystem::path get_ini_file_path(const std::string &ini_filename, Logger &logger)
     {
         std::wstring module_dir = get_runtime_directory();
 
@@ -865,7 +865,7 @@ namespace
 } // anonymous namespace
 
 // All register_* functions use the deferred callback pattern: state is
-// mutated under getConfigMutex(), but the setter callback is invoked after
+// mutated under get_config_mutex(), but the setter callback is invoked after
 // the lock is released.  This allows setters to call back into the Config
 // API without deadlocking (no reentrancy guard needed).
 void DetourModKit::Config::register_int(std::string_view section, std::string_view ini_key,
@@ -874,7 +874,7 @@ void DetourModKit::Config::register_int(std::string_view section, std::string_vi
 {
     std::function<void()> deferred;
     {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
+        std::lock_guard<std::mutex> lock(get_config_mutex());
         replace_or_append(
             std::make_unique<CallbackConfigItem<int>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
@@ -895,7 +895,7 @@ void DetourModKit::Config::register_float(std::string_view section, std::string_
 {
     std::function<void()> deferred;
     {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
+        std::lock_guard<std::mutex> lock(get_config_mutex());
         replace_or_append(
             std::make_unique<CallbackConfigItem<float>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
@@ -916,7 +916,7 @@ void DetourModKit::Config::register_bool(std::string_view section, std::string_v
 {
     std::function<void()> deferred;
     {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
+        std::lock_guard<std::mutex> lock(get_config_mutex());
         replace_or_append(
             std::make_unique<CallbackConfigItem<bool>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
@@ -937,7 +937,7 @@ void DetourModKit::Config::register_string(std::string_view section, std::string
 {
     std::function<void()> deferred;
     {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
+        std::lock_guard<std::mutex> lock(get_config_mutex());
         replace_or_append(
             std::make_unique<CallbackConfigItem<std::string>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
@@ -971,7 +971,7 @@ void DetourModKit::Config::register_key_combo(std::string_view section, std::str
 
     std::function<void()> deferred;
     {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
+        std::lock_guard<std::mutex> lock(get_config_mutex());
         replace_or_append(
             std::make_unique<CallbackConfigItem<Config::KeyComboList>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_combos));
         if (setter)
@@ -1041,10 +1041,10 @@ void DetourModKit::Config::load(std::string_view ini_filename)
     std::vector<std::function<void()>> deferred_callbacks;
 
     {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
+        std::lock_guard<std::mutex> lock(get_config_mutex());
 
         Logger &logger = Logger::get_instance();
-        std::filesystem::path ini_path = getIniFilePath(std::string(ini_filename), logger);
+        std::filesystem::path ini_path = get_ini_file_path(std::string(ini_filename), logger);
         std::string ini_path_str = ini_path.string(); // convert to narrow string for logger formatting
         CSimpleIniA ini;
         ini.SetUnicode(false);  // Assume ASCII/MBCS INI
@@ -1062,7 +1062,7 @@ void DetourModKit::Config::load(std::string_view ini_filename)
             logger.error("Config: Failed to open '{}'. Using defaults.", ini_path_str);
             // File unreadable: wipe the cached hash so the next reload()
             // does not short-circuit against a stale value.
-            getLastLoadedIniHash().reset();
+            get_last_loaded_ini_hash().reset();
         }
         else if (!outcome.parse_succeeded)
         {
@@ -1071,16 +1071,16 @@ void DetourModKit::Config::load(std::string_view ini_filename)
             // Parse failed: clear the hash so a subsequent successful
             // load() does not spuriously hash-skip a reload against a
             // hash computed for bytes we could not actually parse.
-            getLastLoadedIniHash().reset();
+            get_last_loaded_ini_hash().reset();
         }
         else
         {
             logger.debug("Config: Opened {}", ini_path_str);
-            getLastLoadedIniHash() = outcome.hash;
+            get_last_loaded_ini_hash() = outcome.hash;
         }
 
         // Read all values under lock, but defer setter callbacks
-        for (const auto &item : getRegisteredConfigItems())
+        for (const auto &item : get_registered_config_items())
         {
             item->load(ini, logger);
             auto cb = item->take_deferred_apply();
@@ -1098,10 +1098,10 @@ void DetourModKit::Config::load(std::string_view ini_filename)
         // malformed one.
         if (load_succeeded)
         {
-            getLastLoadedIniPath() = std::string(ini_filename);
+            get_last_loaded_ini_path() = std::string(ini_filename);
         }
 
-        logger.info("Config: Loaded {} items from {}", getRegisteredConfigItems().size(), ini_path_str);
+        logger.info("Config: Loaded {} items from {}", get_registered_config_items().size(), ini_path_str);
     }
 
     // Invoke setter callbacks outside the config mutex -- same deferred
@@ -1131,9 +1131,9 @@ namespace
         std::string ini_filename;
 
         {
-            std::lock_guard<std::mutex> lock(getConfigMutex());
+            std::lock_guard<std::mutex> lock(get_config_mutex());
 
-            ini_filename = getLastLoadedIniPath();
+            ini_filename = get_last_loaded_ini_path();
             if (ini_filename.empty())
             {
                 // No prior load() -- nothing to reload. Caller is expected
@@ -1143,7 +1143,7 @@ namespace
             }
 
             DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
-            std::filesystem::path ini_path = getIniFilePath(ini_filename, logger);
+            std::filesystem::path ini_path = get_ini_file_path(ini_filename, logger);
             std::string ini_path_str = ini_path.string();
 
             CSimpleIniA ini;
@@ -1166,7 +1166,7 @@ namespace
                 // (same as the last successful load), match the stale
                 // hash, and hash-skip -- silently leaving in-memory
                 // state at the defaults from this failed reload.
-                getLastLoadedIniHash() = std::nullopt;
+                get_last_loaded_ini_hash() = std::nullopt;
                 logger.warning("Config: reload() could not open '{}'; retaining last values where setters keep state.",
                                ini_path_str);
             }
@@ -1176,7 +1176,7 @@ namespace
                 // the last successful load()/reload(). Identical bytes
                 // -> no setters. Uses the hash we just computed in the
                 // pipeline; no second read.
-                if (auto &cached_hash = getLastLoadedIniHash(); cached_hash.has_value())
+                if (auto &cached_hash = get_last_loaded_ini_hash(); cached_hash.has_value())
                 {
                     const std::uint64_t current_hash = *outcome.hash;
                     if (current_hash == *cached_hash)
@@ -1195,7 +1195,7 @@ namespace
                     // No cached hash (prior failure or never-loaded):
                     // adopt the current one so a subsequent no-op
                     // reload short-circuits.
-                    getLastLoadedIniHash() = outcome.hash;
+                    get_last_loaded_ini_hash() = outcome.hash;
                 }
 
                 if (!outcome.parse_succeeded)
@@ -1216,7 +1216,7 @@ namespace
                 }
             }
 
-            for (const auto &item : getRegisteredConfigItems())
+            for (const auto &item : get_registered_config_items())
             {
                 item->load(ini, logger);
                 auto cb = item->take_deferred_apply();
@@ -1227,7 +1227,7 @@ namespace
             }
 
             logger.info("Config: Reloaded {} items from {}",
-                        getRegisteredConfigItems().size(), ini_path_str);
+                        get_registered_config_items().size(), ini_path_str);
         }
 
         // The registry mutex is released by the scope above; setters run
@@ -1269,8 +1269,8 @@ DetourModKit::Config::AutoReloadStatus DetourModKit::Config::enable_auto_reload(
 {
     std::string ini_filename;
     {
-        std::lock_guard<std::mutex> lock(getConfigMutex());
-        ini_filename = getLastLoadedIniPath();
+        std::lock_guard<std::mutex> lock(get_config_mutex());
+        ini_filename = get_last_loaded_ini_path();
     }
 
     Logger &logger = Logger::get_instance();
@@ -1283,19 +1283,19 @@ DetourModKit::Config::AutoReloadStatus DetourModKit::Config::enable_auto_reload(
 
     // Resolve to the same absolute path load() uses so the watcher observes
     // the actual file on disk rather than a caller-supplied relative stub.
-    std::filesystem::path ini_path = getIniFilePath(ini_filename, logger);
+    std::filesystem::path ini_path = get_ini_file_path(ini_filename, logger);
     std::string resolved_path = ini_path.string();
 
-    // Hold getWatcherMutex() across start() to serialize against a
+    // Hold get_watcher_mutex() across start() to serialize against a
     // concurrent disable_auto_reload(). start() normally returns in
     // milliseconds; under a pathological handshake stall it returns
     // within the 5 s timeout, which is preferable to a use-after-free
     // on the watcher if we released the lock and disable_auto_reload()
     // moved the unique_ptr out and destroyed it mid-start().
     {
-        std::lock_guard<std::mutex> wlock(getWatcherMutex());
+        std::lock_guard<std::mutex> wlock(get_watcher_mutex());
 
-        auto &watcher = getConfigWatcher();
+        auto &watcher = get_config_watcher();
         // Guard on existence, not is_running(): there is a window between
         // make_unique<ConfigWatcher> + start() and the worker flipping its
         // running flag true, during which a second concurrent caller would
@@ -1342,8 +1342,8 @@ void DetourModKit::Config::disable_auto_reload() noexcept
 {
     std::unique_ptr<ConfigWatcher> to_drop;
     {
-        std::lock_guard<std::mutex> wlock(getWatcherMutex());
-        auto &watcher = getConfigWatcher();
+        std::lock_guard<std::mutex> wlock(get_watcher_mutex());
+        auto &watcher = get_config_watcher();
         // Detect self-invocation from a setter that fires on the watcher
         // thread. Moving out and destroying the unique_ptr here would
         // force the worker to join itself inside ~StoppableWorker,
@@ -1396,12 +1396,12 @@ bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
     std::string binding_name = "config_reload:" + std::string(ini_key);
 
     // Lazily spin up the reload servicer thread on the first hotkey
-    // registration. Holding getWatcherMutex() here keeps the lifetime
+    // registration. Holding get_watcher_mutex() here keeps the lifetime
     // invariants aligned with disable_auto_reload / clear_registered_items.
     std::shared_ptr<ReloadServicer> servicer;
     {
-        std::lock_guard<std::mutex> lock(getWatcherMutex());
-        auto &slot = getReloadServicer();
+        std::lock_guard<std::mutex> lock(get_watcher_mutex());
+        auto &slot = get_reload_servicer();
         if (!slot)
         {
             slot = std::make_shared<ReloadServicer>();
@@ -1433,8 +1433,8 @@ bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
     // Replace any prior guard registered for the same INI key so repeat
     // calls update in place rather than stacking.
     {
-        std::lock_guard<std::mutex> lock(getWatcherMutex());
-        auto &guards = getReloadHotkeyGuards();
+        std::lock_guard<std::mutex> lock(get_watcher_mutex());
+        auto &guards = get_reload_hotkey_guards();
         for (auto it = guards.begin(); it != guards.end(); ++it)
         {
             if (it->name() == binding_name)
@@ -1451,10 +1451,10 @@ bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
 
 void DetourModKit::Config::log_all()
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
+    std::lock_guard<std::mutex> lock(get_config_mutex());
 
     Logger &logger = Logger::get_instance();
-    const auto &items = getRegisteredConfigItems();
+    const auto &items = get_registered_config_items();
     if (items.empty())
     {
         logger.info("Config: No configuration items registered.");
@@ -1485,13 +1485,13 @@ void DetourModKit::Config::log_all()
 
 void DetourModKit::Config::clear_registered_items()
 {
-    std::lock_guard<std::mutex> lock(getConfigMutex());
+    std::lock_guard<std::mutex> lock(get_config_mutex());
 
     Logger &logger = Logger::get_instance();
-    size_t count = getRegisteredConfigItems().size();
+    size_t count = get_registered_config_items().size();
     if (count > 0)
     {
-        getRegisteredConfigItems().clear();
+        get_registered_config_items().clear();
         logger.debug("Config: Cleared {} registered configuration items.", count);
     }
     else
@@ -1502,10 +1502,10 @@ void DetourModKit::Config::clear_registered_items()
     // Drop the remembered INI path too so reload() does not act on a
     // previous file after a full reset.  Leaves the watcher alone; the
     // caller owns its lifecycle via disable_auto_reload().
-    getLastLoadedIniPath().clear();
+    get_last_loaded_ini_path().clear();
     // Wipe the cached content hash alongside the path so the next load()
     // starts from a clean slate.
-    getLastLoadedIniHash().reset();
+    get_last_loaded_ini_hash().reset();
 
     // Release any reload-hotkey guards so the cancellation flags flip
     // deterministically. Held under the watcher mutex because that is
@@ -1513,9 +1513,9 @@ void DetourModKit::Config::clear_registered_items()
     // reference to the reload servicer.
     std::shared_ptr<ReloadServicer> servicer_to_drop;
     {
-        std::lock_guard<std::mutex> wlock(getWatcherMutex());
-        getReloadHotkeyGuards().clear();
-        servicer_to_drop = std::move(getReloadServicer());
+        std::lock_guard<std::mutex> wlock(get_watcher_mutex());
+        get_reload_hotkey_guards().clear();
+        servicer_to_drop = std::move(get_reload_servicer());
     }
     // Release our strong reference to the servicer. The InputManager
     // binding registered by register_reload_hotkey() still holds another

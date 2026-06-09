@@ -88,6 +88,35 @@ bool probe_object(uintptr_t obj, ObjectFields &out) noexcept
 }
 ```
 
+For frame hooks, keep the hook body limited to cached state, branch-only guards,
+and one guarded read path. Resolve signatures, RTTI identities, and offsets
+outside the hook.
+
+```cpp
+namespace Mem = DetourModKit::Memory;
+
+namespace
+{
+    std::atomic<std::uintptr_t> g_player_state{0};
+    constexpr std::array<std::ptrdiff_t, 3> PLAYER_HEALTH_CHAIN{0x18, 0x30, 0x8};
+}
+
+void camera_update_hook(void *camera, float delta_time)
+{
+    const std::uintptr_t player_state = g_player_state.load(std::memory_order_relaxed);
+    if (Mem::plausible_userspace_ptr(player_state))
+    {
+        const auto health = Mem::seh_read_chain<float>(player_state, PLAYER_HEALTH_CHAIN);
+        if (health)
+        {
+            apply_camera_rules(camera, *health);
+        }
+    }
+
+    original_camera_update(camera, delta_time);
+}
+```
+
 For a multi-level pointer chain, resolve the whole chain under one fault guard
 rather than calling `seh_read` once per link. The combined walk is one
 out-of-line call instead of N, keeps each link in a register instead of

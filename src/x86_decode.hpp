@@ -3,26 +3,36 @@
 
 #include "DetourModKit/memory.hpp"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <optional>
 
 namespace DetourModKit::detail
 {
+    // Each decoder copies the candidate instruction bytes into a local buffer
+    // under a single SEH fault guard (seh_read_bytes), then inspects the copy.
+    // Read-then-test on a local buffer closes the time-of-check to time-of-use
+    // gap that is_readable + a raw dereference leaves open: the target page can
+    // change protection or unmap between the probe and the access, and these
+    // decoders run on the nested-hook detection and prologue-recovery paths
+    // where the page state is most likely to be in flux. A faulting read
+    // returns nullopt rather than taking down the host.
+
     [[nodiscard]] inline std::optional<std::uintptr_t>
     decode_e9_rel32(std::uintptr_t address) noexcept
     {
-        if (!Memory::is_readable(reinterpret_cast<const void *>(address), 5))
+        std::array<std::uint8_t, 5> code{};
+        if (!Memory::seh_read_bytes(address, code.data(), code.size()))
         {
             return std::nullopt;
         }
-        const auto *bytes = reinterpret_cast<const std::uint8_t *>(address);
-        if (bytes[0] != 0xE9)
+        if (code[0] != 0xE9)
         {
             return std::nullopt;
         }
         std::int32_t disp = 0;
-        std::memcpy(&disp, bytes + 1, sizeof(disp));
+        std::memcpy(&disp, code.data() + 1, sizeof(disp));
         return static_cast<std::uintptr_t>(
             static_cast<std::int64_t>(address) + 5 + disp);
     }
@@ -30,16 +40,16 @@ namespace DetourModKit::detail
     [[nodiscard]] inline std::optional<std::uintptr_t>
     decode_eb_rel8(std::uintptr_t address) noexcept
     {
-        if (!Memory::is_readable(reinterpret_cast<const void *>(address), 2))
+        std::array<std::uint8_t, 2> code{};
+        if (!Memory::seh_read_bytes(address, code.data(), code.size()))
         {
             return std::nullopt;
         }
-        const auto *bytes = reinterpret_cast<const std::uint8_t *>(address);
-        if (bytes[0] != 0xEB)
+        if (code[0] != 0xEB)
         {
             return std::nullopt;
         }
-        const auto disp = static_cast<std::int8_t>(bytes[1]);
+        const auto disp = static_cast<std::int8_t>(code[1]);
         return static_cast<std::uintptr_t>(
             static_cast<std::int64_t>(address) + 2 + disp);
     }
@@ -52,28 +62,27 @@ namespace DetourModKit::detail
     {
         static_assert(sizeof(void *) == 8,
                       "decode_ff25_indirect assumes x86-64 RIP-relative semantics");
-        if (!Memory::is_readable(reinterpret_cast<const void *>(address), 6))
+        std::array<std::uint8_t, 6> code{};
+        if (!Memory::seh_read_bytes(address, code.data(), code.size()))
         {
             return std::nullopt;
         }
-        const auto *bytes = reinterpret_cast<const std::uint8_t *>(address);
-        if (bytes[0] != 0xFF || bytes[1] != 0x25)
+        if (code[0] != 0xFF || code[1] != 0x25)
         {
             return std::nullopt;
         }
         std::int32_t disp = 0;
-        std::memcpy(&disp, bytes + 2, sizeof(disp));
+        std::memcpy(&disp, code.data() + 2, sizeof(disp));
         const auto slot_addr = static_cast<std::uintptr_t>(
             static_cast<std::int64_t>(address) + 6 + disp);
-        if (!Memory::is_readable(reinterpret_cast<const void *>(slot_addr), sizeof(std::uintptr_t)))
+        // The slot stores the final indirect target; read it under the same
+        // fault guard rather than is_readable + a raw dereference.
+        const auto indirect_destination = Memory::seh_read<std::uintptr_t>(slot_addr);
+        if (!indirect_destination)
         {
             return std::nullopt;
         }
-        std::uintptr_t indirect_destination = 0;
-        std::memcpy(&indirect_destination,
-                    reinterpret_cast<const void *>(slot_addr),
-                    sizeof(indirect_destination));
-        return indirect_destination;
+        return *indirect_destination;
     }
 } // namespace DetourModKit::detail
 

@@ -44,8 +44,8 @@ namespace DetourModKit
     private:
         bool flush_buffer();
 
-        win_handle_t handle_;
-        std::array<char, BUFFER_SIZE> buffer_;
+        win_handle_t m_handle;
+        std::array<char, BUFFER_SIZE> m_buffer;
     };
 
     /**
@@ -74,7 +74,7 @@ namespace DetourModKit
         void close();
 
     private:
-        WinFileStreamBuf buf_;
+        WinFileStreamBuf m_buf;
     };
 
 } // namespace DetourModKit

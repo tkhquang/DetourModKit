@@ -43,7 +43,7 @@ namespace DetourModKit
 
     namespace
     {
-        constexpr DWORD kNotifyFilter =
+        constexpr DWORD NOTIFY_FILTER =
             FILE_NOTIFY_CHANGE_LAST_WRITE |
             FILE_NOTIFY_CHANGE_FILE_NAME |
             FILE_NOTIFY_CHANGE_SIZE;
@@ -59,19 +59,19 @@ namespace DetourModKit
 
         // Sized so bursty editor saves do not overflow a single call while
         // still fitting comfortably on the worker's stack.
-        constexpr DWORD kBufferBytes = 16 * 1024;
+        constexpr DWORD BUFFER_BYTES = 16 * 1024;
 
         // Pumping timeout for GetOverlappedResultEx. Bounds how long a
         // pending stop() must wait for the worker to observe its
         // stop_token; idle cost is ~10 syscalls/s per watcher (not zero).
-        constexpr DWORD kPumpTimeoutMs = 100;
+        constexpr DWORD PUMP_TIMEOUT_MS = 100;
 
         // Per-wait bound for the stop-path drain. Only bites when a notify IRP
         // is genuinely stuck (a deleted/orphaned watched directory); in the
         // normal case the cancelled read completes in microseconds and the
         // wait returns immediately. Two waits (cancel, then handle-close) cap
         // worst-case teardown at ~2 * this value instead of an infinite hang.
-        constexpr DWORD kDrainTimeoutMs = 1000;
+        constexpr DWORD DRAIN_TIMEOUT_MS = 1000;
 
         bool iequals_w(std::wstring_view lhs, std::wstring_view rhs) noexcept
         {
@@ -171,15 +171,15 @@ namespace DetourModKit
             // weakly_canonical is avoided because the file may not exist yet;
             // absolute() is enough for ReadDirectoryChangesW.
             std::error_code ec;
-            std::filesystem::path p(ini_path_utf8);
-            std::filesystem::path abs = std::filesystem::absolute(p, ec);
+            std::filesystem::path input_path(ini_path_utf8);
+            std::filesystem::path absolute_path = std::filesystem::absolute(input_path, ec);
             if (ec)
             {
-                abs = p;
+                absolute_path = input_path;
             }
 
-            directory_wide = abs.parent_path().wstring();
-            filename_wide = abs.filename().wstring();
+            directory_wide = absolute_path.parent_path().wstring();
+            filename_wide = absolute_path.filename().wstring();
         }
     };
 
@@ -330,7 +330,7 @@ namespace DetourModKit
                 worker_id_slot->store(std::this_thread::get_id(),
                                       std::memory_order_release);
                 auto io = std::make_unique<WatchIoState>();
-                io->buffer.resize(kBufferBytes);
+                io->buffer.resize(BUFFER_BYTES);
 
                 // Reference aliases keep the pump body below unchanged while the
                 // backing storage lives on the heap, so the stop-path drain can
@@ -394,7 +394,7 @@ namespace DetourModKit
                         buffer.data(),
                         static_cast<DWORD>(buffer.size()),
                         FALSE, // no recursion
-                        kNotifyFilter,
+                        NOTIFY_FILTER,
                         &bytes_returned,
                         &overlapped,
                         nullptr);
@@ -424,7 +424,7 @@ namespace DetourModKit
                     DWORD bytes_transferred = 0;
                     const BOOL overlapped_ok = ::GetOverlappedResultEx(
                         dir_handle.h, &overlapped, &bytes_transferred,
-                        kPumpTimeoutMs, FALSE);
+                        PUMP_TIMEOUT_MS, FALSE);
 
                     if (!overlapped_ok)
                     {
@@ -600,7 +600,7 @@ namespace DetourModKit
 
                 DWORD drain_bytes = 0;
                 const BOOL drain_ok = ::GetOverlappedResultEx(
-                    dir_handle.h, &overlapped, &drain_bytes, kDrainTimeoutMs, FALSE);
+                    dir_handle.h, &overlapped, &drain_bytes, DRAIN_TIMEOUT_MS, FALSE);
 
                 // Only WAIT_TIMEOUT / WAIT_IO_COMPLETION mean the IRP is still
                 // pending; any other status (including ERROR_OPERATION_ABORTED)
@@ -618,7 +618,7 @@ namespace DetourModKit
                     // Force completion by releasing the directory handle, then
                     // wait on the event the IRP signals on its way out.
                     dir_handle.reset();
-                    drained = ::WaitForSingleObject(event_handle.h, kDrainTimeoutMs) ==
+                    drained = ::WaitForSingleObject(event_handle.h, DRAIN_TIMEOUT_MS) ==
                               WAIT_OBJECT_0;
                 }
 

@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -35,23 +36,27 @@ namespace
 
     std::optional<std::uintptr_t> decode_prehook_destination(std::uintptr_t target_address) noexcept
     {
-        if (!Memory::is_readable(reinterpret_cast<const void *>(target_address), 2))
+        // Read the opcode bytes under a fault guard and dispatch on the copy;
+        // an unguarded dereference of target_address could fault if the page is
+        // unmapped or guarded.
+        std::array<std::uint8_t, 2> opcode{};
+        if (!Memory::seh_read_bytes(target_address, opcode.data(), opcode.size()))
         {
             return std::nullopt;
         }
-        const auto *bytes = reinterpret_cast<const std::uint8_t *>(target_address);
 
-        if (bytes[0] == 0xE9)
+        // Only E9 (jmp rel32) and FF 25 (jmp [rip+disp32]) can redirect a
+        // prologue into a hook trampoline in another module. EB (jmp rel8)
+        // reaches at most +/-127 bytes, far too short to land in a foreign hook
+        // stub, so a leading 0xEB is ordinary code, not a pre-existing inline
+        // hook. Matching it here would only add false positives on functions
+        // that legitimately begin with a short jump.
+        if (opcode[0] == 0xE9)
         {
             return detail::decode_e9_rel32(target_address);
         }
 
-        if (bytes[0] == 0xEB)
-        {
-            return detail::decode_eb_rel8(target_address);
-        }
-
-        if (bytes[0] == 0xFF && bytes[1] == 0x25)
+        if (opcode[0] == 0xFF && opcode[1] == 0x25)
         {
             return detail::decode_ff25_indirect(target_address);
         }
@@ -137,8 +142,11 @@ HookManager::~HookManager() noexcept
     // Ordering (matches the shutdown() contract so readers see one story):
     //   1. Flip m_shutdown_called under m_mutator_gate (exclusive) to
     //      block new mutators and serialize with a late shutdown() call.
-    //   2. Disable all hooks under shared m_hooks_mutex so that in-flight
-    //      trampoline callers can drain from SafetyHook::disable().
+    //   2. Disable all hooks under shared m_hooks_mutex. SafetyHook::disable()
+    //      restores the original bytes and relocates any thread caught inside
+    //      the patched prologue (thread-suspend + IP fixup); it does NOT drain
+    //      a thread already in the detour or trampoline body. The shared lock
+    //      just lets the kit's own with_* readers coexist with the disable.
     //   3. Acquire exclusive m_hooks_mutex to wait out any shared_lock
     //      holder still inside a with_* callback. Only then clear the
     //      maps -- destroying the Hook objects would UAF a live reader.
@@ -225,9 +233,12 @@ void HookManager::shutdown()
     // exclusive here waits for active mutators and blocks new ones.
     std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
-    // Two-phase shutdown: disable hooks under a shared lock first so that
-    // hooked threads blocked on m_hooks_mutex can drain from SafetyHook's
-    // disable() without deadlock, then clear the maps under exclusive lock.
+    // Two-phase shutdown: disable hooks under a shared lock first, then clear
+    // the maps under the exclusive lock. The shared phase lets the kit's own
+    // with_* readers (shared_lock holders) finish; SafetyHook::disable()
+    // relocates only threads caught in the patched prologue and does not drain
+    // threads already in the detour or trampoline body, so the caller must
+    // quiesce the hooked function during teardown to close the residual window.
     {
         std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
         for (auto &[name, hook] : m_hooks)
@@ -658,11 +669,15 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
     std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
-    // Two-phase removal: disable under shared lock first so that in-flight
-    // trampoline callers (which may acquire shared_lock via with_inline_hook)
-    // can drain before we take the exclusive lock to erase. Without this,
-    // SafetyHook's destructor waiting for trampoline threads while holding
-    // the exclusive lock would deadlock against those threads.
+    // Two-phase removal: disable under the shared lock first, then take the
+    // exclusive lock to erase. The shared phase lets the kit's own
+    // with_inline_hook readers (shared_lock holders) finish before the Hook is
+    // destroyed; SafetyHook's disable()/destructor relocates only threads
+    // caught in the patched prologue, not threads already in the detour or
+    // trampoline body. Sequencing disable() before the exclusive clear also
+    // keeps SafetyHook's own thread-suspend teardown off the exclusive lock.
+    // The caller must ensure no thread is executing the hooked function during
+    // removal to close the residual narrow window.
     {
         std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
         auto it = m_hooks.find(hook_id);
@@ -700,12 +715,13 @@ void HookManager::remove_all_hooks()
     // exclusive here waits for active mutators and blocks new ones.
     std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
-    // Two-phase removal: disable hooks under shared lock first so that
-    // in-flight trampoline callers (which may hold shared_lock via
-    // with_inline_hook) can drain before we take the exclusive lock
-    // to erase. Without this, SafetyHook's destructor waiting for
-    // trampoline threads while holding the exclusive lock would
-    // deadlock against those threads.
+    // Two-phase removal: disable hooks under the shared lock first, then take
+    // the exclusive lock to erase. The shared phase lets the kit's own
+    // with_inline_hook readers (shared_lock holders) finish before the Hook is
+    // destroyed; SafetyHook relocates only threads caught in the patched
+    // prologue, not threads already in the detour or trampoline body, so the
+    // caller must quiesce the hooked function during teardown to close the
+    // residual narrow window.
     {
         std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
         for (auto &[name, hook] : m_hooks)

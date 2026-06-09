@@ -5,13 +5,13 @@
 
 [Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Guides](#guides) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
 
-DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, input handling, configuration management, and DLL lifecycle orchestration. It is built with MinGW in mind but aims for general C++ compatibility.
+DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, input handling, configuration management, and DLL lifecycle orchestration. It targets Windows x64 and builds under both MSVC 2022+ and MinGW (GCC 12+).
 
 ## Features
 
 | Module | Description | Header |
 |--------|-------------|--------|
-| AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, multi-candidate cascade resolver with prologue fallback, host-EXE cascade overloads, and in-code constant (immediate/displacement) extraction | `scanner.hpp` |
+| AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, multi-candidate cascade resolver with prologue fallback, host-EXE cascade overloads, in-code constant (immediate/displacement) extraction, and string-reference (xref) resolution | `scanner.hpp` |
 | Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
 | Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
@@ -19,7 +19,7 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads, PE module range queries | `memory.hpp` |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | `rtti.hpp` |
 | RTTI Self-Heal | Reverse-identify the object behind a pointer slot; self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver; drift-telemetry report | `rtti_dissect.hpp` |
-| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, pinned literal) resolved and reported in a single pass | `anchors.hpp` |
+| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) resolved and reported in a single pass | `anchors.hpp` |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
@@ -182,7 +182,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <summary><strong>Anchor Registry</strong></summary>
 
 - One declarative table (`Anchors::Anchor[]`) over the self-healing backends, so every magic constant a mod depends on is declared once with its kind and inputs, then resolved and reported in a single pass instead of a scattered wall of hand-maintained offsets and per-call-site resolvers
-- `AnchorKind` covers the backends that resolve from a module range alone: `VtableIdentity` (`Rtti::vtable_for_type`), `RipGlobal` (an AOB/RIP cascade returning an absolute address), `CodeOperand` (`Scanner::read_code_constant`), and `Manual` (a pinned literal, surfaced as at-risk in a report). `CallArgHome` is reserved for a future prologue-dataflow backend and reports `Unsupported`
+- `AnchorKind` covers the backends that resolve from a module range alone: `VtableIdentity` (`Rtti::vtable_for_type`), `RipGlobal` (an AOB/RIP cascade returning an absolute address), `CodeOperand` (`Scanner::read_code_constant`), `StringXref` (`Scanner::find_string_xref`, the most update-resilient kind: the unique instruction or enclosing function that references an immutable string literal), and `Manual` (a pinned literal, surfaced as at-risk in a report). `CallArgHome` is reserved for a future prologue-dataflow backend and reports `Unsupported`
 - `Anchors::resolve(anchor, range?)` resolves one entry; `resolve_all(anchors, out, range?)` fills a parallel `ResolvedAnchor` report (`{label, kind, status, value}`). Resolution is idempotent and side-effect-free, so re-heal-on-miss is just re-running `resolve` on the failing anchor
 - RTTI pointer-field offset healing (`heal_landmark`) is intentionally not a registry kind: it needs a runtime struct base resolved from another anchor, so it is driven directly once that base is known
 
@@ -252,7 +252,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 
 **Performance:**
 
-- Hash-map-backed `is_binding_active()` query for lock-free cross-thread state reads (e.g., from render hooks at 60+ fps)
+- Hash-map-backed `is_binding_active()` query for low-overhead cross-thread state reads (e.g., from render hooks at 60+ fps)
 - Multiple bindings per name for multi-combo hotkeys
 - Lock-free `is_running()` via atomic flag
 - O(1) reverse name lookup for `input_code_to_name()`
@@ -408,6 +408,21 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     | `mingw-release` | GCC (MinGW) | Release | OFF | |
     | `msvc-debug` | MSVC (cl) | Debug | ON | |
     | `msvc-release` | MSVC (cl) | Release | OFF | |
+
+   ### Installed package smoke test
+
+    ```bash
+    cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DDetourModKit_DIR="$PWD/install_package/mingw/lib/cmake/DetourModKit" \
+        -DCMAKE_CXX_COMPILER=g++
+    cmake --build build/package-smoke-mingw --parallel
+    ctest --test-dir build/package-smoke-mingw --output-on-failure
+    ```
+
+    The package smoke project includes the installed headers, links the
+    installed `DetourModKit::DetourModKit` target, and touches `HookManager`
+    so the static dependency chain is pulled into the consumer link.
 
 > [!NOTE]
 > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,

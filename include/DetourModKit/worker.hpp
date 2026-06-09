@@ -64,7 +64,7 @@ namespace DetourModKit
         /**
          * @brief Returns the worker's descriptive name.
          */
-        [[nodiscard]] const std::string &name() const noexcept { return name_; }
+        [[nodiscard]] const std::string &name() const noexcept { return m_name; }
 
         /**
          * @brief Requests stop and joins the worker thread.
@@ -76,9 +76,9 @@ namespace DetourModKit
         void shutdown() noexcept;
 
     private:
-        std::string name_;
-        std::jthread thread_;
-        std::atomic<bool> joined_{false};
+        std::string m_name;
+        std::jthread m_thread;
+        std::atomic<bool> m_joined{false};
     };
 } // namespace DetourModKit
 

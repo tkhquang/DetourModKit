@@ -138,9 +138,9 @@ namespace
      * @details Higher scores indicate bytes that appear more frequently, making them
      *          poor candidates for anchor-based scanning.
      */
-    static constexpr uint8_t byte_frequency_class(uint8_t b) noexcept
+    static constexpr uint8_t byte_frequency_class(uint8_t byte_value) noexcept
     {
-        switch (b)
+        switch (byte_value)
         {
         case 0x00:
             return 10; // null padding, very common
@@ -345,9 +345,9 @@ namespace
     // logs when the Nth-occurrence overload or scan_executable_regions loops.
     bool pattern_has_literal_byte(const Scanner::CompiledPattern &pattern) noexcept
     {
-        for (const std::byte m : pattern.mask)
+        for (const std::byte mask_byte : pattern.mask)
         {
-            if (m != std::byte{0x00})
+            if (mask_byte != std::byte{0x00})
                 return true;
         }
         return false;
@@ -580,7 +580,18 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::r
     // to the correct 64-bit offset.
     const uintptr_t base = reinterpret_cast<uintptr_t>(instruction_address);
     const uintptr_t disp_sext = static_cast<uintptr_t>(static_cast<int64_t>(*displacement));
-    return base + instruction_length + disp_sext;
+    const uintptr_t target = base + instruction_length + disp_sext;
+
+    // Fail closed on a target that cannot be a real in-process address. A
+    // corrupt or hostile displacement can resolve to 0, a low guard-page
+    // address, or a kernel-range value; returning that as "success" would hand
+    // the caller a pointer that faults on first use. plausible_userspace_ptr is
+    // pure arithmetic, so this guard adds no syscall and no memory access.
+    if (!Memory::plausible_userspace_ptr(target))
+    {
+        return std::unexpected(RipResolveError::ImplausibleTarget);
+    }
+    return target;
 }
 
 std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::find_and_resolve_rip_relative(
@@ -740,6 +751,183 @@ namespace
     constexpr DWORD READABLE_PAGE_FLAGS = EXECUTABLE_PAGE_FLAGS |
                                           PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
 
+    // Builds a literal-byte CompiledPattern from a string query: the raw bytes of
+    // the text (UTF-8, or each code unit widened to UTF-16LE) plus an optional
+    // trailing NUL. The query content is emitted as a hex AOB and run through
+    // parse_aob so the string scan reuses the exact same compiled-pattern path as
+    // every other AOB. Returns nullopt on an empty query. Non-ASCII UTF-16 is out
+    // of scope: each byte is widened verbatim (Latin-1), which covers the ASCII
+    // identifiers that anchor strings almost always are.
+    std::optional<Scanner::CompiledPattern> compile_string_pattern(const Scanner::StringRefQuery &query)
+    {
+        if (query.text.empty())
+        {
+            return std::nullopt;
+        }
+        const bool wide = (query.encoding == Scanner::StringEncoding::Utf16le);
+        std::string aob;
+        aob.reserve(query.text.size() * (wide ? 6 : 3) + 6);
+        const auto emit = [&aob](std::uint8_t byte)
+        {
+            static constexpr char hex_digits[] = "0123456789ABCDEF";
+            aob.push_back(hex_digits[byte >> 4]);
+            aob.push_back(hex_digits[byte & 0x0F]);
+            aob.push_back(' ');
+        };
+        for (const char ch : query.text)
+        {
+            emit(static_cast<std::uint8_t>(ch));
+            if (wide)
+            {
+                emit(0x00); // High byte of a Latin-1 code unit in UTF-16LE.
+            }
+        }
+        if (query.require_terminator)
+        {
+            emit(0x00);
+            if (wide)
+            {
+                emit(0x00);
+            }
+        }
+        return Scanner::parse_aob(aob);
+    }
+
+    // Phase 2 of find_string_xref: scan the image's execute-readable pages for the
+    // RIP-relative load(s) whose resolved absolute target is string_addr.
+    //
+    // Recognizes the dominant 64-bit string-load forms only: an optional REX.W
+    // prefix (0x48..0x4F), opcode 8D (lea) or 8B (mov), and a ModRM byte in the
+    // RIP-relative form -- mod == 00b and rm == 101b, i.e. (modrm & 0xC7) == 0x05 --
+    // followed by a 4-byte displacement. With one REX byte the instruction is
+    // exactly 7 bytes and the disp32 sits at offset 3, so the candidate is
+    // self-delimiting from its shape: this needs no instruction-aligned linear
+    // sweep and therefore cannot desync on data or jump tables embedded in .text.
+    //
+    // The resolved target is next-instruction-address + sign-extended disp32, done
+    // in unsigned modular arithmetic so it is well-defined for every input. Only a
+    // target that exactly equals string_addr is accepted, which is an extremely
+    // strong filter: string_addr is the already-located, plausible .rdata address,
+    // so this equality subsumes the plausible_userspace_ptr floor (an implausible
+    // target cannot equal it) and a coincidental byte sequence resolving to
+    // precisely string_addr is not a realistic false positive. Counting stops at
+    // the second hit so the caller can fail closed on ambiguity.
+    //
+    // Reads live region bytes directly, exactly as scan_regions_filtered does: the
+    // per-region VirtualQuery gate (MEM_COMMIT, execute-readable base protection,
+    // not PAGE_GUARD / PAGE_NOACCESS) is what makes the unguarded read safe.
+    std::uintptr_t scan_executable_for_string_ref(std::uintptr_t string_addr,
+                                                  uintptr_t window_lo, uintptr_t window_hi,
+                                                  std::size_t &found_count) noexcept
+    {
+        found_count = 0;
+        std::uintptr_t first_site = 0;
+        constexpr std::size_t instr_len = 7; // REX.W + opcode + ModRM + disp32.
+
+        MEMORY_BASIC_INFORMATION mbi{};
+        uintptr_t addr = window_lo;
+        while (addr < window_hi && VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
+        {
+            const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+            const auto region_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            const uintptr_t region_end = region_base + mbi.RegionSize;
+            const uintptr_t scan_lo = region_base < window_lo ? window_lo : region_base;
+            const uintptr_t scan_hi = region_end > window_hi ? window_hi : region_end;
+
+            if (mbi.State == MEM_COMMIT && (mbi.Protect & EXECUTABLE_PAGE_FLAGS) != 0 &&
+                !protection_unsafe && scan_hi > scan_lo &&
+                static_cast<std::size_t>(scan_hi - scan_lo) >= instr_len)
+            {
+                const auto *bytes = reinterpret_cast<const std::uint8_t *>(scan_lo);
+                const std::size_t span = static_cast<std::size_t>(scan_hi - scan_lo);
+                for (std::size_t i = 0; i + instr_len <= span; ++i)
+                {
+                    const std::uint8_t rex = bytes[i];
+                    const std::uint8_t opcode = bytes[i + 1];
+                    const std::uint8_t modrm = bytes[i + 2];
+                    if (rex < 0x48 || rex > 0x4F ||
+                        (opcode != 0x8D && opcode != 0x8B) ||
+                        (modrm & 0xC7) != 0x05)
+                    {
+                        continue;
+                    }
+                    std::int32_t disp = 0;
+                    std::memcpy(&disp, &bytes[i + 3], sizeof(disp));
+                    const uintptr_t instr_addr = scan_lo + i;
+                    const uintptr_t target = instr_addr + instr_len +
+                                             static_cast<uintptr_t>(static_cast<std::int64_t>(disp));
+                    if (target != string_addr)
+                    {
+                        continue;
+                    }
+                    ++found_count;
+                    if (found_count == 1)
+                    {
+                        first_site = instr_addr;
+                    }
+                    else
+                    {
+                        return 0; // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                    }
+                }
+            }
+
+            if (region_end <= addr)
+            {
+                break; // Overflow guard, mirroring scan_regions_filtered.
+            }
+            addr = region_end;
+        }
+        return (found_count == 1) ? first_site : 0;
+    }
+
+    // Best-effort enclosing-function entry for a referencing instruction. Walks
+    // backward for the nearest function boundary -- a terminal RET (0xC3) or a run
+    // of INT3 (0xCC) alignment padding -- and returns the first byte after it that
+    // passes is_likely_function_prologue, skipping any further INT3 padding. The
+    // back-scan is bounded so a pathological region cannot scan unboundedly, and
+    // it fails closed (returns 0) when no boundary is found in the window. This is
+    // a heuristic, not control-flow analysis: a 0xC3 / 0xCC byte that is actually
+    // operand data inside an instruction can mark a false boundary, which is why
+    // the default return mode is the exact referencing instruction.
+    std::uintptr_t enclosing_function_start(std::uintptr_t instr_addr, uintptr_t window_lo) noexcept
+    {
+        constexpr uintptr_t back_scan_window = 0x2000; // 8 KiB.
+        const uintptr_t floor =
+            (instr_addr - window_lo > back_scan_window) ? instr_addr - back_scan_window : window_lo;
+
+        for (uintptr_t probe = instr_addr; probe > floor; --probe)
+        {
+            const auto boundary_byte = Memory::seh_read<std::uint8_t>(probe - 1);
+            if (!boundary_byte)
+            {
+                return 0;
+            }
+            if (*boundary_byte != 0xCC && *boundary_byte != 0xC3)
+            {
+                continue;
+            }
+            // The boundary byte ends the previous function (or its padding); the
+            // enclosing function begins at the first non-INT3 byte after it.
+            uintptr_t start = probe;
+            while (start < instr_addr)
+            {
+                const auto pad_byte = Memory::seh_read<std::uint8_t>(start);
+                if (!pad_byte)
+                {
+                    return 0;
+                }
+                if (*pad_byte != 0xCC)
+                {
+                    break;
+                }
+                ++start;
+            }
+            return Scanner::is_likely_function_prologue(start) ? start : 0;
+        }
+        return 0;
+    }
+
 } // anonymous namespace
 
 // Module-scoped siblings of scan_executable_regions / scan_readable_regions:
@@ -825,6 +1013,64 @@ const std::byte *DetourModKit::Scanner::scan_readable_regions(const CompiledPatt
     // rather than deduplicated against scan_executable_regions; callers wanting
     // non-code matches post-filter. The window spans the whole address space.
     return scan_regions_filtered(pattern, occurrence, READABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
+}
+
+std::expected<std::uintptr_t, Scanner::StringXrefError>
+DetourModKit::Scanner::find_string_xref(const StringRefQuery &query, Memory::ModuleRange range)
+{
+    if (query.text.empty())
+    {
+        return std::unexpected(StringXrefError::EmptyQuery);
+    }
+    if (!range.valid())
+    {
+        return std::unexpected(StringXrefError::InvalidRange);
+    }
+
+    // Phase 1: locate the single occurrence of the string in the image's readable
+    // pages. The linker pools identical literals, so a second occurrence makes the
+    // anchor ambiguous and must fail closed.
+    const auto pattern = compile_string_pattern(query);
+    if (!pattern)
+    {
+        // Non-empty text that does not compile to a pattern cannot be located;
+        // report not-found rather than guess.
+        return std::unexpected(StringXrefError::StringNotFound);
+    }
+    const std::byte *first = detail::scan_module_readable(*pattern, range, 1);
+    if (first == nullptr)
+    {
+        return std::unexpected(StringXrefError::StringNotFound);
+    }
+    if (detail::scan_module_readable(*pattern, range, 2) != nullptr)
+    {
+        return std::unexpected(StringXrefError::StringAmbiguous);
+    }
+    const auto string_addr = reinterpret_cast<std::uintptr_t>(first);
+
+    // Phase 2: find the single RIP-relative load whose target is the string.
+    std::size_t ref_count = 0;
+    const std::uintptr_t site =
+        scan_executable_for_string_ref(string_addr, range.base, range.end, ref_count);
+    if (ref_count == 0)
+    {
+        return std::unexpected(StringXrefError::NoReference);
+    }
+    if (ref_count >= 2)
+    {
+        return std::unexpected(StringXrefError::AmbiguousReference);
+    }
+
+    if (query.return_mode == XrefReturn::EnclosingFunction)
+    {
+        const std::uintptr_t function_start = enclosing_function_start(site, range.base);
+        if (function_start == 0)
+        {
+            return std::unexpected(StringXrefError::FunctionNotFound);
+        }
+        return function_start;
+    }
+    return site;
 }
 
 Scanner::SimdLevel DetourModKit::Scanner::active_simd_level() noexcept

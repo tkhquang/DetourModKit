@@ -246,6 +246,61 @@ TEST(AnchorsTest, CodeOperandResolvesDisplacementWithByteWidth)
     EXPECT_EQ(result.value, -1);
 }
 
+TEST(AnchorsTest, StringXrefResolvesReference)
+{
+    // StringXref phase 2 scans execute-readable pages, so this case needs an
+    // executable page rather than the read-write Region helper.
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
+    auto *base = static_cast<std::uint8_t *>(
+        VirtualAlloc(nullptr, page, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (!base)
+    {
+        GTEST_SKIP() << "could not allocate an executable page";
+    }
+    std::memset(base, 0x00, page);
+    const char marker[] = "AnchorRegistryString";
+    std::memcpy(base + 0x100, marker, sizeof(marker));
+    // lea rax, [rip+disp32] at 0x10 resolving to the string at 0x100.
+    base[0x10] = 0x48;
+    base[0x11] = 0x8D;
+    base[0x12] = 0x05;
+    const auto base_addr = reinterpret_cast<std::uintptr_t>(base);
+    const auto disp = static_cast<std::int32_t>(
+        static_cast<std::int64_t>(base_addr + 0x100) -
+        static_cast<std::int64_t>(base_addr + 0x10 + 7));
+    std::memcpy(base + 0x13, &disp, sizeof(disp));
+
+    Anchors::Anchor anchor{};
+    anchor.label = "string-xref";
+    anchor.kind = Anchors::AnchorKind::StringXref;
+    anchor.xref_text = "AnchorRegistryString";
+
+    const auto result = Anchors::resolve(anchor, Memory::ModuleRange{base_addr, base_addr + page});
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(result.value), base_addr + 0x10);
+    EXPECT_EQ(result.kind, Anchors::AnchorKind::StringXref);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+TEST(AnchorsTest, StringXrefFailsClosedWhenAbsent)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+
+    Anchors::Anchor anchor{};
+    anchor.label = "string-xref";
+    anchor.kind = Anchors::AnchorKind::StringXref;
+    anchor.xref_text = "DefinitelyNotInThisRegion";
+
+    // The string is absent, so the backend fails closed (no value invented).
+    const auto result = Anchors::resolve(anchor, reg.range());
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::Failed);
+    EXPECT_EQ(result.value, 0);
+}
+
 TEST(AnchorsTest, StatusToStringNonEmpty)
 {
     EXPECT_FALSE(Anchors::anchor_status_to_string(Anchors::AnchorStatus::Unresolved).empty());

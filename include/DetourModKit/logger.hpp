@@ -143,7 +143,7 @@ namespace DetourModKit
          */
         [[nodiscard]] LogLevel get_log_level() const noexcept
         {
-            return current_log_level_.load(std::memory_order_acquire);
+            return m_current_log_level.load(std::memory_order_acquire);
         }
 
         /**
@@ -155,7 +155,7 @@ namespace DetourModKit
          */
         [[nodiscard]] bool is_enabled(LogLevel level) const noexcept
         {
-            return level >= current_log_level_.load(std::memory_order_acquire);
+            return level >= m_current_log_level.load(std::memory_order_acquire);
         }
 
         /**
@@ -183,7 +183,7 @@ namespace DetourModKit
         template <typename... Args>
         void log(LogLevel level, std::format_string<Args...> fmt, Args &&...args)
         {
-            if (level >= current_log_level_.load(std::memory_order_acquire))
+            if (level >= m_current_log_level.load(std::memory_order_acquire))
             {
                 log(level, std::format(fmt, std::forward<Args>(args)...));
             }
@@ -262,7 +262,7 @@ namespace DetourModKit
         void shutdown_internal();
 
         /**
-         * @brief Generates the current timestamp formatted according to timestamp_format_.
+         * @brief Generates the current timestamp formatted according to m_timestamp_format.
          * @return std::string The formatted timestamp string.
          */
         std::string get_timestamp() const;
@@ -277,21 +277,21 @@ namespace DetourModKit
         static void set_static_config(std::shared_ptr<const StaticConfig> config);
 
         // Lock ordering (must be acquired in this order to prevent deadlock):
-        //   1. async_mutex_      -- async logger lifecycle
-        //   2. *log_mutex_ptr_   -- file stream I/O
+        //   1. m_async_mutex      -- async logger lifecycle
+        //   2. *m_log_mutex_ptr   -- file stream I/O
 
-        std::string log_prefix_;
-        std::string log_file_name_;
-        std::string timestamp_format_;
+        std::string m_log_prefix;
+        std::string m_log_file_name;
+        std::string m_timestamp_format;
 
-        std::shared_ptr<WinFileStream> log_file_stream_ptr_;
-        std::shared_ptr<std::mutex> log_mutex_ptr_;
-        std::atomic<LogLevel> current_log_level_{LogLevel::Info};
-        std::atomic<bool> shutdown_called_{false};
+        std::shared_ptr<WinFileStream> m_log_file_stream_ptr;
+        std::shared_ptr<std::mutex> m_log_mutex_ptr;
+        std::atomic<LogLevel> m_current_log_level{LogLevel::Info};
+        std::atomic<bool> m_shutdown_called{false};
 
         // Async logging support (forward declared).
-        // async_logger_ is atomic for lock-free reads on the log() hot path.
-        // async_mutex_ serializes lifecycle operations (enable/disable/shutdown).
+        // m_async_logger is atomic for lock-free reads on the log() hot path.
+        // m_async_mutex serializes lifecycle operations (enable/disable/shutdown).
         //
         // On MSVC x64, std::atomic<std::shared_ptr<T>> is lock-free (uses
         // 128-bit compare-exchange). On MinGW/GCC, this may fall back to a
@@ -300,9 +300,9 @@ namespace DetourModKit
         // benefits the primary target (MSVC), and the MinGW fallback is
         // bounded to one mutex acquisition per log() call, which is
         // comparable to the mutex already used by synchronous mode.
-        std::atomic<std::shared_ptr<AsyncLogger>> async_logger_{};
-        std::atomic<bool> async_mode_enabled_{false};
-        std::mutex async_mutex_;
+        std::atomic<std::shared_ptr<AsyncLogger>> m_async_logger{};
+        std::atomic<bool> m_async_mode_enabled{false};
+        std::mutex m_async_mutex;
     };
 } // namespace DetourModKit
 

@@ -923,6 +923,55 @@ TEST_F(ScannerRipTest, resolve_rip_relative_null_address)
     EXPECT_FALSE(result.has_value());
 }
 
+TEST_F(ScannerRipTest, resolve_rip_relative_implausible_target_rejected)
+{
+    // Resolve a RIP-relative instruction whose computed target lands below
+    // USERSPACE_PTR_MIN (0x10000). The displacement bytes are read from
+    // committed memory, but the resolved address is not a plausible user-mode
+    // pointer, so the resolver must fail closed with ImplausibleTarget rather
+    // than return a near-null address that faults on first dereference.
+    //
+    // A sub-0x10000 target is only reachable when the instruction itself lives
+    // at the lowest user-allocatable address (the int32 displacement cannot
+    // move a normal high allocation out of user range). Request that page
+    // explicitly and skip when the slot is already taken in this process; the
+    // allocation is environment dependent, never flaky-failing.
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    constexpr uintptr_t LOW_BASE = 0x10000; // USERSPACE_PTR_MIN, the allocation granularity.
+    void *region = VirtualAlloc(reinterpret_cast<LPVOID>(LOW_BASE), si.dwPageSize,
+                                MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (region != reinterpret_cast<LPVOID>(LOW_BASE))
+    {
+        if (region)
+        {
+            VirtualFree(region, 0, MEM_RELEASE);
+        }
+        GTEST_SKIP() << "low-address page at 0x10000 unavailable in this process";
+    }
+
+    // MOV RAX, [RIP+disp] => 48 8B 05 <disp32>, length 7, disp at offset 3.
+    // target = base + 7 + disp; disp = -15 gives base - 8 == 0xFFF8, which is
+    // below USERSPACE_PTR_MIN and therefore implausible.
+    auto *bytes = static_cast<std::uint8_t *>(region);
+    bytes[0] = 0x48;
+    bytes[1] = 0x8B;
+    bytes[2] = 0x05;
+    const std::int32_t disp = -15;
+    std::memcpy(bytes + 3, &disp, sizeof(disp));
+
+    const auto result = Scanner::resolve_rip_relative(
+        reinterpret_cast<const std::byte *>(region), 3, 7);
+
+    EXPECT_FALSE(result.has_value());
+    if (!result)
+    {
+        EXPECT_EQ(result.error(), RipResolveError::ImplausibleTarget);
+    }
+
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
 TEST_F(ScannerRipTest, find_and_resolve_mov_rax_rip)
 {
     // Padding + MOV RAX, [RIP+0x00000020]

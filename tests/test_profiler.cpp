@@ -6,6 +6,8 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cstdio>
+#include <string>
 #include <string_view>
 #include <system_error>
 #include <thread>
@@ -13,6 +15,23 @@
 #include <vector>
 
 using namespace DetourModKit;
+
+namespace
+{
+    [[nodiscard]] std::FILE *open_binary_file(const std::string &path) noexcept
+    {
+#if defined(_MSC_VER)
+        std::FILE *file = nullptr;
+        if (fopen_s(&file, path.c_str(), "rb") != 0)
+        {
+            return nullptr;
+        }
+        return file;
+#else
+        return std::fopen(path.c_str(), "rb");
+#endif
+    }
+} // namespace
 
 // --- Profiler singleton ---
 
@@ -216,7 +235,7 @@ TEST_F(ProfilerRecordTest, ExportToFile_WritesValidFile)
     EXPECT_TRUE(ok);
 
     // Read back and verify
-    std::FILE *fp = std::fopen(path.c_str(), "rb");
+    std::FILE *fp = open_binary_file(path);
     ASSERT_NE(fp, nullptr);
     std::fseek(fp, 0, SEEK_END);
     const long size = std::ftell(fp);
@@ -609,7 +628,7 @@ TEST_F(ProfilerRecordTest, ExportToFile_ContentMatchesChromeJson)
     const std::string path = std::format("dmk_profiler_match_test_{}.json", _getpid());
     ASSERT_TRUE(profiler.export_to_file(path));
 
-    std::FILE *fp = std::fopen(path.c_str(), "rb");
+    std::FILE *fp = open_binary_file(path);
     ASSERT_NE(fp, nullptr);
     std::fseek(fp, 0, SEEK_END);
     const long size = std::ftell(fp);

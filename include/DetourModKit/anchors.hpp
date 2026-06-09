@@ -23,8 +23,9 @@ namespace DetourModKit
      *          Scope: the registry unifies the backends whose inputs resolve from
      *          a module range alone -- a vtable by RTTI name (@ref Rtti::vtable_for_type),
      *          a global address by AOB/RIP cascade (@ref Scanner::resolve_cascade_in_module),
-     *          and an in-code constant (@ref Scanner::read_code_constant) -- plus a
-     *          pinned @ref AnchorKind::Manual literal. RTTI pointer-field offset
+     *          an in-code constant (@ref Scanner::read_code_constant), and the instruction
+     *          (or function) that references a string literal (@ref Scanner::find_string_xref)
+     *          -- plus a pinned @ref AnchorKind::Manual literal. RTTI pointer-field offset
      *          healing (@ref Rtti::heal_landmark) is intentionally not a registry
      *          kind: it needs a runtime struct base resolved from another anchor,
      *          so it is driven directly once that base is known. @ref AnchorKind::CallArgHome
@@ -47,6 +48,7 @@ namespace DetourModKit
             VtableIdentity, ///< Rtti::vtable_for_type -> a class vtable address by name.
             RipGlobal,      ///< Scanner cascade -> an absolute address (Direct or RipRelative candidates).
             CodeOperand,    ///< Scanner::read_code_constant -> an in-code immediate/displacement value.
+            StringXref,     ///< Scanner::find_string_xref -> the instruction (or function) referencing a string literal.
             Manual,         ///< A pinned literal; surfaced as at-risk in a report.
             CallArgHome     ///< Reserved for a future prologue-dataflow backend; not yet resolvable.
         };
@@ -83,6 +85,13 @@ namespace DetourModKit
             std::uint8_t operand_index = 0;          ///< CodeOperand: visible operand index.
             std::uint8_t byte_width = 0;             ///< CodeOperand: 0 = decoded width.
 
+            std::string_view xref_text;              ///< StringXref: the string literal content.
+            Scanner::StringEncoding xref_encoding =
+                Scanner::StringEncoding::Utf8;       ///< StringXref: how the string is stored.
+            Scanner::XrefReturn xref_return =
+                Scanner::XrefReturn::ReferencingInstruction; ///< StringXref: instruction vs function.
+            bool xref_require_terminator = true;     ///< StringXref: match a trailing NUL.
+
             std::int64_t manual_value = 0;           ///< Manual: the pinned literal.
         };
 
@@ -91,8 +100,9 @@ namespace DetourModKit
          * @brief Result of resolving an @ref Anchor: the cached value plus status.
          * @details @ref value carries the resolved quantity interpreted per kind:
          *          a vtable or global address (cast to uintptr_t), a code constant,
-         *          or the manual literal. Meaningful only when @ref status is
-         *          @ref AnchorStatus::Resolved.
+         *          the referencing-instruction (or enclosing-function) address of a
+         *          string xref (cast to uintptr_t), or the manual literal.
+         *          Meaningful only when @ref status is @ref AnchorStatus::Resolved.
          */
         struct ResolvedAnchor
         {

@@ -8,18 +8,18 @@ namespace DetourModKit
 {
     StoppableWorker::StoppableWorker(std::string_view name,
                                      std::function<void(std::stop_token)> body)
-        : name_(name)
+        : m_name(name)
     {
         if (!body)
         {
             Logger::get_instance().error(
-                "StoppableWorker '{}': empty body; no thread started.", name_);
-            joined_.store(true, std::memory_order_release);
+                "StoppableWorker '{}': empty body; no thread started.", m_name);
+            m_joined.store(true, std::memory_order_release);
             return;
         }
 
-        thread_ = std::jthread(
-            [fn = std::move(body), label = name_](std::stop_token st)
+        m_thread = std::jthread(
+            [fn = std::move(body), label = m_name](std::stop_token st)
             {
                 try
                 {
@@ -37,7 +37,7 @@ namespace DetourModKit
                 }
             });
 
-        Logger::get_instance().debug("StoppableWorker '{}' started.", name_);
+        Logger::get_instance().debug("StoppableWorker '{}' started.", m_name);
     }
 
     StoppableWorker::~StoppableWorker() noexcept
@@ -47,40 +47,40 @@ namespace DetourModKit
 
     void StoppableWorker::request_stop() noexcept
     {
-        if (thread_.joinable())
+        if (m_thread.joinable())
         {
-            thread_.request_stop();
+            m_thread.request_stop();
         }
     }
 
     bool StoppableWorker::is_running() const noexcept
     {
-        return thread_.joinable() && !joined_.load(std::memory_order_acquire);
+        return m_thread.joinable() && !m_joined.load(std::memory_order_acquire);
     }
 
     void StoppableWorker::shutdown() noexcept
     {
         bool expected = false;
-        if (!joined_.compare_exchange_strong(expected, true,
+        if (!m_joined.compare_exchange_strong(expected, true,
                                              std::memory_order_acq_rel))
         {
             return;
         }
 
-        if (!thread_.joinable())
+        if (!m_thread.joinable())
         {
             return;
         }
 
-        thread_.request_stop();
+        m_thread.request_stop();
 
         if (detail::is_loader_lock_held())
         {
             detail::pin_current_module();
-            thread_.detach();
+            m_thread.detach();
             return;
         }
 
-        thread_.join();
+        m_thread.join();
     }
 } // namespace DetourModKit

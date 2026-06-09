@@ -59,7 +59,7 @@ namespace DetourModKit::detail
         // seqlock (s_consume_rules_seq: even = stable, odd = mid-update) so the
         // detour gets an all-or-nothing snapshot of the whole list without locking.
         // Single writer: whichever thread mutates the bindings, serialized by
-        // InputPoller::bindings_rw_mutex_ held in write mode while
+        // InputPoller::m_bindings_rw_mutex held in write mode while
         // recompute_modifier_caches_locked / clear_bindings publish. This is not the
         // poll thread, which only takes a shared lock and never writes or reads this
         // list. Many readers: the game's XInput caller threads via the detour.
@@ -371,24 +371,24 @@ namespace DetourModKit::detail
         const uint16_t relevant = static_cast<uint16_t>(state.armed | owned_now);
         for (int bit = 0; bit < 16; ++bit)
         {
-            const uint16_t m = static_cast<uint16_t>(1u << bit);
-            if ((relevant & m) == 0)
+            const uint16_t bit_mask = static_cast<uint16_t>(1u << bit);
+            if ((relevant & bit_mask) == 0)
             {
                 continue;
             }
-            const bool phys_down = (true_buttons & m) != 0;
-            const bool owned = (owned_now & m) != 0;
+            const bool phys_down = (true_buttons & bit_mask) != 0;
+            const bool owned = (owned_now & bit_mask) != 0;
 
-            if (owned || ((state.armed & m) != 0 && phys_down))
+            if (owned || ((state.armed & bit_mask) != 0 && phys_down))
             {
                 // Actively held: a chord claims it now, or the trigger button is
                 // still physically down after the modifier was released. Keep
                 // suppressing and cancel any in-progress release grace.
-                state.armed = static_cast<uint16_t>(state.armed | m);
+                state.armed = static_cast<uint16_t>(state.armed | bit_mask);
                 state.deadline_ms[static_cast<size_t>(bit)] = held_sentinel;
-                mask = static_cast<uint16_t>(mask | m);
+                mask = static_cast<uint16_t>(mask | bit_mask);
             }
-            else if ((state.armed & m) != 0)
+            else if ((state.armed & bit_mask) != 0)
             {
                 // Armed but the physical button is up: run the release grace so a
                 // trailing bare-trigger frame cannot leak to the game.
@@ -398,11 +398,11 @@ namespace DetourModKit::detail
                 }
                 if (now_ms < state.deadline_ms[static_cast<size_t>(bit)])
                 {
-                    mask = static_cast<uint16_t>(mask | m);
+                    mask = static_cast<uint16_t>(mask | bit_mask);
                 }
                 else
                 {
-                    state.armed = static_cast<uint16_t>(state.armed & static_cast<uint16_t>(~m));
+                    state.armed = static_cast<uint16_t>(state.armed & static_cast<uint16_t>(~bit_mask));
                     state.deadline_ms[static_cast<size_t>(bit)] = 0;
                 }
             }
@@ -669,7 +669,7 @@ namespace DetourModKit::detail
         // Clearing the reactive mask stops reactive masking and clearing the rule
         // gate stops rule masking. Do NOT seqlock-publish an empty rule list here:
         // that is a multi-step write, and a concurrent binding mutation (set_consume
-        // / add_binding, serialized on InputPoller::bindings_rw_mutex_) is a
+        // / add_binding, serialized on InputPoller::m_bindings_rw_mutex) is a
         // documented thread-safe call that could race a second writer and tear the
         // list. The published list is left as is; it is inert once the hooks are
         // gone and the gate is false, the binding-clear path already empties it

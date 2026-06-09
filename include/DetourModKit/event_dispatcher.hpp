@@ -98,10 +98,10 @@ namespace DetourModKit
         Subscription &operator=(const Subscription &) = delete;
 
         Subscription(Subscription &&other) noexcept
-            : alive_(std::move(other.alive_)),
-              unsubscribe_(std::move(other.unsubscribe_))
+            : m_alive(std::move(other.m_alive)),
+              m_unsubscribe(std::move(other.m_unsubscribe))
         {
-            other.unsubscribe_ = nullptr;
+            other.m_unsubscribe = nullptr;
         }
 
         Subscription &operator=(Subscription &&other) noexcept
@@ -109,9 +109,9 @@ namespace DetourModKit
             if (this != &other)
             {
                 reset();
-                alive_ = std::move(other.alive_);
-                unsubscribe_ = std::move(other.unsubscribe_);
-                other.unsubscribe_ = nullptr;
+                m_alive = std::move(other.m_alive);
+                m_unsubscribe = std::move(other.m_unsubscribe);
+                other.m_unsubscribe = nullptr;
             }
             return *this;
         }
@@ -121,7 +121,7 @@ namespace DetourModKit
          * @details If called from within a handler on the same dispatcher
          *          (i.e. emitting_depth > 0 on this thread), the unsubscribe
          *          is silently skipped and the subscription remains active.
-         *          The unsubscribe_ lambda is retained so that a subsequent
+         *          The m_unsubscribe lambda is retained so that a subsequent
          *          reset() call outside the emit stack -- including the
          *          Subscription destructor -- will complete the removal.
          *          If the Subscription is also destroyed inside the same
@@ -132,21 +132,21 @@ namespace DetourModKit
          */
         void reset() noexcept
         {
-            if (unsubscribe_ && !alive_.expired())
+            if (m_unsubscribe && !m_alive.expired())
             {
-                if (!unsubscribe_())
+                if (!m_unsubscribe())
                 {
                     return;
                 }
             }
-            unsubscribe_ = nullptr;
-            alive_.reset();
+            m_unsubscribe = nullptr;
+            m_alive.reset();
         }
 
         /// Returns true if this subscription is still active.
         [[nodiscard]] bool active() const noexcept
         {
-            return unsubscribe_ != nullptr && !alive_.expired();
+            return m_unsubscribe != nullptr && !m_alive.expired();
         }
 
     private:
@@ -154,12 +154,12 @@ namespace DetourModKit
         friend class EventDispatcher;
 
         Subscription(std::weak_ptr<void> alive, std::function<bool()> unsub) noexcept
-            : alive_(std::move(alive)), unsubscribe_(std::move(unsub))
+            : m_alive(std::move(alive)), m_unsubscribe(std::move(unsub))
         {
         }
 
-        std::weak_ptr<void> alive_;
-        std::function<bool()> unsubscribe_;
+        std::weak_ptr<void> m_alive;
+        std::function<bool()> m_unsubscribe;
     };
 
     /**
@@ -230,8 +230,8 @@ namespace DetourModKit
 
     public:
         EventDispatcher()
-            : handlers_(std::make_shared<const HandlerList>()),
-              alive_(std::make_shared<char>('\0'))
+            : m_handlers(std::make_shared<const HandlerList>()),
+              m_alive(std::make_shared<char>('\0'))
         {
         }
 
@@ -260,22 +260,22 @@ namespace DetourModKit
             }
 
             const auto id = static_cast<SubscriptionId>(
-                this->next_id_.fetch_add(1, std::memory_order_relaxed));
+                this->m_next_id.fetch_add(1, std::memory_order_relaxed));
 
             {
-                std::scoped_lock lock{this->writer_mutex_};
-                auto current = this->handlers_.load(std::memory_order_acquire);
+                std::scoped_lock lock{this->m_writer_mutex};
+                auto current = this->m_handlers.load(std::memory_order_acquire);
                 auto next = std::make_shared<HandlerList>(*current);
                 next->push_back(Entry{id, std::move(handler)});
                 // Publish the new count first so a reader that sees 0 on the
                 // counter and skips the snapshot load cannot miss a handler
                 // that has already been installed in the snapshot.
-                this->handler_count_.store(next->size(), std::memory_order_release);
-                this->handlers_.store(std::shared_ptr<const HandlerList>(std::move(next)),
+                this->m_handler_count.store(next->size(), std::memory_order_release);
+                this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)),
                                       std::memory_order_release);
             }
 
-            std::weak_ptr<void> weak = this->alive_;
+            std::weak_ptr<void> weak = this->m_alive;
             return Subscription(
                 std::move(weak),
                 [this, id]() noexcept -> bool { return this->unsubscribe(id); });
@@ -298,12 +298,12 @@ namespace DetourModKit
         void emit(const Event &event) const
         {
             // Fast path: no subscribers means no snapshot load at all.
-            if (this->handler_count_.load(std::memory_order_acquire) == 0)
+            if (this->m_handler_count.load(std::memory_order_acquire) == 0)
             {
                 return;
             }
 
-            SharedList snap = this->handlers_.load(std::memory_order_acquire);
+            SharedList snap = this->m_handlers.load(std::memory_order_acquire);
             EmitGuard guard{emitting_depth()};
             for (const auto &entry : *snap)
             {
@@ -322,14 +322,14 @@ namespace DetourModKit
          */
         void emit_safe(const Event &event) const noexcept
         {
-            if (this->handler_count_.load(std::memory_order_acquire) == 0)
+            if (this->m_handler_count.load(std::memory_order_acquire) == 0)
             {
                 return;
             }
 
             // std::shared_ptr copy-construction and load are noexcept, so the
             // entire function remains noexcept despite the per-handler catch.
-            SharedList snap = this->handlers_.load(std::memory_order_acquire);
+            SharedList snap = this->m_handlers.load(std::memory_order_acquire);
             EmitGuard guard{emitting_depth()};
             for (const auto &entry : *snap)
             {
@@ -346,13 +346,13 @@ namespace DetourModKit
         /// Returns the number of active subscribers.
         [[nodiscard]] size_t subscriber_count() const noexcept
         {
-            return this->handler_count_.load(std::memory_order_acquire);
+            return this->m_handler_count.load(std::memory_order_acquire);
         }
 
         /// Returns true if there are no subscribers.
         [[nodiscard]] bool empty() const noexcept
         {
-            return this->handler_count_.load(std::memory_order_acquire) == 0;
+            return this->m_handler_count.load(std::memory_order_acquire) == 0;
         }
 
         /**
@@ -365,9 +365,9 @@ namespace DetourModKit
          */
         void clear() noexcept
         {
-            std::scoped_lock lock{this->writer_mutex_};
+            std::scoped_lock lock{this->m_writer_mutex};
             // Build the replacement snapshot before touching any published
-            // state so a throwing allocator leaves handlers_ / handler_count_
+            // state so a throwing allocator leaves m_handlers / m_handler_count
             // in their prior consistent pair. Swallowing bad_alloc keeps
             // clear() a noexcept best-effort teardown.
             std::shared_ptr<const HandlerList> empty_snap;
@@ -382,8 +382,8 @@ namespace DetourModKit
             // Counter must go to 0 before publishing the empty snapshot so
             // an emit that reads 0 on the fast-path counter cannot still see
             // the non-empty old snapshot afterwards.
-            this->handler_count_.store(0, std::memory_order_release);
-            this->handlers_.store(std::move(empty_snap), std::memory_order_release);
+            this->m_handler_count.store(0, std::memory_order_release);
+            this->m_handlers.store(std::move(empty_snap), std::memory_order_release);
         }
 
 #if defined(DMK_EVENT_DISPATCHER_INTERNAL_TESTING)
@@ -403,7 +403,7 @@ namespace DetourModKit
             // for its own lifetime; subtract that so the reported count
             // reflects only the other holders (the dispatcher atomic and
             // any in-flight emit snapshots).
-            auto snap = this->handlers_.load(std::memory_order_acquire);
+            auto snap = this->m_handlers.load(std::memory_order_acquire);
             return snap.use_count() - 1;
         }
 #endif
@@ -411,9 +411,9 @@ namespace DetourModKit
     private:
         // Returns false when called from within a handler (reentrancy) or
         // when the replacement snapshot could not be allocated. The
-        // Subscription::reset() caller retains its unsubscribe_ lambda on
+        // Subscription::reset() caller retains its m_unsubscribe lambda on
         // false returns and will retry on the next reset() call (including
-        // the destructor). This is safe because the alive_ weak_ptr prevents
+        // the destructor). This is safe because the m_alive weak_ptr prevents
         // calling into a destroyed dispatcher, and on allocation failure the
         // published state is left untouched so the retry observes the same
         // entry still present.
@@ -428,10 +428,10 @@ namespace DetourModKit
                 return false;
             }
 
-            std::scoped_lock lock{this->writer_mutex_};
-            auto current = this->handlers_.load(std::memory_order_acquire);
+            std::scoped_lock lock{this->m_writer_mutex};
+            auto current = this->m_handlers.load(std::memory_order_acquire);
             auto it = std::find_if(current->begin(), current->end(),
-                                   [id](const Entry &e) { return e.id == id; });
+                                   [id](const Entry &entry) { return entry.id == id; });
             if (it == current->end())
             {
                 // Not found; treat as successful (idempotent unsubscribe).
@@ -440,7 +440,7 @@ namespace DetourModKit
 
             // Build the replacement snapshot in full before touching any
             // published state. A throwing allocator (reserve / push_back /
-            // make_shared) must not leave handlers_ and handler_count_ out
+            // make_shared) must not leave m_handlers and m_handler_count out
             // of sync, and noexcept forbids propagation, so we catch
             // bad_alloc and fall through to the false-return retry path.
             std::shared_ptr<HandlerList> next;
@@ -464,9 +464,9 @@ namespace DetourModKit
             // Publish snapshot first, then the counter. An emit that loads a
             // stale snapshot containing the removed handler is still safe
             // because the handler callable is retained by the old snapshot.
-            this->handlers_.store(std::shared_ptr<const HandlerList>(std::move(next)),
+            this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)),
                                   std::memory_order_release);
-            this->handler_count_.store(current->size() - 1, std::memory_order_release);
+            this->m_handler_count.store(current->size() - 1, std::memory_order_release);
             return true;
         }
 
@@ -488,7 +488,7 @@ namespace DetourModKit
         struct EmitGuard
         {
             int &depth;
-            explicit EmitGuard(int &d) noexcept : depth(d) { ++depth; }
+            explicit EmitGuard(int &depth_ref) noexcept : depth(depth_ref) { ++depth; }
             ~EmitGuard() noexcept { --depth; }
             EmitGuard(const EmitGuard &) = delete;
             EmitGuard &operator=(const EmitGuard &) = delete;
@@ -499,11 +499,11 @@ namespace DetourModKit
         // alignas(64) keeps the hot atomics on their own cache line so the
         // writer mutex and shared_ptr control-block traffic do not produce
         // false sharing with readers doing the fast-path counter load.
-        alignas(64) mutable std::atomic<SharedList> handlers_;
-        std::atomic<size_t> handler_count_{0};
-        std::atomic<uint64_t> next_id_{1};
-        std::mutex writer_mutex_; // serializes writers only
-        std::shared_ptr<void> alive_; // Prevents Subscription::reset() from calling
+        alignas(64) mutable std::atomic<SharedList> m_handlers;
+        std::atomic<size_t> m_handler_count{0};
+        std::atomic<uint64_t> m_next_id{1};
+        std::mutex m_writer_mutex; // serializes writers only
+        std::shared_ptr<void> m_alive; // Prevents Subscription::reset() from calling
                                       // unsubscribe() after dispatcher destruction.
     };
 

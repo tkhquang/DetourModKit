@@ -235,9 +235,9 @@ namespace DetourModKit
         }
         struct InputCodeHash
         {
-            size_t operator()(const InputCode &c) const noexcept
+            size_t operator()(const InputCode &ic) const noexcept
             {
-                return std::hash<int>{}(c.code) ^ (std::hash<uint8_t>{}(static_cast<uint8_t>(c.source)) << 16);
+                return std::hash<int>{}(ic.code) ^ (std::hash<uint8_t>{}(static_cast<uint8_t>(ic.source)) << 16);
             }
         };
 

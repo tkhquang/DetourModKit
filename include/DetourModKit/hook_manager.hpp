@@ -366,7 +366,7 @@ namespace DetourModKit
         safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
         const safetyhook::VmtHook &vmt_hook() const noexcept { return m_vmt_hook; }
 
-        bool has_method_hook(size_t index) const { return m_method_hooks.find(index) != m_method_hooks.end(); }
+        [[nodiscard]] bool has_method_hook(size_t index) const noexcept { return m_method_hooks.find(index) != m_method_hooks.end(); }
 
         safetyhook::VmHook *get_method_hook(size_t index)
         {
@@ -532,6 +532,14 @@ namespace DetourModKit
          * @param name A unique, descriptive name for the VMT hook.
          * @param object Pointer to the polymorphic object whose vptr will be replaced.
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
+         * @warning VMT hooks have no enable/disable: creation swaps the object's
+         *          vptr to the cloned table and removal restores it. As with the
+         *          inline hooks, removal cannot drain a thread that is mid-dispatch
+         *          through a hooked slot, so the caller must guarantee no thread is
+         *          calling a hooked method on @p object across create/remove, and
+         *          that @p object outlives the hook. The vptr must also stay stable
+         *          for the hook's lifetime; if the game reconstructs the object in
+         *          place (rewriting its vptr) the hook is silently lost.
          */
         [[nodiscard]] std::expected<std::string, HookError> create_vmt_hook(
             std::string_view name, void *object);
@@ -749,9 +757,12 @@ namespace DetourModKit
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
          * @details Uses two-phase removal: disables all hooks under a shared lock
-         *          first so that in-flight trampoline callers can drain, then clears
-         *          the maps under an exclusive lock. This prevents deadlock when a
-         *          hooked thread is blocked on m_hooks_mutex via with_inline_hook().
+         *          first, then clears the maps under an exclusive lock. The shared
+         *          phase lets DetourModKit's own with_* readers finish before Hook
+         *          storage is destroyed. SafetyHook can relocate threads caught in
+         *          the patched prologue, but it cannot drain threads already running
+         *          the detour or trampoline body; callers must quiesce the hooked
+         *          function during planned teardown to close that residual window.
          *
          *          After clearing, resets the internal shutdown flag to false,
          *          allowing subsequent create_*_hook() calls to succeed for

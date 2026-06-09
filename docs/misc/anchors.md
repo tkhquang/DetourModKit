@@ -11,8 +11,11 @@ The registry unifies the self-healing backends that resolve from a module range 
 | `VtableIdentity` | `Rtti::vtable_for_type` | A class vtable address, keyed on its mangled name |
 | `RipGlobal` | `Scanner::resolve_cascade_in_module` | An absolute address (Direct or RIP-relative candidates) |
 | `CodeOperand` | `Scanner::read_code_constant` | An in-code immediate or `[reg + disp]` displacement |
+| `StringXref` | `Scanner::find_string_xref` | The instruction (or enclosing function) that references an immutable string literal |
 | `Manual` | none (pinned literal) | The literal, flagged as at-risk in a report |
 | `CallArgHome` | reserved | Not yet resolvable (reports `Unsupported`) |
+
+A `StringXref` anchor is the most update-resilient kind: it locates an immutable string literal in the image's read-only data and resolves the unique RIP-relative `lea` / `mov` that references it, returning that instruction (or, with `xref_return = XrefReturn::EnclosingFunction`, a best-effort prologue back-scan to the function that uses it). Strings survive game patches far better than the code bytes around them. It fails closed on a missing, duplicated (linker-pooled), or unreferenced string, so pick a long, specific literal that occurs and is referenced exactly once. Set `xref_encoding = StringEncoding::Utf16le` for `wchar_t` literals; `xref_require_terminator` (default true) keeps a prefix of a longer literal from matching ("Player" inside "PlayerController").
 
 `CallArgHome` is a reserved enumerator for a future prologue-dataflow backend (mapping a call argument to its current register or stack home); declaring it now keeps a registry table forward-compatible.
 

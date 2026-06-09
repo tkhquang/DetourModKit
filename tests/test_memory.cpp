@@ -402,7 +402,7 @@ TEST_F(MemoryTest, CacheLRUEviction)
     (void)Memory::init_cache(2, 60000);
 
     void *mem1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    void *mem2 = VirtualAlloc(reinterpret_cast<void *>(0), 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void *mem2 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     void *mem3 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
 
     ASSERT_NE(mem1, nullptr);
@@ -594,7 +594,7 @@ TEST_F(MemoryTest, InvalidateRangeBasic)
 TEST_F(MemoryTest, InvalidateRangeNull)
 {
     EXPECT_NO_THROW(Memory::invalidate_range(nullptr, 100));
-    EXPECT_NO_THROW(Memory::invalidate_range(reinterpret_cast<const void *>(0x1000), 0));
+    EXPECT_NO_THROW(Memory::invalidate_range(reinterpret_cast<const void *>(static_cast<uintptr_t>(0x1000)), 0));
 }
 
 TEST_F(MemoryTest, WriteBytesInvalidatesCache)

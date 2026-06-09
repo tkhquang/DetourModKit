@@ -151,7 +151,7 @@ namespace DetourModKit::detail
     /**
      * @brief Publishes the consume rule list read by the XInput detour.
      * @details Single-writer: the binding-mutation thread, serialized by
-     *          InputPoller::bindings_rw_mutex_ (not the poll thread). Copies up
+     *          InputPoller::m_bindings_rw_mutex (not the poll thread). Copies up
      *          to @ref MAX_GAMEPAD_CONSUME_RULES rules behind a seqlock so a detour
      *          on a game thread reads a consistent snapshot without locking; a
      *          @p count above the cap publishes an empty list rather than a

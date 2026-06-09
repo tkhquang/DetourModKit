@@ -203,7 +203,7 @@ namespace DetourModKit
          * @param index Zero-based index into the bindings vector.
          * @return true if the binding's key(s) are currently pressed.
          *         Returns false for out-of-range indices.
-         * @note Thread-safe. Acquires bindings_rw_mutex_ as a reader so the
+         * @note Thread-safe. Acquires m_bindings_rw_mutex as a reader so the
          *       index/array pair stays consistent across reshape calls
          *       (add_binding, remove_bindings_by_name, update_combos). The
          *       fast path is the cheap shared_lock acquire when no writer
@@ -277,7 +277,7 @@ namespace DetourModKit
          * @brief Appends a binding to the running poller.
          * @details Thread-safe. Takes the bindings rw mutex exclusively, so a
          *          concurrent poll cycle blocks for at most the duration of
-         *          its current tick. The active_states_ array is rebuilt to
+         *          its current tick. The m_active_states array is rebuilt to
          *          match the new binding count, with the previous atomic
          *          value carried forward for every existing entry so a held
          *          binding does not flicker through one inactive tick.
@@ -289,7 +289,7 @@ namespace DetourModKit
          * @brief Removes every binding whose name matches @p name.
          * @details Thread-safe. Active hold bindings receive an
          *          on_state_change(false) callback before erasure. The
-         *          active_states_ array is rebuilt to match the new
+         *          m_active_states array is rebuilt to match the new
          *          binding count, with the previous atomic value carried
          *          forward for every surviving entry.
          * @param name Binding name to remove.
@@ -343,7 +343,7 @@ namespace DetourModKit
     private:
         void poll_loop(std::stop_token stop_token);
         void release_active_holds() noexcept;
-        [[nodiscard]] bool is_process_foreground() const;
+        [[nodiscard]] bool is_process_foreground() const noexcept;
         void recompute_modifier_caches_locked() noexcept;
 
         /// Transparent hasher enabling std::string_view lookup without allocation.
@@ -356,37 +356,37 @@ namespace DetourModKit
             }
         };
 
-        // bindings_rw_mutex_ protects bindings_, name_index_, known_modifiers_,
-        // and has_gamepad_bindings_ when a live update is in flight. The poll
+        // m_bindings_rw_mutex protects m_bindings, m_name_index, m_known_modifiers,
+        // and m_has_gamepad_bindings when a live update is in flight. The poll
         // loop holds a shared lock for the duration of one polling cycle;
-        // update_combos() holds an exclusive lock across the swap. active_states_
+        // update_combos() holds an exclusive lock across the swap. m_active_states
         // entries are always accessed via atomic ops and need no further guard.
-        mutable std::shared_mutex bindings_rw_mutex_;
-        std::vector<InputBinding> bindings_;
-        std::unordered_map<std::string, std::vector<size_t>, StringHash, std::equal_to<>> name_index_;
-        std::vector<InputCode> known_modifiers_;
-        std::chrono::milliseconds poll_interval_;
-        std::atomic<bool> require_focus_;
-        std::atomic<bool> running_{false};
-        std::jthread poll_thread_;
-        std::mutex cv_mutex_;
-        std::condition_variable_any cv_;
+        mutable std::shared_mutex m_bindings_rw_mutex;
+        std::vector<InputBinding> m_bindings;
+        std::unordered_map<std::string, std::vector<size_t>, StringHash, std::equal_to<>> m_name_index;
+        std::vector<InputCode> m_known_modifiers;
+        std::chrono::milliseconds m_poll_interval;
+        std::atomic<bool> m_require_focus;
+        std::atomic<bool> m_running{false};
+        std::jthread m_poll_thread;
+        std::mutex m_cv_mutex;
+        std::condition_variable_any m_cv;
 
-        // Per-binding active state, indexed parallel to bindings_.
+        // Per-binding active state, indexed parallel to m_bindings.
         // Atomic for cross-thread reads via is_binding_active().
-        std::unique_ptr<std::atomic<uint8_t>[]> active_states_;
+        std::unique_ptr<std::atomic<uint8_t>[]> m_active_states;
 
-        int gamepad_index_;
-        int trigger_threshold_;
-        int stick_threshold_;
-        std::atomic<bool> has_gamepad_bindings_{false};
+        int m_gamepad_index;
+        int m_trigger_threshold;
+        int m_stick_threshold;
+        std::atomic<bool> m_has_gamepad_bindings{false};
 
         // Interception gates, recomputed alongside the modifier caches. Each
         // decides whether an active-input hook is installed lazily by the poll
         // loop, so a mod that never opts in pays no interception cost.
-        std::atomic<bool> has_wheel_bindings_{false};          // any MouseWheel trigger -> WndProc hook
-        std::atomic<bool> has_consume_gamepad_bindings_{false}; // any consume gamepad binding -> XInput hook
-        std::atomic<bool> has_wheel_consume_bindings_{false};   // any consume wheel binding -> swallow wheel messages
+        std::atomic<bool> m_has_wheel_bindings{false};          // any MouseWheel trigger -> WndProc hook
+        std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
+        std::atomic<bool> m_has_wheel_consume_bindings{false};   // any consume wheel binding -> swallow wheel messages
     };
 
     /**
@@ -654,15 +654,15 @@ namespace DetourModKit
         InputManager(InputManager &&) = delete;
         InputManager &operator=(InputManager &&) = delete;
 
-        mutable std::mutex mutex_;
-        std::vector<InputBinding> pending_bindings_;
-        std::shared_ptr<InputPoller> poller_;
-        std::atomic<std::shared_ptr<InputPoller>> active_poller_{};
-        std::atomic<bool> running_{false};
-        bool require_focus_ = true;
-        int gamepad_index_ = 0;
-        int trigger_threshold_ = GamepadCode::TriggerThreshold;
-        int stick_threshold_ = GamepadCode::StickThreshold;
+        mutable std::mutex m_mutex;
+        std::vector<InputBinding> m_pending_bindings;
+        std::shared_ptr<InputPoller> m_poller;
+        std::atomic<std::shared_ptr<InputPoller>> m_active_poller{};
+        std::atomic<bool> m_running{false};
+        bool m_require_focus{true};
+        int m_gamepad_index{0};
+        int m_trigger_threshold{GamepadCode::TriggerThreshold};
+        int m_stick_threshold{GamepadCode::StickThreshold};
     };
 } // namespace DetourModKit
 

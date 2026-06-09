@@ -53,9 +53,20 @@ namespace
             // returning nullopt here prevents a false ResolveHit at 0.
             return std::nullopt;
         }
-        return static_cast<std::uintptr_t>(
+        const auto resolved = static_cast<std::uintptr_t>(
             static_cast<std::int64_t>(match_addr + static_cast<std::uintptr_t>(candidate.instr_end_offset)) +
             *disp);
+        // Mirror resolve_rip_relative's plausibility floor. A corrupt or crafted
+        // displacement can resolve to 0, a low guard-page address, or a
+        // kernel-range value; the whole-process cascade path has no image to
+        // bound the result (the module-scoped path layers a stricter contains()
+        // check on top), so reject an implausible target here rather than commit
+        // to a hit the caller cannot later reverse.
+        if (!DetourModKit::Memory::plausible_userspace_ptr(resolved))
+        {
+            return std::nullopt;
+        }
+        return resolved;
     }
 
     // Minimum number of literal (non-wildcard) bytes the tail of the pattern
@@ -275,9 +286,11 @@ namespace
 
             const auto addr = resolve_candidate_match(
                 reinterpret_cast<std::uintptr_t>(match), candidate);
-            // A RipRelative candidate whose displacement read faulted resolves to
-            // nothing; skip it so the whole-process path cannot commit to a hit at
-            // address 0 (only the module-scoped path below has an in-range guard).
+            // A RipRelative candidate whose displacement read faulted or resolved
+            // to an implausible address yields nothing here (resolve_candidate_match
+            // applies the same plausibility floor as resolve_rip_relative), so the
+            // whole-process path cannot commit to a near-null or kernel-range hit.
+            // The module-scoped path below adds a stricter in-image guard.
             if (!addr)
             {
                 continue;

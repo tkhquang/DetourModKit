@@ -77,13 +77,13 @@ namespace DetourModKit
     // --- Profiler ---
 
     Profiler::Profiler()
-        : buffer_(std::make_unique<ProfileSample[]>(DEFAULT_CAPACITY)),
-          capacity_(DEFAULT_CAPACITY),
-          mask_(DEFAULT_CAPACITY - 1)
+        : m_buffer(std::make_unique<ProfileSample[]>(DEFAULT_CAPACITY)),
+          m_capacity(DEFAULT_CAPACITY),
+          m_mask(DEFAULT_CAPACITY - 1)
     {
         LARGE_INTEGER freq;
         QueryPerformanceFrequency(&freq);
-        qpc_frequency_ = freq.QuadPart;
+        m_qpc_frequency = freq.QuadPart;
     }
 
     Profiler &Profiler::get_instance() noexcept
@@ -101,12 +101,12 @@ namespace DetourModKit
         // Use 64-bit intermediate to avoid overflow for deltas up to ~9200 seconds
         // at a 10 MHz QPC frequency (common on modern hardware).
         const auto duration_us = static_cast<uint32_t>(
-            std::min<int64_t>((delta_ticks * 1'000'000) / qpc_frequency_,
+            std::min<int64_t>((delta_ticks * 1'000'000) / m_qpc_frequency,
                               static_cast<int64_t>(UINT32_MAX)));
 
-        const size_t idx = write_pos_.fetch_add(1, std::memory_order_relaxed) & mask_;
+        const size_t idx = m_write_pos.fetch_add(1, std::memory_order_relaxed) & m_mask;
 
-        auto &sample = buffer_[idx];
+        auto &sample = m_buffer[idx];
 
         // Open the write window with a monotonic increment. The result is
         // guaranteed odd because every closed sequence is even (sequence
@@ -119,7 +119,7 @@ namespace DetourModKit
         //
         // Design note: if a writer is stalled between its fetch_add and
         // its final sequence store, and 65536 intervening record() calls
-        // advance write_pos_ past a full buffer wrap, a new writer will
+        // advance m_write_pos past a full buffer wrap, a new writer will
         // land on the same slot and clobber the stalled writer's data.
         // This requires the stalled writer to be preempted for the
         // duration of an entire ring buffer cycle, which is unreachable
@@ -155,22 +155,22 @@ namespace DetourModKit
     // contract that is only relevant during session boundaries.
     void Profiler::reset() noexcept
     {
-        write_pos_.store(0, std::memory_order_relaxed);
-        for (size_t i = 0; i < capacity_; ++i)
+        m_write_pos.store(0, std::memory_order_relaxed);
+        for (size_t i = 0; i < m_capacity; ++i)
         {
-            auto &s = buffer_[i];
-            s.sequence.store(0, std::memory_order_relaxed);
-            s.name = nullptr;
-            s.start_ticks = 0;
-            s.duration_us = 0;
-            s.thread_id = 0;
+            auto &sample = m_buffer[i];
+            sample.sequence.store(0, std::memory_order_relaxed);
+            sample.name = nullptr;
+            sample.start_ticks = 0;
+            sample.duration_us = 0;
+            sample.thread_id = 0;
         }
     }
 
     std::string Profiler::export_chrome_json() const
     {
-        const size_t total = write_pos_.load(std::memory_order_relaxed);
-        const size_t count = std::min(total, capacity_);
+        const size_t total = m_write_pos.load(std::memory_order_relaxed);
+        const size_t count = std::min(total, m_capacity);
 
         if (count == 0)
         {
@@ -179,7 +179,7 @@ namespace DetourModKit
 
         // Determine start index: if the buffer has wrapped, start from the
         // oldest surviving sample; otherwise start from 0.
-        const size_t start_idx = (total > capacity_) ? (total & mask_) : 0;
+        const size_t start_idx = (total > m_capacity) ? (total & m_mask) : 0;
 
         // Pre-allocate: ~120 bytes per JSON event is a reasonable estimate.
         std::string json;
@@ -187,25 +187,39 @@ namespace DetourModKit
         json += "[\n";
 
         // QPC frequency for converting start_ticks to microseconds
-        const double ticks_to_us = 1'000'000.0 / static_cast<double>(qpc_frequency_);
+        const double ticks_to_us = 1'000'000.0 / static_cast<double>(m_qpc_frequency);
 
         bool first = true;
         for (size_t i = 0; i < count; ++i)
         {
-            const auto &s = buffer_[(start_idx + i) & mask_];
+            const auto &sample = m_buffer[(start_idx + i) & m_mask];
 
-            // Single pre-read sequence check: skip if odd (in-flight write).
-            // A full seqlock would re-check after reading fields to detect
-            // writes that started mid-read, but we intentionally omit the
-            // post-read re-check to avoid a second atomic load per sample
-            // on the export path.  The resulting race window is narrow
-            // (a write must start between the sequence load and the field
-            // reads) and benign -- a stale-but-consistent sample may appear
-            // in the export at worst.  Same trade-off as InputPoller's
-            // relaxed active_states_ reads (stale by one cycle is acceptable).
-            const uint32_t seq = s.sequence.load(std::memory_order_acquire);
-            if ((seq & 1) != 0 || s.name == nullptr)
+            // Seqlock read: load the sequence, copy the sample fields into
+            // locals, then re-load the sequence. record() opens a write with an
+            // odd sequence and closes it with the next even value, so a sample
+            // is consistent only when the pre-read sequence is even (no
+            // in-flight write) AND the post-read sequence is unchanged (no write
+            // started and finished mid-copy). The acquire fence between the
+            // field copies and the second load stops the copies from being
+            // reordered after it. This runs on the cold export path; the second
+            // load costs nothing measurable and the producer hot path is
+            // untouched.
+            const uint32_t seq_before = sample.sequence.load(std::memory_order_acquire);
+            if ((seq_before & 1) != 0 || sample.name == nullptr)
             {
+                continue;
+            }
+
+            const char *name = sample.name;
+            const auto start_ticks = sample.start_ticks;
+            const auto duration_us = sample.duration_us;
+            const auto thread_id = sample.thread_id;
+
+            std::atomic_thread_fence(std::memory_order_acquire);
+            const uint32_t seq_after = sample.sequence.load(std::memory_order_relaxed);
+            if (seq_after != seq_before)
+            {
+                // A producer overwrote this slot mid-copy; drop the torn sample.
                 continue;
             }
 
@@ -216,13 +230,13 @@ namespace DetourModKit
             first = false;
 
             // Chrome Trace Event Format: "X" = complete event (has duration).
-            // Escape the name to produce valid JSON even if the caller
-            // passes a string containing quotes or backslashes.
-            const double ts = static_cast<double>(s.start_ticks) * ticks_to_us;
-            const std::string escaped_name = escape_json_string(s.name);
+            // Escape the name to produce valid JSON even if the caller passes a
+            // string containing quotes or backslashes.
+            const double ts = static_cast<double>(start_ticks) * ticks_to_us;
+            const std::string escaped_name = escape_json_string(name);
             json += std::format(
                 R"({{"name":"{}","ph":"X","ts":{:.1f},"dur":{},"pid":1,"tid":{}}})",
-                escaped_name, ts, s.duration_us, s.thread_id);
+                escaped_name, ts, duration_us, thread_id);
         }
 
         json += "\n]";
@@ -264,39 +278,39 @@ namespace DetourModKit
 
     size_t Profiler::total_samples_recorded() const noexcept
     {
-        return write_pos_.load(std::memory_order_relaxed);
+        return m_write_pos.load(std::memory_order_relaxed);
     }
 
     size_t Profiler::available_samples() const noexcept
     {
-        return std::min(write_pos_.load(std::memory_order_relaxed), capacity_);
+        return std::min(m_write_pos.load(std::memory_order_relaxed), m_capacity);
     }
 
     size_t Profiler::capacity() const noexcept
     {
-        return capacity_;
+        return m_capacity;
     }
 
     int64_t Profiler::qpc_frequency() const noexcept
     {
-        return qpc_frequency_;
+        return m_qpc_frequency;
     }
 
     // --- ScopedProfile ---
 
     ScopedProfile::ScopedProfile(const char *name, literal_tag) noexcept
-        : name_(name), thread_id_(GetCurrentThreadId())
+        : m_name(name), m_thread_id(GetCurrentThreadId())
     {
         LARGE_INTEGER ticks;
         QueryPerformanceCounter(&ticks);
-        start_ticks_ = ticks.QuadPart;
+        m_start_ticks = ticks.QuadPart;
     }
 
     ScopedProfile::~ScopedProfile() noexcept
     {
         LARGE_INTEGER ticks;
         QueryPerformanceCounter(&ticks);
-        Profiler::get_instance().record(name_, start_ticks_, ticks.QuadPart, thread_id_);
+        Profiler::get_instance().record(m_name, m_start_ticks, ticks.QuadPart, m_thread_id);
     }
 
 } // namespace DetourModKit

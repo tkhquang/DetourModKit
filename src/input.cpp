@@ -339,38 +339,38 @@ namespace DetourModKit
                              int gamepad_index,
                              int trigger_threshold,
                              int stick_threshold)
-        : bindings_(std::move(bindings)),
-          poll_interval_(std::clamp(poll_interval, MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)),
-          require_focus_(require_focus),
-          active_states_(std::make_unique<std::atomic<uint8_t>[]>(bindings_.size())),
-          gamepad_index_(std::clamp(gamepad_index, 0, 3)),
-          trigger_threshold_(std::clamp(trigger_threshold, 0, 255)), stick_threshold_(std::clamp(stick_threshold, 0, 32767))
+        : m_bindings(std::move(bindings)),
+          m_poll_interval(std::clamp(poll_interval, MIN_POLL_INTERVAL, MAX_POLL_INTERVAL)),
+          m_require_focus(require_focus),
+          m_active_states(std::make_unique<std::atomic<uint8_t>[]>(m_bindings.size())),
+          m_gamepad_index(std::clamp(gamepad_index, 0, 3)),
+          m_trigger_threshold(std::clamp(trigger_threshold, 0, 255)), m_stick_threshold(std::clamp(stick_threshold, 0, 32767))
     {
-        name_index_.reserve(bindings_.size());
+        m_name_index.reserve(m_bindings.size());
         recompute_modifier_caches_locked();
     }
 
     void InputPoller::recompute_modifier_caches_locked() noexcept
     {
-        name_index_.clear();
+        m_name_index.clear();
         std::unordered_set<InputCode, InputCodeHash> modifier_set;
-        for (size_t i = 0; i < bindings_.size(); ++i)
+        for (size_t i = 0; i < m_bindings.size(); ++i)
         {
-            if (!bindings_[i].name.empty())
+            if (!m_bindings[i].name.empty())
             {
-                name_index_[bindings_[i].name].push_back(i);
+                m_name_index[m_bindings[i].name].push_back(i);
             }
-            for (const auto &mod : bindings_[i].modifiers)
+            for (const auto &mod : m_bindings[i].modifiers)
             {
                 modifier_set.insert(mod);
             }
         }
-        known_modifiers_.assign(modifier_set.begin(), modifier_set.end());
-        has_gamepad_bindings_.store(scan_for_gamepad_bindings(bindings_), std::memory_order_relaxed);
-        has_wheel_bindings_.store(scan_for_wheel_bindings(bindings_), std::memory_order_relaxed);
-        has_consume_gamepad_bindings_.store(scan_for_consume_gamepad_bindings(bindings_),
+        m_known_modifiers.assign(modifier_set.begin(), modifier_set.end());
+        m_has_gamepad_bindings.store(scan_for_gamepad_bindings(m_bindings), std::memory_order_relaxed);
+        m_has_wheel_bindings.store(scan_for_wheel_bindings(m_bindings), std::memory_order_relaxed);
+        m_has_consume_gamepad_bindings.store(scan_for_consume_gamepad_bindings(m_bindings),
                                             std::memory_order_relaxed);
-        has_wheel_consume_bindings_.store(scan_for_wheel_consume_bindings(bindings_),
+        m_has_wheel_consume_bindings.store(scan_for_wheel_consume_bindings(m_bindings),
                                           std::memory_order_relaxed);
 
         // Publish the detour-side consume rule list. The XInput detour evaluates
@@ -379,7 +379,7 @@ namespace DetourModKit
         // inside one poll interval. Built from the same bindings and known modifiers
         // as the reactive path so the two masking paths never disagree.
         const std::vector<detail::GamepadConsumeRule> consume_rules =
-            build_gamepad_consume_rules(bindings_, known_modifiers_);
+            build_gamepad_consume_rules(m_bindings, m_known_modifiers);
         detail::publish_gamepad_consume_rules(consume_rules.data(), consume_rules.size());
     }
 
@@ -390,70 +390,70 @@ namespace DetourModKit
 
     void InputPoller::start()
     {
-        if (poll_thread_.joinable())
+        if (m_poll_thread.joinable())
         {
             Logger::get_instance().debug("InputPoller: start() called while already running; no-op.");
             return;
         }
 
-        running_.store(true, std::memory_order_release);
+        m_running.store(true, std::memory_order_release);
         try
         {
-            poll_thread_ = std::jthread([this](std::stop_token token)
+            m_poll_thread = std::jthread([this](std::stop_token token)
                                         { poll_loop(std::move(token)); });
         }
         catch (...)
         {
-            running_.store(false, std::memory_order_release);
+            m_running.store(false, std::memory_order_release);
             throw;
         }
     }
 
     bool InputPoller::is_running() const noexcept
     {
-        return running_.load(std::memory_order_acquire);
+        return m_running.load(std::memory_order_acquire);
     }
 
     size_t InputPoller::binding_count() const noexcept
     {
-        return bindings_.size();
+        return m_bindings.size();
     }
 
     std::chrono::milliseconds InputPoller::poll_interval() const noexcept
     {
-        return poll_interval_;
+        return m_poll_interval;
     }
 
     int InputPoller::gamepad_index() const noexcept
     {
-        return gamepad_index_;
+        return m_gamepad_index;
     }
 
     bool InputPoller::is_binding_active(size_t index) const noexcept
     {
         // Acquire the shared lock so the index/array pair stays consistent
         // across a reshape (add_binding, remove_bindings_by_name,
-        // update_combos all swap active_states_ under the writer lock and
-        // resize bindings_ alongside it). The relaxed atomic load on the
+        // update_combos all swap m_active_states under the writer lock and
+        // resize m_bindings alongside it). The relaxed atomic load on the
         // element itself is still cheap; it is the unique_ptr<atomic[]>
         // ownership swap that needs synchronisation.
-        std::shared_lock lock(bindings_rw_mutex_);
-        if (index >= bindings_.size())
+        std::shared_lock lock(m_bindings_rw_mutex);
+        if (index >= m_bindings.size())
         {
             return false;
         }
-        return active_states_[index].load(std::memory_order_relaxed) != 0;
+        return m_active_states[index].load(std::memory_order_relaxed) != 0;
     }
 
     bool InputPoller::is_binding_active(std::string_view name) const noexcept
     {
-        std::shared_lock lock(bindings_rw_mutex_);
-        const auto it = name_index_.find(name);
-        if (it != name_index_.end())
+        std::shared_lock lock(m_bindings_rw_mutex);
+        const auto it = m_name_index.find(name);
+        if (it != m_name_index.end())
         {
             for (const size_t idx : it->second)
             {
-                if (active_states_[idx].load(std::memory_order_relaxed) != 0)
+                if (m_active_states[idx].load(std::memory_order_relaxed) != 0)
                 {
                     return true;
                 }
@@ -464,20 +464,20 @@ namespace DetourModKit
 
     void InputPoller::set_require_focus(bool require_focus) noexcept
     {
-        require_focus_.store(require_focus, std::memory_order_relaxed);
+        m_require_focus.store(require_focus, std::memory_order_relaxed);
     }
 
     void InputPoller::set_consume(std::string_view name, bool consume) noexcept
     {
-        std::unique_lock lock(bindings_rw_mutex_);
-        const auto it = name_index_.find(name);
-        if (it == name_index_.end())
+        std::unique_lock lock(m_bindings_rw_mutex);
+        const auto it = m_name_index.find(name);
+        if (it == m_name_index.end())
         {
             return;
         }
         for (const size_t idx : it->second)
         {
-            bindings_[idx].consume = consume;
+            m_bindings[idx].consume = consume;
         }
         // Refresh the interception gates so the poll loop installs or skips the
         // XInput / window-procedure hooks on its next cycle.
@@ -486,13 +486,13 @@ namespace DetourModKit
 
     void InputPoller::shutdown() noexcept
     {
-        if (!poll_thread_.joinable())
+        if (!m_poll_thread.joinable())
         {
             return;
         }
 
-        poll_thread_.request_stop();
-        cv_.notify_all();
+        m_poll_thread.request_stop();
+        m_cv.notify_all();
 
         if (is_loader_lock_held())
         {
@@ -505,16 +505,16 @@ namespace DetourModKit
             // (a callback that enters the loader -- LoadLibrary family or a peer
             // DllMain mutex -- would deadlock). Mirrors clear_bindings(invoke_callbacks=false).
             pin_current_module();
-            poll_thread_.detach();
-            running_.store(false, std::memory_order_release);
+            m_poll_thread.detach();
+            m_running.store(false, std::memory_order_release);
             return;
         }
 
-        poll_thread_.join();
+        m_poll_thread.join();
 
         // The poll thread is provably stopped here, so releasing active holds
         // and firing their on_state_change(false) callbacks is race-free.
-        running_.store(false, std::memory_order_release);
+        m_running.store(false, std::memory_order_release);
 
         // The poll thread is the sole publisher of the suppression mask and the
         // sole reader of the XInput trampoline, so tearing the interception hooks
@@ -530,8 +530,8 @@ namespace DetourModKit
 
     void InputPoller::poll_loop(std::stop_token stop_token)
     {
-        const int trigger_thresh = trigger_threshold_;
-        const int stick_thresh = stick_threshold_;
+        const int trigger_thresh = m_trigger_threshold;
+        const int stick_thresh = m_stick_threshold;
 
         constexpr auto gamepad_reconnect_interval = std::chrono::seconds{2};
         bool gamepad_was_connected = false;
@@ -551,26 +551,26 @@ namespace DetourModKit
         };
         std::vector<PendingCallback> pending;
         {
-            std::shared_lock lock(bindings_rw_mutex_);
-            pending.reserve(bindings_.size());
+            std::shared_lock lock(m_bindings_rw_mutex);
+            pending.reserve(m_bindings.size());
         }
 
         while (!stop_token.stop_requested())
         {
             pending.clear();
             const bool process_focused =
-                !require_focus_.load(std::memory_order_relaxed) || is_process_foreground();
+                !m_require_focus.load(std::memory_order_relaxed) || is_process_foreground();
 
             // Lazily install the active-input hooks the current bindings need.
             // Each call is idempotent and fails cheaply until its target (a loaded
             // xinput module / the game window) becomes available, so this also
             // handles a target that appears after the poller starts.
-            if (has_consume_gamepad_bindings_.load(std::memory_order_relaxed) &&
+            if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed) &&
                 !detail::xinput_installed())
             {
-                (void)detail::install_xinput(gamepad_index_);
+                (void)detail::install_xinput(m_gamepad_index);
             }
-            if (has_wheel_bindings_.load(std::memory_order_relaxed) &&
+            if (m_has_wheel_bindings.load(std::memory_order_relaxed) &&
                 !detail::wndproc_installed())
             {
                 (void)detail::install_wndproc();
@@ -582,7 +582,7 @@ namespace DetourModKit
             // counters are drained even when unfocused so a background notch is
             // discarded rather than queued to fire on the next focus.
             uint8_t wheel_pulse_mask = 0;
-            if (has_wheel_bindings_.load(std::memory_order_relaxed))
+            if (m_has_wheel_bindings.load(std::memory_order_relaxed))
             {
                 const auto taken = detail::take_wheel_counts();
                 for (int dir = 0; dir < 4; ++dir)
@@ -602,7 +602,7 @@ namespace DetourModKit
             // below: a backgrounded mod must not swallow the focused app's wheel.
             detail::set_wheel_consume(
                 process_focused &&
-                has_wheel_consume_bindings_.load(std::memory_order_relaxed));
+                m_has_wheel_consume_bindings.load(std::memory_order_relaxed));
 
             // Digital gamepad button bits claimed by active consume chords this
             // cycle, accumulated in the binding loop and published afterwards.
@@ -616,7 +616,7 @@ namespace DetourModKit
             // rather than its own published mask.
             XINPUT_STATE gamepad_state{};
             bool gamepad_connected = false;
-            if (has_gamepad_bindings_.load(std::memory_order_relaxed) && process_focused)
+            if (m_has_gamepad_bindings.load(std::memory_order_relaxed) && process_focused)
             {
                 const auto now = std::chrono::steady_clock::now();
                 if (gamepad_was_connected ||
@@ -626,8 +626,8 @@ namespace DetourModKit
                     const detail::XInputGetStateFn xinput_original = detail::xinput_trampoline();
                     const DWORD xinput_result =
                         (xinput_original != nullptr)
-                            ? xinput_original(static_cast<DWORD>(gamepad_index_), &gamepad_state)
-                            : XInputGetState(static_cast<DWORD>(gamepad_index_), &gamepad_state);
+                            ? xinput_original(static_cast<DWORD>(m_gamepad_index), &gamepad_state)
+                            : XInputGetState(static_cast<DWORD>(m_gamepad_index), &gamepad_state);
                     gamepad_was_connected = xinput_result == ERROR_SUCCESS;
                 }
                 gamepad_connected = gamepad_was_connected;
@@ -636,13 +636,13 @@ namespace DetourModKit
             // Collect callbacks to fire outside the shared lock so user code
             // can call back into update_binding_combos() without deadlocking.
             {
-                std::shared_lock lock(bindings_rw_mutex_);
-                const size_t count = bindings_.size();
-                const auto &known_mods = known_modifiers_;
+                std::shared_lock lock(m_bindings_rw_mutex);
+                const size_t count = m_bindings.size();
+                const auto &known_mods = m_known_modifiers;
 
                 for (size_t i = 0; i < count; ++i)
                 {
-                    const auto &binding = bindings_[i];
+                    const auto &binding = m_bindings[i];
                     if (binding.keys.empty())
                     {
                         continue;
@@ -735,7 +735,7 @@ namespace DetourModKit
                     }
 
                     const bool was_active =
-                        active_states_[i].load(std::memory_order_relaxed) != 0;
+                        m_active_states[i].load(std::memory_order_relaxed) != 0;
 
                     switch (binding.mode)
                     {
@@ -745,7 +745,7 @@ namespace DetourModKit
                         {
                             pending.push_back({binding.name, binding.on_press, {}, false});
                         }
-                        active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
+                        m_active_states[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
                         break;
                     }
                     case InputMode::Hold:
@@ -754,7 +754,7 @@ namespace DetourModKit
                         {
                             pending.push_back({binding.name, {}, binding.on_state_change, any_pressed});
                         }
-                        active_states_[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
+                        m_active_states[i].store(any_pressed ? 1 : 0, std::memory_order_relaxed);
                         break;
                     }
                     }
@@ -767,7 +767,7 @@ namespace DetourModKit
             // modifier before the trigger cannot leak a bare trigger to the game.
             // When unfocused or disconnected, clear the latch and mask so the
             // game keeps its input while the mod is in the background.
-            if (has_consume_gamepad_bindings_.load(std::memory_order_relaxed))
+            if (m_has_consume_gamepad_bindings.load(std::memory_order_relaxed))
             {
                 if (process_focused && gamepad_connected)
                 {
@@ -791,33 +791,33 @@ namespace DetourModKit
                 }
             }
 
-            for (auto &p : pending)
+            for (auto &callback : pending)
             {
                 try
                 {
-                    if (p.on_press)
+                    if (callback.on_press)
                     {
-                        p.on_press();
+                        callback.on_press();
                     }
-                    else if (p.on_state_change)
+                    else if (callback.on_state_change)
                     {
-                        p.on_state_change(p.hold_value);
+                        callback.on_state_change(callback.hold_value);
                     }
                 }
                 catch (const std::exception &e)
                 {
                     Logger::get_instance().error(
-                        "InputPoller: Exception in callback \"{}\": {}", p.name, e.what());
+                        "InputPoller: Exception in callback \"{}\": {}", callback.name, e.what());
                 }
                 catch (...)
                 {
                     Logger::get_instance().error(
-                        "InputPoller: Unknown exception in callback \"{}\"", p.name);
+                        "InputPoller: Unknown exception in callback \"{}\"", callback.name);
                 }
             }
 
-            std::unique_lock lock(cv_mutex_);
-            cv_.wait_for(lock, stop_token, poll_interval_, [&stop_token]()
+            std::unique_lock lock(m_cv_mutex);
+            m_cv.wait_for(lock, stop_token, m_poll_interval, [&stop_token]()
                          { return stop_token.stop_requested(); });
         }
     }
@@ -828,9 +828,9 @@ namespace DetourModKit
         std::vector<std::string> hold_release_names;
 
         {
-            std::unique_lock lock(bindings_rw_mutex_);
-            const auto it = name_index_.find(name);
-            if (it == name_index_.end())
+            std::unique_lock lock(m_bindings_rw_mutex);
+            const auto it = m_name_index.find(name);
+            if (it == m_name_index.end())
             {
                 Logger::get_instance().debug("InputPoller: update_combos(\"{}\") ignored: name not found", name);
                 return false;
@@ -843,7 +843,7 @@ namespace DetourModKit
             }
 
             // Cardinality-preserving fast path: in-place rewrite of keys and
-            // modifiers leaves bindings_ and active_states_ in lockstep. The
+            // modifiers leaves m_bindings and m_active_states in lockstep. The
             // poll thread holds a shared_lock for the duration of one tick,
             // so the unique_lock here serializes against it; concurrent
             // is_binding_active(size_t) reads stay valid because the
@@ -853,38 +853,38 @@ namespace DetourModKit
                 for (size_t i = 0; i < indices.size(); ++i)
                 {
                     const size_t idx = indices[i];
-                    bindings_[idx].keys = combos[i].keys;
-                    bindings_[idx].modifiers = combos[i].modifiers;
+                    m_bindings[idx].keys = combos[i].keys;
+                    m_bindings[idx].modifiers = combos[i].modifiers;
                 }
                 recompute_modifier_caches_locked();
                 return true;
             }
 
             // Cardinality change requires rebuilding the bindings vector and
-            // the parallel active_states_ array. Capture the prototype from
+            // the parallel m_active_states array. Capture the prototype from
             // the first existing entry so callback identity, mode, and name
             // stay stable across the rebuild.
-            InputBinding prototype = bindings_[indices.front()];
+            InputBinding prototype = m_bindings[indices.front()];
 
             // Capture release callbacks for any held entries that this update
             // is about to drop. Without this, a register_hold consumer whose
             // combo cardinality changes via INI hot-reload would latch in the
             // held state forever because the underlying entry vanishes from
-            // bindings_ before the next poll tick can observe the release.
+            // m_bindings before the next poll tick can observe the release.
             for (size_t idx : indices)
             {
-                if (active_states_[idx].load(std::memory_order_relaxed) != 0 &&
-                    bindings_[idx].mode == InputMode::Hold &&
-                    bindings_[idx].on_state_change)
+                if (m_active_states[idx].load(std::memory_order_relaxed) != 0 &&
+                    m_bindings[idx].mode == InputMode::Hold &&
+                    m_bindings[idx].on_state_change)
                 {
-                    hold_release_callbacks.push_back(bindings_[idx].on_state_change);
-                    hold_release_names.push_back(bindings_[idx].name);
+                    hold_release_callbacks.push_back(m_bindings[idx].on_state_change);
+                    hold_release_names.push_back(m_bindings[idx].name);
                 }
             }
 
             std::sort(indices.begin(), indices.end());
 
-            // Build a parallel old-state vector keyed to the new bindings_
+            // Build a parallel old-state vector keyed to the new m_bindings
             // order so surviving entries carry their atomic value across the
             // swap. Newly appended combos default to zero (the genuine
             // cardinality-grew case has no prior state to inherit). Entries
@@ -893,7 +893,7 @@ namespace DetourModKit
             // if the binding name persists.
             std::vector<InputBinding> rebuilt;
             std::vector<uint8_t> rebuilt_states;
-            rebuilt.reserve(bindings_.size() - indices.size() +
+            rebuilt.reserve(m_bindings.size() - indices.size() +
                             (combos.empty() ? 1 : combos.size()));
             rebuilt_states.reserve(rebuilt.capacity());
             size_t cursor = 0;
@@ -901,54 +901,54 @@ namespace DetourModKit
             {
                 for (size_t i = cursor; i < skip; ++i)
                 {
-                    rebuilt_states.push_back(active_states_[i].load(std::memory_order_relaxed));
-                    rebuilt.push_back(std::move(bindings_[i]));
+                    rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
+                    rebuilt.push_back(std::move(m_bindings[i]));
                 }
                 cursor = skip + 1;
             }
-            for (size_t i = cursor; i < bindings_.size(); ++i)
+            for (size_t i = cursor; i < m_bindings.size(); ++i)
             {
-                rebuilt_states.push_back(active_states_[i].load(std::memory_order_relaxed));
-                rebuilt.push_back(std::move(bindings_[i]));
+                rebuilt_states.push_back(m_active_states[i].load(std::memory_order_relaxed));
+                rebuilt.push_back(std::move(m_bindings[i]));
             }
             if (combos.empty())
             {
                 // Empty replacement leaves one inert sentinel entry so the
                 // binding name stays addressable for a subsequent
                 // update_combos() call. Without the sentinel the name would
-                // vanish from name_index_ and a later non-empty update
+                // vanish from m_name_index and a later non-empty update
                 // would be rejected as "name not found", breaking the
                 // bound -> unbound -> bound INI hot-reload cycle.
-                InputBinding b = prototype;
-                b.keys.clear();
-                b.modifiers.clear();
-                rebuilt.push_back(std::move(b));
+                InputBinding binding = prototype;
+                binding.keys.clear();
+                binding.modifiers.clear();
+                rebuilt.push_back(std::move(binding));
                 rebuilt_states.push_back(0);
             }
             else
             {
                 for (const auto &combo : combos)
                 {
-                    InputBinding b = prototype;
-                    b.keys = combo.keys;
-                    b.modifiers = combo.modifiers;
-                    rebuilt.push_back(std::move(b));
+                    InputBinding binding = prototype;
+                    binding.keys = combo.keys;
+                    binding.modifiers = combo.modifiers;
+                    rebuilt.push_back(std::move(binding));
                     rebuilt_states.push_back(0);
                 }
             }
-            bindings_ = std::move(rebuilt);
+            m_bindings = std::move(rebuilt);
 
-            // Reallocate active_states_ to match the new binding count and
+            // Reallocate m_active_states to match the new binding count and
             // seed each slot from the captured pre-rebuild value. Surviving
             // entries keep their atomic state so a held binding does not
             // momentarily report inactive; the writer lock serialises the
             // swap against any concurrent is_binding_active() reader.
-            auto new_states = std::make_unique<std::atomic<uint8_t>[]>(bindings_.size());
+            auto new_states = std::make_unique<std::atomic<uint8_t>[]>(m_bindings.size());
             for (size_t i = 0; i < rebuilt_states.size(); ++i)
             {
                 new_states[i].store(rebuilt_states[i], std::memory_order_relaxed);
             }
-            active_states_ = std::move(new_states);
+            m_active_states = std::move(new_states);
 
             recompute_modifier_caches_locked();
         }
@@ -983,29 +983,29 @@ namespace DetourModKit
 
     void InputPoller::add_binding(InputBinding binding) noexcept
     {
-        std::unique_lock lock(bindings_rw_mutex_);
+        std::unique_lock lock(m_bindings_rw_mutex);
 
         // Capture the existing per-binding atomic states before the swap so
         // surviving entries do not flicker through a one-tick "inactive" blip
-        // while the new active_states_ array is built. The relaxed load is
+        // while the new m_active_states array is built. The relaxed load is
         // sufficient: we already hold the writer lock, which serialises us
         // against every other reader and writer of this array.
-        const size_t old_count = bindings_.size();
+        const size_t old_count = m_bindings.size();
         std::vector<uint8_t> carried;
         carried.reserve(old_count);
         for (size_t i = 0; i < old_count; ++i)
         {
-            carried.push_back(active_states_[i].load(std::memory_order_relaxed));
+            carried.push_back(m_active_states[i].load(std::memory_order_relaxed));
         }
 
-        bindings_.push_back(std::move(binding));
+        m_bindings.push_back(std::move(binding));
 
-        auto new_states = std::make_unique<std::atomic<uint8_t>[]>(bindings_.size());
+        auto new_states = std::make_unique<std::atomic<uint8_t>[]>(m_bindings.size());
         for (size_t i = 0; i < carried.size(); ++i)
         {
             new_states[i].store(carried[i], std::memory_order_relaxed);
         }
-        active_states_ = std::move(new_states);
+        m_active_states = std::move(new_states);
 
         recompute_modifier_caches_locked();
     }
@@ -1017,9 +1017,9 @@ namespace DetourModKit
         size_t removed = 0;
 
         {
-            std::unique_lock lock(bindings_rw_mutex_);
-            const auto it = name_index_.find(name);
-            if (it == name_index_.end())
+            std::unique_lock lock(m_bindings_rw_mutex);
+            const auto it = m_name_index.find(name);
+            if (it == m_name_index.end())
             {
                 return 0;
             }
@@ -1037,48 +1037,48 @@ namespace DetourModKit
             {
                 for (size_t idx : indices)
                 {
-                    if (active_states_[idx].load(std::memory_order_relaxed) != 0 &&
-                        bindings_[idx].mode == InputMode::Hold &&
-                        bindings_[idx].on_state_change)
+                    if (m_active_states[idx].load(std::memory_order_relaxed) != 0 &&
+                        m_bindings[idx].mode == InputMode::Hold &&
+                        m_bindings[idx].on_state_change)
                     {
-                        hold_release_callbacks.push_back(bindings_[idx].on_state_change);
-                        hold_release_names.push_back(bindings_[idx].name);
+                        hold_release_callbacks.push_back(m_bindings[idx].on_state_change);
+                        hold_release_names.push_back(m_bindings[idx].name);
                     }
                 }
             }
 
-            // Build a flat skip-mask so the new active_states_ slot for every
+            // Build a flat skip-mask so the new m_active_states slot for every
             // surviving binding inherits its prior atomic value. Without this
             // a held binding would briefly report inactive after the
             // reshape, breaking register_hold consumers that observe the
             // state through is_binding_active(size_t).
-            std::vector<bool> drop(bindings_.size(), false);
+            std::vector<bool> drop(m_bindings.size(), false);
             for (size_t idx : indices)
             {
                 drop[idx] = true;
             }
             std::vector<uint8_t> carried;
-            carried.reserve(bindings_.size() - indices.size());
-            for (size_t i = 0; i < bindings_.size(); ++i)
+            carried.reserve(m_bindings.size() - indices.size());
+            for (size_t i = 0; i < m_bindings.size(); ++i)
             {
                 if (!drop[i])
                 {
-                    carried.push_back(active_states_[i].load(std::memory_order_relaxed));
+                    carried.push_back(m_active_states[i].load(std::memory_order_relaxed));
                 }
             }
 
             for (auto idx_it = indices.rbegin(); idx_it != indices.rend(); ++idx_it)
             {
-                bindings_.erase(bindings_.begin() + static_cast<std::ptrdiff_t>(*idx_it));
+                m_bindings.erase(m_bindings.begin() + static_cast<std::ptrdiff_t>(*idx_it));
             }
             removed = indices.size();
 
-            auto new_states = std::make_unique<std::atomic<uint8_t>[]>(bindings_.size());
+            auto new_states = std::make_unique<std::atomic<uint8_t>[]>(m_bindings.size());
             for (size_t i = 0; i < carried.size(); ++i)
             {
                 new_states[i].store(carried[i], std::memory_order_relaxed);
             }
-            active_states_ = std::move(new_states);
+            m_active_states = std::move(new_states);
 
             recompute_modifier_caches_locked();
         }
@@ -1111,7 +1111,7 @@ namespace DetourModKit
         std::vector<std::pair<std::function<void(bool)>, std::string>> hold_releases;
 
         {
-            std::unique_lock lock(bindings_rw_mutex_);
+            std::unique_lock lock(m_bindings_rw_mutex);
             // Skip the release-callback capture entirely on the loader-lock
             // path (Bootstrap::on_logic_dll_unload_all). Running user
             // callbacks under loader lock is unsafe because the Logic DLL
@@ -1120,55 +1120,55 @@ namespace DetourModKit
             // family or a peer DllMain's mutex would deadlock.
             if (invoke_callbacks)
             {
-                for (size_t i = 0; i < bindings_.size(); ++i)
+                for (size_t i = 0; i < m_bindings.size(); ++i)
                 {
-                    if (active_states_[i].load(std::memory_order_relaxed) != 0 &&
-                        bindings_[i].mode == InputMode::Hold &&
-                        bindings_[i].on_state_change)
+                    if (m_active_states[i].load(std::memory_order_relaxed) != 0 &&
+                        m_bindings[i].mode == InputMode::Hold &&
+                        m_bindings[i].on_state_change)
                     {
-                        hold_releases.emplace_back(bindings_[i].on_state_change, bindings_[i].name);
+                        hold_releases.emplace_back(m_bindings[i].on_state_change, m_bindings[i].name);
                     }
                 }
             }
-            bindings_.clear();
-            name_index_.clear();
-            known_modifiers_.clear();
-            has_gamepad_bindings_.store(false, std::memory_order_relaxed);
-            has_wheel_bindings_.store(false, std::memory_order_relaxed);
-            has_consume_gamepad_bindings_.store(false, std::memory_order_relaxed);
-            has_wheel_consume_bindings_.store(false, std::memory_order_relaxed);
+            m_bindings.clear();
+            m_name_index.clear();
+            m_known_modifiers.clear();
+            m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
+            m_has_wheel_bindings.store(false, std::memory_order_relaxed);
+            m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
+            m_has_wheel_consume_bindings.store(false, std::memory_order_relaxed);
             detail::publish_gamepad_consume_rules(nullptr, 0);
-            active_states_ = std::make_unique<std::atomic<uint8_t>[]>(0);
+            m_active_states = std::make_unique<std::atomic<uint8_t>[]>(0);
         }
 
-        for (auto &[cb, n] : hold_releases)
+        for (auto &[callback, name] : hold_releases)
         {
             try
             {
-                cb(false);
+                callback(false);
             }
             catch (const std::exception &e)
             {
                 Logger::get_instance().error(
-                    "InputPoller: Exception in hold release callback \"{}\": {}", n, e.what());
+                    "InputPoller: Exception in hold release callback \"{}\": {}", name, e.what());
             }
             catch (...)
             {
                 Logger::get_instance().error(
-                    "InputPoller: Unknown exception in hold release callback \"{}\"", n);
+                    "InputPoller: Unknown exception in hold release callback \"{}\"", name);
             }
         }
     }
 
     void InputPoller::release_active_holds() noexcept
     {
-        for (size_t i = 0; i < bindings_.size(); ++i)
+        for (size_t i = 0; i < m_bindings.size(); ++i)
         {
-            if (active_states_[i].load(std::memory_order_relaxed) != 0)
+            if (m_active_states[i].load(std::memory_order_relaxed) != 0)
             {
-                active_states_[i].store(0, std::memory_order_relaxed);
+                m_active_states[i].store(0, std::memory_order_relaxed);
 
-                const auto &binding = bindings_[i];
+                const auto &binding = m_bindings[i];
                 if (binding.mode == InputMode::Hold && binding.on_state_change)
                 {
                     try
@@ -1192,7 +1192,7 @@ namespace DetourModKit
         }
     }
 
-    bool InputPoller::is_process_foreground() const
+    bool InputPoller::is_process_foreground() const noexcept
     {
         HWND foreground = GetForegroundWindow();
         if (!foreground)
@@ -1225,21 +1225,21 @@ namespace DetourModKit
         binding.on_press = std::move(callback);
 
         {
-            std::lock_guard lock(mutex_);
-            if (poller_)
+            std::lock_guard lock(m_mutex);
+            if (m_poller)
             {
-                live_poller = poller_;
+                live_poller = m_poller;
             }
             else
             {
-                pending_bindings_.push_back(std::move(binding));
+                m_pending_bindings.push_back(std::move(binding));
                 return;
             }
         }
 
         // Forward outside the InputManager mutex so the poller's exclusive
-        // bindings_rw_mutex_ acquisition cannot AB/BA against any caller
-        // already holding mutex_.
+        // m_bindings_rw_mutex acquisition cannot AB/BA against any caller
+        // already holding m_mutex.
         live_poller->add_binding(std::move(binding));
     }
 
@@ -1262,14 +1262,14 @@ namespace DetourModKit
         binding.on_state_change = std::move(callback);
 
         {
-            std::lock_guard lock(mutex_);
-            if (poller_)
+            std::lock_guard lock(m_mutex);
+            if (m_poller)
             {
-                live_poller = poller_;
+                live_poller = m_poller;
             }
             else
             {
-                pending_bindings_.push_back(std::move(binding));
+                m_pending_bindings.push_back(std::move(binding));
                 return;
             }
         }
@@ -1283,7 +1283,7 @@ namespace DetourModKit
         // An empty combo list still has to register the binding name so a
         // later update_binding_combos() can attach a real combo. Without
         // this the for-each loop produces zero bindings, the name never
-        // lands in pending_bindings_, and the INI-driven update silently
+        // lands in m_pending_bindings, and the INI-driven update silently
         // fails with "name not found".
         if (combos.empty())
         {
@@ -1312,11 +1312,11 @@ namespace DetourModKit
 
     void InputManager::set_require_focus(bool require_focus)
     {
-        std::lock_guard lock(mutex_);
-        require_focus_ = require_focus;
-        if (poller_)
+        std::lock_guard lock(m_mutex);
+        m_require_focus = require_focus;
+        if (m_poller)
         {
-            poller_->set_require_focus(require_focus);
+            m_poller->set_require_focus(require_focus);
         }
     }
 
@@ -1325,14 +1325,14 @@ namespace DetourModKit
         std::shared_ptr<InputPoller> live_poller;
 
         {
-            std::lock_guard lock(mutex_);
-            if (poller_)
+            std::lock_guard lock(m_mutex);
+            if (m_poller)
             {
-                live_poller = poller_;
+                live_poller = m_poller;
             }
             else
             {
-                for (auto &binding : pending_bindings_)
+                for (auto &binding : m_pending_bindings)
                 {
                     if (binding.name == name)
                     {
@@ -1344,84 +1344,84 @@ namespace DetourModKit
         }
 
         // Forward outside the InputManager mutex so the poller's exclusive
-        // bindings_rw_mutex_ acquisition cannot deadlock against a caller already
-        // holding mutex_ (matches register_press / register_hold).
+        // m_bindings_rw_mutex acquisition cannot deadlock against a caller already
+        // holding m_mutex (matches register_press / register_hold).
         live_poller->set_consume(name, consume);
     }
 
     void InputManager::set_gamepad_index(int index)
     {
-        std::lock_guard lock(mutex_);
-        gamepad_index_ = std::clamp(index, 0, 3);
+        std::lock_guard lock(m_mutex);
+        m_gamepad_index = std::clamp(index, 0, 3);
     }
 
     void InputManager::set_trigger_threshold(int threshold)
     {
-        std::lock_guard lock(mutex_);
-        trigger_threshold_ = std::clamp(threshold, 0, 255);
+        std::lock_guard lock(m_mutex);
+        m_trigger_threshold = std::clamp(threshold, 0, 255);
     }
 
     void InputManager::set_stick_threshold(int threshold)
     {
-        std::lock_guard lock(mutex_);
-        stick_threshold_ = std::clamp(threshold, 0, 32767);
+        std::lock_guard lock(m_mutex);
+        m_stick_threshold = std::clamp(threshold, 0, 32767);
     }
 
     void InputManager::start(std::chrono::milliseconds poll_interval)
     {
-        std::lock_guard lock(mutex_);
+        std::lock_guard lock(m_mutex);
 
-        if (poller_)
+        if (m_poller)
         {
             Logger::get_instance().debug("InputManager: start() called while already running; no-op.");
             return;
         }
 
-        if (pending_bindings_.empty())
+        if (m_pending_bindings.empty())
         {
             return;
         }
 
         Logger &logger = Logger::get_instance();
         logger.info("InputManager: Starting with {} binding(s), poll interval {}ms",
-                    pending_bindings_.size(), poll_interval.count());
+                    m_pending_bindings.size(), poll_interval.count());
 
-        for (const auto &binding : pending_bindings_)
+        for (const auto &binding : m_pending_bindings)
         {
             logger.trace("InputManager: Registered {} binding \"{}\" with {} key(s)",
                          input_mode_to_string(binding.mode), binding.name, binding.keys.size());
         }
 
-        poller_ = std::make_shared<InputPoller>(std::move(pending_bindings_), poll_interval,
-                                                require_focus_, gamepad_index_, trigger_threshold_,
-                                                stick_threshold_);
-        pending_bindings_.clear();
-        poller_->start();
-        active_poller_.store(poller_, std::memory_order_release);
-        running_.store(true, std::memory_order_release);
+        m_poller = std::make_shared<InputPoller>(std::move(m_pending_bindings), poll_interval,
+                                                m_require_focus, m_gamepad_index, m_trigger_threshold,
+                                                m_stick_threshold);
+        m_pending_bindings.clear();
+        m_poller->start();
+        m_active_poller.store(m_poller, std::memory_order_release);
+        m_running.store(true, std::memory_order_release);
     }
 
     bool InputManager::is_running() const noexcept
     {
-        return running_.load(std::memory_order_acquire);
+        return m_running.load(std::memory_order_acquire);
     }
 
     size_t InputManager::binding_count() const noexcept
     {
-        std::lock_guard lock(mutex_);
-        if (poller_)
+        std::lock_guard lock(m_mutex);
+        if (m_poller)
         {
-            return poller_->binding_count();
+            return m_poller->binding_count();
         }
-        return pending_bindings_.size();
+        return m_pending_bindings.size();
     }
 
     bool InputManager::is_binding_active(std::string_view name) const noexcept
     {
-        auto p = active_poller_.load(std::memory_order_acquire);
-        if (p)
+        auto active_poller = m_active_poller.load(std::memory_order_acquire);
+        if (active_poller)
         {
-            return p->is_binding_active(name);
+            return active_poller->is_binding_active(name);
         }
         return false;
     }
@@ -1433,18 +1433,18 @@ namespace DetourModKit
         bool updated_pending = false;
 
         {
-            std::lock_guard lock(mutex_);
-            if (poller_)
+            std::lock_guard lock(m_mutex);
+            if (m_poller)
             {
-                local_poller = poller_;
+                local_poller = m_poller;
             }
             else
             {
                 std::vector<size_t> indices;
-                indices.reserve(pending_bindings_.size());
-                for (size_t i = 0; i < pending_bindings_.size(); ++i)
+                indices.reserve(m_pending_bindings.size());
+                for (size_t i = 0; i < m_pending_bindings.size(); ++i)
                 {
-                    if (pending_bindings_[i].name == name)
+                    if (m_pending_bindings[i].name == name)
                     {
                         indices.push_back(i);
                     }
@@ -1460,52 +1460,52 @@ namespace DetourModKit
                 {
                     for (size_t i = 0; i < indices.size(); ++i)
                     {
-                        pending_bindings_[indices[i]].keys = combos[i].keys;
-                        pending_bindings_[indices[i]].modifiers = combos[i].modifiers;
+                        m_pending_bindings[indices[i]].keys = combos[i].keys;
+                        m_pending_bindings[indices[i]].modifiers = combos[i].modifiers;
                     }
                     updated_pending = true;
                 }
                 else
                 {
-                    InputBinding prototype = pending_bindings_[indices.front()];
+                    InputBinding prototype = m_pending_bindings[indices.front()];
                     std::sort(indices.begin(), indices.end());
                     std::vector<InputBinding> rebuilt;
-                    rebuilt.reserve(pending_bindings_.size() - indices.size() +
+                    rebuilt.reserve(m_pending_bindings.size() - indices.size() +
                                     (combos.empty() ? 1 : combos.size()));
                     size_t cursor = 0;
                     for (size_t skip : indices)
                     {
                         for (size_t i = cursor; i < skip; ++i)
                         {
-                            rebuilt.push_back(std::move(pending_bindings_[i]));
+                            rebuilt.push_back(std::move(m_pending_bindings[i]));
                         }
                         cursor = skip + 1;
                     }
-                    for (size_t i = cursor; i < pending_bindings_.size(); ++i)
+                    for (size_t i = cursor; i < m_pending_bindings.size(); ++i)
                     {
-                        rebuilt.push_back(std::move(pending_bindings_[i]));
+                        rebuilt.push_back(std::move(m_pending_bindings[i]));
                     }
                     if (combos.empty())
                     {
                         // Preserve a sentinel entry so the binding name
                         // remains addressable for a later non-empty
                         // update_binding_combos() call.
-                        InputBinding b = prototype;
-                        b.keys.clear();
-                        b.modifiers.clear();
-                        rebuilt.push_back(std::move(b));
+                        InputBinding binding = prototype;
+                        binding.keys.clear();
+                        binding.modifiers.clear();
+                        rebuilt.push_back(std::move(binding));
                     }
                     else
                     {
                         for (const auto &combo : combos)
                         {
-                            InputBinding b = prototype;
-                            b.keys = combo.keys;
-                            b.modifiers = combo.modifiers;
-                            rebuilt.push_back(std::move(b));
+                            InputBinding binding = prototype;
+                            binding.keys = combo.keys;
+                            binding.modifiers = combo.modifiers;
+                            rebuilt.push_back(std::move(binding));
                         }
                     }
-                    pending_bindings_ = std::move(rebuilt);
+                    m_pending_bindings = std::move(rebuilt);
                     updated_pending = true;
                 }
             }
@@ -1528,19 +1528,19 @@ namespace DetourModKit
         size_t removed_pending = 0;
 
         {
-            std::lock_guard lock(mutex_);
-            if (poller_)
+            std::lock_guard lock(m_mutex);
+            if (m_poller)
             {
-                live_poller = poller_;
+                live_poller = m_poller;
             }
             else
             {
                 auto new_end = std::remove_if(
-                    pending_bindings_.begin(), pending_bindings_.end(),
+                    m_pending_bindings.begin(), m_pending_bindings.end(),
                     [name](const InputBinding &b) { return b.name == name; });
                 removed_pending = static_cast<size_t>(
-                    std::distance(new_end, pending_bindings_.end()));
-                pending_bindings_.erase(new_end, pending_bindings_.end());
+                    std::distance(new_end, m_pending_bindings.end()));
+                m_pending_bindings.erase(new_end, m_pending_bindings.end());
             }
         }
 
@@ -1556,11 +1556,11 @@ namespace DetourModKit
         std::shared_ptr<InputPoller> live_poller;
 
         {
-            std::lock_guard lock(mutex_);
-            pending_bindings_.clear();
-            if (poller_)
+            std::lock_guard lock(m_mutex);
+            m_pending_bindings.clear();
+            if (m_poller)
             {
-                live_poller = poller_;
+                live_poller = m_poller;
             }
         }
 
@@ -1575,13 +1575,13 @@ namespace DetourModKit
         std::shared_ptr<InputPoller> local_poller;
 
         {
-            std::lock_guard lock(mutex_);
+            std::lock_guard lock(m_mutex);
             // Clear atomic shared_ptr before releasing the poller to ensure
             // concurrent is_binding_active() callers hold a valid shared_ptr.
-            active_poller_.store(nullptr, std::memory_order_release);
-            running_.store(false, std::memory_order_release);
-            local_poller = std::move(poller_);
-            pending_bindings_.clear();
+            m_active_poller.store(nullptr, std::memory_order_release);
+            m_running.store(false, std::memory_order_release);
+            local_poller = std::move(m_poller);
+            m_pending_bindings.clear();
         }
 
         if (local_poller)
@@ -1596,8 +1596,8 @@ namespace DetourModKit
             {
                 // Under the loader lock InputPoller::shutdown() detaches its poll
                 // thread instead of joining it (a join would deadlock the loader).
-                // The detached thread keeps reading InputPoller members (cv_,
-                // cv_mutex_, poll_interval_, bindings_) until it observes the stop
+                // The detached thread keeps reading InputPoller members (m_cv,
+                // m_cv_mutex, m_poll_interval, m_bindings) until it observes the stop
                 // request, so destroying the poller now would free those members
                 // mid-access: a use-after-free. Move the last reference into a
                 // nothrow-allocated heap cell that is never freed, so the object
