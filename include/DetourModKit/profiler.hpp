@@ -194,13 +194,13 @@ namespace DetourModKit
         Profiler();
         ~Profiler() = default;
 
-        // write_pos_ first to avoid 40 bytes of padding (alignas(64) requirement).
+        // m_write_pos first to avoid 40 bytes of padding (alignas(64) requirement).
         // This placement ensures cache-line alignment for the lock-free ring buffer.
-        alignas(64) std::atomic<size_t> write_pos_{0};
-        std::unique_ptr<ProfileSample[]> buffer_;
-        size_t capacity_;
-        size_t mask_; // capacity_ - 1 for power-of-2 index wrapping
-        int64_t qpc_frequency_{0};
+        alignas(64) std::atomic<size_t> m_write_pos{0};
+        std::unique_ptr<ProfileSample[]> m_buffer;
+        size_t m_capacity;
+        size_t m_mask; // m_capacity - 1 for power-of-2 index wrapping
+        int64_t m_qpc_frequency{0};
     };
 
     /**
@@ -255,9 +255,9 @@ namespace DetourModKit
 
         ScopedProfile(const char *name, literal_tag) noexcept;
 
-        const char *name_;
-        int64_t start_ticks_;
-        uint32_t thread_id_;
+        const char *m_name;
+        int64_t m_start_ticks;
+        uint32_t m_thread_id;
     };
 
 } // namespace DetourModKit

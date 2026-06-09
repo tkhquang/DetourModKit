@@ -67,8 +67,20 @@ jobs:
           echo "--- Verifying cmake ---" && cmake --version
         shell: bash
 
+      - name: Configure DetourModKit (MinGW Debug + Tests)
+        run: cmake --preset mingw-debug -DDMK_WARNINGS_AS_ERRORS=ON
+        shell: bash
+
+      - name: Build DetourModKit (MinGW Debug + Tests)
+        run: cmake --build --preset mingw-debug --parallel
+        shell: bash
+
+      - name: Run DetourModKit Tests (MinGW Debug)
+        run: ctest --preset mingw-debug --output-on-failure
+        shell: bash
+
       - name: Configure DetourModKit (MinGW Release)
-        run: cmake --preset mingw-release -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/mingw"
+        run: cmake --preset mingw-release -DDMK_WARNINGS_AS_ERRORS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/mingw"
         shell: bash
 
       - name: Build DetourModKit (MinGW Release)
@@ -92,6 +104,16 @@ jobs:
             Write-Warning "Install directory '${installDir}' is empty!"
           }
         shell: pwsh
+
+      - name: Smoke Test Installed Package (MinGW)
+        run: |
+          cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DDetourModKit_DIR="${{ github.workspace }}/install_package/mingw/lib/cmake/DetourModKit" \
+            -DCMAKE_CXX_COMPILER=g++
+          cmake --build build/package-smoke-mingw --parallel
+          ctest --test-dir build/package-smoke-mingw --output-on-failure
+        shell: bash
 
       - name: Determine Artifact Name (MinGW)
         id: determine-artifact-name-mingw
@@ -145,17 +167,29 @@ jobs:
           cmake --version
         shell: bash
 
+      - name: Configure DetourModKit (MSVC Debug + Tests)
+        run: cmake --preset msvc-debug -DDMK_WARNINGS_AS_ERRORS=ON
+        shell: cmd
+
+      - name: Build DetourModKit (MSVC Debug + Tests)
+        run: cmake --build --preset msvc-debug --parallel 2
+        shell: cmd
+
+      - name: Run DetourModKit Tests (MSVC Debug)
+        run: ctest --preset msvc-debug --output-on-failure
+        shell: cmd
+
       - name: Configure DetourModKit (MSVC Release)
-        run: cmake --preset msvc-release -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/msvc"
-        shell: bash
+        run: cmake --preset msvc-release -DDMK_WARNINGS_AS_ERRORS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/msvc"
+        shell: cmd
 
       - name: Build DetourModKit (MSVC Release)
-        run: cmake --build --preset msvc-release --parallel
-        shell: bash
+        run: cmake --build --preset msvc-release --parallel 2
+        shell: cmd
 
       - name: Install DetourModKit (MSVC Release)
         run: cmake --install build/msvc-release
-        shell: bash
+        shell: cmd
 
       - name: Verify Install Directory (MSVC)
         run: |
@@ -170,6 +204,16 @@ jobs:
             Write-Warning "Install directory '${installDir}' is empty!"
           }
         shell: pwsh
+
+      - name: Smoke Test Installed Package (MSVC)
+        run: |
+          cmake -S tests/package_smoke -B build/package-smoke-msvc -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release ^
+            -DDetourModKit_DIR="${{ github.workspace }}/install_package/msvc/lib/cmake/DetourModKit" ^
+            -DCMAKE_CXX_COMPILER=cl
+          cmake --build build/package-smoke-msvc --parallel
+          ctest --test-dir build/package-smoke-msvc --output-on-failure
+        shell: cmd
 
       - name: Determine Artifact Name (MSVC)
         id: determine-artifact-name-msvc
@@ -259,8 +303,8 @@ jobs:
             **Artifacts:**
             This release includes packages for different build environments. Both packages ensure library names are prefixed with `lib` for consistency (e.g., `libDetourModKit.a`, `libDetourModKit.lib`).
 
-            *   `${{ needs.build-mingw.outputs.artifact_name }}`: Built with MinGW (g++). Contains `libDetourModKit.a`, `libsafetyhook.a`, headers, CMake config files. (Zydis & Zycore are statically linked into libsafetyhook.a).
-            *   `${{ needs.build-msvc.outputs.artifact_name }}`: Built with MSVC (Visual Studio 2022). Contains `libDetourModKit.lib`, `libsafetyhook.lib` (or `safetyhook.lib` if SafetyHook doesn't get the prefix), headers, CMake config files. (Zydis & Zycore are statically linked into libsafetyhook.lib/safetyhook.lib).
+            *   `${{ needs.build-mingw.outputs.artifact_name }}`: Built with MinGW (g++). Contains `libDetourModKit.a`, `libsafetyhook.a`, `libZydis.a`, `libZycore.a`, headers, and CMake config files. `find_package` links the transitive static chain via the `DetourModKit::deps` imported target.
+            *   `${{ needs.build-msvc.outputs.artifact_name }}`: Built with MSVC (Visual Studio 2022). Contains `libDetourModKit.lib`, `safetyhook.lib`, `Zydis.lib`, `Zycore.lib`, headers, and CMake config files. Same `DetourModKit::deps` wiring as the MinGW package.
 
             These packages are ready to be used by other CMake projects via `find_package(DetourModKit)`.
             See README for detailed usage instructions.

@@ -69,7 +69,7 @@ Look at the "Missing" column for specific line numbers, then categorize by reaso
 
 | Reason | Examples | Solution |
 | ------ | -------- | -------- |
-| **Invalid memory addresses** | Hook functions requiring valid function pointers | Use real function addresses with `[[gnu::noinline]]` |
+| **Invalid memory addresses** | Hook functions requiring valid function pointers | Use real function addresses with `DMK_TEST_NOINLINE` |
 | **Error paths** | Exception handlers, error returns | Test with invalid inputs that trigger errors |
 | **Windows API errors** | `GetModuleHandleExA`, `VirtualQuery` failures | Accept limitation or mock |
 | **Template instantiation** | Template methods only instantiated with specific types | Add tests calling with those types |
@@ -86,7 +86,7 @@ Each module has a corresponding test file that tests the module in isolation:
 src/<module>.cpp  →  tests/test_<module>.cpp
 ```
 
-Unit tests use `[[gnu::noinline]]` static functions as hook targets within the test binary itself. This validates the hooking mechanics without cross-module complexity.
+Unit tests use `DMK_TEST_NOINLINE` static functions as hook targets within the test binary itself. This validates the hooking mechanics without cross-module complexity.
 
 ### Integration Tests
 
@@ -105,14 +105,22 @@ The fixture DLL exports `extern "C"` functions with volatile magic constants for
 ### Using Real Function Addresses
 
 ```cpp
+#if defined(_MSC_VER)
+#define DMK_TEST_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define DMK_TEST_NOINLINE [[gnu::noinline]]
+#else
+#define DMK_TEST_NOINLINE
+#endif
+
 // Test-local functions marked noinline to prevent the compiler
-// from optimizing away the function body
-[[gnu::noinline]] static int real_hook_target_add(int a, int b)
+// from optimizing away the function body.
+DMK_TEST_NOINLINE static int real_hook_target_add(int a, int b)
 {
     return a + b;
 }
 
-[[gnu::noinline]] static int real_hook_detour_add(int a, int b)
+DMK_TEST_NOINLINE static int real_hook_detour_add(int a, int b)
 {
     return a + b + 100;
 }
@@ -351,6 +359,25 @@ cmake --build build/mingw-release --parallel
 
 `DetourModKit_bench_memory` is documented in [../misc/hot-path-memory.md](../misc/hot-path-memory.md); read the `probe_gated_over_direct` TSV row for the gated-vs-direct multiplier on your machine.
 
+## Installed Package Smoke Test
+
+`tests/package_smoke` is a minimal consumer project for validating installed
+release packages. It uses `find_package(DetourModKit REQUIRED)`, links
+`DetourModKit::DetourModKit`, and touches `HookManager` so the static
+dependency archives are required by the final link.
+
+```bash
+cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DDetourModKit_DIR="$PWD/install_package/mingw/lib/cmake/DetourModKit" \
+    -DCMAKE_CXX_COMPILER=g++
+cmake --build build/package-smoke-mingw --parallel
+ctest --test-dir build/package-smoke-mingw --output-on-failure
+```
+
+The release workflow runs this smoke project for both MinGW and MSVC after
+installing the package and before uploading release artifacts.
+
 ## Project Structure
 
 ```text
@@ -362,6 +389,9 @@ tests/
 ├── bench_scanner.cpp           # Scanner::find_pattern rare-byte-anchor bench (DMK_BUILD_BENCHMARKS)
 ├── fixtures/
 │   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
+├── package_smoke/
+│   ├── CMakeLists.txt          # Minimal installed-package consumer project
+│   └── main.cpp                # Smoke executable that forces a DetourModKit link
 ├── test_async_logger.cpp       # Async logger tests
 ├── test_bootstrap.cpp          # DllMain lifecycle and instance-gate tests
 ├── test_config.cpp             # Configuration tests
@@ -422,7 +452,7 @@ g++ -o test_compile.exe docs/tests/test_compile.cpp
 ## Best Practices
 
 1. **Start with error paths**: Test invalid inputs first (easy coverage gains).
-2. **Use real addresses**: For hook tests, use `[[gnu::noinline]]` functions or DLL exports.
+2. **Use real addresses**: For hook tests, use `DMK_TEST_NOINLINE` functions or DLL exports.
 3. **Use `ASSERT_*` for preconditions**: Stop the test immediately if setup fails.
 4. **Use `EXPECT_*` for verifications**: Continue testing even if one check fails.
 5. **Guard platform-specific tests**: Use `GTEST_SKIP()` for architecture-dependent logic.

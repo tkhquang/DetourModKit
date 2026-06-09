@@ -3,7 +3,8 @@
  * @brief Declarative self-healing anchor registry.
  *
  * Dispatches each anchor to the backend its kind names (reverse-RTTI vtable
- * resolve, AOB/RIP cascade, in-code constant decode, or a pinned literal) and
+ * resolve, AOB/RIP cascade, in-code constant decode, a string-literal xref
+ * resolve, or a pinned literal) and
  * reports a uniform value + status, so a consumer declares every magic constant
  * once and resolves the whole table in a single pass. Every backend already
  * fails closed; this layer only maps their typed failures onto a common status.
@@ -68,6 +69,30 @@ namespace DetourModKit
             if (constant)
             {
                 result.value = *constant;
+                result.status = AnchorStatus::Resolved;
+            }
+            else
+            {
+                result.status = AnchorStatus::Failed;
+            }
+            break;
+        }
+        case AnchorKind::StringXref:
+        {
+            // Anchor on an immutable string literal, then resolve the instruction
+            // (or enclosing function) that references it. The string survives game
+            // updates far better than the surrounding code, so this is the most
+            // update-resilient backend; it fails closed on a missing, duplicated,
+            // or unreferenced string.
+            Scanner::StringRefQuery query{};
+            query.text = anchor.xref_text;
+            query.encoding = anchor.xref_encoding;
+            query.require_terminator = anchor.xref_require_terminator;
+            query.return_mode = anchor.xref_return;
+            const auto site = Scanner::find_string_xref(query, range);
+            if (site)
+            {
+                result.value = static_cast<std::int64_t>(*site);
                 result.status = AnchorStatus::Resolved;
             }
             else

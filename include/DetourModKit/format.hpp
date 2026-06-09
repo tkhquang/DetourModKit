@@ -106,7 +106,7 @@ namespace DetourModKit
                 return "[]";
             }
 
-            // "0x" + 2+ hex digits ≈ 4 chars per entry, plus ", " separator
+            // "0x" + 2+ hex digits ~4 chars per entry, plus ", " separator
             std::string result;
             result.reserve(1 + values.size() * 6 + 1);
             result += '[';

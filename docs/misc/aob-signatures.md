@@ -318,7 +318,8 @@ Error values (`RipResolveError`):
 | `NullInput` | `instruction_address` or `search_start` was null |
 | `PrefixNotFound` | (find-and-resolve only) no match within `search_length` |
 | `RegionTooSmall` | (find-and-resolve only) `search_length < prefix_len + 4` |
-| `UnreadableDisplacement` | disp32 bytes failed `Memory::is_readable()` |
+| `UnreadableDisplacement` | disp32 bytes could not be read under the SEH fault guard (`Memory::seh_read`) |
+| `ImplausibleTarget` | the resolved address is not a plausible user-mode pointer (a corrupt displacement that resolves to 0, a low guard-page address, or a kernel-range value); gated by `Memory::plausible_userspace_ptr` |
 
 ### 5.2 One-step: find the prefix and resolve in the same call
 
@@ -346,6 +347,8 @@ const auto resolved = sc::find_and_resolve_rip_relative(
     /*instruction_length=*/5);        // E8 + disp32
 ```
 
+`find_and_resolve_rip_relative` is **first-prefix-wins**: it resolves the first location whose bytes match `opcode_prefix` and does not check whether the prefix occurs again within the window. When a signature may be ambiguous, anchor it through the cascade resolver (which enforces per-candidate uniqueness) instead of widening the search window. The resolved target is gated by the same `ImplausibleTarget` check as `resolve_rip_relative`.
+
 ### 5.3 What these helpers will not resolve
 
 `resolve_rip_relative` deliberately understands only the 32-bit signed displacement form. The following need manual handling:
@@ -354,6 +357,39 @@ const auto resolved = sc::find_and_resolve_rip_relative(
 - 16-bit displacements and legacy `EA ptr16:32` far jumps.
 - Indirect calls through memory: `FF 15 disp32` and `FF 25 disp32`. The disp32 points to a **pointer**; DMK returns the pointer's address, not the final target. Dereference it yourself.
 - Instructions where the disp32 is interrupted by a SIB byte combination or a VEX/EVEX prefix boundary: supply your own longer `opcode_prefix` that covers up to the disp32 start.
+
+### 5.4 String-reference anchors
+
+When the most stable thing about a target is the text it uses, anchor on the string instead of the code. `find_string_xref` is a two-phase, fail-closed resolve scoped to one module image:
+
+1. Locate the literal in the image's readable pages (`.rdata` / `.data`). The linker pools identical strings, so a second occurrence is treated as ambiguous and the resolve fails closed (`StringAmbiguous`).
+2. Scan the image's execute-readable pages for the single RIP-relative load whose resolved absolute target is that string, and return it. Zero references is `NoReference`; more than one is `AmbiguousReference`.
+
+```cpp
+namespace sc = DetourModKit::Scanner;
+
+sc::StringRefQuery query{
+    .text = "Assertion failed: m_world != nullptr",  // a long, specific, once-used literal
+    .encoding = sc::StringEncoding::Utf8,             // Utf16le for L"" / wchar_t literals
+    .require_terminator = true,                       // do not match a prefix of a longer string
+    .return_mode = sc::XrefReturn::ReferencingInstruction,
+};
+
+const auto site = sc::find_string_xref(query); // defaults to the host EXE range
+if (!site)
+{
+    dmk::Logger::get_instance().error("string xref failed: {}",
+                                      sc::string_xref_error_to_string(site.error()));
+    return false;
+}
+// *site is the address of the `lea`/`mov` that loads the string. With
+// XrefReturn::EnclosingFunction it is instead a best-effort prologue back-scan to
+// the function that uses it.
+```
+
+Why anchor on a string: a game patch reshuffles code bytes (breaking AOBs) and reorders globals, but a format string or assert message almost never changes. The reference is RIP-relative and resolved against the live image, so the result is ASLR-correct with no fixed address baked in.
+
+Recognized forms and limits (v1): the dominant 64-bit string loads, `REX.W lea`/`mov reg, [rip+disp32]` (opcodes `8D` / `8B` with a RIP-relative ModRM). Other reference shapes (`cmp [rip+d], imm`, indirect `call`/`jmp` through a pointer to the string) are not matched and report `NoReference`. Choose a string that is referenced exactly once; short, common strings are pooled and shared. This backend is also exposed declaratively as `AnchorKind::StringXref` in the [anchor registry](anchors.md).
 
 ## 6. Cascading candidates
 

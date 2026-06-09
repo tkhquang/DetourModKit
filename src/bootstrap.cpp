@@ -61,24 +61,24 @@ namespace DetourModKit::Bootstrap
                 wprefix.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
             }
 
-            const int n = wsprintfW(mutex_name, L"%s%lu", wprefix.c_str(), GetCurrentProcessId());
-            if (n <= 0)
+            const int written_len = wsprintfW(mutex_name, L"%s%lu", wprefix.c_str(), GetCurrentProcessId());
+            if (written_len <= 0)
             {
                 return false;
             }
 
-            HANDLE h = CreateMutexW(nullptr, FALSE, mutex_name);
-            if (!h)
+            HANDLE mutex_handle = CreateMutexW(nullptr, FALSE, mutex_name);
+            if (!mutex_handle)
             {
                 return false;
             }
             if (GetLastError() == ERROR_ALREADY_EXISTS)
             {
-                CloseHandle(h);
+                CloseHandle(mutex_handle);
                 return false;
             }
 
-            g_instance_mutex = h;
+            g_instance_mutex = mutex_handle;
             return true;
         }
 
@@ -380,8 +380,8 @@ namespace DetourModKit::Bootstrap
                 // as safe from DllMain detach paths. User on_state_change(false)
                 // callbacks for held bindings live in the unloading Logic DLL;
                 // running them under loader lock is the deadlock-or-crash
-                // vector that the v3.2.1 leak-on-purpose discipline was set
-                // up to forbid.
+                // vector that the leak-on-purpose discipline was set up to
+                // forbid.
                 bindings_removed += InputManager::get_instance().remove_binding_by_name(name, false);
             }
             catch (const std::exception &e)

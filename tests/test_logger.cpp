@@ -1233,7 +1233,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
     HANDLE exclusive_handle = CreateFileA(
         test_log_file_.string().c_str(),
         GENERIC_READ,
-        0, // No sharing — exclusive lock
+        0, // No sharing -- exclusive lock
         nullptr,
         OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL,
@@ -1365,7 +1365,7 @@ TEST_F(LoggerTest, SetLogLevel_SameLevel_NoLogMessage)
 {
     Logger &logger = Logger::get_instance();
 
-    // Stabilize: set to Trace, then set again — second call must be silent
+    // Stabilize: set to Trace, then set again -- second call must be silent
     logger.set_log_level(LogLevel::Trace);
     logger.info("MARKER_BEFORE_SAME_a7k2");
     logger.set_log_level(LogLevel::Trace);

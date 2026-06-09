@@ -63,6 +63,26 @@ TEST(X86DecodeTest, DecodeE9Rel32_ValidBackwardDisplacement)
     EXPECT_EQ(*result, base + 5 - 32);
 }
 
+TEST(X86DecodeTest, DecodeE9Rel32_UnmappedInstructionRejected)
+{
+    // Reserve a page with no committed backing and no access, then decode at
+    // its base. The decoders no longer probe with is_readable; the SEH fault
+    // guard inside seh_read_bytes is the only thing between a bad address and
+    // an access violation, so this asserts that an unmapped instruction yields
+    // nullopt instead of faulting the process. Covers the time-of-check to
+    // time-of-use fix for the instruction-bytes read shared by all three
+    // decoders.
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    LPVOID region = VirtualAlloc(nullptr, si.dwPageSize, MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(region, nullptr);
+
+    const auto result = decode_e9_rel32(reinterpret_cast<std::uintptr_t>(region));
+    EXPECT_FALSE(result.has_value());
+
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
 TEST(X86DecodeTest, DecodeEbRel8_NullAddressRejected)
 {
     const auto result = decode_eb_rel8(0);

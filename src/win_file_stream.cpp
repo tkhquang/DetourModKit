@@ -12,9 +12,9 @@ namespace DetourModKit
     // --- WinFileStreamBuf ---
 
     WinFileStreamBuf::WinFileStreamBuf() noexcept
-        : handle_(INVALID_HANDLE_VALUE)
+        : m_handle(INVALID_HANDLE_VALUE)
     {
-        setp(buffer_.data(), buffer_.data() + BUFFER_SIZE);
+        setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
     }
 
     WinFileStreamBuf::~WinFileStreamBuf() noexcept
@@ -35,7 +35,7 @@ namespace DetourModKit
             creation = OPEN_ALWAYS;
         }
 
-        handle_ = CreateFileW(
+        m_handle = CreateFileW(
             path.c_str(),
             GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -44,23 +44,23 @@ namespace DetourModKit
             FILE_ATTRIBUTE_NORMAL,
             nullptr);
 
-        if (handle_ == INVALID_HANDLE_VALUE)
+        if (m_handle == INVALID_HANDLE_VALUE)
         {
             return false;
         }
 
         if (mode & std::ios_base::app)
         {
-            if (SetFilePointer(static_cast<HANDLE>(handle_), 0, nullptr, FILE_END) ==
+            if (SetFilePointer(static_cast<HANDLE>(m_handle), 0, nullptr, FILE_END) ==
                 INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR)
             {
-                CloseHandle(static_cast<HANDLE>(handle_));
-                handle_ = INVALID_HANDLE_VALUE;
+                CloseHandle(static_cast<HANDLE>(m_handle));
+                m_handle = INVALID_HANDLE_VALUE;
                 return false;
             }
         }
 
-        setp(buffer_.data(), buffer_.data() + BUFFER_SIZE);
+        setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
         return true;
     }
 
@@ -87,7 +87,7 @@ namespace DetourModKit
 
     bool WinFileStreamBuf::is_open() const noexcept
     {
-        return handle_ != INVALID_HANDLE_VALUE;
+        return m_handle != INVALID_HANDLE_VALUE;
     }
 
     void WinFileStreamBuf::close()
@@ -98,8 +98,8 @@ namespace DetourModKit
         }
 
         flush_buffer();
-        CloseHandle(static_cast<HANDLE>(handle_));
-        handle_ = INVALID_HANDLE_VALUE;
+        CloseHandle(static_cast<HANDLE>(m_handle));
+        m_handle = INVALID_HANDLE_VALUE;
         setp(nullptr, nullptr);
     }
 
@@ -178,8 +178,8 @@ namespace DetourModKit
 
         DWORD bytes_written = 0;
         const BOOL result = WriteFile(
-            static_cast<HANDLE>(handle_), pbase(), count, &bytes_written, nullptr);
-        setp(buffer_.data(), buffer_.data() + BUFFER_SIZE);
+            static_cast<HANDLE>(m_handle), pbase(), count, &bytes_written, nullptr);
+        setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
 
         return result != 0 && bytes_written == count;
     }
@@ -187,12 +187,12 @@ namespace DetourModKit
     // --- WinFileStream ---
 
     WinFileStream::WinFileStream()
-        : std::ostream(&buf_)
+        : std::ostream(&m_buf)
     {
     }
 
     WinFileStream::WinFileStream(const std::string &path, std::ios_base::openmode mode)
-        : std::ostream(&buf_)
+        : std::ostream(&m_buf)
     {
         open(path, mode);
     }
@@ -202,7 +202,7 @@ namespace DetourModKit
     void WinFileStream::open(const std::string &path, std::ios_base::openmode mode)
     {
         clear();
-        if (!buf_.open(path, mode))
+        if (!m_buf.open(path, mode))
         {
             setstate(std::ios_base::failbit);
         }
@@ -211,7 +211,7 @@ namespace DetourModKit
     void WinFileStream::open(const std::wstring &path, std::ios_base::openmode mode)
     {
         clear();
-        if (!buf_.open(path, mode))
+        if (!m_buf.open(path, mode))
         {
             setstate(std::ios_base::failbit);
         }
@@ -219,12 +219,12 @@ namespace DetourModKit
 
     bool WinFileStream::is_open() const noexcept
     {
-        return buf_.is_open();
+        return m_buf.is_open();
     }
 
     void WinFileStream::close()
     {
-        buf_.close();
+        m_buf.close();
     }
 
 } // namespace DetourModKit

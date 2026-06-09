@@ -99,15 +99,15 @@ namespace DetourModKit
         StringPool();
         ~StringPool() noexcept;
 
-        /// Must be called with pool_mutex_ held.
+        /// Must be called with m_pool_mutex held.
         void grow_pool_locked();
         PoolSlot *claim_free_slot() noexcept;
         void return_slot_locked(PoolSlot *slot, Block *block) noexcept;
 
-        std::atomic<Block *> head_{nullptr};
-        std::atomic<size_t> pool_size_{0};
-        std::atomic<size_t> heap_fallback_count_{0};
-        std::mutex pool_mutex_;
+        std::atomic<Block *> m_head{nullptr};
+        std::atomic<size_t> m_pool_size{0};
+        std::atomic<size_t> m_heap_fallback_count{0};
+        std::mutex m_pool_mutex;
     };
 
     /**
@@ -208,7 +208,7 @@ namespace DetourModKit
          * @brief Returns the capacity of the queue.
          * @return size_t The maximum number of elements.
          */
-        size_t capacity() const noexcept { return capacity_; }
+        size_t capacity() const noexcept { return m_capacity; }
 
     private:
         struct Slot
@@ -228,17 +228,17 @@ namespace DetourModKit
         /// allocation of an invalid-sized buffer in the initializer list.
         static size_t validated_capacity(size_t capacity);
 
-        // Immutable after construction — never resized.
-        const size_t capacity_;
-        const size_t mask_;
+        // Immutable after construction -- never resized.
+        const size_t m_capacity;
+        const size_t m_mask;
 
         // Allocated once in the constructor; the unique_ptr ensures immutability
         // (no accidental resize) while maintaining contiguous cache-friendly layout.
-        std::unique_ptr<Slot[]> buffer_;
+        std::unique_ptr<Slot[]> m_buffer;
 
         // Cache-line aligned to prevent false sharing between producers and consumers.
-        alignas(64) std::atomic<size_t> enqueue_pos_{0};
-        alignas(64) std::atomic<size_t> dequeue_pos_{0};
+        alignas(64) std::atomic<size_t> m_enqueue_pos{0};
+        alignas(64) std::atomic<size_t> m_dequeue_pos{0};
     };
 
 #ifdef _MSC_VER
@@ -335,9 +335,9 @@ namespace DetourModKit
 
         /**
          * @brief Stops the writer thread and drains remaining queued messages.
-         * @details Sets shutdown_requested_, joins the writer thread, then drains
+         * @details Sets m_shutdown_requested, joins the writer thread, then drains
          *          any messages that arrived between the stop signal and thread exit.
-         * @note A producer that already passed the shutdown_requested_ check but has
+         * @note A producer that already passed the m_shutdown_requested check but has
          *       not yet completed try_push() can enqueue at most one message after the
          *       final drain. This is an accepted trade-off to avoid adding atomic
          *       overhead (producers_in_flight counter) to every enqueue() call.
@@ -365,7 +365,7 @@ namespace DetourModKit
         /**
          * @brief Drains any messages remaining in the queue after the writer thread exits.
          * @details Called during shutdown to flush late-enqueued messages that arrived
-         *          between running_=false and the writer thread observing an empty queue.
+         *          between m_running=false and the writer thread observing an empty queue.
          *          No external lock is required; the writer thread has already been joined.
          */
         void drain_remaining() noexcept;
@@ -374,20 +374,20 @@ namespace DetourModKit
 
         bool handle_overflow(LogMessage &&message) noexcept;
 
-        DynamicMPMCQueue queue_;
-        AsyncLoggerConfig config_;
+        DynamicMPMCQueue m_queue;
+        AsyncLoggerConfig m_config;
 
-        std::shared_ptr<WinFileStream> file_stream_;
-        std::shared_ptr<std::mutex> log_mutex_;
+        std::shared_ptr<WinFileStream> m_file_stream;
+        std::shared_ptr<std::mutex> m_log_mutex;
 
-        std::jthread writer_thread_;
-        std::atomic<bool> running_{false};
-        std::atomic<bool> shutdown_requested_{false};
+        std::jthread m_writer_thread;
+        std::atomic<bool> m_running{false};
+        std::atomic<bool> m_shutdown_requested{false};
 
-        std::mutex flush_mutex_;
-        std::condition_variable flush_cv_;
-        std::atomic<size_t> pending_messages_{0};
-        std::atomic<size_t> dropped_messages_{0};
+        std::mutex m_flush_mutex;
+        std::condition_variable m_flush_cv;
+        std::atomic<size_t> m_pending_messages{0};
+        std::atomic<size_t> m_dropped_messages{0};
     };
 
 } // namespace DetourModKit

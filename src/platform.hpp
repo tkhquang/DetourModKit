@@ -27,28 +27,28 @@ namespace DetourModKit::detail
     {
 #ifdef _WIN64
         auto *peb = reinterpret_cast<char *>(__readgsqword(0x60));
-        constexpr size_t kLoaderLockOffset = 0x110;
+        constexpr size_t LOADER_LOCK_OFFSET = 0x110;
 #else
         auto *peb = reinterpret_cast<char *>(__readfsdword(0x30));
-        constexpr size_t kLoaderLockOffset = 0xA0;
+        constexpr size_t LOADER_LOCK_OFFSET = 0xA0;
 #endif
         if (!peb)
             return true;
 
-        auto *cs = *reinterpret_cast<PCRITICAL_SECTION *>(peb + kLoaderLockOffset);
+        auto *cs = *reinterpret_cast<PCRITICAL_SECTION *>(peb + LOADER_LOCK_OFFSET);
         if (!cs)
             return true;
 
         // Confirm the critical section lives in committed, readable memory before
         // dereferencing OwningThread. A wrong kLoaderLockOffset (foreign or future
         // PEB layout) would otherwise read a bogus pointer and fault the host.
-        constexpr DWORD kReadableProtect =
+        constexpr DWORD READABLE_PROTECT =
             PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
             PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
         MEMORY_BASIC_INFORMATION mbi{};
         if (VirtualQuery(cs, &mbi, sizeof(mbi)) != sizeof(mbi) ||
             mbi.State != MEM_COMMIT ||
-            (mbi.Protect & kReadableProtect) == 0 ||
+            (mbi.Protect & READABLE_PROTECT) == 0 ||
             (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0)
         {
             return true;

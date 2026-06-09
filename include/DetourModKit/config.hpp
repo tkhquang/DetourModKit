@@ -98,7 +98,7 @@ namespace DetourModKit
         public:
             InputBindingGuard() = default;
             InputBindingGuard(std::string name, std::shared_ptr<std::atomic<bool>> enabled) noexcept
-                : name_(std::move(name)), enabled_(std::move(enabled)) {}
+                : m_name(std::move(name)), m_enabled(std::move(enabled)) {}
 
             ~InputBindingGuard() noexcept { release(); }
 
@@ -106,15 +106,15 @@ namespace DetourModKit
             InputBindingGuard &operator=(const InputBindingGuard &) = delete;
 
             InputBindingGuard(InputBindingGuard &&other) noexcept
-                : name_(std::move(other.name_)), enabled_(std::move(other.enabled_)) {}
+                : m_name(std::move(other.m_name)), m_enabled(std::move(other.m_enabled)) {}
 
             InputBindingGuard &operator=(InputBindingGuard &&other) noexcept
             {
                 if (this != &other)
                 {
                     release();
-                    name_ = std::move(other.name_);
-                    enabled_ = std::move(other.enabled_);
+                    m_name = std::move(other.m_name);
+                    m_enabled = std::move(other.m_enabled);
                 }
                 return *this;
             }
@@ -124,48 +124,84 @@ namespace DetourModKit
              */
             void release() noexcept
             {
-                if (enabled_)
+                if (m_enabled)
                 {
-                    enabled_->store(false, std::memory_order_release);
-                    enabled_.reset();
+                    m_enabled->store(false, std::memory_order_release);
+                    m_enabled.reset();
                 }
             }
 
             /**
              * @brief Returns the binding's InputManager name.
              */
-            [[nodiscard]] const std::string &name() const noexcept { return name_; }
+            [[nodiscard]] const std::string &name() const noexcept { return m_name; }
 
             /**
              * @brief Returns true while the binding's callback is still live.
              */
             [[nodiscard]] bool is_active() const noexcept
             {
-                return enabled_ && enabled_->load(std::memory_order_acquire);
+                return m_enabled && m_enabled->load(std::memory_order_acquire);
             }
 
         private:
-            std::string name_;
-            std::shared_ptr<std::atomic<bool>> enabled_;
+            std::string m_name;
+            std::shared_ptr<std::atomic<bool>> m_enabled;
         };
 
-        /// Registers an integer configuration item.
-        /// @note The setter is called immediately with default_value and again on load().
+        /**
+         * @brief Registers an integer configuration item.
+         * @details The setter is invoked immediately with @p default_value and
+         *          again on every load() / reload() with the parsed INI value.
+         * @param section INI section name.
+         * @param ini_key Key within the section.
+         * @param log_key_name Human-readable name used in log output.
+         * @param setter Callback applied with the resolved value. Must be
+         *               reentrant and thread-safe.
+         * @param default_value Value used when the key is absent or unparsable.
+         */
         void register_int(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                           std::function<void(int)> setter, int default_value);
 
-        /// Registers a floating-point configuration item.
-        /// @note The setter is called immediately with default_value and again on load().
+        /**
+         * @brief Registers a floating-point configuration item.
+         * @details The setter is invoked immediately with @p default_value and
+         *          again on every load() / reload() with the parsed INI value.
+         * @param section INI section name.
+         * @param ini_key Key within the section.
+         * @param log_key_name Human-readable name used in log output.
+         * @param setter Callback applied with the resolved value. Must be
+         *               reentrant and thread-safe.
+         * @param default_value Value used when the key is absent or unparsable.
+         */
         void register_float(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                             std::function<void(float)> setter, float default_value);
 
-        /// Registers a boolean configuration item.
-        /// @note The setter is called immediately with default_value and again on load().
+        /**
+         * @brief Registers a boolean configuration item.
+         * @details The setter is invoked immediately with @p default_value and
+         *          again on every load() / reload() with the parsed INI value.
+         * @param section INI section name.
+         * @param ini_key Key within the section.
+         * @param log_key_name Human-readable name used in log output.
+         * @param setter Callback applied with the resolved value. Must be
+         *               reentrant and thread-safe.
+         * @param default_value Value used when the key is absent or unparsable.
+         */
         void register_bool(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                            std::function<void(bool)> setter, bool default_value);
 
-        /// Registers a string configuration item.
-        /// @note The setter is called immediately with default_value and again on load().
+        /**
+         * @brief Registers a string configuration item.
+         * @details The setter is invoked immediately with @p default_value and
+         *          again on every load() / reload() with the parsed INI value.
+         * @param section INI section name.
+         * @param ini_key Key within the section.
+         * @param log_key_name Human-readable name used in log output.
+         * @param setter Callback applied with the resolved value. Must be
+         *               reentrant and thread-safe.
+         * @param default_value Value used when the key is absent or unparsable.
+         */
         void register_string(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                              std::function<void(const std::string &)> setter, std::string default_value);
 

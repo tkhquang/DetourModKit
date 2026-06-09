@@ -240,52 +240,52 @@ namespace DetourModKit
         // 2. Single bounds computation. Unsigned arithmetic is wrap-defined; a
         //    nominal_offset that wraps the address space or lands outside the
         //    canonical user-mode window is rejected here, before any read. With
-        //    a validated s (>= MIN_VALID_PTR) and window <= MAX_HEAL_WINDOW
+        //    a validated nominal_slot (>= MIN_VALID_PTR) and window <= MAX_HEAL_WINDOW
         //    (4096) << MIN_VALID_PTR (0x10000), the lo/hi derivations below
         //    cannot themselves underflow or wrap.
-        const std::uintptr_t s = lm.base + static_cast<std::uintptr_t>(lm.nominal_offset);
-        if (!Memory::plausible_userspace_ptr(s))
+        const std::uintptr_t nominal_slot = lm.base + static_cast<std::uintptr_t>(lm.nominal_offset);
+        if (!Memory::plausible_userspace_ptr(nominal_slot))
             return std::unexpected(HealError::BadDescriptor);
-        std::uintptr_t lo = s - lm.window;
+        std::uintptr_t lo = nominal_slot - lm.window;
         if (lo < detail::MIN_VALID_PTR)
             lo = detail::MIN_VALID_PTR;
-        const std::uintptr_t hi = s + lm.window;
+        const std::uintptr_t hi = nominal_slot + lm.window;
 
         PointeeType pt;
 
         // 3. Nominal slot first. An exact-offset match short-circuits before the
         //    window scan, so an unchanged offset -- or a same-typed neighbour in
         //    the window -- never reaches the ambiguity test.
-        if (slot_matches(s, lm, pt))
-            return make_hit(s, lm.base, pt);
+        if (slot_matches(nominal_slot, lm, pt))
+            return make_hit(nominal_slot, lm.base, pt);
 
         // 4. Widened grid scan, nearest distance first. Candidate slots are
-        //    congruent to s modulo stride, so every probe stays pointer-aligned
+        //    congruent to nominal_slot modulo stride, so every probe stays pointer-aligned
         //    to the nominal slot. At each distance ring the -d and +d slots are
         //    both evaluated before deciding, so an equidistant tie is detected
         //    rather than silently resolved to one side.
         for (std::size_t k = 1;; ++k)
         {
             const std::size_t step = k * stride;
-            const bool minus_in = step <= (s - lo);
-            const bool plus_in = step <= (hi - s);
+            const bool minus_in = step <= (nominal_slot - lo);
+            const bool plus_in = step <= (hi - nominal_slot);
             if (!minus_in && !plus_in)
                 break;
 
             bool minus_match = false;
             HealHit minus_hit{};
-            if (minus_in && slot_matches(s - step, lm, pt))
+            if (minus_in && slot_matches(nominal_slot - step, lm, pt))
             {
                 minus_match = true;
-                minus_hit = make_hit(s - step, lm.base, pt);
+                minus_hit = make_hit(nominal_slot - step, lm.base, pt);
             }
 
             bool plus_match = false;
             HealHit plus_hit{};
-            if (plus_in && slot_matches(s + step, lm, pt))
+            if (plus_in && slot_matches(nominal_slot + step, lm, pt))
             {
                 plus_match = true;
-                plus_hit = make_hit(s + step, lm.base, pt);
+                plus_hit = make_hit(nominal_slot + step, lm.base, pt);
             }
 
             // A uniquely nearest match heals; an equidistant +d/-d pair is the
@@ -303,15 +303,15 @@ namespace DetourModKit
 
     std::optional<std::ptrdiff_t> Rtti::heal_offset(const Landmark &lm) noexcept
     {
-        const auto r = heal_landmark(lm);
-        if (!r)
+        const auto result = heal_landmark(lm);
+        if (!result)
             return std::nullopt;
-        return r->healed_offset;
+        return result->healed_offset;
     }
 
-    std::string_view Rtti::heal_error_to_string(HealError e) noexcept
+    std::string_view Rtti::heal_error_to_string(HealError error) noexcept
     {
-        switch (e)
+        switch (error)
         {
         case HealError::BadDescriptor:
             return "Landmark descriptor is invalid";

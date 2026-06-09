@@ -3,6 +3,7 @@
 
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -192,12 +193,12 @@ namespace DetourModKit
          *          read. It does not prove the pointer is mapped or that the
          *          target object is the expected type; pair it with a module or
          *          heap range check and an SEH-guarded read for full validation.
-         * @param p The pointer value to test.
-         * @return true if @p p is a plausible user-mode pointer, false otherwise.
+         * @param ptr The pointer value to test.
+         * @return true if @p ptr is a plausible user-mode pointer, false otherwise.
          */
-        [[nodiscard]] inline constexpr bool plausible_userspace_ptr(uintptr_t p) noexcept
+        [[nodiscard]] inline constexpr bool plausible_userspace_ptr(uintptr_t ptr) noexcept
         {
-            return p >= USERSPACE_PTR_MIN && p < USERSPACE_PTR_MAX;
+            return ptr >= USERSPACE_PTR_MIN && ptr < USERSPACE_PTR_MAX;
         }
 
         /**
@@ -214,10 +215,16 @@ namespace DetourModKit
          *          instead (SEH-protected on MSVC, VirtualQuery-guarded on MinGW).
          *
          *          The "unchecked" in the name refers to the absence of OS-level
-         *          memory validation (no SEH, no VirtualQuery, no cache lookup).
-         *          Only low-address guards are applied. Intended for hot paths
-         *          where the caller can guarantee structural pointer validity
-         *          (e.g. game objects known to be alive this frame).
+         *          memory validation in release builds (no SEH, no VirtualQuery,
+         *          no cache lookup). Only low-address guards are applied. Intended
+         *          for hot paths where the caller can guarantee structural pointer
+         *          validity (e.g. game objects known to be alive this frame).
+         * @note Debug builds (NDEBUG undefined) add an assert that the source is
+         *       readable, so passing a stale or unmapped pointer is caught during
+         *       development instead of faulting the host. The probe is compiled
+         *       out in release, leaving the hot path a single guarded memcpy. Use
+         *       @ref seh_read_chain or @ref read_ptr_unsafe for pointers that may
+         *       not be alive.
          * @param base The base address to read from.
          * @param offset Byte offset added to base before dereferencing.
          * @param min_valid Minimum address value to accept (default 0x10000).
@@ -230,6 +237,15 @@ namespace DetourModKit
             const auto src = base + static_cast<uintptr_t>(offset);
             if (src <= min_valid)
                 return 0;
+            // Debug-build footgun guard. In release the dereference below is a
+            // bare memcpy: a stale or unmapped src faults and takes down the host.
+            // This primitive is only for pointers the caller has proven are alive
+            // this frame, so in debug we confirm src is readable and assert
+            // otherwise, surfacing misuse during development. The probe compiles
+            // out in release (NDEBUG), keeping the hot path a single guarded memcpy.
+            assert(is_readable(reinterpret_cast<const void *>(src), sizeof(uintptr_t)) &&
+                   "read_ptr_unchecked: source pointer is not readable (stale/unmapped); "
+                   "use seh_read_chain or read_ptr_unsafe for pointers that may not be alive");
             uintptr_t addr{0};
             std::memcpy(&addr, reinterpret_cast<const void *>(src), sizeof(addr));
             return (addr > min_valid) ? addr : 0;
@@ -256,14 +272,14 @@ namespace DetourModKit
          * @details Handles changing memory protection, performs the write operation,
          *          and restores original protection. Also flushes instruction cache.
          *          Automatically invalidates the affected cache range.
-         *          If numBytes exceeds MAX_WRITE_SIZE the function performs no write
+         *          If num_bytes exceeds MAX_WRITE_SIZE the function performs no write
          *          and returns MemoryError::SizeTooLarge.
-         * @param targetAddress Destination memory address.
-         * @param sourceBytes Pointer to the source buffer containing data to write.
-         * @param numBytes Number of bytes to write. Must not exceed MAX_WRITE_SIZE.
+         * @param target_address Destination memory address.
+         * @param source_bytes Pointer to the source buffer containing data to write.
+         * @param num_bytes Number of bytes to write. Must not exceed MAX_WRITE_SIZE.
          * @return std::expected<void, MemoryError> on success, or the specific error on failure.
          */
-        [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *targetAddress, const std::byte *sourceBytes, size_t numBytes);
+        [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *target_address, const std::byte *source_bytes, size_t num_bytes);
 
         /**
          * @struct ModuleRange
@@ -334,12 +350,12 @@ namespace DetourModKit
         [[nodiscard]] ModuleRange host_module_range() noexcept;
 
         /**
-         * @brief Tests whether @p p lies inside @p range.
-         * @return true iff @p range is valid and @p p is in [base, end).
+         * @brief Tests whether @p ptr lies inside @p range.
+         * @return true iff @p range is valid and @p ptr is in [base, end).
          */
-        [[nodiscard]] constexpr bool contains(ModuleRange range, uintptr_t p) noexcept
+        [[nodiscard]] constexpr bool contains(ModuleRange range, uintptr_t ptr) noexcept
         {
-            return range.valid() && p >= range.base && p < range.end;
+            return range.valid() && ptr >= range.base && ptr < range.end;
         }
 
         /**

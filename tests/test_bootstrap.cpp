@@ -20,6 +20,14 @@ using namespace DetourModKit;
 using namespace std::chrono_literals;
 using DetourModKit::keyboard_key;
 
+#if defined(_MSC_VER)
+#define DMK_TEST_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define DMK_TEST_NOINLINE [[gnu::noinline]]
+#else
+#define DMK_TEST_NOINLINE
+#endif
+
 namespace
 {
     constexpr auto kTestTimeout = 5s;
@@ -368,26 +376,26 @@ TEST_F(BootstrapIntegrationTest, InitAndShutdownExceptionsAreCaught)
 
 namespace
 {
-    [[gnu::noinline]] int logic_unload_target_add(int a, int b)
+    DMK_TEST_NOINLINE int logic_unload_target_add(int a, int b)
     {
         volatile int r = a + b;
         return r;
     }
 
-    [[gnu::noinline]] int logic_unload_detour_add(int a, int b)
+    DMK_TEST_NOINLINE int logic_unload_detour_add(int a, int b)
     {
         return a + b + 1;
     }
 
     // Distinct target keeps the prologue-restore assertion meaningful in the
     // _all() tests when two hooks are installed at once.
-    [[gnu::noinline]] int logic_unload_target_sub(int a, int b)
+    DMK_TEST_NOINLINE int logic_unload_target_sub(int a, int b)
     {
         volatile int r = a - b;
         return r;
     }
 
-    [[gnu::noinline]] int logic_unload_detour_sub(int a, int b)
+    DMK_TEST_NOINLINE int logic_unload_detour_sub(int a, int b)
     {
         return a - b - 1;
     }

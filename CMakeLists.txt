@@ -264,9 +264,15 @@ target_include_directories(DetourModKit SYSTEM
 
 # --- Linking Dependencies for DetourModKit ---
 if(TARGET ${SAFETYHOOK_LIBRARY_TARGET_NAME})
-  # Link SafetyHook. Zydis and Zycore should be linked transitively if SafetyHook
-  # specifies them as PUBLIC or INTERFACE dependencies.
-  target_link_libraries(DetourModKit PUBLIC ${SAFETYHOOK_LIBRARY_TARGET_NAME})
+  # In the build tree (in-source consumers, tests) link SafetyHook directly so
+  # its Zydis/Zycore chain and include dirs propagate. The INSTALL interface
+  # cannot reference those targets: each registers its own export set, and CMake
+  # forbids a transitively-required target from living in more than one export
+  # set. Installed consumers instead link DetourModKit::deps, an imported target
+  # the package config defines over the shipped dependency archives.
+  target_link_libraries(DetourModKit
+    PUBLIC "$<BUILD_INTERFACE:${SAFETYHOOK_LIBRARY_TARGET_NAME}>"
+    INTERFACE "$<INSTALL_INTERFACE:DetourModKit::deps>")
   message(STATUS "DetourModKit linked against target: ${SAFETYHOOK_LIBRARY_TARGET_NAME}")
 else()
   message(WARNING "SafetyHook library target '${SAFETYHOOK_LIBRARY_TARGET_NAME}' was not found. "
@@ -290,6 +296,35 @@ if(WIN32)
     user32 # GetAsyncKeyState, GetForegroundWindow, GetWindowThreadProcessId
     ${_DMK_XINPUT_LIB} # XInput gamepad polling (xinput1_4.dll ships with Win8+)
   )
+
+  # Propagate the security-hardening link switches to consumers. The
+  # directory-scoped add_link_options() above only hardens targets built in this
+  # tree (DetourModKit's own tests/benches). DetourModKit is a static library, so
+  # the consumer performs the final link of the mod DLL/EXE; the switches must
+  # ride along on the exported INTERFACE to reach that link. ASLR (/DYNAMICBASE,
+  # --dynamicbase) and DEP (/NXCOMPAT, --nxcompat) are toolchain defaults but are
+  # stated explicitly, and /GUARD:CF activates the Control Flow Guard load config
+  # so DetourModKit's /guard:cf-instrumented code is enforced in the consumer
+  # binary. CMake's compiler-frontend generator expression is 3.30+, so keep the
+  # project compatible with its 3.25 minimum by detecting the active frontend at
+  # configure time. Release packages are compiler-specific, and add_subdirectory
+  # consumers share the same toolchain that configured this target.
+  set(_dmk_uses_msvc_linker_frontend OFF)
+  if(MSVC OR "${CMAKE_CXX_SIMULATE_ID}" STREQUAL "MSVC")
+    set(_dmk_uses_msvc_linker_frontend ON)
+  endif()
+
+  set(_dmk_uses_gnu_linker_frontend OFF)
+  if(MINGW OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR
+      (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT _dmk_uses_msvc_linker_frontend))
+    set(_dmk_uses_gnu_linker_frontend ON)
+  endif()
+
+  if(_dmk_uses_msvc_linker_frontend)
+    target_link_options(DetourModKit INTERFACE /DYNAMICBASE /NXCOMPAT /GUARD:CF)
+  elseif(_dmk_uses_gnu_linker_frontend)
+    target_link_options(DetourModKit INTERFACE -Wl,--dynamicbase -Wl,--nxcompat)
+  endif()
 endif()
 
 # --- Installation Rules ---
@@ -298,6 +333,32 @@ set(DETOURMODKIT_LIB_COMPONENT lib) # For the library files (.a, .lib)
 set(DETOURMODKIT_DEV_COMPONENT dev) # For development files (headers, CMake config)
 set(DETOURMODKIT_DOCS_COMPONENT docs) # For documentation (LICENSE, README)
 
+# DetourModKit is a STATIC library and does not absorb the object code of the
+# static dependencies it links (safetyhook -> Zydis -> Zycore); a find_package
+# consumer must link those archives too. The dependency targets register their
+# own install/export sets, and CMake forbids a transitively-required target from
+# living in more than one export set, so they cannot be folded into
+# DetourModKitTargets. Instead ship their archives as plain files and expose
+# them to consumers through the DetourModKit::deps imported target the package
+# config defines (see cmake/DetourModKitConfig.cmake.in). Collect the archive
+# generator expressions (for install) and their installed file names (for the
+# config template) here, guarding on real (non-imported, non-alias) targets so a
+# system-Zydis build (SAFETYHOOK_FETCH_ZYDIS=OFF) does not break configure.
+# Order matters: a dependent precedes its dependency for single-pass linkers.
+set(_dmk_dep_archives "")
+set(_DMK_DEP_ARCHIVE_NAMES "")
+foreach(_dep IN ITEMS ${SAFETYHOOK_LIBRARY_TARGET_NAME} Zydis Zycore)
+  if(TARGET ${_dep})
+    get_target_property(_dep_aliased ${_dep} ALIASED_TARGET)
+    get_target_property(_dep_imported ${_dep} IMPORTED)
+    if(NOT _dep_aliased AND NOT _dep_imported)
+      list(APPEND _dmk_dep_archives "$<TARGET_FILE:${_dep}>")
+      list(APPEND _DMK_DEP_ARCHIVE_NAMES
+        "${CMAKE_STATIC_LIBRARY_PREFIX}${_dep}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    endif()
+  endif()
+endforeach()
+
 # Install the compiled DetourModKit library target.
 install(TARGETS DetourModKit
   EXPORT DetourModKitTargets # Associates this target with the DetourModKitTargets export set.
@@ -305,6 +366,13 @@ install(TARGETS DetourModKit
   LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT}
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT}
 )
+
+# Ship the static dependency archives next to libDetourModKit so the
+# DetourModKit::deps imported target in the package config can point at them.
+if(_dmk_dep_archives)
+  install(FILES ${_dmk_dep_archives}
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}" COMPONENT ${DETOURMODKIT_LIB_COMPONENT})
+endif()
 
 # Install public header files.
 # Install individual module headers from include/DetourModKit/

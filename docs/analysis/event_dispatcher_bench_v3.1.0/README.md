@@ -20,7 +20,7 @@ path for the zero-subscriber case.
 | `emit_safe`                 |    8 |          233.2 |         219.1 | -6.0%             | REAL    |
 | `emit_safe`                 |   64 |         1086.3 |        1099.8 | +1.2%             | NOISE   |
 | `emit_concurrent_4_threads` |    8 |          517.9 |     **248.2** | **-52.1% (2.1x)** | REAL    |
-| `subscribe_unsub_roundtrip` |    — |          446.0 |        1150.4 | +158.0%           | REAL    |
+| `subscribe_unsub_roundtrip` |  n/a |          446.0 |        1150.4 | +158.0%           | REAL    |
 | `reentrancy_rejection`      |    1 |          212.5 |         192.7 | -9.4%             | marginal|
 
 Verdict key:

@@ -195,7 +195,7 @@ namespace DetourModKit
          *
          *          Marked noexcept because consumers may invoke it from
          *          a DllMain detach path. Internal allocations performed
-         *          while logging or rebuilding active_states_ may throw;
+         *          while logging or rebuilding m_active_states may throw;
          *          every throw site is caught and logged so no exception
          *          propagates to the caller.
          *
