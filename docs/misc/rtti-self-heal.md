@@ -145,6 +145,27 @@ if (const auto fit = Rtti::solve_fingerprint(player_base, k_player_fp, 0x40))
 
 It searches deltas in `[-window, +window]` stepping by pointer size, requires **every** landmark whose `required` flag is set (the default) to match at the shifted offset, and uses optional landmarks only to break ties. It fails closed: `NoMatch` when no delta fits, `Ambiguous` when two deltas tie for the most optional matches. `delta` is the drift to add to each landmark's `nominal_offset`. Given a single landmark it degenerates to `heal_landmark`.
 
+## Drift telemetry -- `heal_report`
+
+`heal_report(landmarks, out)` heals a whole set in one pass and writes a `DriftEntry` per landmark, so a patch's re-layout becomes a machine-readable diff for a changelog instead of a debugging session. It is a thin aggregation over `heal_landmark`: no extra reads, no allocation.
+
+```cpp
+Rtti::DriftEntry report[k_landmarks.size()];
+const std::size_t n = Rtti::heal_report(k_landmarks, report);
+for (std::size_t i = 0; i < n; ++i)
+{
+    const auto &e = report[i];
+    if (!e.ok)
+        log.warning("{}: heal failed ({})", e.name, Rtti::heal_error_to_string(e.error));
+    else if (e.delta != 0)
+        log.info("{}: moved {:+#x} ({:#x} -> {:#x})", e.name, e.delta, e.nominal_offset, e.healed_offset);
+}
+```
+
+Each entry carries `{name, nominal_offset, healed_offset, delta, ok, error}`; `delta` (`healed_offset - nominal_offset`) is the headline number. The landmarks must already have their `base` filled in, exactly as for a direct `heal_landmark` call.
+
+A drift report is the signal that a patch moved a layout. When it shows a field the heal could not recover (`ok == false`, for example a type that was renamed across the patch and so no longer matches by name), that is a job for a mod update by someone who understands the engine, not something to paper over with a hand-edited offset: a wrong offset reads the wrong memory just as confidently as a right one. DetourModKit deliberately ships no persisted, user-editable heal file for that reason; the recipe (the `Landmark` set) lives in mod code.
+
 ## Performance and the init-time contract
 
 `Memory::module_range_for` issues a `GetModuleHandleEx` lookup on **every** call, even a cache hit. `identify_pointee_type` calls it up to twice per slot, so a naive window scan is thousands of syscalls. Therefore `heal_landmark`, `solve_fingerprint`, and `reverse_scan_block` are documented **init-time / re-heal-on-miss**, not per-frame. The `window` is capped at `MAX_HEAL_WINDOW` (4096 bytes, 512 slots per side) so the worst case is bounded, and `heal_landmark` reuses one stack `PointeeType` so the heal path allocates nothing.

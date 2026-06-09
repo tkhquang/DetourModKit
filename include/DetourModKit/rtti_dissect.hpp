@@ -321,6 +321,41 @@ namespace DetourModKit
         [[nodiscard]] std::expected<FingerprintHit, HealError>
         solve_fingerprint(std::uintptr_t base, std::span<const Landmark> fp,
                           std::size_t window_bytes) noexcept;
+
+        /**
+         * @struct DriftEntry
+         * @brief One landmark's heal outcome, for a structured drift report.
+         * @details The raw "what moved and by how much" record a consumer logs to
+         *          a changelog or scans to spot a patch's re-layout at a glance.
+         *          All fields are derived from an existing @ref heal_landmark
+         *          result; this adds no new analysis.
+         */
+        struct DriftEntry
+        {
+            std::string_view name;             ///< Aliases the landmark's @c expected_mangled.
+            std::ptrdiff_t nominal_offset = 0; ///< The landmark's last-known offset.
+            std::ptrdiff_t healed_offset = 0;  ///< The resolved offset (valid only when @ref ok).
+            std::ptrdiff_t delta = 0;          ///< healed_offset - nominal_offset (valid only when @ref ok).
+            bool ok = false;                   ///< Whether the landmark healed.
+            HealError error{};                 ///< Failure reason; meaningful only when @ref ok is false.
+        };
+
+        /**
+         * @brief Heals a set of landmarks and writes a per-landmark drift report.
+         * @details Runs @ref heal_landmark on each landmark in order and records
+         *          the outcome (nominal, healed, delta, or the typed failure) into
+         *          @p out. Each landmark must already have its @c base filled in,
+         *          exactly as for a direct @ref heal_landmark call. This is a thin
+         *          aggregation over the existing heal path: it performs no read the
+         *          individual heals would not, and allocates nothing.
+         * @param landmarks The landmarks to heal (each with @c base set).
+         * @param out Destination, parallel to @p landmarks. At most
+         *            @c out.size() entries are written.
+         * @return The number of entries written: @c min(landmarks.size(),
+         *         out.size()).
+         */
+        [[nodiscard]] std::size_t heal_report(std::span<const Landmark> landmarks,
+                                              std::span<DriftEntry> out) noexcept;
     } // namespace Rtti
 } // namespace DetourModKit
 

@@ -413,4 +413,37 @@ namespace DetourModKit
             return std::unexpected(HealError::Ambiguous);
         return FingerprintHit{best_delta, required_count, best_optional};
     }
+
+    std::size_t Rtti::heal_report(std::span<const Landmark> landmarks,
+                                  std::span<DriftEntry> out) noexcept
+    {
+        const std::size_t written = (landmarks.size() < out.size()) ? landmarks.size() : out.size();
+        for (std::size_t i = 0; i < written; ++i)
+        {
+            const Landmark &landmark = landmarks[i];
+            DriftEntry &entry = out[i];
+            // Start from a clean entry so a failed heal cannot expose stale
+            // healed_offset/delta from a reused (non-zeroed) output buffer.
+            entry = DriftEntry{};
+            entry.name = landmark.expected_mangled;
+            entry.nominal_offset = landmark.nominal_offset;
+
+            const auto heal = heal_landmark(landmark);
+            if (heal)
+            {
+                entry.ok = true;
+                entry.healed_offset = heal->healed_offset;
+                // delta is the realised layout shift: 0 when the field did not
+                // move, signed when it did. It is the headline number a changelog
+                // wants, derived purely from the existing heal result.
+                entry.delta = heal->healed_offset - landmark.nominal_offset;
+            }
+            else
+            {
+                // ok stays false; healed_offset and delta stay 0 (valid only when ok).
+                entry.error = heal.error();
+            }
+        }
+        return written;
+    }
 } // namespace DetourModKit

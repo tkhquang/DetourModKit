@@ -40,8 +40,11 @@ RVAs are 32-bit unsigned offsets relative to the **owning module's** image base,
 | `Rtti::type_name_into(vtable, buf, len)` | You want the same answer with zero allocation. Returns bytes written; output is always NUL-terminated when `len > 0`. |
 | `Rtti::vtable_is_type(vtable, expected)` | You only need a yes/no identity probe. Reads `expected.size() + 1` bytes and short-circuits. No allocation. |
 | `Rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<uintptr_t>` cache slot reduces steady-state cost to a single qword compare per slot. |
+| `Rtti::vtable_for_type(mangled, range?)` | You know a stable class name and want its primary (most-derived) vtable address, scoped to one module. The name-keyed inverse of `vtable_is_type`. |
+| `Rtti::vtables_for_type(mangled, out, cap, range?)` | The class may be multiply/virtually inherited and you want every sub-object vtable that shares the name, not just the primary. |
+| `Rtti::TypeIdentity(mangled, range?)` | You want a cached, name-keyed identity handle: resolve the primary vtable once, then `matches(vtable)` is a single qword compare. |
 
-All entry points are noexcept and SEH-guarded; an unmapped page, missing COL, or zero RVA produces a failure return rather than a fault.
+The forward entry points are noexcept and SEH-guarded; an unmapped page, missing COL, or zero RVA produces a failure return rather than a fault. The reverse resolvers (`vtable_for_type`, `vtables_for_type`) and `TypeIdentity` are SEH-guarded as well and return `std::nullopt` / a zero count on any failure.
 
 ## Common patterns
 
@@ -98,14 +101,37 @@ if (n > 0)
 
 ### Resolving a vtable from a type name (reverse direction)
 
-The walker runs vtable to name. The inverse, name to vtable, is the natural way to bootstrap a class marker at init: you know the mangled name but not yet the vtable address. Because the `TypeDescriptor` name string lives in `.rdata`, this direction needs a data-section scan, which the executable-only sweep cannot do. `Scanner::scan_readable_regions` (see [aob-signatures.md](aob-signatures.md), section 4.7) provides it.
+The walker runs vtable to name. The inverse, name to vtable, is the natural way to bootstrap a class marker at init: you know the mangled name but not yet the vtable address. `Rtti::vtable_for_type` does this directly.
 
-The flow inverts the [ABI layout](#abi-layout) above:
+```cpp
+// Resolve once at init; key on the stable class name, not a vtable literal.
+const auto vt = DMK::Rtti::vtable_for_type(".?AVGameAudioEffect@engine@@");
+if (vt)
+    g_audio_effect_vtable = *vt;
+```
 
-1. `scan_readable_regions` for the mangled name string (for example `.?AVMyClass@ns@@`, including the trailing NUL) to land on `td + 0x10`. The name is plain ASCII and fully ASLR-invariant, so it is a far stronger anchor than the vtable header, whose entries are relocated pointers that shift with the ASLR slide.
-2. Subtract `0x10` to reach the `TypeDescriptor` base, then locate the COL whose `pTypeDescriptor` RVA points back at it and read `vtable = col_address + ...` via the same self-RVA / image-base arithmetic the walker uses internally.
+It sweeps the module's readable, non-executable sections -- where MSVC keeps vtables and their RTTI meta-pointers (`.rdata` for a normal `/GR` image, `.data` for a packed or section-merged one) -- for the COL whose `TypeDescriptor` name matches, then returns the vtable whose `vtable[-1]` meta-slot points back at that COL. Every candidate is re-validated through the same COL prelude the forward walker uses, so a coincidental pointer-shaped match is rejected, not returned.
 
-This is the recommended path for "find the one vtable for a known class" because it does not depend on a volatile constructor or on the per-launch byte values of relocated vtable pointers.
+Keying on the name rather than the vtable header is deliberate: the `TypeDescriptor` name string is plain ASCII and fully ASLR-invariant, a far stronger anchor than a vtable whose entries are relocated pointers that shift with the ASLR slide and whose bytes change per launch.
+
+Multiple inheritance and `/OPT:ICF`:
+
+- `vtable_for_type` returns the **primary** vtable (the COL whose `offset` is 0), which is the value an object pointer's first qword holds for a most-derived instance. A class used only as a secondary or virtual base has its first qword pointing at a `COL.offset != 0` sub-object vtable; use `vtables_for_type` to get every sub-object vtable. An ambiguous primary (the same name with two distinct offset-0 vtables, for example a type linked into the image twice) fails closed and returns `std::nullopt`.
+- Take identity from the returned vtable **address** (the `[-1]`-COL-anchored value), never from the vtable's slot contents: under the linker's identical-COMDAT folding (`/OPT:ICF`) two distinct classes can share folded function-pointer slots, so a slot-content comparison is not class-unique.
+
+For a cached per-frame identity check, wrap it in `Rtti::TypeIdentity`:
+
+```cpp
+namespace { DMK::Rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
+
+bool is_combat_camera(std::uintptr_t obj) noexcept
+{
+    const auto vt = DMK::Memory::seh_read<std::uintptr_t>(obj);
+    return vt && g_camera_id.matches(*vt); // resolves once, then a qword compare
+}
+```
+
+Scoping to one `ModuleRange` (the default is the host EXE) is load-bearing for correctness, not just ergonomics: the same mangled name can appear in several loaded modules. Pass the game module's range explicitly when the target type lives in a separate DLL.
 
 ## Performance notes
 

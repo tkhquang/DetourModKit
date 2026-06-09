@@ -1,6 +1,8 @@
 #ifndef DETOURMODKIT_RTTI_HPP
 #define DETOURMODKIT_RTTI_HPP
 
+#include "DetourModKit/memory.hpp"
+
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -160,6 +162,127 @@ namespace DetourModKit
             std::string_view expected,
             std::atomic<std::uintptr_t> *vtable_cache = nullptr,
             std::size_t stride = sizeof(std::uintptr_t)) noexcept;
+
+        /**
+         * @brief Resolves the primary (most-derived) vtable for a class by its
+         *        MSVC mangled name, scoped to one module image.
+         * @details The reverse of @ref vtable_is_type: instead of "what type is
+         *          this vtable", it answers "where is the vtable for this type".
+         *          The module's readable, non-executable sections are swept for an
+         *          RTTICompleteObjectLocator whose TypeDescriptor name equals
+         *          @p mangled and whose COL.offset is 0, and the vtable that points
+         *          back to that COL (via its vtable[-1] meta-slot) is returned.
+         *          Every candidate is validated through the same COL prelude the
+         *          forward walker uses (x64 signature, the pSelf-vs-loader-base
+         *          cross-check, in-module bounds), so a forged or coincidental
+         *          match is rejected rather than returned.
+         *
+         *          COL.offset == 0 is required so the result is the vtable an
+         *          object pointer's first qword holds for a most-derived instance,
+         *          which is exactly what an identity check compares against. A
+         *          class used only as a secondary or virtual base has its first
+         *          qword pointing at a COL.offset != 0 sub-object vtable; use
+         *          @ref vtables_for_type for that case.
+         * @param mangled Exact MSVC mangled name (e.g. ".?AVMyClass@ns@@").
+         * @param range Module image to search. Defaults to the host EXE. The
+         *              scope is load-bearing for correctness, not merely
+         *              ergonomic: the same mangled name can appear in several
+         *              loaded modules and COL RVAs are image-base-relative.
+         * @return The primary vtable address on a unique match; std::nullopt when
+         *         no COL.offset == 0 match exists, when @p range is invalid, or
+         *         when more than one distinct primary vtable shares the name (an
+         *         ambiguous image: the resolver fails closed rather than guessing).
+         */
+        [[nodiscard]] std::optional<std::uintptr_t> vtable_for_type(
+            std::string_view mangled,
+            Memory::ModuleRange range = Memory::host_module_range()) noexcept;
+
+        /**
+         * @brief Collects every sub-object vtable sharing a class's mangled name.
+         * @details Multiple or virtual inheritance gives one class (one
+         *          TypeDescriptor, one mangled name) several COLs -- one per base
+         *          sub-object, each at a distinct COL.offset and each referenced
+         *          by its own vtable. This returns all of them so a caller
+         *          matching an object pointer that may point at a secondary base
+         *          is not limited to the primary vtable. Each match is validated
+         *          through the COL prelude exactly as @ref vtable_for_type.
+         * @param mangled Exact MSVC mangled name.
+         * @param out Destination buffer for the matching vtable addresses, written
+         *            in ascending COL.offset order (the primary, offset 0, first).
+         *            May be nullptr only when @p out_cap is 0 (count-only query).
+         * @param out_cap Capacity of @p out; at most @p out_cap addresses are
+         *               written even when more matches exist.
+         * @param range Module image to search. Defaults to the host EXE.
+         * @return Total number of distinct matching vtables found (capped at an
+         *         internal upper bound that far exceeds any real inheritance
+         *         graph). A return value greater than @p out_cap signals the
+         *         output was truncated.
+         */
+        [[nodiscard]] std::size_t vtables_for_type(
+            std::string_view mangled,
+            std::uintptr_t *out,
+            std::size_t out_cap,
+            Memory::ModuleRange range = Memory::host_module_range()) noexcept;
+
+        /**
+         * @brief Cached, self-healing identity handle for a class vtable.
+         * @details Resolves the primary vtable for a mangled name once (lazily, on
+         *          first use) via @ref vtable_for_type and caches it, so a
+         *          per-frame identity check is a single qword compare with no RTTI
+         *          walk -- the same warm-cache shape as @ref find_in_pointer_table.
+         *          Because the cached value is keyed on the stable class name, it
+         *          survives a game patch that relocates the vtable (the name does
+         *          not move), which a hard-coded vtable literal does not.
+         * @note Take identity from the cached vtable ADDRESS (the vtable[-1]
+         *       COL-anchored value), never from the vtable's slot contents: under
+         *       the MSVC linker's identical-COMDAT folding (/OPT:ICF) two distinct
+         *       classes can share folded function-pointer slots, so a
+         *       slot-content comparison is not class-unique.
+         * @note Holds the name as a non-owning view; the backing string must
+         *       outlive the handle. Non-copyable and non-movable (it owns atomic
+         *       cache state); hold it as a static or a long-lived member.
+         */
+        class TypeIdentity
+        {
+        public:
+            /**
+             * @brief Constructs an identity for @p mangled, scoped to @p range.
+             * @param mangled Exact MSVC mangled name. Stored as a view; the
+             *                backing storage must outlive the handle.
+             * @param range Module image to resolve in. Defaults to the host EXE.
+             */
+            explicit TypeIdentity(
+                std::string_view mangled,
+                Memory::ModuleRange range = Memory::host_module_range()) noexcept;
+
+            /**
+             * @brief Tests whether @p vtable is this type's primary vtable.
+             * @details Resolves on first call, then compares. Returns false when
+             *          the type cannot be resolved, so a missing type never
+             *          matches.
+             * @param vtable Candidate vtable (an object's first qword).
+             * @return true when @p vtable equals the resolved primary vtable.
+             */
+            [[nodiscard]] bool matches(std::uintptr_t vtable) const noexcept;
+
+            /**
+             * @brief Returns the resolved primary vtable, resolving on first use.
+             * @return The vtable address, or std::nullopt if it cannot be
+             *         resolved in the configured module range.
+             */
+            [[nodiscard]] std::optional<std::uintptr_t> vtable() const noexcept;
+
+        private:
+            std::string_view m_mangled;
+            Memory::ModuleRange m_range;
+
+            // m_cached holds the resolved primary vtable (0 once resolved-but-not-
+            // found). m_resolved latches a completed resolve and is published with
+            // release after m_cached is stored, so an acquire-load that observes
+            // it also observes the cached value.
+            mutable std::atomic<std::uintptr_t> m_cached{0};
+            mutable std::atomic<bool> m_resolved{false};
+        };
     } // namespace Rtti
 } // namespace DetourModKit
 

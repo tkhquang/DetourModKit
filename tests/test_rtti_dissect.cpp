@@ -1122,3 +1122,81 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
     EXPECT_EQ(Rtti::solve_fingerprint(base, all_optional, 0x20).error(),
               Rtti::HealError::BadDescriptor);
 }
+
+// --- heal_report (drift telemetry) ---
+
+TEST_F(RttiDissectTest, HealReport_RecordsNoDriftAndPositiveDrift)
+{
+    SyntheticVtable a(".?AVReportA@@");
+    SyntheticVtable b(".?AVReportB@@");
+    SynStruct st;
+    const std::size_t off_a = 0x40;
+    const std::size_t off_b = 0x80;
+    st.put(off_a, syn_heap_object(a.vtable()));        // stays put: delta 0
+    st.put(off_b + 0x10, syn_heap_object(b.vtable())); // drifted +0x10
+
+    const Rtti::Landmark lms[] = {
+        {.base = st.base(), .nominal_offset = static_cast<std::ptrdiff_t>(off_a), .expected_mangled = ".?AVReportA@@"},
+        {.base = st.base(), .nominal_offset = static_cast<std::ptrdiff_t>(off_b), .expected_mangled = ".?AVReportB@@"},
+    };
+
+    Rtti::DriftEntry report[2];
+    const std::size_t n = Rtti::heal_report(lms, report);
+    ASSERT_EQ(n, 2u);
+
+    EXPECT_TRUE(report[0].ok);
+    EXPECT_EQ(report[0].name, ".?AVReportA@@");
+    EXPECT_EQ(report[0].nominal_offset, static_cast<std::ptrdiff_t>(off_a));
+    EXPECT_EQ(report[0].healed_offset, static_cast<std::ptrdiff_t>(off_a));
+    EXPECT_EQ(report[0].delta, 0);
+
+    EXPECT_TRUE(report[1].ok);
+    EXPECT_EQ(report[1].delta, static_cast<std::ptrdiff_t>(0x10));
+    EXPECT_EQ(report[1].healed_offset, static_cast<std::ptrdiff_t>(off_b + 0x10));
+}
+
+TEST_F(RttiDissectTest, HealReport_RecordsTypedFailure)
+{
+    SynStruct st; // nothing of the expected type anywhere in the window
+    const Rtti::Landmark lms[] = {
+        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVReportMissing@@"},
+    };
+
+    // Pre-seed the output with stale values to prove a failed entry is reset and
+    // never exposes a reused buffer's prior contents.
+    Rtti::DriftEntry report[1];
+    report[0].healed_offset = 0x7777;
+    report[0].delta = 0x1234;
+    report[0].ok = true;
+
+    const std::size_t n = Rtti::heal_report(lms, report);
+    ASSERT_EQ(n, 1u);
+    EXPECT_FALSE(report[0].ok);
+    EXPECT_EQ(report[0].error, Rtti::HealError::NoMatch);
+    EXPECT_EQ(report[0].name, ".?AVReportMissing@@");
+    EXPECT_EQ(report[0].nominal_offset, 0x40); // populated regardless of success
+    EXPECT_EQ(report[0].healed_offset, 0);     // reset, not the stale 0x7777
+    EXPECT_EQ(report[0].delta, 0);             // reset, not the stale 0x1234
+}
+
+TEST_F(RttiDissectTest, HealReport_RespectsOutputCapacity)
+{
+    SyntheticVtable a(".?AVCapReport@@");
+    SynStruct st;
+    st.put(0x40, syn_heap_object(a.vtable()));
+
+    const Rtti::Landmark lms[] = {
+        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
+        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
+        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
+    };
+
+    Rtti::DriftEntry report[2]; // smaller than the landmark set
+    const std::size_t n = Rtti::heal_report(lms, report);
+    EXPECT_EQ(n, 2u); // min(landmarks.size(), out.size())
+
+    // The written entries must be real heals, not just a returned count.
+    EXPECT_TRUE(report[0].ok);
+    EXPECT_TRUE(report[1].ok);
+    EXPECT_EQ(report[0].name, ".?AVCapReport@@");
+}

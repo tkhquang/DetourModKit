@@ -21,6 +21,7 @@
 #include "DetourModKit/input.hpp"
 
 // Module headers
+#include "DetourModKit/anchors.hpp"
 #include "DetourModKit/bootstrap.hpp"
 #include "DetourModKit/event_dispatcher.hpp"
 #include "DetourModKit/filesystem.hpp"
@@ -48,6 +49,7 @@ namespace DMKMemory = DetourModKit::Memory;
 namespace DMKMath = DetourModKit::Math;
 namespace DMKBootstrap = DetourModKit::Bootstrap;
 namespace DMKRtti = DetourModKit::Rtti;
+namespace DMKAnchors = DetourModKit::Anchors;
 
 #ifndef DMK_NO_SHORT_NAMES
 /**

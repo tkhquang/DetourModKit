@@ -388,11 +388,14 @@ struct AddrCandidate
 
 enum class ResolveError : std::uint8_t
 {
-    EmptyCandidates,
-    NoMatch,
-    AllPatternsInvalid,
-    PrologueFallbackNotApplicable,
-    InvalidRange
+    EmptyCandidates,               // no candidates supplied
+    NoMatch,                       // no candidate matched the scanned regions
+    AllPatternsInvalid,            // every candidate pattern failed to parse
+    PrologueFallbackNotApplicable, // prologue fallback pattern too short to be unique
+    InvalidRange,                  // supplied module range is invalid
+    DecodeFailed,                  // read_code_constant: resolved site did not decode
+    UnexpectedShape,               // read_code_constant: operand was not the requested kind
+    OperandOutOfRange              // read_code_constant: operand_index past the operand count
 };
 
 struct ResolveHit
@@ -471,6 +474,44 @@ There is one guardrail callers must be aware of. The fallback refuses to scan an
 ### 6.5 Ordering and logging
 
 Put the most-specific candidate first. The cascade returns on the first successful resolution, so an overly-generic pattern placed near the head will shadow tighter patterns further down the list. The `winning_name` on `ResolveHit` tells you which candidate fired; log it or stash it in your mod's telemetry so you can correlate a running session with a specific build of the game after the fact. The cascade also emits a Debug-level log line of the form `"<label> resolved via '<name>' at 0x..."` the first time it succeeds; raise your log level to Debug to capture it for build identification even without explicit caller logging.
+
+### 6.6 Host-module convenience overloads
+
+The overwhelmingly common scope for an injected ASI is "the host EXE." `resolve_cascade_in_host_module` and `resolve_cascade_in_host_module_with_prologue_fallback` are one-line overloads that supply `Memory::host_module_range()` for you, so you stop threading the range through every call site:
+
+```cpp
+const auto hit = sc::resolve_cascade_in_host_module(k_candidates, "weapon_fire");
+```
+
+They return `ResolveError::InvalidRange` if the host module range cannot be determined. Use them **only** when the target code lives in the host EXE. For a game whose logic is in a separate module (an engine DLL loaded by a thin launcher EXE), the host EXE holds none of the target code: resolve that module's range explicitly (`Memory::module_range_for(...)`) and call `resolve_cascade_in_module` instead, or host-scoping will scan the wrong image.
+
+### 6.7 Reading a code constant (`read_code_constant`)
+
+Sometimes the value a mod needs is not an address but a constant baked into an instruction: an array stride in an `add reg, imm`, a struct displacement in a `movzx [reg + disp]`, a bit position. Hand-reading those immediates every patch is the largest "re-RE every update" bucket. `read_code_constant` is the code-side twin of the RTTI self-heal: declare the instruction site (an AOB cascade that lands **on** the instruction) plus which operand to read, and it decodes the live instruction and returns the current value.
+
+```cpp
+static constexpr sc::AddrCandidate k_stride_site[] = {
+    {"equip-stride", "48 6B C0 ?? 48 03 ...", sc::ResolveMode::Direct, 0, 0},
+};
+
+sc::CodeConstant cc{};
+cc.site = k_stride_site;
+cc.kind = sc::OperandKind::Immediate; // or MemoryDisplacement
+cc.operand_index = 1;                  // index into the VISIBLE operands
+
+if (const auto stride = sc::read_code_constant(cc))
+    g_equip_stride = static_cast<std::size_t>(*stride);
+```
+
+Key behaviours:
+
+- **Always decodes.** `cc.nominal` is a telemetry/baseline hint only, never a return short-circuit, so a same-shape / different-value drift (a stride that changed from 232 to 240) is reported as the new value. Set `cc.has_nominal = true` to make `nominal` meaningful (do not overload `nominal == 0` as "unset").
+- **Visible-operand indexing.** `operand_index` counts the operands you see in a disassembler; implicit operands (flags, implicit registers) do not shift the index.
+- **RIP-relative is resolved to an absolute.** A `[rip + disp]` memory operand returns the absolute target address, not the raw relative displacement.
+- **Narrowing.** `byte_width = 0` returns the decoded value (already sign-extended); a non-zero `byte_width` narrows to that many bytes and re-sign-extends, so a deliberately narrowed negative displacement stays negative.
+- **Fails closed.** A site that no longer decodes, a wrong operand kind, or an out-of-range index returns `ResolveError::DecodeFailed` / `UnexpectedShape` / `OperandOutOfRange` (plus any cascade error from resolving the site) rather than a guess.
+
+The decoder (Zydis) is kept entirely inside the DetourModKit implementation; consumers never include or link Zydis themselves.
 
 ## 7. Patch-proof patterns (cache, fallback, verify)
 
