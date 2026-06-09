@@ -410,7 +410,10 @@ namespace DetourModKit
             NoMatch,
             AllPatternsInvalid,
             PrologueFallbackNotApplicable,
-            InvalidRange
+            InvalidRange,
+            DecodeFailed,
+            UnexpectedShape,
+            OperandOutOfRange
         };
 
         /**
@@ -430,6 +433,12 @@ namespace DetourModKit
                 return "Prologue fallback pattern too short to be unique";
             case ResolveError::InvalidRange:
                 return "Supplied module range is invalid";
+            case ResolveError::DecodeFailed:
+                return "Instruction at the resolved site did not decode";
+            case ResolveError::UnexpectedShape:
+                return "Decoded operand is not the requested kind";
+            case ResolveError::OperandOutOfRange:
+                return "Operand index exceeds the instruction operand count";
             default:
                 return "Unknown resolve error";
             }
@@ -592,6 +601,109 @@ namespace DetourModKit
         resolve_cascade_in_module_with_prologue_fallback(
             std::span<const AddrCandidate> candidates, std::string_view label,
             Memory::ModuleRange range);
+
+        /**
+         * @brief Convenience: resolve_cascade_in_module() scoped to the host EXE.
+         * @details Forwards to resolve_cascade_in_module() with the range of the
+         *          process's main executable image (Memory::host_module_range()).
+         *          This is the overwhelmingly common scope for an injected ASI
+         *          whose target code lives in the game's own EXE, and it removes
+         *          the boilerplate of building the range at every call site.
+         * @warning Use this ONLY when the host executable is the image that holds
+         *          the target code. For a game whose logic lives in a separate
+         *          module (for example an engine DLL loaded by a thin launcher
+         *          EXE), resolve that module's range explicitly and call
+         *          resolve_cascade_in_module(): the host EXE then holds none of
+         *          the target code, so host-scoping would scan the wrong image.
+         * @param candidates Ordered candidates.
+         * @param label Human-readable identifier used in log messages.
+         * @return ResolveHit on success; ResolveError on failure. If the host
+         *         module range cannot be determined the result is
+         *         ResolveError::InvalidRange.
+         */
+        [[nodiscard]] std::expected<ResolveHit, ResolveError>
+        resolve_cascade_in_host_module(std::span<const AddrCandidate> candidates,
+                                       std::string_view label);
+
+        /**
+         * @brief Host-EXE-scoped variant of
+         *        resolve_cascade_in_module_with_prologue_fallback().
+         * @details Forwards to resolve_cascade_in_module_with_prologue_fallback()
+         *          with Memory::host_module_range(). Same host-scope caveat as
+         *          resolve_cascade_in_host_module() applies.
+         * @param candidates Ordered candidates.
+         * @param label Human-readable identifier used in log messages.
+         * @return ResolveHit on success; ResolveError on failure. If the host
+         *         module range cannot be determined the result is
+         *         ResolveError::InvalidRange.
+         */
+        [[nodiscard]] std::expected<ResolveHit, ResolveError>
+        resolve_cascade_in_host_module_with_prologue_fallback(
+            std::span<const AddrCandidate> candidates, std::string_view label);
+
+        /**
+         * @enum OperandKind
+         * @brief Which operand field @ref read_code_constant extracts.
+         */
+        enum class OperandKind : std::uint8_t
+        {
+            Immediate,         ///< An immediate operand (e.g. the imm of `add reg, imm`).
+            MemoryDisplacement ///< A memory operand's displacement (e.g. the disp of `[reg + disp]`).
+        };
+
+        /**
+         * @struct CodeConstant
+         * @brief Declares a constant encoded in the engine's machine code so DMK
+         *        can re-derive it after a patch instead of hard-coding it.
+         * @details The code-side twin of the RTTI self-heal: where a struct stride
+         *          or field displacement is an immediate or `[reg + disp]` in a
+         *          dispatch loop, declare the AOB-resolved instruction site plus
+         *          which operand to read, and @ref read_code_constant decodes the
+         *          live instruction and returns the current value. A consumer
+         *          stops hand-reading the immediate every patch.
+         */
+        struct CodeConstant
+        {
+            /// AOB cascade that lands ON the instruction (a Direct candidate, disp_offset 0).
+            std::span<const AddrCandidate> site;
+            /// Which operand field to read: an immediate or a memory displacement.
+            OperandKind kind = OperandKind::Immediate;
+            /// Index into the instruction's VISIBLE operands, as counted in a disassembler.
+            std::uint8_t operand_index = 0;
+            /// 0 returns Zydis's already-sign-extended value; > 0 narrows to this many bytes then re-sign-extends.
+            std::uint8_t byte_width = 0;
+            /// Last-known value, for telemetry/baseline ONLY; never returned in place of a live decode.
+            std::int64_t nominal = 0;
+            /// Set true to make @ref nominal meaningful (do not overload nominal == 0 as "unset").
+            bool has_nominal = false;
+        };
+
+        /**
+         * @brief Resolves @p cc.site, decodes the instruction there, and returns
+         *        the requested operand's current value.
+         * @details Always decodes and returns the live operand (sign-extended);
+         *          @c cc.nominal is never a short-circuit, so a same-shape /
+         *          different-value drift (e.g. a stride 232 -> 240) is reported as
+         *          the new value, which is the whole point. Self-validating and
+         *          fail-closed: a site that no longer decodes, or whose requested
+         *          operand is the wrong kind or out of range, returns a typed error
+         *          rather than a guess. A RIP-relative memory operand is resolved
+         *          to its absolute target (so the return is an absolute address in
+         *          that case); other relative forms are reported as a value as-is.
+         * @param cc The code-constant declaration.
+         * @param range Module image to resolve the site in. Defaults to the host EXE.
+         * @return The decoded value, or:
+         *         - any @ref ResolveError from resolving @c cc.site (EmptyCandidates,
+         *           NoMatch, InvalidRange, ...);
+         *         - @ref ResolveError::DecodeFailed if the site does not decode;
+         *         - @ref ResolveError::OperandOutOfRange if @c operand_index is past
+         *           the visible operand count;
+         *         - @ref ResolveError::UnexpectedShape if the operand is not the
+         *           requested @c kind (or a memory operand carries no displacement).
+         */
+        [[nodiscard]] std::expected<std::int64_t, ResolveError>
+        read_code_constant(const CodeConstant &cc,
+                           Memory::ModuleRange range = Memory::host_module_range());
 
         /**
          * @brief Cheap heuristic: does @p addr look like the first byte of a

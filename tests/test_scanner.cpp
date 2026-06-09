@@ -1117,6 +1117,9 @@ TEST(ScannerCascade, resolve_error_to_string_coverage)
     EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::AllPatternsInvalid).empty());
     EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::PrologueFallbackNotApplicable).empty());
     EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::InvalidRange).empty());
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::DecodeFailed).empty());
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::UnexpectedShape).empty());
+    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::OperandOutOfRange).empty());
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
@@ -1656,6 +1659,9 @@ TEST(ScannerStringTest, ResolveErrorToString_IsNoexcept)
     static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::AllPatternsInvalid)));
     static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::PrologueFallbackNotApplicable)));
     static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::InvalidRange)));
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::DecodeFailed)));
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::UnexpectedShape)));
+    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::OperandOutOfRange)));
 }
 
 TEST(ScannerTest, find_pattern_common_byte_anchoring)
@@ -3252,4 +3258,88 @@ TEST(ScannerPrologueTest, UnreadableAddrReturnsFalse)
     EXPECT_FALSE(Scanner::is_likely_function_prologue(
         reinterpret_cast<std::uintptr_t>(na)));
     VirtualFree(na, 0, MEM_RELEASE);
+}
+
+// --- Tests for resolve_cascade_in_host_module / _with_prologue_fallback ---
+
+// A unique 16-byte signature compiled into the test executable's own image so a
+// host-module-scoped cascade has a real in-host target to resolve. volatile const
+// keeps the linker from folding the bytes or discarding them as unused (the
+// fixture DLL uses the same idiom for its stable AOB markers).
+static volatile const unsigned char s_host_marker[16] = {
+    0x5A, 0xC3, 0x91, 0x44, 0xE2, 0x7B, 0x10, 0x8F,
+    0x36, 0xBD, 0x09, 0xA1, 0xCE, 0x52, 0x74, 0xF0};
+
+TEST(ScannerHostModuleCascade, FindsMarkerInHostImage)
+{
+    const auto marker_addr = reinterpret_cast<std::uintptr_t>(&s_host_marker[0]);
+
+    // Host-scoping is only the correct scope when the target lives in the main
+    // EXE image; assert that precondition holds for the planted marker.
+    const auto host = Memory::host_module_range();
+    ASSERT_TRUE(host.valid());
+    ASSERT_TRUE(Memory::contains(host, marker_addr));
+
+    Scanner::AddrCandidate cands[] = {
+        {"host-marker", "5A C3 91 44 E2 7B 10 8F 36 BD 09 A1 CE 52 74 F0",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_host_module(cands, "host-marker");
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, marker_addr);
+    EXPECT_TRUE(Memory::contains(host, hit->address));
+}
+
+TEST(ScannerHostModuleCascade, PrologueFallbackOverloadFindsMarker)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"host-marker", "5A C3 91 44 E2 7B 10 8F 36 BD 09 A1 CE 52 74 F0",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    // The marker is data, so the direct pass resolves it and the prologue-recovery
+    // pass never runs; this confirms the fallback overload forwards correctly on
+    // the happy path.
+    const auto hit =
+        Scanner::resolve_cascade_in_host_module_with_prologue_fallback(cands, "host-marker");
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&s_host_marker[0]));
+}
+
+TEST(ScannerHostModuleCascade, AbsentSignatureMatchesExplicitHostRangeResult)
+{
+    const auto host = Memory::host_module_range();
+    ASSERT_TRUE(host.valid());
+
+    Scanner::AddrCandidate cands[] = {
+        {"absent", "13 57 9B DF 02 46 8A CE 11 33 55 77 99 BB DD FF",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    // The host overload must produce the same outcome as the explicit-range call
+    // against host_module_range(); this proves it forwards rather than resolving
+    // against some other scope. Asserted as equivalence so it holds whether or
+    // not the pattern happens to exist in the image.
+    const auto via_host = Scanner::resolve_cascade_in_host_module(cands, "absent");
+    const auto via_range = Scanner::resolve_cascade_in_module(cands, "absent", host);
+    ASSERT_EQ(via_host.has_value(), via_range.has_value());
+    if (!via_host.has_value())
+    {
+        EXPECT_EQ(via_host.error(), via_range.error());
+    }
+}
+
+TEST(ScannerHostModuleCascade, EmptyCandidatesReturnsEmptyCandidates)
+{
+    const std::span<const Scanner::AddrCandidate> empty{};
+
+    const auto direct = Scanner::resolve_cascade_in_host_module(empty, "empty");
+    ASSERT_FALSE(direct.has_value());
+    EXPECT_EQ(direct.error(), Scanner::ResolveError::EmptyCandidates);
+
+    const auto fallback =
+        Scanner::resolve_cascade_in_host_module_with_prologue_fallback(empty, "empty");
+    ASSERT_FALSE(fallback.has_value());
+    EXPECT_EQ(fallback.error(), Scanner::ResolveError::EmptyCandidates);
 }

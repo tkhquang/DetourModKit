@@ -11,14 +11,15 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 
 | Module | Description | Header |
 |--------|-------------|--------|
-| AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, and multi-candidate cascade resolver with prologue fallback | `scanner.hpp` |
+| AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, multi-candidate cascade resolver with prologue fallback, host-EXE cascade overloads, and in-code constant (immediate/displacement) extraction | `scanner.hpp` |
 | Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
 | Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads, PE module range queries | `memory.hpp` |
-| MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache | `rtti.hpp` |
-| RTTI Self-Heal | Reverse-identify the object behind a pointer slot; self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver | `rtti_dissect.hpp` |
+| MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | `rtti.hpp` |
+| RTTI Self-Heal | Reverse-identify the object behind a pointer slot; self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver; drift-telemetry report | `rtti_dissect.hpp` |
+| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, pinned literal) resolved and reported in a single pass | `anchors.hpp` |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
@@ -43,6 +44,8 @@ DetourModKit is a full-featured C++ toolkit designed to simplify common tasks in
 - `scan_executable_regions()` for scanning all committed executable pages in the process - useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module (pure-execute pages without a read bit are skipped to avoid access violations)
 - `scan_readable_regions()` -- the data-section sibling of `scan_executable_regions()` -- sweeps every committed readable page (`.rdata` / `.data`, read-only heaps) to reach C++ vtables, RTTI type descriptors, and read-only metadata the executable-only sweep cannot see (guard / no-access / uncommitted pages are skipped); opt a cascade into it with `resolve_cascade(..., ScannerKind::Readable)`
 - `resolve_cascade()` and the module-scoped `resolve_cascade_in_module()` -- ordered multi-candidate resolution (try signatures in priority order, return the first that resolves), with an optional hooked-prologue recovery pass; the `_in_module` variants confine the scan to one mapped image `[base, end)` and reject out-of-module resolutions, so a generic signature that also matches inside another injected module (a graphics overlay, a sibling mod) cannot shadow the correct in-module target. By default each candidate must match uniquely in the scanned scope: an ambiguous signature (more than one match) falls through to the next candidate instead of silently committing to an arbitrary match, so a too-loose pattern surfaces as a clean failure to fix rather than a wrong hook. Set `require_unique = false` per candidate only to opt out a deliberately non-unique, separately-verified candidate
+- `resolve_cascade_in_host_module()` / `resolve_cascade_in_host_module_with_prologue_fallback()` -- one-line convenience overloads that scope a cascade to the host EXE (`host_module_range()`), removing the boilerplate of building the range at every call site. They return `ResolveError::InvalidRange` if the host range cannot be determined. Use them only when the target lives in the host EXE; for a game whose logic is in a separate module (an engine DLL), resolve that module's range and call `resolve_cascade_in_module()` instead
+- `read_code_constant(cc, range?)` -- the code-side twin of the RTTI self-heal: declare an instruction site (an AOB cascade) plus which operand to read, and it decodes the live instruction and returns the current immediate or `[reg + disp]` displacement, so a hand-read array stride or struct displacement re-derives itself after a patch instead of being a baked literal. It always decodes (the `nominal` field is telemetry only, never a short-circuit, so a same-shape / different-value drift is reported as the new value), indexes the **visible** operands, resolves a RIP-relative operand to its absolute target, and fails closed (`DecodeFailed` / `UnexpectedShape` / `OperandOutOfRange`). Built on a Zydis decoder kept entirely inside the implementation, so no consumer needs Zydis headers
 - `is_likely_function_prologue(addr)` heuristic that rejects scan poison (zero pages, alignment pads, bare RET stubs) while still accepting JMP-shaped patched prologues so nested-hook scenarios resolve
 
 </details>
@@ -154,6 +157,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - `Rtti::type_name_of(vtable)` returns the mangled name (e.g. `.?AVMyClass@ns@@`) as `std::optional<std::string>`; `type_name_into(vtable, buf, len)` writes into a caller buffer for zero-allocation per-frame probes
 - `Rtti::vtable_is_type(vtable, expected)` performs a byte-exact NUL-terminated comparison against an expected mangled name (single SEH-guarded read of `expected.size() + 1` bytes; no allocation)
 - `Rtti::find_in_pointer_table(table, slot_count, expected, vtable_cache?, stride?)` scans a sparse pointer table for the first slot whose object has the given type; an optional caller-owned `std::atomic<uintptr_t>` cache slot lets repeated calls take a single qword-compare fast path after the first match
+- `Rtti::vtable_for_type(mangled, range?)` is the reverse of `vtable_is_type`: it sweeps a module's readable, non-executable sections for the COL whose name matches and returns the primary (COL.offset == 0) vtable, so a mod keys on a stable class name instead of a patch-fragile vtable literal. `vtables_for_type(...)` returns every sub-object vtable (multiple/virtual inheritance gives one name many vtables); an ambiguous primary fails closed. Returning the COL-anchored vtable address (not its folded slot contents) keeps identity correct under the linker's `/OPT:ICF`
+- `Rtti::TypeIdentity(mangled, range?)` resolves the primary vtable once, then `matches(vtable)` is a single qword compare -- a name-keyed, patch-surviving per-frame identity check
 - Image-base recovery via `COL.pSelf` (canonical IDA/Ghidra approach) so vtables in any loaded module resolve correctly without trusting `GetModuleHandleEx`; the loader call is used only as a fallback for the x86 signature
 - All entry points are noexcept and SEH-guarded; unreadable pages, missing COLs, and zero RVAs never fault. Failure surfaces through the return type of each API: `std::nullopt` for the `std::optional` returns (`type_name_of`, `find_in_pointer_table`), `false` for the boolean return (`vtable_is_type`), and `0` for the size return (`type_name_into`, which additionally sets `out[0] = '\0'` on failure)
 
@@ -167,8 +172,19 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - `Rtti::reverse_scan_block(start, slot_count, out, stride?)` RTTI-labels every pointer slot in a struct (allocating triage tool; init-time only)
 - `Rtti::heal_landmark(lm)` / `Rtti::heal_offset(lm)` -- the self-healing offset resolver. Record a landmark once (`"a field of mangled type T sits near offset O within struct S"`); after a small patch shifts the layout, it scans a `+/-` window around the nominal offset, reverse-RTTI-identifies each slot, and returns the healed field offset. The nominal offset is checked first and short-circuits, the widened scan prefers the nearest match, and an equidistant tie fails closed as `Ambiguous` -- the same `require_unique` philosophy the module-scoped cascade uses, transplanted from an AOB scan to a slot scan
 - `Rtti::solve_fingerprint(base, landmarks, window)` recovers a single uniform shift across several co-moving fields when one landmark alone would be ambiguous in a dense region
+- `Rtti::heal_report(landmarks, out)` heals a set in one pass and fills a `DriftEntry` per landmark (`{name, nominal_offset, healed_offset, delta, ok}`) -- a structured "what moved and by how much" report for changelogs, derived purely from the existing heal path
 - Consumers cache the healed **offset** (a `std::ptrdiff_t`), never an absolute address, so a cached delta stays valid across instances and sessions. The library stores nothing: no registry, no lifetimes
 - Init-time / re-heal-on-miss, not per-frame: each probe runs the syscall-heavy module-range lookup up to twice. The search window is hard-capped; the hot heal path allocates nothing
+
+</details>
+
+<details>
+<summary><strong>Anchor Registry</strong></summary>
+
+- One declarative table (`Anchors::Anchor[]`) over the self-healing backends, so every magic constant a mod depends on is declared once with its kind and inputs, then resolved and reported in a single pass instead of a scattered wall of hand-maintained offsets and per-call-site resolvers
+- `AnchorKind` covers the backends that resolve from a module range alone: `VtableIdentity` (`Rtti::vtable_for_type`), `RipGlobal` (an AOB/RIP cascade returning an absolute address), `CodeOperand` (`Scanner::read_code_constant`), and `Manual` (a pinned literal, surfaced as at-risk in a report). `CallArgHome` is reserved for a future prologue-dataflow backend and reports `Unsupported`
+- `Anchors::resolve(anchor, range?)` resolves one entry; `resolve_all(anchors, out, range?)` fills a parallel `ResolvedAnchor` report (`{label, kind, status, value}`). Resolution is idempotent and side-effect-free, so re-heal-on-miss is just re-running `resolve` on the failing anchor
+- RTTI pointer-field offset healing (`heal_landmark`) is intentionally not a registry kind: it needs a runtime struct base resolved from another anchor, so it is driven directly once that base is known
 
 </details>
 
@@ -316,6 +332,7 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 * [AOB Signature Scanning Guide](docs/misc/aob-signatures.md) - Pattern syntax, RIP-relative resolution, and patch-proof signature practices
 * [MSVC RTTI Walker Guide](docs/misc/rtti-walker.md) - Recover concrete type names from runtime vtables across DLL boundaries without `typeid`/`dynamic_cast`
 * [RTTI Self-Heal Guide](docs/misc/rtti-self-heal.md) - Reverse-identify objects behind pointer slots and self-heal field offsets after a game patch shifts the struct layout
+* [Anchor Registry Guide](docs/misc/anchors.md) - Declare every patch-fragile constant once and resolve the whole table in a single self-healing pass
 * [Hot-Path Memory Guide](docs/misc/hot-path-memory.md) - Reading and writing game memory in per-frame hot paths with the `seh_*` and `read_ptr_*` primitives
 * [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
 * [Config Hot-Reload Guide](docs/config-hot-reload/README.md) - INI filesystem watcher and hotkey-triggered `Config::reload()`
@@ -961,12 +978,12 @@ The configuration system recognizes the following named input codes (case-insens
 | Category | Names |
 | --- | --- |
 | **Modifiers** | `Ctrl`, `LCtrl`, `RCtrl`, `Shift`, `LShift`, `RShift`, `Alt`, `LAlt`, `RAlt` |
-| **Letters** | `A`–`Z` |
-| **Digits** | `0`–`9` |
-| **Function keys** | `F1`–`F24` |
+| **Letters** | `A`-`Z` |
+| **Digits** | `0`-`9` |
+| **Function keys** | `F1`-`F24` |
 | **Navigation** | `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete` |
 | **Common** | `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `CapsLock`, `NumLock`, `ScrollLock`, `PrintScreen`, `Pause` |
-| **Numpad** | `Numpad0`–`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal` |
+| **Numpad** | `Numpad0`-`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal` |
 | **Mouse** | `Mouse1` (left), `Mouse2` (right), `Mouse3` (middle), `Mouse4`, `Mouse5` |
 | **Mouse wheel** | `WheelUp`, `WheelDown`, `WheelLeft`, `WheelRight` (trigger-only, Press mode) |
 | **Gamepad** | `Gamepad_A`, `Gamepad_B`, `Gamepad_X`, `Gamepad_Y`, `Gamepad_LB`, `Gamepad_RB`, `Gamepad_LT`, `Gamepad_RT`, `Gamepad_Start`, `Gamepad_Back`, `Gamepad_LS`, `Gamepad_RS`, `Gamepad_DpadUp`, `Gamepad_DpadDown`, `Gamepad_DpadLeft`, `Gamepad_DpadRight` |
