@@ -15,6 +15,8 @@ Practical reference for building, maintaining, and resolving array-of-bytes (AOB
     - 6.3 [Basic usage](#63-basic-usage)
     - 6.4 [Prologue fallback variant](#64-prologue-fallback-variant)
     - 6.5 [Ordering and logging](#65-ordering-and-logging)
+    - 6.6 [Host-module convenience overloads](#66-host-module-convenience-overloads)
+    - 6.7 [Reading a code constant (read_code_constant)](#67-reading-a-code-constant-read_code_constant)
 7. [Patch-proof patterns (cache, fallback, verify)](#7-patch-proof-patterns-cache-fallback-verify)
 8. [Worked examples](#8-worked-examples)
 9. [DOs and DON'Ts](#9-dos-and-donts)
@@ -491,7 +493,7 @@ Sometimes the value a mod needs is not an address but a constant baked into an i
 
 ```cpp
 static constexpr sc::AddrCandidate k_stride_site[] = {
-    {"equip-stride", "48 6B C0 ?? 48 03 ...", sc::ResolveMode::Direct, 0, 0},
+    {"equip-stride", "48 6B C0 ?? 48 03 ??", sc::ResolveMode::Direct, 0, 0},
 };
 
 sc::CodeConstant cc{};

@@ -33,8 +33,8 @@ using namespace DetourModKit;
 
 namespace
 {
-    std::uintptr_t resolve_candidate_match(std::uintptr_t match_addr,
-                                           const DetourModKit::Scanner::AddrCandidate &candidate) noexcept
+    std::optional<std::uintptr_t> resolve_candidate_match(std::uintptr_t match_addr,
+                                                          const DetourModKit::Scanner::AddrCandidate &candidate) noexcept
     {
         using DetourModKit::Scanner::ResolveMode;
         if (candidate.mode == ResolveMode::Direct)
@@ -48,7 +48,10 @@ namespace
         const auto disp = DetourModKit::Memory::seh_read<std::int32_t>(disp_addr);
         if (!disp)
         {
-            return 0;
+            // A faulted displacement read is a miss, not a hit at address 0: the
+            // whole-process path has no in-range guard to reject a zero result, so
+            // returning nullopt here prevents a false ResolveHit at 0.
+            return std::nullopt;
         }
         return static_cast<std::uintptr_t>(
             static_cast<std::int64_t>(match_addr + static_cast<std::uintptr_t>(candidate.instr_end_offset)) +
@@ -63,7 +66,7 @@ namespace
     // is roughly two to four real instructions of context and reduces the
     // false-positive rate to near zero on real binaries while staying inside
     // the 12 to 20 byte sweet spot documented for fallback signatures.
-    constexpr int kPrologueFallbackMinTailLiterals = 10;
+    constexpr int PROLOGUE_FALLBACK_MIN_TAIL_LITERALS = 10;
 
     // Upper bound on hits the rebuilt fallback pattern may produce within the
     // scanned scope (the module image when a range is supplied, the process's
@@ -74,7 +77,7 @@ namespace
     // Any value above 1 admits a false positive whose blast radius (a hook
     // installed at an unrelated function) far outweighs the benefit of
     // tolerating duplicate matches.
-    constexpr std::size_t kPrologueFallbackMaxHits = 1;
+    constexpr std::size_t PROLOGUE_FALLBACK_MAX_HITS = 1;
 
     bool is_wildcard_token(std::string_view token) noexcept
     {
@@ -146,7 +149,7 @@ namespace
         {
             return {};
         }
-        if (split.literal_tail_count < kPrologueFallbackMinTailLiterals)
+        if (split.literal_tail_count < PROLOGUE_FALLBACK_MIN_TAIL_LITERALS)
         {
             return {};
         }
@@ -272,6 +275,13 @@ namespace
 
             const auto addr = resolve_candidate_match(
                 reinterpret_cast<std::uintptr_t>(match), candidate);
+            // A RipRelative candidate whose displacement read faulted resolves to
+            // nothing; skip it so the whole-process path cannot commit to a hit at
+            // address 0 (only the module-scoped path below has an in-range guard).
+            if (!addr)
+            {
+                continue;
+            }
             // Module-scoped resolutions must land inside the image. The match
             // site is already in-range (the module-scoped scan only searches it), but
             // a RipRelative disp read at an in-module instruction can still
@@ -279,11 +289,11 @@ namespace
             // Reject that here so the cascade falls through to the next candidate
             // instead of committing to an out-of-module address -- a decision a
             // post-resolution check by the caller could not reverse.
-            if (range && !DetourModKit::Memory::contains(*range, addr))
+            if (range && !DetourModKit::Memory::contains(*range, *addr))
             {
                 continue;
             }
-            return CascadeAttempt{addr, i, true};
+            return CascadeAttempt{*addr, i, true};
         }
         return CascadeAttempt{0, 0, false};
     }
@@ -322,17 +332,17 @@ namespace
             }
             out.not_applicable = false;
             const std::size_t hits =
-                count_pattern_hits_bounded(*compiled, kPrologueFallbackMaxHits, range);
+                count_pattern_hits_bounded(*compiled, PROLOGUE_FALLBACK_MAX_HITS, range);
             if (hits == 0)
             {
                 continue;
             }
-            if (hits > kPrologueFallbackMaxHits)
+            if (hits > PROLOGUE_FALLBACK_MAX_HITS)
             {
                 logger.debug(
                     "Scanner: prologue fallback rejected for '{}': {} hits exceed uniqueness ceiling ({})",
                     candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name,
-                    hits, kPrologueFallbackMaxHits);
+                    hits, PROLOGUE_FALLBACK_MAX_HITS);
                 continue;
             }
             const auto *match = range
@@ -368,7 +378,11 @@ namespace
             }
 
             const auto addr = resolve_candidate_match(match_addr, candidate);
-            out.attempt = CascadeAttempt{addr, i, true};
+            if (!addr)
+            {
+                continue;
+            }
+            out.attempt = CascadeAttempt{*addr, i, true};
             return out;
         }
         return out;
