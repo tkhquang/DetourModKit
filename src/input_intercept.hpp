@@ -37,6 +37,7 @@
 #include <Xinput.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace DetourModKit::detail
@@ -100,6 +101,95 @@ namespace DetourModKit::detail
                                                  uint16_t true_buttons,
                                                  uint64_t now_ms,
                                                  uint64_t grace_ms) noexcept;
+
+    /**
+     * @struct GamepadConsumeRule
+     * @brief A consume chord reduced to the XInput button bits the detour can
+     *        evaluate without the poll thread.
+     * @details The reactive (poll-published) mask trails the physical state by up to
+     *          one poll cycle, which leaves a leading-edge window: a modifier and
+     *          trigger pressed inside one poll interval can be read by the game
+     *          before the mask catches up. A rule lets the detour mask the trigger
+     *          against the exact snapshot the game is about to read, closing that
+     *          window. Built only from chords whose modifiers and masked triggers
+     *          are all digital gamepad buttons (the detour sees only
+     *          XINPUT_GAMEPAD.wButtons), so the decision is fully reproducible there.
+     */
+    struct GamepadConsumeRule
+    {
+        uint16_t modifier_mask{0};  ///< Digital button bits that must all be held.
+        uint16_t forbidden_mask{0}; ///< Known-modifier bits outside this chord; any held rejects it (strict match).
+        uint16_t trigger_mask{0};   ///< Digital button bits to clear when the chord matches.
+    };
+
+    /**
+     * @brief Maximum number of consume rules the detour evaluates.
+     * @details A binding set that would exceed this publishes no rules at all (the
+     *          reactive mask still covers the held-modifier case), so the detour
+     *          never silently evaluates a subset.
+     */
+    inline constexpr std::size_t MAX_GAMEPAD_CONSUME_RULES = 32;
+
+    /**
+     * @brief Evaluates consume rules against a raw button snapshot.
+     * @details Pure helper shared by the XInput detour and its tests. A rule
+     *          contributes its @ref GamepadConsumeRule::trigger_mask when every
+     *          @ref GamepadConsumeRule::modifier_mask bit is present in
+     *          @p true_buttons and no @ref GamepadConsumeRule::forbidden_mask bit
+     *          is. Masking a trigger bit that is not currently down is a no-op
+     *          against the game's state, so a rule may match before its trigger is
+     *          pressed without observable effect.
+     * @param true_buttons The unmasked XINPUT_GAMEPAD.wButtons the game will read.
+     * @param rules Pointer to @p count contiguous rules (may be nullptr if 0).
+     * @param count Number of rules.
+     * @return Button bits to clear from the game's state.
+     */
+    [[nodiscard]] uint16_t evaluate_consume_rules(uint16_t true_buttons,
+                                                  const GamepadConsumeRule *rules,
+                                                  std::size_t count) noexcept;
+
+    /**
+     * @brief Publishes the consume rule list read by the XInput detour.
+     * @details Single-writer: the binding-mutation thread, serialized by
+     *          InputPoller::bindings_rw_mutex_ (not the poll thread). Copies up
+     *          to @ref MAX_GAMEPAD_CONSUME_RULES rules behind a seqlock so a detour
+     *          on a game thread reads a consistent snapshot without locking; a
+     *          @p count above the cap publishes an empty list rather than a
+     *          truncated one. Rule masking shares the reactive mask's time-to-live
+     *          (rules exist only while consume gamepad bindings do, which is exactly
+     *          when publish_gamepad_suppress refreshes the deadline), so a stalled
+     *          poll thread stops rule masking too.
+     * @param rules Pointer to @p count contiguous rules (may be nullptr if 0).
+     * @param count Number of rules to publish.
+     */
+    void publish_gamepad_consume_rules(const GamepadConsumeRule *rules, std::size_t count) noexcept;
+
+    /**
+     * @brief Reads the published consume rule list and evaluates it against a raw
+     *        button snapshot.
+     * @details The XInput detour's rule-read side, exported for testing. Reads the
+     *          seqlock-guarded rule list in a single attempt (a torn or mid-update
+     *          snapshot yields 0) and returns evaluate_consume_rules over it. This is
+     *          independent of the focus gate (see set_gamepad_rule_suppress_enabled),
+     *          which the detour applies separately.
+     * @param true_buttons The unmasked XINPUT_GAMEPAD.wButtons the game will read.
+     * @return Button bits the currently published rules would clear.
+     */
+    [[nodiscard]] uint16_t evaluate_published_consume_rules(uint16_t true_buttons) noexcept;
+
+    /**
+     * @brief Enables or disables detour-side consume-rule masking.
+     * @details Gates whether the XInput detour evaluates the published rule list. The
+     *          poll thread drives this every cycle so rule masking stops the instant
+     *          the host window loses focus or the controller disconnects, matching the
+     *          reactive mask (which the poll loop clears to 0 on focus loss) and the
+     *          mouse-wheel consume flag. Without it the detour would keep masking the
+     *          foreground game's gamepad input while the mod is in the background,
+     *          because the published rule list and its time-to-live both stay alive
+     *          across focus changes.
+     * @param enabled True to evaluate rules, false to skip them.
+     */
+    void set_gamepad_rule_suppress_enabled(bool enabled) noexcept;
 
     // --- XInput interception (gamepad passthrough suppression) ---
 
