@@ -366,7 +366,7 @@ namespace DetourModKit
         safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
         const safetyhook::VmtHook &vmt_hook() const noexcept { return m_vmt_hook; }
 
-        bool has_method_hook(size_t index) const noexcept { return m_method_hooks.find(index) != m_method_hooks.end(); }
+        [[nodiscard]] bool has_method_hook(size_t index) const noexcept { return m_method_hooks.find(index) != m_method_hooks.end(); }
 
         safetyhook::VmHook *get_method_hook(size_t index)
         {

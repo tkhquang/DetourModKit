@@ -235,6 +235,56 @@ TEST(BootstrapUnitTest, InstanceMutexCollisionReturnsFalse)
     CloseHandle(pre_owned);
 }
 
+TEST(BootstrapUnitTest, InstanceMutexLongPrefixDoesNotOverflow)
+{
+    // A prefix far longer than the old fixed 128-wchar formatting buffer must be
+    // handled without overflowing it. Reconstruct the expected name exactly as
+    // the bootstrap now does (each prefix byte widened, then the decimal PID)
+    // and pre-own it so the attach fails on the collision: a clean FALSE proves
+    // the long name was formed intact rather than truncated or written past a
+    // fixed buffer.
+    const std::string prefix(200, 'A');
+
+    std::wstring expected_name;
+    expected_name.reserve(prefix.size() + 10);
+    for (char c : prefix)
+    {
+        expected_name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+    }
+    expected_name += std::to_wstring(GetCurrentProcessId());
+
+    HANDLE pre_owned = CreateMutexW(nullptr, FALSE, expected_name.c_str());
+    ASSERT_NE(pre_owned, nullptr);
+    ASSERT_EQ(GetLastError(), 0u) << "Long mutex name collided with an existing one before the test";
+
+    CallbackSignals sig;
+    const std::string exe_name = current_exe_basename();
+    Bootstrap::ModInfo info{};
+    info.prefix = "BS_TEST";
+    info.log_file = "bs_test_mutex_long.log";
+    info.game_process_name = exe_name;
+    info.instance_mutex_prefix = prefix;
+
+    const BOOL result = Bootstrap::on_dll_attach(
+        GetModuleHandleW(nullptr),
+        info,
+        [&sig]() noexcept
+        {
+            sig.init_calls.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        },
+        [&sig]() noexcept
+        {
+            sig.shutdown_calls.fetch_add(1, std::memory_order_relaxed);
+        });
+
+    EXPECT_EQ(result, FALSE);
+    EXPECT_EQ(sig.init_calls.load(), 0);
+    EXPECT_EQ(sig.shutdown_calls.load(), 0);
+
+    CloseHandle(pre_owned);
+}
+
 class BootstrapIntegrationTest : public ::testing::Test
 {
 protected:

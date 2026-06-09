@@ -53,21 +53,20 @@ namespace DetourModKit::Bootstrap
                 return true;
             }
 
-            wchar_t mutex_name[128]{};
-            std::wstring wprefix;
-            wprefix.reserve(prefix.size());
+            // Build the name in a std::wstring rather than formatting into a
+            // fixed wchar_t buffer: the prefix is caller-supplied, so a bounded
+            // formatter would have to truncate or fail, and an unbounded one
+            // (wsprintfW) could overflow. CreateMutexW rejects an over-long name
+            // on its own, which the null-handle check below already handles.
+            std::wstring mutex_name;
+            mutex_name.reserve(prefix.size() + 10);
             for (char c : prefix)
             {
-                wprefix.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+                mutex_name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
             }
+            mutex_name += std::to_wstring(GetCurrentProcessId());
 
-            const int written_len = wsprintfW(mutex_name, L"%s%lu", wprefix.c_str(), GetCurrentProcessId());
-            if (written_len <= 0)
-            {
-                return false;
-            }
-
-            HANDLE mutex_handle = CreateMutexW(nullptr, FALSE, mutex_name);
+            HANDLE mutex_handle = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
             if (!mutex_handle)
             {
                 return false;

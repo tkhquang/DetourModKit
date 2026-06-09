@@ -210,8 +210,8 @@ jobs:
           cmake -S tests/package_smoke -B build/package-smoke-msvc -G Ninja ^
             -DCMAKE_BUILD_TYPE=Release ^
             -DDetourModKit_DIR="${{ github.workspace }}/install_package/msvc/lib/cmake/DetourModKit" ^
-            -DCMAKE_CXX_COMPILER=cl
-          cmake --build build/package-smoke-msvc --parallel
+            -DCMAKE_CXX_COMPILER=cl && ^
+          cmake --build build/package-smoke-msvc --parallel && ^
           ctest --test-dir build/package-smoke-msvc --output-on-failure
         shell: cmd
 

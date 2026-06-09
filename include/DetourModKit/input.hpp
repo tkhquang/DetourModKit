@@ -659,10 +659,10 @@ namespace DetourModKit
         std::shared_ptr<InputPoller> m_poller;
         std::atomic<std::shared_ptr<InputPoller>> m_active_poller{};
         std::atomic<bool> m_running{false};
-        bool m_require_focus = true;
-        int m_gamepad_index = 0;
-        int m_trigger_threshold = GamepadCode::TriggerThreshold;
-        int m_stick_threshold = GamepadCode::StickThreshold;
+        bool m_require_focus{true};
+        int m_gamepad_index{0};
+        int m_trigger_threshold{GamepadCode::TriggerThreshold};
+        int m_stick_threshold{GamepadCode::StickThreshold};
     };
 } // namespace DetourModKit
 
