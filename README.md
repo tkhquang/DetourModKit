@@ -19,7 +19,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads, PE module range queries | `memory.hpp` |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | `rtti.hpp` |
 | RTTI Self-Heal | Reverse-identify the object behind a pointer slot; self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver; drift-telemetry report | `rtti_dissect.hpp` |
-| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) resolved and reported in a single pass | `anchors.hpp` |
+| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) plus two-signal quorum corroboration and optional post-resolve validators, resolved and reported in a single pass | `anchors.hpp` |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
@@ -143,7 +143,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Optional memory region cache with sharded SRWLOCK concurrency, LRU eviction, and stampede coalescing
 - `is_readable_nonblocking()` - tri-state (readable/not-readable/unknown) for latency-sensitive threads
 - `read_ptr_unsafe()` - safe pointer reads in hot paths (SEH-protected on MSVC, cache-accelerated with VirtualQuery fallback on MinGW)
-- `read_ptr_unchecked()` - inline header-only variant with configurable low-address validity guard for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity)
+- `read_ptr_unchecked()` - inline header-only variant with a configurable lower-bound guard plus a `USERSPACE_PTR_MAX` ceiling for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity)
 - `seh_read<T>()` / `seh_read_bytes()` - typed SEH-guarded reads for arbitrary trivially copyable T (and contiguous byte ranges), used to walk torn pointer chains and parse PE headers without per-site `__try` boilerplate. Returns `std::optional<T>` / `bool` so callers can distinguish "read faulted" from "read returned zero"
 - `module_range_for(addr)` / `own_module_range()` / `host_module_range()` - PE image range queries (base + SizeOfImage) for sanity-checking that a resolved vtable or return address lives inside the game image vs the heap or an injected DLL. Per-HMODULE cache for `module_range_for`; magic-static cache for the own and host variants
 - `Memory::contains(range, p)` - constexpr point-in-range test
@@ -182,7 +182,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <summary><strong>Anchor Registry</strong></summary>
 
 - One declarative table (`Anchors::Anchor[]`) over the self-healing backends, so every magic constant a mod depends on is declared once with its kind and inputs, then resolved and reported in a single pass instead of a scattered wall of hand-maintained offsets and per-call-site resolvers
-- `AnchorKind` covers the backends that resolve from a module range alone: `VtableIdentity` (`Rtti::vtable_for_type`), `RipGlobal` (an AOB/RIP cascade returning an absolute address), `CodeOperand` (`Scanner::read_code_constant`), `StringXref` (`Scanner::find_string_xref`, the most update-resilient kind: the unique instruction or enclosing function that references an immutable string literal), and `Manual` (a pinned literal, surfaced as at-risk in a report). `CallArgHome` is reserved for a future prologue-dataflow backend and reports `Unsupported`
+- `AnchorKind` covers the backends that resolve from a module range alone: `VtableIdentity` (`Rtti::vtable_for_type`), `RipGlobal` (an AOB/RIP cascade returning an absolute address), `CodeOperand` (`Scanner::read_code_constant`), `StringXref` (`Scanner::find_string_xref`, the most update-resilient kind: the unique instruction or enclosing function that references an immutable string literal), and `Manual` (a pinned literal, surfaced as at-risk in a report). `Quorum` layers corroboration on top: it accepts a target only when two independent sub-anchors resolve and agree (exact or within a tolerance), so a coincidental match must fool both signals. `CallArgHome` is reserved for a future prologue-dataflow backend and reports `Unsupported`
+- Any backend-resolved anchor may carry an optional `validator` (`bool(*)(value, context) noexcept`) that screens the resolved value and fails the anchor closed when it returns false, letting a caller assert a domain invariant a generic backend cannot know
 - `Anchors::resolve(anchor, range?)` resolves one entry; `resolve_all(anchors, out, range?)` fills a parallel `ResolvedAnchor` report (`{label, kind, status, value}`). Resolution is idempotent and side-effect-free, so re-heal-on-miss is just re-running `resolve` on the failing anchor
 - RTTI pointer-field offset healing (`heal_landmark`) is intentionally not a registry kind: it needs a runtime struct base resolved from another anchor, so it is driven directly once that base is known
 

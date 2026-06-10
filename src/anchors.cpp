@@ -4,9 +4,11 @@
  *
  * Dispatches each anchor to the backend its kind names (reverse-RTTI vtable
  * resolve, AOB/RIP cascade, in-code constant decode, a string-literal xref
- * resolve, or a pinned literal) and
- * reports a uniform value + status, so a consumer declares every magic constant
- * once and resolves the whole table in a single pass. Every backend already
+ * resolve, or a pinned literal) and reports a uniform value + status, so a
+ * consumer declares every magic constant once and resolves the whole table in a
+ * single pass. A quorum kind layers corroboration on top, accepting a target only
+ * when two independent sub-anchors resolve and agree, and any resolved value may
+ * be screened by an optional caller-supplied validator. Every backend already
  * fails closed; this layer only maps their typed failures onto a common status.
  */
 
@@ -18,6 +20,49 @@
 
 namespace DetourModKit
 {
+    namespace
+    {
+        // Fail-closed agreement test for the two quorum signals. A negative
+        // tolerance is rejected outright: widening it through unsigned subtraction
+        // would turn -1 into a huge bound that accepts almost any gap and defeat the
+        // corroboration the quorum exists to provide.
+        [[nodiscard]] bool quorum_values_agree(std::int64_t first, std::int64_t second,
+                                               Anchors::QuorumMatch match, std::int64_t tolerance) noexcept
+        {
+            if (match == Anchors::QuorumMatch::ExactValue)
+            {
+                return first == second;
+            }
+            if (tolerance < 0)
+            {
+                return false;
+            }
+            // Order the pair so the gap is hi - lo, then widen through unsigned
+            // subtraction to avoid signed overflow across a large address span.
+            const std::int64_t lo = (first < second) ? first : second;
+            const std::int64_t hi = (first < second) ? second : first;
+            const auto gap = static_cast<std::uint64_t>(hi) - static_cast<std::uint64_t>(lo);
+            return gap <= static_cast<std::uint64_t>(tolerance);
+        }
+
+        // Commits a backend-resolved value, applying the anchor's optional
+        // fail-closed validator. On a validator miss the anchor is reported Failed
+        // with no value, identical to a backend miss, so the caller re-heals by
+        // re-running resolve.
+        void commit_resolved(const Anchors::Anchor &anchor, Anchors::ResolvedAnchor &result,
+                             std::int64_t value) noexcept
+        {
+            if (anchor.validator != nullptr && !anchor.validator(value, anchor.validator_context))
+            {
+                result.status = Anchors::AnchorStatus::Failed;
+                result.value = 0;
+                return;
+            }
+            result.value = value;
+            result.status = Anchors::AnchorStatus::Resolved;
+        }
+    } // namespace
+
     Anchors::ResolvedAnchor Anchors::resolve(const Anchor &anchor, Memory::ModuleRange range)
     {
         ResolvedAnchor result{};
@@ -33,8 +78,7 @@ namespace DetourModKit
             const auto vtable = Rtti::vtable_for_type(anchor.mangled, range);
             if (vtable)
             {
-                result.value = static_cast<std::int64_t>(*vtable);
-                result.status = AnchorStatus::Resolved;
+                commit_resolved(anchor, result, static_cast<std::int64_t>(*vtable));
             }
             else
             {
@@ -49,8 +93,7 @@ namespace DetourModKit
             const auto hit = Scanner::resolve_cascade_in_module(anchor.site, anchor.label, range);
             if (hit)
             {
-                result.value = static_cast<std::int64_t>(hit->address);
-                result.status = AnchorStatus::Resolved;
+                commit_resolved(anchor, result, static_cast<std::int64_t>(hit->address));
             }
             else
             {
@@ -68,8 +111,7 @@ namespace DetourModKit
             const auto constant = Scanner::read_code_constant(code_constant, range);
             if (constant)
             {
-                result.value = *constant;
-                result.status = AnchorStatus::Resolved;
+                commit_resolved(anchor, result, *constant);
             }
             else
             {
@@ -93,8 +135,7 @@ namespace DetourModKit
             const auto site = Scanner::find_string_xref(query, range);
             if (site)
             {
-                result.value = static_cast<std::int64_t>(*site);
-                result.status = AnchorStatus::Resolved;
+                commit_resolved(anchor, result, static_cast<std::int64_t>(*site));
             }
             else
             {
@@ -112,6 +153,41 @@ namespace DetourModKit
             // Reserved for a future prologue-dataflow backend; no resolver yet.
             result.status = AnchorStatus::Unsupported;
             break;
+        case AnchorKind::Quorum:
+        {
+            // A critical target accepts only when two independent signals corroborate.
+            // Fail closed on a malformed declaration (a missing sub-anchor, or a
+            // sub-anchor that is itself a Quorum) exactly as the single-signal
+            // backends fail closed on ambiguity; rejecting nested Quorum bounds the
+            // recursion to one level.
+            const Anchor *first = anchor.quorum_a;
+            const Anchor *second = anchor.quorum_b;
+            if (!first || !second ||
+                first->kind == AnchorKind::Quorum || second->kind == AnchorKind::Quorum)
+            {
+                result.status = AnchorStatus::Failed;
+                break;
+            }
+
+            const ResolvedAnchor resolved_first = resolve(*first, range);
+            const ResolvedAnchor resolved_second = resolve(*second, range);
+            if (resolved_first.status == AnchorStatus::Resolved &&
+                resolved_second.status == AnchorStatus::Resolved &&
+                quorum_values_agree(resolved_first.value, resolved_second.value,
+                                    anchor.quorum_match, anchor.quorum_tolerance))
+            {
+                // Both agree under the policy. Commit through the same path as the
+                // single-signal backends so the Quorum anchor's own validator runs on
+                // the corroborated value (each sub-anchor's validator already ran in
+                // its recursive resolve).
+                commit_resolved(anchor, result, resolved_first.value);
+            }
+            else
+            {
+                result.status = AnchorStatus::Failed;
+            }
+            break;
+        }
         }
 
         return result;

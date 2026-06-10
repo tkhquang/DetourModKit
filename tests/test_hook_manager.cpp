@@ -39,13 +39,13 @@ namespace
 // guarantees when storing VmtHookEntry values inside an unordered_map: any
 // container operation that selects a copy fallback for VmtHookEntry would
 // fail to compile, so guard the contract here.
-static_assert(!std::is_copy_constructible_v<VmtHookEntry>,
+static_assert(!std::is_copy_constructible_v<detail::VmtHookEntry>,
               "VmtHookEntry must remain non-copyable to preserve VmtHook ownership semantics.");
-static_assert(!std::is_copy_assignable_v<VmtHookEntry>,
+static_assert(!std::is_copy_assignable_v<detail::VmtHookEntry>,
               "VmtHookEntry must remain non-copy-assignable to preserve VmtHook ownership semantics.");
-static_assert(std::is_move_constructible_v<VmtHookEntry>,
+static_assert(std::is_move_constructible_v<detail::VmtHookEntry>,
               "VmtHookEntry must be move-constructible so it can live in standard containers.");
-static_assert(std::is_move_assignable_v<VmtHookEntry>,
+static_assert(std::is_move_assignable_v<detail::VmtHookEntry>,
               "VmtHookEntry must be move-assignable so it can live in standard containers.");
 
 // The loader-lock fallback in HookManager::~HookManager heap-allocates an

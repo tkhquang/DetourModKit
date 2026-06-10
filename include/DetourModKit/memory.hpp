@@ -202,12 +202,15 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Fastest pointer dereference with low-address validity guards only.
+         * @brief Fastest pointer dereference with user-mode range validity guards only.
          * @details Validates the source address (base + offset) before dereferencing,
-         *          then rejects result values at or below min_valid. Addresses below
-         *          0x10000 are never valid usermode pointers on Windows (null page +
-         *          guard pages), so both checks terminate stale/dangling pointer chain
-         *          traversals early without requiring an SEH frame.
+         *          then applies the same guard to the loaded value. Both the source
+         *          and the result must sit in the user-mode window
+         *          (min_valid, @ref USERSPACE_PTR_MAX): the floor rejects the null page
+         *          and guard pages (addresses below 0x10000 are never valid usermode
+         *          pointers on Windows), and the ceiling rejects kernel-range and
+         *          non-canonical addresses. Both checks terminate stale/dangling
+         *          pointer chain traversals early without requiring an SEH frame.
          *
          *          This function does NOT provide fault protection against unmapped or
          *          freed memory above min_valid. If the pointer chain may reference
@@ -216,7 +219,7 @@ namespace DetourModKit
          *
          *          The "unchecked" in the name refers to the absence of OS-level
          *          memory validation in release builds (no SEH, no VirtualQuery,
-         *          no cache lookup). Only low-address guards are applied. Intended
+         *          no cache lookup). Only user-mode range guards are applied. Intended
          *          for hot paths where the caller can guarantee structural pointer
          *          validity (e.g. game objects known to be alive this frame).
          * @note Debug builds (NDEBUG undefined) add an assert that the source is
@@ -229,13 +232,22 @@ namespace DetourModKit
          * @param offset Byte offset added to base before dereferencing.
          * @param min_valid Minimum address value to accept (default 0x10000).
          * @return The pointer-sized value at the address, or 0 if either the source
-         *         address or the dereferenced value is at or below min_valid.
+         *         address or the dereferenced value falls outside the user-mode
+         *         window (min_valid, @ref USERSPACE_PTR_MAX).
          */
         inline uintptr_t read_ptr_unchecked(uintptr_t base, ptrdiff_t offset,
                                             uintptr_t min_valid = 0x10000) noexcept
         {
             const auto src = base + static_cast<uintptr_t>(offset);
-            if (src <= min_valid)
+            // Accept the source only inside the user-mode window
+            // (min_valid, USERSPACE_PTR_MAX). The ceiling rejects kernel-range and
+            // non-canonical sources; together with the floor it also subsumes any
+            // pointer-arithmetic wraparound, because a ptrdiff_t offset is too small
+            // to carry base back into this window (a non-negative offset cannot
+            // overflow past 2^64 from a userspace base, and an underflowing negative
+            // offset lands either below min_valid or above the ceiling), so no
+            // separate wrap check is needed.
+            if (src <= min_valid || src >= USERSPACE_PTR_MAX)
                 return 0;
             // Debug-build footgun guard. In release the dereference below is a
             // bare memcpy: a stale or unmapped src faults and takes down the host.
@@ -248,7 +260,10 @@ namespace DetourModKit
                    "use seh_read_chain or read_ptr_unsafe for pointers that may not be alive");
             uintptr_t addr{0};
             std::memcpy(&addr, reinterpret_cast<const void *>(src), sizeof(addr));
-            return (addr > min_valid) ? addr : 0;
+            // Apply the same user-mode window to the loaded value so a structurally
+            // valid source that yields a kernel-range or non-canonical pointer is
+            // rejected rather than propagated to the next link of the chain.
+            return (addr > min_valid && addr < USERSPACE_PTR_MAX) ? addr : 0;
         }
 
         /**
