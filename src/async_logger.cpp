@@ -1,4 +1,5 @@
 #include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "platform.hpp"
 
 #include <algorithm>
@@ -538,6 +539,7 @@ namespace DetourModKit
             {
                 pin_current_module();
                 m_writer_thread.detach();
+                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::AsyncLogger);
             }
             else
             {

@@ -1,4 +1,5 @@
 #include "DetourModKit/logger.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
@@ -230,6 +231,7 @@ namespace DetourModKit
             auto *leaked = new (std::nothrow)
                 std::shared_ptr<AsyncLogger>(std::move(local_logger));
             static_cast<void>(leaked);
+            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
         }
 
         {
