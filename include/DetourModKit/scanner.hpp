@@ -752,7 +752,7 @@ namespace DetourModKit
             InvalidRange,       ///< @p range was not a valid mapped image.
             StringNotFound,     ///< The string bytes were not found in any readable page of the image.
             StringAmbiguous,    ///< The string occurs more than once (linker-pooled or repeated).
-            NoReference,        ///< No recognized RIP-relative load in the image resolves to the string.
+            NoReference,        ///< No recognized RIP-relative reference in the image resolves to the string.
             AmbiguousReference, ///< More than one instruction references the string.
             FunctionNotFound    ///< EnclosingFunction mode: no prologue within the back-scan window.
         };
@@ -789,8 +789,8 @@ namespace DetourModKit
          * @struct StringRefQuery
          * @brief A string-reference anchor query.
          * @details Anchors a target on an immutable string literal in the image's
-         *          read-only data, then resolves the unique RIP-relative load that
-         *          references it. Strings survive game updates far better than the
+         *          read-only data, then resolves the unique RIP-relative reference
+         *          to it. Strings survive game updates far better than the
          *          code bytes around them, so a string xref is the most
          *          update-resilient anchor source. @ref text is a non-owning view
          *          into caller storage (a static table), matching the
@@ -800,10 +800,27 @@ namespace DetourModKit
         {
             std::string_view text;                          ///< Literal content (no quotes).
             StringEncoding encoding = StringEncoding::Utf8; ///< How it is stored in the image.
-            /// Match a trailing NUL so a prefix of a longer literal is not matched
-            /// (e.g. "Player" inside "PlayerController").
+            /**
+             * @brief Match a trailing NUL so a prefix of a longer literal is not
+             *        matched (e.g. "Player" inside "PlayerController").
+             */
             bool require_terminator = true;
+            /// Selects the exact instruction site or the enclosing function heuristic.
             XrefReturn return_mode = XrefReturn::ReferencingInstruction;
+            /**
+             * @brief Selects the phase-2 reference scan.
+             * @details false (default) runs the fast, desync-immune all-offset
+             *          shape scan that recognizes only the REX.W
+             *          `lea`/`mov reg, [rip+disp32]` forms. true keeps that scan
+             *          and also runs a Zydis-verified linear sweep that recognizes
+             *          the rarer RIP-relative reference shapes
+             *          (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea`/`mov`,
+             *          ...), at the cost of a full decode per instruction. Both
+             *          scans apply the same exact-target and single-reference
+             *          uniqueness guards, so broad mode adds coverage without
+             *          relaxing fail-closed behaviour.
+             */
+            bool broad_match = false;
         };
 
         /**
@@ -813,9 +830,9 @@ namespace DetourModKit
          *          StringNotFound, more than one -> StringAmbiguous; the linker
          *          pools identical literals, so a non-unique string is genuinely
          *          ambiguous). Phase 2 scans the image's execute-readable pages for
-         *          the single RIP-relative load whose resolved absolute target is
-         *          that string (zero -> NoReference, more than one ->
-         *          AmbiguousReference). A load counts only when its resolved
+         *          the single RIP-relative reference whose resolved absolute target
+         *          is that string (zero -> NoReference, more than one ->
+         *          AmbiguousReference). A reference counts only when its resolved
          *          target exactly equals the located string address, which is
          *          itself a plausible in-image pointer, so the equality subsumes
          *          the @ref Memory::plausible_userspace_ptr floor that
@@ -826,13 +843,21 @@ namespace DetourModKit
          * @param range Module image to search. Defaults to the host EXE.
          * @return The referencing instruction (or enclosing function) address, or a
          *         StringXrefError.
-         * @note v1 recognizes the dominant 64-bit string-load forms: REX.W
-         *       `lea`/`mov reg, [rip+disp32]` (opcodes 8D / 8B with a RIP ModRM).
-         *       Other reference shapes (cmp/push/indirect call through a pointer)
-         *       are not matched and report NoReference.
+         * @note By default phase 2 recognizes the dominant 64-bit string-load
+         *       forms: REX.W `lea`/`mov reg, [rip+disp32]` (opcodes 8D / 8B with a
+         *       RIP ModRM). Set @ref StringRefQuery::broad_match to keep that
+         *       all-offset shape scan and additionally recognize the rarer
+         *       RIP-relative shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX
+         *       `lea`/`mov`) via a Zydis-verified sweep. Either way, a shape the
+         *       active scans do not model reports NoReference rather than a guess.
          * @note Choose a string referenced exactly once (a long, specific literal
          *       such as a format or assert message); short, common strings are
          *       pooled and shared and will report StringAmbiguous / AmbiguousReference.
+         * @note StringEncoding::Utf16le widens each query character to a
+         *       little-endian 16-bit code unit by zero-extension (Latin-1), which
+         *       covers the ASCII identifiers anchor strings almost always are. A
+         *       non-ASCII character does not match its true UTF-16 encoding and
+         *       reports StringNotFound.
          * @warning XrefReturn::EnclosingFunction is a bounded heuristic prologue
          *          back-scan, not control-flow analysis; prefer the default
          *          ReferencingInstruction when an exact site is acceptable.

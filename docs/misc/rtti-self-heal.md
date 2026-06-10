@@ -188,3 +188,9 @@ A drift report is the signal that a patch moved a layout. When it shows a field 
 ## Relation to the walker
 
 The walker runs vtable -> name; this module runs slot -> object -> name and adds the offset-recovery policy on top. Both share the same `resolve_col_site` prelude internally, so the two compose into one fail-closed resilience story: resolve the struct base via a module-scoped `Scanner::resolve_cascade`, then heal field offsets inside it via `heal_landmark` -- one contract across both code-address and data-layout drift.
+
+## Prior art and acknowledgements
+
+The reverse-direction design here -- identifying an object from its vtable, RTTI-labelling a block of pointer slots (`reverse_scan_block`), and the `COL.offset` handling for multiple-inheritance secondary subobjects -- was inspired by the **CERTTIExplorer** Cheat Engine script in [Frans Bouma](https://github.com/FransBouma)'s (Otis_Inf) [InjectableGenericCameraSystem](https://github.com/FransBouma/InjectableGenericCameraSystem/tree/master/Tools/CERTTIExplorer) (BSD-2-Clause). That tool was originally written by [**GhostInTheCamera**](https://github.com/ghostinthecamera) from the [FramedSC RTTI guide](https://framedsc.com/GeneralGuides/using_rtti.htm) (distilled from Hatti's video), with COL-validation refinements credited to **etra**.
+
+No code was copied: this is an independent C++ reimplementation of the same MSVC RTTI techniques (a widely documented walk: COL -> TypeDescriptor -> mangled name, and its inverse). The credit is for the design ideas and for the nudge to add the block/reverse-range lookup and multiple-inheritance offset handling. Thanks to Otis for sharing the script.

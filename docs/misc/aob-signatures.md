@@ -363,7 +363,7 @@ const auto resolved = sc::find_and_resolve_rip_relative(
 When the most stable thing about a target is the text it uses, anchor on the string instead of the code. `find_string_xref` is a two-phase, fail-closed resolve scoped to one module image:
 
 1. Locate the literal in the image's readable pages (`.rdata` / `.data`). The linker pools identical strings, so a second occurrence is treated as ambiguous and the resolve fails closed (`StringAmbiguous`).
-2. Scan the image's execute-readable pages for the single RIP-relative load whose resolved absolute target is that string, and return it. Zero references is `NoReference`; more than one is `AmbiguousReference`.
+2. Scan the image's execute-readable pages for the single RIP-relative reference whose resolved absolute target is that string, and return it. Zero references is `NoReference`; more than one is `AmbiguousReference`.
 
 ```cpp
 namespace sc = DetourModKit::Scanner;
@@ -373,6 +373,7 @@ sc::StringRefQuery query{
     .encoding = sc::StringEncoding::Utf8,             // Utf16le for L"" / wchar_t literals
     .require_terminator = true,                       // do not match a prefix of a longer string
     .return_mode = sc::XrefReturn::ReferencingInstruction,
+    .broad_match = false,                             // true keeps lea/mov scan and adds cmp/push/no-REX
 };
 
 const auto site = sc::find_string_xref(query); // defaults to the host EXE range
@@ -389,7 +390,12 @@ if (!site)
 
 Why anchor on a string: a game patch reshuffles code bytes (breaking AOBs) and reorders globals, but a format string or assert message almost never changes. The reference is RIP-relative and resolved against the live image, so the result is ASLR-correct with no fixed address baked in.
 
-Recognized forms and limits (v1): the dominant 64-bit string loads, `REX.W lea`/`mov reg, [rip+disp32]` (opcodes `8D` / `8B` with a RIP-relative ModRM). Other reference shapes (`cmp [rip+d], imm`, indirect `call`/`jmp` through a pointer to the string) are not matched and report `NoReference`. Choose a string that is referenced exactly once; short, common strings are pooled and shared. This backend is also exposed declaratively as `AnchorKind::StringXref` in the [anchor registry](anchors.md).
+Recognized forms. Phase 2 has two modes, both gated by the same exact-target and single-reference uniqueness guards:
+
+- Default (`broad_match = false`): a shape scan for the dominant 64-bit string loads, `REX.W lea`/`mov reg, [rip+disp32]` (opcodes `8D` / `8B` with a RIP-relative ModRM). These instructions are self-delimiting from their byte shape, so the scan needs no instruction alignment and cannot desync on data or jump tables embedded in `.text`. This is the fast, robust default.
+- `broad_match = true`: keeps the default all-offset shape scan, then adds a Zydis-verified linear sweep that decodes the instruction stream and matches any RIP-relative memory operand resolving to the string. This additionally catches the rarer shapes the shape scan does not model -- `cmp [rip+d], imm`, `push [rip+d]`, a 32-bit (no-REX) `lea`/`mov`, and similar. The sweep restarts at the next byte on a decode failure to realign past embedded data, and any hit already found by the default scan is counted only once. Prefer broad mode only when the default reports `NoReference` for a target you know is referenced, since it does extra decode work.
+
+A shape the active mode does not model reports `NoReference` rather than a guess. One shape is out of scope for both modes: an indirect `call`/`jmp` through a `.data` pointer that itself holds the string address (a two-level indirection rather than a direct RIP reference to the string). Choose a string that is referenced exactly once; short, common strings are pooled and shared. This backend is also exposed declaratively as `AnchorKind::StringXref` in the [anchor registry](anchors.md).
 
 ## 6. Cascading candidates
 

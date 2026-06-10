@@ -91,6 +91,7 @@ namespace DetourModKit
             Scanner::XrefReturn xref_return =
                 Scanner::XrefReturn::ReferencingInstruction; ///< StringXref: instruction vs function.
             bool xref_require_terminator = true;     ///< StringXref: match a trailing NUL.
+            bool xref_broad_match = false;           ///< StringXref: keep lea/mov scan and add Zydis rarer shapes.
 
             std::int64_t manual_value = 0;           ///< Manual: the pinned literal.
         };
