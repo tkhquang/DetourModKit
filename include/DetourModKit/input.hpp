@@ -544,8 +544,9 @@ namespace DetourModKit
         /**
          * @brief Starts the input polling thread with all registered bindings.
          * @details Constructs an internal InputPoller with the current bindings
-         *          and begins monitoring. Subsequent register calls are ignored
-         *          until the poller is stopped and bindings are cleared.
+         *          and begins monitoring. Registrations made after start() are
+         *          forwarded live to the active poller and take effect on the next
+         *          poll cycle; no stop or restart is required.
          * @param poll_interval Time between polling cycles.
          */
         void start(std::chrono::milliseconds poll_interval = DEFAULT_POLL_INTERVAL);

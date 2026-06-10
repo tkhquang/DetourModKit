@@ -30,7 +30,11 @@ namespace DetourModKit
      *          kind: it needs a runtime struct base resolved from another anchor,
      *          so it is driven directly once that base is known. @ref AnchorKind::CallArgHome
      *          is reserved for a future prologue-dataflow backend and is not yet
-     *          resolvable.
+     *          resolvable. @ref AnchorKind::Quorum layers corroboration over those
+     *          single-signal backends: it accepts a target only when two independent
+     *          sub-anchors resolve and agree. Any backend-resolved anchor may also
+     *          carry an optional @ref AnchorValidator that screens the resolved value
+     *          and can reject it (fail closed).
      *
      *          Re-heal on a validation miss is the caller's loop: a resolved value
      *          is cached in the returned @ref ResolvedAnchor, and when a later
@@ -50,7 +54,18 @@ namespace DetourModKit
             CodeOperand,    ///< Scanner::read_code_constant -> an in-code immediate/displacement value.
             StringXref,     ///< Scanner::find_string_xref -> the instruction (or function) referencing a string literal.
             Manual,         ///< A pinned literal; surfaced as at-risk in a report.
-            CallArgHome     ///< Reserved for a future prologue-dataflow backend; not yet resolvable.
+            CallArgHome,    ///< Reserved for a future prologue-dataflow backend; not yet resolvable.
+            Quorum          ///< Two independent sub-anchors that must resolve and agree before acceptance.
+        };
+
+        /**
+         * @enum QuorumMatch
+         * @brief How an @ref AnchorKind::Quorum decides its two signals agree.
+         */
+        enum class QuorumMatch : std::uint8_t
+        {
+            ExactValue,     ///< Both sub-anchors must resolve to the identical value.
+            WithinTolerance ///< Resolved values may differ by at most @ref Anchor::quorum_tolerance.
         };
 
         /**
@@ -64,6 +79,24 @@ namespace DetourModKit
             Failed,      ///< The backend failed (fail closed: no value).
             Unsupported  ///< The kind has no backend yet (CallArgHome).
         };
+
+        /**
+         * @brief Optional caller-supplied post-resolve predicate.
+         * @details Invoked after a backend resolves an anchor, with the resolved
+         *          value interpreted exactly as @ref ResolvedAnchor::value for the
+         *          anchor's @ref AnchorKind (a vtable/global address, a code constant,
+         *          or a string-xref site). Returning false fails the anchor closed:
+         *          @ref resolve reports @ref AnchorStatus::Failed and resets the value
+         *          to 0, identical to a backend miss, so a caller re-heals by
+         *          re-running @ref resolve.
+         * @param value The backend-resolved value (per-kind, as @ref ResolvedAnchor::value).
+         * @param context The opaque @ref Anchor::validator_context pointer, verbatim.
+         * @return true to accept the resolution; false to reject it (fail closed).
+         * @note Must be noexcept; it runs on the side-effect-free resolution path and
+         *       may be re-run on a validation miss. Not invoked for
+         *       @ref AnchorKind::Manual or @ref AnchorKind::CallArgHome.
+         */
+        using AnchorValidator = bool (*)(std::int64_t value, const void *context) noexcept;
 
         /**
          * @struct Anchor
@@ -94,6 +127,28 @@ namespace DetourModKit
             bool xref_broad_match = false;           ///< StringXref: keep lea/mov scan and add Zydis rarer shapes.
 
             std::int64_t manual_value = 0;           ///< Manual: the pinned literal.
+
+            /**
+             * @brief Optional fail-closed post-resolve check. nullptr (default)
+             *        accepts whatever the backend resolves, preserving the unguarded
+             *        behaviour.
+             * @details Example domain checks a caller can wire here: the target lies
+             *          in an expected sub-range, a displacement points into .rdata, or
+             *          the byte at the site is a plausible prologue
+             *          (@ref Scanner::is_likely_function_prologue). Not invoked for
+             *          @ref AnchorKind::Manual or @ref AnchorKind::CallArgHome, whose
+             *          statuses are fixed by definition. For @ref AnchorKind::Quorum it
+             *          runs once on the corroborated value after both sub-anchors agree.
+             */
+            AnchorValidator validator = nullptr;
+
+            /// Opaque pointer passed verbatim to @ref validator; nullptr if unused.
+            const void *validator_context = nullptr;
+
+            const Anchor *quorum_a = nullptr;        ///< Quorum: first independent sub-anchor (non-owning).
+            const Anchor *quorum_b = nullptr;        ///< Quorum: second independent sub-anchor (non-owning).
+            QuorumMatch quorum_match = QuorumMatch::ExactValue; ///< Quorum: how the two values must agree.
+            std::int64_t quorum_tolerance = 0;       ///< Quorum: max |first - second| when WithinTolerance.
         };
 
         /**
@@ -118,8 +173,15 @@ namespace DetourModKit
          * @details Dispatches to the backend for @c anchor.kind and maps its typed
          *          failure to @ref AnchorStatus::Failed. @ref AnchorKind::Manual
          *          always resolves to its literal; @ref AnchorKind::CallArgHome
-         *          always reports @ref AnchorStatus::Unsupported. Idempotent: call
-         *          again to re-resolve after a validation miss.
+         *          always reports @ref AnchorStatus::Unsupported. A backend-resolved
+         *          value is passed through @c anchor.validator (when set) and fails
+         *          closed if the validator rejects it. Idempotent: call again to
+         *          re-resolve after a validation miss.
+         * @note @ref AnchorKind::Quorum resolves its two sub-anchors through this same
+         *       function and accepts only when both resolve and agree under
+         *       @ref Anchor::quorum_match; a null sub-anchor, a sub-anchor that is
+         *       itself a @ref AnchorKind::Quorum (nesting is not allowed), or a
+         *       disagreement fails closed. Recursion is bounded to one level.
          * @param anchor The anchor declaration.
          * @param range Module image to resolve in. Defaults to the host EXE.
          * @return The resolved value and status.

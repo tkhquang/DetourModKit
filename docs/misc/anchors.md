@@ -14,10 +14,36 @@ The registry unifies the self-healing backends that resolve from a module range 
 | `StringXref` | `Scanner::find_string_xref` | The instruction (or enclosing function) that references an immutable string literal |
 | `Manual` | none (pinned literal) | The literal, flagged as at-risk in a report |
 | `CallArgHome` | reserved | Not yet resolvable (reports `Unsupported`) |
+| `Quorum` | two sub-anchors via `resolve` | The corroborated value, accepted only when both independent signals resolve and agree |
 
 A `StringXref` anchor is the most update-resilient kind: it locates an immutable string literal in the image's read-only data and resolves the unique RIP-relative `lea` / `mov` that references it, returning that instruction (or, with `xref_return = XrefReturn::EnclosingFunction`, a best-effort prologue back-scan to the function that uses it). Strings survive game patches far better than the code bytes around them. It fails closed on a missing, duplicated (linker-pooled), or unreferenced string, so pick a long, specific literal that occurs and is referenced exactly once. Set `xref_encoding = StringEncoding::Utf16le` for `wchar_t` literals; `xref_require_terminator` (default true) keeps a prefix of a longer literal from matching ("Player" inside "PlayerController"). `xref_broad_match` (default false) selects the phase-2 reference scan: the default shape scan matches only `REX.W lea` / `mov reg, [rip+disp32]`, while `xref_broad_match = true` keeps that scan and adds a Zydis-verified sweep for rarer shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea` / `mov`). Reach for it only when the default reports a miss for a string you know is referenced. See [String-reference anchors](aob-signatures.md) for the full two-mode model.
 
 `CallArgHome` is a reserved enumerator for a future prologue-dataflow backend (mapping a call argument to its current register or stack home); declaring it now keeps a registry table forward-compatible.
+
+### Corroborating a critical target (`Quorum`)
+
+For a target whose breakage would be costly, a single signal can be too weak: one AOB or code constant might resolve to a coincidental match after a patch. A `Quorum` anchor requires two independent sub-anchors to resolve *and agree* before it accepts a value, so a coincidental match has to fool both signals at once. Point `quorum_a` and `quorum_b` at two sub-anchors of any resolvable kind (the canonical pair is a `StringXref` plus a `CodeOperand`) and pick the agreement policy:
+
+```cpp
+// Corroborate a struct stride: two independent code sites must agree on it.
+const an::Anchor stride_code = {.kind = an::AnchorKind::CodeOperand,
+                                .site = k_equip_stride, .operand_index = 1};
+const an::Anchor stride_alt = {.kind = an::AnchorKind::CodeOperand,
+                               .site = k_equip_stride_alt, .operand_index = 1};
+const an::Anchor stride = {
+    .label = "equip_stride",
+    .kind = an::AnchorKind::Quorum,
+    .quorum_a = &stride_code,
+    .quorum_b = &stride_alt,
+    .quorum_match = an::QuorumMatch::ExactValue, // or WithinTolerance + quorum_tolerance
+};
+```
+
+`quorum_a` / `quorum_b` are non-owning pointers into your own anchor storage, so keep the sub-anchors alive across the `resolve` call. `QuorumMatch::ExactValue` (the default) requires the two resolved values to be identical; `QuorumMatch::WithinTolerance` accepts a gap of at most `quorum_tolerance` (a negative tolerance fails closed, never accepts). On success `value` carries the first sub-anchor's value, which by construction equals the second under the policy. It fails closed -- to `AnchorStatus::Failed` -- when either signal fails, the two disagree, a sub-anchor pointer is null, or a sub-anchor is itself a `Quorum` (nesting is bounded to one level).
+
+### Post-resolve validators
+
+Any backend-resolved anchor (not `Manual` or `CallArgHome`) may carry an optional `validator`: a `bool(*)(std::int64_t value, const void* context) noexcept` predicate run on the resolved value just before it is accepted. Returning `false` fails the anchor closed (`Failed`, value reset to 0), identical to a backend miss, so the caller re-heals by re-running `resolve`. Use it to assert a domain invariant a generic backend cannot know -- the target lies in an expected sub-range, a displacement points into `.rdata`, or the site begins with a plausible prologue (`Scanner::is_likely_function_prologue`). `validator_context` is an opaque pointer forwarded verbatim to the predicate (nullptr if unused). For a `Quorum`, the validator runs once on the corroborated value after both sub-anchors agree.
 
 RTTI pointer-field offset healing (`Rtti::heal_landmark`) is intentionally **not** a registry kind: it needs a runtime struct base that is itself resolved from another anchor, so it is driven directly once that base is known (see [rtti-self-heal.md](rtti-self-heal.md)).
 

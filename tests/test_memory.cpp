@@ -1595,6 +1595,50 @@ TEST_F(MemoryTest, ReadPtrUnchecked_ValidSourceValidResult)
     EXPECT_EQ(result, high_value);
 }
 
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsKernelRangeSource)
+{
+    // A kernel-range source is rejected by the upper-bound guard before any
+    // dereference (early return), so this is safe to call with a non-readable base.
+    const uintptr_t base = 0xFFFF800000000000ULL;
+    EXPECT_EQ(Memory::read_ptr_unchecked(base, 0), 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsSourceAtCeiling)
+{
+    // USERSPACE_PTR_MAX is the first non-canonical address; the window is half-open,
+    // so a source exactly at the ceiling is rejected (also before any dereference).
+    EXPECT_EQ(Memory::read_ptr_unchecked(Memory::USERSPACE_PTR_MAX, 0), 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsSourceOffsetCrossingCeiling)
+{
+    // A positive offset that carries the source up to the ceiling is rejected; this
+    // is also how the range guard subsumes pointer-arithmetic wraparound.
+    const uintptr_t base = Memory::USERSPACE_PTR_MAX - 0x100;
+    EXPECT_EQ(Memory::read_ptr_unchecked(base, 0x100), 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsKernelRangeResult)
+{
+    // A structurally valid source that yields a kernel-range pointer must not be
+    // propagated down the chain; the result guard rejects it like the source guard.
+    uintptr_t kernel_value = 0xFFFF800000000000ULL;
+    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&kernel_value), 0), 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnchecked_RejectsResultAtCeiling)
+{
+    uintptr_t ceiling_value = Memory::USERSPACE_PTR_MAX;
+    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&ceiling_value), 0), 0u);
+}
+
+TEST_F(MemoryTest, ReadPtrUnchecked_AcceptsResultJustBelowCeiling)
+{
+    uintptr_t high_value = Memory::USERSPACE_PTR_MAX - 1;
+    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&high_value), 0);
+    EXPECT_EQ(result, high_value);
+}
+
 TEST_F(MemoryTest, InvalidateRange_WraparoundAddress)
 {
     uintptr_t near_max = UINTPTR_MAX - 0x10;

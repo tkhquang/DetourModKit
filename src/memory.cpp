@@ -1253,13 +1253,22 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
 
     memcpy(reinterpret_cast<void *>(target_address), reinterpret_cast<const void *>(source_bytes), num_bytes);
 
+    // The bytes are now modified. The instruction-cache flush and the DMK
+    // cache-range invalidation must run on every path from here -- they are
+    // promised unconditionally, and skipping them after a write would leave stale
+    // cached state for bytes that have already changed. Restore the original page
+    // protection first so its outcome can be reported, but keep that out of an
+    // early return: the cleanup below is a single unconditional block, so the
+    // restore-failure path runs exactly the same maintenance as the success path
+    // by construction and cannot diverge.
     DWORD temp_old_protect;
-    if (!VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes, old_protection_flags, &temp_old_protect))
+    const bool restore_succeeded =
+        VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes, old_protection_flags, &temp_old_protect) != FALSE;
+    if (!restore_succeeded)
     {
         logger.error("write_bytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
                      DetourModKit::Format::format_hex(static_cast<int>(old_protection_flags)),
                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
-        return std::unexpected(MemoryError::ProtectionRestoreFailed);
     }
 
     if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(target_address), num_bytes))
@@ -1269,6 +1278,12 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
     }
 
     Memory::invalidate_range(target_address, num_bytes);
+
+    // Surface the restore failure only after cache maintenance has run.
+    if (!restore_succeeded)
+    {
+        return std::unexpected(MemoryError::ProtectionRestoreFailed);
+    }
 
     logger.debug("write_bytes: Successfully wrote {} bytes to address {}.",
                  num_bytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)));

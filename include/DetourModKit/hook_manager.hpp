@@ -347,64 +347,96 @@ namespace DetourModKit
         safetyhook::MidHook m_safetyhook_impl;
     };
 
-    /**
-     * @class VmtHookEntry
-     * @brief Manages a VMT hook for a single object class, wrapping SafetyHook's VmtHook.
-     * @details Owns the cloned vtable and tracks individual method hooks by vtable index.
-     *          VMT hooks operate at the object level by replacing the vptr with a cloned
-     *          vtable. Individual methods are hooked by index within the cloned table.
-     *          Does not support enable/disable toggling (SafetyHook VmHook limitation).
-     */
-    class VmtHookEntry
-    {
-    public:
-        VmtHookEntry(std::string name, safetyhook::VmtHook vmt_hook)
-            : m_name(std::move(name)), m_vmt_hook(std::move(vmt_hook)) {}
-
-        const std::string &get_name() const noexcept { return m_name; }
-
-        safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
-        const safetyhook::VmtHook &vmt_hook() const noexcept { return m_vmt_hook; }
-
-        [[nodiscard]] bool has_method_hook(size_t index) const noexcept { return m_method_hooks.find(index) != m_method_hooks.end(); }
-
-        safetyhook::VmHook *get_method_hook(size_t index)
-        {
-            auto it = m_method_hooks.find(index);
-            return it != m_method_hooks.end() ? &it->second : nullptr;
-        }
-
-        const safetyhook::VmHook *get_method_hook(size_t index) const
-        {
-            auto it = m_method_hooks.find(index);
-            return it != m_method_hooks.end() ? &it->second : nullptr;
-        }
-
-        void add_method_hook(size_t index, safetyhook::VmHook hook)
-        {
-            m_method_hooks.emplace(index, std::move(hook));
-        }
-
-        bool remove_method_hook(size_t index)
-        {
-            return m_method_hooks.erase(index) > 0;
-        }
-
-        size_t method_hook_count() const noexcept { return m_method_hooks.size(); }
-
-        VmtHookEntry(const VmtHookEntry &) = delete;
-        VmtHookEntry &operator=(const VmtHookEntry &) = delete;
-        VmtHookEntry(VmtHookEntry &&) = default;
-        VmtHookEntry &operator=(VmtHookEntry &&) = default;
-
-    private:
-        std::string m_name;
-        safetyhook::VmtHook m_vmt_hook;
-        std::unordered_map<size_t, safetyhook::VmHook> m_method_hooks;
-    };
-
     namespace detail
     {
+        /**
+         * @class VmtHookEntry
+         * @brief Manages a VMT hook for a single object class, wrapping SafetyHook's VmtHook.
+         * @details Owns the cloned vtable and tracks individual method hooks by vtable index.
+         *          VMT hooks operate at the object level by replacing the vptr with a cloned
+         *          vtable. Individual methods are hooked by index within the cloned table.
+         *          Does not support enable/disable toggling (SafetyHook VmHook limitation).
+         *          Internal: held only inside @ref VmtHookMap and not part of the public API.
+         */
+        class VmtHookEntry
+        {
+        public:
+            /**
+             * @brief Constructs an entry that takes ownership of a SafetyHook VMT hook.
+             * @param name The registered hook name.
+             * @param vmt_hook The VMT hook to own.
+             */
+            VmtHookEntry(std::string name, safetyhook::VmtHook vmt_hook)
+                : m_name(std::move(name)), m_vmt_hook(std::move(vmt_hook)) {}
+
+            /// Returns the registered hook name.
+            const std::string &get_name() const noexcept { return m_name; }
+
+            /// Returns the underlying SafetyHook VMT hook (mutable).
+            safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
+
+            /// Returns the underlying SafetyHook VMT hook.
+            const safetyhook::VmtHook &vmt_hook() const noexcept { return m_vmt_hook; }
+
+            /// Returns true if a method at the given vtable index is hooked.
+            [[nodiscard]] bool has_method_hook(size_t index) const noexcept { return m_method_hooks.find(index) != m_method_hooks.end(); }
+
+            /**
+             * @brief Returns the method hook installed at a vtable index.
+             * @param index The vtable index to look up.
+             * @return Pointer to the method hook, or nullptr if none is installed.
+             */
+            safetyhook::VmHook *get_method_hook(size_t index)
+            {
+                auto it = m_method_hooks.find(index);
+                return it != m_method_hooks.end() ? &it->second : nullptr;
+            }
+
+            /**
+             * @brief Returns the method hook installed at a vtable index.
+             * @param index The vtable index to look up.
+             * @return Pointer to the method hook, or nullptr if none is installed.
+             */
+            const safetyhook::VmHook *get_method_hook(size_t index) const
+            {
+                auto it = m_method_hooks.find(index);
+                return it != m_method_hooks.end() ? &it->second : nullptr;
+            }
+
+            /**
+             * @brief Installs a method hook at a vtable index.
+             * @param index The vtable index being hooked.
+             * @param hook The method hook to own.
+             */
+            void add_method_hook(size_t index, safetyhook::VmHook hook)
+            {
+                m_method_hooks.emplace(index, std::move(hook));
+            }
+
+            /**
+             * @brief Removes the method hook at a vtable index.
+             * @param index The vtable index to clear.
+             * @return true if a hook was removed, false if none was installed.
+             */
+            [[nodiscard]] bool remove_method_hook(size_t index)
+            {
+                return m_method_hooks.erase(index) > 0;
+            }
+
+            /// Returns the number of installed method hooks.
+            size_t method_hook_count() const noexcept { return m_method_hooks.size(); }
+
+            VmtHookEntry(const VmtHookEntry &) = delete;
+            VmtHookEntry &operator=(const VmtHookEntry &) = delete;
+            VmtHookEntry(VmtHookEntry &&) = default;
+            VmtHookEntry &operator=(VmtHookEntry &&) = default;
+
+        private:
+            std::string m_name;
+            safetyhook::VmtHook m_vmt_hook;
+            std::unordered_map<size_t, safetyhook::VmHook> m_method_hooks;
+        };
+
         /**
          * @brief Container type for the inline / mid hook registry, keyed by hook name.
          * @details Centralized once so every site that references this exact instantiation sees identical template arguments.
