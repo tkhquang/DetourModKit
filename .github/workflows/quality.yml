@@ -10,9 +10,10 @@ permissions:
   contents: read
 
 # Both jobs are advisory and non-blocking. clang-format stays red until a planned
-# repo-wide reformat. The sanitizer job runs under the MSYS2 CLANG64 toolchain,
-# whose compiler-rt ships the ASan/UBSan runtimes (mingw-w64 GCC does not, so the
-# preset uses clang there). The blocking gate (build, tests, coverage) lives in
+# repo-wide reformat. The sanitizer job uses MSVC AddressSanitizer -- the only
+# sanitizer that works on Windows (GCC and Clang on mingw-w64 ship no ASan/UBSan
+# runtime for the Windows target, so the build links only under MSVC, and ASan is
+# the only sanitizer there). The blocking gate (build, tests, coverage) lives in
 # pr-check.yml and is untouched here.
 
 jobs:
@@ -38,12 +39,9 @@ jobs:
         shell: bash
 
   sanitizers:
-    name: ASan + UBSan probe (advisory)
+    name: AddressSanitizer probe (MSVC, advisory)
     runs-on: windows-latest
     continue-on-error: true
-    defaults:
-      run:
-        shell: msys2 {0}
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -51,21 +49,19 @@ jobs:
           submodules: "recursive"
           persist-credentials: false
 
-      - name: Set up MSYS2 CLANG64 toolchain (compiler-rt ships ASan/UBSan)
-        uses: msys2/setup-msys2@v2
+      - name: Set up MSVC (x64) -- puts cl and the ASan runtime on PATH
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
-          msystem: CLANG64
-          install: >-
-            mingw-w64-clang-x86_64-clang
-            mingw-w64-clang-x86_64-compiler-rt
-            mingw-w64-clang-x86_64-cmake
-            mingw-w64-clang-x86_64-ninja
+          arch: x64
 
-      - name: Configure (Clang Debug + Sanitizers)
-        run: cmake --preset clang-debug-asan
+      - name: Configure (MSVC Debug + ASan)
+        run: cmake --preset msvc-debug-asan
+        shell: pwsh
 
       - name: Build
-        run: cmake --build --preset clang-debug-asan --parallel
+        run: cmake --build --preset msvc-debug-asan --parallel
+        shell: pwsh
 
-      - name: Run tests under sanitizers
-        run: ctest --preset clang-debug-asan
+      - name: Run tests under ASan
+        run: ctest --preset msvc-debug-asan --output-on-failure
+        shell: pwsh
