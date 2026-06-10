@@ -10,7 +10,9 @@
 #include <chrono>
 #include <latch>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <vector>
 #include <windows.h>
 
 #include "DetourModKit/hook_manager.hpp"
@@ -488,6 +490,81 @@ TEST_F(HookManagerTest, RealInlineHook_EnableDisable)
 
     EXPECT_TRUE(hook_manager_->enable_hook("RealEnDisHook").has_value());
     EXPECT_EQ(*hook_manager_->get_hook_status("RealEnDisHook"), HookStatus::Active);
+}
+
+// Creates two real inline hooks on the two distinct test targets; returns their
+// ids. Each TEST_F gets a fresh manager (SetUp/TearDown call remove_all_hooks).
+static std::vector<std::string> make_two_real_hooks(HookManager &manager)
+{
+    void *tramp_add = nullptr;
+    void *tramp_mul = nullptr;
+    EXPECT_TRUE(manager.create_inline_hook("BatchHookAdd",
+                                           reinterpret_cast<uintptr_t>(&real_hook_target_add),
+                                           reinterpret_cast<void *>(&real_hook_detour_add), &tramp_add)
+                    .has_value());
+    EXPECT_TRUE(manager.create_inline_hook("BatchHookMul",
+                                           reinterpret_cast<uintptr_t>(&real_hook_target_mul),
+                                           reinterpret_cast<void *>(&real_hook_detour_mul), &tramp_mul)
+                    .has_value());
+    return {"BatchHookAdd", "BatchHookMul"};
+}
+
+TEST_F(HookManagerTest, BatchDisableThenEnable_RealHooks)
+{
+    const auto ids = make_two_real_hooks(*hook_manager_);
+    const std::vector<std::string_view> id_views{ids[0], ids[1]};
+
+    EXPECT_EQ(hook_manager_->disable_hooks(id_views), 2u);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookAdd"), HookStatus::Disabled);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookMul"), HookStatus::Disabled);
+
+    EXPECT_EQ(hook_manager_->enable_hooks(id_views), 2u);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookAdd"), HookStatus::Active);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookMul"), HookStatus::Active);
+}
+
+TEST_F(HookManagerTest, BatchToggle_SkipsUnknownIds)
+{
+    const auto ids = make_two_real_hooks(*hook_manager_);
+    // One real id plus one that does not exist: only the real one counts.
+    const std::vector<std::string_view> mixed{ids[0], "NoSuchHook"};
+
+    EXPECT_EQ(hook_manager_->disable_hooks(mixed), 1u);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookAdd"), HookStatus::Disabled);
+    // The other real hook was not in the batch, so it stays active.
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookMul"), HookStatus::Active);
+}
+
+TEST_F(HookManagerTest, BatchToggle_IsIdempotent)
+{
+    const auto ids = make_two_real_hooks(*hook_manager_);
+    const std::vector<std::string_view> id_views{ids[0], ids[1]};
+
+    EXPECT_EQ(hook_manager_->disable_hooks(id_views), 2u);
+    // Disabling again is a success per hook (disable is idempotent).
+    EXPECT_EQ(hook_manager_->disable_hooks(id_views), 2u);
+}
+
+TEST_F(HookManagerTest, EnableAllAndDisableAll_RealHooks)
+{
+    make_two_real_hooks(*hook_manager_);
+
+    EXPECT_EQ(hook_manager_->disable_all_hooks(), 2u);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookAdd"), HookStatus::Disabled);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookMul"), HookStatus::Disabled);
+
+    EXPECT_EQ(hook_manager_->enable_all_hooks(), 2u);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookAdd"), HookStatus::Active);
+    EXPECT_EQ(*hook_manager_->get_hook_status("BatchHookMul"), HookStatus::Active);
+}
+
+TEST_F(HookManagerTest, BatchToggle_EmptyInputs)
+{
+    // No hooks and an empty span: both batch entry points report zero work.
+    const std::vector<std::string_view> empty;
+    EXPECT_EQ(hook_manager_->enable_hooks(empty), 0u);
+    EXPECT_EQ(hook_manager_->enable_all_hooks(), 0u);
+    EXPECT_EQ(hook_manager_->disable_all_hooks(), 0u);
 }
 
 TEST_F(HookManagerTest, RealInlineHook_Remove)
