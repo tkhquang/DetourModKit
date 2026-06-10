@@ -89,6 +89,7 @@ namespace DetourModKit
             query.encoding = anchor.xref_encoding;
             query.require_terminator = anchor.xref_require_terminator;
             query.return_mode = anchor.xref_return;
+            query.broad_match = anchor.xref_broad_match;
             const auto site = Scanner::find_string_xref(query, range);
             if (site)
             {

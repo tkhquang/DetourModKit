@@ -3,22 +3,25 @@
 
 /**
  * @file scanner_internal.hpp
- * @brief Shared module-scoped scan primitives for the scanner.cpp and
- *        scanner_cascade.cpp TUs.
+ * @brief Shared module-scoped scan primitives for the scanner.cpp,
+ *        scanner_cascade.cpp, and string_xref.cpp TUs.
  *
- * The cascade resolver lives in its own translation unit but still needs to
- * search a single mapped image. These two entry points expose that capability
- * without leaking the Windows page-protection masks: the mask choice (code-only
- * vs. all-readable pages) is encoded in the function name and kept private to
- * scanner.cpp, where scan_regions_filtered and the PAGE_* constants live. The
- * declarations are internal to the build and are NOT part of the installed
- * public surface.
+ * The cascade resolver and the string-xref backend each live in their own
+ * translation unit but still need to search a single mapped image. These entry
+ * points expose that capability without leaking the Windows page-protection
+ * masks: the scan_module_* mask choice (code-only vs. all-readable pages) is
+ * encoded in the function name, and collect_executable_windows centralizes the
+ * executable-page gate, so scan_regions_filtered and the PAGE_* constants stay
+ * private to scanner.cpp. The declarations are internal to the build and are
+ * NOT part of the installed public surface.
  */
 
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/memory.hpp"
 
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 namespace DetourModKit
 {
@@ -51,6 +54,39 @@ namespace DetourModKit
             [[nodiscard]] const std::byte *scan_module_readable(
                 const CompiledPattern &pattern, Memory::ModuleRange range,
                 std::size_t occurrence = 1) noexcept;
+
+            /**
+             * @struct ExecutableWindow
+             * @brief One committed, execute-readable slice of a module image.
+             * @details @ref base / @ref span describe live, directly-readable
+             *          bytes: the region passed the same VirtualQuery protection
+             *          gate the whole-process scanners apply (MEM_COMMIT, an
+             *          execute-readable base protection, not PAGE_GUARD /
+             *          PAGE_NOACCESS), so a caller may read [base, base + span)
+             *          without a fault guard, exactly as scan_regions_filtered does.
+             */
+            struct ExecutableWindow
+            {
+                std::uintptr_t base = 0; ///< Absolute address of the first readable byte.
+                std::size_t span = 0;    ///< Window length in bytes.
+            };
+
+            /**
+             * @brief Collects the execute-readable windows of a module image.
+             * @details Walks [range.base, range.end) via VirtualQuery and returns
+             *          each committed, execute-readable region clamped to that
+             *          range, applying the identical page-protection gate
+             *          @ref scan_module_executable uses. This centralizes that gate
+             *          so an out-of-TU caller (the string-xref backend in
+             *          string_xref.cpp) scans the image's code without re-deriving
+             *          the Windows page masks.
+             * @param range The mapped image to walk.
+             * @return The execute-readable windows in ascending address order;
+             *         empty when @p range is invalid or the image exposes no
+             *         readable code pages.
+             */
+            [[nodiscard]] std::vector<ExecutableWindow> collect_executable_windows(
+                Memory::ModuleRange range);
         } // namespace detail
     } // namespace Scanner
 } // namespace DetourModKit

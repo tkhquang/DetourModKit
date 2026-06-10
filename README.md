@@ -11,7 +11,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 
 | Module | Description | Header |
 |--------|-------------|--------|
-| AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, multi-candidate cascade resolver with prologue fallback, host-EXE cascade overloads, in-code constant (immediate/displacement) extraction, and string-reference (xref) resolution | `scanner.hpp` |
+| AOB Scanner | SIMD-accelerated pattern scanning with wildcards, RIP resolution, multi-candidate cascade resolver with prologue fallback, host-EXE cascade overloads, in-code constant (immediate/displacement) extraction, and string-reference (xref) resolution (fast lea/mov shape scan, plus an opt-in Zydis sweep for cmp/push/no-REX shapes) | `scanner.hpp` |
 | Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
 | Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
@@ -1036,6 +1036,7 @@ For practical reference and real-world usage examples:
 * **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
 * **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
 * **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
+* **KCD2-TPVCamera**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVCamera](https://github.com/tkhquang/KCD2Tools/tree/main/TPVCamera)
 * **CrimsonDesert-EquipHide**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide)
 * **CrimsonDesert-LiveTransmog**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertLiveTransmog](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertLiveTransmog)
 
@@ -1047,3 +1048,5 @@ DetourModKit incorporates components from other open-source projects. See [Detou
 * [SimpleIni](https://github.com/brofield/simpleini) (MIT)
 * [DirectXMath](https://github.com/microsoft/DirectXMath) (MIT)
 * [Zydis & Zycore](https://github.com/zyantific/zydis) (MIT)
+
+The RTTI self-heal / reverse-dissection design was **inspired by** (no code incorporated) the [CERTTIExplorer](https://github.com/FransBouma/InjectableGenericCameraSystem/tree/master/Tools/CERTTIExplorer) Cheat Engine script ([GhostInTheCamera](https://github.com/ghostinthecamera), with improvements by [Frans Bouma](https://github.com/FransBouma) / Otis_Inf; BSD-2-Clause) and the [FramedSC RTTI guide](https://framedsc.com/GeneralGuides/using_rtti.htm). See [docs/misc/rtti-self-heal.md](docs/misc/rtti-self-heal.md#prior-art-and-acknowledgements) for the full credit.

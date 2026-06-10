@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -80,6 +81,204 @@ namespace
         std::size_t m_size = 0;
     };
 
+    // A two-page synthetic image mirroring a real PE's split protections: page 0 is
+    // execute-readable (the .text analogue swept in phase 2) and page 1 is readable
+    // data (the .rdata analogue located in phase 1). Reserving both pages in one
+    // VirtualAlloc keeps them contiguous so a single ModuleRange spans them, and the
+    // distinct protections keep the planted string out of the executable sweep --
+    // exactly as production strings in .rdata are never decoded as code. This is the
+    // fixture the broad (Zydis) phase-2 tests use so the decoder only ever walks the
+    // code page, never the string bytes.
+    class SplitImage
+    {
+    public:
+        SplitImage()
+        {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            m_page = si.dwPageSize;
+            m_base = static_cast<std::uint8_t *>(
+                VirtualAlloc(nullptr, m_page * 2, MEM_RESERVE, PAGE_NOACCESS));
+            if (m_base)
+            {
+                // Code page must be writable here so the test can plant instruction
+                // bytes; PAGE_EXECUTE_READWRITE still satisfies the executable sweep.
+                void *code = VirtualAlloc(m_base, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                void *data = VirtualAlloc(m_base + m_page, m_page, MEM_COMMIT, PAGE_READWRITE);
+                if (code == nullptr || data == nullptr)
+                {
+                    VirtualFree(m_base, 0, MEM_RELEASE);
+                    m_base = nullptr;
+                }
+            }
+        }
+
+        ~SplitImage()
+        {
+            if (m_base)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        SplitImage(const SplitImage &) = delete;
+        SplitImage &operator=(const SplitImage &) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+        [[nodiscard]] std::uintptr_t code_addr(std::size_t off) const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base + off);
+        }
+
+        // Writes raw bytes into the executable code page (page 0). Used to plant a
+        // byte the decoder rejects, exercising the broad sweep's byte-restart
+        // recovery, which plant_code_rip_insn (which only plants well-formed
+        // instructions) cannot reach.
+        void write_code(std::size_t off, const void *data, std::size_t n) noexcept
+        {
+            std::memcpy(m_base + off, data, n);
+        }
+
+        void write_data(std::size_t off, const void *data, std::size_t n) noexcept
+        {
+            std::memcpy(m_base + m_page + off, data, n);
+        }
+
+        // Plants an instruction in the code page whose RIP-relative memory operand
+        // resolves to data offset target_off. `head` is the bytes preceding the
+        // disp32 (prefixes, opcode, ModRM); `total_len` is the full instruction
+        // length so the next-instruction anchor the disp is measured from is
+        // correct; `tail` is any bytes after the disp32 (e.g. an immediate). This
+        // drives phase-2 shapes the narrow scan does not model.
+        void plant_code_rip_insn(std::size_t instr_off, std::size_t target_off,
+                                 std::initializer_list<std::uint8_t> head, std::size_t total_len,
+                                 std::initializer_list<std::uint8_t> tail = {}) noexcept
+        {
+            std::uint8_t *p = m_base + instr_off;
+            std::size_t i = 0;
+            for (const std::uint8_t b : head)
+            {
+                p[i++] = b;
+            }
+            const std::size_t disp_off = i;
+            const auto next = static_cast<std::int64_t>(code_addr(instr_off) + total_len);
+            const auto data_target =
+                static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(m_base + m_page + target_off));
+            const auto disp = static_cast<std::int32_t>(data_target - next);
+            std::memcpy(p + disp_off, &disp, sizeof(disp));
+            std::size_t j = disp_off + sizeof(disp);
+            for (const std::uint8_t b : tail)
+            {
+                p[j++] = b;
+            }
+        }
+
+        [[nodiscard]] Memory::ModuleRange range() const noexcept
+        {
+            const auto base = reinterpret_cast<std::uintptr_t>(m_base);
+            return Memory::ModuleRange{base, base + m_page * 2};
+        }
+
+    private:
+        std::uint8_t *m_base = nullptr;
+        std::size_t m_page = 0;
+    };
+
+    // A four-page synthetic image whose executable region is split in two by a
+    // non-executable interior page: page 0 and page 2 are execute-readable code
+    // windows, page 1 is an uncommitted (reserved) gap that VirtualQuery reports
+    // as MEM_RESERVE so collect_executable_windows skips it, and page 3 is the
+    // readable data page holding the string. This is the only fixture that makes
+    // collect_executable_windows return more than one window, so it exercises the
+    // cross-window accumulation in both phase-2 scans (a reference living only in
+    // the second window must still resolve; one reference in each window must
+    // still report AmbiguousReference). Real PE .text is one contiguous window, so
+    // this is defensive-path coverage rather than a production layout.
+    class GappedCodeImage
+    {
+    public:
+        GappedCodeImage()
+        {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            m_page = si.dwPageSize;
+            m_base = static_cast<std::uint8_t *>(
+                VirtualAlloc(nullptr, m_page * 4, MEM_RESERVE, PAGE_NOACCESS));
+            if (m_base)
+            {
+                // Commit pages 0, 2, and 3; page 1 stays reserved as the gap that
+                // splits the executable region into two windows.
+                void *code0 = VirtualAlloc(m_base, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                void *code1 = VirtualAlloc(m_base + m_page * 2, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                void *data = VirtualAlloc(m_base + m_page * 3, m_page, MEM_COMMIT, PAGE_READWRITE);
+                if (code0 == nullptr || code1 == nullptr || data == nullptr)
+                {
+                    VirtualFree(m_base, 0, MEM_RELEASE);
+                    m_base = nullptr;
+                }
+            }
+        }
+
+        ~GappedCodeImage()
+        {
+            if (m_base)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        GappedCodeImage(const GappedCodeImage &) = delete;
+        GappedCodeImage &operator=(const GappedCodeImage &) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+        [[nodiscard]] std::uintptr_t window1_addr(std::size_t off) const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base + m_page * 2 + off);
+        }
+
+        void write_string(std::size_t off, const void *data, std::size_t n) noexcept
+        {
+            std::memcpy(m_base + m_page * 3 + off, data, n);
+        }
+
+        // Plants a REX.W lea rax, [rip+disp32] in window 0 (page 0) whose target is
+        // the string at data offset target_off.
+        void plant_lea_window0(std::size_t off, std::size_t target_off) noexcept
+        {
+            std::uint8_t *instr = m_base + off;
+            plant_lea(instr, reinterpret_cast<std::uintptr_t>(instr), target_off);
+        }
+
+        // Plants the same lea in window 1 (page 2), past the gap.
+        void plant_lea_window1(std::size_t off, std::size_t target_off) noexcept
+        {
+            std::uint8_t *instr = m_base + m_page * 2 + off;
+            plant_lea(instr, reinterpret_cast<std::uintptr_t>(instr), target_off);
+        }
+
+        [[nodiscard]] Memory::ModuleRange range() const noexcept
+        {
+            const auto base = reinterpret_cast<std::uintptr_t>(m_base);
+            return Memory::ModuleRange{base, base + m_page * 4};
+        }
+
+    private:
+        void plant_lea(std::uint8_t *instr, std::uintptr_t instr_addr, std::size_t target_off) noexcept
+        {
+            instr[0] = 0x48; // REX.W
+            instr[1] = 0x8D; // lea
+            instr[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
+            const auto next = static_cast<std::int64_t>(instr_addr + 7);
+            const auto target = static_cast<std::int64_t>(
+                reinterpret_cast<std::uintptr_t>(m_base + m_page * 3 + target_off));
+            const auto disp = static_cast<std::int32_t>(target - next);
+            std::memcpy(instr + 3, &disp, sizeof(disp));
+        }
+
+        std::uint8_t *m_base = nullptr;
+        std::size_t m_page = 0;
+    };
+
     constexpr std::uint8_t LEA = 0x8D;
     constexpr std::uint8_t MOV = 0x8B;
 
@@ -90,6 +289,13 @@ namespace
         q.encoding = Scanner::StringEncoding::Utf8;
         q.require_terminator = true;
         q.return_mode = Scanner::XrefReturn::ReferencingInstruction;
+        return q;
+    }
+
+    Scanner::StringRefQuery broad_query(std::string_view text)
+    {
+        Scanner::StringRefQuery q = utf8_query(text);
+        q.broad_match = true;
         return q;
     }
 } // namespace
@@ -292,6 +498,257 @@ TEST(StringXrefTest, EmptyQueryAndInvalidRange)
     const auto bad_range = Scanner::find_string_xref(utf8_query("Anything"), Memory::ModuleRange{});
     ASSERT_FALSE(bad_range.has_value());
     EXPECT_EQ(bad_range.error(), Scanner::StringXrefError::InvalidRange);
+}
+
+TEST(StringXrefTest, BroadMatchResolvesCmpReference)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "BroadCmpAnchorString";
+    img.write_data(0x40, str, sizeof(str));
+    // cmp dword ptr [rip+disp], 0x01  ->  83 3D <disp32> 01  (7 bytes)
+    img.plant_code_rip_insn(0x10, 0x40, {0x83, 0x3D}, 7, {0x01});
+
+    // The narrow scan models only lea/mov, so the cmp is invisible to it.
+    const auto narrow = Scanner::find_string_xref(utf8_query("BroadCmpAnchorString"), img.range());
+    ASSERT_FALSE(narrow.has_value());
+    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::NoReference);
+
+    // The broad sweep decodes the cmp and resolves its RIP operand to the string.
+    const auto broad = Scanner::find_string_xref(broad_query("BroadCmpAnchorString"), img.range());
+    ASSERT_TRUE(broad.has_value());
+    EXPECT_EQ(*broad, img.code_addr(0x10));
+}
+
+TEST(StringXrefTest, BroadMatchResolvesPushReference)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "BroadPushAnchorString";
+    img.write_data(0x40, str, sizeof(str));
+    // push qword ptr [rip+disp]  ->  FF 35 <disp32>  (6 bytes)
+    img.plant_code_rip_insn(0x10, 0x40, {0xFF, 0x35}, 6);
+
+    const auto broad = Scanner::find_string_xref(broad_query("BroadPushAnchorString"), img.range());
+    ASSERT_TRUE(broad.has_value());
+    EXPECT_EQ(*broad, img.code_addr(0x10));
+}
+
+TEST(StringXrefTest, BroadMatchResolvesNoRexLea)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "BroadNoRexLeaAnchor";
+    img.write_data(0x40, str, sizeof(str));
+    // lea eax, [rip+disp]  ->  8D 05 <disp32>  (6 bytes, no REX.W)
+    img.plant_code_rip_insn(0x10, 0x40, {0x8D, 0x05}, 6);
+
+    // The narrow scan requires a REX prefix (0x48..0x4F), so a 32-bit lea misses.
+    const auto narrow = Scanner::find_string_xref(utf8_query("BroadNoRexLeaAnchor"), img.range());
+    ASSERT_FALSE(narrow.has_value());
+    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::NoReference);
+
+    const auto broad = Scanner::find_string_xref(broad_query("BroadNoRexLeaAnchor"), img.range());
+    ASSERT_TRUE(broad.has_value());
+    EXPECT_EQ(*broad, img.code_addr(0x10));
+}
+
+TEST(StringXrefTest, BroadMatchResolvesRexLeaForm)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "BroadRexLeaAnchor";
+    img.write_data(0x40, str, sizeof(str));
+    // lea rax, [rip+disp]  ->  48 8D 05 <disp32>  (7 bytes); also caught by the
+    // narrow scan, so this proves the broad sweep is a strict superset.
+    img.plant_code_rip_insn(0x10, 0x40, {0x48, 0x8D, 0x05}, 7);
+
+    const auto broad = Scanner::find_string_xref(broad_query("BroadRexLeaAnchor"), img.range());
+    ASSERT_TRUE(broad.has_value());
+    EXPECT_EQ(*broad, img.code_addr(0x10));
+}
+
+TEST(StringXrefTest, BroadMatchKeepsNarrowShapeScanCoverage)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "BroadKeepsNarrowAnchor";
+    img.write_data(0x40, str, sizeof(str));
+
+    // The REX.W lea is intentionally planted at an odd byte offset. The Zydis
+    // linear sweep can step over such a site after decoding preceding bytes, so
+    // broad_match must merge in the default all-offset shape scan rather than
+    // replacing it.
+    img.plant_code_rip_insn(0x11, 0x40, {0x48, 0x8D, 0x05}, 7);
+
+    const auto broad = Scanner::find_string_xref(broad_query("BroadKeepsNarrowAnchor"), img.range());
+    ASSERT_TRUE(broad.has_value());
+    EXPECT_EQ(*broad, img.code_addr(0x11));
+}
+
+TEST(StringXrefTest, BroadMatchAmbiguousReference)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "BroadTwiceAnchorString";
+    img.write_data(0x40, str, sizeof(str));
+    // Two references to the same string. The second is placed immediately after the
+    // first (offset = first + its length) so the linear sweep, having decoded the
+    // first instruction, lands exactly on the second and counts both -- a gap would
+    // let the zero-fill cursor desync past an odd offset. Expressing the adjacency
+    // as first + len keeps that invariant in code rather than a magic literal.
+    constexpr std::size_t cmp_off = 0x10;
+    constexpr std::size_t cmp_len = 7; // 83 3D <disp32> 01
+    img.plant_code_rip_insn(cmp_off, 0x40, {0x83, 0x3D}, cmp_len, {0x01});
+    img.plant_code_rip_insn(cmp_off + cmp_len, 0x40, {0xFF, 0x35}, 6);
+
+    const auto broad = Scanner::find_string_xref(broad_query("BroadTwiceAnchorString"), img.range());
+    ASSERT_FALSE(broad.has_value());
+    EXPECT_EQ(broad.error(), Scanner::StringXrefError::AmbiguousReference);
+}
+
+TEST(StringXrefTest, BroadMatchNoReference)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    // The string is present in the data page but no instruction loads it.
+    const char str[] = "BroadUnreferencedAnchor";
+    img.write_data(0x40, str, sizeof(str));
+
+    const auto broad = Scanner::find_string_xref(broad_query("BroadUnreferencedAnchor"), img.range());
+    ASSERT_FALSE(broad.has_value());
+    EXPECT_EQ(broad.error(), Scanner::StringXrefError::NoReference);
+}
+
+TEST(StringXrefTest, BroadMatchRecoversFromDecodeFailure)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "BroadRecoveryAnchorString";
+    img.write_data(0x40, str, sizeof(str));
+
+    // 0x06 (PUSH ES) has no valid 64-bit encoding, so ZydisDecoderDecodeFull
+    // rejects it and the sweep must byte-restart (offset += 1) to realign. The
+    // zero-filled lead-in decodes cleanly as `add [rax], al` (00 00) in 2-byte
+    // steps, landing the cursor exactly on this even offset before the failure.
+    const std::uint8_t invalid_opcode = 0x06;
+    img.write_code(0x10, &invalid_opcode, sizeof(invalid_opcode));
+
+    // The real reference sits at 0x11, one byte past the failure -- an odd offset
+    // the 2-byte zero-fill walk never visits unless recovery advanced by exactly
+    // one byte. cmp dword ptr [rip+disp], 0x01  ->  83 3D <disp32> 01 (7 bytes).
+    img.plant_code_rip_insn(0x11, 0x40, {0x83, 0x3D}, 7, {0x01});
+
+    // If the failure branch broke or stalled instead of byte-restarting, the
+    // misaligned reference would be invisible and this would report NoReference;
+    // resolving it proves the sweep realigns past undecodable bytes.
+    const auto broad = Scanner::find_string_xref(broad_query("BroadRecoveryAnchorString"), img.range());
+    ASSERT_TRUE(broad.has_value());
+    EXPECT_EQ(*broad, img.code_addr(0x11));
+}
+
+TEST(StringXrefTest, DataPageIsNeverDecodedAsCode)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "DataPageNeverCodeAnchor";
+    img.write_data(0x40, str, sizeof(str));
+
+    // Plant, inside the non-executable data page, a byte sequence that -- if the
+    // data page were ever swept as code -- decodes to `lea rax, [rip+0x39]` whose
+    // target is the string at data offset 0x40 (0x00 + 7 + 0x39 == 0x40; the
+    // displacement is a pure intra-page constant, independent of the load base).
+    // No reference is planted in the executable code page.
+    const std::uint8_t data_lea[] = {0x48, 0x8D, 0x05, 0x39, 0x00, 0x00, 0x00};
+    img.write_data(0x00, data_lea, sizeof(data_lea));
+
+    // collect_executable_windows must exclude the PAGE_READWRITE data page, so
+    // both scans -- which iterate only those windows -- fail closed with
+    // NoReference. A regression that widened the gate to readable pages would
+    // count the data-page pseudo-instruction and flip this to a wrong success.
+    const auto narrow = Scanner::find_string_xref(utf8_query("DataPageNeverCodeAnchor"), img.range());
+    ASSERT_FALSE(narrow.has_value());
+    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::NoReference);
+
+    const auto broad = Scanner::find_string_xref(broad_query("DataPageNeverCodeAnchor"), img.range());
+    ASSERT_FALSE(broad.has_value());
+    EXPECT_EQ(broad.error(), Scanner::StringXrefError::NoReference);
+}
+
+TEST(StringXrefTest, MultiWindowResolvesReferenceInSecondWindow)
+{
+    GappedCodeImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a gapped multi-window image";
+    }
+    const char str[] = "SecondWindowAnchorString";
+    img.write_string(0x40, str, sizeof(str));
+
+    // The only reference lives in the second executable window, past the
+    // non-executable gap page. Resolving it proves both scans iterate every window
+    // collect_executable_windows returns, not just the first.
+    img.plant_lea_window1(0x10, 0x40);
+
+    const auto narrow = Scanner::find_string_xref(utf8_query("SecondWindowAnchorString"), img.range());
+    ASSERT_TRUE(narrow.has_value());
+    EXPECT_EQ(*narrow, img.window1_addr(0x10));
+
+    const auto broad = Scanner::find_string_xref(broad_query("SecondWindowAnchorString"), img.range());
+    ASSERT_TRUE(broad.has_value());
+    EXPECT_EQ(*broad, img.window1_addr(0x10));
+}
+
+TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
+{
+    GappedCodeImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a gapped multi-window image";
+    }
+    const char str[] = "CrossWindowAnchorString";
+    img.write_string(0x40, str, sizeof(str));
+
+    // One reference in each window. found_count must accumulate across the window
+    // boundary so a hit in window 0 and a hit in window 1 still report
+    // AmbiguousReference rather than silently resolving the first.
+    img.plant_lea_window0(0x10, 0x40);
+    img.plant_lea_window1(0x10, 0x40);
+
+    const auto narrow = Scanner::find_string_xref(utf8_query("CrossWindowAnchorString"), img.range());
+    ASSERT_FALSE(narrow.has_value());
+    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::AmbiguousReference);
+
+    const auto broad = Scanner::find_string_xref(broad_query("CrossWindowAnchorString"), img.range());
+    ASSERT_FALSE(broad.has_value());
+    EXPECT_EQ(broad.error(), Scanner::StringXrefError::AmbiguousReference);
 }
 
 TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
