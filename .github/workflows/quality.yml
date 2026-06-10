@@ -5,9 +5,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Both jobs are advisory and must never block a PR: they surface formatting
-# drift and prove the sanitizer preset still links and runs, but clang-format
-# version and MinGW ASan availability both vary by runner. The blocking gate
+# Read-only token: this advisory workflow never writes to the repo.
+permissions:
+  contents: read
+
+# Both jobs are advisory and non-blocking. clang-format stays red until a planned
+# repo-wide reformat; the sanitizer job runs on an MSYS2 toolchain that ships the
+# ASan/UBSan runtimes (the runner's default MinGW does not). The blocking gate
 # (build, tests, coverage) lives in pr-check.yml and is untouched here.
 
 jobs:
@@ -17,7 +21,9 @@ jobs:
     continue-on-error: true
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install clang-format
         run: pip install "clang-format==18.*"
@@ -34,35 +40,30 @@ jobs:
     name: ASan + UBSan probe (advisory)
     runs-on: windows-latest
     continue-on-error: true
-    env:
-      MINGW_BIN: C:\mingw64\bin
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: "recursive"
+          persist-credentials: false
 
-      - name: Add MinGW to PATH
-        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-        shell: powershell
+      - name: Set up MSYS2 MinGW toolchain (ships libasan/libubsan)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
 
       - name: Configure (Debug + Sanitizers)
         run: cmake --preset mingw-debug-asan
-        shell: bash
 
       - name: Build
         run: cmake --build --preset mingw-debug-asan --parallel
-        shell: bash
-
-      - name: Copy MinGW runtime DLLs
-        run: |
-          $testDir = "build\mingw-debug-asan\tests"
-          Get-ChildItem "${{ env.MINGW_BIN }}\lib*.dll" | ForEach-Object {
-            Copy-Item $_.FullName "$testDir\"
-          }
-        shell: powershell
 
       - name: Run tests under sanitizers
-        timeout-minutes: 10
         run: ctest --preset mingw-debug-asan
-        shell: bash

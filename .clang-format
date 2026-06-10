@@ -3,7 +3,9 @@
 # Derived from the current tree, not from any external/ submodule config.
 Language: Cpp
 BasedOnStyle: LLVM
-Standard: c++20
+# The project is C++23. clang-format has no explicit c++23 enum yet, so Latest
+# selects the newest standard it knows and parses C++23 syntax correctly.
+Standard: Latest
 # The codebase does not enforce a hard column limit (some Doxygen and log lines
 # run well past 120), so do not let the formatter reflow on width.
 ColumnLimit: 0
