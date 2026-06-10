@@ -1,0 +1,68 @@
+name: Quality Probes
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Both jobs are advisory and must never block a PR: they surface formatting
+# drift and prove the sanitizer preset still links and runs, but clang-format
+# version and MinGW ASan availability both vary by runner. The blocking gate
+# (build, tests, coverage) lives in pr-check.yml and is untouched here.
+
+jobs:
+  format-check:
+    name: clang-format (advisory)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: pip install "clang-format==18.*"
+        shell: bash
+
+      - name: Check formatting (dry run, project sources only)
+        run: |
+          # git ls-files lists only this repo's tracked files, so submodule
+          # sources under external/ are never formatted.
+          git ls-files '*.cpp' '*.hpp' | xargs clang-format --dry-run --Werror
+        shell: bash
+
+  sanitizers:
+    name: ASan + UBSan probe (advisory)
+    runs-on: windows-latest
+    continue-on-error: true
+    env:
+      MINGW_BIN: C:\mingw64\bin
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Add MinGW to PATH
+        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Configure (Debug + Sanitizers)
+        run: cmake --preset mingw-debug-asan
+        shell: bash
+
+      - name: Build
+        run: cmake --build --preset mingw-debug-asan --parallel
+        shell: bash
+
+      - name: Copy MinGW runtime DLLs
+        run: |
+          $testDir = "build\mingw-debug-asan\tests"
+          Get-ChildItem "${{ env.MINGW_BIN }}\lib*.dll" | ForEach-Object {
+            Copy-Item $_.FullName "$testDir\"
+          }
+        shell: powershell
+
+      - name: Run tests under sanitizers
+        timeout-minutes: 10
+        run: ctest --preset mingw-debug-asan
+        shell: bash

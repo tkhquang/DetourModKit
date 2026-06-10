@@ -37,6 +37,14 @@
       }
     },
     {
+      "name": "mingw-debug-coverage",
+      "inherits": "mingw-debug",
+      "displayName": "MinGW Debug + Coverage",
+      "cacheVariables": {
+        "DMK_ENABLE_COVERAGE": "ON"
+      }
+    },
+    {
       "name": "mingw-release",
       "inherits": "base",
       "displayName": "MinGW Release",
@@ -84,6 +92,10 @@
       "configurePreset": "mingw-debug-asan"
     },
     {
+      "name": "mingw-debug-coverage",
+      "configurePreset": "mingw-debug-coverage"
+    },
+    {
       "name": "msvc-debug",
       "configurePreset": "msvc-debug"
     },
@@ -103,6 +115,13 @@
     {
       "name": "mingw-debug-asan",
       "configurePreset": "mingw-debug-asan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "mingw-debug-coverage",
+      "configurePreset": "mingw-debug-coverage",
       "output": {
         "outputOnFailure": true
       }
