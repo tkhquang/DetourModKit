@@ -113,11 +113,11 @@ namespace DetourModKit
         // execute-readable windows for the dominant 64-bit string-load forms whose
         // resolved absolute target is string_addr.
         //
-        // Recognizes an optional REX.W prefix (0x48..0x4F), opcode 8D (lea) or 8B
+        // Recognizes a mandatory REX.W prefix (0x48..0x4F), opcode 8D (lea) or 8B
         // (mov), and a ModRM byte in the RIP-relative form -- mod == 00b and
         // rm == 101b, i.e. (modrm & 0xC7) == 0x05 -- followed by a 4-byte
-        // displacement. With the REX byte present the instruction is exactly 7 bytes
-        // and the disp32 sits at offset 3, so the candidate is self-delimiting from
+        // displacement. That required REX.W byte makes the instruction exactly 7
+        // bytes and the disp32 sits at offset 3, so the candidate is self-delimiting from
         // its shape: this needs no instruction-aligned linear sweep and therefore
         // cannot desync on data or jump tables embedded in .text.
         //
