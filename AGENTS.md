@@ -92,31 +92,32 @@ Latest scanner bench numbers and methodology live in
 Memory validation-vs-direct-read numbers live in
 [docs/analysis/memory_bench_v3.x/README.md](docs/analysis/memory_bench_v3.x/README.md).
 
-### Sanitizers and coverage (MinGW only)
+### Sanitizers (MSVC) and coverage (MinGW)
 
 ```bash
-# Dedicated sanitizer preset (ASan + UBSan)
-cmake --preset mingw-debug-asan
-cmake --build --preset mingw-debug-asan --parallel
-ctest --preset mingw-debug-asan
+# AddressSanitizer -- MSVC only. Run from a Developer Command Prompt / VS DevShell.
+cmake --preset msvc-debug-asan
+cmake --build --preset msvc-debug-asan --parallel
+ctest --preset msvc-debug-asan
 
-# Dedicated coverage preset (gcov instrumentation)
+# Coverage (gcov instrumentation) -- MinGW GCC.
 cmake --preset mingw-debug-coverage
 cmake --build --preset mingw-debug-coverage --parallel
 ctest --preset mingw-debug-coverage
 
-# Or enable either flag on top of mingw-debug manually
-cmake --preset mingw-debug -DDMK_ENABLE_SANITIZERS=ON
+# Or enable either flag on its matching debug preset manually
+cmake --preset msvc-debug -DDMK_ENABLE_SANITIZERS=ON
 cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 ```
 
-The ASan/UBSan runtimes ship inside the MinGW GCC package itself
-(`mingw-w64-x86_64-gcc` on MSYS2). If a sanitizer build fails to link with a
-missing `libasan` / `libubsan`, reinstall or update that package
-(`pacman -S mingw-w64-x86_64-gcc`). A non-blocking CI probe in
-`.github/workflows/quality.yml` builds and runs the sanitizer preset (alongside
-an advisory clang-format check) so regressions in that wiring surface without
-gating PRs.
+AddressSanitizer is the only sanitizer that links on Windows: GCC and Clang on
+mingw-w64 ship no ASan/UBSan runtime for the Windows target, so the sanitizer
+build links only under MSVC, and ASan is the only sanitizer there (no UBSan or
+LSan). MSVC ASan needs `clang_rt.asan_dynamic-x86_64.dll` on `PATH` at run time;
+a Developer Command Prompt provides it. Coverage is separate and works on MinGW
+via gcov. A non-blocking CI probe in `.github/workflows/quality.yml` builds and
+runs the MSVC ASan preset (alongside an advisory clang-format check) so
+regressions in that wiring surface without gating PRs.
 
 ### Makefile wrapper
 
@@ -169,7 +170,7 @@ tests/                   # GoogleTest suites (one test_*.cpp per module)
   package_smoke/         # Minimal installed-package consumer used by release CI
 external/                # Git submodules (safetyhook, DirectXMath, simpleini)
 CMakeLists.txt           # Single CMakeLists -- static library target
-CMakePresets.json        # Build presets (mingw-debug/release, mingw-debug-asan, msvc-debug/release)
+CMakePresets.json        # Build presets (mingw-debug/release/coverage, msvc-debug/release/asan)
 ```
 
 ## Code style

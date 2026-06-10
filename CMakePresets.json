@@ -29,19 +29,19 @@
       }
     },
     {
-      "name": "mingw-debug-asan",
-      "inherits": "mingw-debug",
-      "displayName": "MinGW Debug + Sanitizers",
-      "cacheVariables": {
-        "DMK_ENABLE_SANITIZERS": "ON"
-      }
-    },
-    {
       "name": "mingw-debug-coverage",
       "inherits": "mingw-debug",
       "displayName": "MinGW Debug + Coverage",
       "cacheVariables": {
         "DMK_ENABLE_COVERAGE": "ON"
+      }
+    },
+    {
+      "name": "msvc-debug-asan",
+      "inherits": "msvc-debug",
+      "displayName": "MSVC Debug + ASan",
+      "cacheVariables": {
+        "DMK_ENABLE_SANITIZERS": "ON"
       }
     },
     {
@@ -88,12 +88,12 @@
       "configurePreset": "mingw-release"
     },
     {
-      "name": "mingw-debug-asan",
-      "configurePreset": "mingw-debug-asan"
-    },
-    {
       "name": "mingw-debug-coverage",
       "configurePreset": "mingw-debug-coverage"
+    },
+    {
+      "name": "msvc-debug-asan",
+      "configurePreset": "msvc-debug-asan"
     },
     {
       "name": "msvc-debug",
@@ -113,15 +113,15 @@
       }
     },
     {
-      "name": "mingw-debug-asan",
-      "configurePreset": "mingw-debug-asan",
+      "name": "mingw-debug-coverage",
+      "configurePreset": "mingw-debug-coverage",
       "output": {
         "outputOnFailure": true
       }
     },
     {
-      "name": "mingw-debug-coverage",
-      "configurePreset": "mingw-debug-coverage",
+      "name": "msvc-debug-asan",
+      "configurePreset": "msvc-debug-asan",
       "output": {
         "outputOnFailure": true
       }

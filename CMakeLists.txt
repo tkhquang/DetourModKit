@@ -310,13 +310,15 @@ if(WIN32)
   # configure time. Release packages are compiler-specific, and add_subdirectory
   # consumers share the same toolchain that configured this target.
   set(_dmk_uses_msvc_linker_frontend OFF)
+
   if(MSVC OR "${CMAKE_CXX_SIMULATE_ID}" STREQUAL "MSVC")
     set(_dmk_uses_msvc_linker_frontend ON)
   endif()
 
   set(_dmk_uses_gnu_linker_frontend OFF)
+
   if(MINGW OR CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR
-      (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT _dmk_uses_msvc_linker_frontend))
+    (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT _dmk_uses_msvc_linker_frontend))
     set(_dmk_uses_gnu_linker_frontend ON)
   endif()
 
@@ -347,10 +349,12 @@ set(DETOURMODKIT_DOCS_COMPONENT docs) # For documentation (LICENSE, README)
 # Order matters: a dependent precedes its dependency for single-pass linkers.
 set(_dmk_dep_archives "")
 set(_DMK_DEP_ARCHIVE_NAMES "")
+
 foreach(_dep IN ITEMS ${SAFETYHOOK_LIBRARY_TARGET_NAME} Zydis Zycore)
   if(TARGET ${_dep})
     get_target_property(_dep_aliased ${_dep} ALIASED_TARGET)
     get_target_property(_dep_imported ${_dep} IMPORTED)
+
     if(NOT _dep_aliased AND NOT _dep_imported)
       list(APPEND _dmk_dep_archives "$<TARGET_FILE:${_dep}>")
       list(APPEND _DMK_DEP_ARCHIVE_NAMES
@@ -514,12 +518,36 @@ if(DMK_ENABLE_PROFILING)
 endif()
 
 # --- Sanitizers ---
-option(DMK_ENABLE_SANITIZERS "Enable ASan and UBSan (GCC/Clang only)" OFF)
+option(DMK_ENABLE_SANITIZERS "Enable AddressSanitizer (and UBSan on GCC/Clang)" OFF)
 
-if(DMK_ENABLE_SANITIZERS AND NOT MSVC)
-  add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
-  add_link_options(-fsanitize=address,undefined)
-  message(STATUS "Sanitizers enabled: ASan + UBSan")
+if(DMK_ENABLE_SANITIZERS)
+  if(MSVC)
+    # AddressSanitizer is the only sanitizer available on Windows: UBSan is
+    # GCC/Clang-only, and mingw-w64 ships no sanitizer runtime at all (only the
+    # MSVC target has one). /fsanitize=address is incompatible with the /RTC
+    # runtime checks CMake's Debug config injects and with incremental linking,
+    # so strip /RTC* (globally, which also reaches the library target defined
+    # earlier) and force non-incremental linking.
+    string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+    string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+
+    # The vendored SafetyHook is not instrumented, so the MSVC STL ASan container
+    # annotations (annotate_string / annotate_vector) would differ across the link
+    # and fail with LNK2038. Disable those annotations on every instrumented target
+    # so all objects agree (value 0); the core ASan checks (heap/stack/use-after-
+    # free) stay on. The library is instrumented explicitly because it was created
+    # before this block; the tests (added afterwards) pick up the directory options.
+    target_compile_options(DetourModKit PRIVATE /fsanitize=address)
+    target_compile_definitions(DetourModKit PRIVATE _DISABLE_STRING_ANNOTATION=1 _DISABLE_VECTOR_ANNOTATION=1)
+    add_compile_options(/fsanitize=address)
+    add_compile_definitions(_DISABLE_STRING_ANNOTATION=1 _DISABLE_VECTOR_ANNOTATION=1)
+    add_link_options(/INCREMENTAL:NO)
+    message(STATUS "Sanitizers enabled: ASan (MSVC)")
+  else()
+    add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=address,undefined)
+    message(STATUS "Sanitizers enabled: ASan + UBSan")
+  endif()
 endif()
 
 # --- Link-Time Optimization ---

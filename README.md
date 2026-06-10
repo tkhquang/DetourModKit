@@ -407,9 +407,10 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     | Preset | Compiler | Build Type | Tests | Notes |
     | --- | --- | --- | --- | --- |
     | `mingw-debug` | GCC (MinGW) | Debug | ON | |
-    | `mingw-debug-asan` | GCC (MinGW) | Debug | ON | ASan + UBSan enabled |
+    | `mingw-debug-coverage` | GCC (MinGW) | Debug | ON | gcov coverage |
     | `mingw-release` | GCC (MinGW) | Release | OFF | |
     | `msvc-debug` | MSVC (cl) | Debug | ON | |
+    | `msvc-debug-asan` | MSVC (cl) | Debug | ON | AddressSanitizer (the only sanitizer on Windows) |
     | `msvc-release` | MSVC (cl) | Release | OFF | |
 
    ### Installed package smoke test
@@ -547,22 +548,23 @@ When `DMK_ENABLE_PROFILING` is OFF (the default), all profiling macros expand to
 
 ### Enabling Sanitizers
 
-To enable AddressSanitizer and UndefinedBehaviorSanitizer (requires GCC/Clang):
+AddressSanitizer is available on Windows through **MSVC only**. GCC and Clang on
+mingw-w64 ship no ASan/UBSan runtime for the Windows target, so a MinGW sanitizer
+build cannot link here; UndefinedBehaviorSanitizer is not available on Windows.
 
 ```bash
-# Using the dedicated preset
-cmake --preset mingw-debug-asan
-cmake --build --preset mingw-debug-asan --parallel
-
-# Or manually with any debug preset
-cmake --preset mingw-debug -DDMK_ENABLE_SANITIZERS=ON
-cmake --build --preset mingw-debug --parallel
+# AddressSanitizer via MSVC -- run from a Developer Command Prompt.
+cmake --preset msvc-debug-asan
+cmake --build --preset msvc-debug-asan --parallel
+ctest --preset msvc-debug-asan
 ```
 
 > [!NOTE]
-> Sanitizer support on MinGW requires `libasan` and `libubsan` runtime libraries.
-> Not all MSYS2 MinGW GCC builds ship these. If linking fails with
-> `cannot find -lasan`, install the sanitizer package or use Clang instead.
+> MSVC ASan needs `clang_rt.asan_dynamic-x86_64.dll` on `PATH` at run time; a
+> Developer Command Prompt (or `Enter-VsDevShell`) provides it. ASan only -- there
+> is no UBSan or LeakSanitizer on MSVC. The GCC/Clang `-fsanitize=address,undefined`
+> path only links where the runtimes exist (a Linux toolchain), which does not
+> apply to this Windows-only library.
 
 ### Enabling Code Coverage
 

@@ -10,9 +10,11 @@ permissions:
   contents: read
 
 # Both jobs are advisory and non-blocking. clang-format stays red until a planned
-# repo-wide reformat; the sanitizer job runs on an MSYS2 toolchain that ships the
-# ASan/UBSan runtimes (the runner's default MinGW does not). The blocking gate
-# (build, tests, coverage) lives in pr-check.yml and is untouched here.
+# repo-wide reformat. The sanitizer job uses MSVC AddressSanitizer -- the only
+# sanitizer that works on Windows (GCC and Clang on mingw-w64 ship no ASan/UBSan
+# runtime for the Windows target, so the build links only under MSVC, and ASan is
+# the only sanitizer there). The blocking gate (build, tests, coverage) lives in
+# pr-check.yml and is untouched here.
 
 jobs:
   format-check:
@@ -37,12 +39,9 @@ jobs:
         shell: bash
 
   sanitizers:
-    name: ASan + UBSan probe (advisory)
+    name: AddressSanitizer probe (MSVC, advisory)
     runs-on: windows-latest
     continue-on-error: true
-    defaults:
-      run:
-        shell: msys2 {0}
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -50,20 +49,19 @@ jobs:
           submodules: "recursive"
           persist-credentials: false
 
-      - name: Set up MSYS2 MinGW toolchain (ships libasan/libubsan)
-        uses: msys2/setup-msys2@v2
+      - name: Set up MSVC (x64) -- puts cl and the ASan runtime on PATH
+        uses: ilammy/msvc-dev-cmd@v1
         with:
-          msystem: MINGW64
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
+          arch: x64
 
-      - name: Configure (Debug + Sanitizers)
-        run: cmake --preset mingw-debug-asan
+      - name: Configure (MSVC Debug + ASan)
+        run: cmake --preset msvc-debug-asan
+        shell: pwsh
 
       - name: Build
-        run: cmake --build --preset mingw-debug-asan --parallel
+        run: cmake --build --preset msvc-debug-asan --parallel
+        shell: pwsh
 
-      - name: Run tests under sanitizers
-        run: ctest --preset mingw-debug-asan
+      - name: Run tests under ASan
+        run: ctest --preset msvc-debug-asan --output-on-failure
+        shell: pwsh
