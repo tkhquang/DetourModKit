@@ -45,6 +45,18 @@
       }
     },
     {
+      "name": "clang-debug-asan",
+      "inherits": "base",
+      "displayName": "Clang Debug + Sanitizers",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DMK_BUILD_TESTS": "ON",
+        "DMK_ENABLE_SANITIZERS": "ON",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++"
+      }
+    },
+    {
       "name": "mingw-release",
       "inherits": "base",
       "displayName": "MinGW Release",
@@ -96,6 +108,10 @@
       "configurePreset": "mingw-debug-coverage"
     },
     {
+      "name": "clang-debug-asan",
+      "configurePreset": "clang-debug-asan"
+    },
+    {
       "name": "msvc-debug",
       "configurePreset": "msvc-debug"
     },
@@ -122,6 +138,13 @@
     {
       "name": "mingw-debug-coverage",
       "configurePreset": "mingw-debug-coverage",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "clang-debug-asan",
+      "configurePreset": "clang-debug-asan",
       "output": {
         "outputOnFailure": true
       }

@@ -10,9 +10,10 @@ permissions:
   contents: read
 
 # Both jobs are advisory and non-blocking. clang-format stays red until a planned
-# repo-wide reformat; the sanitizer job runs on an MSYS2 toolchain that ships the
-# ASan/UBSan runtimes (the runner's default MinGW does not). The blocking gate
-# (build, tests, coverage) lives in pr-check.yml and is untouched here.
+# repo-wide reformat. The sanitizer job runs under the MSYS2 CLANG64 toolchain,
+# whose compiler-rt ships the ASan/UBSan runtimes (mingw-w64 GCC does not, so the
+# preset uses clang there). The blocking gate (build, tests, coverage) lives in
+# pr-check.yml and is untouched here.
 
 jobs:
   format-check:
@@ -50,20 +51,21 @@ jobs:
           submodules: "recursive"
           persist-credentials: false
 
-      - name: Set up MSYS2 MinGW toolchain (ships libasan/libubsan)
+      - name: Set up MSYS2 CLANG64 toolchain (compiler-rt ships ASan/UBSan)
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: CLANG64
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-cmake
-            mingw-w64-x86_64-ninja
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-compiler-rt
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
 
-      - name: Configure (Debug + Sanitizers)
-        run: cmake --preset mingw-debug-asan
+      - name: Configure (Clang Debug + Sanitizers)
+        run: cmake --preset clang-debug-asan
 
       - name: Build
-        run: cmake --build --preset mingw-debug-asan --parallel
+        run: cmake --build --preset clang-debug-asan --parallel
 
       - name: Run tests under sanitizers
-        run: ctest --preset mingw-debug-asan
+        run: ctest --preset clang-debug-asan

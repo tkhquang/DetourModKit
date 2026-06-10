@@ -341,12 +341,19 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
         });
     }
 
-    // Reader thread: export while writers are active
+    // Reader thread: export while writers are active. Loop until the window
+    // closes AND at least one export has completed. A full 65536-sample buffer
+    // serializes to a multi-megabyte string, so on a loaded runner a single
+    // export can outlast the 50 ms window; keying the exit on a completed export
+    // (not on wall-clock alone) keeps export_count deterministic instead of
+    // letting it flake at 0.
     std::thread reader([&profiler, &stop, &export_count]() {
-        while (!stop.load(std::memory_order_relaxed))
+        while (!stop.load(std::memory_order_relaxed) ||
+               export_count.load(std::memory_order_relaxed) == 0)
         {
             const std::string json = profiler.export_chrome_json();
-            // Verify the JSON is well-formed (starts with [, ends with ])
+            // The export wraps a seqlock snapshot, so a well-formed result starts
+            // with '[' and ends with ']' even while writers overwrite slots.
             if (!json.empty())
             {
                 EXPECT_EQ(json.front(), '[');
