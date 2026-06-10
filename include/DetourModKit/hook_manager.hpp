@@ -10,6 +10,7 @@
 #include <optional>
 #include <expected>
 #include <string_view>
+#include <span>
 #include <type_traits>
 #include <concepts>
 #include <atomic>
@@ -827,6 +828,44 @@ namespace DetourModKit
         [[nodiscard]] std::expected<void, HookError> disable_hook(std::string_view hook_id);
 
         /**
+         * @brief Enables several hooks by name in a single locked pass.
+         * @details Convenience for startup and hot-reload phases that toggle many
+         *          hooks at once: takes the manager's locks once for the whole batch
+         *          instead of once per hook. An unknown id is warned and skipped, not
+         *          fatal, and an already-active hook counts as a success (enable is
+         *          idempotent). This is an ergonomic wrapper, not a performance
+         *          optimization over repeated enable_hook calls: the SafetyHook
+         *          backend installs via a vectored exception handler and does not
+         *          suspend threads, so there is no process-wide suspension to amortize.
+         * @param hook_ids The names of the hooks to enable.
+         * @return The number of hooks now active.
+         */
+        [[nodiscard]] std::size_t enable_hooks(std::span<const std::string_view> hook_ids);
+
+        /**
+         * @brief Disables several hooks by name in a single locked pass.
+         * @details The disable counterpart to @ref enable_hooks: locks once, warns
+         *          and skips unknown ids, and counts an already-disabled hook as a
+         *          success (disable is idempotent). Ergonomics only (see
+         *          @ref enable_hooks).
+         * @param hook_ids The names of the hooks to disable.
+         * @return The number of hooks now disabled.
+         */
+        [[nodiscard]] std::size_t disable_hooks(std::span<const std::string_view> hook_ids);
+
+        /**
+         * @brief Enables every hook currently managed by this instance in one pass.
+         * @return The number of hooks now active.
+         */
+        [[nodiscard]] std::size_t enable_all_hooks();
+
+        /**
+         * @brief Disables every hook currently managed by this instance in one pass.
+         * @return The number of hooks now disabled.
+         */
+        [[nodiscard]] std::size_t disable_all_hooks();
+
+        /**
          * @brief Retrieves the current status of a hook.
          * @param hook_id The name of the hook.
          * @return std::optional<HookStatus> The current status, or std::nullopt if not found.
@@ -1096,6 +1135,19 @@ namespace DetourModKit
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;
+
+        /**
+         * @brief Enables or disables one already-located hook under the held locks.
+         * @details Shared body of the batch toggle methods. The caller must hold
+         *          m_mutator_gate and m_hooks_mutex (both shared) and must have
+         *          confirmed the manager is not shutting down. Logs the outcome
+         *          exactly like the single-hook enable_hook / disable_hook path.
+         * @param hook_id The hook's name, used only for logging.
+         * @param hook The hook to toggle.
+         * @param enable true to enable, false to disable.
+         * @return true if the hook is now in the requested state.
+         */
+        [[nodiscard]] bool toggle_hook_locked(std::string_view hook_id, Hook &hook, bool enable);
 
         bool hook_id_exists_locked(std::string_view hook_id) const
         {

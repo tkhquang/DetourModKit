@@ -164,6 +164,10 @@ for (std::size_t i = 0; i < n; ++i)
 
 Each entry carries `{name, nominal_offset, healed_offset, delta, ok, error}`; `delta` (`healed_offset - nominal_offset`) is the headline number. The landmarks must already have their `base` filled in, exactly as for a direct `heal_landmark` call.
 
+### Persisting the report -- `drift_manifest.hpp`
+
+`heal_report` produces the live report; `drift_manifest.hpp` makes it durable so two runs against two game versions can be diffed offline. `serialize_drift_report(entries)` renders a versioned, line-oriented manifest, `parse_drift_report` / `read_drift_report_from_file` read it back into owning `DriftRecord`s (the parsed records copy the name, so they outlive the source buffer), and `write_drift_report_to_file` saves it. Parsing fails closed (`ManifestError::MissingHeader` / `MalformedLine`). This is a report **archive for analysis**, not a heal input: nothing reads a manifest back to drive resolution, so it does not reintroduce the hand-edited-offset hazard the next paragraph warns about. The recipe (the `Landmark` set) still lives only in mod code.
+
 A drift report is the signal that a patch moved a layout. When it shows a field the heal could not recover (`ok == false`, for example a type that was renamed across the patch and so no longer matches by name), that is a job for a mod update by someone who understands the engine, not something to paper over with a hand-edited offset: a wrong offset reads the wrong memory just as confidently as a right one. DetourModKit deliberately ships no persisted, user-editable heal file for that reason; the recipe (the `Landmark` set) lives in mod code.
 
 ## Performance and the init-time contract

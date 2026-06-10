@@ -44,7 +44,6 @@
 #endif
 
 using namespace DetourModKit;
-using namespace DetourModKit::String;
 
 namespace
 {

@@ -1,0 +1,37 @@
+---
+# Formatting rules that codify DetourModKit's existing C++23 style.
+# Derived from the current tree, not from any external/ submodule config.
+Language: Cpp
+BasedOnStyle: LLVM
+# The project is C++23. clang-format has no explicit c++23 enum yet, so Latest
+# selects the newest standard it knows and parses C++23 syntax correctly.
+Standard: Latest
+# The codebase does not enforce a hard column limit (some Doxygen and log lines
+# run well past 120), so do not let the formatter reflow on width.
+ColumnLimit: 0
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AccessModifierOffset: -4
+NamespaceIndentation: All
+# Allman braces for functions, classes, and namespaces; K&R-style indented
+# blocks inside function bodies.
+BreakBeforeBraces: Allman
+# East-side pointers and references (int *p), matching the whole tree. Do NOT
+# switch to Left: the external/safetyhook config uses Left and must not be
+# copied here.
+PointerAlignment: Right
+ReferenceAlignment: Right
+# Keep trivial inline accessors on one line; everything else expands.
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortBlocksOnASingleLine: Never
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortCaseLabelsOnASingleLine: false
+# Includes are grouped by hand (project, then external, then standard); the
+# formatter must not reorder or regroup them.
+SortIncludes: Never
+IncludeBlocks: Preserve
+SpaceAfterTemplateKeyword: true
+FixNamespaceComments: true

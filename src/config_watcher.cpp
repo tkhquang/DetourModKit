@@ -4,6 +4,7 @@
  */
 
 #include "DetourModKit/config_watcher.hpp"
+#include "DetourModKit/diagnostics.hpp"
 
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/worker.hpp"
@@ -241,6 +242,7 @@ namespace DetourModKit
             {
                 static_cast<void>(m_impl.release());
             }
+            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::ConfigWatcher);
             return;
         }
 

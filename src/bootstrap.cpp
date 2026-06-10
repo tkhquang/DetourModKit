@@ -1,4 +1,5 @@
 #include "DetourModKit/bootstrap.hpp"
+#include "DetourModKit/diagnostics.hpp"
 
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/hook_manager.hpp"
@@ -311,6 +312,7 @@ namespace DetourModKit::Bootstrap
             // that callers who need a clean unload call request_shutdown()
             // before FreeLibrary and give the worker time to drain.
             SetEvent(g_shutdown_event);
+            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Bootstrap);
         }
 
         if (g_shutdown_event)

@@ -12,6 +12,7 @@
  */
 
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/logger.hpp"
 #include "platform.hpp"
@@ -894,6 +895,7 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
                         {
                             pin_current_module();
                             s_cleanupThread.detach();
+                            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::MemoryCache);
                         }
                         s_cacheInitialized.store(false, std::memory_order_release);
                         return;
@@ -969,6 +971,7 @@ void DetourModKit::Memory::shutdown_cache()
             // flag and exit on its own.
             pin_current_module();
             s_cleanupThread.detach();
+            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::MemoryCache);
         }
         else
         {

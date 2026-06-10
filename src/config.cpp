@@ -39,8 +39,8 @@
 #include <vector>
 
 using namespace DetourModKit;
-using namespace DetourModKit::Filesystem;
-using namespace DetourModKit::String;
+using DetourModKit::Filesystem::get_runtime_directory;
+using DetourModKit::String::trim;
 
 // Anonymous namespace for internal helpers and storage
 namespace

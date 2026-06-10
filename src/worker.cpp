@@ -1,4 +1,5 @@
 #include "DetourModKit/worker.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 #include "platform.hpp"
 
@@ -78,6 +79,7 @@ namespace DetourModKit
         {
             detail::pin_current_module();
             m_thread.detach();
+            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Worker);
             return;
         }
 

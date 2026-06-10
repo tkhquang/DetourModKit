@@ -98,11 +98,25 @@ Memory validation-vs-direct-read numbers live in
 # Dedicated sanitizer preset (ASan + UBSan)
 cmake --preset mingw-debug-asan
 cmake --build --preset mingw-debug-asan --parallel
+ctest --preset mingw-debug-asan
 
-# Or manually
+# Dedicated coverage preset (gcov instrumentation)
+cmake --preset mingw-debug-coverage
+cmake --build --preset mingw-debug-coverage --parallel
+ctest --preset mingw-debug-coverage
+
+# Or enable either flag on top of mingw-debug manually
 cmake --preset mingw-debug -DDMK_ENABLE_SANITIZERS=ON
 cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 ```
+
+The ASan/UBSan runtimes ship inside the MinGW GCC package itself
+(`mingw-w64-x86_64-gcc` on MSYS2). If a sanitizer build fails to link with a
+missing `libasan` / `libubsan`, reinstall or update that package
+(`pacman -S mingw-w64-x86_64-gcc`). A non-blocking CI probe in
+`.github/workflows/quality.yml` builds and runs the sanitizer preset (alongside
+an advisory clang-format check) so regressions in that wiring surface without
+gating PRs.
 
 ### Makefile wrapper
 
@@ -130,6 +144,7 @@ include/DetourModKit/    # Public headers -- one per module
   memory.hpp             # Memory read/write, sharded region cache, seh_read<T>, seh_resolve_chain/seh_read_chain<T>, plausible_userspace_ptr, PE module range
   rtti.hpp               # MSVC RTTI walker (type_name_of, vtable_is_type, find_in_pointer_table) + reverse name-to-vtable (vtable_for_type, vtables_for_type, TypeIdentity)
   rtti_dissect.hpp       # Reverse RTTI dissection + self-healing offsets (identify_pointee_type, reverse_scan_block, heal_landmark/heal_offset, solve_fingerprint) + drift-telemetry report (heal_report, DriftEntry)
+  drift_manifest.hpp     # Durable serialize/parse of the self-heal drift report (DriftEntry) so drift can be saved and diffed across game versions
   anchors.hpp            # Declarative self-healing anchor registry over the vtable / cascade / code-constant / string-xref / manual backends, plus two-signal quorum corroboration and optional post-resolve validators (Anchors::resolve, resolve_all)
   event_dispatcher.hpp   # Typed pub/sub with RAII subscriptions (header-only)
   profiler.hpp           # Opt-in scoped timing (zero-cost when disabled)
@@ -139,6 +154,7 @@ include/DetourModKit/    # Public headers -- one per module
   filesystem.hpp         # Module directory resolution (wide-string and UTF-8 APIs)
   bootstrap.hpp          # DllMain lifecycle (worker thread, mutex, process gate)
   worker.hpp             # StoppableWorker RAII std::jthread wrapper
+  diagnostics.hpp        # Consumer-queryable counters for intentional loader-lock leak/detach events, per subsystem
 src/                     # Implementation files. One .cpp per module, except a
                          # cohesive module may split into sibling TUs sharing one
                          # public header: scanner.cpp (scan engine) +
@@ -303,6 +319,8 @@ selection table, and the anti-patterns to remove -- lives in
 - **Anchor registry tests:** `tests/test_anchors.cpp` covers `anchors.hpp` (`resolve`, `resolve_all`, `anchor_status_to_string`), one case per resolvable kind (Manual literal, CodeOperand, RipGlobal, VtableIdentity fail-closed) plus the `CallArgHome` `Unsupported` path and the parallel-report capacity behaviour. It also covers the optional post-resolve validator (accept, reject-fails-closed, context pass-through both ways, and the Manual / CallArgHome exemptions) and the `Quorum` kind (agreement, disagreement, one-signal-fails, null sub-anchor, rejected nesting, within-tolerance accept and reject, negative-tolerance fail-closed, the quorum's own validator applied to the corroborated value, and quorum propagation through `resolve_all`).
 - **Test fixture pattern:** Each suite uses a `::testing::Test` subclass with `SetUp()`/`TearDown()` for temp file cleanup. Temp file paths must include the process ID (`_getpid()`) and a counter to avoid collisions when CTest runs tests in parallel as separate processes.
 - **VMT hook test lifetime:** GoogleTest destroys test-body locals *before* calling `TearDown()`. VMT tests must explicitly call `remove_all_vmt_hooks()` (or `remove_vmt_hook`) before target objects go out of scope. Do not rely on `TearDown()` for VMT cleanup when the hooked object is a test-body local.
+- **Drift manifest tests:** `tests/test_drift_manifest.cpp` covers `drift_manifest.hpp`: round-trip of a DriftEntry report through serialize/parse (including negative offsets and the owned-name-survives-source-destruction guarantee), the empty-report header-only case, file round-trip, and the fail-closed parse errors (missing header, wrong field count, non-numeric offset, missing file).
+- **Diagnostics tests:** `tests/test_diagnostics.cpp` covers `diagnostics.hpp` (the per-subsystem intentional-leak counters): per-subsystem increment isolation, accumulation, the cross-subsystem total, the out-of-range `LeakSubsystem::Count` no-op, and reset. The instrumented loader-lock teardown sites themselves are not reachable from a normal test run; the counter contract is verified directly.
 - **Coverage gate:** 80% minimum line coverage enforced in CI. All PRs must pass.
 - **Concurrency tests:** Use `std::atomic<bool> stop` flag pattern with multiple threads. See `AsyncMode_ConcurrentLogAndDisable` in `test_logger.cpp` for the reference pattern.
 - **Build flag:** Tests are enabled with `DMK_BUILD_TESTS=ON` (on by default in debug presets).

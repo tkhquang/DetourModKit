@@ -1,4 +1,5 @@
 #include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/memory.hpp"
 #include "platform.hpp"
@@ -17,7 +18,7 @@
 #include <vector>
 
 using namespace DetourModKit;
-using namespace DetourModKit::Scanner;
+using DetourModKit::Scanner::parse_aob;
 
 namespace
 {
@@ -200,6 +201,9 @@ HookManager::~HookManager() noexcept
         {
             leaked_vmt_hooks->swap(m_vmt_hooks);
         }
+        // Surface this loader-lock leak so consumers can observe teardown
+        // escape-hatch activity without parsing logs.
+        DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::HookManager);
         m_shutdown_called.store(true, std::memory_order_release);
         return;
     }
@@ -841,6 +845,149 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
         m_logger.error("HookManager: Failed to disable hook '{}': {}", hook_id, Hook::error_to_string(error));
     }
     return std::unexpected(error);
+}
+
+bool HookManager::toggle_hook_locked(std::string_view hook_id, Hook &hook, bool enable)
+{
+    auto result = enable ? hook.enable() : hook.disable();
+    // "enable" + 'd' / "disable" + 'd' reads as "enabled" / "disabled" in the log.
+    const std::string_view verb = enable ? "enable" : "disable";
+    if (result)
+    {
+        m_logger.debug("HookManager: Hook '{}' successfully {}d.", hook_id, verb);
+        return true;
+    }
+
+    const auto error = result.error();
+    if (error == HookError::InvalidHookState)
+    {
+        m_logger.warning("HookManager: Hook '{}' cannot be {}d. Current status: {}", hook_id, verb, Hook::status_to_string(hook.get_status()));
+    }
+    else
+    {
+        m_logger.error("HookManager: Failed to {} hook '{}': {}", verb, hook_id, Hook::error_to_string(error));
+    }
+    return false;
+}
+
+std::size_t HookManager::enable_hooks(std::span<const std::string_view> hook_ids)
+{
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable {} hook(s).", hook_ids.size());
+        return 0;
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable {} hook(s).", hook_ids.size());
+        return 0;
+    }
+
+    std::size_t enabled = 0;
+    for (const std::string_view hook_id : hook_ids)
+    {
+        auto it = m_hooks.find(hook_id);
+        if (it == m_hooks.end())
+        {
+            m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
+            continue;
+        }
+        if (toggle_hook_locked(hook_id, *it->second, true))
+        {
+            ++enabled;
+        }
+    }
+    return enabled;
+}
+
+std::size_t HookManager::disable_hooks(std::span<const std::string_view> hook_ids)
+{
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable {} hook(s).", hook_ids.size());
+        return 0;
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable {} hook(s).", hook_ids.size());
+        return 0;
+    }
+
+    std::size_t disabled = 0;
+    for (const std::string_view hook_id : hook_ids)
+    {
+        auto it = m_hooks.find(hook_id);
+        if (it == m_hooks.end())
+        {
+            m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
+            continue;
+        }
+        if (toggle_hook_locked(hook_id, *it->second, false))
+        {
+            ++disabled;
+        }
+    }
+    return disabled;
+}
+
+std::size_t HookManager::enable_all_hooks()
+{
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable all hooks.");
+        return 0;
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot enable all hooks.");
+        return 0;
+    }
+
+    std::size_t enabled = 0;
+    for (const auto &[hook_id, hook] : m_hooks)
+    {
+        if (toggle_hook_locked(hook_id, *hook, true))
+        {
+            ++enabled;
+        }
+    }
+    return enabled;
+}
+
+std::size_t HookManager::disable_all_hooks()
+{
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable all hooks.");
+        return 0;
+    }
+
+    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    if (m_shutdown_called.load(std::memory_order_acquire))
+    {
+        m_logger.warning("HookManager: Shutdown in progress. Cannot disable all hooks.");
+        return 0;
+    }
+
+    std::size_t disabled = 0;
+    for (const auto &[hook_id, hook] : m_hooks)
+    {
+        if (toggle_hook_locked(hook_id, *hook, false))
+        {
+            ++disabled;
+        }
+    }
+    return disabled;
 }
 
 std::optional<HookStatus> HookManager::get_hook_status(std::string_view hook_id) const

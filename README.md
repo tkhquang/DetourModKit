@@ -18,7 +18,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads, PE module range queries | `memory.hpp` |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | `rtti.hpp` |
-| RTTI Self-Heal | Reverse-identify the object behind a pointer slot; self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver; drift-telemetry report | `rtti_dissect.hpp` |
+| RTTI Self-Heal | Reverse-identify the object behind a pointer slot; self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver; drift-telemetry report with a durable, diffable manifest | `rtti_dissect.hpp`, `drift_manifest.hpp` |
 | Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) plus two-signal quorum corroboration and optional post-resolve validators, resolved and reported in a single pass | `anchors.hpp` |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
@@ -28,6 +28,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Version Macros | Compile-time version checking generated from CMake | `version.hpp` |
 | Input System | Hotkey monitoring with background polling (keyboard/mouse/gamepad) | `input.hpp`, `input_codes.hpp` |
 | Mod Bootstrap | DllMain scaffolding, instance mutex, process gate, lifecycle worker | `bootstrap.hpp` |
+| Diagnostics | Consumer-queryable counters for intentional loader-lock leak/detach events, per subsystem | `diagnostics.hpp` |
 | Stoppable Worker | RAII named `std::jthread` wrapper, loader-lock-safe teardown | `worker.hpp` |
 
 <details>
@@ -61,6 +62,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
   - Safe callback-based access to hooked methods via `with_vmt_method()`
 - **Convenience helpers**: `try_install_inline` / `try_install_inline_aob` / `try_install_mid` / `try_install_mid_aob` fuse `create_*_hook` with single-line Error logging on failure, returning `optional<string>` of the registered name
 - **Duplicate-target query**: `HookManager::is_target_already_hooked(addr)` reports whether the local registry already inline-hooks a given address (does not see hooks installed by other statically-linked DMK consumers in the same process)
+- **Batch toggling**: `enable_hooks` / `disable_hooks` (by name span) and `enable_all_hooks` / `disable_all_hooks` toggle many hooks under one lock acquisition for startup and hot-reload phases, returning the count affected (ergonomics, not a performance change: SafetyHook installs via a vectored exception handler and does not suspend threads)
 
 </details>
 
