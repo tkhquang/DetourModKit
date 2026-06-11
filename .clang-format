@@ -6,9 +6,13 @@ BasedOnStyle: LLVM
 # The project is C++23. clang-format has no explicit c++23 enum yet, so Latest
 # selects the newest standard it knows and parses C++23 syntax correctly.
 Standard: Latest
-# The codebase does not enforce a hard column limit (some Doxygen and log lines
-# run well past 120), so do not let the formatter reflow on width.
-ColumnLimit: 0
+# Hard 120-column baseline for code and comments. String literals are the one
+# sanctioned exception: log and error messages read and grep better as a single
+# literal, so BreakStringLiterals below keeps the formatter from splitting them
+# and a line whose excess is inside one literal is left alone.
+ColumnLimit: 120
+ReflowComments: Always
+BreakStringLiterals: false
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never

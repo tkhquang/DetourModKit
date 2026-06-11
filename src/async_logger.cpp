@@ -7,7 +7,6 @@
 #include <iomanip>
 #include <iostream>
 #include <new>
-#include <sstream>
 #include <type_traits>
 
 namespace DetourModKit
@@ -33,8 +32,7 @@ namespace DetourModKit
 
         if (leaked > 0)
         {
-            std::cerr << "[StringPool] " << leaked
-                      << " heap-fallback string(s) were not returned before destruction\n";
+            std::cerr << "[StringPool] " << leaked << " heap-fallback string(s) were not returned before destruction\n";
         }
 
         Block *current = m_head.load(std::memory_order_relaxed);
@@ -51,9 +49,8 @@ namespace DetourModKit
                 }
             }
 
-            // Block is over-aligned (alignas(64)); it must be released through
-            // the aligned operator delete that matches its aligned allocation
-            // in grow_pool_locked().
+            // Block is over-aligned (alignas(64)); it must be released through the aligned operator delete that matches
+            // its aligned allocation in grow_pool_locked().
             ::operator delete(current, std::align_val_t{alignof(Block)});
             current = next;
         }
@@ -72,14 +69,12 @@ namespace DetourModKit
             }
         }
 
-        // Block is over-aligned via its alignas(64) data member, so it must be
-        // allocated through the aligned operator new; the plain overload is not
-        // required to honour an alignment stricter than
-        // __STDCPP_DEFAULT_NEW_ALIGNMENT__ (typically 16 on x64), which would be
-        // alignment UB. The allocation is also nothrow: this runs underneath the
-        // noexcept logging path, so on out-of-memory it must leave the pool
-        // unchanged and let the caller fall back to a nothrow heap string (or
-        // drop the message) rather than let std::bad_alloc escape and terminate.
+        // Block is over-aligned via its alignas(64) data member, so it must be allocated through the aligned operator
+        // new; the plain overload is not required to honour an alignment stricter than
+        // __STDCPP_DEFAULT_NEW_ALIGNMENT__ (typically 16 on x64), which would be alignment UB. The allocation is also
+        // nothrow: this runs underneath the noexcept logging path, so on out-of-memory it must leave the pool unchanged
+        // and let the caller fall back to a nothrow heap string (or drop the message) rather than let std::bad_alloc
+        // escape and terminate.
         void *raw = ::operator new(sizeof(Block), std::align_val_t{alignof(Block)}, std::nothrow);
         if (!raw)
         {
@@ -91,10 +86,10 @@ namespace DetourModKit
         new_block->free_list = nullptr;
 
         PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
-        static_assert(POOL_SLOTS_PER_BLOCK <= 32, "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
-        // Slot construction must not throw, otherwise a partially built block
-        // could leak with no unwinding under this noexcept function. std::string's
-        // default constructor is noexcept, so the loop below is provably no-throw.
+        static_assert(POOL_SLOTS_PER_BLOCK <= 32,
+                      "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
+        // Slot construction must not throw, otherwise a partially built block could leak with no unwinding under this
+        // noexcept function. std::string's default constructor is noexcept, so the loop below is provably no-throw.
         static_assert(std::is_nothrow_default_constructible_v<PoolSlot>,
                       "PoolSlot must be nothrow-default-constructible so grow_pool_locked stays no-throw");
         uint32_t constructed = 0;
@@ -112,17 +107,13 @@ namespace DetourModKit
 
     StringPool &StringPool::instance() noexcept
     {
-        // Constructed once into function-local static storage and never
-        // destroyed. A Meyers singleton would be destroyed at static teardown
-        // and race late LogMessage destructors that call into deallocate()
-        // (use-after-free under DLL unload and loader-lock teardown). A
-        // heap-allocated singleton (`*new StringPool()`) would instead require
-        // a throwing operator new whose std::bad_alloc would escape this
-        // noexcept accessor and terminate the host. Placement-new into static
-        // storage avoids both: the object lives for the whole process, its
-        // destructor never runs, and construction performs no throwing
-        // allocation because grow_pool_locked() is nothrow. The bounded block
-        // leak (at most MEMORY_POOL_BLOCK_COUNT blocks of
+        // Constructed once into function-local static storage and never destroyed. A Meyers singleton would be
+        // destroyed at static teardown and race late LogMessage destructors that call into deallocate() (use-after-free
+        // under DLL unload and loader-lock teardown). A heap-allocated singleton (`*new StringPool()`) would instead
+        // require a throwing operator new whose std::bad_alloc would escape this noexcept accessor and terminate the
+        // host. Placement-new into static storage avoids both: the object lives for the whole process, its destructor
+        // never runs, and construction performs no throwing allocation because grow_pool_locked() is nothrow. The
+        // bounded block leak (at most MEMORY_POOL_BLOCK_COUNT blocks of
         // MEMORY_POOL_BLOCK_SIZE bytes) is released by the OS at process exit.
         alignas(StringPool) static unsigned char storage[sizeof(StringPool)];
         static StringPool *const pool = ::new (static_cast<void *>(storage)) StringPool();
@@ -201,13 +192,12 @@ namespace DetourModKit
             }
         }
 
-        // Not a pool allocation -- heap fallback. The delete is performed
-        // under m_pool_mutex to serialize with concurrent deallocate() calls
-        // that walk the block list above. Without the lock, a concurrent
-        // deallocate could see a partially updated free list. The lock does
+        // Not a pool allocation -- heap fallback. The delete is performed under m_pool_mutex to serialize with
+        // concurrent deallocate() calls that walk the block list above. Without the lock, a concurrent deallocate could
+        // see a partially updated free list. The lock does
         // not prevent double-free of heap pointers (those are not tracked);
-        // callers must ensure each pointer is deallocated exactly once. The
-        // cost is a single free() call (or no-op for SSO-sized strings).
+        // callers must ensure each pointer is deallocated exactly once. The cost is a single free() call (or no-op for
+        // SSO-sized strings).
         delete ptr;
         if (m_heap_fallback_count.load(std::memory_order_relaxed) > 0)
         {
@@ -222,9 +212,7 @@ namespace DetourModKit
     }
 
     LogMessage::LogMessage(LogLevel lvl, std::string_view msg) noexcept
-        : level(lvl),
-          timestamp(std::chrono::system_clock::now()),
-          thread_id(std::this_thread::get_id())
+        : level(lvl), timestamp(std::chrono::system_clock::now()), thread_id(std::this_thread::get_id())
     {
         const size_t msg_size = std::min(msg.size(), MAX_VALID_LENGTH);
 
@@ -264,15 +252,11 @@ namespace DetourModKit
     }
 
     // Move transfers ownership of the overflow pointer without touching the
-    // StringPool or m_heap_fallback_count. The allocation/deallocation balance
-    // is maintained because exactly one LogMessage owns the pointer at any
-    // time, and only reset() (called by the eventual owner's destructor)
-    // returns it to the pool.
+    // StringPool or m_heap_fallback_count. The allocation/deallocation balance is maintained because exactly one
+    // LogMessage owns the pointer at any time, and only reset() (called by the eventual owner's destructor) returns it
+    // to the pool.
     LogMessage::LogMessage(LogMessage &&other) noexcept
-        : level(other.level),
-          timestamp(other.timestamp),
-          thread_id(other.thread_id),
-          length(other.length),
+        : level(other.level), timestamp(other.timestamp), thread_id(other.thread_id), length(other.length),
           overflow(other.overflow)
     {
         if (length > 0 && !overflow)
@@ -362,8 +346,7 @@ namespace DetourModKit
 
             if (diff == 0)
             {
-                if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1,
-                                                        std::memory_order_relaxed))
+                if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 {
                     slot.data = std::move(item);
                     slot.sequence.store(pos + 1, std::memory_order_release);
@@ -393,8 +376,7 @@ namespace DetourModKit
 
             if (diff == 0)
             {
-                if (m_dequeue_pos.compare_exchange_weak(pos, pos + 1,
-                                                        std::memory_order_relaxed))
+                if (m_dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
                 {
                     item = std::move(slot.data);
                     slot.sequence.store(pos + m_capacity, std::memory_order_release);
@@ -445,12 +427,9 @@ namespace DetourModKit
         return size() == 0;
     }
 
-    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config,
-                             std::shared_ptr<WinFileStream> file_stream,
+    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex)
-        : m_queue(config.queue_capacity),
-          m_config(config),
-          m_file_stream(std::move(file_stream)),
+        : m_queue(config.queue_capacity), m_config(config), m_file_stream(std::move(file_stream)),
           m_log_mutex(std::move(log_mutex))
     {
         if (!m_config.validate())
@@ -484,8 +463,8 @@ namespace DetourModKit
             std::lock_guard<std::mutex> lock(*m_log_mutex);
             if (!m_file_stream->is_open() || !m_file_stream->good())
             {
-                // Stream already closed or failed during teardown: the message cannot be
-                // delivered, so report the drop rather than a false success.
+                // Stream already closed or failed during teardown: the message cannot be delivered, so report the drop
+                // rather than a false success.
                 return false;
             }
 
@@ -499,14 +478,11 @@ namespace DetourModKit
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                now.time_since_epoch()) %
-                            1000;
-            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str())
-                           << "." << std::setfill('0') << std::setw(3) << ms.count()
-                           << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
-                           << message << '\n';
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
+                           << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
+                           << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: " << message
+                           << '\n';
             m_file_stream->flush();
 
             // Surface a write/flush failure through the no-throw delivery bool.
@@ -515,8 +491,8 @@ namespace DetourModKit
 
         LogMessage msg(level, message);
 
-        // Increment before push so flush cannot observe zero while a message
-        // is already in the queue but not yet counted.
+        // Increment before push so flush cannot observe zero while a message is already in the queue but not yet
+        // counted.
         m_pending_messages.fetch_add(1, std::memory_order_acq_rel);
         if (m_queue.try_push(msg))
         {
@@ -551,8 +527,7 @@ namespace DetourModKit
     void AsyncLogger::shutdown() noexcept
     {
         bool expected = false;
-        if (!m_shutdown_requested.compare_exchange_strong(expected, true,
-                                                          std::memory_order_acq_rel))
+        if (!m_shutdown_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         {
             return;
         }
@@ -566,7 +541,8 @@ namespace DetourModKit
             {
                 pin_current_module();
                 m_writer_thread.detach();
-                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::AsyncLogger);
+                DetourModKit::Diagnostics::record_intentional_leak(
+                    DetourModKit::Diagnostics::LeakSubsystem::AsyncLogger);
             }
             else
             {
@@ -574,17 +550,13 @@ namespace DetourModKit
             }
         }
 
-        // Drain any messages enqueued between m_running=false and the writer
-        // thread exiting. Without this, late-arriving messages would be silently
-        // lost and the force-zero below would mask the discrepancy.
+        // Drain any messages enqueued between m_running=false and the writer thread exiting. Without this,
+        // late-arriving messages would be silently lost and the force-zero below would mask the discrepancy.
         //
-        // A narrow race remains: a producer that already passed the
-        // m_shutdown_requested check in enqueue() but has not yet called
-        // try_push() can enqueue one message after this drain completes.
-        // This is an accepted trade-off -- closing it would require a
-        // producers_in_flight atomic counter on every enqueue() call,
-        // adding two atomic RMW operations to the hot path. At most one
-        // message per producer thread can be lost, and only during the
+        // A narrow race remains: a producer that already passed the m_shutdown_requested check in enqueue() but has not
+        // yet called try_push() can enqueue one message after this drain completes. This is an accepted trade-off --
+        // closing it would require a producers_in_flight atomic counter on every enqueue() call, adding two atomic RMW
+        // operations to the hot path. At most one message per producer thread can be lost, and only during the
         // nanosecond window between the drain and the force-zero below.
         drain_remaining();
 
@@ -626,7 +598,9 @@ namespace DetourModKit
         while (m_running.load(std::memory_order_acquire) || !m_queue.empty())
         {
             batch.clear();
-            m_queue.try_pop_batch(batch, m_config.batch_size);
+            // The popped count is not needed here; the batch.empty() check below decides between the write path and the
+            // idle-flush path.
+            static_cast<void>(m_queue.try_pop_batch(batch, m_config.batch_size));
 
             if (!batch.empty())
             {
@@ -693,8 +667,8 @@ namespace DetourModKit
             return;
         }
 
-        // Cache the localtime result across consecutive messages that share the
-        // same second to avoid repeated CRT lock acquisition inside localtime_s.
+        // Cache the localtime result across consecutive messages that share the same second to avoid repeated CRT lock
+        // acquisition inside localtime_s.
         std::time_t cached_second{-1};
         std::tm cached_tm{};
 
@@ -712,15 +686,13 @@ namespace DetourModKit
 #endif
             }
 
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                msg.timestamp.time_since_epoch()) %
-                            1000;
+            const auto ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(msg.timestamp.time_since_epoch()) % 1000;
 
-            *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str())
-                           << "." << std::setfill('0') << std::setw(3) << ms.count()
-                           << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
-                           << msg.message() << '\n';
+            *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str()) << "."
+                           << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
+                           << "[" << std::setw(7) << std::left << log_level_to_string(msg.level)
+                           << "] :: " << msg.message() << '\n';
         }
 
         m_file_stream->flush();
@@ -750,8 +722,8 @@ namespace DetourModKit
                 // Pop succeeded but push failed: net -1
                 m_pending_messages.fetch_sub(1, std::memory_order_acq_rel);
             }
-            // Count the new message as dropped (separate from the evicted oldest above).
-            // m_dropped_messages counts individual lost messages, not overflow events.
+            // Count the new message as dropped (separate from the evicted oldest above). m_dropped_messages counts
+            // individual lost messages, not overflow events.
             m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
@@ -809,14 +781,12 @@ namespace DetourModKit
             localtime_r(&time_t, &tm_buf);
 #endif
 
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                message.timestamp.time_since_epoch()) %
-                            1000;
-            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str())
-                           << "." << std::setfill('0') << std::setw(3) << ms.count()
-                           << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
-                           << message.message() << '\n';
+            const auto ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(message.timestamp.time_since_epoch()) % 1000;
+            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
+                           << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
+                           << "[" << std::setw(7) << std::left << log_level_to_string(message.level)
+                           << "] :: " << message.message() << '\n';
             m_file_stream->flush();
 
             if (m_file_stream->fail())

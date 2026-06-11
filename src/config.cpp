@@ -2,9 +2,8 @@
  * @file config.cpp
  * @brief Implementation of configuration loading and management.
  *
- * Provides a system for registering configuration variables, loading their
- * values from an INI file, and logging them. This allows mods to define their
- * configuration needs and have DetourModKit handle the INI parsing and value
+ * Provides a system for registering configuration variables, loading their values from an INI file, and logging them.
+ * This allows mods to define their configuration needs and have DetourModKit handle the INI parsing and value
  * assignment.
  */
 
@@ -47,10 +46,10 @@ namespace
 {
     /**
      * @brief Parses a comma-separated string of input tokens into a vector of InputCodes.
-     * @details Each token is first matched against the named key table (case-insensitive).
-     *          If no name matches, the token is parsed as a hexadecimal VK code (with or
-     *          without 0x prefix), defaulting to InputSource::Keyboard. Handles inline
-     *          semicolon comments, whitespace, and gracefully skips invalid tokens.
+     * @details Each token is first matched against the named key table (case-insensitive). If no name matches, the
+     *          token is parsed as a hexadecimal VK code (with or without 0x prefix), defaulting to
+     *          InputSource::Keyboard. Handles inline semicolon comments, whitespace, and gracefully skips invalid
+     *          tokens.
      * @param input The raw string to parse.
      * @return std::vector<InputCode> Parsed valid input codes.
      */
@@ -60,8 +59,7 @@ namespace
 
         // Strip trailing comment from the full line
         const size_t comment_pos = input.find(';');
-        const std::string effective = trim(
-            (comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
+        const std::string effective = trim((comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
         if (effective.empty())
         {
             return result;
@@ -129,10 +127,9 @@ namespace
     /**
      * @brief Parses a single key combo string into a KeyCombo struct.
      * @details Format: "modifier1+modifier2+trigger_key" where each token is a
-     *          named key or hex VK code. The last '+'-delimited token is the trigger
-     *          key, all preceding tokens are modifier keys (AND logic). This function
-     *          expects a single combo with no commas; use parse_key_combo_list to
-     *          split comma-separated alternatives first.
+     *          named key or hex VK code. The last '+'-delimited token is the trigger key, all preceding tokens are
+     *          modifier keys (AND logic). This function expects a single combo with no commas; use parse_key_combo_list
+     *          to split comma-separated alternatives first.
      * @param input The raw string to parse (no commas expected).
      * @return Config::KeyCombo Parsed key combination.
      */
@@ -180,13 +177,11 @@ namespace
     }
 
     /**
-     * @brief Returns true when @p text is the literal "NONE" sentinel
-     *        (case-insensitive ASCII, exact length match).
+     * @brief Returns true when @p text is the literal "NONE" sentinel (case-insensitive ASCII, exact length match).
      * @details The whole-string-only rule keeps the sentinel unambiguous:
-     *          a NONE token nested inside a comma-separated list cannot be
-     *          told apart from a key-name typo without a per-token lookup,
-     *          and the OR-of-combos semantic makes "an unbound slot inside
-     *          an OR-list" meaningless. Caller must pass a pre-trimmed view.
+     *          a NONE token nested inside a comma-separated list cannot be told apart from a key-name typo without a
+     *          per-token lookup, and the OR-of-combos semantic makes "an unbound slot inside an OR-list" meaningless.
+     *          Caller must pass a pre-trimmed view.
      */
     [[nodiscard]] bool is_none_sentinel(std::string_view text) noexcept
     {
@@ -208,31 +203,25 @@ namespace
 
     /**
      * @brief Parses a comma-separated string of key combos into a KeyComboList.
-     * @details Commas at the top level separate independent combos (OR logic between
-     *          combos). Each combo is parsed by parse_key_combo. Handles inline
-     *          semicolon comments and whitespace. Two opt-out sentinels yield an
-     *          empty result silently: an empty (post-trim) input, and the literal
-     *          "NONE" (case-insensitive, whole-string only). A non-empty input
-     *          that is not the NONE sentinel and whose every comma-separated token
-     *          fails to parse is treated as a user typo and emits a single WARNING
-     *          naming the binding and the offending raw string. Empty inner tokens
-     *          (e.g. "F4,,F5") are silently skipped; the WARNING fires only when
-     *          the entire result list is empty.
+     * @details Commas at the top level separate independent combos (OR logic between combos). Each combo is parsed by
+     *          parse_key_combo. Handles inline semicolon comments and whitespace. Two opt-out sentinels yield an empty
+     *          result silently: an empty (post-trim) input, and the literal "NONE" (case-insensitive, whole-string
+     *          only). A non-empty input that is not the NONE sentinel and whose every comma-separated token fails to
+     *          parse is treated as a user typo and emits a single WARNING naming the binding and the offending raw
+     *          string. Empty inner tokens (e.g. "F4,,F5") are silently skipped; the WARNING fires only when the entire
+     *          result list is empty.
      * @param input The raw string to parse.
-     * @param binding_log_name Optional human-readable binding name used in the
-     *                         typo WARNING. Defaults to an empty view, in which
-     *                         case the WARNING uses "<unnamed>".
+     * @param binding_log_name Optional human-readable binding name used in the typo WARNING. Defaults to an empty view,
+     *                         in which case the WARNING uses "<unnamed>".
      * @return Config::KeyComboList Parsed list of key combinations.
      */
-    Config::KeyComboList parse_key_combo_list(const std::string &input,
-                                              std::string_view binding_log_name = {})
+    Config::KeyComboList parse_key_combo_list(const std::string &input, std::string_view binding_log_name = {})
     {
         Config::KeyComboList result;
 
         // Strip trailing comment from the full line
         const size_t comment_pos = input.find(';');
-        const std::string effective = trim(
-            (comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
+        const std::string effective = trim((comment_pos != std::string::npos) ? input.substr(0, comment_pos) : input);
 
         // Disposition 1: explicit opt-out via empty string. Silent.
         if (effective.empty())
@@ -240,8 +229,7 @@ namespace
             return result;
         }
 
-        // Disposition 2: explicit opt-out via NONE sentinel (whole-string,
-        // case-insensitive, post-trim). Silent.
+        // Disposition 2: explicit opt-out via NONE sentinel (whole-string, case-insensitive, post-trim). Silent.
         if (is_none_sentinel(effective))
         {
             return result;
@@ -268,17 +256,16 @@ namespace
             }
         }
 
-        // Disposition 3: input was non-empty and not the NONE sentinel,
-        // yet every token failed to parse. Real user typo, name it.
+        // Disposition 3: input was non-empty and not the NONE sentinel, yet every token failed to parse. Real user
+        // typo, name it.
         if (result.empty())
         {
             const std::string_view name_view =
                 binding_log_name.empty() ? std::string_view{"<unnamed>"} : binding_log_name;
-            Logger::get_instance().warning(
-                "Config: combo string \"{}\" for binding '{}' did not parse to any "
-                "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
-                "out explicitly.",
-                effective, name_view);
+            Logger::get_instance().warning("Config: combo string \"{}\" for binding '{}' did not parse to any "
+                                           "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
+                                           "out explicitly.",
+                                           effective, name_view);
         }
 
         return result;
@@ -330,8 +317,7 @@ namespace
 
     /**
      * @brief Base class for typed configuration items.
-     * @details This allows storing different types of configuration items
-     *          polymorphically in a collection.
+     * @details This allows storing different types of configuration items polymorphically in a collection.
      */
     struct ConfigItemBase
     {
@@ -340,7 +326,9 @@ namespace
         std::string log_key_name;
 
         ConfigItemBase(std::string sec, std::string key, std::string log_name)
-            : section(std::move(sec)), ini_key(std::move(key)), log_key_name(std::move(log_name)) {}
+            : section(std::move(sec)), ini_key(std::move(key)), log_key_name(std::move(log_name))
+        {
+        }
         virtual ~ConfigItemBase() = default;
         ConfigItemBase(const ConfigItemBase &) = delete;
         ConfigItemBase &operator=(const ConfigItemBase &) = delete;
@@ -370,22 +358,19 @@ namespace
     /**
      * @brief Configuration item using std::function callback for value setting.
      * @tparam T The data type of the configuration item (e.g., int, bool, std::string).
-     * @note Setter callbacks are invoked outside the config mutex to prevent deadlocks.
-     *       See register_* and load() for the deferred invocation pattern.
+     * @note Setter callbacks are invoked outside the config mutex to prevent deadlocks. See register_* and load() for
+     *       the deferred invocation pattern.
      */
-    template <typename T>
-    struct CallbackConfigItem : public ConfigItemBase
+    template <typename T> struct CallbackConfigItem : public ConfigItemBase
     {
         std::function<void(T)> setter; // Callback function to set the value
         T default_value;
         T current_value;
 
-        CallbackConfigItem(std::string sec, std::string key, std::string log_name,
-                           std::function<void(T)> set_fn, T def_val)
-            : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)),
-              setter(std::move(set_fn)),
-              default_value(def_val),
-              current_value(std::move(def_val))
+        CallbackConfigItem(std::string sec, std::string key, std::string log_name, std::function<void(T)> set_fn,
+                           T def_val)
+            : ConfigItemBase(std::move(sec), std::move(key), std::move(log_name)), setter(std::move(set_fn)),
+              default_value(def_val), current_value(std::move(def_val))
         {
         }
 
@@ -397,68 +382,59 @@ namespace
         {
             if (!setter)
                 return {};
-            return [fn = setter, val = current_value]() mutable
-            { fn(std::move(val)); };
+            return [fn = setter, val = current_value]() mutable { fn(std::move(val)); };
         }
     };
 
     // --- Specializations for CallbackConfigItem<T>::load and ::log_current_value ---
 
     // For int
-    template <>
-    void CallbackConfigItem<int>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    template <> void CallbackConfigItem<int>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         current_value = static_cast<int>(ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value));
     }
 
-    template <>
-    void CallbackConfigItem<int>::log_current_value(Logger &logger) const
+    template <> void CallbackConfigItem<int>::log_current_value(Logger &logger) const
     {
         logger.debug("Config:   {} = {}", ini_key, current_value);
     }
 
     // For float
-    template <>
-    void CallbackConfigItem<float>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    template <> void CallbackConfigItem<float>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
-        current_value = static_cast<float>(ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
+        current_value = static_cast<float>(
+            ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
     }
 
-    template <>
-    void CallbackConfigItem<float>::log_current_value(Logger &logger) const
+    template <> void CallbackConfigItem<float>::log_current_value(Logger &logger) const
     {
         logger.debug("Config:   {} = {}", ini_key, current_value);
     }
 
     // For bool
-    template <>
-    void CallbackConfigItem<bool>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    template <> void CallbackConfigItem<bool>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         current_value = ini.GetBoolValue(section.c_str(), ini_key.c_str(), default_value);
     }
 
-    template <>
-    void CallbackConfigItem<bool>::log_current_value(Logger &logger) const
+    template <> void CallbackConfigItem<bool>::log_current_value(Logger &logger) const
     {
         logger.debug("Config:   {} = {}", ini_key, current_value ? "true" : "false");
     }
 
     // For std::string
-    template <>
-    void CallbackConfigItem<std::string>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    template <> void CallbackConfigItem<std::string>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         current_value = ini.GetValue(section.c_str(), ini_key.c_str(), default_value.c_str());
     }
 
-    template <>
-    void CallbackConfigItem<std::string>::log_current_value(Logger &logger) const
+    template <> void CallbackConfigItem<std::string>::log_current_value(Logger &logger) const
     {
         logger.debug("Config:   {} = \"{}\"", ini_key, current_value);
     }
 
     // For Config::KeyComboList (list of key combinations)
-    template <>
-    void CallbackConfigItem<Config::KeyComboList>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
+    template <> void CallbackConfigItem<Config::KeyComboList>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
     {
         const char *ini_value_str = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
         if (ini_value_str != nullptr)
@@ -471,8 +447,7 @@ namespace
         }
     }
 
-    template <>
-    void CallbackConfigItem<Config::KeyComboList>::log_current_value(Logger &logger) const
+    template <> void CallbackConfigItem<Config::KeyComboList>::log_current_value(Logger &logger) const
     {
         const std::string formatted = format_key_combo_list(current_value);
         if (formatted.empty())
@@ -488,8 +463,8 @@ namespace
     // --- Global storage for registered configuration items ---
     std::mutex &get_config_mutex()
     {
-        static std::mutex mtx;
-        return mtx;
+        static std::mutex s_mtx;
+        return s_mtx;
     }
 
     std::vector<std::unique_ptr<ConfigItemBase>> &get_registered_config_items()
@@ -499,19 +474,17 @@ namespace
         return s_registered_items;
     }
 
-    // Holds the INI path last passed to Config::load(). Empty until the
-    // first load() call -- reload() returns false in that window.
-    // Caller must hold get_config_mutex() when reading or writing.
+    // Holds the INI path last passed to Config::load(). Empty until the first load() call -- reload() returns false in
+    // that window. Caller must hold get_config_mutex() when reading or writing.
     std::string &get_last_loaded_ini_path()
     {
         static std::string s_last_loaded_ini_path;
         return s_last_loaded_ini_path;
     }
 
-    // Content hash of the bytes last successfully loaded from the INI file.
-    // std::nullopt until the first successful load() (or after
-    // clear_registered_items(), which wipes it alongside the path).
-    // Caller must hold get_config_mutex() when reading or writing.
+    // Content hash of the bytes last successfully loaded from the INI file. std::nullopt until the first successful
+    // load() (or after clear_registered_items(), which wipes it alongside the path). Caller must hold
+    // get_config_mutex() when reading or writing.
     std::optional<std::uint64_t> &get_last_loaded_ini_hash()
     {
         static std::optional<std::uint64_t> s_last_loaded_ini_hash;
@@ -521,9 +494,8 @@ namespace
     /**
      * @brief 64-bit FNV-1a hash over a raw byte range.
      * @details Computed on the disk bytes (pre-parse) so cosmetic churn by
-     *          SimpleIni's own parser (comment stripping, whitespace
-     *          normalisation) cannot skew the result. Produces a stable
-     *          value on any platform without pulling in a dependency.
+     *          SimpleIni's own parser (comment stripping, whitespace normalisation) cannot skew the result. Produces a
+     *          stable value on any platform without pulling in a dependency.
      */
     [[nodiscard]] std::uint64_t fnv1a_64(const std::vector<std::uint8_t> &bytes) noexcept
     {
@@ -540,14 +512,11 @@ namespace
 
     /**
      * @brief Reads all bytes of @p path into memory.
-     * @details Returns std::nullopt when the file cannot be opened (e.g.
-     *          mid-save by an editor that locks exclusively). Callers
-     *          should treat a nullopt return as "unable to verify
-     *          content; proceed with a full reload" -- erring on the
-     *          side of reloading is safer than skipping a real change.
+     * @details Returns std::nullopt when the file cannot be opened (e.g. mid-save by an editor that locks exclusively).
+     *          Callers should treat a nullopt return as "unable to verify content; proceed with a full reload" --
+     *          erring on the side of reloading is safer than skipping a real change.
      */
-    [[nodiscard]] std::optional<std::vector<std::uint8_t>>
-    read_ini_bytes(const std::filesystem::path &path) noexcept
+    [[nodiscard]] std::optional<std::vector<std::uint8_t>> read_ini_bytes(const std::filesystem::path &path) noexcept
     {
         try
         {
@@ -594,20 +563,16 @@ namespace
     };
 
     /**
-     * @brief Reads the INI bytes once, computes their hash, and feeds
-     *        those exact bytes to CSimpleIniA::LoadData.
-     * @details Closes the TOCTOU window where LoadFile would re-read the
-     *          file after our byte snapshot: if the file was rewritten
-     *          between the two reads, the cached hash would reflect one
-     *          version and the parsed INI another. By using LoadData on
-     *          the already-buffered bytes, the hash and the parse are
-     *          guaranteed to reflect the same file state.
+     * @brief Reads the INI bytes once, computes their hash, and feeds those exact bytes to CSimpleIniA::LoadData.
+     * @details Closes the TOCTOU window where LoadFile would re-read the file after our byte snapshot: if the file was
+     *          rewritten between the two reads, the cached hash would reflect one version and the parsed INI another.
+     *          By using LoadData on the already-buffered bytes, the hash and the parse are guaranteed to reflect the
+     *          same file state.
      * @param path Absolute path to the INI file.
      * @param ini  SimpleIni instance to populate.
      * @return IniLoadOutcome describing each pipeline stage.
      */
-    [[nodiscard]] IniLoadOutcome
-    load_ini_into(const std::filesystem::path &path, CSimpleIniA &ini) noexcept
+    [[nodiscard]] IniLoadOutcome load_ini_into(const std::filesystem::path &path, CSimpleIniA &ini) noexcept
     {
         IniLoadOutcome outcome{};
         auto bytes = read_ini_bytes(path);
@@ -618,14 +583,11 @@ namespace
         outcome.read_succeeded = true;
         outcome.hash = fnv1a_64(*bytes);
 
-        // CSimpleIniA::LoadData(const char*, size_t). Empty buffers are
-        // accepted by SimpleIni (SI_OK, zero sections) -- we still
-        // preserve the hash so an empty file can be content-hash-skipped.
+        // CSimpleIniA::LoadData(const char*, size_t). Empty buffers are accepted by SimpleIni (SI_OK, zero sections) --
+        // we still preserve the hash so an empty file can be content-hash-skipped.
         try
         {
-            const char *data_ptr = bytes->empty()
-                                       ? ""
-                                       : reinterpret_cast<const char *>(bytes->data());
+            const char *data_ptr = bytes->empty() ? "" : reinterpret_cast<const char *>(bytes->data());
             outcome.parse_rc = ini.LoadData(data_ptr, bytes->size());
             outcome.parse_succeeded = (outcome.parse_rc >= 0);
         }
@@ -641,8 +603,8 @@ namespace
     // start / stop transitions do not contend with registration traffic.
     std::mutex &get_watcher_mutex()
     {
-        static std::mutex mtx;
-        return mtx;
+        static std::mutex s_mtx;
+        return s_mtx;
     }
 
     std::unique_ptr<ConfigWatcher> &get_config_watcher()
@@ -651,13 +613,11 @@ namespace
         return s_watcher;
     }
 
-    // Keeps reload-hotkey InputBindingGuards alive for the process lifetime.
-    // Returning the guard by value from register_reload_hotkey would
-    // immediately destroy it (the call site has nowhere to store it), and
-    // ~InputBindingGuard flips the binding's enabled flag to false, so the
-    // press callback would silently no-op forever. Protected by
-    // get_watcher_mutex() because it already serialises lifetime state that
-    // lives alongside the watcher (both are Config-wide, not per-item).
+    // Keeps reload-hotkey InputBindingGuards alive for the process lifetime. Returning the guard by value from
+    // register_reload_hotkey would immediately destroy it (the call site has nowhere to store it), and
+    // ~InputBindingGuard flips the binding's enabled flag to false, so the press callback would silently no-op forever.
+    // Protected by get_watcher_mutex() because it already serialises lifetime state that lives alongside the watcher
+    // (both are Config-wide, not per-item).
     std::vector<DetourModKit::Config::InputBindingGuard> &get_reload_hotkey_guards() noexcept
     {
         static std::vector<DetourModKit::Config::InputBindingGuard> s_guards;
@@ -666,54 +626,41 @@ namespace
 
     /**
      * @class ReloadServicer
-     * @brief Background thread that coalesces reload-hotkey presses and
-     *        invokes Config::reload() off the InputManager poll thread.
-     * @details The hotkey press callback must return in microseconds so
-     *          other hotkeys do not jitter while a 30-item INI parse runs.
-     *          The servicer latches a pending-reload flag; its worker
-     *          thread blocks on a condition variable, drains the flag on
-     *          wake, and invokes reload() at most once per batch of
-     *          presses. Exceptions from reload() are caught so the
-     *          servicer never dies.
+     * @brief Background thread that coalesces reload-hotkey presses and invokes Config::reload() off the InputManager
+     *        poll thread.
+     * @details The hotkey press callback must return in microseconds so other hotkeys do not jitter while a 30-item INI
+     *          parse runs. The servicer latches a pending-reload flag; its worker thread blocks on a condition
+     *          variable, drains the flag on wake, and invokes reload() at most once per batch of presses. Exceptions
+     *          from reload() are caught so the servicer never dies.
      *
-     *          Lazy lifetime: created on the first register_reload_hotkey
-     *          call, kept alive until clear_registered_items() tears it
-     *          down. Shared via std::shared_ptr so a press callback that
-     *          races with shutdown cannot dereference a freed channel.
+     *          Lazy lifetime: created on the first register_reload_hotkey call, kept alive until
+     *          clear_registered_items() tears it down. Shared via std::shared_ptr so a press callback that races with
+     *          shutdown cannot dereference a freed channel.
      */
     class ReloadServicer
     {
     public:
         ReloadServicer()
         {
-            // Launch the servicer worker. StoppableWorker passes its
-            // own stop_token into the body; we observe it via
-            // stop_requested() inside the wait predicate. To make
-            // request_stop() wake a currently blocked cv.wait, we
-            // install a stop_callback on the body's token (captured
-            // inside service_loop) that flips m_shutdown and notifies
-            // the CV.
+            // Launch the servicer worker. StoppableWorker passes its own stop_token into the body; we observe it via
+            // stop_requested() inside the wait predicate. To make request_stop() wake a currently blocked cv.wait, we
+            // install a stop_callback on the body's token (captured inside service_loop) that flips m_shutdown and
+            // notifies the CV.
             m_worker = std::make_unique<DetourModKit::StoppableWorker>(
-                "ConfigReloadServicer",
-                [this](std::stop_token st)
-                {
-                    service_loop(std::move(st));
-                });
+                "ConfigReloadServicer", [this](std::stop_token st) { service_loop(std::move(st)); });
         }
 
         ~ReloadServicer() noexcept
         {
             // Flip the shutdown flag and wake the worker before the
-            // StoppableWorker destructor asks it to stop + join.
-            // notify_all() is harmless if the worker already exited.
+            // StoppableWorker destructor asks it to stop + join. notify_all() is harmless if the worker already exited.
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_shutdown.store(true, std::memory_order_release);
             }
             m_cv.notify_all();
 
-            // ~StoppableWorker requests stop + joins (or detaches under
-            // loader lock). Safe to let it run as-is.
+            // ~StoppableWorker requests stop + joins (or detaches under loader lock). Safe to let it run as-is.
             m_worker.reset();
         }
 
@@ -723,21 +670,16 @@ namespace
         ReloadServicer &operator=(ReloadServicer &&) = delete;
 
         /**
-         * @brief Requests a reload. noexcept and allocation-free on the
-         *        fast path; the press callback uses this and must not
-         *        throw back onto the InputManager poll thread.
+         * @brief Requests a reload. noexcept and allocation-free on the fast path; the press callback uses this and
+         *        must not throw back onto the InputManager poll thread.
          */
         void request_reload() noexcept
         {
-            // The predicate variable m_reload_requested must be mutated
-            // under m_mutex (or at minimum the notifier must take the
-            // mutex before notify_one) to close the lost-wakeup window
-            // on the waiter side: waiter evaluates the predicate false
-            // (pre-lock), then parks; if we stored + notified in that
-            // gap without touching the mutex, the press could be
-            // dropped until the next one. Taking the mutex here serialises
-            // against the waiter's predicate re-check under m_mutex,
-            // making the wakeup observation guaranteed.
+            // The predicate variable m_reload_requested must be mutated under m_mutex (or at minimum the notifier must
+            // take the mutex before notify_one) to close the lost-wakeup window on the waiter side: waiter evaluates
+            // the predicate false (pre-lock), then parks; if we stored + notified in that gap without touching the
+            // mutex, the press could be dropped until the next one. Taking the mutex here serialises against the
+            // waiter's predicate re-check under m_mutex, making the wakeup observation guaranteed.
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_reload_requested.store(true, std::memory_order_release);
@@ -750,39 +692,37 @@ namespace
         {
             DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
 
-            // Wake the CV when the worker is asked to stop so the blocked
-            // wait exits promptly instead of waiting for the next press.
-            std::stop_callback stop_cb(
-                st,
-                [this]() -> void
-                {
-                    {
-                        std::lock_guard<std::mutex> lock(m_mutex);
-                        m_shutdown.store(true, std::memory_order_release);
-                    }
-                    m_cv.notify_all();
-                });
+            // Wake the CV when the worker is asked to stop so the blocked wait exits promptly instead of waiting for
+            // the next press.
+            std::stop_callback stop_cb(st,
+                                       [this]() -> void
+                                       {
+                                           {
+                                               std::lock_guard<std::mutex> lock(m_mutex);
+                                               m_shutdown.store(true, std::memory_order_release);
+                                           }
+                                           m_cv.notify_all();
+                                       });
 
-            while (!st.stop_requested() &&
-                   !m_shutdown.load(std::memory_order_acquire))
+            while (!st.stop_requested() && !m_shutdown.load(std::memory_order_acquire))
             {
                 {
                     std::unique_lock<std::mutex> lock(m_mutex);
-                    m_cv.wait(lock, [&]()
-                              { return st.stop_requested() ||
-                                       m_shutdown.load(std::memory_order_acquire) ||
-                                       m_reload_requested.load(std::memory_order_acquire); });
+                    m_cv.wait(lock,
+                              [&]()
+                              {
+                                  return st.stop_requested() || m_shutdown.load(std::memory_order_acquire) ||
+                                         m_reload_requested.load(std::memory_order_acquire);
+                              });
                 }
 
-                if (st.stop_requested() ||
-                    m_shutdown.load(std::memory_order_acquire))
+                if (st.stop_requested() || m_shutdown.load(std::memory_order_acquire))
                 {
                     break;
                 }
 
                 // Coalesce: a burst of presses during the reload below
-                // collapses into at most one follow-up pass because the
-                // next iteration will exchange the flag once.
+                // collapses into at most one follow-up pass because the next iteration will exchange the flag once.
                 while (m_reload_requested.exchange(false, std::memory_order_acq_rel))
                 {
                     try
@@ -791,13 +731,11 @@ namespace
                     }
                     catch (const std::exception &e)
                     {
-                        logger.error(
-                            "Config: reload servicer caught exception: {}", e.what());
+                        logger.error("Config: reload servicer caught exception: {}", e.what());
                     }
                     catch (...)
                     {
-                        logger.error(
-                            "Config: reload servicer caught unknown exception.");
+                        logger.error("Config: reload servicer caught unknown exception.");
                     }
                 }
             }
@@ -810,8 +748,8 @@ namespace
         std::unique_ptr<DetourModKit::StoppableWorker> m_worker;
     };
 
-    // Shared_ptr so a press callback holding its own strong reference
-    // cannot crash when clear_registered_items() resets the slot.
+    // Shared_ptr so a press callback holding its own strong reference cannot crash when clear_registered_items() resets
+    // the slot.
     std::shared_ptr<ReloadServicer> &get_reload_servicer() noexcept
     {
         static std::shared_ptr<ReloadServicer> s_servicer;
@@ -845,7 +783,9 @@ namespace
 
         if (module_dir.empty() || module_dir == L".")
         {
-            logger.warning("Config: Could not reliably determine module directory or it's current working directory. Using relative path for INI: {}", ini_filename);
+            logger.warning("Config: Could not reliably determine module directory or it's current working directory. "
+                           "Using relative path for INI: {}",
+                           ini_filename);
             // Fallback to relative path
             return std::filesystem::path(ini_filename);
         }
@@ -858,19 +798,21 @@ namespace
         }
         catch (const std::filesystem::filesystem_error &fs_err)
         {
-            logger.warning("Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}", fs_err.what(), ini_filename);
+            logger.warning("Config: Filesystem error constructing INI path: {}. Using relative path for INI: {}",
+                           fs_err.what(), ini_filename);
         }
         catch (const std::exception &e)
         {
-            logger.warning("Config: General error constructing INI path: {}. Using relative path for INI: {}", e.what(), ini_filename);
+            logger.warning("Config: General error constructing INI path: {}. Using relative path for INI: {}", e.what(),
+                           ini_filename);
         }
         return std::filesystem::path(ini_filename); // Fallback
     }
 
 } // anonymous namespace
 
-// All register_* functions use the deferred callback pattern: state is
-// mutated under get_config_mutex(), but the setter callback is invoked after
+// All register_* functions use the deferred callback pattern: state is mutated under get_config_mutex(), but the setter
+// callback is invoked after
 // the lock is released.  This allows setters to call back into the Config
 // API without deadlocking (no reentrancy guard needed).
 void DetourModKit::Config::register_int(std::string_view section, std::string_view ini_key,
@@ -880,12 +822,11 @@ void DetourModKit::Config::register_int(std::string_view section, std::string_vi
     std::function<void()> deferred;
     {
         std::lock_guard<std::mutex> lock(get_config_mutex());
-        replace_or_append(
-            std::make_unique<CallbackConfigItem<int>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
+        replace_or_append(std::make_unique<CallbackConfigItem<int>>(std::string(section), std::string(ini_key),
+                                                                    std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, default_value]()
-            { setter(default_value); };
+            deferred = [setter, default_value]() { setter(default_value); };
         }
     }
     if (deferred)
@@ -901,12 +842,11 @@ void DetourModKit::Config::register_float(std::string_view section, std::string_
     std::function<void()> deferred;
     {
         std::lock_guard<std::mutex> lock(get_config_mutex());
-        replace_or_append(
-            std::make_unique<CallbackConfigItem<float>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
+        replace_or_append(std::make_unique<CallbackConfigItem<float>>(
+            std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, default_value]()
-            { setter(default_value); };
+            deferred = [setter, default_value]() { setter(default_value); };
         }
     }
     if (deferred)
@@ -922,12 +862,11 @@ void DetourModKit::Config::register_bool(std::string_view section, std::string_v
     std::function<void()> deferred;
     {
         std::lock_guard<std::mutex> lock(get_config_mutex());
-        replace_or_append(
-            std::make_unique<CallbackConfigItem<bool>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
+        replace_or_append(std::make_unique<CallbackConfigItem<bool>>(std::string(section), std::string(ini_key),
+                                                                     std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, default_value]()
-            { setter(default_value); };
+            deferred = [setter, default_value]() { setter(default_value); };
         }
     }
     if (deferred)
@@ -937,18 +876,17 @@ void DetourModKit::Config::register_bool(std::string_view section, std::string_v
 }
 
 void DetourModKit::Config::register_string(std::string_view section, std::string_view ini_key,
-                                           std::string_view log_key_name, std::function<void(const std::string &)> setter,
-                                           std::string default_value)
+                                           std::string_view log_key_name,
+                                           std::function<void(const std::string &)> setter, std::string default_value)
 {
     std::function<void()> deferred;
     {
         std::lock_guard<std::mutex> lock(get_config_mutex());
-        replace_or_append(
-            std::make_unique<CallbackConfigItem<std::string>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
+        replace_or_append(std::make_unique<CallbackConfigItem<std::string>>(
+            std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
         if (setter)
         {
-            deferred = [setter, val = std::move(default_value)]()
-            { setter(val); };
+            deferred = [setter, val = std::move(default_value)]() { setter(val); };
         }
     }
     if (deferred)
@@ -960,12 +898,14 @@ void DetourModKit::Config::register_string(std::string_view section, std::string
 void DetourModKit::Config::register_log_level(std::string_view section, std::string_view ini_key,
                                               std::string_view default_value)
 {
-    register_string(section, ini_key, "Log level", [](const std::string &value)
-                    { Logger::get_instance().set_log_level(Logger::string_to_log_level(value)); }, std::string(default_value));
+    register_string(
+        section, ini_key, "Log level", [](const std::string &value)
+        { Logger::get_instance().set_log_level(Logger::string_to_log_level(value)); }, std::string(default_value));
 }
 
 void DetourModKit::Config::register_key_combo(std::string_view section, std::string_view ini_key,
-                                              std::string_view log_key_name, std::function<void(const KeyComboList &)> setter,
+                                              std::string_view log_key_name,
+                                              std::function<void(const KeyComboList &)> setter,
                                               std::string_view default_value_str)
 {
     Config::KeyComboList default_combos = parse_key_combo_list(std::string(default_value_str), log_key_name);
@@ -973,12 +913,11 @@ void DetourModKit::Config::register_key_combo(std::string_view section, std::str
     std::function<void()> deferred;
     {
         std::lock_guard<std::mutex> lock(get_config_mutex());
-        replace_or_append(
-            std::make_unique<CallbackConfigItem<Config::KeyComboList>>(std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_combos));
+        replace_or_append(std::make_unique<CallbackConfigItem<Config::KeyComboList>>(
+            std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_combos));
         if (setter)
         {
-            deferred = [setter, combos = std::move(default_combos)]()
-            { setter(combos); };
+            deferred = [setter, combos = std::move(default_combos)]() { setter(combos); };
         }
     }
     if (deferred)
@@ -987,50 +926,46 @@ void DetourModKit::Config::register_key_combo(std::string_view section, std::str
     }
 }
 
-DetourModKit::Config::InputBindingGuard DetourModKit::Config::register_press_combo(
-    std::string_view section,
-    std::string_view ini_key,
-    std::string_view log_name,
-    std::string_view input_binding_name,
-    std::function<void()> on_press,
-    std::string_view default_value)
+DetourModKit::Config::InputBindingGuard
+DetourModKit::Config::register_press_combo(std::string_view section, std::string_view ini_key,
+                                           std::string_view log_name, std::string_view input_binding_name,
+                                           std::function<void()> on_press, std::string_view default_value)
 {
     auto enabled_flag = std::make_shared<std::atomic<bool>>(true);
     auto current_combos = std::make_shared<KeyComboList>(parse_key_combo_list(std::string(default_value), log_name));
     std::string binding_name_str(input_binding_name);
 
-    register_key_combo(section, ini_key, log_name, [current_combos, binding_name_str](const KeyComboList &combos)
-                       {
-                           *current_combos = combos;
-                           InputManager::get_instance().update_binding_combos(binding_name_str, combos); }, default_value);
-
-    InputManager::get_instance().register_press(
-        binding_name_str,
-        *current_combos,
-        [enabled_flag, cb = std::move(on_press)]()
+    register_key_combo(
+        section, ini_key, log_name,
+        [current_combos, binding_name_str](const KeyComboList &combos)
         {
-            if (cb && enabled_flag->load(std::memory_order_acquire))
-            {
-                cb();
-            }
-        });
+            *current_combos = combos;
+            InputManager::get_instance().update_binding_combos(binding_name_str, combos);
+        },
+        default_value);
+
+    InputManager::get_instance().register_press(binding_name_str, *current_combos,
+                                                [enabled_flag, cb = std::move(on_press)]()
+                                                {
+                                                    if (cb && enabled_flag->load(std::memory_order_acquire))
+                                                    {
+                                                        cb();
+                                                    }
+                                                });
 
     return InputBindingGuard{std::move(binding_name_str), std::move(enabled_flag)};
 }
 
-void DetourModKit::Config::register_consume_flag(
-    std::string_view section,
-    std::string_view ini_key,
-    std::string_view log_key_name,
-    std::string_view input_binding_name,
-    bool default_value)
+void DetourModKit::Config::register_consume_flag(std::string_view section, std::string_view ini_key,
+                                                 std::string_view log_key_name, std::string_view input_binding_name,
+                                                 bool default_value)
 {
-    // Capture the binding name by value so the setter, which outlives this call
-    // and re-runs on every load()/reload(), stays valid. set_consume is a no-op
-    // for an unknown name, so registering this before the binding exists is safe.
+    // Capture the binding name by value so the setter, which outlives this call and re-runs on every load()/reload(),
+    // stays valid. set_consume is a no-op for an unknown name, so registering this before the binding exists is safe.
     std::string binding_name_str(input_binding_name);
-    register_bool(section, ini_key, log_key_name, [binding_name_str](bool consume)
-                  { InputManager::get_instance().set_consume(binding_name_str, consume); }, default_value);
+    register_bool(
+        section, ini_key, log_key_name, [binding_name_str](bool consume)
+        { InputManager::get_instance().set_consume(binding_name_str, consume); }, default_value);
 }
 
 void DetourModKit::Config::load(std::string_view ini_filename)
@@ -1048,27 +983,24 @@ void DetourModKit::Config::load(std::string_view ini_filename)
         ini.SetUnicode(false);  // Assume ASCII/MBCS INI
         ini.SetMultiKey(false); // Disallow duplicate keys in a section
 
-        // Read-hash-parse pipeline: read bytes once, hash them, feed the
-        // same buffer into CSimpleIniA::LoadData so the cached hash and
-        // the parsed INI state are guaranteed to reflect identical file
-        // contents (TOCTOU-free vs. a separate LoadFile call).
+        // Read-hash-parse pipeline: read bytes once, hash them, feed the same buffer into CSimpleIniA::LoadData so the
+        // cached hash and the parsed INI state are guaranteed to reflect identical file contents (TOCTOU-free vs. a
+        // separate LoadFile call).
         IniLoadOutcome outcome = load_ini_into(ini_path, ini);
 
         const bool load_succeeded = outcome.read_succeeded && outcome.parse_succeeded;
         if (!outcome.read_succeeded)
         {
             logger.error("Config: Failed to open '{}'. Using defaults.", ini_path_str);
-            // File unreadable: wipe the cached hash so the next reload()
-            // does not short-circuit against a stale value.
+            // File unreadable: wipe the cached hash so the next reload() does not short-circuit against a stale value.
             get_last_loaded_ini_hash().reset();
         }
         else if (!outcome.parse_succeeded)
         {
-            logger.error("Config: Failed to parse '{}' (error {}). Using defaults.",
-                         ini_path_str, static_cast<int>(outcome.parse_rc));
-            // Parse failed: clear the hash so a subsequent successful
-            // load() does not spuriously hash-skip a reload against a
-            // hash computed for bytes we could not actually parse.
+            logger.error("Config: Failed to parse '{}' (error {}). Using defaults.", ini_path_str,
+                         static_cast<int>(outcome.parse_rc));
+            // Parse failed: clear the hash so a subsequent successful load() does not spuriously hash-skip a reload
+            // against a hash computed for bytes we could not actually parse.
             get_last_loaded_ini_hash().reset();
         }
         else
@@ -1088,11 +1020,9 @@ void DetourModKit::Config::load(std::string_view ini_filename)
             }
         }
 
-        // Remember the INI path so reload() can re-run setters against the
-        // same file without the caller passing it again. Only update the
-        // stored path on success; a failed load must leave the previously
-        // remembered path (if any) untouched so subsequent reload() calls
-        // keep targeting the last good file rather than a missing or
+        // Remember the INI path so reload() can re-run setters against the same file without the caller passing it
+        // again. Only update the stored path on success; a failed load must leave the previously remembered path (if
+        // any) untouched so subsequent reload() calls keep targeting the last good file rather than a missing or
         // malformed one.
         if (load_succeeded)
         {
@@ -1113,13 +1043,11 @@ void DetourModKit::Config::load(std::string_view ini_filename)
 namespace
 {
     /**
-     * @brief Internal reload implementation that also reports whether
-     *        setters actually ran.
-     * @param[out] out_setters_ran Set to true when setters were invoked.
-     *                             False when the content-hash short-circuit
+     * @brief Internal reload implementation that also reports whether setters actually ran.
+     * @param[out] out_setters_ran Set to true when setters were invoked. False when the content-hash short-circuit
      *                             skipped the reload.
-     * @return true if a previous load() path was available and the reload
-     *         proceeded; false if reload() was called before any load().
+     * @return true if a previous load() path was available and the reload proceeded; false if reload() was called
+     *         before any load().
      */
     bool reload_impl(bool &out_setters_ran)
     {
@@ -1134,9 +1062,8 @@ namespace
             ini_filename = get_last_loaded_ini_path();
             if (ini_filename.empty())
             {
-                // No prior load() -- nothing to reload. Caller is expected
-                // to check the return value and either call load() first
-                // or surface a user-facing error.
+                // No prior load() -- nothing to reload. Caller is expected to check the return value and either call
+                // load() first or surface a user-facing error.
                 return false;
             }
 
@@ -1148,51 +1075,43 @@ namespace
             ini.SetUnicode(false);
             ini.SetMultiKey(false);
 
-            // Read-hash-parse pipeline: the hash we compare against the
-            // cache and the bytes SimpleIni parses come from a single
-            // read. Splitting the read (one for hashing, another via
-            // LoadFile for parsing) would let an editor save slip
-            // between them and desync the cached hash from the parsed
-            // state.
+            // Read-hash-parse pipeline: the hash we compare against the cache and the bytes SimpleIni parses come from
+            // a single read. Splitting the read (one for hashing, another via
+            // LoadFile for parsing) would let an editor save slip between them and desync the cached hash from the
+            // parsed state.
             IniLoadOutcome outcome = load_ini_into(ini_path, ini);
 
             if (!outcome.read_succeeded)
             {
-                // Read failure: clear the cached hash before falling
-                // through to run setters with defaults. Leaving it in
-                // place would let a later reload find identical bytes
-                // (same as the last successful load), match the stale
-                // hash, and hash-skip -- silently leaving in-memory
-                // state at the defaults from this failed reload.
+                // Read failure: clear the cached hash before falling through to run setters with defaults. Leaving it
+                // in place would let a later reload find identical bytes (same as the last successful load), match the
+                // stale hash, and hash-skip -- silently leaving in-memory state at the defaults from this failed
+                // reload.
                 get_last_loaded_ini_hash() = std::nullopt;
                 logger.warning("Config: reload() could not open '{}'; retaining last values where setters keep state.",
                                ini_path_str);
             }
             else
             {
-                // Content-hash skip: compare against the hash stored on
-                // the last successful load()/reload(). Identical bytes
-                // -> no setters. Uses the hash we just computed in the
-                // pipeline; no second read.
+                // Content-hash skip: compare against the hash stored on the last successful load()/reload(). Identical
+                // bytes
+                // -> no setters. Uses the hash we just computed in the pipeline; no second read.
                 if (auto &cached_hash = get_last_loaded_ini_hash(); cached_hash.has_value())
                 {
                     const std::uint64_t current_hash = *outcome.hash;
                     if (current_hash == *cached_hash)
                     {
-                        logger.debug(
-                            "Config::reload: content unchanged (hash {:016x}); skipping setters.",
-                            current_hash);
+                        logger.debug("Config::reload: content unchanged (hash {:016x}); skipping setters.",
+                                     current_hash);
                         return true;
                     }
-                    // Content changed: remember the new hash so a
-                    // subsequent no-op reload can short-circuit.
+                    // Content changed: remember the new hash so a subsequent no-op reload can short-circuit.
                     cached_hash = current_hash;
                 }
                 else
                 {
                     // No cached hash (prior failure or never-loaded):
-                    // adopt the current one so a subsequent no-op
-                    // reload short-circuits.
+                    // adopt the current one so a subsequent no-op reload short-circuits.
                     get_last_loaded_ini_hash() = outcome.hash;
                 }
 
@@ -1200,12 +1119,11 @@ namespace
                 {
                     // Asymmetry with the read-failure branch above is
                     // intentional: we have already advanced the cached
-                    // hash to these new bytes, so a later reload with
-                    // identical bytes correctly short-circuits -- the
-                    // partial state produced by re-parsing would be the
-                    // same. The read-failure branch cannot make that
+                    // hash to these new bytes, so a later reload with identical bytes correctly short-circuits -- the
+                    // partial state produced by re-parsing would be the same. The read-failure branch cannot make that
                     // guarantee because it never observed the bytes.
-                    logger.warning("Config: reload() parse error on '{}' (error {}); retaining last values where setters keep state.",
+                    logger.warning("Config: reload() parse error on '{}' (error {}); "
+                                   "retaining last values where setters keep state.",
                                    ini_path_str, static_cast<int>(outcome.parse_rc));
                 }
                 else
@@ -1224,15 +1142,13 @@ namespace
                 }
             }
 
-            logger.info("Config: Reloaded {} items from {}",
-                        get_registered_config_items().size(), ini_path_str);
+            logger.info("Config: Reloaded {} items from {}", get_registered_config_items().size(), ini_path_str);
         }
 
-        // The registry mutex is released by the scope above; setters run
-        // unlocked (the standard deferred-setter pattern). Wrap each call
-        // so a single throwing setter cannot prevent the remaining setters
-        // from seeing the refreshed values. Logger::error() below is also
-        // outside the config mutex -- a custom Logger sink that re-enters
+        // The registry mutex is released by the scope above; setters run unlocked (the standard deferred-setter
+        // pattern). Wrap each call so a single throwing setter cannot prevent the remaining setters from seeing the
+        // refreshed values. Logger::error() below is also outside the config mutex -- a custom Logger sink that
+        // re-enters
         // Config cannot AB/BA deadlock here.
         DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
         for (auto &cb : deferred_callbacks)
@@ -1261,9 +1177,8 @@ bool DetourModKit::Config::reload()
     return reload_impl(ignored);
 }
 
-DetourModKit::Config::AutoReloadStatus DetourModKit::Config::enable_auto_reload(
-    std::chrono::milliseconds debounce_window,
-    std::function<void(bool)> on_reload)
+DetourModKit::Config::AutoReloadStatus
+DetourModKit::Config::enable_auto_reload(std::chrono::milliseconds debounce_window, std::function<void(bool)> on_reload)
 {
     std::string ini_filename;
     {
@@ -1279,48 +1194,44 @@ DetourModKit::Config::AutoReloadStatus DetourModKit::Config::enable_auto_reload(
         return AutoReloadStatus::NoPriorLoad;
     }
 
-    // Resolve to the same absolute path load() uses so the watcher observes
-    // the actual file on disk rather than a caller-supplied relative stub.
+    // Resolve to the same absolute path load() uses so the watcher observes the actual file on disk rather than a
+    // caller-supplied relative stub.
     std::filesystem::path ini_path = get_ini_file_path(ini_filename, logger);
     std::string resolved_path = ini_path.string();
 
-    // Hold get_watcher_mutex() across start() to serialize against a
-    // concurrent disable_auto_reload(). start() normally returns in
-    // milliseconds; under a pathological handshake stall it returns
-    // within the 5 s timeout, which is preferable to a use-after-free
-    // on the watcher if we released the lock and disable_auto_reload()
-    // moved the unique_ptr out and destroyed it mid-start().
+    // Hold get_watcher_mutex() across start() to serialize against a concurrent disable_auto_reload(). start() normally
+    // returns in milliseconds; under a pathological handshake stall it returns within the 5 s timeout, which is
+    // preferable to a use-after-free on the watcher if we released the lock and disable_auto_reload() moved the
+    // unique_ptr out and destroyed it mid-start().
     {
         std::lock_guard<std::mutex> wlock(get_watcher_mutex());
 
         auto &watcher = get_config_watcher();
-        // Guard on existence, not is_running(): there is a window between
-        // make_unique<ConfigWatcher> + start() and the worker flipping its
-        // running flag true, during which a second concurrent caller would
-        // otherwise overwrite the still-starting unique_ptr.
+        // Guard on existence, not is_running(): there is a window between make_unique<ConfigWatcher> + start() and the
+        // worker flipping its running flag true, during which a second concurrent caller would otherwise overwrite the
+        // still-starting unique_ptr.
         if (watcher)
         {
-            logger.warning("Config: enable_auto_reload() called while a watcher is already present; call disable_auto_reload() first.");
+            logger.warning("Config: enable_auto_reload() called while a watcher is already present; "
+                           "call disable_auto_reload() first.");
             return AutoReloadStatus::AlreadyRunning;
         }
 
-        watcher = std::make_unique<ConfigWatcher>(
-            resolved_path,
-            debounce_window,
-            [user_cb = std::move(on_reload)]()
-            {
-                // Reload first so any user callback observes the refreshed
-                // values. The internal impl reports whether setters
-                // actually ran (false when the content-hash short-circuit
-                // skipped the work) so the user callback can distinguish
-                // a real reload from a no-op touch.
-                bool setters_ran = false;
-                (void)reload_impl(setters_ran);
-                if (user_cb)
-                {
-                    user_cb(setters_ran);
-                }
-            });
+        watcher = std::make_unique<ConfigWatcher>(resolved_path, debounce_window,
+                                                  [user_cb = std::move(on_reload)]()
+                                                  {
+                                                      // Reload first so any user callback observes the refreshed
+                                                      // values. The internal impl reports whether setters actually ran
+                                                      // (false when the content-hash short-circuit skipped the work) so
+                                                      // the user callback can distinguish a real reload from a no-op
+                                                      // touch.
+                                                      bool setters_ran = false;
+                                                      (void)reload_impl(setters_ran);
+                                                      if (user_cb)
+                                                      {
+                                                          user_cb(setters_ran);
+                                                      }
+                                                  });
 
         if (!watcher->start())
         {
@@ -1330,8 +1241,7 @@ DetourModKit::Config::AutoReloadStatus DetourModKit::Config::enable_auto_reload(
         }
     }
 
-    logger.info("Config: Auto-reload enabled for {} (debounce {} ms)",
-                resolved_path,
+    logger.info("Config: Auto-reload enabled for {} (debounce {} ms)", resolved_path,
                 static_cast<long long>(debounce_window.count()));
     return AutoReloadStatus::Started;
 }
@@ -1342,12 +1252,10 @@ void DetourModKit::Config::disable_auto_reload() noexcept
     {
         std::lock_guard<std::mutex> wlock(get_watcher_mutex());
         auto &watcher = get_config_watcher();
-        // Detect self-invocation from a setter that fires on the watcher
-        // thread. Moving out and destroying the unique_ptr here would
-        // force the worker to join itself inside ~StoppableWorker,
-        // raising std::system_error(resource_deadlock_would_occur) from
-        // std::thread::join(). Log and return instead -- callers that
-        // want to cancel from inside a reload should release the
+        // Detect self-invocation from a setter that fires on the watcher thread. Moving out and destroying the
+        // unique_ptr here would force the worker to join itself inside ~StoppableWorker, raising
+        // std::system_error(resource_deadlock_would_occur) from std::thread::join(). Log and return instead -- callers
+        // that want to cancel from inside a reload should release the
         // InputBindingGuard or flip their own disable flag.
         if (watcher && watcher->is_worker_thread(std::this_thread::get_id()))
         {
@@ -1358,18 +1266,15 @@ void DetourModKit::Config::disable_auto_reload() noexcept
         }
         to_drop = std::move(watcher);
     }
-    // Destructor of ConfigWatcher joins its worker outside our mutex
-    // to avoid holding the watcher mutex across a thread-join.
+    // Destructor of ConfigWatcher joins its worker outside our mutex to avoid holding the watcher mutex across a
+    // thread-join.
 }
 
-bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
-                                                  std::string_view default_combo)
+bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key, std::string_view default_combo)
 {
-    // An empty or explicitly-opt-out default would leave the hotkey
-    // silently inert (a binding registered without trigger keys never
-    // fires). Surface that to the caller as a false return so they can
-    // decide whether to fall back to a different combo or skip the
-    // hotkey entirely.
+    // An empty or explicitly-opt-out default would leave the hotkey silently inert (a binding registered without
+    // trigger keys never fires). Surface that to the caller as a false return so they can decide whether to fall back
+    // to a different combo or skip the hotkey entirely.
     if (default_combo.empty())
     {
         Logger::get_instance().warning(
@@ -1378,24 +1283,21 @@ bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
         return false;
     }
 
-    // Pre-parse the default. The parser emits its own WARNING when a
-    // non-empty, non-sentinel string fails to parse, so no extra log is
-    // needed for the typo path. Explicit opt-out via the NONE sentinel
-    // still returns false because a hotkey with no keys is useless.
-    const Config::KeyComboList parsed = parse_key_combo_list(
-        std::string(default_combo), "Config reload hotkey");
+    // Pre-parse the default. The parser emits its own WARNING when a non-empty, non-sentinel string fails to parse, so
+    // no extra log is needed for the typo path. Explicit opt-out via the NONE sentinel still returns false because a
+    // hotkey with no keys is useless.
+    const Config::KeyComboList parsed = parse_key_combo_list(std::string(default_combo), "Config reload hotkey");
     if (parsed.empty())
     {
         return false;
     }
 
-    // Stable binding name keyed off the INI key so repeat registrations
-    // (e.g. across reload cycles) update in place rather than stacking.
+    // Stable binding name keyed off the INI key so repeat registrations (e.g. across reload cycles) update in place
+    // rather than stacking.
     std::string binding_name = "config_reload:" + std::string(ini_key);
 
-    // Lazily spin up the reload servicer thread on the first hotkey
-    // registration. Holding get_watcher_mutex() here keeps the lifetime
-    // invariants aligned with disable_auto_reload / clear_registered_items.
+    // Lazily spin up the reload servicer thread on the first hotkey registration. Holding get_watcher_mutex() here
+    // keeps the lifetime invariants aligned with disable_auto_reload / clear_registered_items.
     std::shared_ptr<ReloadServicer> servicer;
     {
         std::lock_guard<std::mutex> lock(get_watcher_mutex());
@@ -1408,17 +1310,12 @@ bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
     }
 
     InputBindingGuard guard = Config::register_press_combo(
-        "Input",
-        ini_key,
-        "Config reload hotkey",
-        binding_name,
+        "Input", ini_key, "Config reload hotkey", binding_name,
         [servicer]() noexcept
         {
-            // InputManager press callbacks run on the input-poll thread
-            // and must return promptly. Defer the actual reload() work to
-            // the servicer thread so a 30-item INI parse cannot jitter
-            // other hotkeys. The servicer holds the shared_ptr slot and
-            // cannot be destroyed while this capture is alive.
+            // InputManager press callbacks run on the input-poll thread and must return promptly. Defer the actual
+            // reload() work to the servicer thread so a 30-item INI parse cannot jitter other hotkeys. The servicer
+            // holds the shared_ptr slot and cannot be destroyed while this capture is alive.
             if (servicer)
             {
                 servicer->request_reload();
@@ -1426,10 +1323,9 @@ bool DetourModKit::Config::register_reload_hotkey(std::string_view ini_key,
         },
         default_combo);
 
-    // Stash the guard under the watcher mutex so its destructor does not
-    // fire at the end of this function (which would disable the binding).
-    // Replace any prior guard registered for the same INI key so repeat
-    // calls update in place rather than stacking.
+    // Stash the guard under the watcher mutex so its destructor does not fire at the end of this function (which would
+    // disable the binding). Replace any prior guard registered for the same INI key so repeat calls update in place
+    // rather than stacking.
     {
         std::lock_guard<std::mutex> lock(get_watcher_mutex());
         auto &guards = get_reload_hotkey_guards();
@@ -1459,15 +1355,16 @@ void DetourModKit::Config::log_all()
         return;
     }
 
-    logger.info("Config: {} registered values across {} section(s)",
-                items.size(), [&items]()
+    logger.info("Config: {} registered values across {} section(s)", items.size(),
+                [&items]()
                 {
                     std::unordered_set<std::string_view> seen;
                     for (const auto &item : items)
                     {
                         seen.insert(item->section);
                     }
-                    return seen.size(); }());
+                    return seen.size();
+                }());
 
     std::string current_section;
     for (const auto &item : items)
@@ -1501,26 +1398,20 @@ void DetourModKit::Config::clear_registered_items()
     // previous file after a full reset.  Leaves the watcher alone; the
     // caller owns its lifecycle via disable_auto_reload().
     get_last_loaded_ini_path().clear();
-    // Wipe the cached content hash alongside the path so the next load()
-    // starts from a clean slate.
+    // Wipe the cached content hash alongside the path so the next load() starts from a clean slate.
     get_last_loaded_ini_hash().reset();
 
-    // Release any reload-hotkey guards so the cancellation flags flip
-    // deterministically. Held under the watcher mutex because that is
-    // where the vector itself is serialised. Also drop our strong
-    // reference to the reload servicer.
+    // Release any reload-hotkey guards so the cancellation flags flip deterministically. Held under the watcher mutex
+    // because that is where the vector itself is serialised. Also drop our strong reference to the reload servicer.
     std::shared_ptr<ReloadServicer> servicer_to_drop;
     {
         std::lock_guard<std::mutex> wlock(get_watcher_mutex());
         get_reload_hotkey_guards().clear();
         servicer_to_drop = std::move(get_reload_servicer());
     }
-    // Release our strong reference to the servicer. The InputManager
-    // binding registered by register_reload_hotkey() still holds another
-    // strong ref via its captured lambda (InputBindingGuard::release()
-    // only flips the cancellation flag; it does not unregister the
-    // binding or drop the captured shared_ptr). The servicer worker
-    // therefore joins when InputManager::shutdown() ultimately tears
-    // down that binding, not at this reset() call.
+    // Release our strong reference to the servicer. The InputManager binding registered by register_reload_hotkey()
+    // still holds another strong ref via its captured lambda (InputBindingGuard::release() only flips the cancellation
+    // flag; it does not unregister the binding or drop the captured shared_ptr). The servicer worker therefore joins
+    // when InputManager::shutdown() ultimately tears down that binding, not at this reset() call.
     servicer_to_drop.reset();
 }

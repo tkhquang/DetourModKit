@@ -70,8 +70,7 @@ TEST(DriftManifestTest, NegativeOffsetsRoundTrip)
     entry.healed_offset = -8;
     entry.delta = 8;
     entry.ok = true;
-    const auto parsed =
-        rtti::parse_drift_report(rtti::serialize_drift_report(std::span<const DriftEntry>(&entry, 1)));
+    const auto parsed = rtti::parse_drift_report(rtti::serialize_drift_report(std::span<const DriftEntry>(&entry, 1)));
     ASSERT_TRUE(parsed.has_value());
     ASSERT_EQ(parsed->size(), 1u);
     EXPECT_EQ((*parsed)[0].nominal_offset, -16);
@@ -103,16 +102,14 @@ TEST(DriftManifestTest, ParseRejectsMalformedLine)
 
 TEST(DriftManifestTest, ParseRejectsNonNumericOffset)
 {
-    const auto parsed =
-        rtti::parse_drift_report("# DetourModKit drift manifest v1\nfoo\tNaN\t2\t3\t1\tNoMatch\n");
+    const auto parsed = rtti::parse_drift_report("# DetourModKit drift manifest v1\nfoo\tNaN\t2\t3\t1\tNoMatch\n");
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error(), ManifestError::MalformedLine);
 }
 
 TEST(DriftManifestTest, ParseToleratesBlankLinesAndCrlf)
 {
-    const std::string text =
-        "# DetourModKit drift manifest v1\r\n\r\nfoo\t1\t2\t1\t1\tBadDescriptor\r\n\r\n";
+    const std::string text = "# DetourModKit drift manifest v1\r\n\r\nfoo\t1\t2\t1\t1\tBadDescriptor\r\n\r\n";
     const auto parsed = rtti::parse_drift_report(text);
     ASSERT_TRUE(parsed.has_value());
     ASSERT_EQ(parsed->size(), 1u);
@@ -129,8 +126,7 @@ TEST(DriftManifestTest, FileRoundTrip)
     entry.delta = 8;
     entry.ok = true;
 
-    const std::string path =
-        std::string("dmk_drift_manifest_test_") + std::to_string(_getpid()) + ".tmp";
+    const std::string path = std::string("dmk_drift_manifest_test_") + std::to_string(_getpid()) + ".tmp";
     ASSERT_TRUE(rtti::write_drift_report_to_file(path, std::span<const DriftEntry>(&entry, 1)));
     const auto parsed = rtti::read_drift_report_from_file(path);
     std::remove(path.c_str());

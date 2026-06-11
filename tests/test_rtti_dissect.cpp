@@ -25,17 +25,15 @@ namespace Rtti = DetourModKit::Rtti;
 
 namespace
 {
-    // Counts every throwing global operator new across the whole test binary.
-    // Only read across a narrow window (the heal-allocation test) where the
-    // module-range cache is already warm, so unrelated allocations elsewhere in
-    // the process do not perturb the measured delta. Constant-initialised so it
-    // is zero before any dynamic initialisation that might allocate.
-    std::atomic<long long> g_new_calls{0};
+    // Counts every throwing global operator new across the whole test binary. Only read across a narrow window (the
+    // heal-allocation test) where the module-range cache is already warm, so unrelated allocations elsewhere in the
+    // process do not perturb the measured delta. Constant-initialised so it is zero before any dynamic initialisation
+    // that might allocate.
+    std::atomic<long long> s_new_calls{0};
 } // anonymous namespace
 
-// Replace the throwing global new/delete with malloc/free plus a counter. The
-// aligned (std::align_val_t) forms are deliberately left at their defaults, so
-// over-aligned allocations stay on the runtime's own consistent new/delete pair
+// Replace the throwing global new/delete with malloc/free plus a counter. The aligned (std::align_val_t) forms are
+// deliberately left at their defaults, so over-aligned allocations stay on the runtime's own consistent new/delete pair
 // and never cross-free against these.
 void *operator new(std::size_t size)
 {
@@ -48,7 +46,7 @@ void *operator new(std::size_t size)
     {
         throw std::bad_alloc{};
     }
-    g_new_calls.fetch_add(1, std::memory_order_relaxed);
+    s_new_calls.fetch_add(1, std::memory_order_relaxed);
     return p;
 }
 
@@ -75,10 +73,9 @@ void operator delete[](void *p, std::size_t) noexcept
 
 namespace
 {
-    // Per-fixture layout offsets shared by every SyntheticVtable instance.
-    // Picked so the COL, TypeDescriptor, and vtable storage live well apart
-    // from each other and from 4 KiB page boundaries. Mirrors the layout used
-    // by test_rtti.cpp; the dissector consumes the same prelude as the walker.
+    // Per-fixture layout offsets shared by every SyntheticVtable instance. Picked so the COL, TypeDescriptor, and
+    // vtable storage live well apart from each other and from 4 KiB page boundaries. Mirrors the layout used by
+    // test_rtti.cpp; the dissector consumes the same prelude as the walker.
     constexpr std::size_t SYN_BUF_SIZE = 4096;
     constexpr std::size_t SYN_COL_OFFSET = 256;
     constexpr std::size_t SYN_TD_OFFSET = SYN_COL_OFFSET + 24; // COL is 24 bytes
@@ -86,40 +83,38 @@ namespace
     constexpr std::size_t SYN_COL_PTR_OFFSET = 2048;
     constexpr std::size_t SYN_VTABLE_OFFSET = SYN_COL_PTR_OFFSET + 8;
 
-    // Static buffer pool for SyntheticVtable storage. Living in the test
-    // executable's data segment ensures Memory::module_range_for resolves every
-    // synthetic vtable back to the test exe's PE range, which the prelude's
+    // Static buffer pool for SyntheticVtable storage. Living in the test executable's data segment ensures
+    // Memory::module_range_for resolves every synthetic vtable back to the test exe's PE range, which the prelude's
     // bound-check guard requires. The pool is reset between tests.
     constexpr std::size_t SYN_POOL_FIXTURES = 32;
     constexpr std::size_t SYN_POOL_SIZE = SYN_BUF_SIZE * SYN_POOL_FIXTURES;
-    alignas(8) std::array<std::byte, SYN_POOL_SIZE> g_syn_pool{};
-    std::size_t g_syn_offset = 0;
+    alignas(8) std::array<std::byte, SYN_POOL_SIZE> s_syn_pool{};
+    std::size_t s_syn_offset = 0;
 
     [[nodiscard]] std::byte *syn_alloc() noexcept
     {
-        if (g_syn_offset + SYN_BUF_SIZE > g_syn_pool.size())
+        if (s_syn_offset + SYN_BUF_SIZE > s_syn_pool.size())
         {
             return nullptr;
         }
-        std::byte *p = g_syn_pool.data() + g_syn_offset;
-        g_syn_offset += SYN_BUF_SIZE;
+        std::byte *p = s_syn_pool.data() + s_syn_offset;
+        s_syn_offset += SYN_BUF_SIZE;
         std::memset(p, 0, SYN_BUF_SIZE);
         return p;
     }
 
     void syn_reset() noexcept
     {
-        g_syn_offset = 0;
+        s_syn_offset = 0;
     }
 
     /**
      * @class SyntheticVtable
      * @brief In-memory MSVC x64 RTTI layout for testing the dissector.
-     * @details Identical shape to the forward-walker fixture: a vtable whose
-     *          qword at offset -8 points to an RTTICompleteObjectLocator whose
-     *          pTypeDescriptor RVA leads to a TypeDescriptor carrying the
-     *          requested mangled name. RVAs are computed against the test exe's
-     *          image base so the prelude's module bound-check accepts them.
+     * @details Identical shape to the forward-walker fixture: a vtable whose qword at offset -8 points to an
+     *          RTTICompleteObjectLocator whose pTypeDescriptor RVA leads to a TypeDescriptor carrying the requested
+     *          mangled name. RVAs are computed against the test exe's image base so the prelude's module bound-check
+     *          accepts them.
      */
     class SyntheticVtable
     {
@@ -138,11 +133,10 @@ namespace
             const std::uintptr_t exe_base = reinterpret_cast<std::uintptr_t>(exe);
             const std::uintptr_t buf_base = reinterpret_cast<std::uintptr_t>(m_buf);
 
-            // The synthetic RVAs are computed as (buffer - image base), which
-            // underflows if the data segment ever sits below the image base.
-            // Flag the violated precondition and stop (mirroring the m_buf guard
-            // above; a fatal ASSERT cannot return from a constructor) so a
-            // wrapped RVA never surfaces later as a misleading resolve failure.
+            // The synthetic RVAs are computed as (buffer - image base), which underflows if the data segment ever sits
+            // below the image base. Flag the violated precondition and stop (mirroring the m_buf guard above; a fatal
+            // ASSERT cannot return from a constructor) so a wrapped RVA never surfaces later as a misleading resolve
+            // failure.
             EXPECT_GE(buf_base, exe_base);
             if (buf_base < exe_base)
             {
@@ -208,8 +202,7 @@ namespace
         void poison_self_rva(std::uint32_t rva) noexcept { write_at(SYN_COL_OFFSET + 20, rva); }
 
     private:
-        template <typename T>
-        void write_at(std::size_t offset, const T &value) noexcept
+        template <typename T> void write_at(std::size_t offset, const T &value) noexcept
         {
             static_assert(std::is_trivially_copyable_v<T>);
             std::memcpy(m_buf + offset, &value, sizeof(T));
@@ -239,10 +232,9 @@ protected:
         m_heap_pages.clear();
     }
 
-    // Allocates a committed page OUTSIDE every module range and writes
-    // @p vtable_addr as the object's first qword, returning the object base.
-    // Exercises the pointer-to-object branch with a pointee that does not live
-    // in any PE image (the cross-region / cross-DLL resolvability case).
+    // Allocates a committed page OUTSIDE every module range and writes @p vtable_addr as the object's first qword,
+    // returning the object base. Exercises the pointer-to-object branch with a pointee that does not live in any PE
+    // image (the cross-region / cross-DLL resolvability case).
     [[nodiscard]] std::uintptr_t syn_heap_object(std::uintptr_t vtable_addr)
     {
         void *p = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -323,9 +315,8 @@ TEST_F(RttiDissectTest, Identify_NonzeroColOffsetRecoversCompleteObject)
 
 TEST_F(RttiDissectTest, Identify_DirectObjectNonzeroColOffsetRecoversCompleteObject)
 {
-    // The direct-object branch sets object_base to the slot ADDRESS, a distinct
-    // code path from the pointer-to-object branch above. Confirm the complete
-    // object is recovered as slot_addr - col_offset there too.
+    // The direct-object branch sets object_base to the slot ADDRESS, a distinct code path from the pointer-to-object
+    // branch above. Confirm the complete object is recovered as slot_addr - col_offset there too.
     SyntheticVtable v(".?AVDirectSub@@");
     v.set_col_offset(0x20);
     std::array<std::uintptr_t, 1> slot{v.vtable()};
@@ -341,9 +332,8 @@ TEST_F(RttiDissectTest, Identify_DirectObjectNonzeroColOffsetRecoversCompleteObj
 
 TEST_F(RttiDissectTest, Identify_ExposesColTdAndNameAddresses)
 {
-    // The col_addr / td_addr / name_addr coordinates are part of the public
-    // introspection surface; pin them to the fixture's known layout so a
-    // regression in the prelude wiring is caught here.
+    // The col_addr / td_addr / name_addr coordinates are part of the public introspection surface; pin them to the
+    // fixture's known layout so a regression in the prelude wiring is caught here.
     SyntheticVtable v(".?AVCoords@@");
     std::array<std::uintptr_t, 1> slot{v.vtable()};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
@@ -387,10 +377,9 @@ TEST_F(RttiDissectTest, Identify_RejectsNullAndLowSlot)
 TEST_F(RttiDissectTest, Identify_RejectsUnreadableSlotAddress)
 {
     const std::uintptr_t gone = unmapped_addr();
-    // Guard the precondition: if the committed-then-freed allocation ever
-    // failed, gone would be 0 and this would silently exercise the null-slot
-    // guard instead of the unmapped-read path. unmapped_addr returns a value,
-    // so the fatal assert lives here rather than inside the helper.
+    // Guard the precondition: if the committed-then-freed allocation ever failed, gone would be 0 and this would
+    // silently exercise the null-slot guard instead of the unmapped-read path. unmapped_addr returns a value, so the
+    // fatal assert lives here rather than inside the helper.
     ASSERT_NE(gone, 0u);
     Rtti::PointeeType pt;
     EXPECT_FALSE(Rtti::identify_pointee_type(gone, pt));
@@ -398,8 +387,8 @@ TEST_F(RttiDissectTest, Identify_RejectsUnreadableSlotAddress)
 
 TEST_F(RttiDissectTest, Identify_RejectsGarbageSlotValue)
 {
-    // Slot holds a plausible-but-unresolvable pointer: neither a pointer to an
-    // object with a valid COL nor a vtable in any module.
+    // Slot holds a plausible-but-unresolvable pointer: neither a pointer to an object with a valid COL nor a vtable in
+    // any module.
     std::array<std::uintptr_t, 1> slot{0xDEADBEEFu};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
@@ -469,12 +458,7 @@ TEST_F(RttiDissectTest, ScanBlock_CustomStrideLabelsInterleaved)
     // Layout: { vtable, filler, vtable, filler, vtable, filler }; a 16-byte
     // stride means only every other qword is a probed slot.
     std::array<std::uintptr_t, 6> block{
-        a.vtable(),
-        0xAAAAAAAAu,
-        b.vtable(),
-        0xBBBBBBBBu,
-        c.vtable(),
-        0xCCCCCCCCu,
+        a.vtable(), 0xAAAAAAAAu, b.vtable(), 0xBBBBBBBBu, c.vtable(), 0xCCCCCCCCu,
     };
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
@@ -527,17 +511,13 @@ TEST_F(RttiDissectTest, ScanBlockBytes_ZeroStrideTreatedAsPointerSize)
 
 namespace
 {
-    // A struct-shaped buffer of pointer-sized fields, plus helpers to place a
-    // pointer-to-object or a direct vtable at a byte offset. The buffer is zero
-    // so every unplaced slot resolves to nothing.
+    // A struct-shaped buffer of pointer-sized fields, plus helpers to place a pointer-to-object or a direct vtable at a
+    // byte offset. The buffer is zero so every unplaced slot resolves to nothing.
     struct SynStruct
     {
         std::array<std::uintptr_t, 96> fields{};
 
-        [[nodiscard]] std::uintptr_t base() const noexcept
-        {
-            return reinterpret_cast<std::uintptr_t>(fields.data());
-        }
+        [[nodiscard]] std::uintptr_t base() const noexcept { return reinterpret_cast<std::uintptr_t>(fields.data()); }
 
         void put(std::size_t byte_off, std::uintptr_t value) noexcept
         {
@@ -552,8 +532,8 @@ TEST_F(RttiDissectTest, Heal_NoDriftHealsToNominalAndIgnoresSameTypedNeighbor)
     SynStruct st;
     const std::size_t nominal = 0x80;
     st.put(nominal, syn_heap_object(t.vtable()));
-    // A same-typed neighbour inside the window must NOT trip Ambiguous because
-    // the nominal-first short-circuit returns before any window scan.
+    // A same-typed neighbour inside the window must NOT trip Ambiguous because the nominal-first short-circuit returns
+    // before any window scan.
     st.put(nominal + 0x08, syn_heap_object(t.vtable()));
 
     const Rtti::Landmark lm{
@@ -607,11 +587,9 @@ TEST_F(RttiDissectTest, Heal_NegativeDrift)
 TEST_F(RttiDissectTest, Heal_RecoversWhenNominalHoldsWrongTypedObject)
 {
     // The realistic post-patch failure: the nominal slot now resolves to a
-    // DIFFERENT (stale) type because another field shifted into it, and the
-    // expected field moved a few bytes away. A read at the old offset would see
-    // the wrong object; heal must reject the wrong-typed nominal slot (the
-    // short-circuit only fires on an exact-type match) and recover the expected
-    // type at the drifted offset.
+    // DIFFERENT (stale) type because another field shifted into it, and the expected field moved a few bytes away. A
+    // read at the old offset would see the wrong object; heal must reject the wrong-typed nominal slot (the
+    // short-circuit only fires on an exact-type match) and recover the expected type at the drifted offset.
     SyntheticVtable expected(".?AVHealExpected@@");
     SyntheticVtable stale(".?AVHealStale@@");
     SynStruct st;
@@ -634,13 +612,11 @@ TEST_F(RttiDissectTest, Heal_RecoversWhenNominalHoldsWrongTypedObject)
 
 TEST_F(RttiDissectTest, Heal_ChainedHealAcrossTwoStructsWithNonUniformDrift)
 {
-    // Two pointer links live in DIFFERENT structs and drift by DIFFERENT
-    // amounts, so no single uniform delta fits the whole chain (the case
-    // solve_fingerprint cannot handle): the outer struct's typed-object pointer
-    // shifts +0x30, while the pointed-to object's own downstream pointer shifts
-    // +0x08. Each link is healed independently and the first heal's resolved
-    // object (object_addr) roots the second heal, confirming object_addr is a
-    // usable next-base. The absolute offsets are chosen to keep the window scans
+    // Two pointer links live in DIFFERENT structs and drift by DIFFERENT amounts, so no single uniform delta fits the
+    // whole chain (the case solve_fingerprint cannot handle): the outer struct's typed-object pointer shifts +0x30,
+    // while the pointed-to object's own downstream pointer shifts
+    // +0x08. Each link is healed independently and the first heal's resolved object (object_addr) roots the second
+    // heal, confirming object_addr is a usable next-base. The absolute offsets are chosen to keep the window scans
     // inside the buffers; the differing per-struct deltas are the point.
     SyntheticVtable outer_vt(".?AVChainOuterTarget@@");
     SyntheticVtable inner_vt(".?AVChainInnerTarget@@");
@@ -840,20 +816,17 @@ TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)
               Rtti::HealError::BadDescriptor);
 
     // Empty expected name.
-    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = ""}).error(),
-              Rtti::HealError::BadDescriptor);
+    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = ""}).error(), Rtti::HealError::BadDescriptor);
 
     // Oversized expected name.
     const std::string huge(Rtti::MAX_TYPE_NAME_LEN + 1, 'X');
-    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = huge}).error(),
-              Rtti::HealError::BadDescriptor);
+    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = huge}).error(), Rtti::HealError::BadDescriptor);
 
     // Expected name of exactly MAX_TYPE_NAME_LEN: the guard is size() >=
-    // MAX_TYPE_NAME_LEN, so this length is the first rejected one (pins the
-    // boundary against an off-by-one that would let it through).
+    // MAX_TYPE_NAME_LEN, so this length is the first rejected one (pins the boundary against an off-by-one that would
+    // let it through).
     const std::string at_cap(Rtti::MAX_TYPE_NAME_LEN, 'X');
-    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = at_cap}).error(),
-              Rtti::HealError::BadDescriptor);
+    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = at_cap}).error(), Rtti::HealError::BadDescriptor);
 
     // Window over the hard cap.
     EXPECT_EQ(Rtti::heal_landmark({.base = base,
@@ -872,9 +845,8 @@ TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)
               Rtti::HealError::BadDescriptor);
 
     // nominal_offset drives the address out of the user-mode window.
-    EXPECT_EQ(Rtti::heal_landmark({.base = base,
-                                   .nominal_offset = -static_cast<std::ptrdiff_t>(base),
-                                   .expected_mangled = ".?AVBad@@"})
+    EXPECT_EQ(Rtti::heal_landmark(
+                  {.base = base, .nominal_offset = -static_cast<std::ptrdiff_t>(base), .expected_mangled = ".?AVBad@@"})
                   .error(),
               Rtti::HealError::BadDescriptor);
 }
@@ -884,9 +856,8 @@ TEST_F(RttiDissectTest, Heal_AllocatesNothing)
     SyntheticVtable t(".?AVNoAlloc@@");
     SynStruct st;
     const std::size_t nominal = 0x80;
-    // Place the match off the nominal slot so the measured call runs the full
-    // window scan (the multi-probe, syscall-heavy path) rather than the
-    // nominal-first short-circuit. That scan is where the "allocates nothing"
+    // Place the match off the nominal slot so the measured call runs the full window scan (the multi-probe,
+    // syscall-heavy path) rather than the nominal-first short-circuit. That scan is where the "allocates nothing"
     // contract is most at risk, so it is the path worth measuring.
     st.put(nominal + 0x10, syn_heap_object(t.vtable()));
 
@@ -896,13 +867,13 @@ TEST_F(RttiDissectTest, Heal_AllocatesNothing)
         .expected_mangled = ".?AVNoAlloc@@",
     };
 
-    // Warm the module-range cache so its one-time per-module insert does not
-    // count against the measured call; heal_landmark itself must not allocate.
+    // Warm the module-range cache so its one-time per-module insert does not count against the measured call;
+    // heal_landmark itself must not allocate.
     (void)Rtti::heal_landmark(lm);
 
-    const long long before = g_new_calls.load(std::memory_order_relaxed);
+    const long long before = s_new_calls.load(std::memory_order_relaxed);
     const auto hit = Rtti::heal_landmark(lm);
-    const long long after = g_new_calls.load(std::memory_order_relaxed);
+    const long long after = s_new_calls.load(std::memory_order_relaxed);
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x10));
@@ -1051,10 +1022,7 @@ TEST_F(RttiDissectTest, Fingerprint_SecondCopyIsAmbiguousAndOptionalBreaksTie)
         fp3[0],
         fp3[1],
         fp3[2],
-        Rtti::Landmark{.base = st.base(),
-                       .nominal_offset = FP_OD,
-                       .expected_mangled = ".?AVFpD@@",
-                       .required = false},
+        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OD, .expected_mangled = ".?AVFpD@@", .required = false},
     };
     const auto broken = Rtti::solve_fingerprint(st.base(), fp4, 0x20);
     ASSERT_TRUE(broken.has_value());
@@ -1078,17 +1046,16 @@ TEST_F(RttiDissectTest, Fingerprint_SingleLandmarkMatchesHeal)
 
     const auto healed = Rtti::heal_landmark(fp[0]);
     ASSERT_TRUE(healed.has_value());
-    // The fingerprint delta is the drift; the heal offset is the absolute
-    // field offset. They agree once the nominal offset is removed.
+    // The fingerprint delta is the drift; the heal offset is the absolute field offset. They agree once the nominal
+    // offset is removed.
     EXPECT_EQ(healed->healed_offset - static_cast<std::ptrdiff_t>(FP_OA), solved->delta);
 }
 
 TEST_F(RttiDissectTest, Fingerprint_AllocatesNothing)
 {
-    // solve_fingerprint documents an allocation-free contract; like the heal
-    // path it reuses one stack PointeeType and never grows a container. Drive a
-    // uniform-drift solve (every required landmark probed at the shifted offset)
-    // and assert the measured call adds no counted allocation.
+    // solve_fingerprint documents an allocation-free contract; like the heal path it reuses one stack PointeeType and
+    // never grows a container. Drive a uniform-drift solve (every required landmark probed at the shifted offset) and
+    // assert the measured call adds no counted allocation.
     FpTypes ty;
     SynStruct st;
     st.put(FP_OA + 0x10, syn_heap_object(ty.a.vtable()));
@@ -1097,13 +1064,12 @@ TEST_F(RttiDissectTest, Fingerprint_AllocatesNothing)
 
     const auto fp = fp_required(st.base());
 
-    // Warm the module-range cache so its one-time per-module insert is not
-    // attributed to the measured call.
+    // Warm the module-range cache so its one-time per-module insert is not attributed to the measured call.
     (void)Rtti::solve_fingerprint(st.base(), fp, 0x20);
 
-    const long long before = g_new_calls.load(std::memory_order_relaxed);
+    const long long before = s_new_calls.load(std::memory_order_relaxed);
     const auto hit = Rtti::solve_fingerprint(st.base(), fp, 0x20);
-    const long long after = g_new_calls.load(std::memory_order_relaxed);
+    const long long after = s_new_calls.load(std::memory_order_relaxed);
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->delta, 0x10);
@@ -1120,8 +1086,7 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
               Rtti::HealError::BadDescriptor);
 
     // Low base.
-    EXPECT_EQ(Rtti::solve_fingerprint(0x100, fp_required(0x100), 0x20).error(),
-              Rtti::HealError::BadDescriptor);
+    EXPECT_EQ(Rtti::solve_fingerprint(0x100, fp_required(0x100), 0x20).error(), Rtti::HealError::BadDescriptor);
 
     // Window over the hard cap.
     EXPECT_EQ(Rtti::solve_fingerprint(base, fp_required(base), Rtti::MAX_HEAL_WINDOW + 1).error(),
@@ -1134,16 +1099,14 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
         lm.base = base;
         lm.expected_mangled = ".?AVCap@@";
     }
-    EXPECT_EQ(Rtti::solve_fingerprint(base, too_many, 0x20).error(),
-              Rtti::HealError::BadDescriptor);
+    EXPECT_EQ(Rtti::solve_fingerprint(base, too_many, 0x20).error(), Rtti::HealError::BadDescriptor);
 
     // Every landmark optional: nothing to anchor on.
     std::array<Rtti::Landmark, 2> all_optional{
         Rtti::Landmark{.base = base, .nominal_offset = FP_OA, .expected_mangled = ".?AVCap@@", .required = false},
         Rtti::Landmark{.base = base, .nominal_offset = FP_OB, .expected_mangled = ".?AVCap@@", .required = false},
     };
-    EXPECT_EQ(Rtti::solve_fingerprint(base, all_optional, 0x20).error(),
-              Rtti::HealError::BadDescriptor);
+    EXPECT_EQ(Rtti::solve_fingerprint(base, all_optional, 0x20).error(), Rtti::HealError::BadDescriptor);
 }
 
 // --- heal_report (drift telemetry) ---
@@ -1185,8 +1148,8 @@ TEST_F(RttiDissectTest, HealReport_RecordsTypedFailure)
         {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVReportMissing@@"},
     };
 
-    // Pre-seed the output with stale values to prove a failed entry is reset and
-    // never exposes a reused buffer's prior contents.
+    // Pre-seed the output with stale values to prove a failed entry is reset and never exposes a reused buffer's prior
+    // contents.
     Rtti::DriftEntry report[1];
     report[0].healed_offset = 0x7777;
     report[0].delta = 0x1234;

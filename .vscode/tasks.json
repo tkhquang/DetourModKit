@@ -1,0 +1,51 @@
+{
+  "version": "2.0.0",
+  // Every task prepends the MinGW toolchain directory to PATH so cmake, ninja,
+  // and g++ resolve, matching the shell workflow in AGENTS.md. The default
+  // MSYS2 root (C:\msys64) is assumed; if MSYS2 is installed elsewhere, update
+  // the PATH value in each task below.
+  "tasks": [
+    {
+      "label": "Configure (mingw-debug)",
+      "type": "shell",
+      "command": "cmake --preset mingw-debug",
+      "options": {
+        "env": {
+          "PATH": "C:\\msys64\\mingw64\\bin;${env:PATH}"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "Build (mingw-debug)",
+      "type": "shell",
+      "command": "cmake --build build/mingw-debug --parallel",
+      "options": {
+        "env": {
+          "PATH": "C:\\msys64\\mingw64\\bin;${env:PATH}"
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": ["$gcc"]
+    },
+    {
+      "label": "Test (mingw-debug, ctest)",
+      "type": "shell",
+      "command": "ctest --test-dir build/mingw-debug --output-on-failure",
+      "options": {
+        "env": {
+          "PATH": "C:\\msys64\\mingw64\\bin;${env:PATH}"
+        }
+      },
+      "group": {
+        "kind": "test",
+        "isDefault": true
+      },
+      "dependsOn": ["Build (mingw-debug)"],
+      "problemMatcher": []
+    }
+  ]
+}

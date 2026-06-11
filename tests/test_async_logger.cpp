@@ -8,6 +8,7 @@
 #include <mutex>
 #include <process.h>
 #include <regex>
+#include <sstream>
 #include <cstdint>
 #include <type_traits>
 
@@ -20,20 +21,20 @@ class AsyncLoggerTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        static int test_counter = 0;
-        test_log_file_ = std::filesystem::temp_directory_path() /
-                         ("test_async_logger_" + std::to_string(_getpid()) + "_" + std::to_string(test_counter++) + ".log");
+        static int s_test_counter = 0;
+        m_test_log_file = std::filesystem::temp_directory_path() / ("test_async_logger_" + std::to_string(_getpid()) +
+                                                                    "_" + std::to_string(s_test_counter++) + ".log");
     }
 
     void TearDown() override
     {
-        if (std::filesystem::exists(test_log_file_))
+        if (std::filesystem::exists(m_test_log_file))
         {
-            std::filesystem::remove(test_log_file_);
+            std::filesystem::remove(m_test_log_file);
         }
     }
 
-    std::filesystem::path test_log_file_;
+    std::filesystem::path m_test_log_file;
 };
 
 TEST(AsyncLoggerConfigTest, DefaultValues)
@@ -66,7 +67,7 @@ TEST_F(AsyncLoggerTest, BasicCreation)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -81,7 +82,7 @@ TEST_F(AsyncLoggerTest, StartStop)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -99,7 +100,7 @@ TEST_F(AsyncLoggerTest, Enqueue)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -112,9 +113,9 @@ TEST_F(AsyncLoggerTest, Enqueue)
 
     logger->shutdown();
 
-    EXPECT_TRUE(std::filesystem::exists(test_log_file_));
+    EXPECT_TRUE(std::filesystem::exists(m_test_log_file));
 
-    std::ifstream file(test_log_file_);
+    std::ifstream file(m_test_log_file);
     std::string line;
     int line_count = 0;
     while (std::getline(file, line))
@@ -133,25 +134,23 @@ TEST_F(AsyncLoggerTest, HonorsConfiguredTimestampFormat)
     AsyncLoggerConfig config;
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
-    // A format distinct from the default "%Y-%m-%d %H:%M:%S" with a literal marker
-    // that strftime/put_time passes through verbatim. The marker can only appear in
-    // the output if the async sink honors the configured format.
+    // A format distinct from the default "%Y-%m-%d %H:%M:%S" with a literal marker that strftime/put_time passes
+    // through verbatim. The marker can only appear in the output if the async sink honors the configured format.
     config.timestamp_format = "%Y/%m/%d STAMP";
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
     static_cast<void>(logger->enqueue(LogLevel::Info, "formatted"));
     logger->shutdown(); // drains queued messages before returning
 
-    std::ifstream file(test_log_file_);
+    std::ifstream file(m_test_log_file);
     std::string line;
     bool found = false;
     while (std::getline(file, line))
     {
-        if (line.find("STAMP") != std::string::npos &&
-            line.find("formatted") != std::string::npos)
+        if (line.find("STAMP") != std::string::npos && line.find("formatted") != std::string::npos)
         {
             found = true;
         }
@@ -165,7 +164,7 @@ TEST_F(AsyncLoggerTest, Enqueue_ReturnsTrue_OnSuccess)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -185,7 +184,7 @@ TEST_F(AsyncLoggerTest, Enqueue_ReturnsFalse_WhenDropped)
     config.overflow_policy = OverflowPolicy::DropNewest;
     config.flush_interval = std::chrono::milliseconds{5000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -212,7 +211,7 @@ TEST_F(AsyncLoggerTest, Enqueue_BlockPolicy_BasicFunctionality)
     config.block_timeout_ms = std::chrono::milliseconds{100};
     config.flush_interval = std::chrono::milliseconds{100};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -229,7 +228,7 @@ TEST_F(AsyncLoggerTest, Flush)
     config.batch_size = 100;
     config.flush_interval = std::chrono::milliseconds{1000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -249,7 +248,7 @@ TEST_F(AsyncLoggerTest, MultiThreadedLogging)
     config.batch_size = 100;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -260,12 +259,15 @@ TEST_F(AsyncLoggerTest, MultiThreadedLogging)
     std::vector<std::thread> threads;
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([&logger, i, messages_per_thread]()
-                             {
-            for (int j = 0; j < messages_per_thread; ++j)
+        threads.emplace_back(
+            [&logger, i, messages_per_thread]()
             {
-                static_cast<void>(logger->enqueue(LogLevel::Info, "Thread " + std::to_string(i) + " message " + std::to_string(j)));
-            } });
+                for (int j = 0; j < messages_per_thread; ++j)
+                {
+                    static_cast<void>(logger->enqueue(LogLevel::Info,
+                                                      "Thread " + std::to_string(i) + " message " + std::to_string(j)));
+                }
+            });
     }
 
     for (auto &t : threads)
@@ -277,7 +279,7 @@ TEST_F(AsyncLoggerTest, MultiThreadedLogging)
 
     logger->shutdown();
 
-    EXPECT_TRUE(std::filesystem::exists(test_log_file_));
+    EXPECT_TRUE(std::filesystem::exists(m_test_log_file));
 }
 
 TEST_F(AsyncLoggerTest, EmptyMessage)
@@ -286,7 +288,7 @@ TEST_F(AsyncLoggerTest, EmptyMessage)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -306,7 +308,7 @@ TEST_F(AsyncLoggerTest, LongMessage)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -324,7 +326,7 @@ TEST_F(AsyncLoggerTest, LongMessage)
 TEST_F(AsyncLoggerTest, DoubleShutdown)
 {
     AsyncLoggerConfig config;
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -337,7 +339,7 @@ TEST_F(AsyncLoggerTest, DoubleShutdown)
 TEST_F(AsyncLoggerTest, IsRunningAfterShutdown)
 {
     AsyncLoggerConfig config;
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -355,7 +357,7 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_SyncWrite)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -371,7 +373,7 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_SyncWrite)
 TEST_F(AsyncLoggerTest, Flush_WhenNotRunning)
 {
     AsyncLoggerConfig config;
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -390,7 +392,7 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_DropNewest)
     config.overflow_policy = OverflowPolicy::DropNewest;
     config.flush_interval = std::chrono::milliseconds{5000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -413,7 +415,7 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_DropOldest_Full)
     config.overflow_policy = OverflowPolicy::DropOldest;
     config.flush_interval = std::chrono::milliseconds{5000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -436,7 +438,7 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_SyncFallback)
     config.overflow_policy = OverflowPolicy::SyncFallback;
     config.flush_interval = std::chrono::milliseconds{5000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -460,7 +462,7 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_Block)
     config.block_timeout_ms = std::chrono::milliseconds{200};
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -598,8 +600,8 @@ TEST(DynamicMPMCQueueTest, CacheLineAlignment)
     DynamicMPMCQueue queue(4);
     auto addr = reinterpret_cast<std::uintptr_t>(&queue);
 
-    // DynamicMPMCQueue contains alignas(64) members; the struct itself
-    // must satisfy that alignment so the atomics land on separate cache lines.
+    // DynamicMPMCQueue contains alignas(64) members; the struct itself must satisfy that alignment so the atomics land
+    // on separate cache lines.
     EXPECT_EQ(alignof(DynamicMPMCQueue), 64u);
     EXPECT_EQ(addr % 64u, 0u);
 }
@@ -704,7 +706,7 @@ TEST_F(AsyncLoggerTest, MessageContentVerification)
     config.batch_size = 10;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -712,16 +714,15 @@ TEST_F(AsyncLoggerTest, MessageContentVerification)
     logger->shutdown();
     file_stream->close();
 
-    std::ifstream in(test_log_file_);
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream in(m_test_log_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("UNIQUE_MARKER_abc123"), std::string::npos);
 }
 
 TEST_F(AsyncLoggerTest, DestructorFlushGuarantee)
 {
     {
-        auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+        auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
         auto log_mutex = std::make_shared<std::mutex>();
         AsyncLoggerConfig config;
         config.batch_size = 10;
@@ -732,9 +733,8 @@ TEST_F(AsyncLoggerTest, DestructorFlushGuarantee)
         static_cast<void>(logger.enqueue(LogLevel::Error, "DESTRUCTOR_FLUSH_MSG_2"));
     }
 
-    std::ifstream in(test_log_file_);
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream in(m_test_log_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("DESTRUCTOR_FLUSH_MSG_1"), std::string::npos);
     EXPECT_NE(content.find("DESTRUCTOR_FLUSH_MSG_2"), std::string::npos);
 }
@@ -746,7 +746,7 @@ TEST_F(AsyncLoggerTest, BatchBoundaryBehavior)
     config.batch_size = kBatchSize;
     config.flush_interval = std::chrono::milliseconds{50};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -757,9 +757,8 @@ TEST_F(AsyncLoggerTest, BatchBoundaryBehavior)
     logger->shutdown();
     file_stream->close();
 
-    std::ifstream in(test_log_file_);
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream in(m_test_log_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     for (size_t i = 0; i < kBatchSize; ++i)
     {
         EXPECT_NE(content.find("BATCH_MSG_" + std::to_string(i)), std::string::npos);
@@ -772,37 +771,40 @@ TEST_F(AsyncLoggerTest, ConcurrentFlushAndEnqueue)
     config.batch_size = 16;
     config.flush_interval = std::chrono::milliseconds{20};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
     std::atomic<bool> done{false};
 
-    std::thread producer([&]()
-                         {
-        for (int i = 0; i < 100; ++i)
+    std::thread producer(
+        [&]()
         {
-            static_cast<void>(logger->enqueue(LogLevel::Info, "CONCURRENT_MSG_" + std::to_string(i)));
-        }
-        done.store(true, std::memory_order_release); });
+            for (int i = 0; i < 100; ++i)
+            {
+                static_cast<void>(logger->enqueue(LogLevel::Info, "CONCURRENT_MSG_" + std::to_string(i)));
+            }
+            done.store(true, std::memory_order_release);
+        });
 
-    std::thread flusher([&]()
-                        {
-        while (!done.load(std::memory_order_acquire))
+    std::thread flusher(
+        [&]()
         {
-            logger->flush();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        } });
+            while (!done.load(std::memory_order_acquire))
+            {
+                logger->flush();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
 
     producer.join();
     flusher.join();
     logger->shutdown();
     file_stream->close();
 
-    std::ifstream in(test_log_file_);
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream in(m_test_log_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     EXPECT_FALSE(content.empty());
 }
 
@@ -821,36 +823,40 @@ TEST(DynamicMPMCQueueTest, MultiThreaded)
     std::vector<std::thread> producers;
     for (int p = 0; p < kProducers; ++p)
     {
-        producers.emplace_back([&, p]()
-                               {
-            for (int i = 0; i < kItemsPerProducer; ++i)
+        producers.emplace_back(
+            [&, p]()
             {
-                LogMessage msg(LogLevel::Info, "P" + std::to_string(p) + "_" + std::to_string(i));
-                while (!queue.try_push(msg))
+                for (int i = 0; i < kItemsPerProducer; ++i)
                 {
-                    std::this_thread::yield();
+                    LogMessage msg(LogLevel::Info, "P" + std::to_string(p) + "_" + std::to_string(i));
+                    while (!queue.try_push(msg))
+                    {
+                        std::this_thread::yield();
+                    }
+                    total_produced.fetch_add(1, std::memory_order_relaxed);
                 }
-                total_produced.fetch_add(1, std::memory_order_relaxed);
-            } });
+            });
     }
 
     std::vector<std::thread> consumers;
     for (int c = 0; c < kConsumers; ++c)
     {
-        consumers.emplace_back([&]()
-                               {
-            LogMessage msg;
-            while (!producers_done.load(std::memory_order_acquire) || !queue.empty())
+        consumers.emplace_back(
+            [&]()
             {
-                if (queue.try_pop(msg))
+                LogMessage msg;
+                while (!producers_done.load(std::memory_order_acquire) || !queue.empty())
                 {
-                    total_consumed.fetch_add(1, std::memory_order_relaxed);
+                    if (queue.try_pop(msg))
+                    {
+                        total_consumed.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else
+                    {
+                        std::this_thread::yield();
+                    }
                 }
-                else
-                {
-                    std::this_thread::yield();
-                }
-            } });
+            });
     }
 
     for (auto &t : producers)
@@ -933,7 +939,7 @@ TEST_F(AsyncLoggerTest, FlushGuarantee_AllMessagesWritten)
     config.batch_size = 4;
     config.flush_interval = std::chrono::milliseconds{1000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -947,9 +953,8 @@ TEST_F(AsyncLoggerTest, FlushGuarantee_AllMessagesWritten)
     logger->shutdown();
     file_stream->close();
 
-    std::ifstream in(test_log_file_);
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream in(m_test_log_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
     for (int i = 0; i < 10; ++i)
     {
@@ -1024,7 +1029,7 @@ TEST_F(AsyncLoggerTest, FlushWithTimeout_Success)
     config.batch_size = 4;
     config.flush_interval = std::chrono::milliseconds{10000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1043,7 +1048,7 @@ TEST_F(AsyncLoggerTest, FlushWithTimeout_Success)
 TEST_F(AsyncLoggerTest, FlushWithTimeout_WhenNotRunning)
 {
     AsyncLoggerConfig config;
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1062,7 +1067,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_Increment)
     config.overflow_policy = OverflowPolicy::DropNewest;
     config.flush_interval = std::chrono::milliseconds{10000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1088,7 +1093,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_DropOldest)
     config.overflow_policy = OverflowPolicy::DropOldest;
     config.flush_interval = std::chrono::milliseconds{10000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1111,7 +1116,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_Reset)
     config.overflow_policy = OverflowPolicy::DropNewest;
     config.flush_interval = std::chrono::milliseconds{10000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1140,7 +1145,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_DropNewest)
     config.overflow_policy = OverflowPolicy::DropNewest;
     config.flush_interval = std::chrono::milliseconds{10000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1165,7 +1170,7 @@ TEST_F(AsyncLoggerTest, QueueSize_Accuracy)
     config.batch_size = 4;
     config.flush_interval = std::chrono::milliseconds{1000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1189,7 +1194,7 @@ TEST_F(AsyncLoggerTest, Shutdown_DrainsAllPending)
     config.batch_size = 4;
     config.flush_interval = std::chrono::milliseconds{10000};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1202,9 +1207,8 @@ TEST_F(AsyncLoggerTest, Shutdown_DrainsAllPending)
     logger->shutdown();
     file_stream->close();
 
-    std::ifstream in(test_log_file_);
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream in(m_test_log_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
     for (int i = 0; i < 20; ++i)
     {
@@ -1223,8 +1227,9 @@ TEST(DynamicMPMCQueueTest, TryPopBatch_PreservesOrder)
     }
 
     std::vector<LogMessage> items;
-    queue.try_pop_batch(items, 8);
+    const size_t count = queue.try_pop_batch(items, 8);
 
+    EXPECT_EQ(count, 8u);
     EXPECT_EQ(items.size(), 8u);
     for (size_t i = 0; i < items.size(); ++i)
     {
@@ -1277,7 +1282,7 @@ TEST_F(AsyncLoggerTest, DropOldest_NoCounterUnderflow)
     config.batch_size = 2;
     config.overflow_policy = OverflowPolicy::DropOldest;
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     AsyncLogger logger(config, file_stream, log_mutex);
@@ -1308,7 +1313,7 @@ TEST_F(AsyncLoggerTest, SyncFallback_WritesWhenQueueFull)
     config.batch_size = 1;
     config.overflow_policy = OverflowPolicy::SyncFallback;
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     AsyncLogger logger(config, file_stream, log_mutex);
@@ -1325,9 +1330,8 @@ TEST_F(AsyncLoggerTest, SyncFallback_WritesWhenQueueFull)
     file_stream->close();
 
     // Verify the sync fallback message was written
-    std::ifstream read_file(test_log_file_.string());
-    std::string content((std::istreambuf_iterator<char>(read_file)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream read_file(m_test_log_file.string());
+    std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("sync_fallback_message"), std::string::npos);
 }
 
@@ -1337,7 +1341,7 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_WritesSync)
     config.queue_capacity = 64;
     config.batch_size = 10;
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     AsyncLogger logger(config, file_stream, log_mutex);
@@ -1349,9 +1353,8 @@ TEST_F(AsyncLoggerTest, EnqueueAfterShutdown_WritesSync)
 
     file_stream->close();
 
-    std::ifstream read_file(test_log_file_.string());
-    std::string content((std::istreambuf_iterator<char>(read_file)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream read_file(m_test_log_file.string());
+    std::string content((std::istreambuf_iterator<char>(read_file)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("post_shutdown_message"), std::string::npos);
 }
 
@@ -1362,7 +1365,7 @@ TEST_F(AsyncLoggerTest, MultiThread_EnqueueStress)
     config.batch_size = 32;
     config.overflow_policy = OverflowPolicy::DropNewest;
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     AsyncLogger logger(config, file_stream, log_mutex);
@@ -1374,15 +1377,17 @@ TEST_F(AsyncLoggerTest, MultiThread_EnqueueStress)
     std::vector<std::thread> threads;
     for (int t = 0; t < num_threads; ++t)
     {
-        threads.emplace_back([&, t]()
-                             {
-            for (int i = 0; i < msgs_per_thread; ++i)
+        threads.emplace_back(
+            [&, t]()
             {
-                if (logger.enqueue(LogLevel::Info, "thread_" + std::to_string(t) + "_msg_" + std::to_string(i)))
+                for (int i = 0; i < msgs_per_thread; ++i)
                 {
-                    total_enqueued.fetch_add(1, std::memory_order_relaxed);
+                    if (logger.enqueue(LogLevel::Info, "thread_" + std::to_string(t) + "_msg_" + std::to_string(i)))
+                    {
+                        total_enqueued.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
-            } });
+            });
     }
 
     for (auto &th : threads)
@@ -1396,8 +1401,7 @@ TEST_F(AsyncLoggerTest, MultiThread_EnqueueStress)
     // At least some messages should have been enqueued
     EXPECT_GT(total_enqueued.load(), 0);
     // Total enqueued + dropped should equal total attempted
-    EXPECT_EQ(total_enqueued.load() + static_cast<int>(logger.dropped_count()),
-              num_threads * msgs_per_thread);
+    EXPECT_EQ(total_enqueued.load() + static_cast<int>(logger.dropped_count()), num_threads * msgs_per_thread);
 
     logger.shutdown();
 }
@@ -1466,18 +1470,20 @@ TEST(StringPoolTest, ConcurrentAllocateDeallocate)
     std::vector<std::thread> threads;
     for (int t = 0; t < kThreads; ++t)
     {
-        threads.emplace_back([&, t]()
-                             {
-            for (int i = 0; i < kOpsPerThread; ++i)
+        threads.emplace_back(
+            [&, t]()
             {
-                std::string *s = pool.allocate(32);
-                if (s)
+                for (int i = 0; i < kOpsPerThread; ++i)
                 {
-                    s->assign("t" + std::to_string(t) + "_" + std::to_string(i));
-                    success_count.fetch_add(1, std::memory_order_relaxed);
-                    pool.deallocate(s);
+                    std::string *s = pool.allocate(32);
+                    if (s)
+                    {
+                        s->assign("t" + std::to_string(t) + "_" + std::to_string(i));
+                        success_count.fetch_add(1, std::memory_order_relaxed);
+                        pool.deallocate(s);
+                    }
                 }
-            } });
+            });
     }
 
     for (auto &th : threads)
@@ -1506,11 +1512,9 @@ TEST(StringPoolTest, ReuseAfterDeallocate)
 
 TEST(StringPoolTest, GrowsAcrossMultipleAlignedBlocks)
 {
-    // Keep more slots live than a single block holds, forcing
-    // grow_pool_locked() to allocate several additional over-aligned blocks
-    // through the aligned operator new. Every allocation must succeed and stay
-    // independently usable; a misaligned block would fault or trip the
-    // sanitizer probe rather than read back its stored value.
+    // Keep more slots live than a single block holds, forcing grow_pool_locked() to allocate several additional
+    // over-aligned blocks through the aligned operator new. Every allocation must succeed and stay independently
+    // usable; a misaligned block would fault or trip the sanitizer probe rather than read back its stored value.
     auto &pool = StringPool::instance();
 
     constexpr size_t kLiveSlots = POOL_SLOTS_PER_BLOCK * 4 + 1;
@@ -1538,8 +1542,8 @@ TEST(StringPoolTest, GrowsAcrossMultipleAlignedBlocks)
 
 TEST(StringPoolTest, AllocationChainIsNoThrow)
 {
-    // The logging hot path crosses noexcept boundaries (AsyncLogger::enqueue is
-    // noexcept), so every link of the StringPool allocation chain must be
+    // The logging hot path crosses noexcept boundaries (AsyncLogger::enqueue is noexcept), so every link of the
+    // StringPool allocation chain must be
     // no-throw: an out-of-memory condition has to drop the message, never let
     // an exception escape and terminate the host.
     auto &pool = StringPool::instance();
@@ -1550,8 +1554,8 @@ TEST(StringPoolTest, AllocationChainIsNoThrow)
 
 TEST(LogMessageTest, OverflowConstructionIsNoThrow)
 {
-    // The overflow ctor reaches into the StringPool; it must be no-throw so it
-    // is safe to build inside the noexcept AsyncLogger::enqueue().
+    // The overflow ctor reaches into the StringPool; it must be no-throw so it is safe to build inside the noexcept
+    // AsyncLogger::enqueue().
     static_assert(std::is_nothrow_constructible_v<LogMessage, LogLevel, std::string_view>,
                   "LogMessage(LogLevel, string_view) must be noexcept for the noexcept enqueue path");
 
@@ -1669,7 +1673,7 @@ TEST_F(AsyncLoggerTest, FlushWithTimeout_ReturnsTrue_WhenDrained)
     config.batch_size = 64;
     config.flush_interval = std::chrono::milliseconds{10};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1691,7 +1695,7 @@ TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
     config.batch_size = 64;
     config.flush_interval = std::chrono::milliseconds{10};
 
-    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
@@ -1701,14 +1705,12 @@ TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
     logger->shutdown();
     file_stream->close();
 
-    std::ifstream in(test_log_file_);
-    std::string content((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
+    std::ifstream in(m_test_log_file);
+    std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
 
     // Expected format: [YYYY-MM-DD HH:MM:SS.mmm] [LEVEL  ] :: message
     // Level field is 7 chars wide, left-aligned, space-padded
-    const std::regex line_pattern(
-        R"(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] \[\w{1,7}\s*\] :: .+)");
+    const std::regex line_pattern(R"(\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] \[\w{1,7}\s*\] :: .+)");
 
     std::istringstream stream(content);
     std::string line;
@@ -1719,8 +1721,7 @@ TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
         {
             continue;
         }
-        EXPECT_TRUE(std::regex_search(line, line_pattern))
-            << "Async log line does not match expected format: " << line;
+        EXPECT_TRUE(std::regex_search(line, line_pattern)) << "Async log line does not match expected format: " << line;
         ++matched;
     }
     EXPECT_EQ(matched, 3);

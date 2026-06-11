@@ -8,12 +8,10 @@
  *   L3 heal_landmark/offset   -- self-heal one field offset after a patch.
  *   L4 solve_fingerprint      -- recover one uniform shift across many fields.
  *
- * Every entry point is noexcept and fails closed. The hot self-heal path
- * allocates nothing (it reuses one stack PointeeType); only the explicitly
- * tooling-only block scanner grows a vector. All reads go through the same
- * SEH-guarded, module-bound-checked prelude the forward walker uses, so an
- * unmapped page or forged COL is a clean non-match, never a fault. Matching is
- * byte-exact on the MSVC most-derived mangled name (no UnDecorateSymbolName).
+ * Every entry point is noexcept and fails closed. The hot self-heal path allocates nothing (it reuses one stack
+ * PointeeType); only the explicitly tooling-only block scanner grows a vector. All reads go through the same
+ * SEH-guarded, module-bound-checked prelude the forward walker uses, so an unmapped page or forged COL is a clean
+ * non-match, never a fault. Matching is byte-exact on the MSVC most-derived mangled name (no UnDecorateSymbolName).
  */
 
 #include "DetourModKit/rtti_dissect.hpp"
@@ -28,12 +26,10 @@ namespace DetourModKit
     namespace
     {
         /**
-         * @brief Soft policy filter: does a resolved slot's shape satisfy the
-         *        landmark's required indirection?
-         * @details Indirection::Any accepts either shape; the other two pin the
-         *          slot to the pointer-to-object or direct-object form. This is
-         *          a policy-layer decision deliberately kept out of L1 so a
-         *          consumer can record Any when capture and heal may straddle a
+         * @brief Soft policy filter: does a resolved slot's shape satisfy the landmark's required indirection?
+         * @details Indirection::Any accepts either shape; the other two pin the slot to the pointer-to-object or
+         *          direct-object form. This is a policy-layer decision deliberately kept out of L1 so a consumer can
+         *          record Any when capture and heal may straddle a
          *          DLL boundary.
          */
         [[nodiscard]] bool shape_ok(bool was_pointer, Rtti::Indirection ind) noexcept
@@ -52,15 +48,12 @@ namespace DetourModKit
 
         /**
          * @brief Probe one slot: resolve, check shape, byte-exact name match.
-         * @details Fills @p pt whenever the slot resolves (so the caller can
-         *          read the match details), and reports whether it also passed
-         *          the shape filter and the exact mangled-name compare. The
-         *          name compare reuses the same semantics as vtable_is_type: a
-         *          superstring or a differing byte fails.
+         * @details Fills @p pt whenever the slot resolves (so the caller can read the match details), and reports
+         *          whether it also passed the shape filter and the exact mangled-name compare. The name compare reuses
+         *          the same semantics as vtable_is_type: a superstring or a differing byte fails.
          * @return true only on a full resolve + shape + exact-name match.
          */
-        [[nodiscard]] bool slot_matches(std::uintptr_t addr, const Rtti::Landmark &lm,
-                                        Rtti::PointeeType &pt) noexcept
+        [[nodiscard]] bool slot_matches(std::uintptr_t addr, const Rtti::Landmark &lm, Rtti::PointeeType &pt) noexcept
         {
             if (!Rtti::identify_pointee_type(addr, pt))
                 return false;
@@ -71,10 +64,9 @@ namespace DetourModKit
 
         /**
          * @brief Builds a HealHit from a matched slot.
-         * @details healed_offset is the field's offset within the struct base
-         *          (slot_addr - base), the value a consumer feeds straight into
-         *          a pointer chain. It equals nominal_offset when the layout did
-         *          not drift and nominal_offset +/- delta after a shift.
+         * @details healed_offset is the field's offset within the struct base (slot_addr - base), the value a consumer
+         *          feeds straight into a pointer chain. It equals nominal_offset when the layout did not drift and
+         *          nominal_offset +/- delta after a shift.
          */
         [[nodiscard]] Rtti::HealHit make_hit(std::uintptr_t slot_addr, std::uintptr_t base,
                                              const Rtti::PointeeType &pt) noexcept
@@ -90,11 +82,9 @@ namespace DetourModKit
 
         /**
          * @brief Validates a landmark's type/shape descriptor fields.
-         * @details Shared by heal_landmark and solve_fingerprint. Does not touch
-         *          @ref Rtti::Landmark::base or @ref Rtti::Landmark::window,
-         *          which the two callers validate differently.
-         * @return true when expected_mangled is a sane length and indirection is
-         *         a known enumerator.
+         * @details Shared by heal_landmark and solve_fingerprint. Does not touch @ref Rtti::Landmark::base or @ref
+         *          Rtti::Landmark::window, which the two callers validate differently.
+         * @return true when expected_mangled is a sane length and indirection is a known enumerator.
          */
         [[nodiscard]] bool descriptor_ok(const Rtti::Landmark &lm) noexcept
         {
@@ -126,21 +116,18 @@ namespace DetourModKit
         std::uintptr_t object_base = 0;
         std::uintptr_t vtable = 0;
 
-        // Pointer-to-object first: treat slot_val as a pointer to an object and
-        // try to resolve the pointee's vtable (*slot_val). A direct object would
-        // read its own first vtable entry here, which practically never
-        // satisfies the COL signature + pSelf cross-check, so this ordering does
-        // not misclassify real direct objects.
+        // Pointer-to-object first: treat slot_val as a pointer to an object and try to resolve the pointee's vtable
+        // (*slot_val). A direct object would read its own first vtable entry here, which practically never satisfies
+        // the COL signature + pSelf cross-check, so this ordering does not misclassify real direct objects.
         const auto vt2_opt = Memory::seh_read<std::uintptr_t>(slot_val);
-        if (vt2_opt && *vt2_opt >= detail::MIN_VALID_PTR &&
-            detail::resolve_col_site(*vt2_opt, site))
+        if (vt2_opt && *vt2_opt >= detail::MIN_VALID_PTR && detail::resolve_col_site(*vt2_opt, site))
         {
             was_pointer = true;
             object_base = slot_val;
             vtable = *vt2_opt;
         }
-        // Else direct object base: the slot itself is the object, its value is
-        // the vtable. Pinned to ground truth: the object base is the slot
+        // Else direct object base: the slot itself is the object, its value is the vtable. Pinned to ground truth: the
+        // object base is the slot
         // ADDRESS, the vtable is the value READ at it (not a second deref).
         else if (detail::resolve_col_site(slot_val, site))
         {
@@ -153,11 +140,9 @@ namespace DetourModKit
             return false;
         }
 
-        // Read the name into the output buffer through the same page-bounded
-        // copy the forward walker uses. A faulted or empty name is a
-        // non-resolution.
-        const std::size_t name_len =
-            detail::read_name_seh(site.name_addr, out.name_buf, sizeof(out.name_buf));
+        // Read the name into the output buffer through the same page-bounded copy the forward walker uses. A faulted or
+        // empty name is a non-resolution.
+        const std::size_t name_len = detail::read_name_seh(site.name_addr, out.name_buf, sizeof(out.name_buf));
         if (name_len == 0)
             return false;
 
@@ -171,25 +156,22 @@ namespace DetourModKit
         out.was_pointer = was_pointer;
         out.name_len = static_cast<std::uint16_t>(name_len);
 
-        // Complete object with underflow clamp: a garbage or forged col_offset
-        // larger than object_base must not wrap the address; report object_base
-        // itself in that (non-physical) case.
-        out.complete_obj = (object_base < site.col_offset)
-                               ? object_base
-                               : object_base - site.col_offset;
+        // Complete object with underflow clamp: a garbage or forged col_offset larger than object_base must not wrap
+        // the address; report object_base itself in that (non-physical) case.
+        out.complete_obj = (object_base < site.col_offset) ? object_base : object_base - site.col_offset;
         return true;
     }
 
-    std::size_t Rtti::reverse_scan_block(std::uintptr_t start, std::size_t slot_count,
-                                         std::vector<LabeledSlot> &out, std::size_t stride) noexcept
+    std::size_t Rtti::reverse_scan_block(std::uintptr_t start, std::size_t slot_count, std::vector<LabeledSlot> &out,
+                                         std::size_t stride) noexcept
     {
         if (start < detail::MIN_VALID_PTR || slot_count == 0)
             return 0;
         if (stride == 0)
             stride = sizeof(std::uintptr_t);
 
-        // Overflow guard mirroring find_in_pointer_table: reject a span that
-        // overflows size_t or wraps the address space.
+        // Overflow guard mirroring find_in_pointer_table: reject a span that overflows size_t or wraps the address
+        // space.
         if (slot_count > SIZE_MAX / stride)
             return 0;
         const std::uintptr_t span = static_cast<std::uintptr_t>(slot_count * stride);
@@ -288,8 +270,7 @@ namespace DetourModKit
                 plus_hit = make_hit(nominal_slot + step, lm.base, pt);
             }
 
-            // A uniquely nearest match heals; an equidistant +d/-d pair is the
-            // irreducible ambiguity and fails closed.
+            // A uniquely nearest match heals; an equidistant +d/-d pair is the irreducible ambiguity and fails closed.
             if (minus_match && plus_match)
                 return std::unexpected(HealError::Ambiguous);
             if (minus_match)
@@ -324,8 +305,7 @@ namespace DetourModKit
     }
 
     std::expected<Rtti::FingerprintHit, Rtti::HealError>
-    Rtti::solve_fingerprint(std::uintptr_t base, std::span<const Landmark> fp,
-                            std::size_t window_bytes) noexcept
+    Rtti::solve_fingerprint(std::uintptr_t base, std::span<const Landmark> fp, std::size_t window_bytes) noexcept
     {
         // Validation. No memory is touched until a delta is probed below.
         if (base < detail::MIN_VALID_PTR)
@@ -343,15 +323,14 @@ namespace DetourModKit
             if (lm.required)
                 ++required_count;
         }
-        // A template with no required landmark cannot fail closed against a
-        // dense region, so it is rejected rather than guessed.
+        // A template with no required landmark cannot fail closed against a dense region, so it is rejected rather than
+        // guessed.
         if (required_count == 0)
             return std::unexpected(HealError::BadDescriptor);
 
-        // Enumerate uniform deltas in [-window, +window] stepping by pointer
-        // size (real-world layout shifts are pointer-granular). A delta is a
-        // candidate only when it satisfies EVERY required landmark; among
-        // candidates the most optional hits wins, and a tie at the top latches
+        // Enumerate uniform deltas in [-window, +window] stepping by pointer size (real-world layout shifts are
+        // pointer-granular). A delta is a candidate only when it satisfies EVERY required landmark; among candidates
+        // the most optional hits wins, and a tie at the top latches
         // Ambiguous (fail closed).
         constexpr std::ptrdiff_t step = static_cast<std::ptrdiff_t>(sizeof(std::uintptr_t));
         const std::ptrdiff_t w = static_cast<std::ptrdiff_t>(window_bytes);
@@ -367,14 +346,13 @@ namespace DetourModKit
             std::size_t opt_hits = 0;
             for (const Landmark &lm : fp)
             {
-                const std::uintptr_t addr = base +
-                                            static_cast<std::uintptr_t>(lm.nominal_offset) +
-                                            static_cast<std::uintptr_t>(delta);
+                const std::uintptr_t addr =
+                    base + static_cast<std::uintptr_t>(lm.nominal_offset) + static_cast<std::uintptr_t>(delta);
                 const bool ok = Memory::plausible_userspace_ptr(addr) && slot_matches(addr, lm, pt);
                 if (lm.required)
                 {
-                    // A missing required landmark disqualifies this delta
-                    // outright; abandon it without scoring the rest.
+                    // A missing required landmark disqualifies this delta outright; abandon it without scoring the
+                    // rest.
                     if (!ok)
                         return;
                 }
@@ -398,8 +376,8 @@ namespace DetourModKit
             }
         };
 
-        // Iterate magnitudes 0, +step, -step, +2*step, ... so the scan is
-        // nearest-first; the decision itself is score-based, not distance-based.
+        // Iterate magnitudes 0, +step, -step, +2*step, ... so the scan is nearest-first; the decision itself is
+        // score-based, not distance-based.
         for (std::ptrdiff_t m = 0; m <= w; m += step)
         {
             eval_delta(m);
@@ -414,16 +392,15 @@ namespace DetourModKit
         return FingerprintHit{best_delta, required_count, best_optional};
     }
 
-    std::size_t Rtti::heal_report(std::span<const Landmark> landmarks,
-                                  std::span<DriftEntry> out) noexcept
+    std::size_t Rtti::heal_report(std::span<const Landmark> landmarks, std::span<DriftEntry> out) noexcept
     {
         const std::size_t written = (landmarks.size() < out.size()) ? landmarks.size() : out.size();
         for (std::size_t i = 0; i < written; ++i)
         {
             const Landmark &landmark = landmarks[i];
             DriftEntry &entry = out[i];
-            // Start from a clean entry so a failed heal cannot expose stale
-            // healed_offset/delta from a reused (non-zeroed) output buffer.
+            // Start from a clean entry so a failed heal cannot expose stale healed_offset/delta from a reused
+            // (non-zeroed) output buffer.
             entry = DriftEntry{};
             entry.name = landmark.expected_mangled;
             entry.nominal_offset = landmark.nominal_offset;
@@ -433,9 +410,8 @@ namespace DetourModKit
             {
                 entry.ok = true;
                 entry.healed_offset = heal->healed_offset;
-                // delta is the realised layout shift: 0 when the field did not
-                // move, signed when it did. It is the headline number a changelog
-                // wants, derived purely from the existing heal result.
+                // delta is the realised layout shift: 0 when the field did not move, signed when it did. It is the
+                // headline number a changelog wants, derived purely from the existing heal result.
                 entry.delta = heal->healed_offset - landmark.nominal_offset;
             }
             else

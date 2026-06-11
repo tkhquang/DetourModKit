@@ -15,9 +15,8 @@ using DetourModKit::detail::decode_ff25_indirect;
 
 namespace
 {
-    // Writes a little-endian 32-bit value into a byte buffer. Avoids
-    // pulling in <bit> / std::bit_cast for what is effectively the same
-    // thing std::memcpy does in the decoders under test.
+    // Writes a little-endian 32-bit value into a byte buffer. Avoids pulling in <bit> / std::bit_cast for what is
+    // effectively the same thing std::memcpy does in the decoders under test.
     void write_le32(std::uint8_t *dst, std::int32_t value) noexcept
     {
         std::memcpy(dst, &value, sizeof(value));
@@ -35,8 +34,7 @@ TEST(X86DecodeTest, DecodeE9Rel32_WrongOpcodeRejected)
     // The buffer is readable but the leading byte is not 0xE9.
     std::array<std::uint8_t, 5> buf{0x90, 0x00, 0x00, 0x00, 0x00};
 
-    const auto result =
-        decode_e9_rel32(reinterpret_cast<std::uintptr_t>(buf.data()));
+    const auto result = decode_e9_rel32(reinterpret_cast<std::uintptr_t>(buf.data()));
     EXPECT_FALSE(result.has_value());
 }
 
@@ -65,13 +63,10 @@ TEST(X86DecodeTest, DecodeE9Rel32_ValidBackwardDisplacement)
 
 TEST(X86DecodeTest, DecodeE9Rel32_UnmappedInstructionRejected)
 {
-    // Reserve a page with no committed backing and no access, then decode at
-    // its base. The decoders no longer probe with is_readable; the SEH fault
-    // guard inside seh_read_bytes is the only thing between a bad address and
-    // an access violation, so this asserts that an unmapped instruction yields
-    // nullopt instead of faulting the process. Covers the time-of-check to
-    // time-of-use fix for the instruction-bytes read shared by all three
-    // decoders.
+    // Reserve a page with no committed backing and no access, then decode at its base. The decoders do not pre-probe
+    // with is_readable; the SEH fault guard inside seh_read_bytes is the only thing between a bad address and an access
+    // violation, so this asserts that an unmapped instruction yields nullopt instead of faulting the process. Covers
+    // the time-of-check to time-of-use hazard on the instruction-bytes read shared by all three decoders.
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
     LPVOID region = VirtualAlloc(nullptr, si.dwPageSize, MEM_RESERVE, PAGE_NOACCESS);
@@ -93,8 +88,7 @@ TEST(X86DecodeTest, DecodeEbRel8_WrongOpcodeRejected)
 {
     std::array<std::uint8_t, 2> buf{0x90, 0x10};
 
-    const auto result =
-        decode_eb_rel8(reinterpret_cast<std::uintptr_t>(buf.data()));
+    const auto result = decode_eb_rel8(reinterpret_cast<std::uintptr_t>(buf.data()));
     EXPECT_FALSE(result.has_value());
 }
 
@@ -110,8 +104,8 @@ TEST(X86DecodeTest, DecodeEbRel8_ValidForwardDisplacement)
 
 TEST(X86DecodeTest, DecodeEbRel8_NegativeDisplacementSignExtended)
 {
-    // 0xFE is -2 when interpreted as signed 8-bit; verifies the cast
-    // to std::int8_t in decode_eb_rel8 sign-extends correctly.
+    // 0xFE is -2 when interpreted as signed 8-bit; verifies the cast to std::int8_t in decode_eb_rel8 sign-extends
+    // correctly.
     std::array<std::uint8_t, 2> buf{0xEB, 0xFE};
 
     const auto base = reinterpret_cast<std::uintptr_t>(buf.data());
@@ -130,29 +124,24 @@ TEST(X86DecodeTest, DecodeFf25Indirect_WrongFirstByteRejected)
 {
     std::array<std::uint8_t, 6> buf{0x48, 0x25, 0x00, 0x00, 0x00, 0x00};
 
-    const auto result =
-        decode_ff25_indirect(reinterpret_cast<std::uintptr_t>(buf.data()));
+    const auto result = decode_ff25_indirect(reinterpret_cast<std::uintptr_t>(buf.data()));
     EXPECT_FALSE(result.has_value());
 }
 
 TEST(X86DecodeTest, DecodeFf25Indirect_WrongSecondByteRejected)
 {
-    // First byte matches, second byte does not; covers the second half
-    // of the compound opcode predicate.
+    // First byte matches, second byte does not; covers the second half of the compound opcode predicate.
     std::array<std::uint8_t, 6> buf{0xFF, 0x15, 0x00, 0x00, 0x00, 0x00};
 
-    const auto result =
-        decode_ff25_indirect(reinterpret_cast<std::uintptr_t>(buf.data()));
+    const auto result = decode_ff25_indirect(reinterpret_cast<std::uintptr_t>(buf.data()));
     EXPECT_FALSE(result.has_value());
 }
 
 TEST(X86DecodeTest, DecodeFf25Indirect_UnreadableSlotRejected)
 {
     // Reserve two adjacent pages, commit only the first, then place the
-    // FF 25 instruction at the end of the committed page. The disp32 is
-    // chosen to point the slot into the uncommitted second page, which
-    // Memory::is_readable rejects deterministically (no reliance on
-    // ambient process layout).
+    // FF 25 instruction at the end of the committed page. The disp32 is chosen to point the slot into the uncommitted
+    // second page, which the SEH-guarded slot read rejects deterministically (no reliance on ambient process layout).
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
     const SIZE_T page = si.dwPageSize;
@@ -179,11 +168,9 @@ TEST(X86DecodeTest, DecodeFf25Indirect_UnreadableSlotRejected)
 
 TEST(X86DecodeTest, DecodeFf25Indirect_SlotProducesDestination)
 {
-    // Lay out the instruction and its slot in a single aligned struct
-    // and point the RIP-relative displacement at the slot explicitly
-    // rather than assuming zero padding. The decoder computes the slot
-    // address as base + 6 + disp32, so disp must equal
-    // (offsetof(slot) - 6) regardless of how the compiler pads.
+    // Lay out the instruction and its slot in a single aligned struct and point the RIP-relative displacement at the
+    // slot explicitly rather than assuming zero padding. The decoder computes the slot address as base + 6 + disp32, so
+    // disp must equal (offsetof(slot) - 6) regardless of how the compiler pads.
     struct alignas(8) Layout
     {
         std::uint8_t instruction[6];

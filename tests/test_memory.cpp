@@ -13,15 +13,9 @@ using namespace DetourModKit;
 class MemoryTest : public ::testing::Test
 {
 protected:
-    void SetUp() override
-    {
-        (void)Memory::init_cache();
-    }
+    void SetUp() override { (void)Memory::init_cache(); }
 
-    void TearDown() override
-    {
-        Memory::shutdown_cache();
-    }
+    void TearDown() override { Memory::shutdown_cache(); }
 };
 
 TEST_F(MemoryTest, InitMemoryCache)
@@ -130,9 +124,8 @@ TEST_F(MemoryTest, IsMemoryWritable_ZeroSize)
 TEST_F(MemoryTest, write_bytes)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
-    std::vector<std::byte> source = {
-        std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
-        std::byte{0x12}, std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
+    std::vector<std::byte> source = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x12},
+                                     std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
 
     auto result = Memory::write_bytes(target.data(), source.data(), source.size());
     EXPECT_TRUE(result.has_value());
@@ -223,10 +216,10 @@ TEST_F(MemoryTest, CacheAfterClear)
 
 TEST_F(MemoryTest, InvalidateRangeEvictsMultiPageRegionInterior)
 {
-    // Reserve and commit a three-page region so the cached VirtualQuery region spans
-    // multiple pages and the invalidated interior address is not the region base. This
-    // exercises the case the per-page key probe used to miss: the entry is keyed by the
-    // region base but the interior address hashes to a different shard.
+    // Reserve and commit a three-page region so the cached VirtualQuery region spans multiple pages and the invalidated
+    // interior address is not the region base. This exercises the case a single per-page key probe cannot find: the
+    // entry is keyed by the region base, but the interior address hashes to a different shard, so only a per-shard
+    // containment scan can locate the covering entry.
     const SIZE_T page_size = 4096;
     const SIZE_T region_size = page_size * 3;
     void *region = VirtualAlloc(nullptr, region_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -239,13 +232,13 @@ TEST_F(MemoryTest, InvalidateRangeEvictsMultiPageRegionInterior)
     // Warm the cache with a READABLE verdict for the interior address.
     EXPECT_TRUE(Memory::is_readable(interior, 16));
 
-    // Flip the whole region to no-access. The cached entry is now stale: without a
-    // correct invalidation a subsequent query would still report READABLE.
+    // Flip the whole region to no-access. The cached entry is now stale: without a correct invalidation a subsequent
+    // query would still report READABLE.
     DWORD old_protect = 0;
     ASSERT_NE(VirtualProtect(region, region_size, PAGE_NOACCESS, &old_protect), 0);
 
-    // Invalidate the interior address. A correct invalidation evicts the covering
-    // entry regardless of which shard stored it.
+    // Invalidate the interior address. A correct invalidation evicts the covering entry regardless of which shard
+    // stored it.
     Memory::invalidate_range(interior, 16);
 
     // The re-query must re-run VirtualQuery and observe the no-access protection.
@@ -286,8 +279,7 @@ TEST_F(MemoryTest, write_bytes_DataIntegrity)
         target[i] = std::byte{static_cast<uint8_t>(i)};
     }
 
-    std::vector<std::byte> source = {
-        std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
+    std::vector<std::byte> source = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
 
     auto result = Memory::write_bytes(target.data() + 10, source.data(), source.size());
     EXPECT_TRUE(result.has_value());
@@ -681,18 +673,20 @@ TEST_F(MemoryTest, ThreadSafetyHighConcurrency)
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([iterations, i, &success_count]()
-                             {
-            char buffers[4][100] = {};
-            for (int j = 0; j < iterations; ++j)
+        threads.emplace_back(
+            [iterations, i, &success_count]()
             {
-                const int buf_idx = (i + j) % 4;
-                if (Memory::is_readable(buffers[buf_idx], sizeof(buffers[buf_idx])) &&
-                    Memory::is_writable(buffers[buf_idx], sizeof(buffers[buf_idx])))
+                char buffers[4][100] = {};
+                for (int j = 0; j < iterations; ++j)
                 {
-                    success_count.fetch_add(1, std::memory_order_relaxed);
+                    const int buf_idx = (i + j) % 4;
+                    if (Memory::is_readable(buffers[buf_idx], sizeof(buffers[buf_idx])) &&
+                        Memory::is_writable(buffers[buf_idx], sizeof(buffers[buf_idx])))
+                    {
+                        success_count.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
-            } });
+            });
     }
 
     for (auto &t : threads)
@@ -756,15 +750,17 @@ TEST_F(MemoryTest, CacheStampedeCoalescing)
     std::vector<std::thread> threads;
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([&]()
-                             {
-            for (int j = 0; j < iterations; ++j)
+        threads.emplace_back(
+            [&]()
             {
-                if (Memory::is_readable(mem, 64))
+                for (int j = 0; j < iterations; ++j)
                 {
-                    success_count.fetch_add(1, std::memory_order_relaxed);
+                    if (Memory::is_readable(mem, 64))
+                    {
+                        success_count.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
-            } });
+            });
     }
 
     for (auto &t : threads)
@@ -1011,14 +1007,16 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
     std::vector<std::thread> readers;
     for (int i = 0; i < num_threads; ++i)
     {
-        readers.emplace_back([&]()
-                             {
-            readers_entered.fetch_add(1, std::memory_order_release);
-            while (keep_reading.load(std::memory_order_acquire))
+        readers.emplace_back(
+            [&]()
             {
-                // After shutdown, is_readable falls back to direct VirtualQuery
-                Memory::is_readable(mem, 64);
-            } });
+                readers_entered.fetch_add(1, std::memory_order_release);
+                while (keep_reading.load(std::memory_order_acquire))
+                {
+                    // After shutdown, is_readable falls back to direct VirtualQuery
+                    Memory::is_readable(mem, 64);
+                }
+            });
     }
 
     // Wait until all readers are actively reading
@@ -1027,11 +1025,9 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
         std::this_thread::yield();
     }
 
-    // Shutdown on a separate thread while readers are still active.
-    // shutdown_cache waits for s_activeReaders == 0 before destroying data.
-    // Readers that re-enter after shutdown use direct VirtualQuery fallback.
-    std::thread shutdown_thread([&]()
-                                { Memory::shutdown_cache(); });
+    // Shutdown on a separate thread while readers are still active. shutdown_cache waits for s_activeReaders == 0
+    // before destroying data. Readers that re-enter after shutdown use direct VirtualQuery fallback.
+    std::thread shutdown_thread([&]() { Memory::shutdown_cache(); });
 
     // Let shutdown and readers race briefly
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1151,8 +1147,8 @@ TEST_F(MemoryTest, CacheRangeLookup_MidRegionHit)
     Memory::shutdown_cache();
     (void)Memory::init_cache(32, 60000, 1);
 
-    // Allocate a large region so VirtualQuery returns a base address that differs
-    // from the queried address within the region
+    // Allocate a large region so VirtualQuery returns a base address that differs from the queried address within the
+    // region
     void *mem = VirtualAlloc(nullptr, 65536, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
@@ -1206,8 +1202,8 @@ TEST_F(MemoryTest, CacheHitRate_RepeatedAccess)
 
 TEST_F(MemoryTest, IsReadable_AddressOverflow)
 {
-    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches
-    // the address+size overflow guard in the cache/query path.
+    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches the address+size overflow guard in the
+    // cache/query path.
     void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(buf, nullptr);
 
@@ -1244,14 +1240,16 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
     std::atomic<bool> reader_done{false};
 
     // Start a reader thread that will be in-flight during shutdown
-    std::thread reader([&]()
-                       {
-        reader_started.store(true);
-        for (int i = 0; i < 100; ++i)
+    std::thread reader(
+        [&]()
         {
-            Memory::is_readable(mem, 4);
-        }
-        reader_done.store(true); });
+            reader_started.store(true);
+            for (int i = 0; i < 100; ++i)
+            {
+                Memory::is_readable(mem, 4);
+            }
+            reader_done.store(true);
+        });
 
     // Wait for reader to start
     while (!reader_started.load())
@@ -1274,8 +1272,8 @@ TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
 {
     Memory::shutdown_cache();
 
-    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches
-    // the overflow guard in the direct (no-cache) path.
+    // Use a real mapped buffer so VirtualQuery succeeds and the code reaches the overflow guard in the direct
+    // (no-cache) path.
     void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(buf, nullptr);
 
@@ -1427,8 +1425,7 @@ TEST_F(MemoryTest, ReadPtrUnsafe_GuardPage)
     VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
 
     uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
-    // MSVC SEH catches the guard page exception and returns 0.
-    // MinGW VirtualQuery detects PAGE_GUARD and returns 0.
+    // MSVC SEH catches the guard page exception and returns 0. MinGW VirtualQuery detects PAGE_GUARD and returns 0.
     EXPECT_EQ(result, 0u);
 
     VirtualFree(mem, 0, MEM_RELEASE);
@@ -1631,31 +1628,31 @@ TEST_F(MemoryTest, ReadPtrUnchecked_ValidSourceValidResult)
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsKernelRangeSource)
 {
-    // A kernel-range source is rejected by the upper-bound guard before any
-    // dereference (early return), so this is safe to call with a non-readable base.
+    // A kernel-range source is rejected by the upper-bound guard before any dereference (early return), so this is safe
+    // to call with a non-readable base.
     const uintptr_t base = 0xFFFF800000000000ULL;
     EXPECT_EQ(Memory::read_ptr_unchecked(base, 0), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsSourceAtCeiling)
 {
-    // USERSPACE_PTR_MAX is the first non-canonical address; the window is half-open,
-    // so a source exactly at the ceiling is rejected (also before any dereference).
+    // USERSPACE_PTR_MAX is the first non-canonical address; the window is half-open, so a source exactly at the ceiling
+    // is rejected (also before any dereference).
     EXPECT_EQ(Memory::read_ptr_unchecked(Memory::USERSPACE_PTR_MAX, 0), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsSourceOffsetCrossingCeiling)
 {
-    // A positive offset that carries the source up to the ceiling is rejected; this
-    // is also how the range guard subsumes pointer-arithmetic wraparound.
+    // A positive offset that carries the source up to the ceiling is rejected; this is also how the range guard
+    // subsumes pointer-arithmetic wraparound.
     const uintptr_t base = Memory::USERSPACE_PTR_MAX - 0x100;
     EXPECT_EQ(Memory::read_ptr_unchecked(base, 0x100), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsKernelRangeResult)
 {
-    // A structurally valid source that yields a kernel-range pointer must not be
-    // propagated down the chain; the result guard rejects it like the source guard.
+    // A structurally valid source that yields a kernel-range pointer must not be propagated down the chain; the result
+    // guard rejects it like the source guard.
     uintptr_t kernel_value = 0xFFFF800000000000ULL;
     EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&kernel_value), 0), 0u);
 }
@@ -1845,8 +1842,8 @@ TEST_F(MemoryTest, SehReadBytes_GuardPageReturnsFalse)
 
 TEST_F(MemoryTest, SehReadBytes_LargeRangePartialUnmapped)
 {
-    // Read more bytes than are available after a committed page; the second
-    // half lives in unmapped territory and the read must fail.
+    // Read more bytes than are available after a committed page; the second half lives in unmapped territory and the
+    // read must fail.
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
@@ -1955,21 +1952,18 @@ TEST_F(MemoryTest, ModuleRangeFor_NullReturnsNullopt)
 
 TEST_F(MemoryTest, ModuleRangeFor_OwnFunctionResolves)
 {
-    // The test exe is itself a loaded module; resolving any address in it
-    // must return a valid range that contains the queried address.
-    const auto range = Memory::module_range_for(
-        reinterpret_cast<const void *>(&Memory::module_range_for));
+    // The test exe is itself a loaded module; resolving any address in it must return a valid range that contains the
+    // queried address.
+    const auto range = Memory::module_range_for(reinterpret_cast<const void *>(&Memory::module_range_for));
     ASSERT_TRUE(range.has_value());
     EXPECT_TRUE(range->valid());
-    EXPECT_TRUE(Memory::contains(*range,
-                                 reinterpret_cast<uintptr_t>(&Memory::module_range_for)));
+    EXPECT_TRUE(Memory::contains(*range, reinterpret_cast<uintptr_t>(&Memory::module_range_for)));
 }
 
 TEST_F(MemoryTest, ModuleRangeFor_HeapAddressReturnsNullopt)
 {
-    // A heap allocation lives in committed memory that is not part of any
-    // loaded image, so GetModuleHandleEx returns nullptr and the function
-    // returns std::nullopt.
+    // A heap allocation lives in committed memory that is not part of any loaded image, so GetModuleHandleEx returns
+    // nullptr and the function returns std::nullopt.
     auto buffer = std::make_unique<int>(42);
     const auto range = Memory::module_range_for(buffer.get());
     EXPECT_FALSE(range.has_value());
@@ -1992,8 +1986,7 @@ TEST_F(MemoryTest, OwnModuleRange_IsValid)
 {
     const auto range = Memory::own_module_range();
     EXPECT_TRUE(range.valid());
-    EXPECT_TRUE(Memory::contains(range,
-                                 reinterpret_cast<uintptr_t>(&Memory::own_module_range)));
+    EXPECT_TRUE(Memory::contains(range, reinterpret_cast<uintptr_t>(&Memory::own_module_range)));
 }
 
 TEST_F(MemoryTest, OwnModuleRange_StableAcrossCalls)
@@ -2017,8 +2010,7 @@ TEST_F(MemoryTest, HostModuleRange_IsValid)
 
 TEST_F(MemoryTest, HostModuleRange_ContainsItself)
 {
-    // The test process is its own host; any code address inside the test exe
-    // must fall inside host_module_range().
+    // The test process is its own host; any code address inside the test exe must fall inside host_module_range().
     const auto range = Memory::host_module_range();
     ASSERT_TRUE(range.valid());
 
@@ -2037,8 +2029,7 @@ TEST_F(MemoryTest, HostModuleRange_StableAcrossCalls)
 
 TEST_F(MemoryTest, ModuleRangeFor_KernelModuleResolves)
 {
-    // kernel32.dll is loaded into every Windows process; resolving any
-    // address inside it must yield a valid range.
+    // kernel32.dll is loaded into every Windows process; resolving any address inside it must yield a valid range.
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
     ASSERT_NE(kernel, nullptr);
 

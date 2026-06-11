@@ -4,9 +4,8 @@
 /**
  * @file format.hpp
  * @brief String and format utilities for DetourModKit.
- * @details Provides string manipulation (trimming) and formatting utilities
- *          for common game modding types like memory addresses, byte values,
- *          and virtual key codes.
+ * @details Provides string manipulation (trimming) and formatting utilities for common game modding types like memory
+ *          addresses, byte values, and virtual key codes.
  */
 
 #include <cstddef>
@@ -22,11 +21,11 @@ namespace DetourModKit
     {
         /**
          * @brief Trims leading and trailing whitespace characters from a string.
-         * @details Whitespace characters considered are space, tab, newline, carriage return,
-         *          form feed, and vertical tab.
+         * @details Whitespace characters considered are space, tab, newline, carriage return, form feed, and vertical
+         *          tab.
          * @param s The string_view to trim.
-         * @return std::string A new string with leading/trailing whitespace removed.
-         *         Returns an empty string if the input string is empty or contains only whitespace.
+         * @return std::string A new string with leading/trailing whitespace removed. Returns an empty string if the
+         *         input string is empty or contains only whitespace.
          */
         inline std::string trim(std::string_view s)
         {

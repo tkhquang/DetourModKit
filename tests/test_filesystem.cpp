@@ -41,8 +41,7 @@ TEST(FilesystemTest, GetRuntimeDirectory_ThreadSafety)
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([&results, i]()
-                             { results[i] = Filesystem::get_runtime_directory(); });
+        threads.emplace_back([&results, i]() { results[i] = Filesystem::get_runtime_directory(); });
     }
 
     for (auto &t : threads)
@@ -78,8 +77,8 @@ TEST(FilesystemTest, GetRuntimeDirectory_NoTrailingSeparator)
 
 TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
 {
-    // Verify that repeated calls return identical values, consistent with
-    // the internal caching of the resolved module directory.
+    // Verify that repeated calls return identical values, consistent with the internal caching of the resolved module
+    // directory.
     const auto dir1 = Filesystem::get_runtime_directory();
     const auto dir2 = Filesystem::get_runtime_directory();
 
@@ -97,8 +96,7 @@ TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
 
     // 10000 cached calls should complete well under 1 second.
-    EXPECT_LT(elapsed_ms, 1000)
-        << "Cached get_runtime_directory should be near-zero cost per call";
+    EXPECT_LT(elapsed_ms, 1000) << "Cached get_runtime_directory should be near-zero cost per call";
 }
 
 TEST(FilesystemUtf8, ReturnsNonEmpty)

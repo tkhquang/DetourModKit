@@ -17,8 +17,8 @@ using namespace DetourModKit;
 
 namespace
 {
-    // A committed page (0xCC filled) for planting instruction bytes / markers that
-    // the cascade- and decode-backed anchor kinds resolve against.
+    // A committed page (0xCC filled) for planting instruction bytes / markers that the cascade- and decode-backed
+    // anchor kinds resolve against.
     class Region
     {
     public:
@@ -69,8 +69,8 @@ namespace
         void *m_base = nullptr;
     };
 
-    // Post-resolve validator stand-ins for the validator tests. Each signature
-    // matches Anchors::AnchorValidator exactly (a noexcept function pointer).
+    // Post-resolve validator stand-ins for the validator tests. Each signature matches Anchors::AnchorValidator exactly
+    // (a noexcept function pointer).
     bool always_reject(std::int64_t, const void *) noexcept
     {
         return false;
@@ -163,8 +163,7 @@ TEST(AnchorsTest, VtableIdentityFailsClosedWhenAbsent)
     anchor.kind = Anchors::AnchorKind::VtableIdentity;
     anchor.mangled = ".?AVAnchorAbsent@@";
 
-    // The region carries no RTTI, so the backend must fail closed (not crash and
-    // not invent a value).
+    // The region carries no RTTI, so the backend must fail closed (not crash and not invent a value).
     const auto result = Anchors::resolve(anchor, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Failed);
 }
@@ -267,13 +266,13 @@ TEST(AnchorsTest, CodeOperandResolvesDisplacementWithByteWidth)
 
 TEST(AnchorsTest, StringXrefResolvesReference)
 {
-    // StringXref phase 2 scans execute-readable pages, so this case needs an
-    // executable page rather than the read-write Region helper.
+    // StringXref phase 2 scans execute-readable pages, so this case needs an executable page rather than the read-write
+    // Region helper.
     SYSTEM_INFO si{};
     GetSystemInfo(&si);
     const SIZE_T page = si.dwPageSize;
-    auto *base = static_cast<std::uint8_t *>(
-        VirtualAlloc(nullptr, page, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    auto *base =
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, page, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
     if (!base)
     {
         GTEST_SKIP() << "could not allocate an executable page";
@@ -286,9 +285,8 @@ TEST(AnchorsTest, StringXrefResolvesReference)
     base[0x11] = 0x8D;
     base[0x12] = 0x05;
     const auto base_addr = reinterpret_cast<std::uintptr_t>(base);
-    const auto disp = static_cast<std::int32_t>(
-        static_cast<std::int64_t>(base_addr + 0x100) -
-        static_cast<std::int64_t>(base_addr + 0x10 + 7));
+    const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(base_addr + 0x100) -
+                                                static_cast<std::int64_t>(base_addr + 0x10 + 7));
     std::memcpy(base + 0x13, &disp, sizeof(disp));
 
     Anchors::Anchor anchor{};
@@ -346,8 +344,8 @@ TEST(AnchorsTest, ValidatorRejectionFailsClosed)
     anchor.operand_index = 1;
     anchor.validator = always_reject;
 
-    // The backend resolves 0xF0, but the validator rejects it: fail closed exactly
-    // like a backend miss (Failed, value reset to 0).
+    // The backend resolves 0xF0, but the validator rejects it: fail closed exactly like a backend miss (Failed, value
+    // reset to 0).
     const auto result = Anchors::resolve(anchor, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Failed);
     EXPECT_EQ(result.value, 0);
@@ -444,8 +442,8 @@ TEST(AnchorsTest, QuorumAcceptsWhenSignalsAgree)
 
 TEST(AnchorsTest, QuorumAcceptsAcrossBackends)
 {
-    // The canonical use: corroborate a decoded code constant against an independent
-    // signal of the same value (here a pinned expectation).
+    // The canonical use: corroborate a decoded code constant against an independent signal of the same value (here a
+    // pinned expectation).
     Region reg;
     ASSERT_TRUE(reg.ok());
     reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
@@ -596,8 +594,8 @@ TEST(AnchorsTest, QuorumWithinToleranceRejectsDistantValues)
 
 TEST(AnchorsTest, QuorumRejectsNegativeTolerance)
 {
-    // A negative tolerance must fail closed. If it were widened to unsigned it would
-    // become a huge bound and wrongly accept these far-apart values.
+    // A negative tolerance must fail closed. If it were widened to unsigned it would become a huge bound and wrongly
+    // accept these far-apart values.
     Anchors::Anchor first{};
     first.kind = Anchors::AnchorKind::Manual;
     first.manual_value = 0x4000;
@@ -618,8 +616,8 @@ TEST(AnchorsTest, QuorumRejectsNegativeTolerance)
 
 TEST(AnchorsTest, QuorumHonoursOwnValidator)
 {
-    // Both signals agree, but the Quorum anchor's own validator rejects the
-    // corroborated value: the commit path must apply it and fail closed.
+    // Both signals agree, but the Quorum anchor's own validator rejects the corroborated value: the commit path must
+    // apply it and fail closed.
     Anchors::Anchor first{};
     first.kind = Anchors::AnchorKind::Manual;
     first.manual_value = 0x4000;

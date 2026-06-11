@@ -526,22 +526,16 @@ TEST_F(InputPollerTest, MixedKeyboardAndGamepadBindings)
 class InputManagerTest : public ::testing::Test
 {
 protected:
-    void SetUp() override
-    {
-        InputManager::get_instance().shutdown();
-    }
+    void SetUp() override { InputManager::get_instance().shutdown(); }
 
-    void TearDown() override
-    {
-        InputManager::get_instance().shutdown();
-    }
+    void TearDown() override { InputManager::get_instance().shutdown(); }
 };
 
 TEST_F(InputManagerTest, SetConsumeBeforeStartUpdatesPendingBinding)
 {
     auto &mgr = InputManager::get_instance();
-    // A keyboard binding never installs a hook (suppression is gamepad/wheel
-    // only), so this exercises the consume plumbing without touching real input.
+    // A keyboard binding never installs a hook (suppression is gamepad/wheel only), so this exercises the consume
+    // plumbing without touching real input.
     mgr.register_press("consume_pending", {keyboard_key(0x70)}, [] {});
     mgr.set_consume("consume_pending", true);
     mgr.set_consume("nonexistent_binding", true); // unknown name is a no-op
@@ -563,10 +557,9 @@ TEST_F(InputManagerTest, RegisterConsumeFlagAppliesToBinding)
 {
     auto &mgr = InputManager::get_instance();
     mgr.register_press("consume_cfg", {keyboard_key(0x70)}, [] {});
-    // The fused helper fires set_consume("consume_cfg", true) at registration
-    // time, with the same setter re-applied on every load() / reload().
-    Config::register_consume_flag("Hotkeys", "ConsumeCfg.Consume", "Consume Cfg",
-                                  "consume_cfg", true);
+    // The fused helper fires set_consume("consume_cfg", true) at registration time, with the same setter re-applied on
+    // every load() / reload().
+    Config::register_consume_flag("Hotkeys", "ConsumeCfg.Consume", "Consume Cfg", "consume_cfg", true);
     EXPECT_EQ(mgr.binding_count(), 1u);
     // Drop the registered setter so it does not fire against later tests.
     Config::clear_registered_items();
@@ -574,11 +567,10 @@ TEST_F(InputManagerTest, RegisterConsumeFlagAppliesToBinding)
 
 TEST_F(InputManagerTest, AnalogOnlyConsumeGamepadBindingInstallsNoXInputHook)
 {
-    // A consume binding whose only trigger is an analog code (trigger/stick) can
-    // never be masked: the XInput detour clears digital wButtons bits only. The
-    // poll loop must therefore not install the hook for such a binding. Asserting
-    // "no hook installed" verifies the digital-only install gate without putting a
-    // live hook into the test process (no game window or controller is needed).
+    // A consume binding whose only trigger is an analog code (trigger/stick) can never be masked: the XInput detour
+    // clears digital wButtons bits only. The poll loop must therefore not install the hook for such a binding.
+    // Asserting "no hook installed" verifies the digital-only install gate without putting a live hook into the test
+    // process (no game window or controller is needed).
     auto &mgr = InputManager::get_instance();
     mgr.register_press("analog_consume", {gamepad_button(GamepadCode::LeftTrigger)}, [] {});
     mgr.set_consume("analog_consume", true);
@@ -586,9 +578,8 @@ TEST_F(InputManagerTest, AnalogOnlyConsumeGamepadBindingInstallsNoXInputHook)
 
     // Give the poll loop several cycles to reach its lazy-install check.
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
-    // Confirm the poll thread is actually alive and cycling, so "no hook
-    // installed" reflects the install gate staying closed for an analog-only
-    // consume binding rather than a thread that never reached the check.
+    // Confirm the poll thread is actually alive and cycling, so "no hook installed" reflects the install gate staying
+    // closed for an analog-only consume binding rather than a thread that never reached the check.
     EXPECT_TRUE(mgr.is_running());
     EXPECT_FALSE(detail::xinput_installed());
 
@@ -767,14 +758,16 @@ TEST_F(InputManagerTest, ConcurrentAccess)
 
     for (int t = 0; t < thread_count; ++t)
     {
-        threads.emplace_back([&mgr, &registered, t]()
-                             {
-            for (int i = 0; i < ops_per_thread; ++i)
+        threads.emplace_back(
+            [&mgr, &registered, t]()
             {
-                std::string name = "binding_" + std::to_string(t) + "_" + std::to_string(i);
-                mgr.register_press(name, {keyboard_key(0x41)}, []() {});
-                registered.fetch_add(1, std::memory_order_relaxed);
-            } });
+                for (int i = 0; i < ops_per_thread; ++i)
+                {
+                    std::string name = "binding_" + std::to_string(t) + "_" + std::to_string(i);
+                    mgr.register_press(name, {keyboard_key(0x41)}, []() {});
+                    registered.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
     }
 
     for (auto &th : threads)
@@ -957,8 +950,8 @@ TEST_F(InputPollerTest, HoldBindingShutdownSafety)
 
 TEST_F(InputPollerTest, StrictModifierMatchingConstruction)
 {
-    // When "V" and "Shift+V" are both registered, the poller should
-    // construct without error and track Shift as a known modifier.
+    // When "V" and "Shift+V" are both registered, the poller should construct without error and track Shift as a known
+    // modifier.
     std::vector<InputBinding> bindings;
 
     InputBinding plain_v;
@@ -1144,9 +1137,8 @@ TEST_F(InputPollerTest, StrictModifierMatchingGamepadBindings)
 
 TEST_F(InputPollerTest, StrictModifierMatchingCrossFeatureIsolation)
 {
-    // Modifier from unrelated binding blocks other bare bindings.
-    // Feature A: "V", Feature B: "Shift+G" -- Shift is known, so
-    // plain "V" won't fire while Shift is held.
+    // Modifier from unrelated binding blocks other bare bindings. Feature A: "V", Feature B: "Shift+G" -- Shift is
+    // known, so plain "V" won't fire while Shift is held.
     std::vector<InputBinding> bindings;
 
     InputBinding plain_v;
@@ -1312,8 +1304,7 @@ TEST_F(InputManagerTest, RegisterGamepadWithModifier)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    mgr.register_press("lb_a", {gamepad_button(GamepadCode::A)},
-                       {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+    mgr.register_press("lb_a", {gamepad_button(GamepadCode::A)}, {gamepad_button(GamepadCode::LeftBumper)}, []() {});
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -1349,8 +1340,8 @@ TEST_F(InputManagerTest, MixedKeyboardAndGamepadBindings)
     InputManager &mgr = InputManager::get_instance();
 
     mgr.register_press("kb_toggle", {keyboard_key(0x72)}, {keyboard_key(0x11)}, []() {});
-    mgr.register_press("gp_toggle", {gamepad_button(GamepadCode::A)},
-                       {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+    mgr.register_press("gp_toggle", {gamepad_button(GamepadCode::A)}, {gamepad_button(GamepadCode::LeftBumper)},
+                       []() {});
     mgr.register_hold("mouse_hold", {mouse_button(0x05)}, [](bool) {});
 
     EXPECT_EQ(mgr.binding_count(), 3u);
@@ -1380,9 +1371,8 @@ TEST_F(InputManagerTest, RegisterHoldFromKeyComboList)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    Config::KeyComboList combos = {
-        {.keys = {keyboard_key(0x10)}, .modifiers = {}},
-        {.keys = {gamepad_button(GamepadCode::LeftTrigger)}, .modifiers = {}}};
+    Config::KeyComboList combos = {{.keys = {keyboard_key(0x10)}, .modifiers = {}},
+                                   {.keys = {gamepad_button(GamepadCode::LeftTrigger)}, .modifiers = {}}};
 
     mgr.register_hold("hold_action", combos, [](bool) {});
 
@@ -1397,8 +1387,7 @@ TEST_F(InputManagerTest, RegisterPressFromEmptyKeyComboListReservesName)
 
     mgr.register_press("empty", combos, []() {});
 
-    // Empty combos still reserve the binding name so a subsequent
-    // update_binding_combos can attach a real combo list.
+    // Empty combos still reserve the binding name so a subsequent update_binding_combos can attach a real combo list.
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
 
@@ -1417,8 +1406,7 @@ TEST_F(InputManagerTest, RegisterPressFromSingleCombo)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    Config::KeyComboList combos = {
-        {.keys = {keyboard_key(0x72)}, .modifiers = {keyboard_key(0x11)}}};
+    Config::KeyComboList combos = {{.keys = {keyboard_key(0x72)}, .modifiers = {keyboard_key(0x11)}}};
 
     mgr.register_press("single", combos, []() {});
 
@@ -1429,9 +1417,8 @@ TEST_F(InputManagerTest, KeyComboListBindingsShareName)
 {
     InputManager &mgr = InputManager::get_instance();
 
-    Config::KeyComboList combos = {
-        {.keys = {keyboard_key(0x72)}, .modifiers = {}},
-        {.keys = {keyboard_key(0x73)}, .modifiers = {}}};
+    Config::KeyComboList combos = {{.keys = {keyboard_key(0x72)}, .modifiers = {}},
+                                   {.keys = {keyboard_key(0x73)}, .modifiers = {}}};
 
     mgr.register_press("shared_name", combos, []() {});
     mgr.start();
@@ -1451,9 +1438,8 @@ TEST_F(InputManagerTest, KeyComboListMixedWithIndividualBindings)
 
     mgr.register_press("individual", {keyboard_key(0x41)}, []() {});
 
-    Config::KeyComboList combos = {
-        {.keys = {keyboard_key(0x72)}, .modifiers = {}},
-        {.keys = {keyboard_key(0x73)}, .modifiers = {}}};
+    Config::KeyComboList combos = {{.keys = {keyboard_key(0x72)}, .modifiers = {}},
+                                   {.keys = {keyboard_key(0x73)}, .modifiers = {}}};
 
     mgr.register_hold("combo_hold", combos, [](bool) {});
 
@@ -1469,8 +1455,7 @@ TEST_F(InputManagerTest, KeyComboListAppendsLiveWhileRunning)
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 
-    Config::KeyComboList combos = {
-        {.keys = {keyboard_key(0x72)}, .modifiers = {}}};
+    Config::KeyComboList combos = {{.keys = {keyboard_key(0x72)}, .modifiers = {}}};
 
     mgr.register_press("after", combos, []() {});
     EXPECT_EQ(mgr.binding_count(), 2u);
@@ -1658,8 +1643,7 @@ TEST_F(InputPollerTest, ThumbstickWithCustomThreshold)
     binding.on_press = []() {};
     bindings.push_back(std::move(binding));
 
-    InputPoller poller(std::move(bindings), DEFAULT_POLL_INTERVAL, true, 0,
-                       GamepadCode::TriggerThreshold, 16000);
+    InputPoller poller(std::move(bindings), DEFAULT_POLL_INTERVAL, true, 0, GamepadCode::TriggerThreshold, 16000);
 
     poller.start();
     std::this_thread::sleep_for(std::chrono::milliseconds{50});
@@ -1714,29 +1698,26 @@ TEST(InputStringTest, InputSourceToString_IsNoexcept)
 TEST(InputReshapeContract, MutatorsAreNoexcept)
 {
     using KCL = Config::KeyComboList;
-    // These reshape APIs are reachable from loader-lock teardown and allocate
-    // internally. They must remain noexcept and genuinely no-throw (fail-closed
-    // on out-of-memory), so removing noexcept here is a regression that this
-    // guard catches at compile time. declval keeps every expression unevaluated.
-    static_assert(noexcept(std::declval<InputManager &>().update_binding_combos(
-                      std::declval<std::string_view>(), std::declval<const KCL &>())),
+    // These reshape APIs are reachable from loader-lock teardown and allocate internally. They must remain noexcept and
+    // genuinely no-throw (fail-closed on out-of-memory), so removing noexcept here is a regression that this guard
+    // catches at compile time. declval keeps every expression unevaluated.
+    static_assert(noexcept(std::declval<InputManager &>().update_binding_combos(std::declval<std::string_view>(),
+                                                                                std::declval<const KCL &>())),
                   "InputManager::update_binding_combos must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<InputManager &>().remove_binding_by_name(
-                      std::declval<std::string_view>(), true)),
-                  "InputManager::remove_binding_by_name must stay noexcept (fail-closed)");
+    static_assert(
+        noexcept(std::declval<InputManager &>().remove_binding_by_name(std::declval<std::string_view>(), true)),
+        "InputManager::remove_binding_by_name must stay noexcept (fail-closed)");
     static_assert(noexcept(std::declval<InputManager &>().clear_bindings(true)),
                   "InputManager::clear_bindings must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<InputManager &>().set_consume(
-                      std::declval<std::string_view>(), true)),
+    static_assert(noexcept(std::declval<InputManager &>().set_consume(std::declval<std::string_view>(), true)),
                   "InputManager::set_consume must stay noexcept (fail-closed)");
 
-    static_assert(noexcept(std::declval<InputPoller &>().update_combos(
-                      std::declval<std::string_view>(), std::declval<const KCL &>())),
+    static_assert(noexcept(std::declval<InputPoller &>().update_combos(std::declval<std::string_view>(),
+                                                                       std::declval<const KCL &>())),
                   "InputPoller::update_combos must stay noexcept (fail-closed)");
     static_assert(noexcept(std::declval<InputPoller &>().add_binding(std::declval<InputBinding>())),
                   "InputPoller::add_binding must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<InputPoller &>().remove_bindings_by_name(
-                      std::declval<std::string_view>())),
+    static_assert(noexcept(std::declval<InputPoller &>().remove_bindings_by_name(std::declval<std::string_view>())),
                   "InputPoller::remove_bindings_by_name must stay noexcept (fail-closed)");
     static_assert(noexcept(std::declval<InputPoller &>().clear_bindings()),
                   "InputPoller::clear_bindings must stay noexcept (fail-closed)");
@@ -1880,9 +1861,8 @@ TEST(InputManagerUpdateCombos, CardinalityCanShrink)
 
 TEST(InputManagerUpdateCombos, EmptyReplacementUnbindsAndPreservesName)
 {
-    // Empty replacement is the explicit-unbound state. The binding name
-    // must remain addressable so a follow-up non-empty update can rebind
-    // it; the entry count collapses to a single inert sentinel.
+    // Empty replacement is the explicit-unbound state. The binding name must remain addressable so a follow-up
+    // non-empty update can rebind it; the entry count collapses to a single inert sentinel.
     auto &im = InputManager::get_instance();
     im.shutdown();
 
@@ -1938,17 +1918,19 @@ TEST(InputManagerUpdateCombos, ConcurrentUpdateWhilePollerRunning)
     im.start(std::chrono::milliseconds(1));
 
     std::atomic<bool> stop{false};
-    constexpr int kIterations = 1000;
+    constexpr int ITERATIONS = 1000;
 
-    std::thread writer([&im, &stop]()
-                       {
-        for (int i = 0; i < kIterations && !stop.load(std::memory_order_relaxed); ++i)
+    std::thread writer(
+        [&im, &stop]()
         {
-            Config::KeyComboList replacement;
-            const std::uint32_t key_code = (i % 2 == 0) ? 0x41u : 0x5Au;
-            replacement.push_back({{keyboard_key(key_code)}, {}});
-            im.update_binding_combos("update-stress", replacement);
-        } });
+            for (int i = 0; i < ITERATIONS && !stop.load(std::memory_order_relaxed); ++i)
+            {
+                Config::KeyComboList replacement;
+                const std::uint32_t key_code = (i % 2 == 0) ? 0x41u : 0x5Au;
+                replacement.push_back({{keyboard_key(key_code)}, {}});
+                im.update_binding_combos("update-stress", replacement);
+            }
+        });
 
     writer.join();
     stop.store(true, std::memory_order_relaxed);
@@ -2041,13 +2023,12 @@ TEST(InputManagerHotReload, EmptyComboListRegistersSentinelName)
     im.shutdown();
 }
 
-// Regression test for the cardinality-rebuild release-callback bug: a held
-// register_hold consumer whose combo cardinality changes via INI hot-reload
-// previously latched in the held state forever because the underlying
-// binding entry was wholesale-replaced without firing on_state_change(false).
-// Without a way to drive GetAsyncKeyState in a test process, this case
-// exercises the call flow against the no-active-hold branch and pins that
-// the cardinality change still proceeds without crashing or leaking state.
+// Regression guard for the cardinality-rebuild release-callback path: a held register_hold consumer whose combo
+// cardinality changes via INI hot-reload
+// must receive on_state_change(false) when its entry is wholesale-replaced;
+// without it the consumer would latch in the held state forever. Without a way to drive GetAsyncKeyState in a test
+// process, this case exercises the call flow against the no-active-hold branch and pins that the cardinality change
+// still proceeds without crashing or leaking state.
 TEST(InputPollerHoldRebuild, CardinalityChangeFiresReleaseForHeldEntries)
 {
     auto &im = InputManager::get_instance();
@@ -2059,16 +2040,14 @@ TEST(InputPollerHoldRebuild, CardinalityChangeFiresReleaseForHeldEntries)
     Config::KeyComboList initial;
     initial.push_back({{keyboard_key(0x41)}, {}});
     initial.push_back({{keyboard_key(0x42)}, {}});
-    im.register_hold(
-        "rebuild-hold",
-        initial,
-        [release_count](bool pressed) noexcept
-        {
-            if (!pressed)
-            {
-                release_count->fetch_add(1, std::memory_order_relaxed);
-            }
-        });
+    im.register_hold("rebuild-hold", initial,
+                     [release_count](bool pressed) noexcept
+                     {
+                         if (!pressed)
+                         {
+                             release_count->fetch_add(1, std::memory_order_relaxed);
+                         }
+                     });
     im.start(std::chrono::milliseconds(2));
 
     Config::KeyComboList replacement;
@@ -2083,10 +2062,9 @@ TEST(InputPollerHoldRebuild, CardinalityChangeFiresReleaseForHeldEntries)
     im.set_require_focus(true);
 }
 
-// Surviving entries' atomic state must carry forward across add_binding so
-// a subsequent add_binding does not flicker held bindings through one
-// inactive tick. Verifies the binding count and lookup behaviour stay
-// consistent across the rebuild.
+// Surviving entries' atomic state must carry forward across add_binding so a subsequent add_binding does not flicker
+// held bindings through one inactive tick. Verifies the binding count and lookup behaviour stay consistent across the
+// rebuild.
 TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
 {
     auto &im = InputManager::get_instance();
@@ -2110,9 +2088,8 @@ TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
     im.set_require_focus(true);
 }
 
-// remove_bindings_by_name must carry surviving entries' atomic states
-// forward; is_binding_active(name) must stay consistent across the reshape
-// with no torn reads against bindings_.size().
+// remove_bindings_by_name must carry surviving entries' atomic states forward; is_binding_active(name) must stay
+// consistent across the reshape with no torn reads against bindings_.size().
 TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
 {
     auto &im = InputManager::get_instance();

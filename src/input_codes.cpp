@@ -2,9 +2,8 @@
  * @file input_codes.cpp
  * @brief Implementation of named input code resolution and formatting.
  *
- * Provides the name lookup table and resolution functions for converting between
- * human-readable input names (e.g., "Ctrl", "Mouse4", "Gamepad_A") and their
- * corresponding InputCode values.
+ * Provides the name lookup table and resolution functions for converting between human-readable input names (e.g.,
+ * "Ctrl", "Mouse4", "Gamepad_A") and their corresponding InputCode values.
  */
 
 #include "DetourModKit/input_codes.hpp"
@@ -223,8 +222,8 @@ namespace DetourModKit
                 {
                     indices[i] = i;
                 }
-                std::sort(indices, indices + count, [](size_t a, size_t b)
-                          { return icompare(name_table[a].name, name_table[b].name) < 0; });
+                std::sort(indices, indices + count,
+                          [](size_t a, size_t b) { return icompare(name_table[a].name, name_table[b].name) < 0; });
             }
         };
 
@@ -233,13 +232,6 @@ namespace DetourModKit
             static const SortedNameIndex instance;
             return instance;
         }
-        struct InputCodeHash
-        {
-            size_t operator()(const InputCode &ic) const noexcept
-            {
-                return std::hash<int>{}(ic.code) ^ (std::hash<uint8_t>{}(static_cast<uint8_t>(ic.source)) << 16);
-            }
-        };
 
         struct CodeNameMap
         {

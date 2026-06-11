@@ -36,9 +36,6 @@ namespace
 
     TEST(VersionTest, EncodedVersionMatchesComponents)
     {
-        EXPECT_EQ(DMK_VERSION,
-                  DMK_MAKE_VERSION(DMK_VERSION_MAJOR,
-                                   DMK_VERSION_MINOR,
-                                   DMK_VERSION_PATCH));
+        EXPECT_EQ(DMK_VERSION, DMK_MAKE_VERSION(DMK_VERSION_MAJOR, DMK_VERSION_MINOR, DMK_VERSION_PATCH));
     }
 } // namespace

@@ -127,7 +127,7 @@ DMK_TEST_NOINLINE static int real_hook_detour_add(int a, int b)
 
 // Create a hook on a real, callable function
 void *trampoline = nullptr;
-auto result = hook_manager_->create_inline_hook(
+auto result = m_hook_manager->create_inline_hook(
     "TestHook",
     reinterpret_cast<uintptr_t>(&real_hook_target_add),
     reinterpret_cast<void *>(&real_hook_detour_add),
@@ -213,7 +213,7 @@ TEST_F(SomeTest, Method_ErrorCondition)
 
 ```cpp
 // Template methods only get coverage when instantiated with specific types
-auto hook_result = hook_manager_->with_inline_hook(
+auto hook_result = m_hook_manager->with_inline_hook(
     "HookName",
     [](InlineHook &hook) -> bool
     {

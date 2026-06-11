@@ -26,11 +26,10 @@
 #include <emmintrin.h>
 #endif
 
-// AVX2 support: compile-time header + runtime CPUID detection.
-// On GCC/Clang, AVX2 intrinsics require either -mavx2 globally or
-// __attribute__((target("avx2"))) per function. We use the latter so
-// the rest of the TU stays SSE2-only and runs on any x86-64 CPU.
-// On MSVC, intrinsics are always available; runtime CPUID gates usage.
+// AVX2 support: compile-time header + runtime CPUID detection. On GCC/Clang, AVX2 intrinsics require either -mavx2
+// globally or
+// __attribute__((target("avx2"))) per function. We use the latter so the rest of the TU stays SSE2-only and runs on any
+// x86-64 CPU. On MSVC, intrinsics are always available; runtime CPUID gates usage.
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
 #define DMK_HAS_AVX2 1
 #include <immintrin.h>
@@ -43,17 +42,15 @@
 #define DMK_AVX2_TARGET
 #endif
 
-// AddressSanitizer poisons the shadow of this process's own committed, readable
-// memory -- the redzones around stack locals and instrumented globals. The AOB
-// scanner deliberately reads across whole readable regions, so under ASan its
-// in-bounds, never-faulting reads land on poisoned shadow and are reported as
-// overflows. DMK_NO_SANITIZE_ADDRESS removes the compiler's load instrumentation
-// from such a function, so the read runs exactly as a release build does. It does
-// NOT stop ASan's libc interceptors (memchr/memcpy are hot-patched at runtime),
-// so those calls are routed around separately under __SANITIZE_ADDRESS__ (see
-// scan_for_byte). ASan links only under MSVC here (mingw-w64 ships no sanitizer
-// runtime), so the attribute is the MSVC __declspec form; the macro is empty in
-// every other build, leaving release codegen unchanged.
+// AddressSanitizer poisons the shadow of this process's own committed, readable memory -- the redzones around stack
+// locals and instrumented globals. The AOB scanner deliberately reads across whole readable regions, so under ASan its
+// in-bounds, never-faulting reads land on poisoned shadow and are reported as overflows. DMK_NO_SANITIZE_ADDRESS
+// removes the compiler's load instrumentation from such a function, so the read runs exactly as a release build does.
+// It does
+// NOT stop ASan's libc interceptors (memchr/memcpy are hot-patched at runtime), so those calls are routed around
+// separately under __SANITIZE_ADDRESS__ (see scan_for_byte). ASan links only under MSVC here (mingw-w64 ships no
+// sanitizer runtime), so the attribute is the MSVC __declspec form; the macro is empty in every other build, leaving
+// release codegen unchanged.
 #if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
 #define DMK_NO_SANITIZE_ADDRESS __declspec(no_sanitize_address)
 #else
@@ -67,10 +64,8 @@ namespace
 #ifdef DMK_HAS_AVX2
     /**
      * @brief Detects AVX2 support at runtime via CPUID.
-     * @details Checks CPUID leaf 7 subleaf 0, EBX bit 5 (AVX2) and also
-     *          verifies that the OS has enabled AVX state saving (XGETBV).
-     *          Result is cached in a function-local static for zero-cost
-     *          repeated queries.
+     * @details Checks CPUID leaf 7 subleaf 0, EBX bit 5 (AVX2) and also verifies that the OS has enabled AVX state
+     *          saving (XGETBV). Result is cached in a function-local static for zero-cost repeated queries.
      */
     bool cpu_has_avx2() noexcept
     {
@@ -109,19 +104,17 @@ namespace
      * @brief Verifies a pattern match using AVX2 (32 bytes per iteration).
      * @param pattern_start Start of the candidate region in memory.
      * @param pattern The compiled pattern to verify against.
-     * @param start_offset Byte offset to start verification from (may be non-zero
-     *                     if a previous tier partially verified).
-     * @return The next byte offset to resume verification from on success
-     *         (equal to pattern.size() when the AVX2 tier covered the whole
-     *         pattern), or std::nullopt when a 32-byte chunk did not match
-     *         and the caller must abandon this candidate position.
+     * @param start_offset Byte offset to start verification from (may be non-zero if a previous tier partially
+     *                     verified).
+     * @return The next byte offset to resume verification from on success (equal to pattern.size() when the AVX2 tier
+     *         covered the whole pattern), or std::nullopt when a 32-byte chunk did not match and the caller must
+     *         abandon this candidate position.
      * @note This function is compiled with AVX2 codegen via target attribute on
      *       GCC/Clang. On MSVC, intrinsics are always available.
      */
     DMK_AVX2_TARGET
     DMK_NO_SANITIZE_ADDRESS
-    std::optional<size_t> verify_pattern_avx2(const std::byte *pattern_start,
-                                              const Scanner::CompiledPattern &pattern,
+    std::optional<size_t> verify_pattern_avx2(const std::byte *pattern_start, const Scanner::CompiledPattern &pattern,
                                               size_t start_offset) noexcept
     {
         const size_t pattern_size = pattern.size();
@@ -129,12 +122,9 @@ namespace
 
         for (; j + 32 <= pattern_size; j += 32)
         {
-            const __m256i mem = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i *>(pattern_start + j));
-            const __m256i pat = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i *>(pattern.bytes.data() + j));
-            const __m256i msk = _mm256_loadu_si256(
-                reinterpret_cast<const __m256i *>(pattern.mask.data() + j));
+            const __m256i mem = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(pattern_start + j));
+            const __m256i pat = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(pattern.bytes.data() + j));
+            const __m256i msk = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(pattern.mask.data() + j));
 
             const __m256i xored = _mm256_xor_si256(mem, pat);
             const __m256i masked = _mm256_and_si256(xored, msk);
@@ -152,10 +142,10 @@ namespace
 
     /**
      * @brief Returns a commonality score for a byte value in typical x64 PE code sections.
-     * @details Higher scores indicate bytes that appear more frequently, making them
-     *          poor candidates for anchor-based scanning.
+     * @details Higher scores indicate bytes that appear more frequently, making them poor candidates for anchor-based
+     *          scanning.
      */
-    static constexpr uint8_t byte_frequency_class(uint8_t byte_value) noexcept
+    constexpr uint8_t byte_frequency_class(uint8_t byte_value) noexcept
     {
         switch (byte_value)
         {
@@ -190,8 +180,8 @@ namespace
 
     /**
      * @brief Picks the rarest literal byte's index in a compiled pattern.
-     * @return The byte index in `[0, pattern.size())` with the lowest score,
-     *         or `pattern.size()` when every position is a wildcard.
+     * @return The byte index in `[0, pattern.size())` with the lowest score, or `pattern.size()` when every position is
+     *         a wildcard.
      */
     size_t select_pattern_anchor(const Scanner::CompiledPattern &pattern) noexcept
     {
@@ -204,8 +194,7 @@ namespace
             {
                 continue;
             }
-            const uint8_t score =
-                byte_frequency_class(static_cast<uint8_t>(pattern.bytes[i]));
+            const uint8_t score = byte_frequency_class(static_cast<uint8_t>(pattern.bytes[i]));
             if (best == pattern_size || score < best_score)
             {
                 best = i;
@@ -347,20 +336,17 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
 
 namespace
 {
-    // Internal scan primitive: returns the match *start* without applying
-    // pattern.offset. The public find_pattern wrappers apply the offset
-    // exactly once on top of this result; scan_executable_regions also calls
-    // this directly so its own final offset-application remains correct.
+    // Internal scan primitive: returns the match *start* without applying pattern.offset. The public find_pattern
+    // wrappers apply the offset exactly once on top of this result; scan_executable_regions also calls this directly so
+    // its own final offset-application remains correct.
     DMK_NO_SANITIZE_ADDRESS
     const std::byte *find_pattern_raw(const std::byte *start_address, size_t region_size,
                                       const Scanner::CompiledPattern &pattern) noexcept;
 
-    // Shared guard for "pattern has no literal bytes". Returning start_address
-    // preserves backwards compatibility for callers that rely on the degenerate
-    // "all wildcards matches anywhere" behaviour, but the call site is almost
-    // always a bug. Logging once per public entry (rather than per internal
-    // find_pattern_raw iteration) keeps the warning visible without flooding
-    // logs when the Nth-occurrence overload or scan_executable_regions loops.
+    // Shared guard for "pattern has no literal bytes". Returning start_address preserves backwards compatibility for
+    // callers that rely on the degenerate "all wildcards matches anywhere" behaviour, but the call site is almost
+    // always a bug. Logging once per public entry (rather than per internal find_pattern_raw iteration) keeps the
+    // warning visible without flooding logs when the Nth-occurrence overload or scan_executable_regions loops.
     bool pattern_has_literal_byte(const Scanner::CompiledPattern &pattern) noexcept
     {
         for (const std::byte mask_byte : pattern.mask)
@@ -371,12 +357,10 @@ namespace
         return false;
     }
 
-    // Shared precondition check for the public find_pattern overloads. Returns
-    // false when the caller must short-circuit with nullptr (empty pattern or
-    // null start_address). Emits the all-wildcard warning itself so callers
-    // do not duplicate it; in that case the caller still continues scanning.
-    bool validate_find_pattern_inputs(const std::byte *start_address,
-                                      const Scanner::CompiledPattern &pattern) noexcept
+    // Shared precondition check for the public find_pattern overloads. Returns false when the caller must short-circuit
+    // with nullptr (empty pattern or null start_address). Emits the all-wildcard warning itself so callers do not
+    // duplicate it; in that case the caller still continues scanning.
+    bool validate_find_pattern_inputs(const std::byte *start_address, const Scanner::CompiledPattern &pattern) noexcept
     {
         Logger &logger = Logger::get_instance();
         if (pattern.empty())
@@ -414,15 +398,13 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
 
 namespace
 {
-    // memchr over [begin, end] for the anchor byte. Under ASan the libc memchr
-    // interceptor inspects the whole range against ASan's shadow and reports a
+    // memchr over [begin, end] for the anchor byte. Under ASan the libc memchr interceptor inspects the whole range
+    // against ASan's shadow and reports a
     // false overflow when the scanner walks this process's own poisoned memory;
-    // no_sanitize_address does not suppress that runtime interceptor. Scanning
-    // inline in a no_sanitize_address function reads the bytes directly, exactly
-    // as the release memchr does. Release builds keep the optimized memchr.
+    // no_sanitize_address does not suppress that runtime interceptor. Scanning inline in a no_sanitize_address function
+    // reads the bytes directly, exactly as the release memchr does. Release builds keep the optimized memchr.
     DMK_NO_SANITIZE_ADDRESS
-    const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end,
-                                   unsigned char target) noexcept
+    const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end, unsigned char target) noexcept
     {
 #if defined(__SANITIZE_ADDRESS__)
         for (const std::byte *p = begin; p <= end; ++p)
@@ -434,8 +416,7 @@ namespace
         }
         return nullptr;
 #else
-        return static_cast<const std::byte *>(
-            memchr(begin, target, static_cast<size_t>(end - begin + 1)));
+        return static_cast<const std::byte *>(memchr(begin, target, static_cast<size_t>(end - begin + 1)));
 #endif
     }
 
@@ -450,18 +431,14 @@ namespace
             return nullptr;
         }
 
-        // Anchor selection: parse_aob() pre-populates pattern.anchor, so the
-        // common path is a single load. Manually constructed patterns fall
-        // back to inline selection without mutating the input (preserves the
-        // const-by-design contract).
-        const size_t best_anchor = (pattern.anchor <= pattern_size)
-                                       ? pattern.anchor
-                                       : select_pattern_anchor(pattern);
+        // Anchor selection: parse_aob() pre-populates pattern.anchor, so the common path is a single load. Manually
+        // constructed patterns fall back to inline selection without mutating the input (preserves the const-by-design
+        // contract).
+        const size_t best_anchor = (pattern.anchor <= pattern_size) ? pattern.anchor : select_pattern_anchor(pattern);
 
-        // All wildcards: the pattern has no literal bytes to anchor on, so the
-        // search degenerates to "always match at region start". The public
-        // wrappers log the warning exactly once per call; repeated internal
-        // iterations (Nth occurrence, per-region scans) stay quiet.
+        // All wildcards: the pattern has no literal bytes to anchor on, so the search degenerates to "always match at
+        // region start". The public wrappers log the warning exactly once per call; repeated internal iterations (Nth
+        // occurrence, per-region scans) stay quiet.
         if (best_anchor == pattern_size)
         {
             return start_address;
@@ -473,18 +450,16 @@ namespace
         const std::byte *search_start = start_address + best_anchor;
         const std::byte *const search_end = start_address + (region_size - pattern_size) + best_anchor;
 
-        // Hoist runtime CPU detection. The query itself is a function-local
-        // static behind a one-shot init, but reading it on every memchr hit
-        // adds an indirect load per false candidate. Caching it once here
-        // lets the per-hit branch use a register-resident bool.
+        // Hoist runtime CPU detection. The query itself is a function-local static behind a one-shot init, but reading
+        // it on every memchr hit adds an indirect load per false candidate. Caching it once here lets the per-hit
+        // branch use a register-resident bool.
 #ifdef DMK_HAS_AVX2
         const bool use_avx2 = cpu_has_avx2();
 #endif
 
         while (search_start <= search_end)
         {
-            const std::byte *current_scan_ptr =
-                scan_for_byte(search_start, search_end, target_val);
+            const std::byte *current_scan_ptr = scan_for_byte(search_start, search_end, target_val);
 
             if (!current_scan_ptr)
             {
@@ -492,8 +467,7 @@ namespace
             }
             const std::byte *pattern_start = current_scan_ptr - best_anchor;
 
-            // Verify the full pattern at this position.
-            // Three-tier SIMD: AVX2 (32B) -> SSE2 (16B) -> scalar (1B).
+            // Verify the full pattern at this position. Three-tier SIMD: AVX2 (32B) -> SSE2 (16B) -> scalar (1B).
             bool match_found = true;
             size_t j = 0;
 
@@ -515,12 +489,9 @@ namespace
 #ifdef DMK_HAS_SSE2
             for (; match_found && j + 16 <= pattern_size; j += 16)
             {
-                const __m128i mem = _mm_loadu_si128(
-                    reinterpret_cast<const __m128i *>(pattern_start + j));
-                const __m128i pat = _mm_loadu_si128(
-                    reinterpret_cast<const __m128i *>(pattern.bytes.data() + j));
-                const __m128i msk = _mm_loadu_si128(
-                    reinterpret_cast<const __m128i *>(pattern.mask.data() + j));
+                const __m128i mem = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern_start + j));
+                const __m128i pat = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern.bytes.data() + j));
+                const __m128i msk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(pattern.mask.data() + j));
 
                 const __m128i xored = _mm_xor_si128(mem, pat);
                 const __m128i masked = _mm_and_si128(xored, msk);
@@ -572,9 +543,8 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
     size_t remaining = region_size;
     size_t found_count = 0;
 
-    // Iterate via the raw helper so the `match + 1` continuation stays
-    // correct regardless of the pattern's offset marker. Offset is applied
-    // exactly once when we return the Nth hit.
+    // Iterate via the raw helper so the `match + 1` continuation stays correct regardless of the pattern's offset
+    // marker. Offset is applied exactly once when we return the Nth hit.
     while (remaining >= pattern.size())
     {
         const std::byte *match = find_pattern_raw(cursor, remaining, pattern);
@@ -594,10 +564,9 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
     return nullptr;
 }
 
-std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::resolve_rip_relative(
-    const std::byte *instruction_address,
-    size_t displacement_offset,
-    size_t instruction_length)
+std::expected<uintptr_t, DetourModKit::RipResolveError>
+DetourModKit::Scanner::resolve_rip_relative(const std::byte *instruction_address, size_t displacement_offset,
+                                            size_t instruction_length)
 {
     if (!instruction_address)
     {
@@ -605,30 +574,26 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::r
     }
 
     const std::byte *disp_ptr = instruction_address + displacement_offset;
-    // Read the displacement under a single SEH fault guard instead of
-    // is_readable + raw memcpy. is_readable is a time-of-check/time-of-use
-    // illusion -- the page can change protection or unmap between the check
-    // and the copy -- so an unguarded memcpy could fault the host.
+    // Read the displacement under a single SEH fault guard instead of is_readable + raw memcpy. is_readable is a
+    // time-of-check/time-of-use illusion -- the page can change protection or unmap between the check and the copy --
+    // so an unguarded memcpy could fault the host.
     const auto displacement = Memory::seh_read<int32_t>(reinterpret_cast<uintptr_t>(disp_ptr));
     if (!displacement)
     {
         return std::unexpected(RipResolveError::UnreadableDisplacement);
     }
 
-    // Compute the target in unsigned modular arithmetic so the math stays
-    // well-defined on every input, including kernel-range instruction
-    // addresses (where intptr_t would be negative and signed overflow is UB).
-    // The displacement is sign-extended first so negative disp32 values wrap
-    // to the correct 64-bit offset.
+    // Compute the target in unsigned modular arithmetic so the math stays well-defined on every input, including
+    // kernel-range instruction addresses (where intptr_t would be negative and signed overflow is UB). The displacement
+    // is sign-extended first so negative disp32 values wrap to the correct 64-bit offset.
     const uintptr_t base = reinterpret_cast<uintptr_t>(instruction_address);
     const uintptr_t disp_sext = static_cast<uintptr_t>(static_cast<int64_t>(*displacement));
     const uintptr_t target = base + instruction_length + disp_sext;
 
-    // Fail closed on a target that cannot be a real in-process address. A
-    // corrupt or hostile displacement can resolve to 0, a low guard-page
-    // address, or a kernel-range value; returning that as "success" would hand
-    // the caller a pointer that faults on first use. plausible_userspace_ptr is
-    // pure arithmetic, so this guard adds no syscall and no memory access.
+    // Fail closed on a target that cannot be a real in-process address. A corrupt or hostile displacement can resolve
+    // to 0, a low guard-page address, or a kernel-range value; returning that as "success" would hand the caller a
+    // pointer that faults on first use. plausible_userspace_ptr is pure arithmetic, so this guard adds no syscall and
+    // no memory access.
     if (!Memory::plausible_userspace_ptr(target))
     {
         return std::unexpected(RipResolveError::ImplausibleTarget);
@@ -636,11 +601,10 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::r
     return target;
 }
 
-std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::find_and_resolve_rip_relative(
-    const std::byte *search_start,
-    size_t search_length,
-    std::span<const std::byte> opcode_prefix,
-    size_t instruction_length)
+std::expected<uintptr_t, DetourModKit::RipResolveError>
+DetourModKit::Scanner::find_and_resolve_rip_relative(const std::byte *search_start, size_t search_length,
+                                                     std::span<const std::byte> opcode_prefix,
+                                                     size_t instruction_length)
 {
     if (!search_start || opcode_prefix.empty())
     {
@@ -677,40 +641,29 @@ std::expected<uintptr_t, DetourModKit::RipResolveError> DetourModKit::Scanner::f
 
 namespace
 {
-    // Region-walking AOB scan shared by scan_executable_regions,
-    // scan_readable_regions, and the module-scoped detail::scan_module_* entry
-    // points. Walks the committed regions
-    // of [window_lo, window_hi) via VirtualQuery and runs find_pattern_raw
-    // against every region whose base protection is present in accept_mask,
-    // returning the Nth match (1-based, adjusted by pattern.offset) or nullptr.
-    // The whole-process scanners pass [0, UINTPTR_MAX); the module-scoped scan
-    // passes the image's [base, end) so only one contiguous image is searched.
+    // Region-walking AOB scan shared by scan_executable_regions, scan_readable_regions, and the module-scoped
+    // detail::scan_module_* entry points. Walks the committed regions of [window_lo, window_hi) via VirtualQuery and
+    // runs find_pattern_raw against every region whose base protection is present in accept_mask, returning the Nth
+    // match (1-based, adjusted by pattern.offset) or nullptr. The whole-process scanners pass [0, UINTPTR_MAX); the
+    // module-scoped scan passes the image's [base, end) so only one contiguous image is searched.
     //
-    // Guard, no-access, and uncommitted regions are always skipped: PAGE_GUARD
-    // raises STATUS_GUARD_PAGE_VIOLATION on the first touch and PAGE_NOACCESS
-    // faults even for reads, so neither is safe to dereference. The Windows base
-    // protections (PAGE_READONLY, PAGE_READWRITE, ... , PAGE_EXECUTE_WRITECOPY)
-    // are mutually exclusive single bits, so a bitwise-AND against a mask of the
-    // acceptable bases is a sound membership test. PAGE_GUARD is a modifier bit
+    // Guard, no-access, and uncommitted regions are always skipped: PAGE_GUARD raises STATUS_GUARD_PAGE_VIOLATION on
+    // the first touch and PAGE_NOACCESS faults even for reads, so neither is safe to dereference. The Windows base
+    // protections (PAGE_READONLY, PAGE_READWRITE, ... , PAGE_EXECUTE_WRITECOPY) are mutually exclusive single bits, so
+    // a bitwise-AND against a mask of the acceptable bases is a sound membership test. PAGE_GUARD is a modifier bit
     // OR-ed onto a base value (a guarded read-only page reads as PAGE_READONLY |
-    // PAGE_GUARD), so it must be excluded separately or it would satisfy the
-    // mask and be scanned.
+    // PAGE_GUARD), so it must be excluded separately or it would satisfy the mask and be scanned.
     //
-    // Each region is scanned through the raw helper so the final
-    // `+ pattern.offset` applies exactly once (the public find_pattern already
-    // applies offset; calling it here would double-apply). A pattern straddling
-    // two adjacent VAD entries is therefore not found; PE-loaded sections are
-    // contiguous, so normal module scanning is unaffected.
-    const std::byte *scan_regions_filtered(const Scanner::CompiledPattern &pattern,
-                                           size_t occurrence, DWORD accept_mask,
-                                           uintptr_t window_lo, uintptr_t window_hi) noexcept
+    // Each region is scanned through the raw helper so the final `+ pattern.offset` applies exactly once (the public
+    // find_pattern already applies offset; calling it here would double-apply). A pattern straddling two adjacent VAD
+    // entries is therefore not found; PE-loaded sections are contiguous, so normal module scanning is unaffected.
+    const std::byte *scan_regions_filtered(const Scanner::CompiledPattern &pattern, size_t occurrence,
+                                           DWORD accept_mask, uintptr_t window_lo, uintptr_t window_hi) noexcept
     {
-        // The compiled pattern's own bytes buffer lives in readable heap memory,
-        // so a whole-process readable sweep would match the needle against
-        // itself and could return the caller's pattern storage instead of the
-        // intended target. Exclude any match that overlaps that buffer. The
-        // executable sweep never reaches pattern.bytes (the heap is not
-        // executable), so this is a no-op there and keeps both scanners
+        // The compiled pattern's own bytes buffer lives in readable heap memory, so a whole-process readable sweep
+        // would match the needle against itself and could return the caller's pattern storage instead of the intended
+        // target. Exclude any match that overlaps that buffer. The executable sweep never reaches pattern.bytes (the
+        // heap is not executable), so this is a no-op there and keeps both scanners
         // consistent: a scan never matches the needle's own storage. The needle
         // is the caller's allocation, so no real target can share its range.
         const auto needle_lo = reinterpret_cast<uintptr_t>(pattern.bytes.data());
@@ -726,18 +679,15 @@ namespace
             const auto region_base = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
             const uintptr_t region_end = region_base + mbi.RegionSize;
 
-            // Clamp the region to the requested window so a region that straddles
-            // window_lo / window_hi is inspected only where it intersects. For a
-            // whole-process sweep the window is [0, UINTPTR_MAX), so the clamp is
-            // a no-op and the scanned span equals the region. For a module-scoped
-            // sweep this is what keeps the scan inside [base, end) even when a
-            // VirtualQuery region (e.g. a section straddling the image boundary)
-            // extends past it.
+            // Clamp the region to the requested window so a region that straddles window_lo / window_hi is inspected
+            // only where it intersects. For a whole-process sweep the window is [0, UINTPTR_MAX), so the clamp is a
+            // no-op and the scanned span equals the region. For a module-scoped sweep this is what keeps the scan
+            // inside [base, end) even when a
+            // VirtualQuery region (e.g. a section straddling the image boundary) extends past it.
             const uintptr_t scan_lo = region_base < window_lo ? window_lo : region_base;
             const uintptr_t scan_hi = region_end > window_hi ? window_hi : region_end;
 
-            if (mbi.State == MEM_COMMIT && (mbi.Protect & accept_mask) != 0 &&
-                !protection_unsafe && scan_hi > scan_lo)
+            if (mbi.State == MEM_COMMIT && (mbi.Protect & accept_mask) != 0 && !protection_unsafe && scan_hi > scan_lo)
             {
                 const size_t scan_size = static_cast<size_t>(scan_hi - scan_lo);
                 if (scan_size >= pattern.size())
@@ -748,8 +698,7 @@ namespace
                     while (match != nullptr)
                     {
                         const auto match_addr = reinterpret_cast<uintptr_t>(match);
-                        const bool self_match = match_addr < needle_hi &&
-                                                (match_addr + pattern.size()) > needle_lo;
+                        const bool self_match = match_addr < needle_hi && (match_addr + pattern.size()) > needle_lo;
                         if (!self_match)
                         {
                             --matches_remaining;
@@ -775,74 +724,57 @@ namespace
         return nullptr;
     }
 
-    // Base protections accepted by the executable-only sweeps: the three page
-    // variants that grant execute *and* read. Bare PAGE_EXECUTE (execute without
-    // a read bit) is excluded because dereferencing it raises an access
-    // violation; PAGE_GUARD / PAGE_NOACCESS are filtered separately inside
-    // scan_regions_filtered. This is the scope for code-only scans: the
-    // whole-process scan_executable_regions and the prologue-recovery fallback,
-    // whose rebuilt near-JMP can only ever overwrite a code prologue.
-    constexpr DWORD EXECUTABLE_PAGE_FLAGS = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
-                                            PAGE_EXECUTE_WRITECOPY;
+    // Base protections accepted by the executable-only sweeps: the three page variants that grant execute *and* read.
+    // Bare PAGE_EXECUTE (execute without a read bit) is excluded because dereferencing it raises an access violation;
+    // PAGE_GUARD / PAGE_NOACCESS are filtered separately inside scan_regions_filtered. This is the scope for code-only
+    // scans: the whole-process scan_executable_regions and the prologue-recovery fallback, whose rebuilt near-JMP can
+    // only ever overwrite a code prologue.
+    constexpr DWORD EXECUTABLE_PAGE_FLAGS = PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
 
-    // Base protections accepted by the readable sweep and the data-capable
-    // module-scoped cascade: the executable-readable set plus the non-executable
-    // readable pages (.rdata / .data and read-only heaps). This reaches C++
-    // vtables, RTTI type descriptors, and other read-only metadata the
-    // executable-only sweep cannot see.
-    constexpr DWORD READABLE_PAGE_FLAGS = EXECUTABLE_PAGE_FLAGS |
-                                          PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
+    // Base protections accepted by the readable sweep and the data-capable module-scoped cascade: the
+    // executable-readable set plus the non-executable readable pages (.rdata / .data and read-only heaps). This reaches
+    // C++ vtables, RTTI type descriptors, and other read-only metadata the executable-only sweep cannot see.
+    constexpr DWORD READABLE_PAGE_FLAGS = EXECUTABLE_PAGE_FLAGS | PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
 
 } // anonymous namespace
 
 // Module-scoped siblings of scan_executable_regions / scan_readable_regions:
 // each searches only the mapped image [range.base, range.end) and returns the
-// Nth match (1-based, adjusted by pattern.offset) or nullptr. They are the
-// internal entry points the cascade resolver (its own TU) calls instead of
-// reaching the page-protection masks directly. Both reuse scan_regions_filtered's
-// per-region VirtualQuery protection gate, so a non-readable interior page (a
-// section-alignment gap, a guard page, a sibling VirtualProtect on part of the
-// image) is skipped instead of dereferenced; find_pattern_raw itself does an
-// unguarded memchr / SIMD compare, so that region filter is what keeps a single
-// contiguous scan from faulting the host.
+// Nth match (1-based, adjusted by pattern.offset) or nullptr. They are the internal entry points the cascade resolver
+// (its own TU) calls instead of reaching the page-protection masks directly. Both reuse scan_regions_filtered's
+// per-region VirtualQuery protection gate, so a non-readable interior page (a section-alignment gap, a guard page, a
+// sibling VirtualProtect on part of the image) is skipped instead of dereferenced; find_pattern_raw itself does an
+// unguarded memchr / SIMD compare, so that region filter is what keeps a single contiguous scan from faulting the host.
 const std::byte *Scanner::detail::scan_module_executable(const Scanner::CompiledPattern &pattern,
-                                                         Memory::ModuleRange range,
-                                                         std::size_t occurrence) noexcept
+                                                         Memory::ModuleRange range, std::size_t occurrence) noexcept
 {
-    // EXECUTABLE_PAGE_FLAGS confines the match to code: the prologue-recovery
-    // fallback's rebuilt near-JMP can only ever overwrite a code prologue, so a
-    // data-page hit would be a false positive.
+    // EXECUTABLE_PAGE_FLAGS confines the match to code: the prologue-recovery fallback's rebuilt near-JMP can only ever
+    // overwrite a code prologue, so a data-page hit would be a false positive.
     if (pattern.empty() || occurrence == 0 || !range.valid())
     {
         return nullptr;
     }
-    return scan_regions_filtered(pattern, occurrence, EXECUTABLE_PAGE_FLAGS,
-                                 range.base, range.end);
+    return scan_regions_filtered(pattern, occurrence, EXECUTABLE_PAGE_FLAGS, range.base, range.end);
 }
 
 const std::byte *Scanner::detail::scan_module_readable(const Scanner::CompiledPattern &pattern,
-                                                       Memory::ModuleRange range,
-                                                       std::size_t occurrence) noexcept
+                                                       Memory::ModuleRange range, std::size_t occurrence) noexcept
 {
-    // READABLE_PAGE_FLAGS lets one pass cover both .text and .rdata / .data
-    // candidates, which is why the in-module cascade needs no ScannerKind split.
+    // READABLE_PAGE_FLAGS lets one pass cover both .text and .rdata / .data candidates, which is why the in-module
+    // cascade needs no ScannerKind split.
     if (pattern.empty() || occurrence == 0 || !range.valid())
     {
         return nullptr;
     }
-    return scan_regions_filtered(pattern, occurrence, READABLE_PAGE_FLAGS,
-                                 range.base, range.end);
+    return scan_regions_filtered(pattern, occurrence, READABLE_PAGE_FLAGS, range.base, range.end);
 }
 
-// Centralizes the executable-page protection gate for out-of-TU callers (the
-// string-xref backend): one VirtualQuery walk over [range.base, range.end) that
-// returns each committed, execute-readable region clamped to the range, using the
-// identical mask scan_module_executable applies. Reading the returned windows
-// without a fault guard is safe for the same reason scan_regions_filtered's
-// unguarded compare is: the per-region gate (MEM_COMMIT, EXECUTABLE_PAGE_FLAGS,
-// not PAGE_GUARD / PAGE_NOACCESS) is what guarantees readability.
-std::vector<Scanner::detail::ExecutableWindow>
-Scanner::detail::collect_executable_windows(Memory::ModuleRange range)
+// Centralizes the executable-page protection gate for out-of-TU callers (the string-xref backend): one VirtualQuery
+// walk over [range.base, range.end) that returns each committed, execute-readable region clamped to the range, using
+// the identical mask scan_module_executable applies. Reading the returned windows without a fault guard is safe for the
+// same reason scan_regions_filtered's unguarded compare is: the per-region gate (MEM_COMMIT, EXECUTABLE_PAGE_FLAGS, not
+// PAGE_GUARD / PAGE_NOACCESS) is what guarantees readability.
+std::vector<Scanner::detail::ExecutableWindow> Scanner::detail::collect_executable_windows(Memory::ModuleRange range)
 {
     std::vector<ExecutableWindow> windows;
     if (!range.valid())
@@ -860,11 +792,10 @@ Scanner::detail::collect_executable_windows(Memory::ModuleRange range)
         const uintptr_t scan_lo = region_base < range.base ? range.base : region_base;
         const uintptr_t scan_hi = region_end > range.end ? range.end : region_end;
 
-        if (mbi.State == MEM_COMMIT && (mbi.Protect & EXECUTABLE_PAGE_FLAGS) != 0 &&
-            !protection_unsafe && scan_hi > scan_lo)
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & EXECUTABLE_PAGE_FLAGS) != 0 && !protection_unsafe &&
+            scan_hi > scan_lo)
         {
-            windows.push_back(
-                ExecutableWindow{scan_lo, static_cast<std::size_t>(scan_hi - scan_lo)});
+            windows.push_back(ExecutableWindow{scan_lo, static_cast<std::size_t>(scan_hi - scan_lo)});
         }
 
         if (region_end <= addr)
@@ -891,10 +822,9 @@ const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPa
     }
 
     // EXECUTABLE_PAGE_FLAGS keeps the sweep to pages we can actually *read*; bare
-    // PAGE_EXECUTE grants execute without read, so dereferencing such a page would
-    // raise an access violation. Whole-process sweep: the window spans the entire
-    // user address space, so the clamp in scan_regions_filtered is a no-op and the
-    // walk stops only when VirtualQuery runs off the end of the address space.
+    // PAGE_EXECUTE grants execute without read, so dereferencing such a page would raise an access violation.
+    // Whole-process sweep: the window spans the entire user address space, so the clamp in scan_regions_filtered is a
+    // no-op and the walk stops only when VirtualQuery runs off the end of the address space.
     return scan_regions_filtered(pattern, occurrence, EXECUTABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
 }
 
@@ -912,13 +842,12 @@ const std::byte *DetourModKit::Scanner::scan_readable_regions(const CompiledPatt
                        "start unchanged");
     }
 
-    // READABLE_PAGE_FLAGS is a superset of the executable-only mask: every
-    // committed region we can read, including .rdata / .data (PAGE_READONLY /
-    // PAGE_READWRITE / PAGE_WRITECOPY) and read-only heaps, plus the
-    // execute-readable variants. The semantic is "find this pattern anywhere
-    // readable", so execute-readable code pages are intentionally included
-    // rather than deduplicated against scan_executable_regions; callers wanting
-    // non-code matches post-filter. The window spans the whole address space.
+    // READABLE_PAGE_FLAGS is a superset of the executable-only mask: every committed region we can read, including
+    // .rdata / .data (PAGE_READONLY /
+    // PAGE_READWRITE / PAGE_WRITECOPY) and read-only heaps, plus the execute-readable variants. The semantic is "find
+    // this pattern anywhere readable", so execute-readable code pages are intentionally included rather than
+    // deduplicated against scan_executable_regions; callers wanting non-code matches post-filter. The window spans the
+    // whole address space.
     return scan_regions_filtered(pattern, occurrence, READABLE_PAGE_FLAGS, 0, UINTPTR_MAX);
 }
 
@@ -942,9 +871,8 @@ bool DetourModKit::Scanner::is_likely_function_prologue(std::uintptr_t addr) noe
         return false;
     }
 
-    // Read the first opcode byte under a fault guard rather than is_readable +
-    // a raw dereference. is_readable is a TOCTOU illusion (the page can change
-    // or unmap between the check and the read), and the bare dereference would
+    // Read the first opcode byte under a fault guard rather than is_readable + a raw dereference. is_readable is a
+    // TOCTOU illusion (the page can change or unmap between the check and the read), and the bare dereference would
     // then fault the host. seh_read returns nullopt on any fault.
     const auto b0 = Memory::seh_read<std::uint8_t>(addr);
     if (!b0)
@@ -952,9 +880,8 @@ bool DetourModKit::Scanner::is_likely_function_prologue(std::uintptr_t addr) noe
         return false;
     }
 
-    // Reject bytes that never begin a real function prologue, so an AOB match
-    // that landed in inter-function padding or past a function's end is filtered
-    // out instead of accepted as a target:
+    // Reject bytes that never begin a real function prologue, so an AOB match that landed in inter-function padding or
+    // past a function's end is filtered out instead of accepted as a target:
     //   0x00 -- zero fill / uninitialized page (decodes as `add [rax], al`)
     //   0xCC -- INT3, the alignment padding linkers insert between functions
     //   0xC3 -- RET (near return): a function epilogue, not a prologue

@@ -96,8 +96,7 @@ TEST(StoppableWorker, EmptyBodyDoesNotStartThreadAndIsNotRunning)
 
 TEST(StoppableWorker, UnknownExceptionFromBodyIsSwallowed)
 {
-    // Raw `throw 42` must land in the catch-all arm; escaping it would
-    // call std::terminate before the test can finish.
+    // Raw `throw 42` must land in the catch-all arm; escaping it would call std::terminate before the test can finish.
     std::atomic<bool> entered{false};
     EXPECT_NO_THROW({
         StoppableWorker w("unit-worker-unknown-throw",
@@ -152,11 +151,13 @@ TEST(StoppableWorker, RequestStopIsIdempotent)
 
 TEST(StoppableWorker, NameAccessorReturnsConstructionName)
 {
-    StoppableWorker w("unit-worker-named", [](std::stop_token st)
+    StoppableWorker w("unit-worker-named",
+                      [](std::stop_token st)
                       {
                           while (!st.stop_requested())
                           {
                               std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                          } });
+                          }
+                      });
     EXPECT_EQ(w.name(), "unit-worker-named");
 }

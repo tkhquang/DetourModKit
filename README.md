@@ -562,9 +562,8 @@ ctest --preset msvc-debug-asan
 > is no UBSan or LeakSanitizer on MSVC. The GCC/Clang `-fsanitize=address,undefined`
 > path only links where the runtimes exist (a Linux toolchain), which does not
 > apply to this Windows-only library. Setting `DMK_ENABLE_SANITIZERS=ON` under a
-> non-MSVC Windows toolchain (e.g. MinGW) now fails fast at configure time with a
-> `FATAL_ERROR` pointing to the MSVC route, instead of configuring cleanly and
-> then failing at link.
+> non-MSVC Windows toolchain (e.g. MinGW) fails fast at configure time with a
+> `FATAL_ERROR` pointing to the MSVC route.
 
 ### Enabling Code Coverage
 

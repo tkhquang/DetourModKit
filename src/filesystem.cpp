@@ -2,8 +2,7 @@
  * @file filesystem.cpp
  * @brief Implementation of file system utilities.
  *
- * Provides functions for file system operations, such as retrieving the directory
- * of the currently executing module.
+ * Provides functions for file system operations, such as retrieving the directory of the currently executing module.
  */
 
 #include "DetourModKit/filesystem.hpp"
@@ -21,12 +20,10 @@ namespace
     /**
      * @brief Resolves the directory of the currently executing module.
      *
-     * @details Called exactly once; the result is cached by the caller.
-     * Returns a wide string to preserve full Unicode fidelity on Windows.
-     * Diagnostics are written to stderr rather than Logger because this
-     * function executes during Logger construction (via generate_log_file_path),
-     * and calling Logger::get_instance() here would deadlock on the magic-static
-     * guard that is already held by the in-progress Logger singleton init.
+     * @details Called exactly once; the result is cached by the caller. Returns a wide string to preserve full Unicode
+     *          fidelity on Windows. Diagnostics are written to stderr rather than Logger because this function executes
+     *          during Logger construction (via generate_log_file_path), and calling Logger::get_instance() here would
+     *          deadlock on the magic-static guard that is already held by the in-progress Logger singleton init.
      */
     std::wstring resolve_module_directory()
     {
@@ -36,13 +33,14 @@ namespace
         try
         {
             // Use the address of the public function to locate the containing module (DLL or EXE).
-            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                    reinterpret_cast<LPCWSTR>(&Filesystem::get_runtime_directory),
-                                    &h_self_module) ||
+            if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    reinterpret_cast<LPCWSTR>(&Filesystem::get_runtime_directory), &h_self_module) ||
                 h_self_module == nullptr)
             {
                 const DWORD last_error = GetLastError();
-                throw std::runtime_error("GetModuleHandleExW failed to retrieve module handle. Error: " + std::to_string(last_error));
+                throw std::runtime_error("GetModuleHandleExW failed to retrieve module handle. Error: " +
+                                         std::to_string(last_error));
             }
 
             // Dynamic buffer to support paths longer than MAX_PATH
@@ -57,7 +55,8 @@ namespace
                 if (path_length == 0)
                 {
                     const DWORD last_error = GetLastError();
-                    throw std::runtime_error("GetModuleFileNameW failed to retrieve module path. Error: " + std::to_string(last_error));
+                    throw std::runtime_error("GetModuleFileNameW failed to retrieve module path. Error: " +
+                                             std::to_string(last_error));
                 }
                 if (path_length < buf_size)
                 {
@@ -133,8 +132,8 @@ namespace
 
 std::wstring DetourModKit::Filesystem::get_runtime_directory()
 {
-    // C++11 magic statics guarantee thread-safe, one-time initialization.
-    // The module directory never changes at runtime, so caching is safe.
+    // C++11 magic statics guarantee thread-safe, one-time initialization. The module directory never changes at
+    // runtime, so caching is safe.
     static const std::wstring cached_directory = resolve_module_directory();
     return cached_directory;
 }
@@ -152,15 +151,14 @@ namespace
             return ".";
         }
         const int wide_len = static_cast<int>(wide.size());
-        const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len,
-                                               nullptr, 0, nullptr, nullptr);
+        const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len, nullptr, 0, nullptr, nullptr);
         if (needed <= 0)
         {
             return ".";
         }
         std::string out(static_cast<size_t>(needed), '\0');
-        const int written = WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len,
-                                                out.data(), needed, nullptr, nullptr);
+        const int written =
+            WideCharToMultiByte(CP_UTF8, 0, wide.data(), wide_len, out.data(), needed, nullptr, nullptr);
         if (written <= 0)
         {
             return ".";

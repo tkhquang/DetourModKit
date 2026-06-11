@@ -5,14 +5,12 @@
 #include <cassert>
 #include <climits>
 #include <cstring>
-#include <memory>
 
 namespace DetourModKit
 {
     // --- WinFileStreamBuf ---
 
-    WinFileStreamBuf::WinFileStreamBuf() noexcept
-        : m_handle(INVALID_HANDLE_VALUE)
+    WinFileStreamBuf::WinFileStreamBuf() noexcept : m_handle(INVALID_HANDLE_VALUE)
     {
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
     }
@@ -35,14 +33,8 @@ namespace DetourModKit
             creation = OPEN_ALWAYS;
         }
 
-        m_handle = CreateFileW(
-            path.c_str(),
-            GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr,
-            creation,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
+        m_handle = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, creation, FILE_ATTRIBUTE_NORMAL, nullptr);
 
         if (m_handle == INVALID_HANDLE_VALUE)
         {
@@ -51,8 +43,7 @@ namespace DetourModKit
 
         if (mode & std::ios_base::app)
         {
-            if (SetFilePointer(static_cast<HANDLE>(m_handle), 0, nullptr, FILE_END) ==
-                    INVALID_SET_FILE_POINTER &&
+            if (SetFilePointer(static_cast<HANDLE>(m_handle), 0, nullptr, FILE_END) == INVALID_SET_FILE_POINTER &&
                 GetLastError() != NO_ERROR)
             {
                 CloseHandle(static_cast<HANDLE>(m_handle));
@@ -178,8 +169,7 @@ namespace DetourModKit
         }
 
         DWORD bytes_written = 0;
-        const BOOL result = WriteFile(
-            static_cast<HANDLE>(m_handle), pbase(), count, &bytes_written, nullptr);
+        const BOOL result = WriteFile(static_cast<HANDLE>(m_handle), pbase(), count, &bytes_written, nullptr);
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
 
         return result != 0 && bytes_written == count;
@@ -187,13 +177,9 @@ namespace DetourModKit
 
     // --- WinFileStream ---
 
-    WinFileStream::WinFileStream()
-        : std::ostream(&m_buf)
-    {
-    }
+    WinFileStream::WinFileStream() : std::ostream(&m_buf) {}
 
-    WinFileStream::WinFileStream(const std::string &path, std::ios_base::openmode mode)
-        : std::ostream(&m_buf)
+    WinFileStream::WinFileStream(const std::string &path, std::ios_base::openmode mode) : std::ostream(&m_buf)
     {
         open(path, mode);
     }

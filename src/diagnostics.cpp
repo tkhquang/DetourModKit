@@ -17,9 +17,8 @@ namespace DetourModKit
         {
             constexpr std::size_t LEAK_SUBSYSTEM_COUNT = static_cast<std::size_t>(LeakSubsystem::Count);
 
-            // One independent event tally per subsystem. Relaxed throughout: the
-            // counters carry no ordering obligation toward any other state, and each
-            // leak site fires at most once per process, so there is no meaningful
+            // One independent event tally per subsystem. Relaxed throughout: the counters carry no ordering obligation
+            // toward any other state, and each leak site fires at most once per process, so there is no meaningful
             // contention to order.
             std::array<std::atomic<std::size_t>, LEAK_SUBSYSTEM_COUNT> s_leak_counts{};
         } // namespace

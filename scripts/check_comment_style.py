@@ -24,8 +24,9 @@ import sys
 BLOCK_TAG = re.compile(
     r"^\s*///.*@(brief|param|tparam|return|retval|note|warning|details|throws|pre|post|name|\{|\})"
 )
-# A /// documentation line, excluding the trailing-doc ///< form.
-DOC_LINE = re.compile(r"^\s*///([^<]|$)")
+# A /// documentation line, excluding the trailing-doc ///< form and ////
+# banner/separator lines (four or more slashes are not documentation).
+DOC_LINE = re.compile(r"^\s*///(?![</])")
 
 
 def main() -> int:

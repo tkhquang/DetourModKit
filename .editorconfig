@@ -14,6 +14,10 @@ insert_final_newline = true
 [*.{yml,yaml,json}]
 indent_size = 2
 
+# C++ sources follow the 120-column baseline codified in .clang-format.
+[*.{cpp,hpp}]
+max_line_length = 120
+
 # Markdown uses trailing whitespace for hard line breaks.
 [*.md]
 trim_trailing_whitespace = false

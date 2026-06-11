@@ -2,13 +2,11 @@
  * @file memory.cpp
  * @brief Implementation of memory manipulation and validation utilities.
  *
- * Provides functions for checking memory readability and writability, writing bytes to memory,
- * and managing a memory region cache for performance optimization.
- * The cache uses sharded locks with SRWLOCK for high-concurrency read-heavy access.
- * Uses monotonic counter-keyed map for O(log n) LRU eviction instead of O(n) scan.
- * In-flight query coalescing prevents cache stampede under high concurrency.
- * On-demand cleanup handles expired entry removal to avoid polluting the miss path.
- * Epoch-based reader tracking prevents use-after-free during shutdown.
+ * Provides functions for checking memory readability and writability, writing bytes to memory, and managing a memory
+ * region cache for performance optimization. The cache uses sharded locks with SRWLOCK for high-concurrency read-heavy
+ * access. Uses monotonic counter-keyed map for O(log n) LRU eviction instead of O(n) scan. In-flight query coalescing
+ * prevents cache stampede under high concurrency. On-demand cleanup handles expired entry removal to avoid polluting
+ * the miss path. Epoch-based reader tracking prevents use-after-free during shutdown.
  */
 
 #include "DetourModKit/memory.hpp"
@@ -44,25 +42,24 @@ using DetourModKit::detail::pin_current_module;
 // Anonymous namespace for internal helpers and storage
 namespace
 {
-    // Page-protection flag groups for the cache permission checks. Grouped in a
-    // struct rather than a named namespace so the constants keep internal
-    // linkage through the enclosing anonymous namespace, per the .cpp
-    // internal-linkage convention.
+    // Page-protection flag groups for the cache permission checks. Grouped in a struct rather than a named namespace so
+    // the constants keep internal linkage through the enclosing anonymous namespace, per the .cpp internal-linkage
+    // convention.
     struct CachePermissions
     {
         static constexpr DWORD READ_PERMISSION_FLAGS = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
-                                                       PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
-        static constexpr DWORD WRITE_PERMISSION_FLAGS = PAGE_READWRITE | PAGE_WRITECOPY |
-                                                        PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+                                                       PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE |
+                                                       PAGE_EXECUTE_WRITECOPY;
+        static constexpr DWORD WRITE_PERMISSION_FLAGS =
+            PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
         static constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
     };
 
     /**
      * @class SrwSharedMutex
      * @brief Shared mutex backed by Windows SRWLOCK instead of pthread_rwlock_t.
-     * @details MinGW/winpthreads' pthread_rwlock_t corrupts internal state under
-     *          high reader contention, causing assertion failures in lock_shared().
-     *          SRWLOCK is kernel-level, lock-free for uncontended cases, and does
+     * @details MinGW/winpthreads' pthread_rwlock_t corrupts internal state under high reader contention, causing
+     *          assertion failures in lock_shared(). SRWLOCK is kernel-level, lock-free for uncontended cases, and does
      *          not suffer from this bug.
      */
     class SrwSharedMutex
@@ -109,11 +106,10 @@ namespace
     /**
      * @struct CacheShard
      * @brief Individual cache shard with O(1) address lookup and O(log n) LRU eviction.
-     * @details Uses unordered_map keyed by region base address for fast lookup.
-     *          std::map keyed by monotonic counter for efficient oldest-entry eviction.
-     *          SrwSharedMutex allows multiple concurrent readers.
-     *          in_flight flag prevents cache stampede by coalescing concurrent VirtualQuery calls.
-     *          Mutex is stored separately to allow vector resize operations.
+     * @details Uses unordered_map keyed by region base address for fast lookup. std::map keyed by monotonic counter for
+     *          efficient oldest-entry eviction. SrwSharedMutex allows multiple concurrent readers. in_flight flag
+     *          prevents cache stampede by coalescing concurrent VirtualQuery calls. Mutex is stored separately to allow
+     *          vector resize operations.
      */
     struct CacheShard
     {
@@ -129,8 +125,7 @@ namespace
         size_t capacity;
         size_t max_capacity;
 
-        CacheShard()
-            : capacity(0), max_capacity(0)
+        CacheShard() : capacity(0), max_capacity(0)
         {
             entries.reserve(64);
             sorted_ranges.reserve(64);
@@ -142,8 +137,7 @@ namespace
      */
     inline uint64_t current_time_ns() noexcept
     {
-        return std::chrono::duration_cast<std::chrono::nanoseconds>(
-                   std::chrono::steady_clock::now().time_since_epoch())
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
             .count();
     }
 
@@ -158,11 +152,10 @@ namespace
     {
         return (static_cast<size_t>((address * 0x9E3779B97F4A7C15ULL) >> 48)) % shard_count;
     }
-} // namespace
+} // anonymous namespace
 
-// Internal static variables and helper functions for memory cache.
-// Anonymous namespace ensures internal linkage, preventing ODR violations
-// if this translation unit's declarations were ever duplicated.
+// Internal static variables and helper functions for memory cache. Anonymous namespace ensures internal linkage,
+// preventing ODR violations if this translation unit's declarations were ever duplicated.
 namespace
 {
     std::vector<CacheShard> s_cache_shards;
@@ -173,54 +166,52 @@ namespace
     std::atomic<unsigned int> s_configured_expiry_ms{0};
     std::atomic<bool> s_cache_initialized{false};
 
+    /// Configured cache-entry expiry converted from milliseconds to nanoseconds.
+    [[nodiscard]] inline uint64_t configured_expiry_ns() noexcept
+    {
+        return static_cast<uint64_t>(s_configured_expiry_ms.load(std::memory_order_acquire)) * 1'000'000ULL;
+    }
+
     // Global cache state mutex to serialize init/clear/shutdown transitions
     // Protects against concurrent state changes that could leave vectors in invalid state
     std::mutex s_cache_state_mutex;
 
-    // Epoch-based reader tracking to prevent use-after-free during shutdown.
-    // Readers increment on entry to is_readable/is_writable and decrement on exit.
-    // shutdown_cache waits for this to reach zero before destroying data structures.
+    // Epoch-based reader tracking to prevent use-after-free during shutdown. Readers increment on entry to
+    // is_readable/is_writable and decrement on exit. shutdown_cache waits for this to reach zero before destroying data
+    // structures.
     std::atomic<int32_t> s_active_readers{0};
 
     /**
      * @class ActiveReaderGuard
-     * @brief RAII guard that increments s_active_readers on construction and
-     *        decrements on destruction, ensuring correct pairing on all exit paths.
+     * @brief RAII guard that increments s_active_readers on construction and decrements on destruction, ensuring
+     *        correct pairing on all exit paths.
      */
     class ActiveReaderGuard
     {
     public:
         ActiveReaderGuard() noexcept
         {
-            // seq_cst (not acq_rel) so this increment and the reader's
-            // subsequent seq_cst load of s_cache_initialized share the single
-            // total order that forbids the store-buffering (Dekker) outcome with
+            // seq_cst (not acq_rel) so this increment and the reader's subsequent seq_cst load of s_cache_initialized
+            // share the single total order that forbids the store-buffering (Dekker) outcome with
             // shutdown_cache: shutdown stores s_cache_initialized=false then loads
-            // s_active_readers, while a reader increments s_active_readers then
-            // loads s_cache_initialized. Under seq_cst a reader that observes the
-            // cache live was necessarily counted before shutdown reads the reader
-            // count, so shutdown cannot free shard data out from under it. On
-            // x86-64 this is the same lock xadd as acq_rel, so the hot path pays
-            // nothing.
+            // s_active_readers, while a reader increments s_active_readers then loads s_cache_initialized. Under
+            // seq_cst a reader that observes the cache live was necessarily counted before shutdown reads the reader
+            // count, so shutdown cannot free shard data out from under it. On x86-64 this is the same lock xadd as
+            // acq_rel, so the hot path pays nothing.
             s_active_readers.fetch_add(1, std::memory_order_seq_cst);
         }
 
-        ~ActiveReaderGuard() noexcept
-        {
-            s_active_readers.fetch_sub(1, std::memory_order_release);
-        }
+        ~ActiveReaderGuard() noexcept { s_active_readers.fetch_sub(1, std::memory_order_release); }
 
         ActiveReaderGuard(const ActiveReaderGuard &) = delete;
         ActiveReaderGuard &operator=(const ActiveReaderGuard &) = delete;
     };
 
-    // Background cleanup thread.
-    // Uses std::thread (not jthread) because these are namespace-scope statics:
-    // jthread's auto-join destructor would run after s_cleanup_cv/s_cleanup_mutex
-    // are destroyed (reverse declaration order), causing UB. Manual join in
-    // shutdown_cache() avoids this. DMK_Shutdown() calls shutdown_cache()
-    // which joins this thread before any other cleanup proceeds, ensuring
-    // the thread is fully stopped before static destruction begins.
+    // Background cleanup thread. Uses std::thread (not jthread) because these are namespace-scope statics:
+    // jthread's auto-join destructor would run after s_cleanup_cv/s_cleanup_mutex are destroyed (reverse declaration
+    // order), causing UB. Manual join in shutdown_cache() avoids this. DMK_Shutdown() calls shutdown_cache() which
+    // joins this thread before any other cleanup proceeds, ensuring the thread is fully stopped before static
+    // destruction begins.
     std::atomic<bool> s_cleanup_thread_running{false};
     std::thread s_cleanup_thread;
     std::mutex s_cleanup_mutex;
@@ -252,11 +243,8 @@ namespace
      * @param expiry_ns Expiry time in nanoseconds.
      * @return true if the entry is valid and covers the range.
      */
-    constexpr inline bool is_entry_valid_and_covers(const CachedMemoryRegionInfo &entry,
-                                                    uintptr_t address,
-                                                    size_t size,
-                                                    uint64_t current_time_ns,
-                                                    uint64_t expiry_ns) noexcept
+    constexpr inline bool is_entry_valid_and_covers(const CachedMemoryRegionInfo &entry, uintptr_t address, size_t size,
+                                                    uint64_t current_time_ns, uint64_t expiry_ns) noexcept
     {
         if (!entry.valid)
             return false;
@@ -301,8 +289,7 @@ namespace
     void insert_sorted_range(CacheShard &shard, uintptr_t base_addr, size_t region_size) noexcept
     {
         auto range = std::make_pair(base_addr, base_addr + region_size);
-        auto pos = std::lower_bound(shard.sorted_ranges.begin(),
-                                    shard.sorted_ranges.end(), range);
+        auto pos = std::lower_bound(shard.sorted_ranges.begin(), shard.sorted_ranges.end(), range);
         shard.sorted_ranges.insert(pos, range);
     }
 
@@ -312,8 +299,7 @@ namespace
      */
     void remove_sorted_range(CacheShard &shard, uintptr_t base_addr) noexcept
     {
-        auto it = std::lower_bound(shard.sorted_ranges.begin(),
-                                   shard.sorted_ranges.end(),
+        auto it = std::lower_bound(shard.sorted_ranges.begin(), shard.sorted_ranges.end(),
                                    std::make_pair(base_addr, uintptr_t{0}));
         if (it != shard.sorted_ranges.end() && it->first == base_addr)
             shard.sorted_ranges.erase(it);
@@ -328,14 +314,10 @@ namespace
      * @param expiry_ns Expiry time in nanoseconds.
      * @return Pointer to the matching entry, or nullptr if not found or expired.
      * @note Must be called with shard mutex held (shared or exclusive).
-     * @note First attempts direct lookup by page-aligned base address for O(1) fast path,
-     *       then falls back to O(log n) binary search via sorted_ranges for addresses
-     *       within larger regions.
+     * @note First attempts direct lookup by page-aligned base address for O(1) fast path, then falls back to O(log n)
+     *       binary search via sorted_ranges for addresses within larger regions.
      */
-    CachedMemoryRegionInfo *find_in_shard(CacheShard &shard,
-                                          uintptr_t address,
-                                          size_t size,
-                                          uint64_t current_time_ns,
+    CachedMemoryRegionInfo *find_in_shard(CacheShard &shard, uintptr_t address, size_t size, uint64_t current_time_ns,
                                           uint64_t expiry_ns) noexcept
     {
         // Fast path: direct lookup by page-aligned base address
@@ -350,11 +332,9 @@ namespace
             }
         }
 
-        // Slow path: O(log n) containment lookup via sorted ranges.
-        // Finds the last range starting at or before the queried address,
-        // then verifies containment and entry validity.
-        auto range_it = std::upper_bound(shard.sorted_ranges.begin(),
-                                         shard.sorted_ranges.end(),
+        // Slow path: O(log n) containment lookup via sorted ranges. Finds the last range starting at or before the
+        // queried address, then verifies containment and entry validity.
+        auto range_it = std::upper_bound(shard.sorted_ranges.begin(), shard.sorted_ranges.end(),
                                          std::make_pair(address, UINTPTR_MAX));
         if (range_it != shard.sorted_ranges.begin())
         {
@@ -421,7 +401,8 @@ namespace
      * @param current_time_ns Current timestamp in nanoseconds.
      * @note Must be called with shard mutex held (exclusive).
      */
-    void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi, uint64_t current_time_ns) noexcept
+    void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
+                                  uint64_t current_time_ns) noexcept
     {
         const uintptr_t base_addr = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
 
@@ -493,9 +474,7 @@ namespace
      * @note Must be called with shard mutex held (exclusive).
      * @return Number of entries removed from this shard.
      */
-    size_t cleanup_expired_entries_in_shard(CacheShard &shard,
-                                            uint64_t current_time_ns,
-                                            uint64_t expiry_ns) noexcept
+    size_t cleanup_expired_entries_in_shard(CacheShard &shard, uint64_t current_time_ns, uint64_t expiry_ns) noexcept
     {
         size_t removed = 0;
         auto it = shard.entries.begin();
@@ -532,9 +511,8 @@ namespace
      */
     void cleanup_expired_entries(bool force) noexcept
     {
-        // Always hold state mutex to prevent racing with shutdown_cache()
-        // which clears the shard vectors. try_lock for on-demand to avoid
-        // blocking the hot path; forced cleanup blocks to guarantee progress.
+        // Always hold state mutex to prevent racing with shutdown_cache() which clears the shard vectors. try_lock for
+        // on-demand to avoid blocking the hot path; forced cleanup blocks to guarantee progress.
         std::unique_lock<std::mutex> lock(s_cache_state_mutex, std::defer_lock);
         if (force)
         {
@@ -553,7 +531,7 @@ namespace
             return;
 
         const uint64_t current_ts = current_time_ns();
-        const uint64_t expiry_ns = static_cast<uint64_t>(s_configured_expiry_ms.load(std::memory_order_acquire)) * 1'000'000ULL;
+        const uint64_t expiry_ns = configured_expiry_ns();
 
         for (size_t i = 0; i < shard_count; ++i)
         {
@@ -604,8 +582,12 @@ namespace
         {
             {
                 std::unique_lock<std::mutex> lock(s_cleanup_mutex);
-                s_cleanup_cv.wait_for(lock, std::chrono::seconds(1), [&]()
-                                      { return s_cleanup_requested.load(std::memory_order_acquire) || !s_cleanup_thread_running.load(std::memory_order_acquire); });
+                s_cleanup_cv.wait_for(lock, std::chrono::seconds(1),
+                                      [&]()
+                                      {
+                                          return s_cleanup_requested.load(std::memory_order_acquire) ||
+                                                 !s_cleanup_thread_running.load(std::memory_order_acquire);
+                                      });
             }
 
             if (!s_cleanup_thread_running.load(std::memory_order_acquire))
@@ -642,16 +624,13 @@ namespace
      * @return Number of entries evicted.
      * @note Must be called with the shard mutex held (exclusive).
      * @note Scans the whole shard rather than probing a single key. An entry is keyed by its
-     *       VirtualQuery region base, but it is stored in the shard chosen from the original
-     *       query address (compute_shard_index mixes the full address, not the region base),
-     *       so one region can be cached in several shards under the same base key. A single
-     *       key/shard probe therefore cannot locate every covering entry; only a per-shard
-     *       containment scan can. The shard is bounded by max_capacity and invalidation runs
-     *       only after a write, so this linear scan is never on a read hot path.
+     *       VirtualQuery region base, but it is stored in the shard chosen from the original query address
+     *       (compute_shard_index mixes the full address, not the region base), so one region can be cached in several
+     *       shards under the same base key. A single key/shard probe therefore cannot locate every covering entry; only
+     *       a per-shard containment scan can. The shard is bounded by max_capacity and invalidation runs only after a
+     *       write, so this linear scan is never on a read hot path.
      */
-    size_t evict_overlapping_entries_in_shard(CacheShard &shard,
-                                              uintptr_t address,
-                                              uintptr_t end_address) noexcept
+    size_t evict_overlapping_entries_in_shard(CacheShard &shard, uintptr_t address, uintptr_t end_address) noexcept
     {
         size_t evicted = 0;
         auto it = shard.entries.begin();
@@ -659,15 +638,11 @@ namespace
         {
             const CachedMemoryRegionInfo &entry = it->second;
             const uintptr_t entry_end_address = entry.base_address + entry.region_size;
-            // A VirtualQuery region cannot extend past the address space, but a corrupt
-            // cached size could; treat a wrapped end as covering the top of the space so a
-            // poisoned entry is still evicted rather than skipped.
-            const uintptr_t clamped_entry_end = (entry_end_address < entry.base_address)
-                                                    ? UINTPTR_MAX
-                                                    : entry_end_address;
-            const bool overlaps = entry.valid &&
-                                  address < clamped_entry_end &&
-                                  end_address > entry.base_address;
+            // A VirtualQuery region cannot extend past the address space, but a corrupt cached size could; treat a
+            // wrapped end as covering the top of the space so a poisoned entry is still evicted rather than skipped.
+            const uintptr_t clamped_entry_end =
+                (entry_end_address < entry.base_address) ? UINTPTR_MAX : entry_end_address;
+            const bool overlaps = entry.valid && address < clamped_entry_end && end_address > entry.base_address;
             if (overlaps)
             {
                 // Drop the LRU back-reference by the stored key so no tombstone accumulates.
@@ -691,10 +666,9 @@ namespace
 
     /**
      * @brief Invalidates cache entries overlapping [address, address + size) across all shards.
-     * @details Every shard is scanned because an entry's storage shard is derived from the
-     *          original query address, not its region base, so a covering entry may live in
-     *          any shard (see evict_overlapping_entries_in_shard). A bounded try-lock retry
-     *          per shard keeps the writer that triggered the invalidation from blocking on a
+     * @details Every shard is scanned because an entry's storage shard is derived from the original query address, not
+     *          its region base, so a covering entry may live in any shard (see evict_overlapping_entries_in_shard). A
+     *          bounded try-lock retry per shard keeps the writer that triggered the invalidation from blocking on a
      *          momentarily contended shard.
      */
     void invalidate_range_internal(uintptr_t address, size_t size) noexcept
@@ -735,13 +709,13 @@ namespace
     bool perform_cache_initialization(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
     {
         if (cache_size == 0)
-            cache_size = 1;
+            cache_size = MIN_CACHE_SIZE;
         if (shard_count == 0)
             shard_count = 1;
 
         const size_t entries_per_shard = (cache_size + shard_count - 1) / shard_count;
-        // Hard upper bound: 2x capacity
-        const size_t hard_max_per_shard = entries_per_shard * 2;
+        // Hard upper bound: nominal per-shard capacity scaled by the multiplier
+        const size_t hard_max_per_shard = entries_per_shard * DEFAULT_MAX_CACHE_SIZE_MULTIPLIER;
 
         try
         {
@@ -750,8 +724,8 @@ namespace
             s_in_flight = std::make_unique<std::atomic<char>[]>(shard_count);
             for (size_t i = 0; i < shard_count; ++i)
             {
-                s_cache_shards[i].entries.reserve(entries_per_shard * 2);
-                s_cache_shards[i].sorted_ranges.reserve(entries_per_shard * 2);
+                s_cache_shards[i].entries.reserve(hard_max_per_shard);
+                s_cache_shards[i].sorted_ranges.reserve(hard_max_per_shard);
                 s_cache_shards[i].capacity = entries_per_shard;
                 s_cache_shards[i].max_capacity = hard_max_per_shard;
                 s_shard_mutexes[i] = std::make_unique<SrwSharedMutex>();
@@ -811,9 +785,9 @@ namespace
         }
         else
         {
-            // We are a follower - VirtualQuery already in progress by another thread.
-            // Bounded wait to avoid stalling game threads on render-critical paths.
-            const uint64_t expiry_ns = static_cast<uint64_t>(s_configured_expiry_ms.load(std::memory_order_acquire)) * 1'000'000ULL;
+            // We are a follower - VirtualQuery already in progress by another thread. Bounded wait to avoid stalling
+            // game threads on render-critical paths.
+            const uint64_t expiry_ns = configured_expiry_ns();
             constexpr size_t MAX_FOLLOWER_YIELDS = 8;
 
             for (size_t yield_count = 0; yield_count < MAX_FOLLOWER_YIELDS; ++yield_count)
@@ -862,7 +836,7 @@ namespace
         }
     }
 
-} // namespace
+} // anonymous namespace
 
 bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
 {
@@ -894,39 +868,40 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
         {
             // Background thread creation failed (MinGW pthreads issue) - use on-demand cleanup
             s_cleanup_thread_running.store(false, std::memory_order_release);
-            Logger::get_instance().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
+            Logger::get_instance().debug(
+                "MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
         }
 
-        // Register atexit handler as a last-resort safety net in case the
-        // consumer forgets to call shutdown_cache() / DMK_Shutdown().
-        // Prevents std::terminate from the joinable std::thread destructor.
-        // The handler detects loader-lock context (FreeLibrary) and skips
-        // the thread join to avoid deadlock.
+        // Register atexit handler as a last-resort safety net in case the consumer forgets to call shutdown_cache() /
+        // DMK_Shutdown(). Prevents std::terminate from the joinable std::thread destructor. The handler detects
+        // loader-lock context (FreeLibrary) and skips the thread join to avoid deadlock.
         static bool atexit_registered = false;
         if (!atexit_registered)
         {
-            std::atexit([]()
-                        {
-                if (s_cache_initialized.load(std::memory_order_seq_cst))
+            std::atexit(
+                []()
                 {
-                    if (is_loader_lock_held())
+                    if (s_cache_initialized.load(std::memory_order_seq_cst))
                     {
-                        // Under loader lock (FreeLibrary path): pin the module
-                        // so code pages remain valid for the detached thread,
-                        // then signal it to stop and detach.
-                        s_cleanup_thread_running.store(false, std::memory_order_release);
-                        s_cleanup_cv.notify_one();
-                        if (s_cleanup_thread.joinable())
+                        if (is_loader_lock_held())
                         {
-                            pin_current_module();
-                            s_cleanup_thread.detach();
-                            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::MemoryCache);
+                            // Under loader lock (FreeLibrary path): pin the module so code pages remain valid for the
+                            // detached thread, then signal it to stop and detach.
+                            s_cleanup_thread_running.store(false, std::memory_order_release);
+                            s_cleanup_cv.notify_one();
+                            if (s_cleanup_thread.joinable())
+                            {
+                                pin_current_module();
+                                s_cleanup_thread.detach();
+                                DetourModKit::Diagnostics::record_intentional_leak(
+                                    DetourModKit::Diagnostics::LeakSubsystem::MemoryCache);
+                            }
+                            s_cache_initialized.store(false, std::memory_order_release);
+                            return;
                         }
-                        s_cache_initialized.store(false, std::memory_order_release);
-                        return;
+                        Memory::shutdown_cache();
                     }
-                    Memory::shutdown_cache();
-                } });
+                });
             atexit_registered = true;
         }
 
@@ -949,10 +924,9 @@ void DetourModKit::Memory::clear_cache()
     if (shard_count == 0)
         return;
 
-    // Acquire exclusive lock on each shard and clear entries.
-    // Uses blocking lock to guarantee all entries are cleared.
-    // The background cleanup thread uses try_to_lock on shard mutexes,
-    // so it will skip shards we hold without deadlocking.
+    // Acquire exclusive lock on each shard and clear entries. Uses blocking lock to guarantee all entries are cleared.
+    // The background cleanup thread uses try_to_lock on shard mutexes, so it will skip shards we hold without
+    // deadlocking.
     for (size_t i = 0; i < shard_count; ++i)
     {
         auto &mutex_ptr = s_shard_mutexes[i];
@@ -979,9 +953,8 @@ void DetourModKit::Memory::clear_cache()
 
 void DetourModKit::Memory::shutdown_cache()
 {
-    // Signal and join cleanup thread BEFORE acquiring state mutex.
-    // The cleanup thread acquires s_cache_state_mutex in cleanup_expired_entries(force=true),
-    // so joining while holding the state mutex would deadlock.
+    // Signal and join cleanup thread BEFORE acquiring state mutex. The cleanup thread acquires s_cache_state_mutex in
+    // cleanup_expired_entries(force=true), so joining while holding the state mutex would deadlock.
     s_cleanup_thread_running.store(false, std::memory_order_release);
     s_cleanup_cv.notify_one();
 
@@ -989,11 +962,9 @@ void DetourModKit::Memory::shutdown_cache()
     {
         if (is_loader_lock_held())
         {
-            // Under loader lock (DllMain / FreeLibrary): thread join would
-            // deadlock because the cleanup thread cannot exit while the
-            // loader lock is held. Pin the module so code and static data
-            // remain valid, then detach. The thread will observe the stop
-            // flag and exit on its own.
+            // Under loader lock (DllMain / FreeLibrary): thread join would deadlock because the cleanup thread cannot
+            // exit while the loader lock is held. Pin the module so code and static data remain valid, then detach. The
+            // thread will observe the stop flag and exit on its own.
             pin_current_module();
             s_cleanup_thread.detach();
             DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::MemoryCache);
@@ -1007,21 +978,18 @@ void DetourModKit::Memory::shutdown_cache()
     // Acquire state mutex to serialize with clear_cache and protect data teardown
     std::lock_guard<std::mutex> state_lock(s_cache_state_mutex);
 
-    // Mark as not initialized and zero shard count so new readers do not enter
-    // the critical section. The s_cache_initialized store is seq_cst (not just
+    // Mark as not initialized and zero shard count so new readers do not enter the critical section. The
+    // s_cache_initialized store is seq_cst (not just
     // release): it pairs with the reader's seq_cst load in the ActiveReaderGuard
-    // protocol so the store-buffering (Dekker) race against the reader-count
-    // load below is forbidden by the single total order. s_shard_count stays
-    // release because readers only read it after passing the seq_cst
+    // protocol so the store-buffering (Dekker) race against the reader-count load below is forbidden by the single
+    // total order. s_shard_count stays release because readers only read it after passing the seq_cst
     // s_cache_initialized gate.
     s_cache_initialized.store(false, std::memory_order_seq_cst);
     s_shard_count.store(0, std::memory_order_release);
 
-    // Wait for in-flight readers to finish before destroying data structures.
-    // Readers increment s_active_readers on entry and decrement on exit.
-    // ActiveReaderGuard is RAII so readers always decrement; this loop is
-    // bounded by the maximum time a single cache lookup can take.
-    // Escalate from yield to sleep to avoid burning CPU if a reader is
+    // Wait for in-flight readers to finish before destroying data structures. Readers increment s_active_readers on
+    // entry and decrement on exit. ActiveReaderGuard is RAII so readers always decrement; this loop is bounded by the
+    // maximum time a single cache lookup can take. Escalate from yield to sleep to avoid burning CPU if a reader is
     // preempted by the OS scheduler.
     constexpr int yield_spins = 4096;
     int spins = 0;
@@ -1102,14 +1070,11 @@ std::string DetourModKit::Memory::get_cache_stats()
     }
 
     std::ostringstream oss;
-    oss << "MemoryCache Stats (Shards: " << shard_count
-        << ", Entries/Shard: " << max_entries_per_shard
-        << ", HardMax/Shard: " << (shard_count > 0 ? total_hard_max / shard_count : 0)
-        << ", Expiry: " << expiry_ms << "ms) - "
-        << "Hits: " << hits << ", Misses: " << misses
-        << ", Invalidations: " << invalidations
-        << ", Coalesced: " << coalesced
-        << ", OnDemandCleanups: " << on_demand_cleanups
+    oss << "MemoryCache Stats (Shards: " << shard_count << ", Entries/Shard: " << max_entries_per_shard
+        << ", HardMax/Shard: " << (shard_count > 0 ? total_hard_max / shard_count : 0) << ", Expiry: " << expiry_ms
+        << "ms) - "
+        << "Hits: " << hits << ", Misses: " << misses << ", Invalidations: " << invalidations
+        << ", Coalesced: " << coalesced << ", OnDemandCleanups: " << on_demand_cleanups
         << ", TotalEntries: " << total_entries;
 
     if (total_queries > 0)
@@ -1129,8 +1094,8 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     if (!address || size == 0)
         return;
 
-    // Construct reader guard BEFORE checking s_cache_initialized to prevent
-    // shutdown_cache from destroying data structures between the check and access.
+    // Construct reader guard BEFORE checking s_cache_initialized to prevent shutdown_cache from destroying data
+    // structures between the check and access.
     ActiveReaderGuard reader_guard;
 
     if (!s_cache_initialized.load(std::memory_order_seq_cst))
@@ -1143,9 +1108,8 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
     invalidate_range_internal(addr_val, size);
 
-    // request_cleanup may trigger on-demand cleanup_expired_entries(force=false)
-    // which iterates shards without s_cache_state_mutex. Keep s_active_readers > 0
-    // so shutdown_cache cannot destroy shards during the cleanup pass.
+    // request_cleanup may trigger on-demand cleanup_expired_entries(force=false) which iterates shards without
+    // s_cache_state_mutex. Keep s_active_readers > 0 so shutdown_cache cannot destroy shards during the cleanup pass.
     request_cleanup();
 }
 
@@ -1153,21 +1117,20 @@ namespace
 {
     /**
      * @brief Unified permission check for is_readable/is_writable.
-     * @details Parameterized by permission checker to avoid duplicating the
-     *          cache lookup, VirtualQuery fallback, and range validation logic.
+     * @details Parameterized by permission checker to avoid duplicating the cache lookup, VirtualQuery fallback, and
+     *          range validation logic.
      * @param address Starting address of the memory region.
      * @param size Number of bytes in the memory region to check.
      * @param check_permission Function that validates protection flags.
      * @return true if the entire region has the requested permission.
      */
-    bool check_memory_permission(const void *address, size_t size,
-                                 bool (*check_permission)(DWORD) noexcept) noexcept
+    bool check_memory_permission(const void *address, size_t size, bool (*check_permission)(DWORD) noexcept) noexcept
     {
         if (!address || size == 0)
             return false;
 
-        // Construct reader guard BEFORE checking s_cache_initialized to prevent
-        // shutdown_cache from destroying data structures between the check and access.
+        // Construct reader guard BEFORE checking s_cache_initialized to prevent shutdown_cache from destroying data
+        // structures between the check and access.
         ActiveReaderGuard reader_guard;
 
         if (!s_cache_initialized.load(std::memory_order_seq_cst))
@@ -1197,14 +1160,13 @@ namespace
         const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
         const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
         const uint64_t now_ns = current_time_ns();
-        const uint64_t expiry_ns = static_cast<uint64_t>(s_configured_expiry_ms.load(std::memory_order_acquire)) * 1'000'000ULL;
+        const uint64_t expiry_ns = configured_expiry_ns();
 
         // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
         {
             std::shared_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx]);
-            CachedMemoryRegionInfo *cached_info = find_in_shard(
-                s_cache_shards[shard_idx],
-                query_addr_val, size, now_ns, expiry_ns);
+            CachedMemoryRegionInfo *cached_info =
+                find_in_shard(s_cache_shards[shard_idx], query_addr_val, size, now_ns, expiry_ns);
             if (cached_info)
             {
                 s_stats.cache_hits.fetch_add(1, std::memory_order_relaxed);
@@ -1246,7 +1208,8 @@ bool DetourModKit::Memory::is_writable(void *address, size_t size)
     return check_memory_permission(address, size, check_write_permission);
 }
 
-std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *target_address, const std::byte *source_bytes, size_t num_bytes)
+std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *target_address,
+                                                                   const std::byte *source_bytes, size_t num_bytes)
 {
     auto &logger = Logger::get_instance();
 
@@ -1272,29 +1235,29 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
     }
 
     DWORD old_protection_flags;
-    if (!VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes, PAGE_EXECUTE_READWRITE, &old_protection_flags))
+    if (!VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes, PAGE_EXECUTE_READWRITE,
+                        &old_protection_flags))
     {
-        logger.error("write_bytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
-                     DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
+        logger.error(
+            "write_bytes: VirtualProtect failed to set PAGE_EXECUTE_READWRITE at address {}. Windows Error: {}",
+            DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
         return std::unexpected(MemoryError::ProtectionChangeFailed);
     }
 
     memcpy(reinterpret_cast<void *>(target_address), reinterpret_cast<const void *>(source_bytes), num_bytes);
 
-    // The bytes are now modified. The instruction-cache flush and the DMK
-    // cache-range invalidation must run on every path from here -- they are
-    // promised unconditionally, and skipping them after a write would leave stale
-    // cached state for bytes that have already changed. Restore the original page
-    // protection first so its outcome can be reported, but keep that out of an
-    // early return: the cleanup below is a single unconditional block, so the
-    // restore-failure path runs exactly the same maintenance as the success path
-    // by construction and cannot diverge.
+    // The bytes are now modified. The instruction-cache flush and the DMK cache-range invalidation must run on every
+    // path from here -- they are promised unconditionally, and skipping them after a write would leave stale cached
+    // state for bytes that have already changed. Restore the original page protection first so its outcome can be
+    // reported, but keep that out of an early return: the cleanup below is a single unconditional block, so the
+    // restore-failure path runs exactly the same maintenance as the success path by construction and cannot diverge.
     DWORD temp_old_protect;
-    const bool restore_succeeded =
-        VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes, old_protection_flags, &temp_old_protect) != FALSE;
+    const bool restore_succeeded = VirtualProtect(reinterpret_cast<LPVOID>(target_address), num_bytes,
+                                                  old_protection_flags, &temp_old_protect) != FALSE;
     if (!restore_succeeded)
     {
-        logger.error("write_bytes: VirtualProtect failed to restore original protection ({}) at address {}. Windows Error: {}. Memory may remain writable!",
+        logger.error("write_bytes: VirtualProtect failed to restore original protection ({}) at address {}. "
+                     "Windows Error: {}. Memory may remain writable!",
                      DetourModKit::Format::format_hex(static_cast<int>(old_protection_flags)),
                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
     }
@@ -1302,7 +1265,8 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
     if (!FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(target_address), num_bytes))
     {
         logger.warning("write_bytes: FlushInstructionCache failed for address {}. Windows Error: {}",
-                       DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)), GetLastError());
+                       DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)),
+                       GetLastError());
     }
 
     Memory::invalidate_range(target_address, num_bytes);
@@ -1313,8 +1277,8 @@ std::expected<void, MemoryError> DetourModKit::Memory::write_bytes(std::byte *ta
         return std::unexpected(MemoryError::ProtectionRestoreFailed);
     }
 
-    logger.debug("write_bytes: Successfully wrote {} bytes to address {}.",
-                 num_bytes, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)));
+    logger.debug("write_bytes: Successfully wrote {} bytes to address {}.", num_bytes,
+                 DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(target_address)));
     return {};
 }
 
@@ -1352,22 +1316,19 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
     const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
     const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
     const uint64_t now_ns = current_time_ns();
-    const uint64_t expiry_ns = static_cast<uint64_t>(s_configured_expiry_ms.load(std::memory_order_acquire)) * 1'000'000ULL;
+    const uint64_t expiry_ns = configured_expiry_ns();
 
     // Non-blocking: try_lock_shared to avoid stalling latency-sensitive threads
     std::shared_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx], std::try_to_lock);
     if (!lock.owns_lock())
         return ReadableStatus::Unknown;
 
-    CachedMemoryRegionInfo *cached_info = find_in_shard(
-        s_cache_shards[shard_idx],
-        query_addr_val, size, now_ns, expiry_ns);
+    CachedMemoryRegionInfo *cached_info =
+        find_in_shard(s_cache_shards[shard_idx], query_addr_val, size, now_ns, expiry_ns);
     if (cached_info)
     {
         s_stats.cache_hits.fetch_add(1, std::memory_order_relaxed);
-        return check_read_permission(cached_info->protection)
-                   ? ReadableStatus::Readable
-                   : ReadableStatus::NotReadable;
+        return check_read_permission(cached_info->protection) ? ReadableStatus::Readable : ReadableStatus::NotReadable;
     }
 
     // Cache miss with non-blocking semantics: return Unknown rather than issuing VirtualQuery
@@ -1381,19 +1342,16 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
     {
         return *reinterpret_cast<const uintptr_t *>(base + offset);
     }
-    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
-               GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
                   ? EXCEPTION_EXECUTE_HANDLER
                   : EXCEPTION_CONTINUE_SEARCH)
     {
         return 0;
     }
 #else
-    // MinGW/GCC lacks __try/__except. Probe the cache with a trylock
-    // to avoid a VirtualQuery syscall when the region is already cached.
-    // Falls back to VirtualQuery on cache miss or when cache is off.
-    // ActiveReaderGuard is required to prevent shutdown_cache() from
-    // destroying shard vectors between our check and access.
+    // MinGW/GCC lacks __try/__except. Probe the cache with a trylock to avoid a VirtualQuery syscall when the region is
+    // already cached. Falls back to VirtualQuery on cache miss or when cache is off. ActiveReaderGuard is required to
+    // prevent shutdown_cache() from destroying shard vectors between our check and access.
     const auto src = base + static_cast<uintptr_t>(offset);
 
     {
@@ -1409,12 +1367,9 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
                 if (lock.owns_lock())
                 {
                     const uint64_t now_ns = current_time_ns();
-                    const uint64_t expiry_ns = static_cast<uint64_t>(
-                                                   s_configured_expiry_ms.load(std::memory_order_acquire)) *
-                                               1'000'000ULL;
-                    CachedMemoryRegionInfo *cached = find_in_shard(
-                        s_cache_shards[shard_idx],
-                        src, sizeof(uintptr_t), now_ns, expiry_ns);
+                    const uint64_t expiry_ns = configured_expiry_ns();
+                    CachedMemoryRegionInfo *cached =
+                        find_in_shard(s_cache_shards[shard_idx], src, sizeof(uintptr_t), now_ns, expiry_ns);
                     if (cached)
                     {
                         if (check_read_permission(cached->protection))
@@ -1445,14 +1400,13 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
 #endif
 }
 
-// Lower bound on a valid usermode pointer on x64 Windows. The null page plus
-// the standard NoAccess guard region cover [0, 0x10000); rejecting addresses
-// in this range without a memory access keeps stale or sentinel pointers from
-// raising first-chance exceptions in callers' debuggers.
+// Lower bound on a valid usermode pointer on x64 Windows. The null page plus the standard NoAccess guard region cover
+// [0, 0x10000); rejecting addresses in this range without a memory access keeps stale or sentinel pointers from raising
+// first-chance exceptions in callers' debuggers.
 namespace
 {
     inline constexpr uintptr_t SEH_READ_MIN_VALID_ADDR = 0x10000;
-} // namespace
+} // anonymous namespace
 
 bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
 {
@@ -1461,8 +1415,7 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
     if (!out || addr < SEH_READ_MIN_VALID_ADDR)
         return false;
 
-    // Overflow guard on (addr + bytes); a wraparound source range can never be
-    // a valid mapped image.
+    // Overflow guard on (addr + bytes); a wraparound source range can never be a valid mapped image.
     if (addr + bytes < addr)
         return false;
 
@@ -1470,20 +1423,17 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
     __try
     {
 #if defined(__SANITIZE_ADDRESS__)
-        // Copy via __movsb (rep movsb) under ASan: MSVC routes std::memcpy through
-        // the ASan interceptor, which inspects the source against ASan's shadow and
-        // false-positives on the foreign mapped memory this probe legitimately
-        // reads (e.g. a module's data section during the RTTI walk). __movsb emits
-        // the copy inline with no interceptable call. Release keeps std::memcpy.
-        __movsb(static_cast<unsigned char *>(out),
-                reinterpret_cast<const unsigned char *>(addr), bytes);
+        // Copy via __movsb (rep movsb) under ASan: MSVC routes std::memcpy through the ASan interceptor, which inspects
+        // the source against ASan's shadow and false-positives on the foreign mapped memory this probe legitimately
+        // reads (e.g. a module's data section during the RTTI walk). __movsb emits the copy inline with no
+        // interceptable call. Release keeps std::memcpy.
+        __movsb(static_cast<unsigned char *>(out), reinterpret_cast<const unsigned char *>(addr), bytes);
 #else
         std::memcpy(out, reinterpret_cast<const void *>(addr), bytes);
 #endif
         return true;
     }
-    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
-               GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
                   ? EXCEPTION_EXECUTE_HANDLER
                   : EXCEPTION_CONTINUE_SEARCH)
     {
@@ -1491,10 +1441,9 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
     }
 #else
     // MinGW lacks __try/__except. Validate every region the read spans with
-    // VirtualQuery before issuing the memcpy. The loop chains across adjacent
-    // regions so multi-region reads (which happen for any buffer that crosses
-    // an allocation boundary) succeed when every covered page is committed
-    // and readable.
+    // VirtualQuery before issuing the memcpy. The loop chains across adjacent regions so multi-region reads (which
+    // happen for any buffer that crosses an allocation boundary) succeed when every covered page is committed and
+    // readable.
     size_t copied = 0;
     while (copied < bytes)
     {
@@ -1516,9 +1465,7 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
         const size_t available = static_cast<size_t>(region_end - cur);
         const size_t remaining = bytes - copied;
         const size_t to_copy = (remaining < available) ? remaining : available;
-        std::memcpy(static_cast<std::byte *>(out) + copied,
-                    reinterpret_cast<const void *>(cur),
-                    to_copy);
+        std::memcpy(static_cast<std::byte *>(out) + copied, reinterpret_cast<const void *>(cur), to_copy);
         copied += to_copy;
     }
     return true;
@@ -1527,15 +1474,12 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
 
 namespace
 {
-    // Walk a Cheat-Engine-style pointer chain inside a single fault guard.
-    // Every offset except the last is added and dereferenced to obtain the next
-    // link; the last offset is added but not dereferenced, yielding the target
-    // field address in out_addr. Each intermediate link is screened with
-    // plausible_userspace_ptr so a torn or sentinel pointer aborts the walk
-    // before the next dereference faults. Returns false on any fault or
-    // implausible intermediate link.
-    bool resolve_chain_guarded(uintptr_t base, const ptrdiff_t *offsets,
-                               size_t count, uintptr_t &out_addr) noexcept
+    // Walk a Cheat-Engine-style pointer chain inside a single fault guard. Every offset except the last is added and
+    // dereferenced to obtain the next link; the last offset is added but not dereferenced, yielding the target field
+    // address in out_addr. Each intermediate link is screened with plausible_userspace_ptr so a torn or sentinel
+    // pointer aborts the walk before the next dereference faults. Returns false on any fault or implausible
+    // intermediate link.
+    bool resolve_chain_guarded(uintptr_t base, const ptrdiff_t *offsets, size_t count, uintptr_t &out_addr) noexcept
     {
 #ifdef _MSC_VER
         __try
@@ -1544,29 +1488,25 @@ namespace
             for (size_t i = 0; i + 1 < count; ++i)
             {
                 uintptr_t next = 0;
-                std::memcpy(&next,
-                            reinterpret_cast<const void *>(cur + static_cast<uintptr_t>(offsets[i])),
+                std::memcpy(&next, reinterpret_cast<const void *>(cur + static_cast<uintptr_t>(offsets[i])),
                             sizeof(next));
                 if (!Memory::plausible_userspace_ptr(next))
                     return false;
                 cur = next;
             }
-            out_addr = (count == 0)
-                           ? cur
-                           : cur + static_cast<uintptr_t>(offsets[count - 1]);
+            out_addr = (count == 0) ? cur : cur + static_cast<uintptr_t>(offsets[count - 1]);
             return true;
         }
-        __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
-                   GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
-                      ? EXCEPTION_EXECUTE_HANDLER
-                      : EXCEPTION_CONTINUE_SEARCH)
+        __except (
+            (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+                ? EXCEPTION_EXECUTE_HANDLER
+                : EXCEPTION_CONTINUE_SEARCH)
         {
             return false;
         }
 #else
-        // MinGW lacks __try/__except. Each intermediate link is read through
-        // read_ptr_unsafe (VirtualQuery-guarded, returns 0 on fault); the
-        // plausibility screen also rejects that 0.
+        // MinGW lacks __try/__except. Each intermediate link is read through read_ptr_unsafe (VirtualQuery-guarded,
+        // returns 0 on fault); the plausibility screen also rejects that 0.
         uintptr_t cur = base;
         for (size_t i = 0; i + 1 < count; ++i)
         {
@@ -1575,16 +1515,14 @@ namespace
                 return false;
             cur = next;
         }
-        out_addr = (count == 0)
-                       ? cur
-                       : cur + static_cast<uintptr_t>(offsets[count - 1]);
+        out_addr = (count == 0) ? cur : cur + static_cast<uintptr_t>(offsets[count - 1]);
         return true;
 #endif
     }
-} // namespace
+} // anonymous namespace
 
-std::optional<uintptr_t> DetourModKit::Memory::seh_resolve_chain(
-    uintptr_t base, std::span<const ptrdiff_t> offsets) noexcept
+std::optional<uintptr_t> DetourModKit::Memory::seh_resolve_chain(uintptr_t base,
+                                                                 std::span<const ptrdiff_t> offsets) noexcept
 {
     uintptr_t addr = 0;
     if (resolve_chain_guarded(base, offsets.data(), offsets.size(), addr))
@@ -1592,8 +1530,8 @@ std::optional<uintptr_t> DetourModKit::Memory::seh_resolve_chain(
     return std::nullopt;
 }
 
-bool DetourModKit::Memory::seh_read_chain_bytes(
-    uintptr_t base, std::span<const ptrdiff_t> offsets, void *out, size_t bytes) noexcept
+bool DetourModKit::Memory::seh_read_chain_bytes(uintptr_t base, std::span<const ptrdiff_t> offsets, void *out,
+                                                size_t bytes) noexcept
 {
     if (bytes == 0)
         return true;
@@ -1601,11 +1539,9 @@ bool DetourModKit::Memory::seh_read_chain_bytes(
         return false;
 
 #ifdef _MSC_VER
-    // The walk is inlined here rather than reusing resolve_chain_guarded so the
-    // resolve and the terminal read sit in one __try region. On x64 the __try
-    // is table-driven and free on the no-fault path, so this is a structural
-    // choice (one uniform failure path for the whole operation) and not a
-    // measurable saving over two adjacent guarded regions.
+    // The walk is inlined here rather than reusing resolve_chain_guarded so the resolve and the terminal read sit in
+    // one __try region. On x64 the __try is table-driven and free on the no-fault path, so this is a structural choice
+    // (one uniform failure path for the whole operation) and not a measurable saving over two adjacent guarded regions.
     const ptrdiff_t *const offs = offsets.data();
     const size_t count = offsets.size();
     __try
@@ -1614,28 +1550,22 @@ bool DetourModKit::Memory::seh_read_chain_bytes(
         for (size_t i = 0; i + 1 < count; ++i)
         {
             uintptr_t next = 0;
-            std::memcpy(&next,
-                        reinterpret_cast<const void *>(cur + static_cast<uintptr_t>(offs[i])),
-                        sizeof(next));
+            std::memcpy(&next, reinterpret_cast<const void *>(cur + static_cast<uintptr_t>(offs[i])), sizeof(next));
             if (!Memory::plausible_userspace_ptr(next))
                 return false;
             cur = next;
         }
-        const uintptr_t final_addr = (count == 0)
-                                         ? cur
-                                         : cur + static_cast<uintptr_t>(offs[count - 1]);
-        // Apply seh_read_bytes' own prechecks on the terminal address so a low
-        // or wrapping final address fails identically on both toolchains. The
-        // MinGW branch below already routes through seh_read_bytes, which
-        // rejects these; matching here keeps a stale or sentinel final address
-        // from raising a (benign but debugger-visible) first-chance exception.
+        const uintptr_t final_addr = (count == 0) ? cur : cur + static_cast<uintptr_t>(offs[count - 1]);
+        // Apply seh_read_bytes' own prechecks on the terminal address so a low or wrapping final address fails
+        // identically on both toolchains. The
+        // MinGW branch below already routes through seh_read_bytes, which rejects these; matching here keeps a stale or
+        // sentinel final address from raising a (benign but debugger-visible) first-chance exception.
         if (final_addr < SEH_READ_MIN_VALID_ADDR || final_addr + bytes < final_addr)
             return false;
         std::memcpy(out, reinterpret_cast<const void *>(final_addr), bytes);
         return true;
     }
-    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
-               GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
+    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
                   ? EXCEPTION_EXECUTE_HANDLER
                   : EXCEPTION_CONTINUE_SEARCH)
     {
@@ -1643,8 +1573,7 @@ bool DetourModKit::Memory::seh_read_chain_bytes(
     }
 #else
     // MinGW: resolve through the VirtualQuery-guarded helper, then read the
-    // terminal range with seh_read_bytes, which validates every region the
-    // read spans before copying.
+    // terminal range with seh_read_bytes, which validates every region the read spans before copying.
     uintptr_t final_addr = 0;
     if (!resolve_chain_guarded(base, offsets.data(), offsets.size(), final_addr))
         return false;
@@ -1654,9 +1583,8 @@ bool DetourModKit::Memory::seh_read_chain_bytes(
 
 namespace
 {
-    // PE header layout for module range resolution. Pulled into an anonymous
-    // namespace so the helper is internal to memory.cpp and shared between
-    // module_range_for, own_module_range, and host_module_range.
+    // PE header layout for module range resolution. Pulled into an anonymous namespace so the helper is internal to
+    // memory.cpp and shared between module_range_for, own_module_range, and host_module_range.
     DetourModKit::Memory::ModuleRange module_range_from_handle(HMODULE mod) noexcept
     {
         if (!mod)
@@ -1676,8 +1604,7 @@ namespace
             return {};
 
         IMAGE_NT_HEADERS nt{};
-        if (!DetourModKit::Memory::seh_read_bytes(base + static_cast<uintptr_t>(dos.e_lfanew),
-                                                  &nt, sizeof(nt)))
+        if (!DetourModKit::Memory::seh_read_bytes(base + static_cast<uintptr_t>(dos.e_lfanew), &nt, sizeof(nt)))
             return {};
         if (nt.Signature != IMAGE_NT_SIGNATURE)
             return {};
@@ -1689,9 +1616,8 @@ namespace
         return {base, base + size_of_image};
     }
 
-    // Per-process ModuleRange cache shared by module_range_for. Constructed on
-    // first use; survives until process exit. Static-storage destruction is
-    // deliberately a non-issue here because the cache is consulted only by
+    // Per-process ModuleRange cache shared by module_range_for. Constructed on first use; survives until process exit.
+    // Static-storage destruction is deliberately a non-issue here because the cache is consulted only by
     // DetourModKit code that has already shut down its own subsystems via
     // DMK_Shutdown() (callers do not query ranges from atexit handlers).
     struct ModuleRangeCache
@@ -1705,20 +1631,16 @@ namespace
         static ModuleRangeCache cache;
         return cache;
     }
-} // namespace
+} // anonymous namespace
 
-std::optional<DetourModKit::Memory::ModuleRange>
-DetourModKit::Memory::module_range_for(const void *address) noexcept
+std::optional<DetourModKit::Memory::ModuleRange> DetourModKit::Memory::module_range_for(const void *address) noexcept
 {
     if (!address)
         return std::nullopt;
 
     HMODULE mod = nullptr;
-    if (!GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(address),
-            &mod) ||
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            reinterpret_cast<LPCWSTR>(address), &mod) ||
         mod == nullptr)
     {
         return std::nullopt;
@@ -1747,18 +1669,14 @@ DetourModKit::Memory::module_range_for(const void *address) noexcept
 
 DetourModKit::Memory::ModuleRange DetourModKit::Memory::own_module_range() noexcept
 {
-    // Magic-static initialization: the lambda runs exactly once per module,
-    // guarded by the C++23 thread-safe-initialization rules. Taking the
-    // address of own_module_range itself anchors the lookup in whichever
+    // Magic-static initialization: the lambda runs exactly once per module, guarded by the C++23
+    // thread-safe-initialization rules. Taking the address of own_module_range itself anchors the lookup in whichever
     // DLL/EXE statically linked this translation unit.
     static const ModuleRange cached = []
     {
         HMODULE mod = nullptr;
-        if (!GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
-                    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(&DetourModKit::Memory::own_module_range),
-                &mod) ||
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(&DetourModKit::Memory::own_module_range), &mod) ||
             mod == nullptr)
         {
             return ModuleRange{};
