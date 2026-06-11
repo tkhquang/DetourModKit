@@ -163,7 +163,8 @@ namespace
         const std::size_t n = lat.size();
         if (n == 0)
             return {0, 0, 0};
-        auto pct = [&](double p) {
+        auto pct = [&](double p)
+        {
             const std::size_t idx = std::min(n - 1, static_cast<std::size_t>(p * static_cast<double>(n)));
             return lat[idx];
         };
@@ -204,7 +205,8 @@ namespace
 
         for (unsigned t = 0; t < threads; ++t)
         {
-            workers.emplace_back([&, t]() {
+            workers.emplace_back([&, t]()
+                                 {
                 auto &lat = per_thread[t];
                 lat.reserve(ops_per_thread);
                 // Each thread starts at a different offset so they collide on
@@ -225,8 +227,7 @@ namespace
                     sink(r ? 1u : 0u);
                     lat.push_back(static_cast<double>(
                         std::chrono::duration_cast<std::chrono::nanoseconds>(e - s).count()));
-                }
-            });
+                } });
         }
 
         go.store(true, std::memory_order_release);
@@ -343,18 +344,16 @@ int main()
     // --- Phase 1: cache OFF -> validators take the direct-VirtualQuery branch.
     Mem::shutdown_cache(); // ensure uninitialized
     std::printf("[1] Validation MISS / uncached (cache off -> VirtualQuery branch)\n");
-    const double ns_qry = median_ns_per_call(kIters, kSamples, [&]() {
+    const double ns_qry = median_ns_per_call(kIters, kSamples, [&]()
+                                             {
         MEMORY_BASIC_INFORMATION mbi;
-        sink(VirtualQuery(page, &mbi, sizeof(mbi)));
-    });
+        sink(VirtualQuery(page, &mbi, sizeof(mbi))); });
     report("raw VirtualQuery", ns_qry);
-    const double ns_isr_miss = median_ns_per_call(kIters, kSamples, [&]() {
-        sink(Mem::is_readable(page, 8) ? 1u : 0u);
-    });
+    const double ns_isr_miss = median_ns_per_call(kIters, kSamples, [&]()
+                                                  { sink(Mem::is_readable(page, 8) ? 1u : 0u); });
     report("is_readable MISS", ns_isr_miss);
-    const double ns_isw_miss = median_ns_per_call(kIters, kSamples, [&]() {
-        sink(Mem::is_writable(page, 8) ? 1u : 0u);
-    });
+    const double ns_isw_miss = median_ns_per_call(kIters, kSamples, [&]()
+                                                  { sink(Mem::is_writable(page, 8) ? 1u : 0u); });
     report("is_writable MISS", ns_isw_miss);
 
     // --- Phase 2: cache ON, warm -> validators hit the fresh entry.
@@ -366,37 +365,31 @@ int main()
     sink(Mem::is_readable(page, 8) ? 1u : 0u); // warm the entry
     sink(Mem::is_writable(page, 8) ? 1u : 0u);
     std::printf("\n[2] Validation WARM HIT (cache on, entry fresh within TTL)\n");
-    const double ns_isr_hit = median_ns_per_call(kIters, kSamples, [&]() {
-        sink(Mem::is_readable(page, 8) ? 1u : 0u);
-    });
+    const double ns_isr_hit = median_ns_per_call(kIters, kSamples, [&]()
+                                                 { sink(Mem::is_readable(page, 8) ? 1u : 0u); });
     report("is_readable HIT", ns_isr_hit);
-    const double ns_isw_hit = median_ns_per_call(kIters, kSamples, [&]() {
-        sink(Mem::is_writable(page, 8) ? 1u : 0u);
-    });
+    const double ns_isw_hit = median_ns_per_call(kIters, kSamples, [&]()
+                                                 { sink(Mem::is_writable(page, 8) ? 1u : 0u); });
     report("is_writable HIT", ns_isw_hit);
 
     // --- Phase 3: direct access primitives (no cache dependence).
     std::printf("\n[3] Direct access primitives\n");
-    const double ns_dread = median_ns_per_call(kIters, kSamples, [&]() {
-        sink(*reinterpret_cast<volatile std::uint64_t *>(page));
-    });
+    const double ns_dread = median_ns_per_call(kIters, kSamples, [&]()
+                                               { sink(*reinterpret_cast<volatile std::uint64_t *>(page)); });
     report("direct volatile load", ns_dread);
-    const double ns_unchecked = median_ns_per_call(kIters, kSamples, [&]() {
-        sink(Mem::read_ptr_unchecked(addr, 0));
-    });
+    const double ns_unchecked = median_ns_per_call(kIters, kSamples, [&]()
+                                                   { sink(Mem::read_ptr_unchecked(addr, 0)); });
     report("read_ptr_unchecked", ns_unchecked);
-    const double ns_sehread = median_ns_per_call(kIters, kSamples, [&]() {
+    const double ns_sehread = median_ns_per_call(kIters, kSamples, [&]()
+                                                 {
         auto v = Mem::seh_read<std::uint64_t>(addr);
-        sink(v ? *v : 0u);
-    });
+        sink(v ? *v : 0u); });
     report("seh_read<u64>", ns_sehread);
-    const double ns_dstore = median_ns_per_call(kIters, kSamples, [&]() {
-        *reinterpret_cast<volatile std::uint64_t *>(page) = g_sink.load(std::memory_order_relaxed);
-    });
+    const double ns_dstore = median_ns_per_call(kIters, kSamples, [&]()
+                                                { *reinterpret_cast<volatile std::uint64_t *>(page) = g_sink.load(std::memory_order_relaxed); });
     report("direct volatile store", ns_dstore);
-    const double ns_wbytes = median_ns_per_call(kWriteIters, kSamples, [&]() {
-        (void)Mem::write_bytes(reinterpret_cast<std::byte *>(page), src, 8);
-    });
+    const double ns_wbytes = median_ns_per_call(kWriteIters, kSamples, [&]()
+                                                { (void)Mem::write_bytes(reinterpret_cast<std::byte *>(page), src, 8); });
     report("write_bytes(8)", ns_wbytes);
 
     std::printf("\n  cache stats: %s\n", Mem::get_cache_stats().c_str());
@@ -412,10 +405,10 @@ int main()
             grow_vad(target - grown);
             grown = target;
         }
-        const double ns = median_ns_per_call(kIters, kSamples, [&]() {
+        const double ns = median_ns_per_call(kIters, kSamples, [&]()
+                                             {
             MEMORY_BASIC_INFORMATION mbi;
-            sink(VirtualQuery(page, &mbi, sizeof(mbi)));
-        });
+            sink(VirtualQuery(page, &mbi, sizeof(mbi))); });
         std::printf("  +%6zu reserved regions   %10.2f ns/call\n", grown, ns);
     }
 
@@ -493,7 +486,8 @@ int main()
     const std::span<const std::ptrdiff_t> chain_span{chain_offsets};
 
     std::printf("\n[8] Pointer chain (%zu links, warm cache)\n", CHAIN_CELLS);
-    const double ns_gated_walk = median_ns_per_call(kIters, kSamples, [&]() {
+    const double ns_gated_walk = median_ns_per_call(kIters, kSamples, [&]()
+                                                    {
         std::uintptr_t cur = chain_base;
         bool ok = true;
         for (std::size_t i = 0; i + 1 < CHAIN_CELLS; ++i)
@@ -508,18 +502,17 @@ int main()
         std::uint64_t v = 0;
         if (ok && Mem::is_readable(reinterpret_cast<void *>(cur), sizeof(std::uint64_t)))
             v = *reinterpret_cast<volatile std::uint64_t *>(cur);
-        sink(v);
-    });
+        sink(v); });
     report("gated link walk", ns_gated_walk);
-    const double ns_resolve_chain = median_ns_per_call(kIters, kSamples, [&]() {
+    const double ns_resolve_chain = median_ns_per_call(kIters, kSamples, [&]()
+                                                       {
         const auto a = Mem::seh_resolve_chain(chain_base, chain_span);
-        sink(a ? *a : 0u);
-    });
+        sink(a ? *a : 0u); });
     report("seh_resolve_chain", ns_resolve_chain);
-    const double ns_read_chain = median_ns_per_call(kIters, kSamples, [&]() {
+    const double ns_read_chain = median_ns_per_call(kIters, kSamples, [&]()
+                                                    {
         const auto v = Mem::seh_read_chain<std::uint64_t>(chain_base, chain_span);
-        sink(v ? *v : 0u);
-    });
+        sink(v ? *v : 0u); });
     report("seh_read_chain<u64>", ns_read_chain);
     std::printf("  gated/seh_read_chain ratio: %.1fx\n",
                 ns_read_chain > 0 ? ns_gated_walk / ns_read_chain : 0.0);

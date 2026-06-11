@@ -74,10 +74,14 @@ namespace DetourModKit
              */
             struct ColSite
             {
-                std::uintptr_t col_addr = 0;   ///< Address of the COL the vtable points back to.
-                std::uintptr_t td_addr = 0;    ///< TypeDescriptor base (image base + COL.pTypeDescriptor RVA).
-                std::uintptr_t name_addr = 0;  ///< Mangled-name buffer (td_addr + TD_NAME_OFFSET).
-                std::uint32_t col_offset = 0;  ///< COL.offset (+0x04): this vtable's offset in the complete object.
+                /// Address of the COL the vtable points back to.
+                std::uintptr_t col_addr = 0;
+                /// TypeDescriptor base (image base + COL.pTypeDescriptor RVA).
+                std::uintptr_t td_addr = 0;
+                /// Mangled-name buffer (td_addr + TD_NAME_OFFSET).
+                std::uintptr_t name_addr = 0;
+                /// COL.offset (+0x04): this vtable's offset in the complete object.
+                std::uint32_t col_offset = 0;
             };
 
             /**

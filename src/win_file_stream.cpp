@@ -52,7 +52,8 @@ namespace DetourModKit
         if (mode & std::ios_base::app)
         {
             if (SetFilePointer(static_cast<HANDLE>(m_handle), 0, nullptr, FILE_END) ==
-                INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR)
+                    INVALID_SET_FILE_POINTER &&
+                GetLastError() != NO_ERROR)
             {
                 CloseHandle(static_cast<HANDLE>(m_handle));
                 m_handle = INVALID_HANDLE_VALUE;

@@ -101,7 +101,8 @@ namespace
 
         const BenchEvent evt{42};
         const auto total_start = Clock::now();
-        const double med = median_ns_per_op(iterations, samples, [&]() {
+        const double med = median_ns_per_op(iterations, samples, [&]()
+                                            {
             if (use_safe)
             {
                 dispatcher.emit_safe(evt);
@@ -109,8 +110,7 @@ namespace
             else
             {
                 dispatcher.emit(evt);
-            }
-        });
+            } });
         const auto total_end = Clock::now();
 
         const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -130,10 +130,11 @@ namespace
         DetourModKit::EventDispatcher<BenchEvent> dispatcher;
 
         const auto total_start = Clock::now();
-        const double med = median_ns_per_op(iterations, samples, [&]() {
-            auto sub = dispatcher.subscribe(&noop_handler);
-            // sub destroyed here: triggers unsubscribe
-        });
+        const double med = median_ns_per_op(iterations, samples, [&]()
+                                            {
+                                                auto sub = dispatcher.subscribe(&noop_handler);
+                                                // sub destroyed here: triggers unsubscribe
+                                            });
         const auto total_end = Clock::now();
 
         const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -166,7 +167,8 @@ namespace
 
         for (std::size_t t = 0; t < thread_count; ++t)
         {
-            workers.emplace_back([&dispatcher, &go, &evt, per_thread_iters]() {
+            workers.emplace_back([&dispatcher, &go, &evt, per_thread_iters]()
+                                 {
                 while (!go.load(std::memory_order_acquire))
                 {
                     std::this_thread::yield();
@@ -174,8 +176,7 @@ namespace
                 for (std::size_t i = 0; i < per_thread_iters; ++i)
                 {
                     dispatcher.emit(evt);
-                }
-            });
+                } });
         }
 
         const auto start = Clock::now();
@@ -207,17 +208,16 @@ namespace
 
         // Inside the handler, subscribe() will be rejected by the
         // reentrancy guard. The cost measured here is the rejection path.
-        auto sub = dispatcher.subscribe([&dispatcher](const BenchEvent &) {
+        auto sub = dispatcher.subscribe([&dispatcher](const BenchEvent &)
+                                        {
             auto inner = dispatcher.subscribe(&noop_handler);
-            (void)inner;
-        });
+            (void)inner; });
 
         const BenchEvent evt{0};
 
         const auto total_start = Clock::now();
-        const double med = median_ns_per_op(iterations, samples, [&]() {
-            dispatcher.emit(evt);
-        });
+        const double med = median_ns_per_op(iterations, samples, [&]()
+                                            { dispatcher.emit(evt); });
         const auto total_end = Clock::now();
 
         const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

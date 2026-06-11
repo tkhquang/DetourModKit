@@ -203,11 +203,14 @@ namespace DetourModKit
             return false;
         }
 
-        /// Reports whether any consume binding carries a suppressible gamepad button
-        /// (gates the XInput hook). Only digital buttons gate it: the detour masks
-        /// XINPUT_GAMEPAD.wButtons, so analog triggers and stick directions (the
-        /// synthetic codes >= GamepadCode::LeftTrigger) can never be cleared and must
-        /// not install a hook that would mask nothing.
+        /**
+         * @brief Reports whether any consume binding carries a suppressible gamepad button
+         *        (gates the XInput hook).
+         * @details Only digital buttons gate it: the detour masks XINPUT_GAMEPAD.wButtons,
+         *          so analog triggers and stick directions (the synthetic codes >=
+         *          GamepadCode::LeftTrigger) can never be cleared and must not install a
+         *          hook that would mask nothing.
+         */
         bool scan_for_consume_gamepad_bindings(const std::vector<InputBinding> &bindings) noexcept
         {
             for (const auto &binding : bindings)
@@ -248,20 +251,22 @@ namespace DetourModKit
             return false;
         }
 
-        /// Builds the detour-evaluable consume rule list from the current bindings.
-        /// A rule is emitted for every consume binding whose masked triggers include
-        /// a digital gamepad button, but only when every known modifier (across all
-        /// bindings) is itself a digital gamepad button. The XInput detour sees only
-        /// XINPUT_GAMEPAD.wButtons, so it cannot observe a keyboard/mouse modifier or
-        /// an analog trigger/stick used as a modifier; if any such modifier exists,
-        /// the poll loop's strict-match decision is not reproducible in the detour,
-        /// so the whole list is dropped and the reactive (poll-published) mask alone
-        /// covers the held-modifier case. For an eligible binding the rule carries:
-        ///   modifier_mask  -- all of the chord's modifier bits,
-        ///   trigger_mask   -- the chord's digital gamepad trigger bits to clear,
-        ///   forbidden_mask -- every other known modifier bit, so holding a modifier
-        ///                     that belongs to a different chord rejects this one,
-        ///                     exactly as the poll loop's strict-match check does.
+        /**
+         * @brief Builds the detour-evaluable consume rule list from the current bindings.
+         * @details A rule is emitted for every consume binding whose masked triggers include
+         *          a digital gamepad button, but only when every known modifier (across all
+         *          bindings) is itself a digital gamepad button. The XInput detour sees only
+         *          XINPUT_GAMEPAD.wButtons, so it cannot observe a keyboard/mouse modifier or
+         *          an analog trigger/stick used as a modifier; if any such modifier exists,
+         *          the poll loop's strict-match decision is not reproducible in the detour,
+         *          so the whole list is dropped and the reactive (poll-published) mask alone
+         *          covers the held-modifier case. For an eligible binding the rule carries:
+         *            modifier_mask  -- all of the chord's modifier bits,
+         *            trigger_mask   -- the chord's digital gamepad trigger bits to clear,
+         *            forbidden_mask -- every other known modifier bit, so holding a modifier
+         *                              that belongs to a different chord rejects this one,
+         *                              exactly as the poll loop's strict-match check does.
+         */
         std::vector<detail::GamepadConsumeRule>
         build_gamepad_consume_rules(const std::vector<InputBinding> &bindings,
                                     const std::vector<InputCode> &known_modifiers) noexcept
@@ -370,9 +375,9 @@ namespace DetourModKit
         m_has_gamepad_bindings.store(scan_for_gamepad_bindings(m_bindings), std::memory_order_relaxed);
         m_has_wheel_bindings.store(scan_for_wheel_bindings(m_bindings), std::memory_order_relaxed);
         m_has_consume_gamepad_bindings.store(scan_for_consume_gamepad_bindings(m_bindings),
-                                            std::memory_order_relaxed);
+                                             std::memory_order_relaxed);
         m_has_wheel_consume_bindings.store(scan_for_wheel_consume_bindings(m_bindings),
-                                          std::memory_order_relaxed);
+                                           std::memory_order_relaxed);
 
         // Publish the detour-side consume rule list. The XInput detour evaluates
         // these against the exact snapshot the game reads, closing the leading-edge
@@ -401,7 +406,7 @@ namespace DetourModKit
         try
         {
             m_poll_thread = std::jthread([this](std::stop_token token)
-                                        { poll_loop(std::move(token)); });
+                                         { poll_loop(std::move(token)); });
         }
         catch (...)
         {
@@ -820,7 +825,7 @@ namespace DetourModKit
 
             std::unique_lock lock(m_cv_mutex);
             m_cv.wait_for(lock, stop_token, m_poll_interval, [&stop_token]()
-                         { return stop_token.stop_requested(); });
+                          { return stop_token.stop_requested(); });
         }
     }
 
@@ -1395,8 +1400,8 @@ namespace DetourModKit
         }
 
         m_poller = std::make_shared<InputPoller>(std::move(m_pending_bindings), poll_interval,
-                                                m_require_focus, m_gamepad_index, m_trigger_threshold,
-                                                m_stick_threshold);
+                                                 m_require_focus, m_gamepad_index, m_trigger_threshold,
+                                                 m_stick_threshold);
         m_pending_bindings.clear();
         m_poller->start();
         m_active_poller.store(m_poller, std::memory_order_release);
@@ -1539,7 +1544,8 @@ namespace DetourModKit
             {
                 auto new_end = std::remove_if(
                     m_pending_bindings.begin(), m_pending_bindings.end(),
-                    [name](const InputBinding &b) { return b.name == name; });
+                    [name](const InputBinding &b)
+                    { return b.name == name; });
                 removed_pending = static_cast<size_t>(
                     std::distance(new_end, m_pending_bindings.end()));
                 m_pending_bindings.erase(new_end, m_pending_bindings.end());

@@ -270,15 +270,15 @@ TEST_F(ProfilerRecordTest, ConcurrentRecord_NoDataRace)
 
     for (int t = 0; t < threads; ++t)
     {
-        workers.emplace_back([&profiler]() {
+        workers.emplace_back([&profiler]()
+                             {
             LARGE_INTEGER tick;
             for (int i = 0; i < samples_per_thread; ++i)
             {
                 QueryPerformanceCounter(&tick);
                 profiler.record("concurrent", tick.QuadPart,
                                 tick.QuadPart + 100, GetCurrentThreadId());
-            }
-        });
+            } });
     }
 
     for (auto &w : workers)
@@ -301,12 +301,12 @@ TEST_F(ProfilerRecordTest, ConcurrentScopedProfile_NoDataRace)
 
     for (int t = 0; t < threads; ++t)
     {
-        workers.emplace_back([]() {
+        workers.emplace_back([]()
+                             {
             for (int i = 0; i < scopes_per_thread; ++i)
             {
                 ScopedProfile sp("concurrent_scope");
-            }
-        });
+            } });
     }
 
     for (auto &w : workers)
@@ -330,15 +330,15 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
     std::vector<std::thread> writers;
     for (int t = 0; t < 4; ++t)
     {
-        writers.emplace_back([&profiler, &stop]() {
+        writers.emplace_back([&profiler, &stop]()
+                             {
             LARGE_INTEGER tick;
             while (!stop.load(std::memory_order_relaxed))
             {
                 QueryPerformanceCounter(&tick);
                 profiler.record("concurrent_export", tick.QuadPart,
                                 tick.QuadPart + 100, GetCurrentThreadId());
-            }
-        });
+            } });
     }
 
     // Reader thread: export while writers are active. Loop until the window
@@ -347,7 +347,8 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
     // export can outlast the 50 ms window; keying the exit on a completed export
     // (not on wall-clock alone) keeps export_count deterministic instead of
     // letting it flake at 0.
-    std::thread reader([&profiler, &stop, &export_count]() {
+    std::thread reader([&profiler, &stop, &export_count]()
+                       {
         while (!stop.load(std::memory_order_relaxed) ||
                export_count.load(std::memory_order_relaxed) == 0)
         {
@@ -360,8 +361,7 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
                 EXPECT_EQ(json.back(), ']');
             }
             export_count.fetch_add(1, std::memory_order_relaxed);
-        }
-    });
+        } });
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     stop.store(true, std::memory_order_relaxed);
@@ -487,7 +487,9 @@ TEST_F(ProfilerRecordTest, ExportChromeJson_EscapesBackspaceFormFeedAndRawContro
     // Name with backspace, form-feed, and a raw control byte (SOH = 0x01).
     // String concatenation separates \x01 from the trailing 'd' to prevent
     // the compiler from parsing "\x01d" as a single hex escape (0x1D).
-    const char name[] = "a\bb\fc" "\x01" "d";
+    const char name[] = "a\bb\fc"
+                        "\x01"
+                        "d";
     profiler.record(name, tick.QuadPart, tick.QuadPart + 100, 1);
 
     const std::string json = profiler.export_chrome_json();
@@ -549,18 +551,19 @@ TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ExporterRemainsWellForme
     writers.reserve(8);
     for (int t = 0; t < 8; ++t)
     {
-        writers.emplace_back([&profiler, &stop]() {
+        writers.emplace_back([&profiler, &stop]()
+                             {
             LARGE_INTEGER tick;
             while (!stop.load(std::memory_order_relaxed))
             {
                 QueryPerformanceCounter(&tick);
                 profiler.record("wrap_race", tick.QuadPart,
                                 tick.QuadPart + 1, GetCurrentThreadId());
-            }
-        });
+            } });
     }
 
-    std::thread reader([&profiler, &stop, &malformed_detected]() {
+    std::thread reader([&profiler, &stop, &malformed_detected]()
+                       {
         // Event markers for scoped content parsing. `k_name_marker` locates
         // an event by name; `k_dur_marker` finds the corresponding duration
         // field within the same compact JSON object.
@@ -599,8 +602,7 @@ TEST_F(ProfilerRecordTest, ConcurrentRecord_WrapsBuffer_ExporterRemainsWellForme
                 }
                 pos += k_name_marker.size();
             }
-        }
-    });
+        } });
 
     // Run long enough for multiple full wraps (>= 3 * capacity samples).
     const auto deadline =

@@ -486,10 +486,11 @@ TEST(BootstrapOnLogicDllUnload, IsIdempotent)
 
     void *trampoline = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "logic_unload_idem",
-        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
-        reinterpret_cast<void *>(&logic_unload_detour_add),
-        &trampoline).has_value());
+                                               "logic_unload_idem",
+                                               reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+                                               reinterpret_cast<void *>(&logic_unload_detour_add),
+                                               &trampoline)
+                    .has_value());
     InputManager::get_instance().register_press(
         "logic_unload_idem_bind", {keyboard_key(0x42)}, []() {});
 
@@ -510,17 +511,19 @@ TEST(BootstrapOnLogicDllUnloadAll, RemovesAllHooksAndBindings)
 
     void *trampoline_add = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "logic_unload_all_add",
-        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
-        reinterpret_cast<void *>(&logic_unload_detour_add),
-        &trampoline_add).has_value());
+                                               "logic_unload_all_add",
+                                               reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+                                               reinterpret_cast<void *>(&logic_unload_detour_add),
+                                               &trampoline_add)
+                    .has_value());
 
     void *trampoline_sub = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "logic_unload_all_sub",
-        reinterpret_cast<uintptr_t>(&logic_unload_target_sub),
-        reinterpret_cast<void *>(&logic_unload_detour_sub),
-        &trampoline_sub).has_value());
+                                               "logic_unload_all_sub",
+                                               reinterpret_cast<uintptr_t>(&logic_unload_target_sub),
+                                               reinterpret_cast<void *>(&logic_unload_detour_sub),
+                                               &trampoline_sub)
+                    .has_value());
 
     InputManager::get_instance().register_press(
         "logic_unload_all_bind_a", {keyboard_key(0x43)}, []() {});
@@ -548,10 +551,11 @@ TEST(BootstrapOnLogicDllUnloadAll, IsIdempotent)
 
     void *trampoline = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "logic_unload_all_idem",
-        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
-        reinterpret_cast<void *>(&logic_unload_detour_add),
-        &trampoline).has_value());
+                                               "logic_unload_all_idem",
+                                               reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+                                               reinterpret_cast<void *>(&logic_unload_detour_add),
+                                               &trampoline)
+                    .has_value());
     InputManager::get_instance().register_press(
         "logic_unload_all_idem_bind", {keyboard_key(0x45)}, []() {});
 
@@ -582,16 +586,18 @@ TEST(BootstrapOnLogicDllUnloadAll, CoexistsWithNamedOverload)
 
     void *trampoline_named = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "logic_unload_mixed_named",
-        reinterpret_cast<uintptr_t>(&logic_unload_target_add),
-        reinterpret_cast<void *>(&logic_unload_detour_add),
-        &trampoline_named).has_value());
+                                               "logic_unload_mixed_named",
+                                               reinterpret_cast<uintptr_t>(&logic_unload_target_add),
+                                               reinterpret_cast<void *>(&logic_unload_detour_add),
+                                               &trampoline_named)
+                    .has_value());
     void *trampoline_residual = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "logic_unload_mixed_residual",
-        reinterpret_cast<uintptr_t>(&logic_unload_target_sub),
-        reinterpret_cast<void *>(&logic_unload_detour_sub),
-        &trampoline_residual).has_value());
+                                               "logic_unload_mixed_residual",
+                                               reinterpret_cast<uintptr_t>(&logic_unload_target_sub),
+                                               reinterpret_cast<void *>(&logic_unload_detour_sub),
+                                               &trampoline_residual)
+                    .has_value());
 
     InputManager::get_instance().register_press(
         "logic_unload_mixed_named_bind", {keyboard_key(0x46)}, []() {});
@@ -713,8 +719,14 @@ namespace
         ~LoadedFixtureModule() { unload(); }
     };
 
-    int __cdecl fixture_detour_compute_damage(int, int) { return 0xC0DE; }
-    int __cdecl fixture_detour_compute_armor(int, int) { return 0xCAFE; }
+    int __cdecl fixture_detour_compute_damage(int, int)
+    {
+        return 0xC0DE;
+    }
+    int __cdecl fixture_detour_compute_armor(int, int)
+    {
+        return 0xCAFE;
+    }
 } // namespace
 
 // Drives the Bootstrap helpers through a real LoadLibrary / FreeLibrary cycle
@@ -732,15 +744,17 @@ TEST(BootstrapOnLogicDllUnload, FixtureDllRoundTrip)
     void *tramp_damage = nullptr;
     void *tramp_armor = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "fixture_dll_damage",
-        reinterpret_cast<uintptr_t>(mod.compute_damage),
-        reinterpret_cast<void *>(&fixture_detour_compute_damage),
-        &tramp_damage).has_value());
+                                               "fixture_dll_damage",
+                                               reinterpret_cast<uintptr_t>(mod.compute_damage),
+                                               reinterpret_cast<void *>(&fixture_detour_compute_damage),
+                                               &tramp_damage)
+                    .has_value());
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "fixture_dll_armor",
-        reinterpret_cast<uintptr_t>(mod.compute_armor),
-        reinterpret_cast<void *>(&fixture_detour_compute_armor),
-        &tramp_armor).has_value());
+                                               "fixture_dll_armor",
+                                               reinterpret_cast<uintptr_t>(mod.compute_armor),
+                                               reinterpret_cast<void *>(&fixture_detour_compute_armor),
+                                               &tramp_armor)
+                    .has_value());
 
     InputManager::get_instance().register_press(
         "fixture_dll_bind_a", {keyboard_key(0x4A)}, []() {});
@@ -800,15 +814,17 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
     void *tramp_damage = nullptr;
     void *tramp_armor = nullptr;
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "fixture_all_damage",
-        reinterpret_cast<uintptr_t>(mod.compute_damage),
-        reinterpret_cast<void *>(&fixture_detour_compute_damage),
-        &tramp_damage).has_value());
+                                               "fixture_all_damage",
+                                               reinterpret_cast<uintptr_t>(mod.compute_damage),
+                                               reinterpret_cast<void *>(&fixture_detour_compute_damage),
+                                               &tramp_damage)
+                    .has_value());
     ASSERT_TRUE(HookManager::get_instance().create_inline_hook(
-        "fixture_all_armor",
-        reinterpret_cast<uintptr_t>(mod.compute_armor),
-        reinterpret_cast<void *>(&fixture_detour_compute_armor),
-        &tramp_armor).has_value());
+                                               "fixture_all_armor",
+                                               reinterpret_cast<uintptr_t>(mod.compute_armor),
+                                               reinterpret_cast<void *>(&fixture_detour_compute_armor),
+                                               &tramp_armor)
+                    .has_value());
     InputManager::get_instance().register_press(
         "fixture_all_bind", {keyboard_key(0x4C)}, []() {});
 
@@ -832,11 +848,12 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
     HookConfig strict;
     strict.fail_if_already_hooked = true;
     EXPECT_TRUE(HookManager::get_instance().create_inline_hook(
-        "fixture_all_damage_reloaded",
-        reinterpret_cast<uintptr_t>(mod.compute_damage),
-        reinterpret_cast<void *>(&fixture_detour_compute_damage),
-        &tramp_reload,
-        strict).has_value());
+                                               "fixture_all_damage_reloaded",
+                                               reinterpret_cast<uintptr_t>(mod.compute_damage),
+                                               reinterpret_cast<void *>(&fixture_detour_compute_damage),
+                                               &tramp_reload,
+                                               strict)
+                    .has_value());
 
     HookManager::get_instance().remove_all_hooks();
 }

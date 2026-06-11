@@ -583,10 +583,14 @@ namespace
      */
     struct IniLoadOutcome
     {
-        bool read_succeeded{false};   ///< Bytes successfully read from disk
-        bool parse_succeeded{false};  ///< CSimpleIniA::LoadData returned SI_OK
-        SI_Error parse_rc{SI_OK};     ///< Raw SimpleIni return code (when read_succeeded)
-        std::optional<std::uint64_t> hash; ///< FNV-1a hash of the read bytes
+        /// Bytes successfully read from disk
+        bool read_succeeded{false};
+        /// CSimpleIniA::LoadData returned SI_OK
+        bool parse_succeeded{false};
+        /// Raw SimpleIni return code (when read_succeeded)
+        SI_Error parse_rc{SI_OK};
+        /// FNV-1a hash of the read bytes
+        std::optional<std::uint64_t> hash;
     };
 
     /**
@@ -765,11 +769,9 @@ namespace
                 {
                     std::unique_lock<std::mutex> lock(m_mutex);
                     m_cv.wait(lock, [&]()
-                              {
-                                  return st.stop_requested() ||
-                                         m_shutdown.load(std::memory_order_acquire) ||
-                                         m_reload_requested.load(std::memory_order_acquire);
-                              });
+                              { return st.stop_requested() ||
+                                       m_shutdown.load(std::memory_order_acquire) ||
+                                       m_reload_requested.load(std::memory_order_acquire); });
                 }
 
                 if (st.stop_requested() ||
@@ -816,8 +818,10 @@ namespace
         return s_servicer;
     }
 
-    /// Replaces an existing item with the same section+key, or appends if none found.
-    /// Caller must hold get_config_mutex().
+    /**
+     * @brief Replaces an existing item with the same section+key, or appends if none found.
+     * @note Caller must hold get_config_mutex().
+     */
     void replace_or_append(std::unique_ptr<ConfigItemBase> item)
     {
         auto &items = get_registered_config_items();
@@ -842,7 +846,8 @@ namespace
         if (module_dir.empty() || module_dir == L".")
         {
             logger.warning("Config: Could not reliably determine module directory or it's current working directory. Using relative path for INI: {}", ini_filename);
-            return std::filesystem::path(ini_filename); // Fallback to relative path
+            // Fallback to relative path
+            return std::filesystem::path(ini_filename);
         }
 
         try
@@ -955,12 +960,8 @@ void DetourModKit::Config::register_string(std::string_view section, std::string
 void DetourModKit::Config::register_log_level(std::string_view section, std::string_view ini_key,
                                               std::string_view default_value)
 {
-    register_string(section, ini_key, "Log level",
-                    [](const std::string &value)
-                    {
-                        Logger::get_instance().set_log_level(Logger::string_to_log_level(value));
-                    },
-                    std::string(default_value));
+    register_string(section, ini_key, "Log level", [](const std::string &value)
+                    { Logger::get_instance().set_log_level(Logger::string_to_log_level(value)); }, std::string(default_value));
 }
 
 void DetourModKit::Config::register_key_combo(std::string_view section, std::string_view ini_key,
@@ -1028,12 +1029,8 @@ void DetourModKit::Config::register_consume_flag(
     // and re-runs on every load()/reload(), stays valid. set_consume is a no-op
     // for an unknown name, so registering this before the binding exists is safe.
     std::string binding_name_str(input_binding_name);
-    register_bool(section, ini_key, log_key_name,
-                  [binding_name_str](bool consume)
-                  {
-                      InputManager::get_instance().set_consume(binding_name_str, consume);
-                  },
-                  default_value);
+    register_bool(section, ini_key, log_key_name, [binding_name_str](bool consume)
+                  { InputManager::get_instance().set_consume(binding_name_str, consume); }, default_value);
 }
 
 void DetourModKit::Config::load(std::string_view ini_filename)
@@ -1045,7 +1042,8 @@ void DetourModKit::Config::load(std::string_view ini_filename)
 
         Logger &logger = Logger::get_instance();
         std::filesystem::path ini_path = get_ini_file_path(std::string(ini_filename), logger);
-        std::string ini_path_str = ini_path.string(); // convert to narrow string for logger formatting
+        // convert to narrow string for logger formatting
+        std::string ini_path_str = ini_path.string();
         CSimpleIniA ini;
         ini.SetUnicode(false);  // Assume ASCII/MBCS INI
         ini.SetMultiKey(false); // Disallow duplicate keys in a section

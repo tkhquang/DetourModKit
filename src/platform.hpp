@@ -40,7 +40,7 @@ namespace DetourModKit::detail
             return true;
 
         // Confirm the critical section lives in committed, readable memory before
-        // dereferencing OwningThread. A wrong kLoaderLockOffset (foreign or future
+        // dereferencing OwningThread. A wrong LOADER_LOCK_OFFSET (foreign or future
         // PEB layout) would otherwise read a bogus pointer and fault the host.
         constexpr DWORD READABLE_PROTECT =
             PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |

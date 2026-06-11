@@ -98,8 +98,9 @@ namespace DetourModKit
         const int64_t delta_ticks = end_ticks - start_ticks;
 
         // Convert ticks to microseconds: (delta * 1'000'000) / frequency.
-        // Use 64-bit intermediate to avoid overflow for deltas up to ~9200 seconds
-        // at a 10 MHz QPC frequency (common on modern hardware).
+        // The 64-bit intermediate (delta * 1'000'000) cannot overflow for any realistic
+        // delta: at a 10 MHz QPC frequency it would take a delta over ~922,000 seconds.
+        // duration_us is additionally clamped to UINT32_MAX microseconds (~71 minutes).
         const auto duration_us = static_cast<uint32_t>(
             std::min<int64_t>((delta_ticks * 1'000'000) / m_qpc_frequency,
                               static_cast<int64_t>(UINT32_MAX)));

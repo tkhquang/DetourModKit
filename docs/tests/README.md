@@ -361,10 +361,7 @@ cmake --build build/mingw-release --parallel
 
 ## Installed Package Smoke Test
 
-`tests/package_smoke` is a minimal consumer project for validating installed
-release packages. It uses `find_package(DetourModKit REQUIRED)`, links
-`DetourModKit::DetourModKit`, and touches `HookManager` so the static
-dependency archives are required by the final link.
+`tests/package_smoke` is a minimal consumer project for validating installed release packages. It uses `find_package(DetourModKit REQUIRED)`, links `DetourModKit::DetourModKit`, and touches `HookManager` so the static dependency archives are required by the final link.
 
 ```bash
 cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
@@ -375,8 +372,7 @@ cmake --build build/package-smoke-mingw --parallel
 ctest --test-dir build/package-smoke-mingw --output-on-failure
 ```
 
-The release workflow runs this smoke project for both MinGW and MSVC after
-installing the package and before uploading release artifacts.
+The release workflow runs this smoke project for both MinGW and MSVC after installing the package and before uploading release artifacts.
 
 ## Project Structure
 

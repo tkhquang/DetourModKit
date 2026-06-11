@@ -609,4 +609,3 @@ DetourModKit::Scanner::resolve_cascade_in_host_module_with_prologue_fallback(
     }
     return resolve_cascade_in_module_with_prologue_fallback(candidates, label, range);
 }
-

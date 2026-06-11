@@ -1534,7 +1534,7 @@ namespace
                ("test_logger_overload_" + std::to_string(GetCurrentProcessId()) + "_" +
                 std::to_string(counter.fetch_add(1)) + ".log");
     }
-}
+} // namespace
 
 TEST(LoggerConfigureOverload, TwoArgConfigureUsesDefaultTimestamp)
 {
@@ -1545,4 +1545,3 @@ TEST(LoggerConfigureOverload, TwoArgConfigureUsesDefaultTimestamp)
     EXPECT_TRUE(std::filesystem::exists(path));
     std::filesystem::remove(path);
 }
-

@@ -355,8 +355,10 @@ namespace DetourModKit
          */
         enum class ScannerKind : std::uint8_t
         {
-            Executable, ///< scan_executable_regions: committed execute-readable pages.
-            Readable    ///< scan_readable_regions: all committed readable pages (superset).
+            /// scan_executable_regions: committed execute-readable pages.
+            Executable,
+            /// scan_readable_regions: all committed readable pages (superset).
+            Readable
         };
 
         /**
@@ -365,8 +367,10 @@ namespace DetourModKit
          */
         enum class ResolveMode : std::uint8_t
         {
-            Direct,     ///< Returned address = match + disp_offset.
-            RipRelative ///< Read int32 displacement at (match + disp_offset), compute match + instr_end_offset + disp.
+            /// Returned address = match + disp_offset.
+            Direct,
+            /// Read int32 displacement at (match + disp_offset), compute match + instr_end_offset + disp.
+            RipRelative
         };
 
         /**
@@ -664,8 +668,10 @@ namespace DetourModKit
          */
         enum class OperandKind : std::uint8_t
         {
-            Immediate,         ///< An immediate operand (e.g. the imm of `add reg, imm`).
-            MemoryDisplacement ///< A memory operand's displacement (e.g. the disp of `[reg + disp]`).
+            /// An immediate operand (e.g. the imm of `add reg, imm`).
+            Immediate,
+            /// A memory operand's displacement (e.g. the disp of `[reg + disp]`).
+            MemoryDisplacement
         };
 
         /**
@@ -728,8 +734,10 @@ namespace DetourModKit
          */
         enum class StringEncoding : std::uint8_t
         {
-            Utf8,   ///< One byte per character (char / std::string literals).
-            Utf16le ///< Two bytes per character, little-endian (wchar_t / L"" on Windows).
+            /// One byte per character (char / std::string literals).
+            Utf8,
+            /// Two bytes per character, little-endian (wchar_t / L"" on Windows).
+            Utf16le
         };
 
         /**
@@ -738,8 +746,10 @@ namespace DetourModKit
          */
         enum class XrefReturn : std::uint8_t
         {
-            ReferencingInstruction, ///< Exact address of the instruction that loads the string.
-            EnclosingFunction       ///< Best-effort prologue back-scan from the instruction (heuristic).
+            /// Exact address of the instruction that loads the string.
+            ReferencingInstruction,
+            /// Best-effort prologue back-scan from the instruction (heuristic).
+            EnclosingFunction
         };
 
         /**
@@ -748,13 +758,20 @@ namespace DetourModKit
          */
         enum class StringXrefError : std::uint8_t
         {
-            EmptyQuery,         ///< The query text was empty.
-            InvalidRange,       ///< @p range was not a valid mapped image.
-            StringNotFound,     ///< The string bytes were not found in any readable page of the image.
-            StringAmbiguous,    ///< The string occurs more than once (linker-pooled or repeated).
-            NoReference,        ///< No recognized RIP-relative reference in the image resolves to the string.
-            AmbiguousReference, ///< More than one instruction references the string.
-            FunctionNotFound    ///< EnclosingFunction mode: no prologue within the back-scan window.
+            /// The query text was empty.
+            EmptyQuery,
+            /// @p range was not a valid mapped image.
+            InvalidRange,
+            /// The string bytes were not found in any readable page of the image.
+            StringNotFound,
+            /// The string occurs more than once (linker-pooled or repeated).
+            StringAmbiguous,
+            /// No recognized RIP-relative reference in the image resolves to the string.
+            NoReference,
+            /// More than one instruction references the string.
+            AmbiguousReference,
+            /// EnclosingFunction mode: no prologue within the back-scan window.
+            FunctionNotFound
         };
 
         /**
@@ -798,8 +815,10 @@ namespace DetourModKit
          */
         struct StringRefQuery
         {
-            std::string_view text;                          ///< Literal content (no quotes).
-            StringEncoding encoding = StringEncoding::Utf8; ///< How it is stored in the image.
+            /// Literal content (no quotes).
+            std::string_view text;
+            /// How it is stored in the image.
+            StringEncoding encoding = StringEncoding::Utf8;
             /**
              * @brief Match a trailing NUL so a prefix of a longer literal is not
              *        matched (e.g. "Player" inside "PlayerController").
@@ -905,9 +924,12 @@ namespace DetourModKit
          */
         enum class SimdLevel
         {
-            Scalar, ///< No SIMD (byte-by-byte verification)
-            Sse2,   ///< SSE2 (16 bytes per iteration)
-            Avx2    ///< AVX2 (32 bytes per iteration, with SSE2 + scalar tail)
+            /// No SIMD (byte-by-byte verification)
+            Scalar,
+            /// SSE2 (16 bytes per iteration)
+            Sse2,
+            /// AVX2 (32 bytes per iteration, with SSE2 + scalar tail)
+            Avx2
         };
 
         /**

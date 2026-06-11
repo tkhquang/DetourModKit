@@ -384,9 +384,12 @@ namespace DetourModKit
         // Interception gates, recomputed alongside the modifier caches. Each
         // decides whether an active-input hook is installed lazily by the poll
         // loop, so a mod that never opts in pays no interception cost.
-        std::atomic<bool> m_has_wheel_bindings{false};          // any MouseWheel trigger -> WndProc hook
-        std::atomic<bool> m_has_consume_gamepad_bindings{false}; // any consume gamepad binding -> XInput hook
-        std::atomic<bool> m_has_wheel_consume_bindings{false};   // any consume wheel binding -> swallow wheel messages
+        // any MouseWheel trigger -> WndProc hook
+        std::atomic<bool> m_has_wheel_bindings{false};
+        // any consume gamepad binding -> XInput hook
+        std::atomic<bool> m_has_consume_gamepad_bindings{false};
+        // any consume wheel binding -> swallow wheel messages
+        std::atomic<bool> m_has_wheel_consume_bindings{false};
     };
 
     /**

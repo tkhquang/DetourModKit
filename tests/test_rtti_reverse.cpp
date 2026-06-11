@@ -34,7 +34,10 @@ namespace
     alignas(8) std::array<std::byte, REV_BUF_SIZE * REV_POOL_FIXTURES> g_rev_pool{};
     std::size_t g_rev_used = 0;
 
-    void rev_reset() noexcept { g_rev_used = 0; }
+    void rev_reset() noexcept
+    {
+        g_rev_used = 0;
+    }
 
     template <typename T>
     void rev_write(std::byte *buf, std::size_t off, const T &value) noexcept
@@ -72,7 +75,7 @@ namespace
         rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 8, 0);          // cd_offset
         rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 12,
                                  static_cast<std::uint32_t>(buf_rva + REV_TD_OFFSET)); // p_type_descriptor
-        rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 16, 0);         // p_class_descriptor
+        rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 16, 0);                         // p_class_descriptor
         rev_write<std::uint32_t>(buf, REV_COL_OFFSET + 20,
                                  static_cast<std::uint32_t>(buf_rva + REV_COL_OFFSET)); // p_self
 

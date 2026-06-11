@@ -79,8 +79,8 @@ namespace DetourModKit
          * @note Starts a background cleanup thread that runs periodically.
          */
         [[nodiscard]] bool init_cache(size_t cache_size = DEFAULT_CACHE_SIZE,
-                        unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS,
-                        size_t shard_count = DEFAULT_CACHE_SHARD_COUNT);
+                                      unsigned int expiry_ms = DEFAULT_CACHE_EXPIRY_MS,
+                                      size_t shard_count = DEFAULT_CACHE_SHARD_COUNT);
 
         /**
          * @brief Clears all entries from the memory region cache.
@@ -306,8 +306,10 @@ namespace DetourModKit
          */
         struct ModuleRange
         {
-            uintptr_t base = 0; ///< Mapped base address (equal to the HMODULE value).
-            uintptr_t end = 0;  ///< Exclusive upper bound (base + SizeOfImage from the PE OptionalHeader).
+            /// Mapped base address (equal to the HMODULE value).
+            uintptr_t base = 0;
+            /// Exclusive upper bound (base + SizeOfImage from the PE OptionalHeader).
+            uintptr_t end = 0;
 
             /// True iff this range is populated (base != 0 && end > base).
             [[nodiscard]] constexpr bool valid() const noexcept { return base != 0 && end > base; }

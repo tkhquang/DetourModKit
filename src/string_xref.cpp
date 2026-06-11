@@ -95,7 +95,8 @@ namespace DetourModKit
                 emit(static_cast<std::uint8_t>(ch));
                 if (wide)
                 {
-                    emit(0x00); // High byte of a Latin-1 code unit in UTF-16LE.
+                    // High byte of a Latin-1 code unit in UTF-16LE.
+                    emit(0x00);
                 }
             }
             if (query.require_terminator)
@@ -135,7 +136,8 @@ namespace DetourModKit
         {
             found_count = 0;
             std::uintptr_t first_site = 0;
-            constexpr std::size_t instr_len = 7; // REX.W + opcode + ModRM + disp32.
+            // REX.W + opcode + ModRM + disp32.
+            constexpr std::size_t instr_len = 7;
 
             for (const auto &window : Scanner::detail::collect_executable_windows(range))
             {
@@ -171,7 +173,8 @@ namespace DetourModKit
                     }
                     else
                     {
-                        return 0; // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                        // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                        return 0;
                     }
                 }
             }
@@ -227,7 +230,8 @@ namespace DetourModKit
                     if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, bytes + offset,
                                                              window.span - offset, &insn, operands)))
                     {
-                        ++offset; // Byte-restart recovery: realign past data / jump tables.
+                        // Byte-restart recovery: realign past data / jump tables.
+                        ++offset;
                         continue;
                     }
 
@@ -264,7 +268,8 @@ namespace DetourModKit
                         }
                         else
                         {
-                            return 0; // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                            // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                            return 0;
                         }
                     }
 

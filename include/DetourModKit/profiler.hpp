@@ -54,15 +54,21 @@
 // array-reference binding accepts any array, including function-local
 // `char buf[N]`. Callers remain responsible for static-storage lifetime.
 // Prefer string literals or namespace-scope `static constexpr char` arrays.
-#define DMK_PROFILE_SCOPE(name) \
-    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__) { name }
+#define DMK_PROFILE_SCOPE(name)                                             \
+    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_, __LINE__) \
+    {                                                                       \
+        name                                                                \
+    }
 
 // Scoped timing using the enclosing function name. `__func__` is a static-
 // storage array per [dcl.fct.def.general]/8, so it binds to the array-
 // reference constructor and the stored pointer remains valid for the
 // lifetime of the process.
-#define DMK_PROFILE_FUNCTION() \
-    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__) { __func__ }
+#define DMK_PROFILE_FUNCTION()                                                   \
+    ::DetourModKit::ScopedProfile DMK_CONCAT(dmk_scoped_profile_func_, __LINE__) \
+    {                                                                            \
+        __func__                                                                 \
+    }
 
 #else
 
@@ -82,7 +88,8 @@ namespace DetourModKit
      */
     struct ProfileSample
     {
-        std::atomic<uint32_t> sequence{0}; ///< Odd = write in progress, even = committed.
+        /// Odd = write in progress, even = committed.
+        std::atomic<uint32_t> sequence{0};
         /**
          * @brief Non-owning pointer to the sample name.
          * @note Caller must ensure the pointed-to string outlives the
@@ -92,9 +99,12 @@ namespace DetourModKit
          *       it does NOT verify static-storage.
          */
         const char *name{nullptr};
-        int64_t start_ticks{0};  ///< QPC tick count at scope entry.
-        uint32_t duration_us{0}; ///< Duration in microseconds (max ~71 minutes).
-        uint32_t thread_id{0};   ///< Win32 thread ID of the recording thread.
+        /// QPC tick count at scope entry.
+        int64_t start_ticks{0};
+        /// Duration in microseconds (max ~71 minutes).
+        uint32_t duration_us{0};
+        /// Win32 thread ID of the recording thread.
+        uint32_t thread_id{0};
 
         ProfileSample() noexcept = default;
         ProfileSample(const ProfileSample &) = delete;

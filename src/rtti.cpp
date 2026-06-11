@@ -335,13 +335,11 @@ namespace DetourModKit
                 mod.base + static_cast<std::uintptr_t>(static_cast<std::uint32_t>(dos->e_lfanew));
             // The NT headers must lie inside the image; a wild e_lfanew is the
             // signature of a forged or truncated header.
-            if (!Memory::contains(mod, nt_addr)
-                || !Memory::contains(mod, nt_addr + sizeof(IMAGE_NT_HEADERS64)))
+            if (!Memory::contains(mod, nt_addr) || !Memory::contains(mod, nt_addr + sizeof(IMAGE_NT_HEADERS64)))
                 return 0;
 
             const auto nt = Memory::seh_read<IMAGE_NT_HEADERS64>(nt_addr);
-            if (!nt || nt->Signature != IMAGE_NT_SIGNATURE
-                || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+            if (!nt || nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
                 return 0;
 
             // The Windows loader caps a PE at 96 sections; a larger count is
@@ -355,8 +353,7 @@ namespace DetourModKit
             // sizeof(IMAGE_NT_HEADERS64) instead would misplace the table whenever
             // the optional-header size differs from the compile-time struct size.
             const std::uintptr_t sec_table =
-                nt_addr + offsetof(IMAGE_NT_HEADERS64, OptionalHeader)
-                + nt->FileHeader.SizeOfOptionalHeader;
+                nt_addr + offsetof(IMAGE_NT_HEADERS64, OptionalHeader) + nt->FileHeader.SizeOfOptionalHeader;
 
             std::size_t count = 0;
             for (std::uint32_t i = 0; i < num_sections && count < cap; ++i)
@@ -439,7 +436,8 @@ namespace DetourModKit
                     continue;
                 }
 
-                std::uintptr_t buf[512]; // a 4 KiB page holds at most 512 qwords
+                // a 4 KiB page holds at most 512 qwords
+                std::uintptr_t buf[512];
                 const std::size_t want = (qwords < 512) ? qwords : 512;
                 if (Memory::seh_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
                 {

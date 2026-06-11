@@ -706,8 +706,8 @@ namespace DetourModKit
          */
         template <typename F>
             requires std::invocable<F, safetyhook::VmHook &> &&
-                     (!std::is_void_v<std::invoke_result_t<F, safetyhook::VmHook &>>) &&
-                     (!std::is_reference_v<std::invoke_result_t<F, safetyhook::VmHook &>>)
+                         (!std::is_void_v<std::invoke_result_t<F, safetyhook::VmHook &>>) &&
+                         (!std::is_reference_v<std::invoke_result_t<F, safetyhook::VmHook &>>)
         [[nodiscard]] auto with_vmt_method(std::string_view vmt_name, size_t method_index, F &&fn)
             -> std::optional<std::invoke_result_t<F, safetyhook::VmHook &>>
         {
@@ -900,8 +900,8 @@ namespace DetourModKit
          */
         template <typename F>
             requires std::invocable<F, InlineHook &> &&
-                     (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
-                     (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
+                         (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
+                         (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
         [[nodiscard]] auto with_inline_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
@@ -965,8 +965,8 @@ namespace DetourModKit
          */
         template <typename F>
             requires std::invocable<F, InlineHook &> &&
-                     (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
-                     (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
+                         (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
+                         (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
         [[nodiscard]] auto try_with_inline_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, InlineHook &>>
         {
@@ -1004,8 +1004,8 @@ namespace DetourModKit
          */
         template <typename F>
             requires std::invocable<F, MidHook &> &&
-                     (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
-                     (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
+                         (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
+                         (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
         [[nodiscard]] auto with_mid_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
@@ -1069,8 +1069,8 @@ namespace DetourModKit
          */
         template <typename F>
             requires std::invocable<F, MidHook &> &&
-                     (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
-                     (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
+                         (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
+                         (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
         [[nodiscard]] auto try_with_mid_hook(std::string_view hook_id, F &&fn)
             -> std::optional<std::invoke_result_t<F, MidHook &>>
         {
@@ -1125,7 +1125,8 @@ namespace DetourModKit
         struct ReentrancyGuard
         {
             int &counter;
-            explicit ReentrancyGuard(int &cnt) noexcept : counter(cnt) { ++counter; }
+            explicit ReentrancyGuard(int &cnt) noexcept
+                : counter(cnt) { ++counter; }
             ~ReentrancyGuard() noexcept { --counter; }
             ReentrancyGuard(const ReentrancyGuard &) = delete;
             ReentrancyGuard &operator=(const ReentrancyGuard &) = delete;

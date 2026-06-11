@@ -666,17 +666,13 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **Every `FreeLibrary` + `LoadLibrary` cycle resets all global/static variables** in the logic DLL. This is usually desirable (clean slate), but be aware:
 
-**Global variables in logic DLL:**
-Reset to initial values on reload. This is expected - design for it.
+**Global variables in logic DLL:** Reset to initial values on reload. This is expected - design for it.
 
-**DMK singletons (Logger, HookManager, etc.):**
-**Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
+**DMK singletons (Logger, HookManager, etc.):** **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
 
-**Game memory (patched bytes, written values):**
-**Persists** - the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `Memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
+**Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `Memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
 
-**Config file on disk:**
-**Persists** across reloads. Edit the INI, press reload, and new values take effect.
+**Config file on disk:** **Persists** across reloads. Edit the INI, press reload, and new values take effect.
 
 **Profiler ring buffer:** The `Profiler` stores timing samples in a ring buffer that lives in the logic DLL's memory. This data is lost when `FreeLibrary` unloads the DLL. If you need the profiling data, call `Profiler::get_instance().export_to_file("profile.json")` or `Profiler::get_instance().export_chrome_json()` before calling `Shutdown()`.
 
@@ -949,26 +945,19 @@ This prevents double-initialization (once from `DllMain`, once from the loader's
 
 ### Common Crashes and Their Causes
 
-**Crash on reload (access violation at 0x00000000):**
-`GetProcAddress` returned null - export name mismatch. Verify `extern "C"` on exports, check with `dumpbin /exports mod_logic.dll`.
+**Crash on reload (access violation at 0x00000000):** `GetProcAddress` returned null - export name mismatch. Verify `extern "C"` on exports, check with `dumpbin /exports mod_logic.dll`.
 
-**Crash during hook callback after reload:**
-Old function pointer stored somewhere. Ensure all hook callbacks reference only data within mod_logic.dll.
+**Crash during hook callback after reload:** Old function pointer stored somewhere. Ensure all hook callbacks reference only data within mod_logic.dll.
 
-**Crash on `FreeLibrary`:**
-Thread still executing code in mod_logic.dll. Increase `CALLBACK_DRAIN_MS` after `Shutdown()`.
+**Crash on `FreeLibrary`:** Thread still executing code in mod_logic.dll. Increase `CALLBACK_DRAIN_MS` after `Shutdown()`.
 
-**Hang on reload:**
-Deadlock in `DMK_Shutdown` (Logger waiting for async thread). Ensure no logging calls are in-flight during shutdown.
+**Hang on reload:** Deadlock in `DMK_Shutdown` (Logger waiting for async thread). Ensure no logging calls are in-flight during shutdown.
 
-**Hooks don't take effect after reload:**
-AOB pattern scan finds wrong address. Game may have moved memory; verify base address hasn't changed.
+**Hooks don't take effect after reload:** AOB pattern scan finds wrong address. Game may have moved memory; verify base address hasn't changed.
 
-**Config values reset unexpectedly:**
-Global state reset on DLL reload. Use persistent state in loader (see Section 2 above).
+**Config values reset unexpectedly:** Global state reset on DLL reload. Use persistent state in loader (see Section 2 above).
 
-**Build fails: "cannot open mod_logic.dll for writing":**
-Game still has DLL loaded. Use the staging directory pattern from Step 4 to avoid this entirely. Without staging: unload first (Numpad 0), then build.
+**Build fails: "cannot open mod_logic.dll for writing":** Game still has DLL loaded. Use the staging directory pattern from Step 4 to avoid this entirely. Without staging: unload first (Numpad 0), then build.
 
 ### Diagnostic Tools
 
@@ -1147,23 +1136,17 @@ Each DLL exports its own `Init()` / `Shutdown()` pair. The loader manages them a
 
 ## FAQ
 
-**Q: Can I hot-reload the loader ASI itself?**
-A: No. The ASI is loaded by the game's ASI loader at startup and cannot be unloaded. But you should rarely need to change the loader - it's just a thin stub.
+**Q: Can I hot-reload the loader ASI itself?** A: No. The ASI is loaded by the game's ASI loader at startup and cannot be unloaded. But you should rarely need to change the loader - it's just a thin stub.
 
-**Q: What if the game crashes during reload?**
-A: Attach a debugger (x64dbg) and check the crash address. If it's in unmapped memory (the old logic DLL's address space), a callback was still executing during `FreeLibrary`. Increase the sleep duration or add a reference-counting mechanism to wait for all callbacks to complete.
+**Q: What if the game crashes during reload?** A: Attach a debugger (x64dbg) and check the crash address. If it's in unmapped memory (the old logic DLL's address space), a callback was still executing during `FreeLibrary`. Increase the sleep duration or add a reference-counting mechanism to wait for all callbacks to complete.
 
-**Q: Can I use this with ASI loaders like Ultimate ASI Loader?**
-A: Yes. The ASI loader loads `mod_loader.asi` normally. The loader then manages `mod_logic.dll` via `LoadLibrary`/`FreeLibrary`. The ASI loader is not involved in the reload cycle.
+**Q: Can I use this with ASI loaders like Ultimate ASI Loader?** A: Yes. The ASI loader loads `mod_loader.asi` normally. The loader then manages `mod_logic.dll` via `LoadLibrary`/`FreeLibrary`. The ASI loader is not involved in the reload cycle.
 
-**Q: Does this work with anti-cheat?**
-A: If the game has anti-cheat that monitors `LoadLibrary` calls, hot-reload may trigger detection. This approach is intended for single-player modding and development environments only.
+**Q: Does this work with anti-cheat?** A: If the game has anti-cheat that monitors `LoadLibrary` calls, hot-reload may trigger detection. This approach is intended for single-player modding and development environments only.
 
-**Q: Can I reload while a game menu/pause screen is open?**
-A: Yes - this is actually the safest time to reload, since fewer game systems are actively calling hooked functions. The pause screen reduces the chance of a callback being mid-execution during teardown.
+**Q: Can I reload while a game menu/pause screen is open?** A: Yes - this is actually the safest time to reload, since fewer game systems are actively calling hooked functions. The pause screen reduces the chance of a callback being mid-execution during teardown.
 
-**Q: What about C++ exceptions thrown during Init()?**
-A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw across DLL boundaries). Use `try/catch` inside `Init()` and return `false` on failure. The loader will log the error and leave the logic DLL unloaded until the next reload attempt.
+**Q: What about C++ exceptions thrown during Init()?** A: If `Init()` throws, the loader catches nothing (C functions shouldn't throw across DLL boundaries). Use `try/catch` inside `Init()` and return `false` on failure. The loader will log the error and leave the logic DLL unloaded until the next reload attempt.
 
 ---
 

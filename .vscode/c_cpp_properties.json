@@ -1,16 +1,37 @@
 {
   "configurations": [
     {
-      "name": "windows-gcc-x64",
+      "name": "windows-msvc-x64",
+      "compileCommands": "${workspaceFolder}/build/msvc-debug/compile_commands.json",
       "includePath": [
+        "${workspaceFolder}/include",
+        "${workspaceFolder}/src",
         "${workspaceFolder}/external/DirectXMath/Inc",
-        "${workspaceFolder}/**"
+        "${workspaceFolder}/external/simpleini",
+        "${workspaceFolder}/external/safetyhook/include",
+        "${workspaceFolder}/build/msvc-debug/generated",
+        "${workspaceFolder}/build/msvc-debug/_deps/zydis-src/include",
+        "${workspaceFolder}/build/msvc-debug/_deps/zydis-build",
+        "${workspaceFolder}/build/msvc-debug/_deps/zydis-src/dependencies/zycore/include",
+        "${workspaceFolder}/build/msvc-debug/_deps/zydis-build/zycore"
       ],
-      "defines": ["_DEBUG", "UNICODE", "_UNICODE"],
-      "compilerPath": "C:\\msys64\\mingw64\\bin\\gcc.exe",
+      "defines": [
+        "_DEBUG",
+        "UNICODE",
+        "_UNICODE",
+        "WIN32",
+        "_WINDOWS",
+        "NOMINMAX",
+        "SAFETYHOOK_NO_DLL",
+        "WINVER=0x0A00",
+        "_WIN32_WINNT=0x0A00",
+        "ZYCORE_STATIC_BUILD",
+        "ZYDIS_STATIC_BUILD"
+      ],
+      "compilerPath": "cl.exe",
       "cStandard": "c23",
       "cppStandard": "c++23",
-      "intelliSenseMode": "windows-gcc-x64"
+      "intelliSenseMode": "windows-msvc-x64"
     }
   ],
   "version": 4

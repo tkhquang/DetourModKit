@@ -2199,7 +2199,7 @@ TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
     for (int i = 0; i < kThreads; ++i)
     {
         threads.emplace_back([&, i]
-        {
+                             {
             start_latch.arrive_and_wait();
             auto result = hook_manager_->create_vmt_hook(
                 std::format("ConcVmt{}", i), targets[i].get());
@@ -2212,8 +2212,7 @@ TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
                 rejected_count.fetch_add(1, std::memory_order_relaxed);
                 std::lock_guard<std::mutex> lock(errors_mutex);
                 errors.push_back(result.error());
-            }
-        });
+            } });
     }
 
     start_latch.arrive_and_wait();
@@ -2526,7 +2525,8 @@ TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
     std::atomic<bool> reader_may_return{false};
     std::atomic<bool> reader_observed_valid{false};
 
-    std::thread reader([&]() {
+    std::thread reader([&]()
+                       {
         bool invoked = hm.with_inline_hook("late-shutdown-hook", [&](InlineHook &hook) {
             reader_started.store(true, std::memory_order_release);
             // Hold the shared_lock while the main thread races shutdown().
@@ -2540,8 +2540,7 @@ TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
             reader_observed_valid.store(!hook.get_name().empty(),
                                         std::memory_order_release);
         });
-        EXPECT_TRUE(invoked);
-    });
+        EXPECT_TRUE(invoked); });
 
     while (!reader_started.load(std::memory_order_acquire))
     {
@@ -2553,7 +2552,8 @@ TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
     // destructor-equivalent ordering.
     std::atomic<bool> killer_started{false};
     std::atomic<bool> shutdown_returned{false};
-    std::thread killer([&]() {
+    std::thread killer([&]()
+                       {
         // Publish entry into hm.shutdown() before the call so the main
         // thread can wait on this flag instead of an unconditional sleep.
         // Without this, shutdown_returned == false could mean "blocked on
@@ -2561,8 +2561,7 @@ TEST_F(HookManagerTest, LateShutdown_DrainsReadersBeforeClearingMaps)
         // letting a premature-return regression slip through.
         killer_started.store(true, std::memory_order_release);
         hm.shutdown();
-        shutdown_returned.store(true, std::memory_order_release);
-    });
+        shutdown_returned.store(true, std::memory_order_release); });
 
     // Wait until the killer has actually entered hm.shutdown() before we
     // assert it is blocked. After that, a short sleep lets the
@@ -2774,4 +2773,3 @@ TEST_F(HookManagerTest, TryInstallMidAob_LogsOnceOnPatternFailure)
     EXPECT_FALSE(name.has_value());
     EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
 }
-

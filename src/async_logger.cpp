@@ -71,7 +71,6 @@ namespace DetourModKit
 
         new_block->next = existing;
         new_block->free_list = nullptr;
-        new_block->slot_count = POOL_SLOTS_PER_BLOCK;
 
         PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
         static_assert(POOL_SLOTS_PER_BLOCK <= 32, "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
@@ -86,7 +85,6 @@ namespace DetourModKit
         new_block->free_list = &slots[0];
 
         m_head.store(new_block, std::memory_order_release);
-        m_pool_size.fetch_add(1, std::memory_order_relaxed);
     }
 
     StringPool &StringPool::instance() noexcept
@@ -114,7 +112,6 @@ namespace DetourModKit
             {
                 PoolSlot *slot = b->free_list;
                 b->free_list = slot->next_free;
-                --b->slot_count;
                 return slot;
             }
         }
@@ -197,7 +194,6 @@ namespace DetourModKit
     {
         slot->next_free = block->free_list;
         block->free_list = slot;
-        ++block->slot_count;
     }
 
     LogMessage::LogMessage(LogLevel lvl, std::string_view msg)
@@ -342,7 +338,7 @@ namespace DetourModKit
             if (diff == 0)
             {
                 if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1,
-                                                       std::memory_order_relaxed))
+                                                        std::memory_order_relaxed))
                 {
                     slot.data = std::move(item);
                     slot.sequence.store(pos + 1, std::memory_order_release);
@@ -373,7 +369,7 @@ namespace DetourModKit
             if (diff == 0)
             {
                 if (m_dequeue_pos.compare_exchange_weak(pos, pos + 1,
-                                                       std::memory_order_relaxed))
+                                                        std::memory_order_relaxed))
                 {
                     item = std::move(slot.data);
                     slot.sequence.store(pos + m_capacity, std::memory_order_release);
@@ -477,10 +473,10 @@ namespace DetourModKit
                                     now.time_since_epoch()) %
                                 1000;
                 *m_file_stream << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
-                              << "." << std::setfill('0') << std::setw(3) << ms.count()
-                              << std::setfill(' ') << "] "
-                              << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
-                              << message << '\n';
+                               << "." << std::setfill('0') << std::setw(3) << ms.count()
+                               << std::setfill(' ') << "] "
+                               << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
+                               << message << '\n';
                 m_file_stream->flush();
             }
             return true;
@@ -511,7 +507,7 @@ namespace DetourModKit
         std::unique_lock<std::mutex> lock(m_flush_mutex);
 
         const bool flushed = m_flush_cv.wait_for(lock, timeout, [this]() noexcept
-                                                { return m_pending_messages.load(std::memory_order_acquire) == 0; });
+                                                 { return m_pending_messages.load(std::memory_order_acquire) == 0; });
 
         return flushed;
     }
@@ -525,7 +521,7 @@ namespace DetourModKit
     {
         bool expected = false;
         if (!m_shutdown_requested.compare_exchange_strong(expected, true,
-                                                         std::memory_order_acq_rel))
+                                                          std::memory_order_acq_rel))
         {
             return;
         }
@@ -627,7 +623,7 @@ namespace DetourModKit
 
                 std::unique_lock<std::mutex> lock(m_flush_mutex);
                 m_flush_cv.wait_for(lock, m_config.flush_interval, [this]()
-                                   { return !m_queue.empty() || !m_running.load(std::memory_order_acquire); });
+                                    { return !m_queue.empty() || !m_running.load(std::memory_order_acquire); });
             }
         }
 
@@ -690,10 +686,10 @@ namespace DetourModKit
                             1000;
 
             *m_file_stream << "[" << std::put_time(&cached_tm, "%Y-%m-%d %H:%M:%S")
-                          << "." << std::setfill('0') << std::setw(3) << ms.count()
-                          << std::setfill(' ') << "] "
-                          << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
-                          << msg.message() << '\n';
+                           << "." << std::setfill('0') << std::setw(3) << ms.count()
+                           << std::setfill(' ') << "] "
+                           << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
+                           << msg.message() << '\n';
         }
 
         m_file_stream->flush();
@@ -786,10 +782,10 @@ namespace DetourModKit
                                 message.timestamp.time_since_epoch()) %
                             1000;
             *m_file_stream << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
-                          << "." << std::setfill('0') << std::setw(3) << ms.count()
-                          << std::setfill(' ') << "] "
-                          << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
-                          << message.message() << '\n';
+                           << "." << std::setfill('0') << std::setw(3) << ms.count()
+                           << std::setfill(' ') << "] "
+                           << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "
+                           << message.message() << '\n';
             m_file_stream->flush();
 
             if (m_file_stream->fail())

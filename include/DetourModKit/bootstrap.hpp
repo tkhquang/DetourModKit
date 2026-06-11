@@ -55,8 +55,9 @@ namespace DetourModKit
          *          shutdown event until on_dll_detach() is invoked.
          *
          *          init_fn is invoked on the worker thread (off the loader
-         *          lock). It should return true on success; a false return
-         *          is logged and the worker exits cleanly.
+         *          lock). It should return true on success; a false return is
+         *          logged and the worker then idles, blocking on the shutdown
+         *          event until on_dll_detach() signals it (it does not exit early).
          *
          *          shutdown_fn is invoked on the worker thread after the
          *          shutdown event is signaled, then DMK_Shutdown() is

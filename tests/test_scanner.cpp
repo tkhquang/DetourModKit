@@ -1796,7 +1796,8 @@ TEST(ScannerTest, find_pattern_avx2_path_exact_32_bytes)
     std::string aob;
     for (size_t i = 16; i < 48; ++i)
     {
-        if (!aob.empty()) aob += ' ';
+        if (!aob.empty())
+            aob += ' ';
         aob += std::format("{:02X}", i & 0xFF);
     }
 
@@ -1819,7 +1820,8 @@ TEST(ScannerTest, find_pattern_avx2_path_48_bytes)
     std::string aob;
     for (size_t i = 8; i < 56; ++i)
     {
-        if (!aob.empty()) aob += ' ';
+        if (!aob.empty())
+            aob += ' ';
         aob += std::format("{:02X}", (i * 7) & 0xFF);
     }
 
@@ -1842,7 +1844,8 @@ TEST(ScannerTest, find_pattern_avx2_path_64_bytes)
     std::string aob;
     for (size_t i = 32; i < 96; ++i)
     {
-        if (!aob.empty()) aob += ' ';
+        if (!aob.empty())
+            aob += ' ';
         aob += std::format("{:02X}", i & 0xFF);
     }
 
@@ -1866,7 +1869,8 @@ TEST(ScannerTest, find_pattern_avx2_path_with_wildcards)
     std::string aob;
     for (size_t i = 16; i < 48; ++i)
     {
-        if (!aob.empty()) aob += ' ';
+        if (!aob.empty())
+            aob += ' ';
         if ((i - 16) % 8 == 4)
             aob += "??";
         else
@@ -1892,7 +1896,8 @@ TEST(ScannerTest, find_pattern_avx2_path_mismatch_in_second_chunk)
     std::string aob;
     for (size_t i = 32; i < 96; ++i)
     {
-        if (!aob.empty()) aob += ' ';
+        if (!aob.empty())
+            aob += ' ';
         aob += std::format("{:02X}", i & 0xFF);
     }
 
@@ -1914,7 +1919,8 @@ TEST(ScannerTest, find_pattern_avx2_path_not_found)
     std::string aob;
     for (int i = 0; i < 32; ++i)
     {
-        if (!aob.empty()) aob += ' ';
+        if (!aob.empty())
+            aob += ' ';
         aob += std::format("{:02X}", i);
     }
 
@@ -1931,7 +1937,7 @@ namespace
     {
         std::memcpy(dst, &value, sizeof(value));
     }
-}
+} // namespace
 
 TEST(ScannerRipResolveTest, resolve_rip_relative_null_input_returns_error)
 {
@@ -2387,7 +2393,8 @@ namespace
         std::uint8_t *base{nullptr};
         std::size_t size{0};
 
-        ExecBuffer(std::size_t s) : size(s)
+        ExecBuffer(std::size_t s)
+            : size(s)
         {
             base = static_cast<std::uint8_t *>(
                 VirtualAlloc(nullptr, s, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
@@ -2508,8 +2515,22 @@ TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
     // prologue -- the only shape the fallback recognises before rebuilding
     // the AOB from the literal tail described above.
     constexpr std::uint8_t kAmbiguousTemplate[] = {
-        0xE9, 0x00, 0x00, 0x00, 0x00,
-        0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, 0x2D, 0x3E, 0x4F,
+        0xE9,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0xA5,
+        0xB6,
+        0xC7,
+        0xD8,
+        0xE9,
+        0xFA,
+        0x0B,
+        0x1C,
+        0x2D,
+        0x3E,
+        0x4F,
     };
 
     // Seed two copies so the rebuilt fallback pattern tallies >= 2 hits in
@@ -2576,8 +2597,22 @@ TEST(ScannerCascade, PrologueFallbackRejectsExactlyTwoMatches)
     // tail clears kPrologueFallbackMinTailLiterals so the test reaches
     // the uniqueness check rather than the literal-floor refusal.
     constexpr std::uint8_t kTemplate[] = {
-        0xE9, 0x00, 0x00, 0x00, 0x00,
-        0x71, 0x82, 0x93, 0xA4, 0xB5, 0xC6, 0xD7, 0xE8, 0xF9, 0x0A, 0x1B,
+        0xE9,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x71,
+        0x82,
+        0x93,
+        0xA4,
+        0xB5,
+        0xC6,
+        0xD7,
+        0xE8,
+        0xF9,
+        0x0A,
+        0x1B,
     };
 
     std::memcpy(buf.base + 0x000, kTemplate, sizeof(kTemplate));

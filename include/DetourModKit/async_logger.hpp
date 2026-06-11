@@ -87,7 +87,6 @@ namespace DetourModKit
             alignas(64) char data[POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot)];
             Block *next{nullptr};
             PoolSlot *free_list{nullptr};
-            size_t slot_count{0};
             uint32_t constructed_mask{0};
 
             PoolSlot *get_slot(size_t index) noexcept
@@ -105,7 +104,6 @@ namespace DetourModKit
         void return_slot_locked(PoolSlot *slot, Block *block) noexcept;
 
         std::atomic<Block *> m_head{nullptr};
-        std::atomic<size_t> m_pool_size{0};
         std::atomic<size_t> m_heap_fallback_count{0};
         std::mutex m_pool_mutex;
     };
@@ -156,7 +154,8 @@ namespace DetourModKit
      */
 #ifdef _MSC_VER
 #pragma warning(push)
-#pragma warning(disable : 4324) // structure was padded due to alignment specifier
+// structure was padded due to alignment specifier
+#pragma warning(disable : 4324)
 #endif
 
     class DynamicMPMCQueue
@@ -216,7 +215,8 @@ namespace DetourModKit
             std::atomic<size_t> sequence;
             LogMessage data;
 
-            Slot() noexcept : sequence(0) {}
+            Slot() noexcept
+                : sequence(0) {}
 
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
@@ -224,8 +224,10 @@ namespace DetourModKit
             Slot &operator=(Slot &&) = delete;
         };
 
-        /// Validates capacity before member initialization to prevent
-        /// allocation of an invalid-sized buffer in the initializer list.
+        /**
+         * @brief Validates capacity before member initialization to prevent
+         *        allocation of an invalid-sized buffer in the initializer list.
+         */
         static size_t validated_capacity(size_t capacity);
 
         // Immutable after construction -- never resized.

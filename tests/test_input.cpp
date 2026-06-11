@@ -12,8 +12,8 @@
 #include "input_intercept.hpp"
 
 using namespace DetourModKit;
-using DetourModKit::keyboard_key;
 using DetourModKit::gamepad_button;
+using DetourModKit::keyboard_key;
 
 // --- InputSource string conversion ---
 
@@ -1311,7 +1311,7 @@ TEST_F(InputManagerTest, RegisterGamepadWithModifier)
     InputManager &mgr = InputManager::get_instance();
 
     mgr.register_press("lb_a", {gamepad_button(GamepadCode::A)},
-                        {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+                       {gamepad_button(GamepadCode::LeftBumper)}, []() {});
 
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
@@ -1348,7 +1348,7 @@ TEST_F(InputManagerTest, MixedKeyboardAndGamepadBindings)
 
     mgr.register_press("kb_toggle", {keyboard_key(0x72)}, {keyboard_key(0x11)}, []() {});
     mgr.register_press("gp_toggle", {gamepad_button(GamepadCode::A)},
-                        {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+                       {gamepad_button(GamepadCode::LeftBumper)}, []() {});
     mgr.register_hold("mouse_hold", {mouse_button(0x05)}, [](bool) {});
 
     EXPECT_EQ(mgr.binding_count(), 3u);
@@ -1687,7 +1687,7 @@ TEST_F(InputManagerTest, ThumbstickAndButtonMixed)
     mgr.register_press("gp_a", {gamepad_button(GamepadCode::A)}, []() {});
     mgr.register_hold("ls_up", {gamepad_button(GamepadCode::LeftStickUp)}, [](bool) {});
     mgr.register_press("rs_right", {gamepad_button(GamepadCode::RightStickRight)},
-                        {gamepad_button(GamepadCode::LeftBumper)}, []() {});
+                       {gamepad_button(GamepadCode::LeftBumper)}, []() {});
 
     EXPECT_EQ(mgr.binding_count(), 3u);
 

@@ -31,12 +31,14 @@ namespace DetourModKit::detail
         /// Undocumented ordinal that exports XInputGetStateEx (reports the Guide button).
         constexpr WORD s_xinput_get_state_ex_ordinal = 100;
 
-        /// How long a published suppression mask stays valid without a refresh.
-        /// Set above the maximum allowed poll interval (MAX_POLL_INTERVAL) so a
-        /// healthy poll thread at any configured rate keeps the mask continuously
-        /// alive, while still bounding a stalled poll thread so it cannot latch the
-        /// game's input off indefinitely. Twice the largest poll interval leaves
-        /// headroom for a slow cycle's own body to run before the deadline lapses.
+        /**
+         * @brief How long a published suppression mask stays valid without a refresh.
+         * @details Set above the maximum allowed poll interval (MAX_POLL_INTERVAL) so a
+         *          healthy poll thread at any configured rate keeps the mask continuously
+         *          alive, while still bounding a stalled poll thread so it cannot latch the
+         *          game's input off indefinitely. Twice the largest poll interval leaves
+         *          headroom for a slow cycle's own body to run before the deadline lapses.
+         */
         constexpr uint64_t s_suppress_ttl_ms = 2000;
 
         // --- XInput interception state ---
@@ -74,9 +76,12 @@ namespace DetourModKit::detail
         // mirroring how the reactive mask is cleared and how s_wheel_consume is gated.
         std::atomic<bool> s_rule_suppress_enabled{false};
 
-        /// Packs a rule into one word: modifier (bits 0-15), forbidden (16-31),
-        /// trigger (32-47). Three 16-bit masks fit a uint64 with room to spare, so a
-        /// rule is published and read as a single atomic store/load.
+        /**
+         * @brief Packs a rule into one word: modifier (bits 0-15), forbidden (16-31),
+         *        trigger (32-47).
+         * @details Three 16-bit masks fit a uint64 with room to spare, so a rule is
+         *          published and read as a single atomic store/load.
+         */
         constexpr uint64_t pack_consume_rule(const GamepadConsumeRule &rule) noexcept
         {
             return static_cast<uint64_t>(rule.modifier_mask) |
@@ -202,11 +207,13 @@ namespace DetourModKit::detail
                 const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
                 if (delta > 0)
                 {
-                    s_wheel_count[0].fetch_add(1, std::memory_order_relaxed); // Up
+                    // Up
+                    s_wheel_count[0].fetch_add(1, std::memory_order_relaxed);
                 }
                 else if (delta < 0)
                 {
-                    s_wheel_count[1].fetch_add(1, std::memory_order_relaxed); // Down
+                    // Down
+                    s_wheel_count[1].fetch_add(1, std::memory_order_relaxed);
                 }
                 if (s_wheel_consume.load(std::memory_order_relaxed))
                 {
@@ -221,11 +228,13 @@ namespace DetourModKit::detail
                 const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
                 if (delta > 0)
                 {
-                    s_wheel_count[3].fetch_add(1, std::memory_order_relaxed); // Right
+                    // Right
+                    s_wheel_count[3].fetch_add(1, std::memory_order_relaxed);
                 }
                 else if (delta < 0)
                 {
-                    s_wheel_count[2].fetch_add(1, std::memory_order_relaxed); // Left
+                    // Left
+                    s_wheel_count[2].fetch_add(1, std::memory_order_relaxed);
                 }
                 if (s_wheel_consume.load(std::memory_order_relaxed))
                 {
