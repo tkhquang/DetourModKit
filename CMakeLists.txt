@@ -543,6 +543,16 @@ if(DMK_ENABLE_SANITIZERS)
     add_compile_definitions(_DISABLE_STRING_ANNOTATION=1 _DISABLE_VECTOR_ANNOTATION=1)
     add_link_options(/INCREMENTAL:NO)
     message(STATUS "Sanitizers enabled: ASan (MSVC)")
+  elseif(WIN32)
+    # On Windows only the MSVC toolchain ships the sanitizer runtimes (MSVC
+    # AddressSanitizer). A non-MSVC Windows toolchain such as mingw-w64 provides
+    # no ASan/UBSan runtime for this target, so -fsanitize would configure
+    # cleanly but fail at link or load. Fail fast with a pointer to the supported
+    # route rather than letting the user discover it after a long build.
+    message(FATAL_ERROR
+      "DMK_ENABLE_SANITIZERS on Windows is supported only with the MSVC toolchain "
+      "(MSVC AddressSanitizer). The current non-MSVC Windows toolchain (e.g. MinGW) "
+      "ships no sanitizer runtime. Reconfigure with MSVC, or leave DMK_ENABLE_SANITIZERS=OFF.")
   else()
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)

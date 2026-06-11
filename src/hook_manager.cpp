@@ -665,45 +665,76 @@ bool HookManager::is_target_already_hooked(uintptr_t target_address) const noexc
 
 std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id)
 {
+    // Non-locking fast-fail before acquiring the mutator gate.
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         m_logger.warning("HookManager: Shutdown in progress. Cannot remove hook '{}'.", hook_id);
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-
-    // Two-phase removal: disable under the shared lock first, then take the
-    // exclusive lock to erase. The shared phase lets the kit's own
-    // with_inline_hook readers (shared_lock holders) finish before the Hook is
-    // destroyed; SafetyHook's disable()/destructor relocates only threads
-    // caught in the patched prologue, not threads already in the detour or
-    // trampoline body. Sequencing disable() before the exclusive clear also
-    // keeps SafetyHook's own thread-suspend teardown off the exclusive lock.
-    // The caller must ensure no thread is executing the hooked function during
-    // removal to close the residual narrow window.
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+
+        // Re-check after acquiring the gate. A thread can observe shutdown as
+        // false above, then block here behind remove_all_hooks()'s exclusive
+        // gate; once that releases (with m_shutdown_called reset to false) this
+        // would otherwise proceed against freshly reset reusable state. The
+        // post-gate re-check makes remove uniform with create/enable/disable.
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot remove hook '{}'.", hook_id), LogLevel::Warning}}};
+        }
+
+        // Two-phase removal: disable under the shared lock first, then take the
+        // exclusive lock to erase. The shared phase lets the kit's own
+        // with_inline_hook readers (shared_lock holders) finish before the Hook is
+        // destroyed; SafetyHook's disable()/destructor relocates only threads
+        // caught in the patched prologue, not threads already in the detour or
+        // trampoline body. Sequencing disable() before the exclusive clear also
+        // keeps SafetyHook's own thread-suspend teardown off the exclusive lock.
+        // The caller must ensure no thread is executing the hooked function during
+        // removal to close the residual narrow window.
+        {
+            std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+            auto it = m_hooks.find(hook_id);
+            if (it == m_hooks.end())
+            {
+                return {std::unexpected(HookError::HookNotFound),
+                        {{std::format("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id), LogLevel::Warning}}};
+            }
+            (void)it->second->disable();
+        }
+
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::vector<DeferredLogEntry> logs;
         auto it = m_hooks.find(hook_id);
         if (it == m_hooks.end())
         {
-            m_logger.warning("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id);
-            return std::unexpected(HookError::HookNotFound);
+            // The hook existed under the shared phase above but a concurrent
+            // removal erased it before this exclusive erase phase. Report
+            // not-found rather than a false success.
+            return {std::unexpected(HookError::HookNotFound),
+                    {{std::format("HookManager: Hook '{}' was concurrently removed before this removal completed.", hook_id),
+                      LogLevel::Warning}}};
         }
-        (void)it->second->disable();
-    }
-
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_hooks.find(hook_id);
-    if (it != m_hooks.end())
-    {
         std::string name_of_removed_hook = it->second->get_name();
         HookType type_of_removed_hook = it->second->get_type();
         m_hooks.erase(it);
-        m_logger.debug("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
-                       name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid"));
+        logs.push_back({std::format("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
+                                    name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid")),
+                        LogLevel::Debug});
+        return {std::expected<void, HookError>{}, std::move(logs)};
+    }();
+
+    // Emit collected messages after all hook locks are released (deferred
+    // logging keeps the Logger's own locks off this module's critical sections).
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
     }
-    return {};
+    return result;
 }
 
 void HookManager::remove_all_hooks()
@@ -771,38 +802,46 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    if (m_shutdown_called.load(std::memory_order_acquire))
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        m_logger.warning("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id);
-        return std::unexpected(HookError::ShutdownInProgress);
-    }
-    auto it = m_hooks.find(hook_id);
-    if (it == m_hooks.end())
-    {
-        m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
-        return std::unexpected(HookError::HookNotFound);
-    }
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id), LogLevel::Warning}}};
+        }
+        auto it = m_hooks.find(hook_id);
+        if (it == m_hooks.end())
+        {
+            return {std::unexpected(HookError::HookNotFound),
+                    {{std::format("HookManager: Hook ID '{}' not found for enable operation.", hook_id), LogLevel::Warning}}};
+        }
 
-    Hook *hook = it->second.get();
-    auto result = hook->enable();
-    if (result)
-    {
-        m_logger.debug("HookManager: Hook '{}' successfully enabled.", hook_id);
-        return {};
-    }
+        Hook *hook = it->second.get();
+        auto enable_result = hook->enable();
+        if (enable_result)
+        {
+            return {std::expected<void, HookError>{},
+                    {{std::format("HookManager: Hook '{}' successfully enabled.", hook_id), LogLevel::Debug}}};
+        }
 
-    const auto error = result.error();
-    if (error == HookError::InvalidHookState)
+        const auto error = enable_result.error();
+        if (error == HookError::InvalidHookState)
+        {
+            return {std::unexpected(error),
+                    {{std::format("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status())), LogLevel::Warning}}};
+        }
+        return {std::unexpected(error),
+                {{std::format("HookManager: Failed to enable hook '{}': {}", hook_id, Hook::error_to_string(error)), LogLevel::Error}}};
+    }();
+
+    // Emit after releasing the gate and hook lock (deferred logging).
+    for (const auto &entry : deferred_logs)
     {
-        m_logger.warning("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
+        m_logger.log(entry.level, entry.msg);
     }
-    else
-    {
-        m_logger.error("HookManager: Failed to enable hook '{}': {}", hook_id, Hook::error_to_string(error));
-    }
-    return std::unexpected(error);
+    return result;
 }
 
 std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_id)
@@ -813,38 +852,46 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
-    if (m_shutdown_called.load(std::memory_order_acquire))
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        m_logger.warning("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id);
-        return std::unexpected(HookError::ShutdownInProgress);
-    }
-    auto it = m_hooks.find(hook_id);
-    if (it == m_hooks.end())
-    {
-        m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
-        return std::unexpected(HookError::HookNotFound);
-    }
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id), LogLevel::Warning}}};
+        }
+        auto it = m_hooks.find(hook_id);
+        if (it == m_hooks.end())
+        {
+            return {std::unexpected(HookError::HookNotFound),
+                    {{std::format("HookManager: Hook ID '{}' not found for disable operation.", hook_id), LogLevel::Warning}}};
+        }
 
-    Hook *hook = it->second.get();
-    auto result = hook->disable();
-    if (result)
-    {
-        m_logger.debug("HookManager: Hook '{}' successfully disabled.", hook_id);
-        return {};
-    }
+        Hook *hook = it->second.get();
+        auto disable_result = hook->disable();
+        if (disable_result)
+        {
+            return {std::expected<void, HookError>{},
+                    {{std::format("HookManager: Hook '{}' successfully disabled.", hook_id), LogLevel::Debug}}};
+        }
 
-    const auto error = result.error();
-    if (error == HookError::InvalidHookState)
+        const auto error = disable_result.error();
+        if (error == HookError::InvalidHookState)
+        {
+            return {std::unexpected(error),
+                    {{std::format("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status())), LogLevel::Warning}}};
+        }
+        return {std::unexpected(error),
+                {{std::format("HookManager: Failed to disable hook '{}': {}", hook_id, Hook::error_to_string(error)), LogLevel::Error}}};
+    }();
+
+    // Emit after releasing the gate and hook lock (deferred logging).
+    for (const auto &entry : deferred_logs)
     {
-        m_logger.warning("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status()));
+        m_logger.log(entry.level, entry.msg);
     }
-    else
-    {
-        m_logger.error("HookManager: Failed to disable hook '{}': {}", hook_id, Hook::error_to_string(error));
-    }
-    return std::unexpected(error);
+    return result;
 }
 
 bool HookManager::toggle_hook_locked(std::string_view hook_id, Hook &hook, bool enable)
@@ -1114,18 +1161,35 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_vmt_hooks.find(vmt_name);
-    if (it != m_vmt_hooks.end())
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::string removed_name = it->second.get_name();
-        m_vmt_hooks.erase(it);
-        m_logger.debug("HookManager: VMT hook '{}' has been removed.", removed_name);
-        return {};
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        // Re-check after acquiring the gate so a teardown that flipped
+        // m_shutdown_called while we waited is not raced (uniform with the
+        // create/enable/disable mutators).
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT hook '{}'.", vmt_name), LogLevel::Warning}}};
+        }
+        auto it = m_vmt_hooks.find(vmt_name);
+        if (it != m_vmt_hooks.end())
+        {
+            std::string removed_name = it->second.get_name();
+            m_vmt_hooks.erase(it);
+            return {std::expected<void, HookError>{},
+                    {{std::format("HookManager: VMT hook '{}' has been removed.", removed_name), LogLevel::Debug}}};
+        }
+        return {std::unexpected(HookError::VmtHookNotFound),
+                {{std::format("HookManager: Attempted to remove VMT hook '{}', but it was not found.", vmt_name), LogLevel::Warning}}};
+    }();
+
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
     }
-    m_logger.warning("HookManager: Attempted to remove VMT hook '{}', but it was not found.", vmt_name);
-    return std::unexpected(HookError::VmtHookNotFound);
+    return result;
 }
 
 std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view vmt_name, size_t method_index)
@@ -1136,23 +1200,36 @@ std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view v
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_vmt_hooks.find(vmt_name);
-    if (it == m_vmt_hooks.end())
+    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        m_logger.warning("HookManager: VMT hook '{}' not found for method removal.", vmt_name);
-        return std::unexpected(HookError::VmtHookNotFound);
-    }
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {std::unexpected(HookError::ShutdownInProgress),
+                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT method on '{}'.", vmt_name), LogLevel::Warning}}};
+        }
+        auto it = m_vmt_hooks.find(vmt_name);
+        if (it == m_vmt_hooks.end())
+        {
+            return {std::unexpected(HookError::VmtHookNotFound),
+                    {{std::format("HookManager: VMT hook '{}' not found for method removal.", vmt_name), LogLevel::Warning}}};
+        }
 
-    if (it->second.remove_method_hook(method_index))
+        if (it->second.remove_method_hook(method_index))
+        {
+            return {std::expected<void, HookError>{},
+                    {{std::format("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index), LogLevel::Debug}}};
+        }
+        return {std::unexpected(HookError::MethodNotFound),
+                {{std::format("HookManager: VMT '{}' has no hooked method at index {}.", vmt_name, method_index), LogLevel::Warning}}};
+    }();
+
+    for (const auto &entry : deferred_logs)
     {
-        m_logger.debug("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index);
-        return {};
+        m_logger.log(entry.level, entry.msg);
     }
-
-    m_logger.warning("HookManager: VMT '{}' has no hooked method at index {}.", vmt_name, method_index);
-    return std::unexpected(HookError::MethodNotFound);
+    return result;
 }
 
 bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
@@ -1168,19 +1245,34 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
         return false;
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_vmt_hooks.find(vmt_name);
-    if (it == m_vmt_hooks.end())
+    auto [result, deferred_logs] = [&]() -> std::pair<bool, std::vector<DeferredLogEntry>>
     {
-        m_logger.warning("HookManager: VMT hook '{}' not found for apply.", vmt_name);
-        return false;
-    }
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {false,
+                    {{std::format("HookManager: Shutdown in progress. Cannot apply VMT hook '{}'.", vmt_name), LogLevel::Warning}}};
+        }
+        auto it = m_vmt_hooks.find(vmt_name);
+        if (it == m_vmt_hooks.end())
+        {
+            return {false,
+                    {{std::format("HookManager: VMT hook '{}' not found for apply.", vmt_name), LogLevel::Warning}}};
+        }
 
-    it->second.vmt_hook().apply(object);
-    m_logger.debug("HookManager: VMT hook '{}' applied to object {}.",
-                   vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
-    return true;
+        it->second.vmt_hook().apply(object);
+        return {true,
+                {{std::format("HookManager: VMT hook '{}' applied to object {}.",
+                              vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                  LogLevel::Debug}}};
+    }();
+
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
+    }
+    return result;
 }
 
 bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object)
@@ -1196,19 +1288,34 @@ bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object
         return false;
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    auto it = m_vmt_hooks.find(vmt_name);
-    if (it == m_vmt_hooks.end())
+    auto [result, deferred_logs] = [&]() -> std::pair<bool, std::vector<DeferredLogEntry>>
     {
-        m_logger.warning("HookManager: VMT hook '{}' not found for object removal.", vmt_name);
-        return false;
-    }
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return {false,
+                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT hook '{}' from object.", vmt_name), LogLevel::Warning}}};
+        }
+        auto it = m_vmt_hooks.find(vmt_name);
+        if (it == m_vmt_hooks.end())
+        {
+            return {false,
+                    {{std::format("HookManager: VMT hook '{}' not found for object removal.", vmt_name), LogLevel::Warning}}};
+        }
 
-    it->second.vmt_hook().remove(object);
-    m_logger.debug("HookManager: VMT hook '{}' removed from object {}.",
-                   vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)));
-    return true;
+        it->second.vmt_hook().remove(object);
+        return {true,
+                {{std::format("HookManager: VMT hook '{}' removed from object {}.",
+                              vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                  LogLevel::Debug}}};
+    }();
+
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
+    }
+    return result;
 }
 
 void HookManager::remove_all_vmt_hooks()
@@ -1216,18 +1323,31 @@ void HookManager::remove_all_vmt_hooks()
     if (m_shutdown_called.load(std::memory_order_acquire))
         return;
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-    if (!m_vmt_hooks.empty())
+    std::vector<DeferredLogEntry> deferred_logs = [&]()
     {
-        size_t num_hooks = m_vmt_hooks.size();
-        m_logger.debug("HookManager: Removing all {} VMT hooks...", num_hooks);
-        m_vmt_hooks.clear();
-        m_logger.debug("HookManager: All {} VMT hooks have been removed.", num_hooks);
-    }
-    else
+        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::vector<DeferredLogEntry> logs;
+        if (m_shutdown_called.load(std::memory_order_acquire))
+        {
+            return logs;
+        }
+        if (!m_vmt_hooks.empty())
+        {
+            size_t num_hooks = m_vmt_hooks.size();
+            m_vmt_hooks.clear();
+            logs.push_back({std::format("HookManager: All {} VMT hooks have been removed.", num_hooks), LogLevel::Debug});
+        }
+        else
+        {
+            logs.push_back({"HookManager: remove_all_vmt_hooks called, but no VMT hooks were active.", LogLevel::Debug});
+        }
+        return logs;
+    }();
+
+    for (const auto &entry : deferred_logs)
     {
-        m_logger.debug("HookManager: remove_all_vmt_hooks called, but no VMT hooks were active.");
+        m_logger.log(entry.level, entry.msg);
     }
 }
 

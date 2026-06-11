@@ -9,6 +9,7 @@
 #include <process.h>
 #include <regex>
 #include <cstdint>
+#include <type_traits>
 
 #include "DetourModKit/async_logger.hpp"
 
@@ -1470,6 +1471,64 @@ TEST(StringPoolTest, ReuseAfterDeallocate)
     s2->assign("second");
     EXPECT_EQ(*s2, "second");
     pool.deallocate(s2);
+}
+
+TEST(StringPoolTest, GrowsAcrossMultipleAlignedBlocks)
+{
+    // Keep more slots live than a single block holds, forcing
+    // grow_pool_locked() to allocate several additional over-aligned blocks
+    // through the aligned operator new. Every allocation must succeed and stay
+    // independently usable; a misaligned block would fault or trip the
+    // sanitizer probe rather than read back its stored value.
+    auto &pool = StringPool::instance();
+
+    constexpr size_t kLiveSlots = POOL_SLOTS_PER_BLOCK * 4 + 1;
+    std::vector<std::string *> ptrs;
+    ptrs.reserve(kLiveSlots);
+
+    for (size_t i = 0; i < kLiveSlots; ++i)
+    {
+        std::string *s = pool.allocate(64);
+        ASSERT_NE(s, nullptr);
+        s->assign("blk_" + std::to_string(i));
+        ptrs.push_back(s);
+    }
+
+    for (size_t i = 0; i < kLiveSlots; ++i)
+    {
+        EXPECT_EQ(*ptrs[i], "blk_" + std::to_string(i));
+    }
+
+    for (auto *p : ptrs)
+    {
+        pool.deallocate(p);
+    }
+}
+
+TEST(StringPoolTest, AllocationChainIsNoThrow)
+{
+    // The logging hot path crosses noexcept boundaries (AsyncLogger::enqueue is
+    // noexcept), so every link of the StringPool allocation chain must be
+    // no-throw: an out-of-memory condition has to drop the message, never let
+    // an exception escape and terminate the host.
+    auto &pool = StringPool::instance();
+    EXPECT_TRUE(noexcept(StringPool::instance()));
+    EXPECT_TRUE(noexcept(pool.allocate(0)));
+    EXPECT_TRUE(noexcept(pool.deallocate(nullptr)));
+}
+
+TEST(LogMessageTest, OverflowConstructionIsNoThrow)
+{
+    // The overflow ctor reaches into the StringPool; it must be no-throw so it
+    // is safe to build inside the noexcept AsyncLogger::enqueue().
+    static_assert(std::is_nothrow_constructible_v<LogMessage, LogLevel, std::string_view>,
+                  "LogMessage(LogLevel, string_view) must be noexcept for the noexcept enqueue path");
+
+    std::string big(LogMessage::MAX_INLINE_SIZE + 4096, 'Q');
+    LogMessage msg(LogLevel::Warning, big);
+    EXPECT_TRUE(msg.is_valid());
+    EXPECT_EQ(msg.message().size(), big.size());
+    EXPECT_NE(msg.overflow, nullptr);
 }
 
 TEST(LogMessageTest, Reset_ClearsOverflow)

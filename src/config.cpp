@@ -527,13 +527,13 @@ namespace
      */
     [[nodiscard]] std::uint64_t fnv1a_64(const std::vector<std::uint8_t> &bytes) noexcept
     {
-        constexpr std::uint64_t offset{0xcbf29ce484222325ULL};
-        constexpr std::uint64_t prime{0x00000100000001b3ULL};
-        std::uint64_t h{offset};
+        constexpr std::uint64_t FNV_OFFSET_BASIS{0xcbf29ce484222325ULL};
+        constexpr std::uint64_t FNV_PRIME{0x00000100000001b3ULL};
+        std::uint64_t h{FNV_OFFSET_BASIS};
         for (std::uint8_t b : bytes)
         {
             h ^= static_cast<std::uint64_t>(b);
-            h *= prime;
+            h *= FNV_PRIME;
         }
         return h;
     }

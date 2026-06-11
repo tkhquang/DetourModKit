@@ -1525,6 +1525,55 @@ TEST_F(LoggerTest, Log_InfoLevel_WhenFileClosed_SilentlyDropped)
     EXPECT_EQ(stderr_output.find("LOG_FILE_WRITE_ERROR"), std::string::npos);
 }
 
+TEST_F(LoggerTest, LogNoexcept_IsNoThrowAndWritesMessage)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    // The no-throw entry point must be declared noexcept so it is safe to call
+    // from hook callbacks and other noexcept-boundary contexts.
+    static_assert(noexcept(logger.log_noexcept(LogLevel::Info, "x")),
+                  "log_noexcept must be noexcept for noexcept-boundary callers");
+
+    EXPECT_TRUE(logger.log_noexcept(LogLevel::Error, "NOEXCEPT_LOG_LINE_4k2p"));
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("NOEXCEPT_LOG_LINE_4k2p"), std::string::npos);
+}
+
+TEST_F(LoggerTest, LogNoexcept_ReturnsFalseWhenFilteredOut)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Error);
+
+    EXPECT_FALSE(logger.log_noexcept(LogLevel::Debug, "below the threshold"));
+    EXPECT_TRUE(logger.log_noexcept(LogLevel::Error, "at the threshold"));
+}
+
+TEST_F(LoggerTest, TryLog_IsNoThrowAndFormatsMessage)
+{
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    // try_log is declared noexcept, but noexcept(try_log(level, "{}", arg)) is
+    // not a useful probe: the std::format_string argument is built by a consteval
+    // constructor that is not noexcept-qualified, so the noexcept operator reports
+    // the whole call-expression as potentially-throwing even though try_log itself
+    // cannot throw at runtime (it catches every std::format and sink failure
+    // internally). The runtime no-throw contract is exercised behaviourally below.
+
+    EXPECT_TRUE(logger.try_log(LogLevel::Warning, "FORMATTED_TRYLOG {} {}", 42, "ok"));
+    logger.flush();
+
+    std::ifstream ifs(test_log_file_);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("FORMATTED_TRYLOG 42 ok"), std::string::npos);
+}
+
 namespace
 {
     std::filesystem::path make_logger_overload_path()

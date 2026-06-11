@@ -168,8 +168,31 @@ namespace DetourModKit
          * @brief Logs a message if its level is at or above the current log level.
          * @param level The LogLevel of the message.
          * @param message The message string to log.
+         * @return true if the message was delivered to the sink (enqueued in async
+         *         mode, or written to a healthy file stream in sync mode); false if
+         *         it was filtered out by level, dropped (queue full), or the file
+         *         sink was closed/unhealthy. The return is informational; callers
+         *         that do not need delivery status may ignore it.
          */
-        void log(LogLevel level, std::string_view message);
+        bool log(LogLevel level, std::string_view message);
+
+        /**
+         * @brief No-throw counterpart of log() for callers that sit on a
+         *        noexcept boundary.
+         * @details The ordinary log()/error() path can throw (the synchronous
+         *          sink allocates while formatting the timestamp, and a custom
+         *          stream could raise). Calling it from a hook callback, a
+         *          loader-lock teardown path, or a catch block inside a
+         *          noexcept function would let that exception escape and call
+         *          std::terminate, taking down the host process. This entry
+         *          point takes an already-formatted message and swallows any
+         *          exception the sink raises, dropping the message instead.
+         * @param level The LogLevel of the message.
+         * @param message The already-formatted message string.
+         * @return true if the message was handed to the sink, false if it was
+         *         filtered out or an internal failure was suppressed.
+         */
+        [[nodiscard]] bool log_noexcept(LogLevel level, std::string_view message) noexcept;
 
         /**
          * @brief Logs a formatted message with the specified log level.
@@ -224,6 +247,34 @@ namespace DetourModKit
             log(LogLevel::Error, fmt, std::forward<Args>(args)...);
         }
         /** @} */
+
+        /**
+         * @brief No-throw formatted logging for callers on a noexcept boundary.
+         * @details Like log(level, fmt, args...) but formats inside a try/catch
+         *          and routes the result through log_noexcept(), so neither a
+         *          std::format failure nor a sink failure can propagate. Prefer
+         *          this over log()/error()/warning() from inside hook callbacks
+         *          and other noexcept contexts. Arguments are only formatted
+         *          when the level is enabled (lazy evaluation).
+         * @return true if the message was handed to the sink, false if it was
+         *         filtered out or dropped because formatting/logging failed.
+         */
+        template <typename... Args>
+        [[nodiscard]] bool try_log(LogLevel level, std::format_string<Args...> fmt, Args &&...args) noexcept
+        {
+            if (level < m_current_log_level.load(std::memory_order_acquire))
+            {
+                return false;
+            }
+            try
+            {
+                return log_noexcept(level, std::format(fmt, std::forward<Args>(args)...));
+            }
+            catch (...)
+            {
+                return false;
+            }
+        }
 
         /**
          * @brief Converts a log level string to the LogLevel enum.

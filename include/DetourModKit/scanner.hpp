@@ -193,6 +193,16 @@ namespace DetourModKit
          *          one-past the scanned region. The pointer is valid for arithmetic
          *          and bounds comparisons but MUST NOT be dereferenced without an
          *          explicit readability check (e.g. `Memory::is_readable`).
+         * @warning READABLE-RANGE PRECONDITION: this raw overload performs no page
+         *          filtering. The caller MUST guarantee the entire span
+         *          `[start_address, start_address + region_size)` is committed and
+         *          readable, because the search reads it with raw `memchr`/SIMD
+         *          loads and an unreadable byte faults the host. Use it only on byte
+         *          buffers or module sections whose readability is already known. To
+         *          scan arbitrary process or module memory, prefer the page-gated
+         *          helpers (`find_pattern_in_module`, `scan_executable_regions`,
+         *          `scan_readable_regions`) which walk `VirtualQuery` and skip guard,
+         *          no-access, and non-readable pages.
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
                                                     const CompiledPattern &pattern);
@@ -211,6 +221,14 @@ namespace DetourModKit
          * @warning A trailing `|` marker produces a one-past pointer identical in
          *          kind to the single-occurrence overload; do not dereference
          *          without a bounds or readability check.
+         * @warning READABLE-RANGE PRECONDITION: like the single-occurrence overload,
+         *          this raw overload performs no page filtering. The caller MUST
+         *          guarantee the entire span `[start_address, start_address +
+         *          region_size)` is committed and readable; the scan uses raw
+         *          `memchr`/SIMD loads and an unreadable byte faults the host. For
+         *          arbitrary process or module memory, prefer the page-gated helpers
+         *          (`find_pattern_in_module`, `scan_executable_regions`,
+         *          `scan_readable_regions`).
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
                                                     const CompiledPattern &pattern, size_t occurrence);

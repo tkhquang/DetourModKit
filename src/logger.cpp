@@ -267,42 +267,71 @@ namespace DetourModKit
             log_level_to_string(old_level), log_level_to_string(level));
     }
 
-    void Logger::log(LogLevel level, std::string_view message)
+    bool Logger::log(LogLevel level, std::string_view message)
     {
-        if (level >= m_current_log_level.load(std::memory_order_acquire))
+        if (level < m_current_log_level.load(std::memory_order_acquire))
         {
-            // Fast path: lock-free check via atomic shared_ptr
-            if (m_async_mode_enabled.load(std::memory_order_acquire))
+            return false;
+        }
+
+        // Fast path: lock-free check via atomic shared_ptr
+        if (m_async_mode_enabled.load(std::memory_order_acquire))
+        {
+            auto local_logger = m_async_logger.load(std::memory_order_acquire);
+            if (local_logger)
             {
-                auto local_logger = m_async_logger.load(std::memory_order_acquire);
-                if (local_logger)
-                {
-                    static_cast<void>(local_logger->enqueue(level, message));
-                    return;
-                }
+                // Propagate the queue's accept/drop result so callers learn the
+                // true delivery status instead of an unconditional success.
+                return local_logger->enqueue(level, message);
+            }
+        }
+
+        const auto level_str = log_level_to_string(level);
+        std::lock_guard<std::mutex> lock(*m_log_mutex_ptr);
+
+        if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
+        {
+            *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
+                                   << "[" << std::setw(7) << std::left << level_str << "] :: "
+                                   << message << '\n';
+
+            // Flush on warnings/errors to ensure critical messages survive crashes
+            if (level >= LogLevel::Warning)
+            {
+                m_log_file_stream_ptr->flush();
             }
 
-            const auto level_str = log_level_to_string(level);
-            std::lock_guard<std::mutex> lock(*m_log_mutex_ptr);
+            // Report whether the write (and any flush) left the stream healthy,
+            // so log_noexcept()/try_log() reflect actual delivery rather than just
+            // a no-throw call.
+            return m_log_file_stream_ptr->good();
+        }
 
-            if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
-            {
-                *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                       << "[" << std::setw(7) << std::left << level_str << "] :: "
-                                       << message << '\n';
+        if (level >= LogLevel::Error)
+        {
+            std::cerr << "[" << m_log_prefix << " LOG_FILE_WRITE_ERROR] [" << get_timestamp() << "] ["
+                      << std::setw(7) << std::left << level_str << "] :: "
+                      << message << '\n';
+        }
 
-                // Flush on warnings/errors to ensure critical messages survive crashes
-                if (level >= LogLevel::Warning)
-                {
-                    m_log_file_stream_ptr->flush();
-                }
-            }
-            else if (level >= LogLevel::Error)
-            {
-                std::cerr << "[" << m_log_prefix << " LOG_FILE_WRITE_ERROR] [" << get_timestamp() << "] ["
-                          << std::setw(7) << std::left << level_str << "] :: "
-                          << message << '\n';
-            }
+        // The file sink was closed or unhealthy; the message was not delivered to
+        // it (an error-level message reached stderr only as a last resort).
+        return false;
+    }
+
+    bool Logger::log_noexcept(LogLevel level, std::string_view message) noexcept
+    {
+        // The synchronous sink allocates (timestamp formatting) and a custom
+        // stream could raise, so the throwing log() is wrapped here to keep the
+        // no-throw contract for noexcept-boundary callers. The returned bool is
+        // log()'s real delivery status, not merely "did not throw".
+        try
+        {
+            return log(level, message);
+        }
+        catch (...)
+        {
+            return false;
         }
     }
 

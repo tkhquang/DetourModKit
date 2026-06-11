@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 # Both jobs are advisory and non-blocking. The clang-format job verifies the tracked
-# project sources stay formatted against the root .clang-format (clang-format 18, the
+# project sources stay formatted against the root .clang-format (clang-format 20, the
 # version pinned below). The sanitizer job uses MSVC AddressSanitizer -- the only
 # sanitizer that works on Windows (GCC and Clang on mingw-w64 ship no ASan/UBSan
 # runtime for the Windows target, so the build links only under MSVC, and ASan is
@@ -29,7 +29,7 @@ jobs:
           persist-credentials: false
 
       - name: Install clang-format
-        run: pip install "clang-format==18.*"
+        run: pip install "clang-format==20.*"
         shell: bash
 
       - name: Check formatting (dry run, project sources only)
