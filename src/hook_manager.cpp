@@ -710,15 +710,21 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
         std::vector<DeferredLogEntry> logs;
         auto it = m_hooks.find(hook_id);
-        if (it != m_hooks.end())
+        if (it == m_hooks.end())
         {
-            std::string name_of_removed_hook = it->second->get_name();
-            HookType type_of_removed_hook = it->second->get_type();
-            m_hooks.erase(it);
-            logs.push_back({std::format("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
-                                        name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid")),
-                            LogLevel::Debug});
+            // The hook existed under the shared phase above but a concurrent
+            // removal erased it before this exclusive erase phase. Report
+            // not-found rather than a false success.
+            return {std::unexpected(HookError::HookNotFound),
+                    {{std::format("HookManager: Hook '{}' was concurrently removed before this removal completed.", hook_id),
+                      LogLevel::Warning}}};
         }
+        std::string name_of_removed_hook = it->second->get_name();
+        HookType type_of_removed_hook = it->second->get_type();
+        m_hooks.erase(it);
+        logs.push_back({std::format("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
+                                    name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid")),
+                        LogLevel::Debug});
         return {std::expected<void, HookError>{}, std::move(logs)};
     }();
 

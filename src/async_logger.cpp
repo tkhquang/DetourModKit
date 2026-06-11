@@ -131,7 +131,6 @@ namespace DetourModKit
 
     StringPool::PoolSlot *StringPool::claim_free_slot() noexcept
     {
-        assert(!m_pool_mutex.try_lock() && "claim_free_slot must be called with m_pool_mutex held");
         for (Block *b = m_head.load(std::memory_order_relaxed); b; b = b->next)
         {
             if (b->free_list)

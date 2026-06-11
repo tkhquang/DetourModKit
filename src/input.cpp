@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <exception>
 #include <new>
+#include <type_traits>
 #include <unordered_set>
 
 using DetourModKit::detail::is_loader_lock_held;
@@ -269,7 +270,7 @@ namespace DetourModKit
          */
         std::vector<detail::GamepadConsumeRule>
         build_gamepad_consume_rules(const std::vector<InputBinding> &bindings,
-                                    const std::vector<InputCode> &known_modifiers) noexcept
+                                    const std::vector<InputCode> &known_modifiers)
         {
             const auto is_digital_gamepad = [](const InputCode &code) noexcept
             {
@@ -337,6 +338,9 @@ namespace DetourModKit
         constexpr uint64_t s_gamepad_suppress_grace_ms = 80;
     } // anonymous namespace
 
+    static_assert(std::is_nothrow_move_assignable_v<InputBinding>,
+                  "Input reshape commits rely on noexcept InputBinding move assignment");
+
     // --- InputPoller ---
 
     InputPoller::InputPoller(std::vector<InputBinding> bindings,
@@ -361,9 +365,8 @@ namespace DetourModKit
         // Rebuild the lookup caches into local containers and commit them with
         // non-throwing moves only after every allocation has succeeded. This
         // helper is noexcept and reachable from loader-lock teardown, so an
-        // allocation failure must leave the previous caches in place and keep
-        // the poller on its last good configuration rather than letting
-        // std::bad_alloc escape and terminate the host.
+        // allocation failure must keep the poller internally consistent rather
+        // than letting std::bad_alloc escape and terminate the host.
         try
         {
             decltype(m_name_index) name_index;
@@ -406,9 +409,20 @@ namespace DetourModKit
         }
         catch (...)
         {
+            // m_bindings and m_active_states may already reflect a reshape. Keep
+            // every derived cache conservative and index-safe rather than leaving
+            // a stale name map whose old indices could address past the new
+            // binding array.
+            m_name_index.clear();
+            m_known_modifiers.clear();
+            m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
+            m_has_wheel_bindings.store(false, std::memory_order_relaxed);
+            m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
+            m_has_wheel_consume_bindings.store(false, std::memory_order_relaxed);
+            detail::publish_gamepad_consume_rules(nullptr, 0);
             static_cast<void>(Logger::get_instance().try_log(
                 LogLevel::Error,
-                "InputPoller: out of memory rebuilding modifier caches; input state may be stale"));
+                "InputPoller: out of memory rebuilding modifier caches; name lookup and input interception disabled until the next successful rebuild"));
         }
     }
 
@@ -836,13 +850,15 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    Logger::get_instance().error(
-                        "InputPoller: Exception in callback \"{}\": {}", callback.name, e.what());
+                    static_cast<void>(Logger::get_instance().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Exception in callback \"{}\": {}", callback.name, e.what()));
                 }
                 catch (...)
                 {
-                    Logger::get_instance().error(
-                        "InputPoller: Unknown exception in callback \"{}\"", callback.name);
+                    static_cast<void>(Logger::get_instance().try_log(
+                        LogLevel::Error,
+                        "InputPoller: Unknown exception in callback \"{}\"", callback.name));
                 }
             }
 
@@ -863,6 +879,9 @@ namespace DetourModKit
             const auto it = m_name_index.find(name);
             if (it == m_name_index.end())
             {
+                // Release the writer lock before logging so the emit does not run
+                // inside the critical section (deferred-logging convention).
+                lock.unlock();
                 static_cast<void>(Logger::get_instance().try_log(
                     LogLevel::Debug, "InputPoller: update_combos(\"{}\") ignored: name not found", name));
                 return false;
@@ -882,11 +901,19 @@ namespace DetourModKit
             // binding count and array sizes do not change.
             if (indices.size() == combos.size())
             {
+                std::vector<InputBinding> replacements;
+                replacements.reserve(indices.size());
                 for (size_t i = 0; i < indices.size(); ++i)
                 {
                     const size_t idx = indices[i];
-                    m_bindings[idx].keys = combos[i].keys;
-                    m_bindings[idx].modifiers = combos[i].modifiers;
+                    InputBinding binding = m_bindings[idx];
+                    binding.keys = combos[i].keys;
+                    binding.modifiers = combos[i].modifiers;
+                    replacements.push_back(std::move(binding));
+                }
+                for (size_t i = 0; i < indices.size(); ++i)
+                {
+                    m_bindings[indices[i]] = std::move(replacements[i]);
                 }
                 recompute_modifier_caches_locked();
                 return true;
@@ -1265,15 +1292,17 @@ namespace DetourModKit
                     }
                     catch (const std::exception &e)
                     {
-                        Logger::get_instance().error(
+                        static_cast<void>(Logger::get_instance().try_log(
+                            LogLevel::Error,
                             "InputPoller: Exception in hold release callback \"{}\": {}",
-                            binding.name, e.what());
+                            binding.name, e.what()));
                     }
                     catch (...)
                     {
-                        Logger::get_instance().error(
+                        static_cast<void>(Logger::get_instance().try_log(
+                            LogLevel::Error,
                             "InputPoller: Unknown exception in hold release callback \"{}\"",
-                            binding.name);
+                            binding.name));
                     }
                 }
             }
@@ -1522,7 +1551,7 @@ namespace DetourModKit
 
         try
         {
-            std::lock_guard lock(m_mutex);
+            std::unique_lock lock(m_mutex);
             if (m_poller)
             {
                 local_poller = m_poller;
@@ -1540,6 +1569,9 @@ namespace DetourModKit
                 }
                 if (indices.empty())
                 {
+                    // Release the lock before logging so the emit does not run
+                    // inside the critical section (deferred-logging convention).
+                    lock.unlock();
                     static_cast<void>(Logger::get_instance().try_log(
                         LogLevel::Debug,
                         "InputManager: update_binding_combos(\"{}\") ignored: name not found", name));
@@ -1548,10 +1580,18 @@ namespace DetourModKit
 
                 if (indices.size() == combos.size())
                 {
+                    std::vector<InputBinding> replacements;
+                    replacements.reserve(indices.size());
                     for (size_t i = 0; i < indices.size(); ++i)
                     {
-                        m_pending_bindings[indices[i]].keys = combos[i].keys;
-                        m_pending_bindings[indices[i]].modifiers = combos[i].modifiers;
+                        InputBinding binding = m_pending_bindings[indices[i]];
+                        binding.keys = combos[i].keys;
+                        binding.modifiers = combos[i].modifiers;
+                        replacements.push_back(std::move(binding));
+                    }
+                    for (size_t i = 0; i < indices.size(); ++i)
+                    {
+                        m_pending_bindings[indices[i]] = std::move(replacements[i]);
                     }
                     updated_pending = true;
                 }

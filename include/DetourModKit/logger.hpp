@@ -168,8 +168,13 @@ namespace DetourModKit
          * @brief Logs a message if its level is at or above the current log level.
          * @param level The LogLevel of the message.
          * @param message The message string to log.
+         * @return true if the message was delivered to the sink (enqueued in async
+         *         mode, or written to a healthy file stream in sync mode); false if
+         *         it was filtered out by level, dropped (queue full), or the file
+         *         sink was closed/unhealthy. The return is informational; callers
+         *         that do not need delivery status may ignore it.
          */
-        void log(LogLevel level, std::string_view message);
+        bool log(LogLevel level, std::string_view message);
 
         /**
          * @brief No-throw counterpart of log() for callers that sit on a
