@@ -727,47 +727,54 @@ void HookManager::remove_all_hooks()
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    // Block all mutators (create_*_hook, enable, disable, remove) before entering phase 1. They hold shared on
-    // m_mutator_gate, so acquiring exclusive here waits for active mutators and blocks new ones.
-    std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-
-    // Two-phase removal: disable hooks under the shared lock first, then take the exclusive lock to erase. The shared
-    // phase lets the kit's own with_inline_hook readers (shared_lock holders) finish before the Hook is destroyed;
-    // SafetyHook relocates only threads caught in the patched prologue, not threads already in the detour or trampoline
-    // body, so the caller must quiesce the hooked function during teardown to close the residual narrow window.
+    size_t num_vmt = 0;
+    size_t num_hooks = 0;
     {
-        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
-        for (auto &[name, hook] : m_hooks)
+        // Block all mutators (create_*_hook, enable, disable, remove) before entering phase 1. They hold shared on
+        // m_mutator_gate, so acquiring exclusive here waits for active mutators and blocks new ones.
+        std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+
+        // Two-phase removal: disable hooks under the shared lock first, then take the exclusive lock to erase. The
+        // shared phase lets the kit's own with_inline_hook readers (shared_lock holders) finish before the Hook is
+        // destroyed; SafetyHook relocates only threads caught in the patched prologue, not threads already in the
+        // detour or trampoline body, so the caller must quiesce the hooked function during teardown to close the
+        // residual narrow window.
         {
-            (void)hook->disable();
+            std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+            for (auto &[name, hook] : m_hooks)
+            {
+                (void)hook->disable();
+            }
         }
+
+        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+
+        num_vmt = m_vmt_hooks.size();
+        m_vmt_hooks.clear();
+
+        num_hooks = m_hooks.size();
+        m_hooks.clear();
+
+        // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
+        // immediately see it as false (accepted) before the maps are fully cleared. Both locks are released when this
+        // block exits, letting new mutators proceed against a fresh m_shutdown_called == false.
+        m_shutdown_called.store(false, std::memory_order_release);
     }
 
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-
-    size_t num_vmt = m_vmt_hooks.size();
+    // Emit the teardown logs only after the hooks mutex and the mutator gate are both released, so the logger's sink
+    // I/O never extends either critical section (deferred-logging convention, matching the create_*_hook paths).
     if (num_vmt > 0)
     {
-        m_logger.debug("HookManager: Removing all {} VMT hooks...", num_vmt);
-        m_vmt_hooks.clear();
+        m_logger.debug("HookManager: Removed all {} VMT hooks.", num_vmt);
     }
-
-    if (!m_hooks.empty())
+    if (num_hooks > 0)
     {
-        size_t num_hooks = m_hooks.size();
-        m_logger.debug("HookManager: Removing all {} managed hooks...", num_hooks);
-        m_hooks.clear();
-        m_logger.debug("HookManager: All {} managed hooks have been removed and unhooked.", num_hooks);
+        m_logger.debug("HookManager: Removed all {} managed hooks and unhooked them.", num_hooks);
     }
     else if (num_vmt == 0)
     {
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
-
-    // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
-    // immediately see it as false (accepted) before the map is fully cleared. The mutator_gate exclusive lock is
-    // released here, allowing new mutators to proceed with a fresh m_shutdown_called=false.
-    m_shutdown_called.store(false, std::memory_order_release);
 }
 
 std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id)
