@@ -119,6 +119,13 @@ via gcov. A non-blocking CI probe in `.github/workflows/quality.yml` builds and
 runs the MSVC ASan preset (alongside an advisory clang-format check) so
 regressions in that wiring surface without gating PRs.
 
+The AOB scanner and the SEH-guarded probe read deliberately read arbitrary mapped
+process memory, which ASan reports as false-positive overflows when it scans this
+process's own poisoned shadow. They are excluded from ASan entirely under
+`#if defined(__SANITIZE_ADDRESS__)`, so release builds are byte-for-byte
+unchanged; see [docs/misc/asan-memory-scanner.md](docs/misc/asan-memory-scanner.md)
+for the mechanism and the pattern for any new foreign-memory primitive.
+
 ### Makefile wrapper
 
 ```bash

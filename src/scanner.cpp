@@ -43,6 +43,23 @@
 #define DMK_AVX2_TARGET
 #endif
 
+// AddressSanitizer poisons the shadow of this process's own committed, readable
+// memory -- the redzones around stack locals and instrumented globals. The AOB
+// scanner deliberately reads across whole readable regions, so under ASan its
+// in-bounds, never-faulting reads land on poisoned shadow and are reported as
+// overflows. DMK_NO_SANITIZE_ADDRESS removes the compiler's load instrumentation
+// from such a function, so the read runs exactly as a release build does. It does
+// NOT stop ASan's libc interceptors (memchr/memcpy are hot-patched at runtime),
+// so those calls are routed around separately under __SANITIZE_ADDRESS__ (see
+// scan_for_byte). ASan links only under MSVC here (mingw-w64 ships no sanitizer
+// runtime), so the attribute is the MSVC __declspec form; the macro is empty in
+// every other build, leaving release codegen unchanged.
+#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
+#define DMK_NO_SANITIZE_ADDRESS __declspec(no_sanitize_address)
+#else
+#define DMK_NO_SANITIZE_ADDRESS
+#endif
+
 using namespace DetourModKit;
 
 namespace
@@ -102,6 +119,7 @@ namespace
      *       GCC/Clang. On MSVC, intrinsics are always available.
      */
     DMK_AVX2_TARGET
+    DMK_NO_SANITIZE_ADDRESS
     std::optional<size_t> verify_pattern_avx2(const std::byte *pattern_start,
                                               const Scanner::CompiledPattern &pattern,
                                               size_t start_offset) noexcept
@@ -333,6 +351,7 @@ namespace
     // pattern.offset. The public find_pattern wrappers apply the offset
     // exactly once on top of this result; scan_executable_regions also calls
     // this directly so its own final offset-application remains correct.
+    DMK_NO_SANITIZE_ADDRESS
     const std::byte *find_pattern_raw(const std::byte *start_address, size_t region_size,
                                       const Scanner::CompiledPattern &pattern) noexcept;
 
@@ -395,6 +414,32 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
 
 namespace
 {
+    // memchr over [begin, end] for the anchor byte. Under ASan the libc memchr
+    // interceptor inspects the whole range against ASan's shadow and reports a
+    // false overflow when the scanner walks this process's own poisoned memory;
+    // no_sanitize_address does not suppress that runtime interceptor. Scanning
+    // inline in a no_sanitize_address function reads the bytes directly, exactly
+    // as the release memchr does. Release builds keep the optimized memchr.
+    DMK_NO_SANITIZE_ADDRESS
+    const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end,
+                                   unsigned char target) noexcept
+    {
+#if defined(__SANITIZE_ADDRESS__)
+        for (const std::byte *p = begin; p <= end; ++p)
+        {
+            if (static_cast<unsigned char>(*p) == target)
+            {
+                return p;
+            }
+        }
+        return nullptr;
+#else
+        return static_cast<const std::byte *>(
+            memchr(begin, target, static_cast<size_t>(end - begin + 1)));
+#endif
+    }
+
+    DMK_NO_SANITIZE_ADDRESS
     const std::byte *find_pattern_raw(const std::byte *start_address, size_t region_size,
                                       const Scanner::CompiledPattern &pattern) noexcept
     {
@@ -438,15 +483,13 @@ namespace
 
         while (search_start <= search_end)
         {
-            const void *found = memchr(search_start, static_cast<int>(target_val),
-                                       static_cast<size_t>(search_end - search_start + 1));
+            const std::byte *current_scan_ptr =
+                scan_for_byte(search_start, search_end, target_val);
 
-            if (!found)
+            if (!current_scan_ptr)
             {
                 break;
             }
-
-            const std::byte *current_scan_ptr = static_cast<const std::byte *>(found);
             const std::byte *pattern_start = current_scan_ptr - best_anchor;
 
             // Verify the full pattern at this position.
