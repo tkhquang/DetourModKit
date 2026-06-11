@@ -561,7 +561,10 @@ ctest --preset msvc-debug-asan
 > Developer Command Prompt (or `Enter-VsDevShell`) provides it. ASan only -- there
 > is no UBSan or LeakSanitizer on MSVC. The GCC/Clang `-fsanitize=address,undefined`
 > path only links where the runtimes exist (a Linux toolchain), which does not
-> apply to this Windows-only library.
+> apply to this Windows-only library. Setting `DMK_ENABLE_SANITIZERS=ON` under a
+> non-MSVC Windows toolchain (e.g. MinGW) now fails fast at configure time with a
+> `FATAL_ERROR` pointing to the MSVC route, instead of configuring cleanly and
+> then failing at link.
 
 ### Enabling Code Coverage
 
@@ -719,6 +722,8 @@ This method uses a pre-built and installed version of DetourModKit.
     ```
 
 ## Code Example
+
+> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScanner::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKHookManager`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
 
 ```cpp
 // MyMod/src/main.cpp

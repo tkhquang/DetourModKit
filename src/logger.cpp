@@ -306,6 +306,26 @@ namespace DetourModKit
         }
     }
 
+    bool Logger::log_noexcept(LogLevel level, std::string_view message) noexcept
+    {
+        if (level < m_current_log_level.load(std::memory_order_acquire))
+        {
+            return false;
+        }
+        // The synchronous sink allocates (timestamp formatting) and a custom
+        // stream could raise, so the throwing log() is wrapped here to keep the
+        // no-throw contract for noexcept-boundary callers.
+        try
+        {
+            log(level, message);
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
     std::string Logger::get_timestamp() const
     {
         try

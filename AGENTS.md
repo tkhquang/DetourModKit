@@ -228,7 +228,7 @@ Markdown files (`*.md`) are **not** hard-wrapped at 80 columns. Write one logica
 
 - **`const` by default:** Declare local variables `const` unless mutation is required. Use `const auto &` in range-for loops over containers.
 - **`constexpr` where possible:** Prefer `constexpr` for functions evaluable at compile time. Use `inline constexpr` for namespace-scope constants in headers. Use `static constexpr` for class-scope constants.
-- **`noexcept`:** Mark all destructors, shutdown methods, accessors, and functions that provably never throw. All `const` getters must be `noexcept`.
+- **`noexcept`:** Mark all destructors, shutdown methods, accessors, and functions that provably never throw. All `const` getters must be `noexcept`. A `noexcept` function must not perform a potentially-throwing allocation (vector/string growth, `make_unique`, plain `operator new`, `std::format`) unless every throwing step is wrapped in a local `try/catch` that preserves the no-throw contract -- fail closed: leave state unchanged (allocate before committing), return a failure/no-op result, and log best-effort through `Logger::log_noexcept` / `Logger::try_log`. For allocation that can genuinely fail under load, prefer `new (std::nothrow)` / the nothrow `operator new` and drop the work rather than terminate. See the `InputPoller` reshape APIs, `StringPool` growth, and the bootstrap helpers.
 - **`[[nodiscard]]`:** Apply to all functions where ignoring the return value is a likely bug: factory functions, status queries, `bool` success/failure returns, `std::expected`/`std::optional` returns.
 - **`explicit`:** All single-argument constructors must be `explicit`.
 - **Casts:** Use C++ casts exclusively (`static_cast`, `reinterpret_cast`, `const_cast`). Never use C-style casts. Use `reinterpret_cast` only for pointer/address conversions at system boundaries. When intentionally discarding a `[[nodiscard]]` return value, cast to void explicitly: `(void)expr;`. This suppresses the compiler warning and signals deliberate intent.
@@ -245,6 +245,8 @@ Markdown files (`*.md`) are **not** hard-wrapped at 80 columns. Write one logica
 - **Lock ordering:** When acquiring multiple locks, document the order in the class header and follow it strictly. Example from `logger.hpp`: `1. m_async_mutex` then `2. *m_log_mutex_ptr`.
 - **Two-phase shutdown:** When destroying or shutting down objects that manage hooks or callbacks, disable/drain under a shared/reader lock first, then clear state under an exclusive/writer lock. This prevents deadlock with in-flight callbacks.
 - **Deferred logging:** When logging inside a critical section, collect messages into a local vector and emit after releasing the lock. This prevents deadlocks when Logger acquires its own locks.
+- **Re-check shutdown after a gate:** A mutator that fast-fails on a global shutdown/teardown flag before acquiring a serializing gate must re-check the same flag after acquiring it. A thread can observe the flag as false, then block behind a teardown that holds the gate exclusively and resets reusable state; the post-gate re-check keeps every mutator uniform and prevents stale operations against a freshly reset generation (see the `HookManager` create/enable/disable/remove and VMT mutators).
+- **Callbacks are host-critical:** Hook callbacks and input callbacks run on the game's threads. Do not perform unbounded allocation, blocking I/O, hook creation/removal, or config reload directly inside them; defer that work to a worker or queue. Logging from a callback must use the no-throw `Logger::log_noexcept` / `Logger::try_log` so a formatting or sink failure cannot escape into the host.
 - **Error returns:** `std::expected` for memory operations, `std::optional` for scanner results. Reserve exceptions for construction failures and truly exceptional conditions.
 - **Security hardening:** The build enables ASLR (`/DYNAMICBASE`), DEP (`/NXCOMPAT`), and Control Flow Guard (`/GUARD:CF`) on MSVC, and equivalent flags (`--dynamicbase`, `--nxcompat`) on MinGW. Because DetourModKit is a static archive (the consumer performs the final link of the mod DLL/EXE), these switches are also propagated to `find_package` / `add_subdirectory` consumers via `target_link_options(DetourModKit INTERFACE ...)`, selected from the linker frontend detected at configure time so the right spelling reaches MSVC/clang-cl and MinGW/Clang while preserving the CMake 3.25 minimum. Do not remove these.
 
@@ -293,6 +295,10 @@ dispatcher.emit_safe(PlayerStateChanged{.health = player->health});
 ### Memory access in hook callbacks
 
 Do not add `Memory::is_readable()` or `Memory::is_writable()` before every field read in hook callbacks. Use those predicates for setup validation and diagnostics. Use `seh_read_chain` for unstable live game pointers, and use `read_ptr_unchecked` only when the caller can prove the pointer chain is live for the current frame. The full pattern -- worked examples, the primitive selection table, and the anti-patterns to remove -- lives in [docs/misc/hot-path-memory.md](docs/misc/hot-path-memory.md).
+
+### Scanning process memory
+
+The raw `Scanner::find_pattern(start_address, region_size, pattern)` overloads do no page filtering: they read the whole span with `memchr`/SIMD, so the caller must guarantee `[start_address, start_address + region_size)` is committed and readable, or the host faults. Use them only on byte buffers or module sections whose readability is already known. To scan arbitrary process or module memory, prefer the page-filtered helpers (`find_pattern_in_module`, `scan_executable_regions`, `scan_readable_regions`), which walk `VirtualQuery` and skip guard, no-access, and non-readable pages.
 
 ## Testing
 

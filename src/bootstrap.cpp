@@ -43,8 +43,19 @@ namespace DetourModKit::Bootstrap
             const char *exe_name = std::strrchr(exe_path, '\\');
             exe_name = exe_name ? exe_name + 1 : exe_path;
 
-            std::string expected_copy(expected);
-            return _stricmp(exe_name, expected_copy.c_str()) == 0;
+            // Copy the caller-supplied name into a bounded stack buffer to get a
+            // null-terminated string for _stricmp without heap allocation: this
+            // helper is noexcept and runs on the bootstrap path, so a throwing
+            // allocation would call std::terminate. A name that cannot fit a
+            // module file name cannot match the running executable.
+            if (expected.size() >= MAX_PATH)
+            {
+                return false;
+            }
+            char expected_buf[MAX_PATH];
+            std::memcpy(expected_buf, expected.data(), expected.size());
+            expected_buf[expected.size()] = '\0';
+            return _stricmp(exe_name, expected_buf) == 0;
         }
 
         bool acquire_instance_mutex(std::string_view prefix) noexcept
@@ -59,13 +70,23 @@ namespace DetourModKit::Bootstrap
             // formatter would have to truncate or fail, and an unbounded one
             // (wsprintfW) could overflow. CreateMutexW rejects an over-long name
             // on its own, which the null-handle check below already handles.
+            // The allocation is wrapped because this helper is noexcept and runs
+            // on the bootstrap path; an out-of-memory failure fails closed (no
+            // single-instance guard) rather than terminating the process.
             std::wstring mutex_name;
-            mutex_name.reserve(prefix.size() + 10);
-            for (char c : prefix)
+            try
             {
-                mutex_name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+                mutex_name.reserve(prefix.size() + 10);
+                for (char c : prefix)
+                {
+                    mutex_name.push_back(static_cast<wchar_t>(static_cast<unsigned char>(c)));
+                }
+                mutex_name += std::to_wstring(GetCurrentProcessId());
             }
-            mutex_name += std::to_wstring(GetCurrentProcessId());
+            catch (...)
+            {
+                return false;
+            }
 
             HANDLE mutex_handle = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
             if (!mutex_handle)

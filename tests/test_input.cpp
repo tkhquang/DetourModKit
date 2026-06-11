@@ -2,8 +2,10 @@
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "DetourModKit/input.hpp"
@@ -1707,6 +1709,38 @@ TEST(InputStringTest, InputSourceToString_IsNoexcept)
 {
     static_assert(noexcept(input_source_to_string(InputSource::Keyboard)));
     static_assert(noexcept(input_source_to_string(InputSource::Gamepad)));
+}
+
+TEST(InputReshapeContract, MutatorsAreNoexcept)
+{
+    using KCL = Config::KeyComboList;
+    // These reshape APIs are reachable from loader-lock teardown and allocate
+    // internally. They must remain noexcept and genuinely no-throw (fail-closed
+    // on out-of-memory), so removing noexcept here is a regression that this
+    // guard catches at compile time. declval keeps every expression unevaluated.
+    static_assert(noexcept(std::declval<InputManager &>().update_binding_combos(
+                      std::declval<std::string_view>(), std::declval<const KCL &>())),
+                  "InputManager::update_binding_combos must stay noexcept (fail-closed)");
+    static_assert(noexcept(std::declval<InputManager &>().remove_binding_by_name(
+                      std::declval<std::string_view>(), true)),
+                  "InputManager::remove_binding_by_name must stay noexcept (fail-closed)");
+    static_assert(noexcept(std::declval<InputManager &>().clear_bindings(true)),
+                  "InputManager::clear_bindings must stay noexcept (fail-closed)");
+    static_assert(noexcept(std::declval<InputManager &>().set_consume(
+                      std::declval<std::string_view>(), true)),
+                  "InputManager::set_consume must stay noexcept (fail-closed)");
+
+    static_assert(noexcept(std::declval<InputPoller &>().update_combos(
+                      std::declval<std::string_view>(), std::declval<const KCL &>())),
+                  "InputPoller::update_combos must stay noexcept (fail-closed)");
+    static_assert(noexcept(std::declval<InputPoller &>().add_binding(std::declval<InputBinding>())),
+                  "InputPoller::add_binding must stay noexcept (fail-closed)");
+    static_assert(noexcept(std::declval<InputPoller &>().remove_bindings_by_name(
+                      std::declval<std::string_view>())),
+                  "InputPoller::remove_bindings_by_name must stay noexcept (fail-closed)");
+    static_assert(noexcept(std::declval<InputPoller &>().clear_bindings()),
+                  "InputPoller::clear_bindings must stay noexcept (fail-closed)");
+    SUCCEED();
 }
 
 // --- InputCodeHash ---

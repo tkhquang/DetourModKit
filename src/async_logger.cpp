@@ -6,14 +6,16 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <new>
 #include <sstream>
+#include <type_traits>
 
 namespace DetourModKit
 {
     using detail::is_loader_lock_held;
     using detail::pin_current_module;
 
-    StringPool::StringPool()
+    StringPool::StringPool() noexcept
     {
         std::lock_guard<std::mutex> lock(m_pool_mutex);
         grow_pool_locked();
@@ -49,13 +51,16 @@ namespace DetourModKit
                 }
             }
 
-            ::operator delete(current);
+            // Block is over-aligned (alignas(64)); it must be released through
+            // the aligned operator delete that matches its aligned allocation
+            // in grow_pool_locked().
+            ::operator delete(current, std::align_val_t{alignof(Block)});
             current = next;
         }
         m_head.store(nullptr, std::memory_order_relaxed);
     }
 
-    void StringPool::grow_pool_locked()
+    void StringPool::grow_pool_locked() noexcept
     {
         Block *existing = m_head.load(std::memory_order_relaxed);
         size_t count = 0;
@@ -67,13 +72,31 @@ namespace DetourModKit
             }
         }
 
-        Block *new_block = new (::operator new(sizeof(Block))) Block();
+        // Block is over-aligned via its alignas(64) data member, so it must be
+        // allocated through the aligned operator new; the plain overload is not
+        // required to honour an alignment stricter than
+        // __STDCPP_DEFAULT_NEW_ALIGNMENT__ (typically 16 on x64), which would be
+        // alignment UB. The allocation is also nothrow: this runs underneath the
+        // noexcept logging path, so on out-of-memory it must leave the pool
+        // unchanged and let the caller fall back to a nothrow heap string (or
+        // drop the message) rather than let std::bad_alloc escape and terminate.
+        void *raw = ::operator new(sizeof(Block), std::align_val_t{alignof(Block)}, std::nothrow);
+        if (!raw)
+        {
+            return;
+        }
+        Block *new_block = new (raw) Block();
 
         new_block->next = existing;
         new_block->free_list = nullptr;
 
         PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
         static_assert(POOL_SLOTS_PER_BLOCK <= 32, "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
+        // Slot construction must not throw, otherwise a partially built block
+        // could leak with no unwinding under this noexcept function. std::string's
+        // default constructor is noexcept, so the loop below is provably no-throw.
+        static_assert(std::is_nothrow_default_constructible_v<PoolSlot>,
+                      "PoolSlot must be nothrow-default-constructible so grow_pool_locked stays no-throw");
         uint32_t constructed = 0;
         for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
         {
@@ -89,18 +112,21 @@ namespace DetourModKit
 
     StringPool &StringPool::instance() noexcept
     {
-        // Intentionally leaked to avoid the static destruction order fiasco.
-        // LogMessage destructors may run after a Meyers singleton would be
-        // destroyed (e.g. thread-local or global LogMessage instances),
-        // causing use-after-free in deallocate(). The leak is bounded:
-        // at most MEMORY_POOL_BLOCK_COUNT blocks of MEMORY_POOL_BLOCK_SIZE bytes.
-        // Neither Bootstrap::request_shutdown() nor DMK_Shutdown() reclaim
-        // this pool; the memory is released by the OS at process exit. This
-        // is intentional for correctness under DLL-unload and loader-lock
-        // scenarios, where running the pool destructor could race with
-        // late LogMessage teardown.
-        static StringPool &pool = *new StringPool();
-        return pool;
+        // Constructed once into function-local static storage and never
+        // destroyed. A Meyers singleton would be destroyed at static teardown
+        // and race late LogMessage destructors that call into deallocate()
+        // (use-after-free under DLL unload and loader-lock teardown). A
+        // heap-allocated singleton (`*new StringPool()`) would instead require
+        // a throwing operator new whose std::bad_alloc would escape this
+        // noexcept accessor and terminate the host. Placement-new into static
+        // storage avoids both: the object lives for the whole process, its
+        // destructor never runs, and construction performs no throwing
+        // allocation because grow_pool_locked() is nothrow. The bounded block
+        // leak (at most MEMORY_POOL_BLOCK_COUNT blocks of
+        // MEMORY_POOL_BLOCK_SIZE bytes) is released by the OS at process exit.
+        alignas(StringPool) static unsigned char storage[sizeof(StringPool)];
+        static StringPool *const pool = ::new (static_cast<void *>(storage)) StringPool();
+        return *pool;
     }
 
     StringPool::PoolSlot *StringPool::claim_free_slot() noexcept
@@ -118,7 +144,7 @@ namespace DetourModKit
         return nullptr;
     }
 
-    std::string *StringPool::allocate(size_t size)
+    std::string *StringPool::allocate(size_t size) noexcept
     {
         if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
         {
@@ -196,7 +222,7 @@ namespace DetourModKit
         block->free_list = slot;
     }
 
-    LogMessage::LogMessage(LogLevel lvl, std::string_view msg)
+    LogMessage::LogMessage(LogLevel lvl, std::string_view msg) noexcept
         : level(lvl),
           timestamp(std::chrono::system_clock::now()),
           thread_id(std::this_thread::get_id())

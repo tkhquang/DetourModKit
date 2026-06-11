@@ -58,7 +58,7 @@ namespace DetourModKit
     public:
         static StringPool &instance() noexcept;
 
-        [[nodiscard]] std::string *allocate(size_t size);
+        [[nodiscard]] std::string *allocate(size_t size) noexcept;
         void deallocate(std::string *ptr) noexcept;
 
         StringPool(const StringPool &) = delete;
@@ -95,11 +95,16 @@ namespace DetourModKit
             }
         };
 
-        StringPool();
+        StringPool() noexcept;
         ~StringPool() noexcept;
 
-        /// Must be called with m_pool_mutex held.
-        void grow_pool_locked();
+        /**
+         * @brief Appends one block to the pool. Must be called with m_pool_mutex held.
+         * @details No-throw: an allocation failure leaves the pool unchanged so
+         *          callers can fall back to a nothrow heap string instead of
+         *          throwing out of the logging path.
+         */
+        void grow_pool_locked() noexcept;
         PoolSlot *claim_free_slot() noexcept;
         void return_slot_locked(PoolSlot *slot, Block *block) noexcept;
 
@@ -128,7 +133,7 @@ namespace DetourModKit
         // Owned: allocated by StringPool, freed by reset().
         std::string *overflow{nullptr};
 
-        LogMessage(LogLevel lvl, std::string_view msg);
+        LogMessage(LogLevel lvl, std::string_view msg) noexcept;
         LogMessage() noexcept = default;
 
         ~LogMessage() noexcept;
