@@ -18,6 +18,9 @@
 #include "platform.hpp"
 
 #include <windows.h>
+#if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
+#include <intrin.h> // __movsb -- ASan-safe copy in the SEH probe read
+#endif
 #include <shared_mutex>
 #include <unordered_map>
 #include <map>
@@ -1443,7 +1446,17 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
 #ifdef _MSC_VER
     __try
     {
+#if defined(__SANITIZE_ADDRESS__)
+        // Copy via __movsb (rep movsb) under ASan: MSVC routes std::memcpy through
+        // the ASan interceptor, which inspects the source against ASan's shadow and
+        // false-positives on the foreign mapped memory this probe legitimately
+        // reads (e.g. a module's data section during the RTTI walk). __movsb emits
+        // the copy inline with no interceptable call. Release keeps std::memcpy.
+        __movsb(static_cast<unsigned char *>(out),
+                reinterpret_cast<const unsigned char *>(addr), bytes);
+#else
         std::memcpy(out, reinterpret_cast<const void *>(addr), bytes);
+#endif
         return true;
     }
     __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ||
