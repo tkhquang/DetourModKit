@@ -629,11 +629,7 @@ namespace DetourModKit
             if (m_has_wheel_bindings.load(std::memory_order_relaxed))
             {
                 const auto taken = detail::take_wheel_counts();
-                for (int dir = 0; dir < 4; ++dir)
-                {
-                    wheel_pulse.pending[static_cast<size_t>(dir)] +=
-                        taken[static_cast<size_t>(dir)];
-                }
+                detail::add_wheel_notches(wheel_pulse, taken);
                 wheel_pulse_mask = detail::step_wheel_pulse(wheel_pulse);
             }
 

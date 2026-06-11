@@ -1116,7 +1116,13 @@ namespace DetourModKit
          */
         mutable std::shared_mutex m_mutator_gate;
 
-        [[nodiscard]] int &get_reentrancy_guard() noexcept
+        /**
+         * @brief Returns the thread-local reentrancy depth counter.
+         * @details Declared const so the const read-only query accessors can consult the
+         *          guard. The counter is thread-local and independent of object state, so
+         *          const is honest here.
+         */
+        [[nodiscard]] int &get_reentrancy_guard() const noexcept
         {
             thread_local int reentrancy_counter{0};
             return reentrancy_counter;
@@ -1133,6 +1139,27 @@ namespace DetourModKit
             ReentrancyGuard(ReentrancyGuard &&) = delete;
             ReentrancyGuard &operator=(ReentrancyGuard &&) = delete;
         };
+
+        /**
+         * @brief Acquires m_hooks_mutex shared, or returns a disengaged lock when reentrant.
+         * @details A with_* or try_with_* callback already holds m_hooks_mutex shared on
+         *          this thread and has bumped the reentrancy guard. Re-locking a non-recursive
+         *          std::shared_mutex from the same thread is undefined behavior (and can
+         *          deadlock if a writer is queued between the two acquisitions), so a const
+         *          query accessor invoked from inside such a callback must read under the
+         *          lock the callback already holds instead of taking a second shared lock.
+         *          When not reentrant (guard == 0) the returned lock owns m_hooks_mutex for
+         *          the caller's scope exactly as a direct shared_lock would.
+         * @return An engaged shared_lock when guard == 0, otherwise a disengaged one.
+         */
+        [[nodiscard]] std::shared_lock<std::shared_mutex> lock_hooks_shared_reentrant() const
+        {
+            if (get_reentrancy_guard() > 0)
+            {
+                return std::shared_lock<std::shared_mutex>{};
+            }
+            return std::shared_lock<std::shared_mutex>(m_hooks_mutex);
+        }
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
         std::string error_to_string(const safetyhook::MidHook::Error &err) const;

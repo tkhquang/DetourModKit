@@ -82,8 +82,17 @@ namespace DetourModKit
           m_mask(DEFAULT_CAPACITY - 1)
     {
         LARGE_INTEGER freq;
-        QueryPerformanceFrequency(&freq);
-        m_qpc_frequency = freq.QuadPart;
+        // QueryPerformanceFrequency cannot fail and is always non-zero on Windows XP and
+        // later, but guard regardless: a zero frequency would divide-by-zero in record().
+        // Fall back to a 10 MHz tick so durations stay finite if the API ever misbehaves.
+        if (QueryPerformanceFrequency(&freq) && freq.QuadPart > 0)
+        {
+            m_qpc_frequency = freq.QuadPart;
+        }
+        else
+        {
+            m_qpc_frequency = 10'000'000;
+        }
     }
 
     Profiler &Profiler::get_instance() noexcept
@@ -95,7 +104,10 @@ namespace DetourModKit
     void Profiler::record(const char *name, int64_t start_ticks, int64_t end_ticks,
                           uint32_t thread_id) noexcept
     {
-        const int64_t delta_ticks = end_ticks - start_ticks;
+        // Clamp a non-positive delta (end before start: swapped arguments or a backwards
+        // clock read) to zero so the unsigned cast below cannot wrap a negative value
+        // into a bogus multi-minute duration.
+        const int64_t delta_ticks = end_ticks > start_ticks ? end_ticks - start_ticks : 0;
 
         // Convert ticks to microseconds: (delta * 1'000'000) / frequency.
         // The 64-bit intermediate (delta * 1'000'000) cannot overflow for any realistic

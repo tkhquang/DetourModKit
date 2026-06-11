@@ -221,6 +221,40 @@ TEST_F(MemoryTest, CacheAfterClear)
     EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
 }
 
+TEST_F(MemoryTest, InvalidateRangeEvictsMultiPageRegionInterior)
+{
+    // Reserve and commit a three-page region so the cached VirtualQuery region spans
+    // multiple pages and the invalidated interior address is not the region base. This
+    // exercises the case the per-page key probe used to miss: the entry is keyed by the
+    // region base but the interior address hashes to a different shard.
+    const SIZE_T page_size = 4096;
+    const SIZE_T region_size = page_size * 3;
+    void *region = VirtualAlloc(nullptr, region_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(region, nullptr);
+
+    auto *base = static_cast<uint8_t *>(region);
+    // Inside the second page, so neither the region base nor a page-aligned key.
+    uint8_t *interior = base + page_size + 64;
+
+    // Warm the cache with a READABLE verdict for the interior address.
+    EXPECT_TRUE(Memory::is_readable(interior, 16));
+
+    // Flip the whole region to no-access. The cached entry is now stale: without a
+    // correct invalidation a subsequent query would still report READABLE.
+    DWORD old_protect = 0;
+    ASSERT_NE(VirtualProtect(region, region_size, PAGE_NOACCESS, &old_protect), 0);
+
+    // Invalidate the interior address. A correct invalidation evicts the covering
+    // entry regardless of which shard stored it.
+    Memory::invalidate_range(interior, 16);
+
+    // The re-query must re-run VirtualQuery and observe the no-access protection.
+    EXPECT_FALSE(Memory::is_readable(interior, 16));
+
+    VirtualProtect(region, region_size, old_protect, &old_protect);
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
 TEST_F(MemoryTest, CacheClearStressTest)
 {
     char buffer[100] = {0};

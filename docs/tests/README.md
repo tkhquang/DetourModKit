@@ -313,6 +313,10 @@ The decoder header lives under `src/` (not the public include tree), so the test
 | `WheelPulseTest.SingleNotchPulsesThenGoesLow` | One queued notch reads pressed for exactly one cycle, then is forced low so the edge detector re-arms. |
 | `WheelPulseTest.TwoNotchesProduceTwoSeparatedPulses` | Two queued notches fire as two distinct Press edges separated by a forced low cycle, never one fused press. |
 | `WheelPulseTest.DirectionsAreIndependent` | Pending notches in different directions pulse on the same cycle without interfering. |
+| `WheelPulseTest.AddWheelNotchesAccumulatesBelowCap` | Freshly drained notches add to the pending backlog while it stays under the cap. |
+| `WheelPulseTest.AddWheelNotchesClampsRunawayBacklog` | A single huge burst and repeated bursts both saturate at `MAX_WHEEL_PENDING`, so a sustained fast scroll cannot queue notches without bound. |
+| `WheelPulseTest.AddWheelNotchesIgnoresNegativeCounts` | A corrupt negative count is ignored rather than driving the pending counter negative. |
+| `WheelPulseTest.CappedBacklogStillDrainsOnePulsePerNotch` | After the backlog saturates, each retained notch still drains as exactly one Press edge. |
 | `GamepadSuppressTest.BarePressIsNotSuppressed` | A trigger physically down with no active chord (`owned_now == 0`) is left untouched so the game still sees it. |
 | `GamepadSuppressTest.ActiveChordSuppressesTrigger` | A trigger claimed by an active chord is added to the clear mask. |
 | `GamepadSuppressTest.ModifierReleasedBeforeTriggerKeepsSuppressing` | Releasing the modifier a frame before the trigger does not leak a bare trigger: suppression latches to the trigger button's own lifetime. |

@@ -199,6 +199,22 @@ TEST_F(ProfilerRecordTest, ExportChromeJson_SingleSample)
     EXPECT_NE(json.find("\"pid\":1"), std::string::npos);
 }
 
+TEST_F(ProfilerRecordTest, Record_ClampsBackwardsDurationToZero)
+{
+    auto &profiler = Profiler::get_instance();
+
+    LARGE_INTEGER tick;
+    QueryPerformanceCounter(&tick);
+    // end before start (swapped arguments or a backwards clock read): the duration
+    // must clamp to zero rather than wrap through the uint32_t cast into a bogus
+    // multi-minute value.
+    profiler.record("backwards", tick.QuadPart + 10000, tick.QuadPart, 7);
+
+    const std::string json = profiler.export_chrome_json();
+    EXPECT_NE(json.find("\"name\":\"backwards\""), std::string::npos);
+    EXPECT_NE(json.find("\"dur\":0,\"pid\":1"), std::string::npos);
+}
+
 TEST_F(ProfilerRecordTest, ExportChromeJson_MultipleSamples_ValidArray)
 {
     auto &profiler = Profiler::get_instance();

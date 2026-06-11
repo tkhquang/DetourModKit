@@ -13,6 +13,7 @@
 #include "DetourModKit/input_codes.hpp"
 
 using namespace DetourModKit;
+using DetourModKit::detail::add_wheel_notches;
 using DetourModKit::detail::evaluate_consume_rules;
 using DetourModKit::detail::evaluate_published_consume_rules;
 using DetourModKit::detail::GamepadConsumeRule;
@@ -20,6 +21,7 @@ using DetourModKit::detail::GamepadSuppressState;
 using DetourModKit::detail::install_wndproc;
 using DetourModKit::detail::install_xinput;
 using DetourModKit::detail::MAX_GAMEPAD_CONSUME_RULES;
+using DetourModKit::detail::MAX_WHEEL_PENDING;
 using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::set_wheel_consume;
@@ -125,6 +127,64 @@ TEST(WheelPulseTest, DirectionsAreIndependent)
 
     EXPECT_EQ(step_wheel_pulse(state), static_cast<uint8_t>(kWheelUpBit | kWheelRightBit));
     EXPECT_EQ(step_wheel_pulse(state), 0u);
+}
+
+// --- add_wheel_notches: backlog accumulation is capped ---
+
+TEST(WheelPulseTest, AddWheelNotchesAccumulatesBelowCap)
+{
+    WheelPulseState state;
+    add_wheel_notches(state, {2, 0, 0, 0});
+    add_wheel_notches(state, {3, 0, 0, 0});
+    EXPECT_EQ(state.pending[0], 5);
+}
+
+TEST(WheelPulseTest, AddWheelNotchesClampsRunawayBacklog)
+{
+    WheelPulseState state;
+    // A single huge burst saturates at the cap rather than queuing every notch.
+    add_wheel_notches(state, {1000, 0, 0, 0});
+    EXPECT_EQ(state.pending[0], MAX_WHEEL_PENDING);
+
+    // Repeated bursts cannot push pending past the cap, so phantom notches cannot
+    // accumulate without bound under sustained fast scrolling.
+    for (int i = 0; i < 100; ++i)
+    {
+        add_wheel_notches(state, {50, 50, 50, 50});
+    }
+    for (int dir = 0; dir < 4; ++dir)
+    {
+        EXPECT_EQ(state.pending[dir], MAX_WHEEL_PENDING);
+    }
+}
+
+TEST(WheelPulseTest, AddWheelNotchesIgnoresNegativeCounts)
+{
+    WheelPulseState state;
+    state.pending[1] = 4;
+    // A corrupt negative count must not drive pending negative (which would
+    // underflow the unsigned-style drain in step_wheel_pulse).
+    add_wheel_notches(state, {0, -10, 0, 0});
+    EXPECT_EQ(state.pending[1], 4);
+}
+
+TEST(WheelPulseTest, CappedBacklogStillDrainsOnePulsePerNotch)
+{
+    WheelPulseState state;
+    add_wheel_notches(state, {0, 1000, 0, 0});
+    ASSERT_EQ(state.pending[1], MAX_WHEEL_PENDING);
+
+    // Each retained notch still maps to exactly one Press edge (one pulse, one gap).
+    int pulses = 0;
+    for (int cycle = 0; cycle < MAX_WHEEL_PENDING * 2; ++cycle)
+    {
+        if (step_wheel_pulse(state) == kWheelDownBit)
+        {
+            ++pulses;
+        }
+    }
+    EXPECT_EQ(pulses, MAX_WHEEL_PENDING);
+    EXPECT_EQ(state.pending[1], 0);
 }
 
 // --- step_gamepad_suppress: consume-until-release latch ---

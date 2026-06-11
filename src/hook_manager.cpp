@@ -651,7 +651,7 @@ bool HookManager::is_target_already_hooked(uintptr_t target_address) const noexc
     {
         return false;
     }
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    const auto lock = lock_hooks_shared_reentrant();
     for (const auto &[name, hook_ptr] : m_hooks)
     {
         if (hook_ptr->get_type() == HookType::Inline &&
@@ -1039,7 +1039,7 @@ std::size_t HookManager::disable_all_hooks()
 
 std::optional<HookStatus> HookManager::get_hook_status(std::string_view hook_id) const
 {
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    const auto lock = lock_hooks_shared_reentrant();
     auto it = m_hooks.find(hook_id);
     if (it != m_hooks.end())
     {
@@ -1050,7 +1050,7 @@ std::optional<HookStatus> HookManager::get_hook_status(std::string_view hook_id)
 
 std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
 {
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    const auto lock = lock_hooks_shared_reentrant();
     std::unordered_map<HookStatus, size_t> counts;
     counts[HookStatus::Active] = 0;
     counts[HookStatus::Disabled] = 0;
@@ -1063,7 +1063,7 @@ std::unordered_map<HookStatus, size_t> HookManager::get_hook_counts() const
 
 std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> status_filter) const
 {
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    const auto lock = lock_hooks_shared_reentrant();
     std::vector<std::string> ids;
     ids.reserve(m_hooks.size());
     for (const auto &[name, hook_ptr] : m_hooks)
@@ -1261,7 +1261,27 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
                     {{std::format("HookManager: VMT hook '{}' not found for apply.", vmt_name), LogLevel::Warning}}};
         }
 
-        it->second.vmt_hook().apply(object);
+        // VmtHook::apply tracks the object in an internal container, so it can throw
+        // bad_alloc. Contain it here as every other SafetyHook call site does, so a
+        // failed apply returns false instead of unwinding out through the held locks.
+        try
+        {
+            it->second.vmt_hook().apply(object);
+        }
+        catch (const std::exception &e)
+        {
+            return {false,
+                    {{std::format("HookManager: Exception applying VMT hook '{}' to object {}: {}",
+                                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)), e.what()),
+                      LogLevel::Error}}};
+        }
+        catch (...)
+        {
+            return {false,
+                    {{std::format("HookManager: Unknown exception applying VMT hook '{}' to object {}.",
+                                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                      LogLevel::Error}}};
+        }
         return {true,
                 {{std::format("HookManager: VMT hook '{}' applied to object {}.",
                               vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
@@ -1353,7 +1373,7 @@ void HookManager::remove_all_vmt_hooks()
 
 std::vector<std::string> HookManager::get_vmt_hook_names() const
 {
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    const auto lock = lock_hooks_shared_reentrant();
     std::vector<std::string> names;
     names.reserve(m_vmt_hooks.size());
     for (const auto &[name, entry] : m_vmt_hooks)

@@ -100,6 +100,10 @@ namespace DetourModKit
          *          which case the worker is detached (see
          *          StoppableWorker::shutdown()). Returns promptly
          *          (~100 ms bound) regardless.
+         * @note A change that arrived within the debounce window but had not yet
+         *       fired triggers one final @p on_reload callback during this stop, so
+         *       stop() does not guarantee that no further callback runs. Callers that
+         *       must observe no callback after stopping should latch their own flag.
          */
         void stop() noexcept;
 

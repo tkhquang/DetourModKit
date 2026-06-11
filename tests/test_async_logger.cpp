@@ -128,6 +128,37 @@ TEST_F(AsyncLoggerTest, Enqueue)
     EXPECT_GE(line_count, 3);
 }
 
+TEST_F(AsyncLoggerTest, HonorsConfiguredTimestampFormat)
+{
+    AsyncLoggerConfig config;
+    config.batch_size = 10;
+    config.flush_interval = std::chrono::milliseconds{50};
+    // A format distinct from the default "%Y-%m-%d %H:%M:%S" with a literal marker
+    // that strftime/put_time passes through verbatim. The marker can only appear in
+    // the output if the async sink honors the configured format.
+    config.timestamp_format = "%Y/%m/%d STAMP";
+
+    auto file_stream = std::make_shared<WinFileStream>(test_log_file_.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+    static_cast<void>(logger->enqueue(LogLevel::Info, "formatted"));
+    logger->shutdown(); // drains queued messages before returning
+
+    std::ifstream file(test_log_file_);
+    std::string line;
+    bool found = false;
+    while (std::getline(file, line))
+    {
+        if (line.find("STAMP") != std::string::npos &&
+            line.find("formatted") != std::string::npos)
+        {
+            found = true;
+        }
+    }
+    EXPECT_TRUE(found);
+}
+
 TEST_F(AsyncLoggerTest, Enqueue_ReturnsTrue_OnSuccess)
 {
     AsyncLoggerConfig config;

@@ -459,6 +459,11 @@ namespace DetourModKit
          *       is logged and the watcher remains running. Tear the watcher
          *       down from a different thread, e.g. by posting the disable
          *       request to a deferred shutdown hook.
+         * @note A config change still inside the debounce window when this is called
+         *       fires one final reload (running the registered setters) during the
+         *       stop, so disabling auto-reload does not guarantee no further setter
+         *       invocation. Callers that require a hard stop should latch their own
+         *       guard around setter side effects.
          */
         void disable_auto_reload() noexcept;
 
