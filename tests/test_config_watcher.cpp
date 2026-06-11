@@ -17,13 +17,11 @@
 using namespace DetourModKit;
 using namespace std::chrono_literals;
 
-// The loader-lock fallback in ~ConfigWatcher heap-allocates a
-// std::unique_ptr<Impl> via new (std::nothrow) and leaks the cell to
-// outlive the destructor. Impl is a private nested type, so this
-// assertion guards the unique_ptr leak-cell pattern at the type level
-// rather than referencing Impl directly: if std::unique_ptr ever ceased
-// to be nothrow-move-constructible, the leak cell could no longer be
-// constructed from a noexcept context without risking std::terminate.
+// The loader-lock fallback in ~ConfigWatcher heap-allocates a std::unique_ptr<Impl> via new (std::nothrow) and leaks
+// the cell to outlive the destructor. Impl is a private nested type, so this assertion guards the unique_ptr leak-cell
+// pattern at the type level rather than referencing Impl directly: if std::unique_ptr ever ceased to be
+// nothrow-move-constructible, the leak cell could no longer be constructed from a noexcept context without risking
+// std::terminate.
 static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<int>>,
               "std::unique_ptr must remain nothrow-move-constructible for the "
               "ConfigWatcher loader-lock leak path to keep ~ConfigWatcher noexcept honest.");
@@ -36,9 +34,8 @@ namespace
         void SetUp() override
         {
             static int s_test_counter = 0;
-            const std::string name = "dmk_watcher_" +
-                                     std::to_string(_getpid()) + "_" +
-                                     std::to_string(++s_test_counter);
+            const std::string name =
+                "dmk_watcher_" + std::to_string(_getpid()) + "_" + std::to_string(++s_test_counter);
             m_temp_dir = std::filesystem::temp_directory_path() / name;
             std::filesystem::create_directories(m_temp_dir);
             m_ini_path = m_temp_dir / "watched.ini";
@@ -59,8 +56,7 @@ namespace
         }
 
         // Waits until @p pred is true or @p timeout expires. Returns pred().
-        template <class Pred>
-        static bool wait_until(Pred pred, std::chrono::milliseconds timeout)
+        template <class Pred> static bool wait_until(Pred pred, std::chrono::milliseconds timeout)
         {
             const auto deadline = std::chrono::steady_clock::now() + timeout;
             while (std::chrono::steady_clock::now() < deadline)
@@ -84,9 +80,7 @@ namespace
     {
         std::atomic<int> hits{0};
         {
-            ConfigWatcher watcher(m_ini_path.string(), 50ms,
-                                  [&hits]()
-                                  { hits.fetch_add(1); });
+            ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
             EXPECT_FALSE(watcher.is_running());
         }
         EXPECT_EQ(hits.load(), 0);
@@ -97,9 +91,7 @@ namespace
         ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
 
         EXPECT_TRUE(watcher.start());
-        EXPECT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        EXPECT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
         EXPECT_TRUE(watcher.start()); // second call is a no-op
         EXPECT_TRUE(watcher.is_running());
@@ -137,24 +129,17 @@ namespace
         ConfigWatcher watcher(m_ini_path.string(), 50ms,
                               [&]()
                               {
-                                  cb_tid.store(std::this_thread::get_id(),
-                                               std::memory_order_release);
-                                  observed.store(true,
-                                                 std::memory_order_release);
+                                  cb_tid.store(std::this_thread::get_id(), std::memory_order_release);
+                                  observed.store(true, std::memory_order_release);
                               });
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
 
         write_ini("[S]\nK=2\n");
 
-        ASSERT_TRUE(wait_until([&]()
-                               { return observed.load(std::memory_order_acquire); },
-                               3s));
-        EXPECT_TRUE(watcher.is_worker_thread(
-            cb_tid.load(std::memory_order_acquire)));
+        ASSERT_TRUE(wait_until([&]() { return observed.load(std::memory_order_acquire); }, 3s));
+        EXPECT_TRUE(watcher.is_worker_thread(cb_tid.load(std::memory_order_acquire)));
         EXPECT_FALSE(watcher.is_worker_thread(std::this_thread::get_id()));
         watcher.stop();
     }
@@ -171,13 +156,9 @@ namespace
     {
         std::atomic<int> hits{0};
         {
-            ConfigWatcher watcher(m_ini_path.string(), 50ms,
-                                  [&hits]()
-                                  { hits.fetch_add(1); });
+            ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
             ASSERT_TRUE(watcher.start());
-            ASSERT_TRUE(wait_until([&]()
-                                   { return watcher.is_running(); },
-                                   1s));
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
             std::this_thread::sleep_for(80ms);
         }
         SUCCEED();
@@ -188,22 +169,16 @@ namespace
     TEST_F(ConfigWatcherTest, BasicFire_CallbackInvokedOnWrite)
     {
         std::atomic<int> hits{0};
-        ConfigWatcher watcher(m_ini_path.string(), 100ms,
-                              [&hits]()
-                              { hits.fetch_add(1); });
+        ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
         // Let ReadDirectoryChangesW issue its first I/O request before we write.
         std::this_thread::sleep_for(100ms);
 
         write_ini("[S]\nK=2\n");
 
-        EXPECT_TRUE(wait_until([&]()
-                               { return hits.load() >= 1; },
-                               2s));
+        EXPECT_TRUE(wait_until([&]() { return hits.load() >= 1; }, 2s));
 
         watcher.stop();
         EXPECT_EQ(hits.load(), 1) << "Expected exactly one debounced fire";
@@ -214,13 +189,9 @@ namespace
     TEST_F(ConfigWatcherTest, Debounce_BurstyWritesCollapseToOneFire)
     {
         std::atomic<int> hits{0};
-        ConfigWatcher watcher(m_ini_path.string(), 200ms,
-                              [&hits]()
-                              { hits.fetch_add(1); });
+        ConfigWatcher watcher(m_ini_path.string(), 200ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
 
         // Five rapid writes within ~100 ms; a 200 ms debounce must collapse them.
@@ -230,16 +201,13 @@ namespace
             std::this_thread::sleep_for(15ms);
         }
 
-        EXPECT_TRUE(wait_until([&]()
-                               { return hits.load() >= 1; },
-                               2s));
+        EXPECT_TRUE(wait_until([&]() { return hits.load() >= 1; }, 2s));
 
         // Give the watcher enough idle time for any spurious second fire to surface.
         std::this_thread::sleep_for(400ms);
 
         watcher.stop();
-        EXPECT_EQ(hits.load(), 1)
-            << "Debounce should collapse the burst into a single callback";
+        EXPECT_EQ(hits.load(), 1) << "Debounce should collapse the burst into a single callback";
     }
 
     // --- Rename-swap-save (Notepad++, VSCode) ---
@@ -247,31 +215,22 @@ namespace
     TEST_F(ConfigWatcherTest, RenameSwapSave_TriggersReload)
     {
         std::atomic<int> hits{0};
-        ConfigWatcher watcher(m_ini_path.string(), 100ms,
-                              [&hits]()
-                              { hits.fetch_add(1); });
+        ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
 
-        // Write sibling .tmp then MoveFileExW over the target -- the atomic
-        // save pattern used by Notepad++ and VSCode.
+        // Write sibling .tmp then MoveFileExW over the target -- the atomic save pattern used by Notepad++ and VSCode.
         const std::filesystem::path tmp = m_temp_dir / "watched.ini.tmp";
         {
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
             out << "[S]\nK=99\n";
         }
-        const BOOL ok = ::MoveFileExW(
-            tmp.wstring().c_str(),
-            m_ini_path.wstring().c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        const BOOL ok = ::MoveFileExW(tmp.wstring().c_str(), m_ini_path.wstring().c_str(),
+                                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
         ASSERT_TRUE(ok) << "MoveFileExW failed, GLE=" << ::GetLastError();
 
-        EXPECT_TRUE(wait_until([&]()
-                               { return hits.load() >= 1; },
-                               2s));
+        EXPECT_TRUE(wait_until([&]() { return hits.load() >= 1; }, 2s));
 
         watcher.stop();
     }
@@ -282,12 +241,10 @@ namespace
     {
         ConfigWatcher watcher(m_ini_path.string(), 100ms, []() {});
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
-        // Stop must return within ~200 ms (pump timeout is 100 ms; we give
-        // a generous 1 s ceiling to avoid flakiness on loaded CI machines).
+        // Stop must return within ~200 ms (pump timeout is 100 ms; we give a generous 1 s ceiling to avoid flakiness on
+        // loaded CI machines).
         const auto t0 = std::chrono::steady_clock::now();
         watcher.stop();
         const auto elapsed = std::chrono::steady_clock::now() - t0;
@@ -302,9 +259,7 @@ namespace
     {
         ConfigWatcher watcher(m_ini_path.string(), 50ms, {});
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
 
         write_ini("[S]\nK=3\n");
@@ -316,8 +271,7 @@ namespace
     TEST_F(ConfigWatcherTest, Stop_WithIoInFlight_NoCrash)
     {
         // Tight start/stop loop. start() only returns once the first
-        // ReadDirectoryChangesW is posted, so I/O is in flight before
-        // every stop().
+        // ReadDirectoryChangesW is posted, so I/O is in flight before every stop().
         for (int i = 0; i < 100; ++i)
         {
             ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
@@ -329,50 +283,38 @@ namespace
 
     TEST_F(ConfigWatcherTest, Overflow_ActuallyExceedsBuffer_CallbackStillFires)
     {
-        // 600 siblings with >70-char names push each FILE_NOTIFY_INFORMATION
-        // entry past 100 bytes, overflowing the 16 KB kernel buffer and
-        // driving the ERROR_NOTIFY_ENUM_DIR / zero-byte-completion paths.
+        // 600 siblings with >70-char names push each FILE_NOTIFY_INFORMATION entry past 100 bytes, overflowing the 16
+        // KB kernel buffer and driving the ERROR_NOTIFY_ENUM_DIR / zero-byte-completion paths.
         std::atomic<int> hits{0};
-        ConfigWatcher watcher(m_ini_path.string(), 100ms,
-                              [&hits]()
-                              { hits.fetch_add(1); });
+        ConfigWatcher watcher(m_ini_path.string(), 100ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
 
         for (int i = 0; i < 600; ++i)
         {
             const std::filesystem::path sibling =
-                m_temp_dir / ("overflow_test_" + std::to_string(i) +
-                              "_with_a_fairly_long_padding_string.dat");
+                m_temp_dir / ("overflow_test_" + std::to_string(i) + "_with_a_fairly_long_padding_string.dat");
             std::ofstream out(sibling, std::ios::binary | std::ios::trunc);
             out << "x";
         }
-        // Target write so the debounced callback fires even if every
-        // sibling event was dropped during overflow.
+        // Target write so the debounced callback fires even if every sibling event was dropped during overflow.
         write_ini("[S]\nK=999\n");
 
-        EXPECT_TRUE(wait_until([&]()
-                               { return hits.load() >= 1; },
-                               3s));
+        EXPECT_TRUE(wait_until([&]() { return hits.load() >= 1; }, 3s));
 
         watcher.stop();
-        EXPECT_GE(hits.load(), 1)
-            << "Watcher must survive buffer overflow and still fire "
-               "the debounced callback for the target write.";
+        EXPECT_GE(hits.load(), 1) << "Watcher must survive buffer overflow and still fire "
+                                     "the debounced callback for the target write.";
     }
 
     TEST_F(ConfigWatcherTest, ParentDirectoryRemoved_WatcherExitsCleanly)
     {
         // Parent-dir removal surfaces as ERROR_OPERATION_ABORTED from
-        // GetOverlappedResultEx. The worker must break the pump loop and
-        // the destructor must still run cleanly.
+        // GetOverlappedResultEx. The worker must break the pump loop and the destructor must still run cleanly.
         const std::filesystem::path temp_parent =
             std::filesystem::temp_directory_path() /
-            ("dmk_watcher_removetest_" + std::to_string(_getpid()) + "_" +
-             std::to_string(::GetCurrentThreadId()));
+            ("dmk_watcher_removetest_" + std::to_string(_getpid()) + "_" + std::to_string(::GetCurrentThreadId()));
         std::filesystem::create_directories(temp_parent);
         const std::filesystem::path ini = temp_parent / "watched.ini";
         {
@@ -383,16 +325,13 @@ namespace
         {
             ConfigWatcher watcher(ini.string(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
-            ASSERT_TRUE(wait_until([&]()
-                                   { return watcher.is_running(); },
-                                   1s));
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
             std::this_thread::sleep_for(100ms);
 
             std::error_code ec;
             std::filesystem::remove_all(temp_parent, ec);
-            // remove_all may fail because the watcher holds the directory
-            // open with FILE_LIST_DIRECTORY + SHARE_DELETE; either outcome
-            // is acceptable.
+            // remove_all may fail because the watcher holds the directory open with FILE_LIST_DIRECTORY + SHARE_DELETE;
+            // either outcome is acceptable.
 
             std::this_thread::sleep_for(300ms);
         }
@@ -405,15 +344,11 @@ namespace
     TEST_F(ConfigWatcherTest, Stop_FlushesPendingDebounce)
     {
         std::atomic<int> hits{0};
-        // 2 s debounce, stop after 200 ms: the pending callback must be
-        // flushed during stop() rather than waiting for the timer.
-        ConfigWatcher watcher(m_ini_path.string(), 2000ms,
-                              [&hits]()
-                              { hits.fetch_add(1); });
+        // 2 s debounce, stop after 200 ms: the pending callback must be flushed during stop() rather than waiting for
+        // the timer.
+        ConfigWatcher watcher(m_ini_path.string(), 2000ms, [&hits]() { hits.fetch_add(1); });
         ASSERT_TRUE(watcher.start());
-        ASSERT_TRUE(wait_until([&]()
-                               { return watcher.is_running(); },
-                               1s));
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         std::this_thread::sleep_for(100ms);
 
         write_ini("[S]\nK=42\n");
@@ -421,28 +356,22 @@ namespace
         std::this_thread::sleep_for(200ms);
 
         watcher.stop();
-        EXPECT_EQ(hits.load(), 1)
-            << "stop() must flush the pending debounced callback exactly once";
+        EXPECT_EQ(hits.load(), 1) << "stop() must flush the pending debounced callback exactly once";
     }
 
     TEST_F(ConfigWatcherTest, Construct_InvalidPath_StartReturnsFalse)
     {
-        ConfigWatcher watcher(
-            (m_temp_dir / "nonexistent_subdir" / "file.ini").string(),
-            100ms, []() {});
+        ConfigWatcher watcher((m_temp_dir / "nonexistent_subdir" / "file.ini").string(), 100ms, []() {});
         EXPECT_FALSE(watcher.start());
         EXPECT_FALSE(watcher.is_running());
     }
 } // namespace
 
-// Loader-lock detach tests. The real loader-lock branch (detected by reading
-// the PEB inside DllMain) cannot be reached from user code in a normal test
-// process, so the runtime exposes a test-only function pointer override that
-// reports "loader lock held" on demand. These tests exercise the leak-on-
-// loader-lock branch in ~ConfigWatcher: the worker is detached instead of
-// joined, the Impl is moved into a per-call heap cell allocated via
-// new (std::nothrow) that outlives the destructor, and the watcher does not
-// deadlock.
+// Loader-lock detach tests. The real loader-lock branch (detected by reading the PEB inside DllMain) cannot be reached
+// from user code in a normal test process, so the runtime exposes a test-only function pointer override that reports
+// "loader lock held" on demand. These tests exercise the leak-on-loader-lock branch in ~ConfigWatcher: the worker is
+// detached instead of joined, the Impl is moved into a per-call heap cell allocated via new (std::nothrow) that
+// outlives the destructor, and the watcher does not deadlock.
 namespace DetourModKit::detail
 {
     extern bool (*g_config_watcher_loader_lock_override)() noexcept;
@@ -472,20 +401,15 @@ namespace
         std::atomic<int> hits{0};
         const auto t_start = std::chrono::steady_clock::now();
         {
-            ConfigWatcher watcher(m_ini_path.string(), 50ms,
-                                  [&hits]()
-                                  { hits.fetch_add(1); });
+            ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
             ASSERT_TRUE(watcher.start());
-            ASSERT_TRUE(wait_until([&]()
-                                   { return watcher.is_running(); },
-                                   1s));
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
         }
         const auto elapsed = std::chrono::steady_clock::now() - t_start;
 
-        // Without the loader-lock override the destructor takes the normal
-        // join path. A clean join completes well under a second; a hang
-        // (e.g. a regression that joined under loader lock) would blow past
-        // the GetOverlappedResultEx pump timeout repeatedly.
+        // Without the loader-lock override the destructor takes the normal join path. A clean join completes well under
+        // a second; a hang (e.g. a regression that joined under loader lock) would blow past the GetOverlappedResultEx
+        // pump timeout repeatedly.
         EXPECT_LT(elapsed, std::chrono::seconds(3));
     }
 
@@ -494,43 +418,33 @@ namespace
         std::atomic<int> hits{0};
         const auto t_start = std::chrono::steady_clock::now();
         {
-            ConfigWatcher watcher(m_ini_path.string(), 50ms,
-                                  [&hits]()
-                                  { hits.fetch_add(1); });
+            ConfigWatcher watcher(m_ini_path.string(), 50ms, [&hits]() { hits.fetch_add(1); });
             ASSERT_TRUE(watcher.start());
-            ASSERT_TRUE(wait_until([&]()
-                                   { return watcher.is_running(); },
-                                   1s));
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
 
-            // Flip the override on so ~ConfigWatcher takes the leak branch.
-            // The detach path must not block, must not call join(), and
-            // must keep the worker's captured pointers valid by leaking
-            // the Impl into a static vector.
+            // Flip the override on so ~ConfigWatcher takes the leak branch. The detach path must not block, must not
+            // call join(), and must keep the worker's captured pointers valid by leaking the Impl into a static vector.
             g_config_watcher_loader_lock_override = &always_true_loader_lock;
         }
         const auto elapsed = std::chrono::steady_clock::now() - t_start;
 
         // Under loader lock the destructor returns essentially immediately:
-        // request_stop on the worker, detach, leak. The OS thread continues
-        // running but no longer blocks the destructor.
-        EXPECT_LT(elapsed, std::chrono::seconds(2))
-            << "Loader-lock detach branch must not join the worker";
+        // request_stop on the worker, detach, leak. The OS thread continues running but no longer blocks the
+        // destructor.
+        EXPECT_LT(elapsed, std::chrono::seconds(2)) << "Loader-lock detach branch must not join the worker";
     }
 
     TEST_F(ConfigWatcherLoaderLockTest, MultipleLoaderLockTeardownsAreSafe)
     {
-        // Confirms the per-call heap leak path accepts multiple invocations
-        // without tripping the single-slot overwrite hazard that the
-        // Logger::shutdown_internal per-call-cell discipline avoids. Each
-        // teardown allocates its own cell via new (std::nothrow), so prior
-        // leaked Impls are never overwritten.
+        // Confirms the per-call heap leak path accepts multiple invocations without tripping the single-slot overwrite
+        // hazard that the
+        // Logger::shutdown_internal per-call-cell discipline avoids. Each teardown allocates its own cell via new
+        // (std::nothrow), so prior leaked Impls are never overwritten.
         for (int i = 0; i < 3; ++i)
         {
             ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
             ASSERT_TRUE(watcher.start());
-            ASSERT_TRUE(wait_until([&]()
-                                   { return watcher.is_running(); },
-                                   1s));
+            ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
             g_config_watcher_loader_lock_override = &always_true_loader_lock;
             // Watcher destructor on scope exit takes the leak path.
         }

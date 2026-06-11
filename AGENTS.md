@@ -201,14 +201,14 @@ Three comment markers are used, each for a distinct purpose. The choice is by *w
  */
 ```
 
-**Single-line `///` exception:** A shorthand for a one-line `/** @brief */`, permitted only for a trivial self-evident declaration where a full block would be noise (e.g. simple getters, size queries, a single named constant). It must be exactly one line -- two consecutive `///` lines are a multi-line doc and belong in a `/** */` block -- and a complete sentence. It may carry inline Doxygen markup that is a link rather than structure (`@ref`, `@c`, `@p`, `@a`), but must not carry a structural/block tag (`@brief`, `@param`, `@return`, `@retval`, `@note`, `@warning`, `@details`, `@throws`, `@name`, `@{`, `@}`); the moment one is needed, switch to a `/** */` block. Place it on the line above the declaration.
+**Single-line `///` exception:** A shorthand for a one-line `/** @brief */`, permitted only for a trivial self-evident declaration where a full block would be noise (e.g. simple getters, size queries, a single named constant). It must be exactly one line -- two consecutive `///` lines are a multi-line doc and belong in a `/** */` block -- and a complete sentence. It may carry inline Doxygen markup that is a link rather than structure (`@ref`, `@c`, `@p`, `@a`), but must not carry a structural/block tag (`@brief`, `@param`, `@tparam`, `@return`, `@retval`, `@note`, `@warning`, `@details`, `@throws`, `@pre`, `@post`, `@name`, `@{`, `@}`); the moment one is needed, switch to a `/** */` block. Place it on the line above the declaration.
 
 ```cpp
 /// Returns the approximate number of items in the queue.
 size_t size() const noexcept;
 ```
 
-**No trailing `///<`:** Member documentation goes on the line(s) above the member as a `///` line or a `/** */` block, never as a trailing `///<` on the same line. Trailing docs run lines past a comfortable width and read inconsistently next to above-the-member docs.
+**No trailing `///<`:** Member documentation goes on the line(s) above the member as a `///` line or a `/** */` block, never as a trailing `///<` on the same line. Trailing docs push lines past the 120-column limit and read inconsistently next to above-the-member docs.
 
 **Inline comments (`//`):** Used inside function bodies and implementation logic to explain *why*, not *what*. This is the only non-documentation marker: a `//` never documents a declaration (use `///` or `/** */` for that). Place on the line above the code it describes. Multi-line explanations use consecutive `//` lines.
 
@@ -220,7 +220,7 @@ m_pending_messages.fetch_add(1, std::memory_order_acq_rel);
 
 ### Formatting and tooling
 
-C++ formatting is codified in the root `.clang-format` (LLVM base, Allman braces for functions/classes, 4-space indent, east-side pointers, includes never reordered). Run clang-format over the changed `*.cpp`/`*.hpp` before committing. CI runs an advisory check in `.github/workflows/quality.yml` (clang-format 20, the version pinned there) over the tracked project sources; submodules under `external/` are never formatted. There is no hard column limit (`ColumnLimit: 0`): long Doxygen and log lines may run past 120, so the formatter never reflows on width. Because width is not enforced, do not chase an 80-column limit -- keep a member's documentation on the line(s) above it (per the comment conventions) instead of letting a trailing comment push the line out. The comment-marker rules above are guarded by an advisory CI step, `scripts/check_comment_style.py` (no trailing `///<`, no multi-line `///`, no block tag on a `///` line).
+C++ formatting is codified in the root `.clang-format` (LLVM base, Allman braces for functions/classes, 4-space indent, east-side pointers, includes never reordered). Run clang-format over the changed `*.cpp`/`*.hpp` before committing. CI runs an advisory check in `.github/workflows/quality.yml` (clang-format 20, the version pinned there) over the tracked project sources; submodules under `external/` are never formatted. The hard column limit is 120 (`ColumnLimit: 120`): code and comments must fit within it, and the formatter reflows comment text that runs past it (`ReflowComments: Always`). String literals are the one sanctioned exception: `BreakStringLiterals: false` keeps long log and error messages as single greppable literals, so a line whose excess sits inside one literal is left alone rather than split. When a message line still exceeds 120 columns, split the literal by hand at sentence or clause boundaries using adjacent string-literal concatenation (the compiler fuses the fragments back into one literal at compile time): keep the distinctive lead phrase whole in its own fragment so it stays greppable, and mind the space at each seam -- a missing seam space silently corrupts the message. Do not work around the limit with trailing comments -- keep a member's documentation on the line(s) above it (per the comment conventions) instead of letting a trailing comment push the line out. The comment-marker rules above are guarded by an advisory CI step, `scripts/check_comment_style.py` (no trailing `///<`, no multi-line `///`, no block tag on a `///` line).
 
 Markdown files (`*.md`) are **not** hard-wrapped at 80 columns. Write one logical line per paragraph, list item, and blockquote line and let editors soft-wrap; do not insert manual line breaks mid-paragraph. Fenced code blocks, tables, and any line indented four or more spaces (indented code, nested list sub-paragraphs) are kept verbatim. As in code, use `--` rather than an em-dash or en-dash.
 
@@ -298,7 +298,7 @@ Do not add `Memory::is_readable()` or `Memory::is_writable()` before every field
 
 ### Scanning process memory
 
-The raw `Scanner::find_pattern(start_address, region_size, pattern)` overloads do no page filtering: they read the whole span with `memchr`/SIMD, so the caller must guarantee `[start_address, start_address + region_size)` is committed and readable, or the host faults. Use them only on byte buffers or module sections whose readability is already known. To scan arbitrary process or module memory, prefer the page-filtered helpers (`find_pattern_in_module`, `scan_executable_regions`, `scan_readable_regions`), which walk `VirtualQuery` and skip guard, no-access, and non-readable pages.
+The raw `Scanner::find_pattern(start_address, region_size, pattern)` overloads do no page filtering: they read the whole span with `memchr`/SIMD, so the caller must guarantee `[start_address, start_address + region_size)` is committed and readable, or the host faults. Use them only on byte buffers or module sections whose readability is already known. To scan arbitrary process or module memory, prefer the page-filtered helpers (`scan_executable_regions`, `scan_readable_regions`), which walk `VirtualQuery` and skip guard, no-access, and non-readable pages.
 
 ## Testing
 

@@ -16,12 +16,10 @@ namespace DetourModKit
         /**
          * @enum LeakSubsystem
          * @brief Identifies the subsystem that took an intentional leak / detach path.
-         * @details Each enumerator names one teardown site that deliberately leaks
-         *          storage or detaches a thread instead of joining or freeing, to
-         *          stay safe under the Windows loader lock (where a join or free
-         *          would risk a deadlock or a use-after-unmap). These events fire at
-         *          most once per subsystem per process and only on the loader-lock
-         *          teardown path; they are not normal-shutdown counters.
+         * @details Each enumerator names one teardown site that deliberately leaks storage or detaches a thread instead
+         *          of joining or freeing, to stay safe under the Windows loader lock (where a join or free would risk a
+         *          deadlock or a use-after-unmap). These events fire at most once per subsystem per process and only on
+         *          the loader-lock teardown path; they are not normal-shutdown counters.
          */
         enum class LeakSubsystem : std::uint8_t
         {
@@ -39,14 +37,14 @@ namespace DetourModKit
 
         /**
          * @brief Records that @p subsystem took an intentional leak / detach path.
-         * @details Performs a single relaxed atomic increment on a process-wide
-         *          counter. Safe to call from a noexcept destructor and from
-         *          DllMain / loader-lock context: it touches only a static atomic and
-         *          never allocates, locks, or calls a Win32 API.
-         * @param subsystem The subsystem reporting the event. @ref LeakSubsystem::Count
-         *        (or any out-of-range value) is ignored.
-         * @note Relaxed ordering is sufficient: the counter is an independent event
-         *       tally with no happens-before relationship to other state.
+         * @details Performs a single relaxed atomic increment on a process-wide counter. Safe to call from a noexcept
+         *          destructor and from
+         *          DllMain / loader-lock context: it touches only a static atomic and never allocates, locks, or calls
+         *          a Win32 API.
+         * @param subsystem The subsystem reporting the event. @ref LeakSubsystem::Count (or any out-of-range value) is
+         *                  ignored.
+         * @note Relaxed ordering is sufficient: the counter is an independent event tally with no happens-before
+         *       relationship to other state.
          */
         void record_intentional_leak(LeakSubsystem subsystem) noexcept;
 

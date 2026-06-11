@@ -5,7 +5,6 @@
 #include <string_view>
 #include <mutex>
 #include <memory>
-#include <chrono>
 #include <format>
 #include <atomic>
 
@@ -63,8 +62,8 @@ namespace DetourModKit
     /**
      * @class Logger
      * @brief A singleton class for logging messages to a file.
-     * @details Provides thread-safe logging with configurable levels, timestamps,
-     *          and log file location. Uses atomic LogLevel for thread-safe level changes.
+     * @details Provides thread-safe logging with configurable levels, timestamps, and log file location. Uses atomic
+     *          LogLevel for thread-safe level changes.
      */
     class Logger
     {
@@ -81,8 +80,8 @@ namespace DetourModKit
 
         /**
          * @brief Configures global static settings for the logger before first instantiation.
-         * @details If the logger instance already exists, this will also reconfigure the instance
-         *          by reopening the log file with the new settings.
+         * @details If the logger instance already exists, this will also reconfigure the instance by reopening the log
+         *          file with the new settings.
          * @param prefix Default log prefix string.
          * @param file_name Default log file name.
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
@@ -92,8 +91,8 @@ namespace DetourModKit
 
         /**
          * @brief Reconfigures an existing logger instance with new settings.
-         * @details Closes the current log file (if open) and reopens it with the new settings.
-         *          Thread-safe. Logs a message about the reconfiguration.
+         * @details Closes the current log file (if open) and reopens it with the new settings. Thread-safe. Logs a
+         *          message about the reconfiguration.
          * @param prefix New log prefix string.
          * @param file_name New log file name.
          * @param timestamp_fmt New timestamp format string (strftime compatible).
@@ -102,8 +101,8 @@ namespace DetourModKit
 
         /**
          * @brief Enables asynchronous logging mode.
-         * @details When enabled, log messages are queued and written by a dedicated
-         *          writer thread, reducing latency on the calling thread.
+         * @details When enabled, log messages are queued and written by a dedicated writer thread, reducing latency on
+         *          the calling thread.
          * @param config Optional async logger configuration. Uses defaults if not provided.
          */
         void enable_async_mode(const AsyncLoggerConfig &config);
@@ -123,16 +122,14 @@ namespace DetourModKit
 
         /**
          * @brief Flushes all pending log messages.
-         * @details In async mode, waits for all queued messages to be written.
-         *          In sync mode, flushes the file stream.
+         * @details In async mode, waits for all queued messages to be written. In sync mode, flushes the file stream.
          */
         void flush();
 
         /**
          * @brief Explicitly shuts down the Logger, closing files without logging.
-         * @details This method is safe to call during shutdown. It closes the log file
-         *          and shuts down async logger without attempting to log, preventing
-         *          use-after-free if called after other singletons are destroyed.
+         * @details This method is safe to call during shutdown. It closes the log file and shuts down async logger
+         *          without attempting to log, preventing use-after-free if called after other singletons are destroyed.
          *          After calling shutdown(), the destructor becomes a no-op.
          */
         void shutdown();
@@ -148,8 +145,8 @@ namespace DetourModKit
 
         /**
          * @brief Checks whether messages at the given level would be logged.
-         * @details Useful for gating expensive trace-only work (e.g. iterating
-         *          a data structure solely to build a log message).
+         * @details Useful for gating expensive trace-only work (e.g. iterating a data structure solely to build a log
+         *          message).
          * @param level The LogLevel to test.
          * @return true if a message at this level would pass the current filter.
          */
@@ -168,43 +165,37 @@ namespace DetourModKit
          * @brief Logs a message if its level is at or above the current log level.
          * @param level The LogLevel of the message.
          * @param message The message string to log.
-         * @return true if the message was delivered to the sink (enqueued in async
-         *         mode, or written to a healthy file stream in sync mode); false if
-         *         it was filtered out by level, dropped (queue full), or the file
-         *         sink was closed/unhealthy. The return is informational; callers
-         *         that do not need delivery status may ignore it.
+         * @return true if the message was delivered to the sink (enqueued in async mode, or written to a healthy file
+         *         stream in sync mode); false if it was filtered out by level, dropped (queue full), or the file sink
+         *         was closed/unhealthy. The return is informational; callers that do not need delivery status may
+         *         ignore it.
          */
         bool log(LogLevel level, std::string_view message);
 
         /**
-         * @brief No-throw counterpart of log() for callers that sit on a
-         *        noexcept boundary.
-         * @details The ordinary log()/error() path can throw (the synchronous
-         *          sink allocates while formatting the timestamp, and a custom
-         *          stream could raise). Calling it from a hook callback, a
-         *          loader-lock teardown path, or a catch block inside a
-         *          noexcept function would let that exception escape and call
-         *          std::terminate, taking down the host process. This entry
-         *          point takes an already-formatted message and swallows any
-         *          exception the sink raises, dropping the message instead.
+         * @brief No-throw counterpart of log() for callers that sit on a noexcept boundary.
+         * @details The ordinary log()/error() path can throw (the synchronous sink allocates while formatting the
+         *          timestamp, and a custom stream could raise). Calling it from a hook callback, a loader-lock teardown
+         *          path, or a catch block inside a noexcept function would let that exception escape and call
+         *          std::terminate, taking down the host process. This entry point takes an already-formatted message
+         *          and swallows any exception the sink raises, dropping the message instead.
          * @param level The LogLevel of the message.
          * @param message The already-formatted message string.
-         * @return true if the message was handed to the sink, false if it was
-         *         filtered out or an internal failure was suppressed.
+         * @return true if the message was handed to the sink, false if it was filtered out or an internal failure was
+         *         suppressed.
          */
         [[nodiscard]] bool log_noexcept(LogLevel level, std::string_view message) noexcept;
 
         /**
          * @brief Logs a formatted message with the specified log level.
-         * @details Uses std::format-style placeholders. Arguments are only formatted
-         *          if the log level is enabled (lazy evaluation).
+         * @details Uses std::format-style placeholders. Arguments are only formatted if the log level is enabled (lazy
+         *          evaluation).
          * @tparam Args Types of the format arguments.
          * @param level The LogLevel of the message.
          * @param fmt The format string with {} placeholders.
          * @param args The arguments to substitute into the format string.
          */
-        template <typename... Args>
-        void log(LogLevel level, std::format_string<Args...> fmt, Args &&...args)
+        template <typename... Args> void log(LogLevel level, std::format_string<Args...> fmt, Args &&...args)
         {
             if (level >= m_current_log_level.load(std::memory_order_acquire))
             {
@@ -217,32 +208,27 @@ namespace DetourModKit
          * @brief Shorthand for `log(LogLevel::X, fmt, args...)`. See log() for parameter docs.
          * @{
          */
-        template <typename... Args>
-        void trace(std::format_string<Args...> fmt, Args &&...args)
+        template <typename... Args> void trace(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Trace, fmt, std::forward<Args>(args)...);
         }
 
-        template <typename... Args>
-        void debug(std::format_string<Args...> fmt, Args &&...args)
+        template <typename... Args> void debug(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Debug, fmt, std::forward<Args>(args)...);
         }
 
-        template <typename... Args>
-        void info(std::format_string<Args...> fmt, Args &&...args)
+        template <typename... Args> void info(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Info, fmt, std::forward<Args>(args)...);
         }
 
-        template <typename... Args>
-        void warning(std::format_string<Args...> fmt, Args &&...args)
+        template <typename... Args> void warning(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Warning, fmt, std::forward<Args>(args)...);
         }
 
-        template <typename... Args>
-        void error(std::format_string<Args...> fmt, Args &&...args)
+        template <typename... Args> void error(std::format_string<Args...> fmt, Args &&...args)
         {
             log(LogLevel::Error, fmt, std::forward<Args>(args)...);
         }
@@ -250,14 +236,12 @@ namespace DetourModKit
 
         /**
          * @brief No-throw formatted logging for callers on a noexcept boundary.
-         * @details Like log(level, fmt, args...) but formats inside a try/catch
-         *          and routes the result through log_noexcept(), so neither a
-         *          std::format failure nor a sink failure can propagate. Prefer
-         *          this over log()/error()/warning() from inside hook callbacks
-         *          and other noexcept contexts. Arguments are only formatted
-         *          when the level is enabled (lazy evaluation).
-         * @return true if the message was handed to the sink, false if it was
-         *         filtered out or dropped because formatting/logging failed.
+         * @details Like log(level, fmt, args...) but formats inside a try/catch and routes the result through
+         *          log_noexcept(), so neither a std::format failure nor a sink failure can propagate. Prefer this over
+         *          log()/error()/warning() from inside hook callbacks and other noexcept contexts. Arguments are only
+         *          formatted when the level is enabled (lazy evaluation).
+         * @return true if the message was handed to the sink, false if it was filtered out or dropped because
+         *         formatting/logging failed.
          */
         template <typename... Args>
         [[nodiscard]] bool try_log(LogLevel level, std::format_string<Args...> fmt, Args &&...args) noexcept
@@ -295,9 +279,9 @@ namespace DetourModKit
             std::string timestamp_format;
 
             StaticConfig(std::string prefix, std::string file, std::string ts_fmt)
-                : log_prefix(std::move(prefix)),
-                  log_file_name(std::move(file)),
-                  timestamp_format(std::move(ts_fmt)) {}
+                : log_prefix(std::move(prefix)), log_file_name(std::move(file)), timestamp_format(std::move(ts_fmt))
+            {
+            }
         };
 
     private:
@@ -342,17 +326,14 @@ namespace DetourModKit
         std::atomic<LogLevel> m_current_log_level{LogLevel::Info};
         std::atomic<bool> m_shutdown_called{false};
 
-        // Async logging support (forward declared).
-        // m_async_logger is atomic for lock-free reads on the log() hot path.
+        // Async logging support (forward declared). m_async_logger is atomic for lock-free reads on the log() hot path.
         // m_async_mutex serializes lifecycle operations (enable/disable/shutdown).
         //
         // On MSVC x64, std::atomic<std::shared_ptr<T>> is lock-free (uses
-        // 128-bit compare-exchange). On MinGW/GCC, this may fall back to a
-        // global mutex, which is still correct but serializes the hot-path
-        // load. This is an accepted trade-off: the lock-free fast path
-        // benefits the primary target (MSVC), and the MinGW fallback is
-        // bounded to one mutex acquisition per log() call, which is
-        // comparable to the mutex already used by synchronous mode.
+        // 128-bit compare-exchange). On MinGW/GCC, this may fall back to a global mutex, which is still correct but
+        // serializes the hot-path load. This is an accepted trade-off: the lock-free fast path benefits the primary
+        // target (MSVC), and the MinGW fallback is bounded to one mutex acquisition per log() call, which is comparable
+        // to the mutex already used by synchronous mode.
         std::atomic<std::shared_ptr<AsyncLogger>> m_async_logger{};
         std::atomic<bool> m_async_mode_enabled{false};
         std::mutex m_async_mutex;

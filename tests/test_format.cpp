@@ -185,7 +185,7 @@ TEST(FormatTest, FormatHex_PtrdiffZero)
 
 TEST(FormatTest, FormatHex_PtrdiffMinNoUB)
 {
-    // This previously caused signed overflow UB via -PTRDIFF_MIN
+    // Negating PTRDIFF_MIN directly is signed-overflow UB; format_hex must take the unsigned-cast negation path.
     ptrdiff_t value = PTRDIFF_MIN;
     std::string result = Format::format_hex(value);
     EXPECT_FALSE(result.empty());

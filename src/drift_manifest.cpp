@@ -19,8 +19,8 @@ namespace DetourModKit
             constexpr std::string_view MANIFEST_HEADER = "# DetourModKit drift manifest v1";
             constexpr char FIELD_SEP = '\t';
 
-            // Stable round-trip tokens for HealError, deliberately distinct from the
-            // verbose human-readable heal_error_to_string text (which is for logs):
+            // Stable round-trip tokens for HealError, deliberately distinct from the verbose human-readable
+            // heal_error_to_string text (which is for logs):
             // a manifest must parse back even if the log wording is reworded.
             [[nodiscard]] std::string_view heal_error_token(HealError error) noexcept
             {
@@ -68,7 +68,7 @@ namespace DetourModKit
                 const auto result = std::from_chars(begin, end, out);
                 return result.ec == std::errc{} && result.ptr == end;
             }
-        } // namespace
+        } // anonymous namespace
 
         std::string serialize_drift_report(std::span<const DriftEntry> entries)
         {
@@ -94,8 +94,7 @@ namespace DetourModKit
             return out;
         }
 
-        std::expected<std::vector<DriftRecord>, ManifestError>
-        parse_drift_report(std::string_view text)
+        std::expected<std::vector<DriftRecord>, ManifestError> parse_drift_report(std::string_view text)
         {
             std::vector<DriftRecord> records;
             bool header_seen = false;
@@ -103,9 +102,8 @@ namespace DetourModKit
             while (pos <= text.size())
             {
                 const std::size_t newline = text.find('\n', pos);
-                std::string_view line = (newline == std::string_view::npos)
-                                            ? text.substr(pos)
-                                            : text.substr(pos, newline - pos);
+                std::string_view line =
+                    (newline == std::string_view::npos) ? text.substr(pos) : text.substr(pos, newline - pos);
                 pos = (newline == std::string_view::npos) ? text.size() + 1 : newline + 1;
 
                 // Strip a trailing CR (CRLF input) and skip blank lines.
@@ -128,8 +126,7 @@ namespace DetourModKit
                     continue;
                 }
 
-                // Split into exactly six tab-separated fields; any other count is
-                // malformed.
+                // Split into exactly six tab-separated fields; any other count is malformed.
                 std::string_view fields[6];
                 std::size_t field_count = 0;
                 std::size_t field_pos = 0;
@@ -159,8 +156,7 @@ namespace DetourModKit
 
                 DriftRecord record;
                 record.name = std::string(fields[0]);
-                if (!parse_offset(fields[1], record.nominal_offset) ||
-                    !parse_offset(fields[2], record.healed_offset) ||
+                if (!parse_offset(fields[1], record.nominal_offset) || !parse_offset(fields[2], record.healed_offset) ||
                     !parse_offset(fields[3], record.delta))
                 {
                     return std::unexpected(ManifestError::MalformedLine);
@@ -205,16 +201,14 @@ namespace DetourModKit
             return static_cast<bool>(file);
         }
 
-        std::expected<std::vector<DriftRecord>, ManifestError>
-        read_drift_report_from_file(const std::string &path)
+        std::expected<std::vector<DriftRecord>, ManifestError> read_drift_report_from_file(const std::string &path)
         {
             std::ifstream file(path, std::ios::binary);
             if (!file)
             {
                 return std::unexpected(ManifestError::MissingHeader);
             }
-            const std::string text((std::istreambuf_iterator<char>(file)),
-                                   std::istreambuf_iterator<char>());
+            const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             return parse_drift_report(text);
         }
     } // namespace Rtti

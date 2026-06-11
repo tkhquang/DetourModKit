@@ -16,15 +16,9 @@ using DetourModKit::keyboard_key;
 class DMKShutdownTest : public ::testing::Test
 {
 protected:
-    void SetUp() override
-    {
-        DMK_Shutdown();
-    }
+    void SetUp() override { DMK_Shutdown(); }
 
-    void TearDown() override
-    {
-        DMK_Shutdown();
-    }
+    void TearDown() override { DMK_Shutdown(); }
 };
 
 TEST_F(DMKShutdownTest, IdempotentShutdown)
@@ -41,25 +35,22 @@ TEST_F(DMKShutdownTest, ShutdownWithNoSubsystemsInitialized)
 TEST_F(DMKShutdownTest, HotReloadScenario)
 {
     int call_count_a = 0;
-    Config::register_int("Section", "Key", "hot_reload_a", [&call_count_a](int)
-                         { ++call_count_a; }, 10);
+    Config::register_int("Section", "Key", "hot_reload_a", [&call_count_a](int) { ++call_count_a; }, 10);
     EXPECT_EQ(call_count_a, 1); // Default applied once
 
     DMK_Shutdown();
 
-    // After shutdown, old registrations are cleared.
-    // Re-register with new items for the "second load".
+    // After shutdown, old registrations are cleared. Re-register with new items for the "second load".
     int call_count_b = 0;
-    Config::register_int("Section", "Key", "hot_reload_b", [&call_count_b](int)
-                         { ++call_count_b; }, 20);
+    Config::register_int("Section", "Key", "hot_reload_b", [&call_count_b](int) { ++call_count_b; }, 20);
     EXPECT_EQ(call_count_b, 1); // Default applied once
 
     // Reset counters before load
     call_count_a = 0;
     call_count_b = 0;
 
-    auto ini_path = std::filesystem::temp_directory_path() /
-                    ("test_shutdown_hotreload_" + std::to_string(_getpid()) + ".ini");
+    auto ini_path =
+        std::filesystem::temp_directory_path() / ("test_shutdown_hotreload_" + std::to_string(_getpid()) + ".ini");
     EXPECT_NO_THROW(Config::load(ini_path.string()));
 
     // Old callback must not fire; new callback fires with default

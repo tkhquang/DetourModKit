@@ -14,7 +14,6 @@
 #include <iostream>
 #include <new>
 #include <stdexcept>
-#include <array>
 #include <type_traits>
 
 namespace DetourModKit
@@ -25,8 +24,8 @@ namespace DetourModKit
         std::atomic<std::shared_ptr<const Logger::StaticConfig>> &static_config_atom()
         {
             static std::atomic<std::shared_ptr<const Logger::StaticConfig>> instance{
-                std::make_shared<const Logger::StaticConfig>(
-                    DEFAULT_LOG_PREFIX, DEFAULT_LOG_FILE_NAME, DEFAULT_TIMESTAMP_FORMAT)};
+                std::make_shared<const Logger::StaticConfig>(DEFAULT_LOG_PREFIX, DEFAULT_LOG_FILE_NAME,
+                                                             DEFAULT_TIMESTAMP_FORMAT)};
             return instance;
         }
     } // anonymous namespace
@@ -45,8 +44,7 @@ namespace DetourModKit
     {
         std::string upper_level_str(level_str);
         std::transform(upper_level_str.begin(), upper_level_str.end(), upper_level_str.begin(),
-                       [](unsigned char c)
-                       { return static_cast<char>(std::toupper(c)); });
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
 
         if (upper_level_str == "TRACE")
             return LogLevel::Trace;
@@ -66,16 +64,17 @@ namespace DetourModKit
 
     void Logger::configure(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
     {
-        set_static_config(std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name), std::string(timestamp_fmt)));
+        set_static_config(std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name),
+                                                               std::string(timestamp_fmt)));
 
         Logger &instance = get_instance();
 
-        // configure() is the authoritative reset path -- allow reconfiguration
-        // even after shutdown to support reuse (e.g., test fixtures).
+        // configure() is the authoritative reset path -- allow reconfiguration even after shutdown to support reuse
+        // (e.g., test fixtures).
         instance.m_shutdown_called.store(false, std::memory_order_release);
 
-        // Comparison is done inside reconfigure() under the lock to prevent
-        // reading string members while another thread is modifying them.
+        // Comparison is done inside reconfigure() under the lock to prevent reading string members while another thread
+        // is modifying them.
         instance.reconfigure(prefix, file_name, timestamp_fmt);
     }
 
@@ -86,16 +85,13 @@ namespace DetourModKit
             return;
         }
 
-        // Acquire both m_async_mutex and m_log_mutex_ptr to prevent concurrent log() calls
-        // from reading partially-updated string members during reconfiguration
+        // Acquire both m_async_mutex and m_log_mutex_ptr to prevent concurrent log() calls from reading
+        // partially-updated string members during reconfiguration
         std::scoped_lock lock(m_async_mutex, *m_log_mutex_ptr);
 
-        // Skip reconfiguration only when all parameters match AND the stream is usable.
-        // After shutdown or a prior open failure the stream may be closed, so we must
-        // fall through to reopen even if the strings are identical.
-        if (m_log_file_stream_ptr->is_open() &&
-            m_log_prefix == prefix &&
-            m_log_file_name == file_name &&
+        // Skip reconfiguration only when all parameters match AND the stream is usable. After shutdown or a prior open
+        // failure the stream may be closed, so we must fall through to reopen even if the strings are identical.
+        if (m_log_file_stream_ptr->is_open() && m_log_prefix == prefix && m_log_file_name == file_name &&
             m_timestamp_format == timestamp_fmt)
         {
             return;
@@ -120,8 +116,7 @@ namespace DetourModKit
         if (!m_log_file_stream_ptr->is_open())
         {
             std::cerr << "[" << m_log_prefix << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file: "
-                      << std::filesystem::path(log_file_full_path).string()
+                      << "Failed to open log file: " << std::filesystem::path(log_file_full_path).string()
                       << ". Subsequent logs to file will fail." << '\n';
         }
         else
@@ -133,8 +128,7 @@ namespace DetourModKit
     }
 
     Logger::Logger()
-        : m_log_file_stream_ptr(std::make_shared<WinFileStream>()),
-          m_log_mutex_ptr(std::make_shared<std::mutex>())
+        : m_log_file_stream_ptr(std::make_shared<WinFileStream>()), m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
         {
             auto config = get_static_config();
@@ -149,14 +143,12 @@ namespace DetourModKit
         if (!m_log_file_stream_ptr->is_open())
         {
             std::cerr << "[" << m_log_prefix << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file: "
-                      << std::filesystem::path(log_file_full_path).string()
+                      << "Failed to open log file: " << std::filesystem::path(log_file_full_path).string()
                       << ". Subsequent logs to file will fail." << '\n';
         }
         else
         {
-            *m_log_file_stream_ptr << "[" << get_timestamp() << "] ["
-                                   << std::setw(7) << std::left << "INFO"
+            *m_log_file_stream_ptr << "[" << get_timestamp() << "] [" << std::setw(7) << std::left << "INFO"
                                    << "] :: Logger initialized. Logging to: " << m_log_file_name << '\n';
         }
     }
@@ -164,8 +156,7 @@ namespace DetourModKit
     Logger::~Logger() noexcept
     {
         bool expected = false;
-        if (!m_shutdown_called.compare_exchange_strong(expected, true,
-                                                       std::memory_order_acq_rel))
+        if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         {
             return;
         }
@@ -175,8 +166,7 @@ namespace DetourModKit
     void Logger::shutdown()
     {
         bool expected = false;
-        if (!m_shutdown_called.compare_exchange_strong(expected, true,
-                                                       std::memory_order_acq_rel))
+        if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         {
             return;
         }
@@ -200,27 +190,21 @@ namespace DetourModKit
             }
         }
 
-        // If the writer thread was detached under loader lock, it may still
-        // be accessing AsyncLogger members (m_queue, m_flush_mutex, etc.).
-        // Transfer ownership to permanent heap storage so the object
-        // outlives the detached thread; pin the module so the code pages
-        // it executes from also remain mapped.
+        // If the writer thread was detached under loader lock, it may still be accessing AsyncLogger members (m_queue,
+        // m_flush_mutex, etc.). Transfer ownership to permanent heap storage so the object outlives the detached
+        // thread; pin the module so the code pages it executes from also remain mapped.
         //
-        // The transfer is unconditional when loader lock is held: concurrent
-        // log() callers may still own temporary shared_ptrs obtained from
-        // m_async_logger before exchange(), so use_count() is not a reliable
-        // proxy for "no other owners". Dropping local_logger's ref while
-        // a temporary outlives us would let the last temporary's destructor
-        // race the detached writer thread.
+        // The transfer is unconditional when loader lock is held: concurrent log() callers may still own temporary
+        // shared_ptrs obtained from m_async_logger before exchange(), so use_count() is not a reliable proxy for "no
+        // other owners". Dropping local_logger's ref while a temporary outlives us would let the last temporary's
+        // destructor race the detached writer thread.
         //
-        // The leak is per-call and append-only: each invocation allocates
-        // its own heap cell, so a process that re-attaches after shutdown
-        // (e.g. hot-reload) and hits loader lock again cannot drop a prior
-        // handle whose writer thread may still be running. Mirrors the
-        // HookManager loader-lock discipline: new (std::nothrow) keeps the
-        // noexcept destructor honest by returning nullptr on OOM rather
-        // than turning a std::vector::emplace_back bad_alloc into
-        // std::terminate inside this noexcept context.
+        // The leak is per-call and append-only: each invocation allocates its own heap cell, so a process that
+        // re-attaches after shutdown (e.g. hot-reload) and hits loader lock again cannot drop a prior handle whose
+        // writer thread may still be running. Mirrors the
+        // HookManager loader-lock discipline: new (std::nothrow) keeps the noexcept destructor honest by returning
+        // nullptr on OOM rather than turning a std::vector::emplace_back bad_alloc into std::terminate inside this
+        // noexcept context.
         if (local_logger && detail::is_loader_lock_held())
         {
             static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
@@ -228,15 +212,14 @@ namespace DetourModKit
 
             detail::pin_current_module();
 
-            auto *leaked = new (std::nothrow)
-                std::shared_ptr<AsyncLogger>(std::move(local_logger));
+            auto *leaked = new (std::nothrow) std::shared_ptr<AsyncLogger>(std::move(local_logger));
             static_cast<void>(leaked);
             DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
         }
 
         {
-            // Acquire both mutexes to prevent configure()/reconfigure() from
-            // opening a new stream in the gap after BLOCK 1 releases m_async_mutex.
+            // Acquire both mutexes to prevent configure()/reconfigure() from opening a new stream in the gap after the
+            // async-logger teardown block above releases m_async_mutex.
             std::scoped_lock lock(m_async_mutex, *m_log_mutex_ptr);
             if (m_log_file_stream_ptr && m_log_file_stream_ptr->is_open())
             {
@@ -251,7 +234,8 @@ namespace DetourModKit
         auto level_int = static_cast<std::underlying_type_t<LogLevel>>(level);
         if (level_int < 0 || level_int > static_cast<std::underlying_type_t<LogLevel>>(LogLevel::Error))
         {
-            log(LogLevel::Warning, "Attempted to set an invalid log level value ({}). Keeping current level.", level_int);
+            log(LogLevel::Warning, "Attempted to set an invalid log level value ({}). Keeping current level.",
+                level_int);
             return;
         }
 
@@ -263,8 +247,8 @@ namespace DetourModKit
 
         m_current_log_level.store(level, std::memory_order_release);
 
-        log(LogLevel::Info, "Log level changed from {} to {}",
-            log_level_to_string(old_level), log_level_to_string(level));
+        log(LogLevel::Info, "Log level changed from {} to {}", log_level_to_string(old_level),
+            log_level_to_string(level));
     }
 
     bool Logger::log(LogLevel level, std::string_view message)
@@ -280,8 +264,8 @@ namespace DetourModKit
             auto local_logger = m_async_logger.load(std::memory_order_acquire);
             if (local_logger)
             {
-                // Propagate the queue's accept/drop result so callers learn the
-                // true delivery status instead of an unconditional success.
+                // Propagate the queue's accept/drop result so callers learn the true delivery status instead of an
+                // unconditional success.
                 return local_logger->enqueue(level, message);
             }
         }
@@ -292,8 +276,7 @@ namespace DetourModKit
         if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
         {
             *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                   << "[" << std::setw(7) << std::left << level_str << "] :: "
-                                   << message << '\n';
+                                   << "[" << std::setw(7) << std::left << level_str << "] :: " << message << '\n';
 
             // Flush on warnings/errors to ensure critical messages survive crashes
             if (level >= LogLevel::Warning)
@@ -301,30 +284,27 @@ namespace DetourModKit
                 m_log_file_stream_ptr->flush();
             }
 
-            // Report whether the write (and any flush) left the stream healthy,
-            // so log_noexcept()/try_log() reflect actual delivery rather than just
-            // a no-throw call.
+            // Report whether the write (and any flush) left the stream healthy, so log_noexcept()/try_log() reflect
+            // actual delivery rather than just a no-throw call.
             return m_log_file_stream_ptr->good();
         }
 
         if (level >= LogLevel::Error)
         {
-            std::cerr << "[" << m_log_prefix << " LOG_FILE_WRITE_ERROR] [" << get_timestamp() << "] ["
-                      << std::setw(7) << std::left << level_str << "] :: "
-                      << message << '\n';
+            std::cerr << "[" << m_log_prefix << " LOG_FILE_WRITE_ERROR] [" << get_timestamp() << "] [" << std::setw(7)
+                      << std::left << level_str << "] :: " << message << '\n';
         }
 
-        // The file sink was closed or unhealthy; the message was not delivered to
-        // it (an error-level message reached stderr only as a last resort).
+        // The file sink was closed or unhealthy; the message was not delivered to it (an error-level message reached
+        // stderr only as a last resort).
         return false;
     }
 
     bool Logger::log_noexcept(LogLevel level, std::string_view message) noexcept
     {
-        // The synchronous sink allocates (timestamp formatting) and a custom
-        // stream could raise, so the throwing log() is wrapped here to keep the
-        // no-throw contract for noexcept-boundary callers. The returned bool is
-        // log()'s real delivery status, not merely "did not throw".
+        // The synchronous sink allocates (timestamp formatting) and a custom stream could raise, so the throwing log()
+        // is wrapped here to keep the no-throw contract for noexcept-boundary callers. The returned bool is log()'s
+        // real delivery status, not merely "did not throw".
         try
         {
             return log(level, message);
@@ -344,8 +324,8 @@ namespace DetourModKit
             std::tm timeinfo_struct = {};
 
 #if defined(_MSC_VER) || defined(__MINGW32__) || defined(__MINGW64__)
-            // MinGW's localtime_s takes the same (struct tm *, const time_t *) argument
-            // order as MSVC, not the ISO C11 Annex K order, so the call is identical.
+            // MinGW's localtime_s takes the same (struct tm *, const time_t *) argument order as MSVC, not the ISO C11
+            // Annex K order, so the call is identical.
             if (localtime_s(&timeinfo_struct, &in_time_t) != 0)
             {
                 throw std::runtime_error("localtime_s failed to convert time.");
@@ -364,20 +344,20 @@ namespace DetourModKit
                 return "TIMESTAMP_FORMAT_ERROR";
             }
 
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                now.time_since_epoch()) %
-                            1000;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
             const int ms_len = std::snprintf(buf + len, 5, ".%03d", static_cast<int>(ms.count()));
             return std::string(buf, len + static_cast<size_t>(ms_len));
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[" << m_log_prefix << " Logger TIMESTAMP_ERROR] Failed to generate timestamp: " << e.what() << '\n';
+            std::cerr << "[" << m_log_prefix << " Logger TIMESTAMP_ERROR] Failed to generate timestamp: " << e.what()
+                      << '\n';
             return "TIMESTAMP_GENERATION_ERROR";
         }
         catch (...)
         {
-            std::cerr << "[" << m_log_prefix << " Logger TIMESTAMP_ERROR] Unknown exception during timestamp generation." << '\n';
+            std::cerr << "[" << m_log_prefix
+                      << " Logger TIMESTAMP_ERROR] Unknown exception during timestamp generation." << '\n';
             return "TIMESTAMP_GENERATION_ERROR";
         }
     }
@@ -405,13 +385,15 @@ namespace DetourModKit
         }
         catch (const std::exception &e)
         {
-            std::cerr << "[" << m_log_prefix << " Logger PATH_WARNING] Failed to determine module directory for log file: "
-                      << e.what() << ". Using relative path for log file: " << m_log_file_name << '\n';
+            std::cerr << "[" << m_log_prefix
+                      << " Logger PATH_WARNING] Failed to determine module directory for log file: " << e.what()
+                      << ". Using relative path for log file: " << m_log_file_name << '\n';
             return log_file_path_obj.wstring();
         }
         catch (...)
         {
-            std::cerr << "[" << m_log_prefix << " Logger PATH_WARNING] Unknown exception while determining module directory for log file."
+            std::cerr << "[" << m_log_prefix
+                      << " Logger PATH_WARNING] Unknown exception while determining module directory for log file."
                       << " Using relative path: " << m_log_file_name << '\n';
             return log_file_path_obj.wstring();
         }
@@ -442,9 +424,9 @@ namespace DetourModKit
             {
                 try
                 {
-                    // Override the config's timestamp format with the Logger's own so the
-                    // async sink emits the same timestamps as the synchronous path; callers
-                    // configure the format through the Logger, not the async config.
+                    // Override the config's timestamp format with the Logger's own so the async sink emits the same
+                    // timestamps as the synchronous path; callers configure the format through the Logger, not the
+                    // async config.
                     AsyncLoggerConfig effective_config = config;
                     effective_config.timestamp_format = m_timestamp_format;
                     m_async_logger.store(
@@ -469,8 +451,7 @@ namespace DetourModKit
         }
         else if (should_log_success)
         {
-            log(LogLevel::Info, "Async logging mode enabled. Queue capacity: {}, Batch size: {}",
-                queue_cap, batch_sz);
+            log(LogLevel::Info, "Async logging mode enabled. Queue capacity: {}, Batch size: {}", queue_cap, batch_sz);
         }
     }
 

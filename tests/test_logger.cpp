@@ -2,6 +2,7 @@
 #include <fstream>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <chrono>
 #include <type_traits>
@@ -13,11 +14,9 @@
 
 using namespace DetourModKit;
 
-// The loader-lock fallback in Logger::shutdown_internal heap-allocates a
-// std::shared_ptr<AsyncLogger> via new (std::nothrow) and leaks the cell
-// to outlive the destructor. Guard the leak cell's move constructor stays
-// noexcept so the call cannot turn the noexcept ~Logger contract into
-// std::terminate via a thrown move.
+// The loader-lock fallback in Logger::shutdown_internal heap-allocates a std::shared_ptr<AsyncLogger> via new
+// (std::nothrow) and leaks the cell to outlive the destructor. Guard the leak cell's move constructor stays noexcept so
+// the call cannot turn the noexcept ~Logger contract into std::terminate via a thrown move.
 static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
               "std::shared_ptr<AsyncLogger> must be nothrow-move-constructible "
               "for the Logger loader-lock leak path to keep ~Logger noexcept honest.");
@@ -27,10 +26,11 @@ class LoggerTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        static int test_counter = 0;
-        test_log_file_ = std::filesystem::temp_directory_path() /
-                         ("test_logger_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(test_counter++) + ".log");
-        Logger::configure("TEST", test_log_file_.string(), "%Y-%m-%d %H:%M:%S");
+        static int s_test_counter = 0;
+        m_test_log_file =
+            std::filesystem::temp_directory_path() /
+            ("test_logger_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(s_test_counter++) + ".log");
+        Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
     }
 
     void TearDown() override
@@ -40,9 +40,9 @@ protected:
 
         try
         {
-            if (std::filesystem::exists(test_log_file_))
+            if (std::filesystem::exists(m_test_log_file))
             {
-                std::filesystem::remove(test_log_file_);
+                std::filesystem::remove(m_test_log_file);
             }
         }
         catch (const std::filesystem::filesystem_error &)
@@ -61,7 +61,7 @@ protected:
         }
     }
 
-    std::filesystem::path test_log_file_;
+    std::filesystem::path m_test_log_file;
 };
 
 TEST_F(LoggerTest, LogLevelToString)
@@ -229,11 +229,14 @@ TEST_F(LoggerTest, ThreadSafety)
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([&logger, i, messages_per_thread]()
-                             {
-            for (int j = 0; j < messages_per_thread; ++j) {
-                logger.log(LogLevel::Info, "Thread " + std::to_string(i) + " message " + std::to_string(j));
-            } });
+        threads.emplace_back(
+            [&logger, i, messages_per_thread]()
+            {
+                for (int j = 0; j < messages_per_thread; ++j)
+                {
+                    logger.log(LogLevel::Info, "Thread " + std::to_string(i) + " message " + std::to_string(j));
+                }
+            });
     }
 
     for (auto &t : threads)
@@ -401,7 +404,9 @@ TEST_F(LoggerTest, LongFormatString)
 {
     Logger &logger = Logger::get_instance();
 
-    EXPECT_NO_THROW(logger.info("This is a very long format string with many placeholders: {} {} {} {} {} {} {} {} {} {}", 1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+    EXPECT_NO_THROW(
+        logger.info("This is a very long format string with many placeholders: {} {} {} {} {} {} {} {} {} {}", 1, 2, 3,
+                    4, 5, 6, 7, 8, 9, 10));
 }
 
 TEST_F(LoggerTest, SpecialFormatCharacters)
@@ -763,7 +768,7 @@ TEST_F(LoggerTest, LogFileContentVerification)
     logger.info("UNIQUE_VERIFY_MSG_7a3b");
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("UNIQUE_VERIFY_MSG_7a3b"), std::string::npos);
@@ -778,7 +783,7 @@ TEST_F(LoggerTest, LogLevelFiltering_OutputVerification)
     logger.warning("VISIBLE_WARNING_MSG_4m8p");
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("VISIBLE_WARNING_MSG_4m8p"), std::string::npos);
@@ -837,10 +842,12 @@ TEST_F(LoggerTest, Shutdown_AtomicCAS_OneShotExecution)
 
     for (int i = 0; i < 4; ++i)
     {
-        threads.emplace_back([&logger, &shutdown_count]()
-                             {
-            logger.shutdown();
-            shutdown_count.fetch_add(1, std::memory_order_relaxed); });
+        threads.emplace_back(
+            [&logger, &shutdown_count]()
+            {
+                logger.shutdown();
+                shutdown_count.fetch_add(1, std::memory_order_relaxed);
+            });
     }
 
     for (auto &t : threads)
@@ -877,22 +884,26 @@ TEST_F(LoggerTest, ConcurrentShutdownAndLog)
     std::atomic<bool> shutdown_complete{false};
     std::vector<std::thread> threads;
 
-    threads.emplace_back([&logger, &shutdown_started, &shutdown_complete]()
-                         {
-        shutdown_started.store(true, std::memory_order_release);
-        logger.shutdown();
-        shutdown_complete.store(true, std::memory_order_release); });
+    threads.emplace_back(
+        [&logger, &shutdown_started, &shutdown_complete]()
+        {
+            shutdown_started.store(true, std::memory_order_release);
+            logger.shutdown();
+            shutdown_complete.store(true, std::memory_order_release);
+        });
 
-    threads.emplace_back([&logger, &shutdown_started]()
-                         {
-        while (!shutdown_started.load(std::memory_order_acquire))
+    threads.emplace_back(
+        [&logger, &shutdown_started]()
         {
-            std::this_thread::yield();
-        }
-        for (int i = 0; i < 100; ++i)
-        {
-            logger.info("Concurrent log message {}", i);
-        } });
+            while (!shutdown_started.load(std::memory_order_acquire))
+            {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < 100; ++i)
+            {
+                logger.info("Concurrent log message {}", i);
+            }
+        });
 
     for (auto &t : threads)
     {
@@ -915,7 +926,7 @@ TEST_F(LoggerTest, AsyncMode_OutputVerification)
     logger.disable_async_mode();
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("ASYNC_VERIFY_MSG_6j9n"), std::string::npos);
@@ -926,21 +937,25 @@ TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
     std::atomic<bool> stop{false};
     std::vector<std::thread> threads;
 
-    threads.emplace_back([&stop]()
-                         {
-        while (!stop.load(std::memory_order_acquire))
+    threads.emplace_back(
+        [&stop]()
         {
-            auto level = Logger::string_to_log_level("INVALID_LEVEL");
-            EXPECT_EQ(level, LogLevel::Info);
-        } });
+            while (!stop.load(std::memory_order_acquire))
+            {
+                auto level = Logger::string_to_log_level("INVALID_LEVEL");
+                EXPECT_EQ(level, LogLevel::Info);
+            }
+        });
 
-    threads.emplace_back([&stop, this]()
-                         {
-        for (int i = 0; i < 50; ++i)
+    threads.emplace_back(
+        [&stop, this]()
         {
-            Logger::configure("PREFIX_" + std::to_string(i), test_log_file_.string(), "%Y-%m-%d %H:%M:%S");
-        }
-        stop.store(true, std::memory_order_release); });
+            for (int i = 0; i < 50; ++i)
+            {
+                Logger::configure("PREFIX_" + std::to_string(i), m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
+            }
+            stop.store(true, std::memory_order_release);
+        });
 
     for (auto &t : threads)
     {
@@ -963,7 +978,7 @@ TEST_F(LoggerTest, Reconfigure_InvalidPath_KeepsOldFile)
     logger.info("AFTER_INVALID_RECONFIG_9p2x");
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("BEFORE_INVALID_RECONFIG_3k7m"), std::string::npos);
@@ -985,7 +1000,7 @@ TEST_F(LoggerTest, FlushAsync_DrainsPendingMessages)
     logger.flush();
     logger.disable_async_mode();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("ASYNC_DRAIN_MSG_0"), std::string::npos);
@@ -1015,8 +1030,9 @@ TEST_F(LoggerTest, ShutdownWithAsyncMode_NoHang)
 TEST_F(LoggerTest, Configure_AbsolutePath_Works)
 {
     static std::atomic<int> s_abs_counter{0};
-    auto abs_log_file = std::filesystem::temp_directory_path() /
-                        ("test_logger_abspath_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(s_abs_counter.fetch_add(1)) + ".log");
+    auto abs_log_file =
+        std::filesystem::temp_directory_path() / ("test_logger_abspath_" + std::to_string(GetCurrentProcessId()) + "_" +
+                                                  std::to_string(s_abs_counter.fetch_add(1)) + ".log");
 
     Logger::configure("ABS_TEST", abs_log_file.string(), "%Y-%m-%d %H:%M:%S");
 
@@ -1052,7 +1068,8 @@ TEST_F(LoggerTest, Reconfigure_WhileAsyncMode_Works)
 
     static std::atomic<int> s_reconfig_counter{0};
     auto new_file = std::filesystem::temp_directory_path() /
-                    ("test_logger_async_reconfig_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(s_reconfig_counter.fetch_add(1)) + ".log");
+                    ("test_logger_async_reconfig_" + std::to_string(GetCurrentProcessId()) + "_" +
+                     std::to_string(s_reconfig_counter.fetch_add(1)) + ".log");
 
     logger.reconfigure("ASYNC_RECONFIG", new_file.string(), "%Y-%m-%d %H:%M:%S");
 
@@ -1092,25 +1109,29 @@ TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
     std::vector<std::thread> writers;
     for (int w = 0; w < writer_count; ++w)
     {
-        writers.emplace_back([&, w]()
-                             {
-            for (int i = 0; i < iterations && !stop.load(std::memory_order_relaxed); ++i)
+        writers.emplace_back(
+            [&, w]()
             {
-                logger.info("CONCURRENT_W{}_MSG_{}", w, i);
-                total_logged.fetch_add(1, std::memory_order_relaxed);
-            } });
+                for (int i = 0; i < iterations && !stop.load(std::memory_order_relaxed); ++i)
+                {
+                    logger.info("CONCURRENT_W{}_MSG_{}", w, i);
+                    total_logged.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
     }
 
     // Toggler thread disables and re-enables async mode mid-flight
-    std::thread toggler([&]()
-                        {
-        for (int i = 0; i < 5; ++i)
+    std::thread toggler(
+        [&]()
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            logger.disable_async_mode();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            logger.enable_async_mode();
-        } });
+            for (int i = 0; i < 5; ++i)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                logger.disable_async_mode();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                logger.enable_async_mode();
+            }
+        });
 
     for (auto &t : writers)
     {
@@ -1123,7 +1144,7 @@ TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
     logger.flush();
 
     // Verify at least some messages survived (no crashes, no hangs)
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_GT(total_logged.load(), 0);
@@ -1138,7 +1159,7 @@ TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
     logger.info("TIMESTAMP_CHECK_MSG_2k4j");
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
@@ -1175,16 +1196,10 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ReadWhileLogging)
     logger.flush();
 
     // Simulate an external process opening the log file for reading
-    HANDLE external_handle = CreateFileA(
-        test_log_file_.string().c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
-    ASSERT_NE(external_handle, INVALID_HANDLE_VALUE)
-        << "Failed to open log file externally: " << GetLastError();
+    HANDLE external_handle = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                         FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(external_handle, INVALID_HANDLE_VALUE) << "Failed to open log file externally: " << GetLastError();
 
     for (int i = 0; i < during_open_count; ++i)
     {
@@ -1200,24 +1215,21 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ReadWhileLogging)
     }
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
     for (int i = 0; i < pre_open_count; ++i)
     {
-        EXPECT_NE(content.find("PRE_OPEN_" + std::to_string(i)), std::string::npos)
-            << "Missing PRE_OPEN_" << i;
+        EXPECT_NE(content.find("PRE_OPEN_" + std::to_string(i)), std::string::npos) << "Missing PRE_OPEN_" << i;
     }
     for (int i = 0; i < during_open_count; ++i)
     {
-        EXPECT_NE(content.find("DURING_OPEN_" + std::to_string(i)), std::string::npos)
-            << "Missing DURING_OPEN_" << i;
+        EXPECT_NE(content.find("DURING_OPEN_" + std::to_string(i)), std::string::npos) << "Missing DURING_OPEN_" << i;
     }
     for (int i = 0; i < post_close_count; ++i)
     {
-        EXPECT_NE(content.find("POST_CLOSE_" + std::to_string(i)), std::string::npos)
-            << "Missing POST_CLOSE_" << i;
+        EXPECT_NE(content.find("POST_CLOSE_" + std::to_string(i)), std::string::npos) << "Missing POST_CLOSE_" << i;
     }
 }
 
@@ -1230,17 +1242,12 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
     logger.flush();
 
     // Open with no sharing flags (simulates an editor that locks the file)
-    HANDLE exclusive_handle = CreateFileA(
-        test_log_file_.string().c_str(),
-        GENERIC_READ,
-        0, // No sharing -- exclusive lock
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
+    HANDLE exclusive_handle = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
+                                          0, // No sharing -- exclusive lock
+                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
 
-    // This open may or may not succeed depending on OS sharing enforcement.
-    // The key assertion is that logging continues to work regardless.
+    // This open may or may not succeed depending on OS sharing enforcement. The key assertion is that logging continues
+    // to work regardless.
     const int msg_count = 10;
     for (int i = 0; i < msg_count; ++i)
     {
@@ -1254,7 +1261,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
     }
 
     // Re-read and verify messages written before the exclusive open
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
@@ -1277,14 +1284,9 @@ TEST_F(LoggerTest, ConcurrentFileAccess_RepeatedOpenClose)
         }
         logger.flush();
 
-        HANDLE h = CreateFileA(
-            test_log_file_.string().c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            nullptr);
+        HANDLE h = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
 
         if (h != INVALID_HANDLE_VALUE)
         {
@@ -1294,7 +1296,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_RepeatedOpenClose)
 
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
@@ -1325,14 +1327,9 @@ TEST_F(LoggerTest, ConcurrentFileAccess_AsyncModeReadWhileLogging)
     }
     logger.flush();
 
-    HANDLE external_handle = CreateFileA(
-        test_log_file_.string().c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        nullptr);
+    HANDLE external_handle = CreateFileA(m_test_log_file.string().c_str(), GENERIC_READ,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                                         FILE_ATTRIBUTE_NORMAL, nullptr);
     ASSERT_NE(external_handle, INVALID_HANDLE_VALUE);
 
     for (int i = 0; i < during_open_count; ++i)
@@ -1345,19 +1342,17 @@ TEST_F(LoggerTest, ConcurrentFileAccess_AsyncModeReadWhileLogging)
 
     logger.disable_async_mode();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
     for (int i = 0; i < pre_open_count; ++i)
     {
-        EXPECT_NE(content.find("ASYNC_PRE_" + std::to_string(i)), std::string::npos)
-            << "Missing ASYNC_PRE_" << i;
+        EXPECT_NE(content.find("ASYNC_PRE_" + std::to_string(i)), std::string::npos) << "Missing ASYNC_PRE_" << i;
     }
     for (int i = 0; i < during_open_count; ++i)
     {
-        EXPECT_NE(content.find("ASYNC_DURING_" + std::to_string(i)), std::string::npos)
-            << "Missing ASYNC_DURING_" << i;
+        EXPECT_NE(content.find("ASYNC_DURING_" + std::to_string(i)), std::string::npos) << "Missing ASYNC_DURING_" << i;
     }
 }
 
@@ -1372,19 +1367,17 @@ TEST_F(LoggerTest, SetLogLevel_SameLevel_NoLogMessage)
     logger.info("MARKER_AFTER_SAME_a7k2");
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
     EXPECT_NE(content.find("MARKER_BEFORE_SAME_a7k2"), std::string::npos);
     EXPECT_NE(content.find("MARKER_AFTER_SAME_a7k2"), std::string::npos);
 
-    // Only one "Log level changed" should exist (the initial set to Trace)
-    // and none after the marker
+    // Only one "Log level changed" should exist (the initial set to Trace) and none after the marker
     auto marker_pos = content.find("MARKER_BEFORE_SAME_a7k2");
     auto change_after = content.find("Log level changed", marker_pos);
-    EXPECT_EQ(change_after, std::string::npos)
-        << "set_log_level with same level should not produce a log message";
+    EXPECT_EQ(change_after, std::string::npos) << "set_log_level with same level should not produce a log message";
 }
 
 TEST_F(LoggerTest, SetLogLevel_DifferentLevel_LogsChange)
@@ -1394,7 +1387,7 @@ TEST_F(LoggerTest, SetLogLevel_DifferentLevel_LogsChange)
     logger.set_log_level(LogLevel::Info);
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
 
@@ -1441,7 +1434,8 @@ TEST_F(LoggerTest, IsEnabled_ConsistentWithGetLogLevel)
 {
     Logger &logger = Logger::get_instance();
 
-    const LogLevel all_levels[] = {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning, LogLevel::Error};
+    const LogLevel all_levels[] = {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning,
+                                   LogLevel::Error};
 
     for (auto configured : all_levels)
     {
@@ -1451,8 +1445,7 @@ TEST_F(LoggerTest, IsEnabled_ConsistentWithGetLogLevel)
         for (auto queried : all_levels)
         {
             EXPECT_EQ(logger.is_enabled(queried), queried >= configured)
-                << "configured=" << static_cast<int>(configured)
-                << " queried=" << static_cast<int>(queried);
+                << "configured=" << static_cast<int>(configured) << " queried=" << static_cast<int>(queried);
         }
     }
 }
@@ -1462,7 +1455,7 @@ TEST_F(LoggerTest, Reconfigure_SameParams_SkipsReopen)
     Logger &logger = Logger::get_instance();
     logger.set_log_level(LogLevel::Trace);
 
-    auto first_file = test_log_file_;
+    auto first_file = m_test_log_file;
     Logger::configure("TEST", first_file.string(), "%Y-%m-%d %H:%M:%S");
     logger.info("Before reconfigure");
     logger.flush();
@@ -1483,12 +1476,12 @@ TEST_F(LoggerTest, Reconfigure_AfterShutdown_Succeeds)
     logger.shutdown();
 
     // Reconfigure after shutdown should reopen and work
-    Logger::configure("TEST", test_log_file_.string(), "%Y-%m-%d %H:%M:%S");
+    Logger::configure("TEST", m_test_log_file.string(), "%Y-%m-%d %H:%M:%S");
     logger.set_log_level(LogLevel::Trace);
     logger.info("Post-shutdown message");
     logger.flush();
 
-    std::ifstream in(test_log_file_);
+    std::ifstream in(m_test_log_file);
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     EXPECT_TRUE(content.find("Post-shutdown message") != std::string::npos);
 }
@@ -1530,15 +1523,15 @@ TEST_F(LoggerTest, LogNoexcept_IsNoThrowAndWritesMessage)
     Logger &logger = Logger::get_instance();
     logger.set_log_level(LogLevel::Trace);
 
-    // The no-throw entry point must be declared noexcept so it is safe to call
-    // from hook callbacks and other noexcept-boundary contexts.
+    // The no-throw entry point must be declared noexcept so it is safe to call from hook callbacks and other
+    // noexcept-boundary contexts.
     static_assert(noexcept(logger.log_noexcept(LogLevel::Info, "x")),
                   "log_noexcept must be noexcept for noexcept-boundary callers");
 
     EXPECT_TRUE(logger.log_noexcept(LogLevel::Error, "NOEXCEPT_LOG_LINE_4k2p"));
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("NOEXCEPT_LOG_LINE_4k2p"), std::string::npos);
@@ -1558,17 +1551,16 @@ TEST_F(LoggerTest, TryLog_IsNoThrowAndFormatsMessage)
     Logger &logger = Logger::get_instance();
     logger.set_log_level(LogLevel::Trace);
 
-    // try_log is declared noexcept, but noexcept(try_log(level, "{}", arg)) is
-    // not a useful probe: the std::format_string argument is built by a consteval
-    // constructor that is not noexcept-qualified, so the noexcept operator reports
-    // the whole call-expression as potentially-throwing even though try_log itself
-    // cannot throw at runtime (it catches every std::format and sink failure
-    // internally). The runtime no-throw contract is exercised behaviourally below.
+    // try_log is declared noexcept, but noexcept(try_log(level, "{}", arg)) is not a useful probe: the
+    // std::format_string argument is built by a consteval constructor that is not noexcept-qualified, so the noexcept
+    // operator reports the whole call-expression as potentially-throwing even though try_log itself cannot throw at
+    // runtime (it catches every std::format and sink failure internally). The runtime no-throw contract is exercised
+    // behaviourally below.
 
     EXPECT_TRUE(logger.try_log(LogLevel::Warning, "FORMATTED_TRYLOG {} {}", 42, "ok"));
     logger.flush();
 
-    std::ifstream ifs(test_log_file_);
+    std::ifstream ifs(m_test_log_file);
     ASSERT_TRUE(ifs.is_open());
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_NE(content.find("FORMATTED_TRYLOG 42 ok"), std::string::npos);
@@ -1583,7 +1575,7 @@ namespace
                ("test_logger_overload_" + std::to_string(GetCurrentProcessId()) + "_" +
                 std::to_string(counter.fetch_add(1)) + ".log");
     }
-} // namespace
+} // anonymous namespace
 
 TEST(LoggerConfigureOverload, TwoArgConfigureUsesDefaultTimestamp)
 {

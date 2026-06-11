@@ -18,18 +18,13 @@ namespace DetourModKit
     /**
      * @class StoppableWorker
      * @brief RAII-owned named background worker built on std::jthread.
-     * @details The body receives a std::stop_token and must poll it
-     *          cooperatively. On destruction the worker requests stop and
-     *          joins the thread, unless it detects that the current thread
-     *          is executing under the Windows loader lock -- in which case
-     *          the thread is detached to avoid deadlock. Callers that need
-     *          to preempt the loader-lock case should call request_stop()
-     *          and join() from a thread outside DllMain prior to teardown.
+     * @details The body receives a std::stop_token and must poll it cooperatively. On destruction the worker requests
+     *          stop and joins the thread, unless it detects that the current thread is executing under the Windows
+     *          loader lock -- in which case the thread is detached to avoid deadlock. Callers that need to preempt the
+     *          loader-lock case should call request_stop() and join() from a thread outside DllMain prior to teardown.
      *
-     *          Non-copyable and non-movable: the name, stop state, and
-     *          thread handle form a single invariant. Copying would
-     *          duplicate the thread handle; moving would race with a
-     *          running body.
+     *          Non-copyable and non-movable: the name, stop state, and thread handle form a single invariant. Copying
+     *          would duplicate the thread handle; moving would race with a running body.
      */
     class StoppableWorker
     {
@@ -37,11 +32,9 @@ namespace DetourModKit
         /**
          * @brief Starts a new worker thread running the supplied body.
          * @param name Descriptive name for logging. Copied into the worker.
-         * @param body Invocable receiving a stop_token. Must return promptly
-         *             when stop_requested() becomes true.
+         * @param body Invocable receiving a stop_token. Must return promptly when stop_requested() becomes true.
          */
-        StoppableWorker(std::string_view name,
-                        std::function<void(std::stop_token)> body);
+        StoppableWorker(std::string_view name, std::function<void(std::stop_token)> body);
 
         ~StoppableWorker() noexcept;
 
@@ -69,9 +62,8 @@ namespace DetourModKit
         /**
          * @brief Requests stop and joins the worker thread.
          * @details Safe to call multiple times. If invoked under the
-         *          Windows loader lock the thread is detached instead of
-         *          joined (documented trade-off -- the pinned module
-         *          keeps code pages alive).
+         *          Windows loader lock the thread is detached instead of joined (documented trade-off -- the pinned
+         *          module keeps code pages alive).
          */
         void shutdown() noexcept;
 

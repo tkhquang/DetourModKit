@@ -1,8 +1,7 @@
 #include <gtest/gtest.h>
 
-// Enables the test-only debug_snapshot_use_count() diagnostic on the
-// dispatcher. Defined here (before the header include) so it affects only
-// this translation unit.
+// Enables the test-only debug_snapshot_use_count() diagnostic on the dispatcher. Defined here (before the header
+// include) so it affects only this translation unit.
 #define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1
 
 #include "DetourModKit/event_dispatcher.hpp"
@@ -52,8 +51,7 @@ TEST(EventDispatcherTest, EmitCallsHandler)
     EventDispatcher<SimpleEvent> dispatcher;
     int received = 0;
 
-    auto sub = dispatcher.subscribe([&received](const SimpleEvent &e)
-                                    { received = e.value; });
+    auto sub = dispatcher.subscribe([&received](const SimpleEvent &e) { received = e.value; });
 
     dispatcher.emit(SimpleEvent{99});
     EXPECT_EQ(received, 99);
@@ -64,12 +62,9 @@ TEST(EventDispatcherTest, EmitCallsMultipleHandlers)
     EventDispatcher<SimpleEvent> dispatcher;
     int count = 0;
 
-    auto sub1 = dispatcher.subscribe([&count](const SimpleEvent &)
-                                     { ++count; });
-    auto sub2 = dispatcher.subscribe([&count](const SimpleEvent &)
-                                     { ++count; });
-    auto sub3 = dispatcher.subscribe([&count](const SimpleEvent &)
-                                     { ++count; });
+    auto sub1 = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
+    auto sub2 = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
+    auto sub3 = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
 
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(count, 3);
@@ -80,8 +75,7 @@ TEST(EventDispatcherTest, EmitPassesEventByConstRef)
     EventDispatcher<StringEvent> dispatcher;
     std::string captured;
 
-    auto sub = dispatcher.subscribe([&captured](const StringEvent &e)
-                                    { captured = e.message; });
+    auto sub = dispatcher.subscribe([&captured](const StringEvent &e) { captured = e.message; });
 
     dispatcher.emit(StringEvent{"hello world"});
     EXPECT_EQ(captured, "hello world");
@@ -95,8 +89,7 @@ TEST(EventDispatcherTest, SubscriptionUnsubscribesOnDestruction)
     int count = 0;
 
     {
-        auto sub = dispatcher.subscribe([&count](const SimpleEvent &)
-                                        { ++count; });
+        auto sub = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
         dispatcher.emit(SimpleEvent{1});
         EXPECT_EQ(count, 1);
         EXPECT_EQ(dispatcher.subscriber_count(), 1u);
@@ -113,8 +106,7 @@ TEST(EventDispatcherTest, SubscriptionReset_Unsubscribes)
     EventDispatcher<SimpleEvent> dispatcher;
     int count = 0;
 
-    auto sub = dispatcher.subscribe([&count](const SimpleEvent &)
-                                    { ++count; });
+    auto sub = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(count, 1);
 
@@ -139,8 +131,7 @@ TEST(EventDispatcherTest, SubscriptionMoveConstructor)
     EventDispatcher<SimpleEvent> dispatcher;
     int count = 0;
 
-    auto sub1 = dispatcher.subscribe([&count](const SimpleEvent &)
-                                     { ++count; });
+    auto sub1 = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
     auto sub2 = std::move(sub1);
 
     EXPECT_FALSE(sub1.active()); // NOLINT: testing moved-from state
@@ -157,10 +148,8 @@ TEST(EventDispatcherTest, SubscriptionMoveAssignment)
     int count_a = 0;
     int count_b = 0;
 
-    auto sub_a = dispatcher.subscribe([&count_a](const SimpleEvent &)
-                                      { ++count_a; });
-    auto sub_b = dispatcher.subscribe([&count_b](const SimpleEvent &)
-                                      { ++count_b; });
+    auto sub_a = dispatcher.subscribe([&count_a](const SimpleEvent &) { ++count_a; });
+    auto sub_b = dispatcher.subscribe([&count_b](const SimpleEvent &) { ++count_b; });
     EXPECT_EQ(dispatcher.subscriber_count(), 2u);
 
     // Move-assign sub_b over sub_a. sub_a's old handler is unsubscribed.
@@ -187,10 +176,8 @@ TEST(EventDispatcherTest, UnsubscribeOne_LeavesOthers)
     int count_a = 0;
     int count_b = 0;
 
-    auto sub_a = dispatcher.subscribe([&count_a](const SimpleEvent &)
-                                      { ++count_a; });
-    auto sub_b = dispatcher.subscribe([&count_b](const SimpleEvent &)
-                                      { ++count_b; });
+    auto sub_a = dispatcher.subscribe([&count_a](const SimpleEvent &) { ++count_a; });
+    auto sub_b = dispatcher.subscribe([&count_b](const SimpleEvent &) { ++count_b; });
 
     sub_a.reset();
 
@@ -206,10 +193,8 @@ TEST(EventDispatcherTest, Clear_RemovesAllSubscribers)
     EventDispatcher<SimpleEvent> dispatcher;
     int count = 0;
 
-    auto sub1 = dispatcher.subscribe([&count](const SimpleEvent &)
-                                     { ++count; });
-    auto sub2 = dispatcher.subscribe([&count](const SimpleEvent &)
-                                     { ++count; });
+    auto sub1 = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
+    auto sub2 = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
 
     dispatcher.clear();
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
@@ -225,10 +210,8 @@ TEST(EventDispatcherTest, EmitSafe_CatchesHandlerExceptions)
     EventDispatcher<SimpleEvent> dispatcher;
     int count = 0;
 
-    auto sub1 = dispatcher.subscribe([](const SimpleEvent &)
-                                     { throw std::runtime_error("handler error"); });
-    auto sub2 = dispatcher.subscribe([&count](const SimpleEvent &)
-                                     { ++count; });
+    auto sub1 = dispatcher.subscribe([](const SimpleEvent &) { throw std::runtime_error("handler error"); });
+    auto sub2 = dispatcher.subscribe([&count](const SimpleEvent &) { ++count; });
 
     // emit_safe should not propagate exceptions; sub2 should still run
     dispatcher.emit_safe(SimpleEvent{1});
@@ -260,10 +243,8 @@ TEST(EventDispatcherTest, IndependentDispatchers_DoNotInterfere)
     int int_count = 0;
     int str_count = 0;
 
-    auto sub1 = int_dispatcher.subscribe([&int_count](const SimpleEvent &)
-                                         { ++int_count; });
-    auto sub2 = str_dispatcher.subscribe([&str_count](const StringEvent &)
-                                         { ++str_count; });
+    auto sub1 = int_dispatcher.subscribe([&int_count](const SimpleEvent &) { ++int_count; });
+    auto sub2 = str_dispatcher.subscribe([&str_count](const StringEvent &) { ++str_count; });
 
     int_dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(int_count, 1);
@@ -281,8 +262,8 @@ TEST(EventDispatcherTest, ConcurrentEmit_NoDataRace)
     EventDispatcher<SimpleEvent> dispatcher;
     std::atomic<int> total{0};
 
-    auto sub = dispatcher.subscribe([&total](const SimpleEvent &e)
-                                    { total.fetch_add(e.value, std::memory_order_relaxed); });
+    auto sub =
+        dispatcher.subscribe([&total](const SimpleEvent &e) { total.fetch_add(e.value, std::memory_order_relaxed); });
 
     constexpr int threads = 8;
     constexpr int emits_per_thread = 1000;
@@ -291,12 +272,14 @@ TEST(EventDispatcherTest, ConcurrentEmit_NoDataRace)
 
     for (int t = 0; t < threads; ++t)
     {
-        workers.emplace_back([&dispatcher]()
-                             {
-            for (int i = 0; i < emits_per_thread; ++i)
+        workers.emplace_back(
+            [&dispatcher]()
             {
-                dispatcher.emit(SimpleEvent{1});
-            } });
+                for (int i = 0; i < emits_per_thread; ++i)
+                {
+                    dispatcher.emit(SimpleEvent{1});
+                }
+            });
     }
 
     for (auto &w : workers)
@@ -317,13 +300,15 @@ TEST(EventDispatcherTest, ConcurrentEmitAndSubscribe_NoDataRace)
     std::vector<std::thread> emitters;
     for (int t = 0; t < 4; ++t)
     {
-        emitters.emplace_back([&dispatcher, &stop, &emit_count]()
-                              {
-            while (!stop.load(std::memory_order_relaxed))
+        emitters.emplace_back(
+            [&dispatcher, &stop, &emit_count]()
             {
-                dispatcher.emit_safe(SimpleEvent{1});
-                emit_count.fetch_add(1, std::memory_order_relaxed);
-            } });
+                while (!stop.load(std::memory_order_relaxed))
+                {
+                    dispatcher.emit_safe(SimpleEvent{1});
+                    emit_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
     }
 
     // Subscribe/unsubscribe churn on main thread while emitters run
@@ -343,9 +328,8 @@ TEST(EventDispatcherTest, ConcurrentEmitAndSubscribe_NoDataRace)
         w.join();
     }
 
-    // If we get here without deadlock or crash, the test passes.
-    // emit_count may be zero on extremely slow machines, so we only
-    // assert no crash/deadlock occurred.
+    // If we get here without deadlock or crash, the test passes. emit_count may be zero on extremely slow machines, so
+    // we only assert no crash/deadlock occurred.
     (void)emit_count;
 }
 
@@ -357,13 +341,13 @@ TEST(EventDispatcherTest, SubscribeInsideHandler_IsRejected)
     Subscription inner_sub;
     bool handler_ran = false;
 
-    auto sub = dispatcher.subscribe([&](const SimpleEvent &)
-                                    {
-        // Attempting to subscribe from within a handler must be rejected
-        // to prevent deadlock (exclusive lock inside shared lock).
-        inner_sub = dispatcher.subscribe([&](const SimpleEvent &) {
-            handler_ran = true;
-        }); });
+    auto sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            // Attempting to subscribe from within a handler must be rejected to prevent deadlock (exclusive lock inside
+            // shared lock).
+            inner_sub = dispatcher.subscribe([&](const SimpleEvent &) { handler_ran = true; });
+        });
 
     dispatcher.emit(SimpleEvent{1});
 
@@ -382,17 +366,17 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_IsRejected)
     int call_count = 0;
 
     Subscription held_sub;
-    held_sub = dispatcher.subscribe([&](const SimpleEvent &)
-                                    {
-        ++call_count;
-        // Attempting to unsubscribe from within a handler is silently
-        // skipped to prevent deadlock.
-        held_sub.reset(); });
+    held_sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            ++call_count;
+            // Attempting to unsubscribe from within a handler is silently skipped to prevent deadlock.
+            held_sub.reset();
+        });
 
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(call_count, 1);
-    // The subscription should still be active because reset() was
-    // rejected inside the handler.
+    // The subscription should still be active because reset() was rejected inside the handler.
     EXPECT_EQ(dispatcher.subscriber_count(), 1u);
 
     // Now unsubscribe outside the handler (must work)
@@ -420,12 +404,9 @@ TEST(EventDispatcherTest, UnsubscribeMiddle_PreservesOrder)
     EventDispatcher<SimpleEvent> dispatcher;
     std::vector<int> order;
 
-    auto sub_a = dispatcher.subscribe([&order](const SimpleEvent &)
-                                      { order.push_back(1); });
-    auto sub_b = dispatcher.subscribe([&order](const SimpleEvent &)
-                                      { order.push_back(2); });
-    auto sub_c = dispatcher.subscribe([&order](const SimpleEvent &)
-                                      { order.push_back(3); });
+    auto sub_a = dispatcher.subscribe([&order](const SimpleEvent &) { order.push_back(1); });
+    auto sub_b = dispatcher.subscribe([&order](const SimpleEvent &) { order.push_back(2); });
+    auto sub_c = dispatcher.subscribe([&order](const SimpleEvent &) { order.push_back(3); });
 
     // Remove the middle subscriber
     sub_b.reset();
@@ -448,8 +429,7 @@ TEST(EventDispatcherTest, SubscriptionsInVector_CleanupOnClear)
 
     for (int i = 0; i < 10; ++i)
     {
-        subs.push_back(dispatcher.subscribe([&count](const SimpleEvent &)
-                                            { ++count; }));
+        subs.push_back(dispatcher.subscribe([&count](const SimpleEvent &) { ++count; }));
     }
     EXPECT_EQ(dispatcher.subscriber_count(), 10u);
 
@@ -464,8 +444,7 @@ TEST(EventDispatcherTest, Emit_PropagatesHandlerException)
 {
     EventDispatcher<SimpleEvent> dispatcher;
 
-    auto sub = dispatcher.subscribe([](const SimpleEvent &)
-                                    { throw std::runtime_error("handler error"); });
+    auto sub = dispatcher.subscribe([](const SimpleEvent &) { throw std::runtime_error("handler error"); });
 
     EXPECT_THROW(dispatcher.emit(SimpleEvent{1}), std::runtime_error);
 }
@@ -475,14 +454,10 @@ TEST(EventDispatcherTest, EmitSafe_AllHandlersRunDespiteMultipleExceptions)
     EventDispatcher<SimpleEvent> dispatcher;
     int success_count = 0;
 
-    auto sub1 = dispatcher.subscribe([](const SimpleEvent &)
-                                     { throw std::runtime_error("error 1"); });
-    auto sub2 = dispatcher.subscribe([&success_count](const SimpleEvent &)
-                                     { ++success_count; });
-    auto sub3 = dispatcher.subscribe([](const SimpleEvent &)
-                                     { throw std::logic_error("error 2"); });
-    auto sub4 = dispatcher.subscribe([&success_count](const SimpleEvent &)
-                                     { ++success_count; });
+    auto sub1 = dispatcher.subscribe([](const SimpleEvent &) { throw std::runtime_error("error 1"); });
+    auto sub2 = dispatcher.subscribe([&success_count](const SimpleEvent &) { ++success_count; });
+    auto sub3 = dispatcher.subscribe([](const SimpleEvent &) { throw std::logic_error("error 2"); });
+    auto sub4 = dispatcher.subscribe([&success_count](const SimpleEvent &) { ++success_count; });
 
     // emit_safe must not propagate; all non-throwing handlers must execute
     dispatcher.emit_safe(SimpleEvent{1});
@@ -491,18 +466,20 @@ TEST(EventDispatcherTest, EmitSafe_AllHandlersRunDespiteMultipleExceptions)
 
 TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
 {
-    // Verifies that a subscription whose reset() was deferred during emit
-    // is properly cleaned up when the Subscription object is destroyed.
+    // Verifies that a subscription whose reset() was deferred during emit is properly cleaned up when the Subscription
+    // object is destroyed.
     EventDispatcher<SimpleEvent> dispatcher;
     int call_count = 0;
 
     {
         Subscription held_sub;
-        held_sub = dispatcher.subscribe([&](const SimpleEvent &)
-                                        {
-            ++call_count;
-            // Deferred: reset() inside handler is silently skipped
-            held_sub.reset(); });
+        held_sub = dispatcher.subscribe(
+            [&](const SimpleEvent &)
+            {
+                ++call_count;
+                // Deferred: reset() inside handler is silently skipped
+                held_sub.reset();
+            });
 
         dispatcher.emit(SimpleEvent{1});
         EXPECT_EQ(call_count, 1);
@@ -517,17 +494,15 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
 
 TEST(EventDispatcherTest, EmptyFastPath_SkipsLock)
 {
-    // A freshly-constructed dispatcher holds exactly one snapshot reference
-    // internally. With no subscribers, emit() must be observably a no-op
-    // and subscriber_count()/empty() must report zero without mutating state.
+    // A freshly-constructed dispatcher holds exactly one snapshot reference internally. With no subscribers, emit()
+    // must be observably a no-op and subscriber_count()/empty() must report zero without mutating state.
     EventDispatcher<SimpleEvent> dispatcher;
 
     EXPECT_TRUE(dispatcher.empty());
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
 
-    // Record the dispatcher's own reference to its handler snapshot before
-    // any emit. If the fast path really skips the snapshot load, emit()
-    // should not leave any residual references alive afterwards.
+    // Record the dispatcher's own reference to its handler snapshot before any emit. If the fast path really skips the
+    // snapshot load, emit() should not leave any residual references alive afterwards.
     const long use_count_before = dispatcher.debug_snapshot_use_count();
     EXPECT_EQ(use_count_before, 1);
 
@@ -557,37 +532,36 @@ TEST(EventDispatcherTest, SnapshotStability_DuringEmit)
     std::atomic<int> old_calls{0};
     std::atomic<int> new_calls{0};
 
-    // Pre-subscribed handler signals when the emit has begun, then blocks
-    // until the main thread allows it to continue.
-    auto old_sub = dispatcher.subscribe([&](const SimpleEvent &)
-                                        {
+    // Pre-subscribed handler signals when the emit has begun, then blocks until the main thread allows it to continue.
+    auto old_sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
         {
-            std::lock_guard lk{gate_mtx};
-            started = true;
-        }
-        handler_started.notify_one();
+            {
+                std::lock_guard lk{gate_mtx};
+                started = true;
+            }
+            handler_started.notify_one();
 
-        std::unique_lock lk{gate_mtx};
-        handler_may_finish.wait(lk, [&] { return may_finish; });
-        old_calls.fetch_add(1, std::memory_order_relaxed); });
+            std::unique_lock lk{gate_mtx};
+            handler_may_finish.wait(lk, [&] { return may_finish; });
+            old_calls.fetch_add(1, std::memory_order_relaxed);
+        });
 
-    // Launch an emitter thread; it will block inside the pre-subscribed
-    // handler holding a shared_ptr snapshot of the current handler list.
-    std::thread emitter([&]
-                        { dispatcher.emit(SimpleEvent{0}); });
+    // Launch an emitter thread; it will block inside the pre-subscribed handler holding a shared_ptr snapshot of the
+    // current handler list.
+    std::thread emitter([&] { dispatcher.emit(SimpleEvent{0}); });
 
     {
         std::unique_lock lk{gate_mtx};
-        handler_started.wait(lk, [&]
-                             { return started; });
+        handler_started.wait(lk, [&] { return started; });
     }
 
     // Subscribe a new handler while the emit is still in flight.
-    auto new_sub = dispatcher.subscribe([&](const SimpleEvent &)
-                                        { new_calls.fetch_add(1, std::memory_order_relaxed); });
+    auto new_sub =
+        dispatcher.subscribe([&](const SimpleEvent &) { new_calls.fetch_add(1, std::memory_order_relaxed); });
 
-    // The freshly-subscribed handler must not be visible to the in-flight
-    // emit, which captured its snapshot before new_sub was published.
+    // The freshly-subscribed handler must not be visible to the in-flight emit, which captured its snapshot before
+    // new_sub was published.
     EXPECT_EQ(new_calls.load(), 0);
 
     // Release the blocked handler and let the emit complete.
@@ -613,11 +587,9 @@ TEST(EventDispatcherTest, SnapshotReclamation_NoLeak)
 {
     EventDispatcher<SimpleEvent> dispatcher;
 
-    // Heavy subscribe + unsubscribe churn with interleaved emits. Each
-    // subscribe allocates a new snapshot; each unsubscribe does the same.
-    // Once every subscription's RAII guard is destroyed and no emit is in
-    // flight, only the dispatcher's own reference to the latest (empty)
-    // snapshot should remain.
+    // Heavy subscribe + unsubscribe churn with interleaved emits. Each subscribe allocates a new snapshot; each
+    // unsubscribe does the same. Once every subscription's RAII guard is destroyed and no emit is in flight, only the
+    // dispatcher's own reference to the latest (empty) snapshot should remain.
     constexpr int iterations = 10000;
     for (int i = 0; i < iterations; ++i)
     {

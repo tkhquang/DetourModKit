@@ -14,12 +14,11 @@ using namespace DetourModKit;
 
 namespace
 {
-    // A committed RWX page used as a synthetic module image. find_string_xref
-    // scans readable pages for the string (phase 1) and execute-readable pages for
-    // the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both masks, so a
-    // single page hosts the whole fixture and the ModuleRange spans exactly it.
-    // The page is zero-filled by VirtualAlloc, so an unwritten byte is 0x00, which
-    // both terminates a planted string and never starts a RIP-relative load.
+    // A committed RWX page used as a synthetic module image. find_string_xref scans readable pages for the string
+    // (phase 1) and execute-readable pages for the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both masks, so
+    // a single page hosts the whole fixture and the ModuleRange spans exactly it. The page is zero-filled by
+    // VirtualAlloc, so an unwritten byte is 0x00, which both terminates a planted string and never starts a
+    // RIP-relative load.
     class SyntheticImage
     {
     public:
@@ -49,24 +48,19 @@ namespace
             return reinterpret_cast<std::uintptr_t>(m_base + off);
         }
 
-        void write(std::size_t off, const void *data, std::size_t n) noexcept
-        {
-            std::memcpy(m_base + off, data, n);
-        }
+        void write(std::size_t off, const void *data, std::size_t n) noexcept { std::memcpy(m_base + off, data, n); }
 
-        // Plants `<rex> <opcode> <modrm> <disp32>` (a RIP-relative lea/mov) at
-        // instr_off whose computed target is target_off. modrm 0x05 is the
+        // Plants `<rex> <opcode> <modrm> <disp32>` (a RIP-relative lea/mov) at instr_off whose computed target is
+        // target_off. modrm 0x05 is the
         // RIP-relative form with rax as the destination register.
-        void plant_rip_load(std::size_t instr_off, std::size_t target_off,
-                            std::uint8_t opcode) noexcept
+        void plant_rip_load(std::size_t instr_off, std::size_t target_off, std::uint8_t opcode) noexcept
         {
             std::uint8_t *p = m_base + instr_off;
             p[0] = 0x48; // REX.W
             p[1] = opcode;
             p[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
             const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
-            const auto disp = static_cast<std::int32_t>(
-                static_cast<std::int64_t>(addr(target_off)) - next);
+            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
             std::memcpy(p + 3, &disp, sizeof(disp));
         }
 
@@ -81,14 +75,13 @@ namespace
         std::size_t m_size = 0;
     };
 
-    // A two-page synthetic image mirroring a real PE's split protections: page 0 is
-    // execute-readable (the .text analogue swept in phase 2) and page 1 is readable
-    // data (the .rdata analogue located in phase 1). Reserving both pages in one
-    // VirtualAlloc keeps them contiguous so a single ModuleRange spans them, and the
-    // distinct protections keep the planted string out of the executable sweep --
-    // exactly as production strings in .rdata are never decoded as code. This is the
-    // fixture the broad (Zydis) phase-2 tests use so the decoder only ever walks the
-    // code page, never the string bytes.
+    // A two-page synthetic image mirroring a real PE's split protections: page 0 is execute-readable (the .text
+    // analogue swept in phase 2) and page 1 is readable data (the .rdata analogue located in phase 1). Reserving both
+    // pages in one
+    // VirtualAlloc keeps them contiguous so a single ModuleRange spans them, and the distinct protections keep the
+    // planted string out of the executable sweep -- exactly as production strings in .rdata are never decoded as code.
+    // This is the fixture the broad (Zydis) phase-2 tests use so the decoder only ever walks the code page, never the
+    // string bytes.
     class SplitImage
     {
     public:
@@ -97,12 +90,11 @@ namespace
             SYSTEM_INFO si{};
             GetSystemInfo(&si);
             m_page = si.dwPageSize;
-            m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, m_page * 2, MEM_RESERVE, PAGE_NOACCESS));
+            m_base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, m_page * 2, MEM_RESERVE, PAGE_NOACCESS));
             if (m_base)
             {
-                // Code page must be writable here so the test can plant instruction
-                // bytes; PAGE_EXECUTE_READWRITE still satisfies the executable sweep.
+                // Code page must be writable here so the test can plant instruction bytes; PAGE_EXECUTE_READWRITE still
+                // satisfies the executable sweep.
                 void *code = VirtualAlloc(m_base, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
                 void *data = VirtualAlloc(m_base + m_page, m_page, MEM_COMMIT, PAGE_READWRITE);
                 if (code == nullptr || data == nullptr)
@@ -130,9 +122,8 @@ namespace
             return reinterpret_cast<std::uintptr_t>(m_base + off);
         }
 
-        // Writes raw bytes into the executable code page (page 0). Used to plant a
-        // byte the decoder rejects, exercising the broad sweep's byte-restart
-        // recovery, which plant_code_rip_insn (which only plants well-formed
+        // Writes raw bytes into the executable code page (page 0). Used to plant a byte the decoder rejects, exercising
+        // the broad sweep's byte-restart recovery, which plant_code_rip_insn (which only plants well-formed
         // instructions) cannot reach.
         void write_code(std::size_t off, const void *data, std::size_t n) noexcept
         {
@@ -144,12 +135,10 @@ namespace
             std::memcpy(m_base + m_page + off, data, n);
         }
 
-        // Plants an instruction in the code page whose RIP-relative memory operand
-        // resolves to data offset target_off. `head` is the bytes preceding the
-        // disp32 (prefixes, opcode, ModRM); `total_len` is the full instruction
-        // length so the next-instruction anchor the disp is measured from is
-        // correct; `tail` is any bytes after the disp32 (e.g. an immediate). This
-        // drives phase-2 shapes the narrow scan does not model.
+        // Plants an instruction in the code page whose RIP-relative memory operand resolves to data offset target_off.
+        // `head` is the bytes preceding the disp32 (prefixes, opcode, ModRM); `total_len` is the full instruction
+        // length so the next-instruction anchor the disp is measured from is correct; `tail` is any bytes after the
+        // disp32 (e.g. an immediate). This drives phase-2 shapes the narrow scan does not model.
         void plant_code_rip_insn(std::size_t instr_off, std::size_t target_off,
                                  std::initializer_list<std::uint8_t> head, std::size_t total_len,
                                  std::initializer_list<std::uint8_t> tail = {}) noexcept
@@ -184,15 +173,12 @@ namespace
         std::size_t m_page = 0;
     };
 
-    // A four-page synthetic image whose executable region is split in two by a
-    // non-executable interior page: page 0 and page 2 are execute-readable code
-    // windows, page 1 is an uncommitted (reserved) gap that VirtualQuery reports
-    // as MEM_RESERVE so collect_executable_windows skips it, and page 3 is the
-    // readable data page holding the string. This is the only fixture that makes
-    // collect_executable_windows return more than one window, so it exercises the
-    // cross-window accumulation in both phase-2 scans (a reference living only in
-    // the second window must still resolve; one reference in each window must
-    // still report AmbiguousReference). Real PE .text is one contiguous window, so
+    // A four-page synthetic image whose executable region is split in two by a non-executable interior page: page 0 and
+    // page 2 are execute-readable code windows, page 1 is an uncommitted (reserved) gap that VirtualQuery reports as
+    // MEM_RESERVE so collect_executable_windows skips it, and page 3 is the readable data page holding the string. This
+    // is the only fixture that makes collect_executable_windows return more than one window, so it exercises the
+    // cross-window accumulation in both phase-2 scans (a reference living only in the second window must still resolve;
+    // one reference in each window must still report AmbiguousReference). Real PE .text is one contiguous window, so
     // this is defensive-path coverage rather than a production layout.
     class GappedCodeImage
     {
@@ -202,12 +188,11 @@ namespace
             SYSTEM_INFO si{};
             GetSystemInfo(&si);
             m_page = si.dwPageSize;
-            m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, m_page * 4, MEM_RESERVE, PAGE_NOACCESS));
+            m_base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, m_page * 4, MEM_RESERVE, PAGE_NOACCESS));
             if (m_base)
             {
-                // Commit pages 0, 2, and 3; page 1 stays reserved as the gap that
-                // splits the executable region into two windows.
+                // Commit pages 0, 2, and 3; page 1 stays reserved as the gap that splits the executable region into two
+                // windows.
                 void *code0 = VirtualAlloc(m_base, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
                 void *code1 = VirtualAlloc(m_base + m_page * 2, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
                 void *data = VirtualAlloc(m_base + m_page * 3, m_page, MEM_COMMIT, PAGE_READWRITE);
@@ -241,8 +226,8 @@ namespace
             std::memcpy(m_base + m_page * 3 + off, data, n);
         }
 
-        // Plants a REX.W lea rax, [rip+disp32] in window 0 (page 0) whose target is
-        // the string at data offset target_off.
+        // Plants a REX.W lea rax, [rip+disp32] in window 0 (page 0) whose target is the string at data offset
+        // target_off.
         void plant_lea_window0(std::size_t off, std::size_t target_off) noexcept
         {
             std::uint8_t *instr = m_base + off;
@@ -269,8 +254,8 @@ namespace
             instr[1] = 0x8D; // lea
             instr[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
             const auto next = static_cast<std::int64_t>(instr_addr + 7);
-            const auto target = static_cast<std::int64_t>(
-                reinterpret_cast<std::uintptr_t>(m_base + m_page * 3 + target_off));
+            const auto target =
+                static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(m_base + m_page * 3 + target_off));
             const auto disp = static_cast<std::int32_t>(target - next);
             std::memcpy(instr + 3, &disp, sizeof(disp));
         }
@@ -446,9 +431,8 @@ TEST(StringXrefTest, EnclosingFunctionReturnsPrologue)
     {
         GTEST_SKIP() << "could not allocate a synthetic image page";
     }
-    // INT3 padding, then a recognizable prologue, then the referencing lea. The
-    // back-scan from the lea must cross the lea-to-prologue gap (no 0xCC/0xC3),
-    // hit the 0xCC pad boundary, and return the prologue start.
+    // INT3 padding, then a recognizable prologue, then the referencing lea. The back-scan from the lea must cross the
+    // lea-to-prologue gap (no 0xCC/0xC3), hit the 0xCC pad boundary, and return the prologue start.
     const std::uint8_t pad[] = {0xCC, 0xCC, 0xCC, 0xCC};
     img.write(0x40, pad, sizeof(pad));
     const std::uint8_t prologue[] = {0x55, 0x48, 0x8B, 0xEC}; // push rbp; mov rbp, rsp
@@ -471,8 +455,8 @@ TEST(StringXrefTest, EnclosingFunctionNotFound)
     {
         GTEST_SKIP() << "could not allocate a synthetic image page";
     }
-    // No 0xCC/0xC3 boundary precedes the lea (the page is zero-filled), so the
-    // back-scan finds no function entry and the resolve fails closed.
+    // No 0xCC/0xC3 boundary precedes the lea (the page is zero-filled), so the back-scan finds no function entry and
+    // the resolve fails closed.
     const char str[] = "NoBoundaryAnchor";
     img.write(0x100, str, sizeof(str));
     img.plant_rip_load(0x10, 0x100, LEA);
@@ -590,9 +574,8 @@ TEST(StringXrefTest, BroadMatchKeepsNarrowShapeScanCoverage)
     const char str[] = "BroadKeepsNarrowAnchor";
     img.write_data(0x40, str, sizeof(str));
 
-    // The REX.W lea is intentionally planted at an odd byte offset. The Zydis
-    // linear sweep can step over such a site after decoding preceding bytes, so
-    // broad_match must merge in the default all-offset shape scan rather than
+    // The REX.W lea is intentionally planted at an odd byte offset. The Zydis linear sweep can step over such a site
+    // after decoding preceding bytes, so broad_match must merge in the default all-offset shape scan rather than
     // replacing it.
     img.plant_code_rip_insn(0x11, 0x40, {0x48, 0x8D, 0x05}, 7);
 
@@ -610,11 +593,10 @@ TEST(StringXrefTest, BroadMatchAmbiguousReference)
     }
     const char str[] = "BroadTwiceAnchorString";
     img.write_data(0x40, str, sizeof(str));
-    // Two references to the same string. The second is placed immediately after the
-    // first (offset = first + its length) so the linear sweep, having decoded the
-    // first instruction, lands exactly on the second and counts both -- a gap would
-    // let the zero-fill cursor desync past an odd offset. Expressing the adjacency
-    // as first + len keeps that invariant in code rather than a magic literal.
+    // Two references to the same string. The second is placed immediately after the first (offset = first + its length)
+    // so the linear sweep, having decoded the first instruction, lands exactly on the second and counts both -- a gap
+    // would let the zero-fill cursor desync past an odd offset. Expressing the adjacency as first + len keeps that
+    // invariant in code rather than a magic literal.
     constexpr std::size_t cmp_off = 0x10;
     constexpr std::size_t cmp_len = 7; // 83 3D <disp32> 01
     img.plant_code_rip_insn(cmp_off, 0x40, {0x83, 0x3D}, cmp_len, {0x01});
@@ -651,15 +633,14 @@ TEST(StringXrefTest, BroadMatchRecoversFromDecodeFailure)
     const char str[] = "BroadRecoveryAnchorString";
     img.write_data(0x40, str, sizeof(str));
 
-    // 0x06 (PUSH ES) has no valid 64-bit encoding, so ZydisDecoderDecodeFull
-    // rejects it and the sweep must byte-restart (offset += 1) to realign. The
-    // zero-filled lead-in decodes cleanly as `add [rax], al` (00 00) in 2-byte
-    // steps, landing the cursor exactly on this even offset before the failure.
+    // 0x06 (PUSH ES) has no valid 64-bit encoding, so ZydisDecoderDecodeFull rejects it and the sweep must byte-restart
+    // (offset += 1) to realign. The zero-filled lead-in decodes cleanly as `add [rax], al` (00 00) in 2-byte steps,
+    // landing the cursor exactly on this even offset before the failure.
     const std::uint8_t invalid_opcode = 0x06;
     img.write_code(0x10, &invalid_opcode, sizeof(invalid_opcode));
 
-    // The real reference sits at 0x11, one byte past the failure -- an odd offset
-    // the 2-byte zero-fill walk never visits unless recovery advanced by exactly
+    // The real reference sits at 0x11, one byte past the failure -- an odd offset the 2-byte zero-fill walk never
+    // visits unless recovery advanced by exactly
     // one byte. cmp dword ptr [rip+disp], 0x01  ->  83 3D <disp32> 01 (7 bytes).
     img.plant_code_rip_insn(0x11, 0x40, {0x83, 0x3D}, 7, {0x01});
 
@@ -681,18 +662,17 @@ TEST(StringXrefTest, DataPageIsNeverDecodedAsCode)
     const char str[] = "DataPageNeverCodeAnchor";
     img.write_data(0x40, str, sizeof(str));
 
-    // Plant, inside the non-executable data page, a byte sequence that -- if the
-    // data page were ever swept as code -- decodes to `lea rax, [rip+0x39]` whose
-    // target is the string at data offset 0x40 (0x00 + 7 + 0x39 == 0x40; the
-    // displacement is a pure intra-page constant, independent of the load base).
-    // No reference is planted in the executable code page.
+    // Plant, inside the non-executable data page, a byte sequence that -- if the data page were ever swept as code --
+    // decodes to `lea rax, [rip+0x39]` whose target is the string at data offset 0x40 (0x00 + 7 + 0x39 == 0x40; the
+    // displacement is a pure intra-page constant, independent of the load base). No reference is planted in the
+    // executable code page.
     const std::uint8_t data_lea[] = {0x48, 0x8D, 0x05, 0x39, 0x00, 0x00, 0x00};
     img.write_data(0x00, data_lea, sizeof(data_lea));
 
-    // collect_executable_windows must exclude the PAGE_READWRITE data page, so
-    // both scans -- which iterate only those windows -- fail closed with
-    // NoReference. A regression that widened the gate to readable pages would
-    // count the data-page pseudo-instruction and flip this to a wrong success.
+    // collect_executable_windows must exclude the PAGE_READWRITE data page, so both scans -- which iterate only those
+    // windows -- fail closed with
+    // NoReference. A regression that widened the gate to readable pages would count the data-page pseudo-instruction
+    // and flip this to a wrong success.
     const auto narrow = Scanner::find_string_xref(utf8_query("DataPageNeverCodeAnchor"), img.range());
     ASSERT_FALSE(narrow.has_value());
     EXPECT_EQ(narrow.error(), Scanner::StringXrefError::NoReference);
@@ -712,9 +692,8 @@ TEST(StringXrefTest, MultiWindowResolvesReferenceInSecondWindow)
     const char str[] = "SecondWindowAnchorString";
     img.write_string(0x40, str, sizeof(str));
 
-    // The only reference lives in the second executable window, past the
-    // non-executable gap page. Resolving it proves both scans iterate every window
-    // collect_executable_windows returns, not just the first.
+    // The only reference lives in the second executable window, past the non-executable gap page. Resolving it proves
+    // both scans iterate every window collect_executable_windows returns, not just the first.
     img.plant_lea_window1(0x10, 0x40);
 
     const auto narrow = Scanner::find_string_xref(utf8_query("SecondWindowAnchorString"), img.range());
@@ -736,8 +715,8 @@ TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
     const char str[] = "CrossWindowAnchorString";
     img.write_string(0x40, str, sizeof(str));
 
-    // One reference in each window. found_count must accumulate across the window
-    // boundary so a hit in window 0 and a hit in window 1 still report
+    // One reference in each window. found_count must accumulate across the window boundary so a hit in window 0 and a
+    // hit in window 1 still report
     // AmbiguousReference rather than silently resolving the first.
     img.plant_lea_window0(0x10, 0x40);
     img.plant_lea_window1(0x10, 0x40);
@@ -755,12 +734,9 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 {
     static_assert(noexcept(Scanner::string_xref_error_to_string(Scanner::StringXrefError::EmptyQuery)));
     const Scanner::StringXrefError all[] = {
-        Scanner::StringXrefError::EmptyQuery,
-        Scanner::StringXrefError::InvalidRange,
-        Scanner::StringXrefError::StringNotFound,
-        Scanner::StringXrefError::StringAmbiguous,
-        Scanner::StringXrefError::NoReference,
-        Scanner::StringXrefError::AmbiguousReference,
+        Scanner::StringXrefError::EmptyQuery,       Scanner::StringXrefError::InvalidRange,
+        Scanner::StringXrefError::StringNotFound,   Scanner::StringXrefError::StringAmbiguous,
+        Scanner::StringXrefError::NoReference,      Scanner::StringXrefError::AmbiguousReference,
         Scanner::StringXrefError::FunctionNotFound,
     };
     for (const auto error : all)

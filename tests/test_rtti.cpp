@@ -18,9 +18,8 @@ namespace Rtti = DetourModKit::Rtti;
 
 namespace
 {
-    // Per-fixture layout offsets shared by every SyntheticVtable instance.
-    // Picked so the COL, TypeDescriptor, and vtable storage live well apart
-    // from each other and from 4 KiB page boundaries.
+    // Per-fixture layout offsets shared by every SyntheticVtable instance. Picked so the COL, TypeDescriptor, and
+    // vtable storage live well apart from each other and from 4 KiB page boundaries.
     constexpr std::size_t SYN_BUF_SIZE = 4096;
     constexpr std::size_t SYN_COL_OFFSET = 256;
     constexpr std::size_t SYN_TD_OFFSET = SYN_COL_OFFSET + 24; // COL is 24 bytes
@@ -28,44 +27,39 @@ namespace
     constexpr std::size_t SYN_COL_PTR_OFFSET = 2048;
     constexpr std::size_t SYN_VTABLE_OFFSET = SYN_COL_PTR_OFFSET + 8;
 
-    // Static buffer pool for SyntheticVtable storage. Living in the test
-    // executable's data segment ensures Memory::module_range_for resolves
-    // every synthetic address back to the test exe's PE range, which is
-    // required by the RTTI walker's bound-check guard. The pool is sized
-    // for up to 16 fixtures per test; RttiTest::SetUp resets the offset
-    // between tests so the pool never grows unbounded.
+    // Static buffer pool for SyntheticVtable storage. Living in the test executable's data segment ensures
+    // Memory::module_range_for resolves every synthetic address back to the test exe's PE range, which is required by
+    // the RTTI walker's bound-check guard. The pool is sized for up to 16 fixtures per test; RttiTest::SetUp resets the
+    // offset between tests so the pool never grows unbounded.
     constexpr std::size_t SYN_POOL_FIXTURES = 16;
     constexpr std::size_t SYN_POOL_SIZE = SYN_BUF_SIZE * SYN_POOL_FIXTURES;
-    alignas(8) std::array<std::byte, SYN_POOL_SIZE> g_syn_pool{};
-    std::size_t g_syn_offset = 0;
+    alignas(8) std::array<std::byte, SYN_POOL_SIZE> s_syn_pool{};
+    std::size_t s_syn_offset = 0;
 
     [[nodiscard]] std::byte *syn_alloc() noexcept
     {
-        if (g_syn_offset + SYN_BUF_SIZE > g_syn_pool.size())
+        if (s_syn_offset + SYN_BUF_SIZE > s_syn_pool.size())
             return nullptr;
-        std::byte *p = g_syn_pool.data() + g_syn_offset;
-        g_syn_offset += SYN_BUF_SIZE;
+        std::byte *p = s_syn_pool.data() + s_syn_offset;
+        s_syn_offset += SYN_BUF_SIZE;
         std::memset(p, 0, SYN_BUF_SIZE);
         return p;
     }
 
     void syn_reset() noexcept
     {
-        g_syn_offset = 0;
+        s_syn_offset = 0;
     }
 
     /**
      * @class SyntheticVtable
      * @brief In-memory MSVC x64 RTTI layout for testing Rtti primitives.
-     * @details Builds a buffer (allocated from a process-wide pool that
-     *          lives in the test executable's data segment) that exposes
-     *          the same shape the Rtti walker expects against a real game
+     * @details Builds a buffer (allocated from a process-wide pool that lives in the test executable's data segment)
+     *          that exposes the same shape the Rtti walker expects against a real game
      *          image: a vtable whose qword at offset -8 points to an
-     *          RTTICompleteObjectLocator whose pTypeDescriptor RVA leads
-     *          to a TypeDescriptor whose name field contains the requested
-     *          mangled string. RVAs are computed relative to the test
-     *          executable's image base so the walker's bound-check guard
-     *          (module_range_for + contains) accepts them.
+     *          RTTICompleteObjectLocator whose pTypeDescriptor RVA leads to a TypeDescriptor whose name field contains
+     *          the requested mangled string. RVAs are computed relative to the test executable's image base so the
+     *          walker's bound-check guard (module_range_for + contains) accepts them.
      */
     class SyntheticVtable
     {
@@ -73,10 +67,8 @@ namespace
         explicit SyntheticVtable(std::string_view mangled_name)
         {
             m_buf = syn_alloc();
-            // syn_alloc returns nullptr when the pool is exhausted. Use
-            // gtest assertion machinery so a test that overflows the pool
-            // fails loudly instead of silently constructing a malformed
-            // fixture.
+            // syn_alloc returns nullptr when the pool is exhausted. Use gtest assertion machinery so a test that
+            // overflows the pool fails loudly instead of silently constructing a malformed fixture.
             EXPECT_NE(m_buf, nullptr) << "SyntheticVtable pool exhausted; raise SYN_POOL_FIXTURES";
             if (!m_buf)
                 return;
@@ -86,8 +78,8 @@ namespace
             const std::uintptr_t exe_base = reinterpret_cast<std::uintptr_t>(exe);
             const std::uintptr_t buf_base = reinterpret_cast<std::uintptr_t>(m_buf);
 
-            // The pool is a static in the test exe, so buf_base lies inside
-            // the test exe's PE image and the offset fits in a 32-bit RVA.
+            // The pool is a static in the test exe, so buf_base lies inside the test exe's PE image and the offset fits
+            // in a 32-bit RVA.
             EXPECT_GE(buf_base, exe_base);
             const std::uintptr_t buf_rva = buf_base - exe_base;
 
@@ -106,9 +98,8 @@ namespace
             write_at(SYN_COL_OFFSET + 20, self_rva);
 
             // TypeDescriptor: pVFTable (8) + spare (8) + zero-terminated
-            // mangled name. The name length is bounded by the available
-            // space between SYN_TD_NAME_OFFSET and SYN_COL_PTR_OFFSET so
-            // it cannot overrun the buffer.
+            // mangled name. The name length is bounded by the available space between SYN_TD_NAME_OFFSET and
+            // SYN_COL_PTR_OFFSET so it cannot overrun the buffer.
             const std::size_t max_name = SYN_COL_PTR_OFFSET - SYN_TD_NAME_OFFSET - 1;
             const std::size_t name_len = std::min(mangled_name.size(), max_name);
             std::memcpy(m_buf + SYN_TD_NAME_OFFSET, mangled_name.data(), name_len);
@@ -127,20 +118,13 @@ namespace
         [[nodiscard]] std::uintptr_t vtable() const noexcept { return m_vtable_addr; }
 
         /// Overwrites COL.p_type_descriptor with @p rva for poisoned-input tests.
-        void poison_type_descriptor_rva(std::uint32_t rva) noexcept
-        {
-            write_at(SYN_COL_OFFSET + 12, rva);
-        }
+        void poison_type_descriptor_rva(std::uint32_t rva) noexcept { write_at(SYN_COL_OFFSET + 12, rva); }
 
         /// Overwrites COL.p_self with @p rva for poisoned-input tests.
-        void poison_self_rva(std::uint32_t rva) noexcept
-        {
-            write_at(SYN_COL_OFFSET + 20, rva);
-        }
+        void poison_self_rva(std::uint32_t rva) noexcept { write_at(SYN_COL_OFFSET + 20, rva); }
 
     private:
-        template <typename T>
-        void write_at(std::size_t offset, const T &value) noexcept
+        template <typename T> void write_at(std::size_t offset, const T &value) noexcept
         {
             static_assert(std::is_trivially_copyable_v<T>);
             std::memcpy(m_buf + offset, &value, sizeof(T));
@@ -161,20 +145,14 @@ namespace
     class SyntheticObject
     {
     public:
-        explicit SyntheticObject(std::uintptr_t vtable_addr) noexcept
-            : m_vtable(vtable_addr)
-        {
-        }
+        explicit SyntheticObject(std::uintptr_t vtable_addr) noexcept : m_vtable(vtable_addr) {}
 
-        [[nodiscard]] std::uintptr_t address() const noexcept
-        {
-            return reinterpret_cast<std::uintptr_t>(this);
-        }
+        [[nodiscard]] std::uintptr_t address() const noexcept { return reinterpret_cast<std::uintptr_t>(this); }
 
     private:
         std::uintptr_t m_vtable;
     };
-} // namespace
+} // anonymous namespace
 
 class RttiTest : public ::testing::Test
 {
@@ -350,10 +328,8 @@ TEST_F(RttiTest, FindInTable_HitsFirstMatchingSlot)
         obj_other_b.address(),
     };
 
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVTarget@@");
+    auto hit =
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVTarget@@");
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(*hit, obj_target.address());
 }
@@ -366,10 +342,8 @@ TEST_F(RttiTest, FindInTable_NoMatchReturnsNullopt)
 
     std::array<std::uintptr_t, 2> table{obj_a.address(), obj_b.address()};
 
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVMissing@@");
+    auto hit =
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVMissing@@");
     EXPECT_FALSE(hit.has_value());
 }
 
@@ -380,10 +354,8 @@ TEST_F(RttiTest, FindInTable_SkipsNullSlots)
 
     std::array<std::uintptr_t, 4> table{0, 0, obj.address(), 0};
 
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVNullSkip@@");
+    auto hit =
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVNullSkip@@");
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(*hit, obj.address());
 }
@@ -395,10 +367,8 @@ TEST_F(RttiTest, FindInTable_SkipsLowAddressSlots)
 
     std::array<std::uintptr_t, 3> table{0x100, 0x200, obj.address()};
 
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVLowSkip@@");
+    auto hit =
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVLowSkip@@");
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(*hit, obj.address());
 }
@@ -411,11 +381,8 @@ TEST_F(RttiTest, FindInTable_CachePopulatedOnFirstHit)
     std::array<std::uintptr_t, 1> table{obj.address()};
 
     std::atomic<std::uintptr_t> cache{0};
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVCacheTest@@",
-        &cache);
+    auto hit = Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(),
+                                           ".?AVCacheTest@@", &cache);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(cache.load(), target.vtable());
 }
@@ -431,11 +398,8 @@ TEST_F(RttiTest, FindInTable_WarmCacheSkipsRttiWalk)
 
     // Pre-seed the cache with the target vtable; the warm path is now active.
     std::atomic<std::uintptr_t> cache{target.vtable()};
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVWarm@@",
-        &cache);
+    auto hit =
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVWarm@@", &cache);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(*hit, obj_target.address());
 }
@@ -447,15 +411,11 @@ TEST_F(RttiTest, FindInTable_WarmCacheRejectsForeignVtables)
 
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    // Cache points at an entirely unrelated vtable address. The single slot
-    // does not match the cached vtable, so the warm path returns nullopt
-    // without ever invoking the RTTI walker.
+    // Cache points at an entirely unrelated vtable address. The single slot does not match the cached vtable, so the
+    // warm path returns nullopt without ever invoking the RTTI walker.
     std::atomic<std::uintptr_t> cache{0xDEADBEEFCAFEULL};
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVWrong@@",
-        &cache);
+    auto hit = Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVWrong@@",
+                                           &cache);
     EXPECT_FALSE(hit.has_value());
 }
 
@@ -470,9 +430,8 @@ TEST_F(RttiTest, FindInTable_ZeroSlotsRejected)
     SyntheticObject obj(v.vtable());
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    EXPECT_FALSE(Rtti::find_in_pointer_table(
-                     reinterpret_cast<std::uintptr_t>(table.data()), 0, ".?AVZero@@")
-                     .has_value());
+    EXPECT_FALSE(
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), 0, ".?AVZero@@").has_value());
 }
 
 TEST_F(RttiTest, FindInTable_EmptyExpectedRejected)
@@ -481,9 +440,8 @@ TEST_F(RttiTest, FindInTable_EmptyExpectedRejected)
     SyntheticObject obj(v.vtable());
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    EXPECT_FALSE(Rtti::find_in_pointer_table(
-                     reinterpret_cast<std::uintptr_t>(table.data()), table.size(), "")
-                     .has_value());
+    EXPECT_FALSE(
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), "").has_value());
 }
 
 TEST_F(RttiTest, FindInTable_CustomStrideSkipsInterleavedMetadata)
@@ -491,16 +449,12 @@ TEST_F(RttiTest, FindInTable_CustomStrideSkipsInterleavedMetadata)
     SyntheticVtable target(".?AVStride@@");
     SyntheticObject obj(target.vtable());
 
-    // Table is { ptr, metadata, ptr, metadata, ... }; stride is 16 bytes
-    // and only every other qword is a real object pointer.
+    // Table is { ptr, metadata, ptr, metadata, ... }; stride is 16 bytes and only every other qword is a real object
+    // pointer.
     std::array<std::uintptr_t, 4> table{obj.address(), 0xAAAAAAAAu, obj.address(), 0xBBBBBBBBu};
 
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        2,
-        ".?AVStride@@",
-        nullptr,
-        16);
+    auto hit =
+        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), 2, ".?AVStride@@", nullptr, 16);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(*hit, obj.address());
 }
@@ -512,12 +466,8 @@ TEST_F(RttiTest, FindInTable_ZeroStrideDefaultsToQword)
 
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    auto hit = Rtti::find_in_pointer_table(
-        reinterpret_cast<std::uintptr_t>(table.data()),
-        table.size(),
-        ".?AVZeroStride@@",
-        nullptr,
-        0);
+    auto hit = Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(),
+                                           ".?AVZeroStride@@", nullptr, 0);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(*hit, obj.address());
 }
@@ -525,18 +475,15 @@ TEST_F(RttiTest, FindInTable_ZeroStrideDefaultsToQword)
 TEST_F(RttiTest, FindInTable_OverflowingRangeRejected)
 {
     // (table + slot_count * stride) wraps; should be treated as invalid.
-    EXPECT_FALSE(Rtti::find_in_pointer_table(
-                     UINTPTR_MAX - 8, 4, ".?AVAnything@@", nullptr, 16)
-                     .has_value());
+    EXPECT_FALSE(Rtti::find_in_pointer_table(UINTPTR_MAX - 8, 4, ".?AVAnything@@", nullptr, 16).has_value());
 }
 
 // --- Bound-check guards against poisoned RTTI fields ---
 
 TEST_F(RttiTest, ResolveRejectsPoisonedTypeDescriptorRva)
 {
-    // A bogus type-descriptor RVA places the computed name buffer outside
-    // the test executable's module range; the walker must reject the read
-    // rather than dereference whatever address the bogus RVA produces.
+    // A bogus type-descriptor RVA places the computed name buffer outside the test executable's module range; the
+    // walker must reject the read rather than dereference whatever address the bogus RVA produces.
     SyntheticVtable v(".?AVValid@@");
     v.poison_type_descriptor_rva(0x7FFFFFFFu);
 
@@ -551,10 +498,9 @@ TEST_F(RttiTest, ResolveRejectsPoisonedTypeDescriptorRva)
 
 TEST_F(RttiTest, ResolveRejectsPoisonedSelfRva)
 {
-    // A bogus pSelf recovers an image base that does not match the
-    // loader-reported module base; the walker must reject rather than
-    // trust the recovered base. self_rva == 1 makes
-    // recovered = col_addr - 1, which never equals mod_range.base.
+    // A bogus pSelf recovers an image base that does not match the loader-reported module base; the walker must reject
+    // rather than trust the recovered base. self_rva == 1 makes recovered = col_addr - 1, which never equals
+    // mod_range.base.
     SyntheticVtable v(".?AVValid@@");
     v.poison_self_rva(1);
 
@@ -564,8 +510,8 @@ TEST_F(RttiTest, ResolveRejectsPoisonedSelfRva)
 
 TEST_F(RttiTest, ResolveRejectsHeapAllocatedVtable)
 {
-    // A vtable whose address is not in any loaded module (here, a heap
-    // allocation) must be rejected at the module_range_for step.
+    // A vtable whose address is not in any loaded module (here, a heap allocation) must be rejected at the
+    // module_range_for step.
     auto buf = std::make_unique<std::array<std::uintptr_t, 4>>();
     (*buf)[0] = 0;
     (*buf)[1] = 0;

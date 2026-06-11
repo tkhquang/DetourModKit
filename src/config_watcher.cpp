@@ -35,19 +35,15 @@ namespace DetourModKit
     {
         // Test-only override for is_loader_lock_held(). When non-null the
         // ConfigWatcher destructor consults this hook instead of the real
-        // PEB-based detection, letting the test suite exercise the
-        // detach-and-leak branch from user code. Defined as a plain
-        // function pointer because the override is set/cleared on a single
-        // thread inside a test fixture.
+        // PEB-based detection, letting the test suite exercise the detach-and-leak branch from user code. Defined as a
+        // plain function pointer because the override is set/cleared on a single thread inside a test fixture.
         bool (*g_config_watcher_loader_lock_override)() noexcept = nullptr;
     } // namespace detail
 
     namespace
     {
         constexpr DWORD NOTIFY_FILTER =
-            FILE_NOTIFY_CHANGE_LAST_WRITE |
-            FILE_NOTIFY_CHANGE_FILE_NAME |
-            FILE_NOTIFY_CHANGE_SIZE;
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE;
 
         bool loader_lock_held_for_watcher() noexcept
         {
@@ -58,20 +54,18 @@ namespace DetourModKit
             return detail::is_loader_lock_held();
         }
 
-        // Sized so bursty editor saves do not overflow a single call while
-        // still fitting comfortably on the worker's stack.
+        // Sized so bursty editor saves do not overflow a single call while still fitting comfortably on the worker's
+        // stack.
         constexpr DWORD BUFFER_BYTES = 16 * 1024;
 
-        // Pumping timeout for GetOverlappedResultEx. Bounds how long a
-        // pending stop() must wait for the worker to observe its
-        // stop_token; idle cost is ~10 syscalls/s per watcher (not zero).
+        // Pumping timeout for GetOverlappedResultEx. Bounds how long a pending stop() must wait for the worker to
+        // observe its stop_token; idle cost is ~10 syscalls/s per watcher (not zero).
         constexpr DWORD PUMP_TIMEOUT_MS = 100;
 
-        // Per-wait bound for the stop-path drain. Only bites when a notify IRP
-        // is genuinely stuck (a deleted/orphaned watched directory); in the
-        // normal case the cancelled read completes in microseconds and the
-        // wait returns immediately. Two waits (cancel, then handle-close) cap
-        // worst-case teardown at ~2 * this value instead of an infinite hang.
+        // Per-wait bound for the stop-path drain. Only bites when a notify IRP is genuinely stuck (a deleted/orphaned
+        // watched directory); in the normal case the cancelled read completes in microseconds and the wait returns
+        // immediately. Two waits (cancel, then handle-close) cap worst-case teardown at ~2 * this value instead of an
+        // infinite hang.
         constexpr DWORD DRAIN_TIMEOUT_MS = 1000;
 
         bool iequals_w(std::wstring_view lhs, std::wstring_view rhs) noexcept
@@ -97,14 +91,12 @@ namespace DetourModKit
             HANDLE h{INVALID_HANDLE_VALUE};
 
             OwnedHandle() = default;
-            explicit OwnedHandle(HANDLE raw) noexcept
-                : h(raw) {}
+            explicit OwnedHandle(HANDLE raw) noexcept : h(raw) {}
 
             OwnedHandle(const OwnedHandle &) = delete;
             OwnedHandle &operator=(const OwnedHandle &) = delete;
 
-            OwnedHandle(OwnedHandle &&other) noexcept
-                : h(std::exchange(other.h, INVALID_HANDLE_VALUE)) {}
+            OwnedHandle(OwnedHandle &&other) noexcept : h(std::exchange(other.h, INVALID_HANDLE_VALUE)) {}
 
             OwnedHandle &operator=(OwnedHandle &&other) noexcept
             {
@@ -118,10 +110,7 @@ namespace DetourModKit
 
             ~OwnedHandle() noexcept { reset(); }
 
-            [[nodiscard]] bool valid() const noexcept
-            {
-                return h != INVALID_HANDLE_VALUE && h != nullptr;
-            }
+            [[nodiscard]] bool valid() const noexcept { return h != INVALID_HANDLE_VALUE && h != nullptr; }
 
             void reset() noexcept
             {
@@ -133,14 +122,11 @@ namespace DetourModKit
             }
         };
 
-        // Heap-resident I/O state for the ReadDirectoryChangesW pump. Bundled
-        // so the stop-path drain can leak the entire set (directory handle,
-        // completion event, OVERLAPPED, and notification buffer) in one move
-        // when a pending notify IRP cannot be confirmed complete. The kernel
-        // may still write into the OVERLAPPED and the buffer after a
-        // cancellation that the filesystem never finishes (e.g. the watched
-        // directory was deleted), so those structures must outlive the worker
-        // rather than be freed while an IRP still references them.
+        // Heap-resident I/O state for the ReadDirectoryChangesW pump. Bundled so the stop-path drain can leak the
+        // entire set (directory handle, completion event, OVERLAPPED, and notification buffer) in one move when a
+        // pending notify IRP cannot be confirmed complete. The kernel may still write into the OVERLAPPED and the
+        // buffer after a cancellation that the filesystem never finishes (e.g. the watched directory was deleted), so
+        // those structures must outlive the worker rather than be freed while an IRP still references them.
         struct WatchIoState
         {
             OwnedHandle dir_handle;
@@ -162,12 +148,8 @@ namespace DetourModKit
         std::unique_ptr<StoppableWorker> worker;
         std::atomic<std::thread::id> worker_thread_id{};
 
-        Impl(std::string_view path,
-             std::chrono::milliseconds deb,
-             std::function<void()> cb)
-            : ini_path_utf8(path),
-              debounce(deb),
-              on_reload(std::move(cb))
+        Impl(std::string_view path, std::chrono::milliseconds deb, std::function<void()> cb)
+            : ini_path_utf8(path), debounce(deb), on_reload(std::move(cb))
         {
             // Resolve into directory + filename components up-front.
             // weakly_canonical is avoided because the file may not exist yet;
@@ -185,8 +167,7 @@ namespace DetourModKit
         }
     };
 
-    ConfigWatcher::ConfigWatcher(std::string_view ini_path,
-                                 std::chrono::milliseconds debounce_window,
+    ConfigWatcher::ConfigWatcher(std::string_view ini_path, std::chrono::milliseconds debounce_window,
                                  std::function<void()> on_reload)
         : m_impl(std::make_unique<Impl>(ini_path, debounce_window, std::move(on_reload)))
     {
@@ -196,46 +177,34 @@ namespace DetourModKit
     {
         if (m_impl && loader_lock_held_for_watcher())
         {
-            // Under loader lock (FreeLibrary path): joining the watcher
-            // would deadlock against ReadDirectoryChangesW's I/O completion,
-            // and tearing down Impl would invalidate the worker_thread_id
-            // pointer the detached lambda still references. Pin the module
-            // so trampoline and worker code pages remain mapped, request
-            // stop, then leak the entire Impl onto the heap so it outlives
-            // the destructor. The same discipline as HookManager::~HookManager
-            // and Logger::shutdown_internal.
+            // Under loader lock (FreeLibrary path): joining the watcher would deadlock against ReadDirectoryChangesW's
+            // I/O completion, and tearing down Impl would invalidate the worker_thread_id pointer the detached lambda
+            // still references. Pin the module so trampoline and worker code pages remain mapped, request stop, then
+            // leak the entire Impl onto the heap so it outlives the destructor. The same discipline as
+            // HookManager::~HookManager and Logger::shutdown_internal.
             detail::pin_current_module();
 
             if (m_impl->worker)
             {
-                // shutdown() takes its own loader-lock branch: it requests
-                // stop and detaches the std::jthread (no join), then sets
-                // joined_ so the eventual ~StoppableWorker run during
-                // static teardown short-circuits without trying to join a
-                // detached handle.
+                // shutdown() takes its own loader-lock branch: it requests stop and detaches the std::jthread (no
+                // join), then sets joined_ so the eventual ~StoppableWorker run during static teardown short-circuits
+                // without trying to join a detached handle.
                 m_impl->worker->shutdown();
             }
 
-            // Per-call heap leak: each invocation allocates its own cell,
-            // so prior leaked Impls are never overwritten and the leak is
-            // bounded by one cell per ~ConfigWatcher-under-loader-lock
-            // call. The detached worker thread holds raw pointers and
-            // references into Impl members (worker_thread_id, captured
-            // strings); they must stay valid until the OS thread either
-            // observes the stop_token and exits or the process tears down.
+            // Per-call heap leak: each invocation allocates its own cell, so prior leaked Impls are never overwritten
+            // and the leak is bounded by one cell per ~ConfigWatcher-under-loader-lock call. The detached worker thread
+            // holds raw pointers and references into Impl members (worker_thread_id, captured strings); they must stay
+            // valid until the OS thread either observes the stop_token and exits or the process tears down.
             //
-            // new (std::nothrow) keeps this noexcept destructor honest by
-            // returning nullptr on OOM rather than turning a container
-            // emplace_back bad_alloc into std::terminate. On allocation
-            // failure, fall back to releasing the unique_ptr so the Impl
-            // storage is leaked directly without invoking ~Impl (which
-            // would tear down the detached StoppableWorker -- safe under
-            // a normal join, but not under loader lock).
+            // new (std::nothrow) keeps this noexcept destructor honest by returning nullptr on OOM rather than turning
+            // a container emplace_back bad_alloc into std::terminate. On allocation failure, fall back to releasing the
+            // unique_ptr so the Impl storage is leaked directly without invoking ~Impl (which would tear down the
+            // detached StoppableWorker -- safe under a normal join, but not under loader lock).
             static_assert(std::is_nothrow_move_constructible_v<std::unique_ptr<Impl>>,
                           "Leak cell must be nothrow-move-constructible to keep ~ConfigWatcher noexcept honest.");
 
-            if (auto *leaked = new (std::nothrow)
-                    std::unique_ptr<Impl>(std::move(m_impl)))
+            if (auto *leaked = new (std::nothrow) std::unique_ptr<Impl>(std::move(m_impl)))
             {
                 static_cast<void>(leaked);
             }
@@ -274,10 +243,9 @@ namespace DetourModKit
     {
         std::lock_guard<std::mutex> lock(m_impl->start_mutex);
 
-        // Guard on existence, not is_running(): there is a window between
-        // make_unique<StoppableWorker> and the worker body flipping the
-        // running flag. Checking is_running() here would let a second
-        // caller in that window overwrite the still-starting worker.
+        // Guard on existence, not is_running(): there is a window between make_unique<StoppableWorker> and the worker
+        // body flipping the running flag. Checking is_running() here would let a second caller in that window overwrite
+        // the still-starting worker.
         if (m_impl->worker)
         {
             return true;
@@ -285,61 +253,47 @@ namespace DetourModKit
 
         if (m_impl->directory_wide.empty() || m_impl->filename_wide.empty())
         {
-            Logger::get_instance().error(
-                "ConfigWatcher: invalid INI path '{}'; cannot start.",
-                m_impl->ini_path_utf8);
+            Logger::get_instance().error("ConfigWatcher: invalid INI path '{}'; cannot start.", m_impl->ini_path_utf8);
             return false;
         }
 
-        // Capture everything the worker needs by value so the body can
-        // outlive the captured Impl members only in the loader-lock detach
-        // path; under normal teardown stop() joins before m_impl unwinds.
+        // Capture everything the worker needs by value so the body can outlive the captured Impl members only in the
+        // loader-lock detach path; under normal teardown stop() joins before m_impl unwinds.
         auto directory = m_impl->directory_wide;
         auto filename = m_impl->filename_wide;
         auto debounce_ms = m_impl->debounce;
         auto callback = m_impl->on_reload;
         auto label = m_impl->ini_path_utf8;
 
-        // The StoppableWorker body is stored in std::function, so the
-        // lambda must stay copyable; we cannot move a non-copyable
-        // OwnedHandle into it. Instead, open the directory handle on the
-        // worker thread and synchronously report success/failure back to
-        // this thread via a shared promise. start() can then return the
-        // real status without polling is_running() in a race.
+        // The StoppableWorker body is stored in std::function, so the lambda must stay copyable; we cannot move a
+        // non-copyable
+        // OwnedHandle into it. Instead, open the directory handle on the worker thread and synchronously report
+        // success/failure back to this thread via a shared promise. start() can then return the real status without
+        // polling is_running() in a race.
         auto open_result = std::make_shared<std::promise<bool>>();
         std::future<bool> open_future = open_result->get_future();
 
-        // Pointer to the Impl's atomic thread-id slot. Using the raw
-        // pointer rather than capturing m_impl by reference: the lambda
-        // may outlive this stack frame via the StoppableWorker detach
-        // path, but ConfigWatcher (and therefore Impl) cannot be
-        // destroyed before the worker joins -- the destructor calls
-        // stop() which joins first. The atomic slot is always valid for
-        // as long as the worker exists.
+        // Pointer to the Impl's atomic thread-id slot. Using the raw pointer rather than capturing m_impl by reference:
+        // the lambda may outlive this stack frame via the StoppableWorker detach path, but ConfigWatcher (and therefore
+        // Impl) cannot be destroyed before the worker joins -- the destructor calls stop() which joins first. The
+        // atomic slot is always valid for as long as the worker exists.
         auto *worker_id_slot = &m_impl->worker_thread_id;
 
         m_impl->worker = std::make_unique<StoppableWorker>(
             "ConfigWatcher",
-            [directory = std::move(directory),
-             filename = std::move(filename),
-             debounce_ms,
-             callback = std::move(callback),
-             label = std::move(label),
-             open_result,
-             worker_id_slot](std::stop_token st)
+            [directory = std::move(directory), filename = std::move(filename), debounce_ms,
+             callback = std::move(callback), label = std::move(label), open_result, worker_id_slot](std::stop_token st)
             {
-                // Publish our thread id so is_worker_thread() can detect
-                // setter-invoked self-calls into disable_auto_reload().
-                worker_id_slot->store(std::this_thread::get_id(),
-                                      std::memory_order_release);
+                // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
+                // disable_auto_reload().
+                worker_id_slot->store(std::this_thread::get_id(), std::memory_order_release);
                 auto io = std::make_unique<WatchIoState>();
                 io->buffer.resize(BUFFER_BYTES);
 
-                // Reference aliases keep the pump body below unchanged while the
-                // backing storage lives on the heap, so the stop-path drain can
-                // leak the whole bundle in one move if a notify IRP cannot be
-                // confirmed complete (see the drain at worker exit for why that
-                // matters). The references stay valid even after io.release():
+                // Reference aliases keep the pump body below unchanged while the backing storage lives on the heap, so
+                // the stop-path drain can leak the whole bundle in one move if a notify IRP cannot be confirmed
+                // complete (see the drain at worker exit for why that matters). The references stay valid even after
+                // io.release():
                 // the object is leaked, not destroyed.
                 OwnedHandle &dir_handle = io->dir_handle;
                 OwnedHandle &event_handle = io->event_handle;
@@ -347,19 +301,13 @@ namespace DetourModKit
                 OVERLAPPED &overlapped = io->overlapped;
 
                 dir_handle = OwnedHandle(::CreateFileW(
-                    directory.c_str(),
-                    FILE_LIST_DIRECTORY,
-                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                    nullptr,
-                    OPEN_EXISTING,
-                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                    nullptr));
+                    directory.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
 
                 if (!dir_handle.valid())
                 {
-                    Logger::get_instance().error(
-                        "ConfigWatcher '{}': CreateFileW failed (GLE={}).",
-                        label, ::GetLastError());
+                    Logger::get_instance().error("ConfigWatcher '{}': CreateFileW failed (GLE={}).", label,
+                                                 ::GetLastError());
                     open_result->set_value(false);
                     return;
                 }
@@ -367,45 +315,36 @@ namespace DetourModKit
                 event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
                 if (!event_handle.valid())
                 {
-                    Logger::get_instance().error(
-                        "ConfigWatcher '{}': CreateEventW failed (GLE={}).",
-                        label, ::GetLastError());
+                    Logger::get_instance().error("ConfigWatcher '{}': CreateEventW failed (GLE={}).", label,
+                                                 ::GetLastError());
                     open_result->set_value(false);
                     return;
                 }
 
                 overlapped.hEvent = event_handle.h;
 
-                // Debounce bookkeeping: once we observe a matching change,
-                // mark it pending and defer the callback until no matching
-                // change has arrived for `debounce_ms`. Using steady_clock
-                // to survive wall-clock adjustments.
+                // Debounce bookkeeping: once we observe a matching change, mark it pending and defer the callback until
+                // no matching change has arrived for `debounce_ms`. Using steady_clock to survive wall-clock
+                // adjustments.
                 bool pending = false;
                 std::chrono::steady_clock::time_point last_event{};
 
-                // Track whether an overflow/coalesced-events completion has
-                // already been logged once per instance; subsequent hits
-                // stay silent at DEBUG level to avoid log spam.
+                // Track whether an overflow/coalesced-events completion has already been logged once per instance;
+                // subsequent hits stay silent at DEBUG level to avoid log spam.
                 bool overflow_logged = false;
 
                 auto issue_read = [&]() -> bool
                 {
                     ::ResetEvent(event_handle.h);
                     DWORD bytes_returned = 0;
-                    const BOOL ok = ::ReadDirectoryChangesW(
-                        dir_handle.h,
-                        buffer.data(),
-                        static_cast<DWORD>(buffer.size()),
-                        FALSE, // no recursion
-                        NOTIFY_FILTER,
-                        &bytes_returned,
-                        &overlapped,
-                        nullptr);
+                    const BOOL ok =
+                        ::ReadDirectoryChangesW(dir_handle.h, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                                FALSE, // no recursion
+                                                NOTIFY_FILTER, &bytes_returned, &overlapped, nullptr);
                     if (!ok)
                     {
-                        Logger::get_instance().error(
-                            "ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
-                            label, ::GetLastError());
+                        Logger::get_instance().error("ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
+                                                     label, ::GetLastError());
                         return false;
                     }
                     return true;
@@ -417,17 +356,15 @@ namespace DetourModKit
                     return;
                 }
 
-                // First overlapped read is queued successfully; signal
-                // start() that the watcher is ready. From here on any
-                // failure is post-startup and reported only via the log.
+                // First overlapped read is queued successfully; signal start() that the watcher is ready. From here on
+                // any failure is post-startup and reported only via the log.
                 open_result->set_value(true);
 
                 while (!st.stop_requested())
                 {
                     DWORD bytes_transferred = 0;
-                    const BOOL overlapped_ok = ::GetOverlappedResultEx(
-                        dir_handle.h, &overlapped, &bytes_transferred,
-                        PUMP_TIMEOUT_MS, FALSE);
+                    const BOOL overlapped_ok =
+                        ::GetOverlappedResultEx(dir_handle.h, &overlapped, &bytes_transferred, PUMP_TIMEOUT_MS, FALSE);
 
                     if (!overlapped_ok)
                     {
@@ -435,8 +372,7 @@ namespace DetourModKit
 
                         if (err == WAIT_TIMEOUT || err == WAIT_IO_COMPLETION)
                         {
-                            // No I/O completed this tick. If a prior event
-                            // is pending and the quiet window has elapsed,
+                            // No I/O completed this tick. If a prior event is pending and the quiet window has elapsed,
                             // fire the debounced callback.
                             if (pending)
                             {
@@ -455,34 +391,27 @@ namespace DetourModKit
 
                         if (err == ERROR_OPERATION_ABORTED)
                         {
-                            // Directory handle closed or I/O cancelled
-                            // externally (e.g. the watched parent
-                            // directory was removed or renamed). We
-                            // cannot recover a handle to a vanished
-                            // directory here; surface the event at
-                            // warning level so users notice.
-                            Logger::get_instance().warning(
-                                "ConfigWatcher '{}': directory handle "
-                                "invalidated (parent removed/renamed); "
-                                "watcher thread exiting.",
-                                label);
+                            // Directory handle closed or I/O cancelled externally (e.g. the watched parent directory
+                            // was removed or renamed). We cannot recover a handle to a vanished directory here; surface
+                            // the event at warning level so users notice.
+                            Logger::get_instance().warning("ConfigWatcher '{}': directory handle "
+                                                           "invalidated (parent removed/renamed); "
+                                                           "watcher thread exiting.",
+                                                           label);
                             break;
                         }
 
                         if (err == ERROR_NOTIFY_ENUM_DIR)
                         {
                             // Kernel/redirector path for buffer overflow:
-                            // events were dropped because they arrived
-                            // faster than we could drain them. Treat as
-                            // a coalesced match, re-issue the read, and
-                            // let debounce deduplicate.
+                            // events were dropped because they arrived faster than we could drain them. Treat as a
+                            // coalesced match, re-issue the read, and let debounce deduplicate.
                             if (!overflow_logged)
                             {
-                                Logger::get_instance().debug(
-                                    "ConfigWatcher '{}': notification "
-                                    "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
-                                    "coalescing dropped events.",
-                                    label);
+                                Logger::get_instance().debug("ConfigWatcher '{}': notification "
+                                                             "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
+                                                             "coalescing dropped events.",
+                                                             label);
                                 overflow_logged = true;
                             }
                             pending = true;
@@ -491,20 +420,16 @@ namespace DetourModKit
                             {
                                 break;
                             }
-                            // Some redirectors raise ERROR_NOTIFY_ENUM_DIR
-                            // continuously under sustained event storms.
+                            // Some redirectors raise ERROR_NOTIFY_ENUM_DIR continuously under sustained event storms.
                             // Without a sleep the worker would spin at
                             // 100% CPU re-issuing reads. Capping at ~20
-                            // Hz keeps debounce semantics intact while
-                            // bounding CPU.
-                            std::this_thread::sleep_for(
-                                std::chrono::milliseconds(50));
+                            // Hz keeps debounce semantics intact while bounding CPU.
+                            std::this_thread::sleep_for(std::chrono::milliseconds(50));
                             continue;
                         }
 
-                        Logger::get_instance().error(
-                            "ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).",
-                            label, err);
+                        Logger::get_instance().error("ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).",
+                                                     label, err);
                         break;
                     }
 
@@ -513,25 +438,21 @@ namespace DetourModKit
                     if (bytes_transferred == 0)
                     {
                         // Successful-completion path for buffer overflow:
-                        // the kernel signals "events coalesced" by
-                        // returning zero bytes. Same handling as
-                        // ERROR_NOTIFY_ENUM_DIR above: mark pending,
-                        // re-issue, let debounce deduplicate.
+                        // the kernel signals "events coalesced" by returning zero bytes. Same handling as
+                        // ERROR_NOTIFY_ENUM_DIR above: mark pending, re-issue, let debounce deduplicate.
                         if (!overflow_logged)
                         {
-                            Logger::get_instance().debug(
-                                "ConfigWatcher '{}': notification buffer "
-                                "overflowed (zero-byte completion); "
-                                "coalescing dropped events.",
-                                label);
+                            Logger::get_instance().debug("ConfigWatcher '{}': notification buffer "
+                                                         "overflowed (zero-byte completion); "
+                                                         "coalescing dropped events.",
+                                                         label);
                             overflow_logged = true;
                         }
                         matched = true;
                     }
                     else
                     {
-                        // Real event batch received. Reset the overflow
-                        // latch so a later recurrence logs again at the
+                        // Real event batch received. Reset the overflow latch so a later recurrence logs again at the
                         // DEBUG edge rather than staying silent forever.
                         overflow_logged = false;
 
@@ -541,16 +462,13 @@ namespace DetourModKit
 
                         while (cursor + sizeof(FILE_NOTIFY_INFORMATION) <= end_ptr)
                         {
-                            const auto *info =
-                                reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(cursor);
+                            const auto *info = reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(cursor);
 
-                            const size_t name_len =
-                                info->FileNameLength / sizeof(WCHAR);
+                            const size_t name_len = info->FileNameLength / sizeof(WCHAR);
                             const std::wstring_view changed_name(info->FileName, name_len);
 
-                            // Match against target filename (case-insensitive).
-                            // Rename-swap-save (temp -> target) surfaces the
-                            // target filename in the RENAMED_NEW_NAME entry.
+                            // Match against target filename (case-insensitive). Rename-swap-save (temp -> target)
+                            // surfaces the target filename in the RENAMED_NEW_NAME entry.
                             if (iequals_w(changed_name, filename))
                             {
                                 matched = true;
@@ -576,19 +494,15 @@ namespace DetourModKit
                     }
                 }
 
-                // Cancel any in-flight I/O, then wait for the kernel to finish
-                // with our OVERLAPPED and notification buffer before they are
-                // freed. Per MSDN the OVERLAPPED and buffer must stay valid
-                // until the cancelled I/O has actually completed; freeing them
-                // early would let the kernel write into released memory.
+                // Cancel any in-flight I/O, then wait for the kernel to finish with our OVERLAPPED and notification
+                // buffer before they are freed. Per MSDN the OVERLAPPED and buffer must stay valid until the cancelled
+                // I/O has actually completed; freeing them early would let the kernel write into released memory.
                 //
-                // CancelIoEx normally drives the pending ReadDirectoryChangesW
-                // to completion, but if the watched directory was deleted the
-                // notify IRP can be orphaned: CancelIoEx reports success yet no
-                // completion is ever delivered. A blind GetOverlappedResult with
-                // bWait=TRUE would then wait forever and hang StoppableWorker's
-                // join (stalling the whole teardown). So every wait here is
-                // bounded and the drain escalates:
+                // CancelIoEx normally drives the pending ReadDirectoryChangesW to completion, but if the watched
+                // directory was deleted the notify IRP can be orphaned: CancelIoEx reports success yet no completion is
+                // ever delivered. A blind GetOverlappedResult with bWait=TRUE would then wait forever and hang
+                // StoppableWorker's join (stalling the whole teardown). So every wait here is bounded and the drain
+                // escalates:
                 //   1. cancel + bounded wait for the normal case;
                 //   2. on timeout, close the directory handle -- dropping the
                 //      last handle to the directory forces the I/O Manager to
@@ -602,51 +516,45 @@ namespace DetourModKit
                 ::CancelIoEx(dir_handle.h, &overlapped);
 
                 DWORD drain_bytes = 0;
-                const BOOL drain_ok = ::GetOverlappedResultEx(
-                    dir_handle.h, &overlapped, &drain_bytes, DRAIN_TIMEOUT_MS, FALSE);
+                const BOOL drain_ok =
+                    ::GetOverlappedResultEx(dir_handle.h, &overlapped, &drain_bytes, DRAIN_TIMEOUT_MS, FALSE);
 
-                // Only WAIT_TIMEOUT / WAIT_IO_COMPLETION mean the IRP is still
-                // pending; any other status (including ERROR_OPERATION_ABORTED)
-                // means the kernel is done with the OVERLAPPED and the buffer.
+                // Only WAIT_TIMEOUT / WAIT_IO_COMPLETION mean the IRP is still pending; any other status (including
+                // ERROR_OPERATION_ABORTED) means the kernel is done with the OVERLAPPED and the buffer.
                 bool drained = drain_ok != FALSE;
                 if (!drained)
                 {
                     const DWORD drain_err = ::GetLastError();
-                    drained = drain_err != WAIT_TIMEOUT &&
-                              drain_err != WAIT_IO_COMPLETION;
+                    drained = drain_err != WAIT_TIMEOUT && drain_err != WAIT_IO_COMPLETION;
                 }
 
                 if (!drained)
                 {
-                    // Force completion by releasing the directory handle, then
-                    // wait on the event the IRP signals on its way out.
+                    // Force completion by releasing the directory handle, then wait on the event the IRP signals on its
+                    // way out.
                     dir_handle.reset();
-                    drained = ::WaitForSingleObject(event_handle.h, DRAIN_TIMEOUT_MS) ==
-                              WAIT_OBJECT_0;
+                    drained = ::WaitForSingleObject(event_handle.h, DRAIN_TIMEOUT_MS) == WAIT_OBJECT_0;
                 }
 
                 if (!drained)
                 {
-                    Logger::get_instance().warning(
-                        "ConfigWatcher '{}': pending directory notification did "
-                        "not drain after cancel + handle close; leaking the watch "
-                        "buffer to stay memory-safe.",
-                        label);
+                    Logger::get_instance().warning("ConfigWatcher '{}': pending directory notification did "
+                                                   "not drain after cancel + handle close; leaking the watch "
+                                                   "buffer to stay memory-safe.",
+                                                   label);
                     static_cast<void>(io.release());
                 }
 
-                // Flush a final debounced callback if we are exiting
-                // with a pending change. This intentionally fires during
-                // stop() as well -- an edit that arrived inside the
-                // debounce window would otherwise be silently dropped.
+                // Flush a final debounced callback if we are exiting with a pending change. This intentionally fires
+                // during stop() as well -- an edit that arrived inside the debounce window would otherwise be silently
+                // dropped.
                 if (pending && callback)
                 {
                     callback();
                 }
             });
 
-        // Wait for the worker to finish its startup handshake with a
-        // bounded wait. Three failure modes to handle:
+        // Wait for the worker to finish its startup handshake with a bounded wait. Three failure modes to handle:
         //   1. Handshake timeout -- worker is stuck somewhere (hostile
         //      AntiCheat hook on CreateFileW, flaky redirector). Callers
         //      hold higher-level mutexes across start(); an unbounded
@@ -656,16 +564,13 @@ namespace DetourModKit
         //      start() is documented to return false on failure, not
         //      throw.
         //   3. Any other exception out of the future -- treat as failed.
-        // On failure we drop the StoppableWorker so a subsequent
-        // start() call can retry rather than staring at a stale worker.
-        // The worker's stop_token fires on StoppableWorker destruction,
-        // so we do not need a separate cancel path for the timeout
-        // branch -- the destructor does it cleanly.
+        // On failure we drop the StoppableWorker so a subsequent start() call can retry rather than staring at a stale
+        // worker. The worker's stop_token fires on StoppableWorker destruction, so we do not need a separate cancel
+        // path for the timeout branch -- the destructor does it cleanly.
         bool started = false;
         try
         {
-            const auto wait_status =
-                open_future.wait_for(std::chrono::seconds(5));
+            const auto wait_status = open_future.wait_for(std::chrono::seconds(5));
             if (wait_status == std::future_status::ready)
             {
                 started = open_future.get();
@@ -691,12 +596,10 @@ namespace DetourModKit
         if (!started)
         {
             auto stale = std::move(m_impl->worker);
-            // stale's destructor triggers the stop_token and joins. If the
-            // worker is still genuinely hung (case 1 above), the join
-            // itself will block here, but that matches the semantics a
-            // caller expects from RAII cleanup; they asked to start()
-            // under a stuck CreateFileW, the destructor is the logical
-            // place to wait for it to come back.
+            // stale's destructor triggers the stop_token and joins. If the worker is still genuinely hung (case 1
+            // above), the join itself will block here, but that matches the semantics a caller expects from RAII
+            // cleanup; they asked to start() under a stuck CreateFileW, the destructor is the logical place to wait for
+            // it to come back.
         }
         return started;
     }

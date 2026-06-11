@@ -11,7 +11,6 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -41,15 +40,12 @@ namespace DetourModKit
     /**
      * @class StringPool
      * @brief Memory pool for small string allocations to reduce heap fragmentation.
-     * @details Uses a free-list approach for O(1) allocation/deallocation.
-     *          Blocks are allocated on-demand up to MEMORY_POOL_BLOCK_COUNT.
-     *          Each block is cache-line aligned to prevent false sharing.
+     * @details Uses a free-list approach for O(1) allocation/deallocation. Blocks are allocated on-demand up to
+     *          MEMORY_POOL_BLOCK_COUNT. Each block is cache-line aligned to prevent false sharing.
      *
-     * @note The singleton returned by instance() is intentionally leaked to
-     *       avoid the static destruction order fiasco with late LogMessage
-     *       teardown. Neither Bootstrap::request_shutdown() nor DMK_Shutdown()
-     *       reclaim it; the OS releases the memory at process exit. The leak
-     *       is bounded to MEMORY_POOL_BLOCK_COUNT blocks of
+     * @note The singleton returned by instance() is intentionally leaked to avoid the static destruction order fiasco
+     *       with late LogMessage teardown. Neither Bootstrap::request_shutdown() nor DMK_Shutdown() reclaim it; the OS
+     *       releases the memory at process exit. The leak is bounded to MEMORY_POOL_BLOCK_COUNT blocks of
      *       MEMORY_POOL_BLOCK_SIZE bytes.
      */
     class StringPool
@@ -87,11 +83,6 @@ namespace DetourModKit
             Block *next{nullptr};
             PoolSlot *free_list{nullptr};
             uint32_t constructed_mask{0};
-
-            PoolSlot *get_slot(size_t index) noexcept
-            {
-                return reinterpret_cast<PoolSlot *>(data) + index;
-            }
         };
 
         StringPool() noexcept;
@@ -100,8 +91,7 @@ namespace DetourModKit
         /**
          * @brief Appends one block to the pool. Must be called with m_pool_mutex held.
          * @details No-throw: an allocation failure leaves the pool unchanged so
-         *          callers can fall back to a nothrow heap string instead of
-         *          throwing out of the logging path.
+         *          callers can fall back to a nothrow heap string instead of throwing out of the logging path.
          */
         void grow_pool_locked() noexcept;
         PoolSlot *claim_free_slot() noexcept;
@@ -115,8 +105,7 @@ namespace DetourModKit
     /**
      * @struct LogMessage
      * @brief A log entry with inline buffer optimization and overflow handling.
-     * @details Messages <= 512 bytes are stored inline. Larger messages use
-     *          heap allocation via StringPool.
+     * @details Messages <= 512 bytes are stored inline. Larger messages use heap allocation via StringPool.
      */
     struct LogMessage
     {
@@ -151,10 +140,10 @@ namespace DetourModKit
     /**
      * @class DynamicMPMCQueue
      * @brief A dynamically-sized, bounded Multi-Producer Multi-Consumer queue.
-     * @details Uses a ring buffer with atomic sequence numbers for lock-free
-     *          synchronization. Capacity is determined at construction time.
-     * @note This queue is designed to be constructed once and never resized.
-     *       Moving slots after construction is not supported and will cause data corruption.
+     * @details Uses a ring buffer with atomic sequence numbers for lock-free synchronization. Capacity is determined at
+     *          construction time.
+     * @note This queue is designed to be constructed once and never resized. Moving slots after construction is not
+     *       supported and will cause data corruption.
      */
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -184,14 +173,14 @@ namespace DetourModKit
          *             left unchanged on failure so the caller can retry or handle overflow.
          * @return true if successful, false if queue is full.
          */
-        bool try_push(LogMessage &item);
+        [[nodiscard]] bool try_push(LogMessage &item);
 
         /**
          * @brief Attempts to pop an item from the queue.
          * @param item Reference to store the popped item.
          * @return true if successful, false if queue is empty.
          */
-        bool try_pop(LogMessage &item);
+        [[nodiscard]] bool try_pop(LogMessage &item);
 
         /**
          * @brief Attempts to pop multiple items up to a maximum count.
@@ -199,19 +188,19 @@ namespace DetourModKit
          * @param max_count Maximum number of items to pop.
          * @return size_t Number of items actually popped.
          */
-        size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count);
+        [[nodiscard]] size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count);
 
         /// Returns the approximate number of items in the queue.
-        size_t size() const noexcept;
+        [[nodiscard]] size_t size() const noexcept;
 
         /// Checks if the queue is approximately empty.
-        bool empty() const noexcept;
+        [[nodiscard]] bool empty() const noexcept;
 
         /**
          * @brief Returns the capacity of the queue.
          * @return size_t The maximum number of elements.
          */
-        size_t capacity() const noexcept { return m_capacity; }
+        [[nodiscard]] size_t capacity() const noexcept { return m_capacity; }
 
     private:
         struct Slot
@@ -219,8 +208,7 @@ namespace DetourModKit
             std::atomic<size_t> sequence;
             LogMessage data;
 
-            Slot() noexcept
-                : sequence(0) {}
+            Slot() noexcept : sequence(0) {}
 
             Slot(const Slot &) = delete;
             Slot &operator=(const Slot &) = delete;
@@ -229,8 +217,8 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Validates capacity before member initialization to prevent
-         *        allocation of an invalid-sized buffer in the initializer list.
+         * @brief Validates capacity before member initialization to prevent allocation of an invalid-sized buffer in
+         *        the initializer list.
          */
         static size_t validated_capacity(size_t capacity);
 
@@ -238,8 +226,8 @@ namespace DetourModKit
         const size_t m_capacity;
         const size_t m_mask;
 
-        // Allocated once in the constructor; the unique_ptr ensures immutability
-        // (no accidental resize) while maintaining contiguous cache-friendly layout.
+        // Allocated once in the constructor; the unique_ptr ensures immutability (no accidental resize) while
+        // maintaining contiguous cache-friendly layout.
         std::unique_ptr<Slot[]> m_buffer;
 
         // Cache-line aligned to prevent false sharing between producers and consumers.
@@ -266,9 +254,8 @@ namespace DetourModKit
         size_t block_max_spin_iterations{1000};
         /**
          * @brief strftime-style date/time format for the async sink.
-         * @details Kept in sync with the synchronous Logger by Logger::enable_async_mode so
-         *          both sinks emit identical timestamps; the trailing ".<ms>" is appended by
-         *          the writer, not this format.
+         * @details Kept in sync with the synchronous Logger by Logger::enable_async_mode so both sinks emit identical
+         *          timestamps; the trailing ".<ms>" is appended by the writer, not this format.
          */
         std::string timestamp_format{"%Y-%m-%d %H:%M:%S"};
 
@@ -297,9 +284,8 @@ namespace DetourModKit
     /**
      * @class AsyncLogger
      * @brief Asynchronous logger that decouples log production from file I/O.
-     * @details Uses a lock-free queue to accept log messages from multiple threads
-     *          and a dedicated writer thread to perform batched file writes.
-     *          This significantly reduces latency on the producer side.
+     * @details Uses a lock-free queue to accept log messages from multiple threads and a dedicated writer thread to
+     *          perform batched file writes. This significantly reduces latency on the producer side.
      * @note Uses shared_ptr<WinFileStream> to safely handle Logger reconfiguration during runtime.
      */
     class AsyncLogger
@@ -311,8 +297,7 @@ namespace DetourModKit
          * @param file_stream Shared pointer to the output file stream (allows safe reconfigure).
          * @param log_mutex Shared pointer to the mutex protecting the file stream.
          */
-        explicit AsyncLogger(const AsyncLoggerConfig &config,
-                             std::shared_ptr<WinFileStream> file_stream,
+        explicit AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex);
 
         ~AsyncLogger() noexcept;
@@ -327,8 +312,8 @@ namespace DetourModKit
          * @param level The log level.
          * @param message The message string.
          * @return true if the message was successfully enqueued or written, false if dropped or timed out.
-         * @details This method is non-blocking (unless OverflowPolicy::Block is used).
-         *          The message will be written to the log file by the writer thread.
+         * @details This method is non-blocking (unless OverflowPolicy::Block is used). The message will be written to
+         *          the log file by the writer thread.
          */
         [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
 
@@ -341,18 +326,17 @@ namespace DetourModKit
 
         /**
          * @brief Flushes all pending log messages.
-         * @details Waits up to 500ms for all queued messages to be written.
-         *          Uses a timeout to prevent indefinite blocking.
+         * @details Waits up to 500ms for all queued messages to be written. Uses a timeout to prevent indefinite
+         *          blocking.
          */
         void flush() noexcept;
 
         /**
          * @brief Stops the writer thread and drains remaining queued messages.
-         * @details Sets m_shutdown_requested, joins the writer thread, then drains
-         *          any messages that arrived between the stop signal and thread exit.
-         * @note A producer that already passed the m_shutdown_requested check but has
-         *       not yet completed try_push() can enqueue at most one message after the
-         *       final drain. This is an accepted trade-off to avoid adding atomic
+         * @details Sets m_shutdown_requested, joins the writer thread, then drains any messages that arrived between
+         *          the stop signal and thread exit.
+         * @note A producer that already passed the m_shutdown_requested check but has not yet completed try_push() can
+         *       enqueue at most one message after the final drain. This is an accepted trade-off to avoid adding atomic
          *       overhead (producers_in_flight counter) to every enqueue() call.
          */
         void shutdown() noexcept;
@@ -377,9 +361,9 @@ namespace DetourModKit
 
         /**
          * @brief Drains any messages remaining in the queue after the writer thread exits.
-         * @details Called during shutdown to flush late-enqueued messages that arrived
-         *          between m_running=false and the writer thread observing an empty queue.
-         *          No external lock is required; the writer thread has already been joined.
+         * @details Called during shutdown to flush late-enqueued messages that arrived between m_running=false and the
+         *          writer thread observing an empty queue. No external lock is required; the writer thread has already
+         *          been joined.
          */
         void drain_remaining() noexcept;
 

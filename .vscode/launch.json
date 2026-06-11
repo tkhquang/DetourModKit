@@ -1,17 +1,27 @@
 {
   "version": "0.2.0",
+  // The MinGW config assumes the default MSYS2 root (C:\msys64), matching the
+  // shell workflow in AGENTS.md; if MSYS2 is installed elsewhere, update the
+  // PATH value and miDebuggerPath below. gdb is an optional MSYS2 package:
+  // pacman -S mingw-w64-x86_64-gdb
   "configurations": [
     {
-      "name": "C/C++ Runner: Debug Session",
+      "name": "Debug tests (MinGW gdb)",
       "type": "cppdbg",
       "request": "launch",
-      "args": [],
+      "program": "${workspaceFolder}/build/mingw-debug/tests/DetourModKit_tests.exe",
+      "args": ["--gtest_filter=${input:gtestFilter}"],
       "stopAtEntry": false,
-      "externalConsole": true,
-      "cwd": "d:/Workspace/DetourModKit/src",
-      "program": "d:/Workspace/DetourModKit/src/build/Debug/outDebug",
+      "cwd": "${workspaceFolder}/build/mingw-debug/tests",
+      "environment": [
+        {
+          "name": "PATH",
+          "value": "C:\\msys64\\mingw64\\bin;${env:PATH}"
+        }
+      ],
+      "externalConsole": false,
       "MIMode": "gdb",
-      "miDebuggerPath": "gdb",
+      "miDebuggerPath": "C:/msys64/mingw64/bin/gdb.exe",
       "setupCommands": [
         {
           "description": "Enable pretty-printing for gdb",
@@ -19,6 +29,24 @@
           "ignoreFailures": true
         }
       ]
+    },
+    {
+      "name": "Debug tests (MSVC)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/msvc-debug/tests/DetourModKit_tests.exe",
+      "args": ["--gtest_filter=${input:gtestFilter}"],
+      "stopAtEntry": false,
+      "cwd": "${workspaceFolder}/build/msvc-debug/tests",
+      "console": "integratedTerminal"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "gtestFilter",
+      "type": "promptString",
+      "description": "gtest filter (e.g. LoggerTest.* or * for all)",
+      "default": "*"
     }
   ]
 }

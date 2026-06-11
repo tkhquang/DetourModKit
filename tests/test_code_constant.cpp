@@ -16,9 +16,8 @@ using namespace DetourModKit;
 
 namespace
 {
-    // A committed page filled with 0xCC into which a test plants a known x86-64
-    // instruction, so read_code_constant has a real, uniquely-matchable site to
-    // resolve and decode. PAGE_READWRITE is enough: the bytes are decoded as data,
+    // A committed page filled with 0xCC into which a test plants a known x86-64 instruction, so read_code_constant has
+    // a real, uniquely-matchable site to resolve and decode. PAGE_READWRITE is enough: the bytes are decoded as data,
     // never executed.
     class CodeRegion
     {
@@ -145,8 +144,7 @@ TEST(CodeConstantTest, ResolvesRipRelativeToAbsolute)
 
     const auto value = Scanner::read_code_constant(cc, region.range());
     ASSERT_TRUE(value.has_value());
-    // Absolute target = site + instruction length (7) + disp (0x100), not the raw
-    // relative displacement.
+    // Absolute target = site + instruction length (7) + disp (0x100), not the raw relative displacement.
     EXPECT_EQ(static_cast<std::uintptr_t>(*value), region.addr(0x100) + 7 + 0x100);
 }
 
@@ -292,8 +290,7 @@ TEST(CodeConstantTest, AbsoluteMemoryDisplacement)
     cc.kind = Scanner::OperandKind::MemoryDisplacement;
     cc.operand_index = 1;
 
-    // A non-RIP absolute [disp32] returns the displacement verbatim (not resolved
-    // as a relative target).
+    // A non-RIP absolute [disp32] returns the displacement verbatim (not resolved as a relative target).
     const auto value = Scanner::read_code_constant(cc, region.range());
     ASSERT_TRUE(value.has_value());
     EXPECT_EQ(static_cast<std::uint32_t>(*value), 0x12345678u);
@@ -303,9 +300,8 @@ TEST(CodeConstantTest, TruncatedWindowReturnsDecodeFailed)
 {
     CodeRegion region;
     ASSERT_TRUE(region.ok());
-    // A REX.W mov that needs a ModRM byte, planted in the final two bytes of the
-    // region so the read window is clamped to 2 bytes and the instruction cannot
-    // be fully decoded.
+    // A REX.W mov that needs a ModRM byte, planted in the final two bytes of the region so the read window is clamped
+    // to 2 bytes and the instruction cannot be fully decoded.
     region.put(0xFFE, {0x48, 0x8B}); // 48 8B = REX.W + opcode, ModRM missing
 
     Scanner::AddrCandidate cands[] = {

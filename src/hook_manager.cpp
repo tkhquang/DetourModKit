@@ -38,20 +38,17 @@ namespace
     std::optional<std::uintptr_t> decode_prehook_destination(std::uintptr_t target_address) noexcept
     {
         // Read the opcode bytes under a fault guard and dispatch on the copy;
-        // an unguarded dereference of target_address could fault if the page is
-        // unmapped or guarded.
+        // an unguarded dereference of target_address could fault if the page is unmapped or guarded.
         std::array<std::uint8_t, 2> opcode{};
         if (!Memory::seh_read_bytes(target_address, opcode.data(), opcode.size()))
         {
             return std::nullopt;
         }
 
-        // Only E9 (jmp rel32) and FF 25 (jmp [rip+disp32]) can redirect a
-        // prologue into a hook trampoline in another module. EB (jmp rel8)
-        // reaches at most +/-127 bytes, far too short to land in a foreign hook
-        // stub, so a leading 0xEB is ordinary code, not a pre-existing inline
-        // hook. Matching it here would only add false positives on functions
-        // that legitimately begin with a short jump.
+        // Only E9 (jmp rel32) and FF 25 (jmp [rip+disp32]) can redirect a prologue into a hook trampoline in another
+        // module. EB (jmp rel8) reaches at most +/-127 bytes, far too short to land in a foreign hook stub, so a
+        // leading 0xEB is ordinary code, not a pre-existing inline hook. Matching it here would only add false
+        // positives on functions that legitimately begin with a short jump.
         if (opcode[0] == 0xE9)
         {
             return detail::decode_e9_rel32(target_address);
@@ -83,15 +80,13 @@ namespace
 
         HMODULE target_module = nullptr;
         HMODULE dest_module = nullptr;
-        if (!GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(target_address), &target_module))
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(target_address), &target_module))
         {
             target_module = nullptr;
         }
-        if (!GetModuleHandleExW(
-                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                reinterpret_cast<LPCWSTR>(destination), &dest_module))
+        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                reinterpret_cast<LPCWSTR>(destination), &dest_module))
         {
             dest_module = nullptr;
         }
@@ -114,8 +109,7 @@ HookManager &HookManager::get_instance()
     return instance;
 }
 
-HookManager::HookManager(Logger &logger)
-    : m_logger(logger)
+HookManager::HookManager(Logger &logger) : m_logger(logger)
 {
     m_allocator = safetyhook::Allocator::global();
     if (!m_allocator)
@@ -137,8 +131,7 @@ HookManager::~HookManager() noexcept
     }
 
     // Fallback teardown path. Reached only when the process did not call
-    // DMK_Shutdown() / HookManager::shutdown() before static destruction
-    // (abnormal exit, FreeLibrary race, host crash).
+    // DMK_Shutdown() / HookManager::shutdown() before static destruction (abnormal exit, FreeLibrary race, host crash).
     //
     // Ordering (matches the shutdown() contract so readers see one story):
     //   1. Flip m_shutdown_called under m_mutator_gate (exclusive) to
@@ -152,45 +145,33 @@ HookManager::~HookManager() noexcept
     //      holder still inside a with_* callback. Only then clear the
     //      maps -- destroying the Hook objects would UAF a live reader.
     //
-    // Loader-lock fallback: if the destructor is fired with the OS loader
-    // lock held (e.g. during abnormal DLL unload), acquiring m_mutator_gate
-    // or blocking readers can deadlock against another thread waiting on a
-    // loader callback. Leak the maps in that case; the pinned module keeps
-    // the hooks' code pages live so SafetyHook trampolines do not dangle.
-    // Mirrors the pattern used in Logger::shutdown_internal().
+    // Loader-lock fallback: if the destructor is fired with the OS loader lock held (e.g. during abnormal DLL unload),
+    // acquiring m_mutator_gate or blocking readers can deadlock against another thread waiting on a loader callback.
+    // Leak the maps in that case; the pinned module keeps the hooks' code pages live so SafetyHook trampolines do not
+    // dangle. Mirrors the pattern used in Logger::shutdown_internal().
     if (detail::is_loader_lock_held())
     {
         detail::pin_current_module();
         // Intentional leak under loader lock: draining readers or destroying
-        // Hook / VmtHookEntry values here can deadlock against another thread
-        // waiting on a loader callback. The pinned module keeps the SafetyHook
-        // trampoline pages live for the remainder of the process, so the leaked
-        // maps and their contents stay valid storage even though no one will
-        // ever observe them again. HookManager is a singleton so this branch
-        // runs at most once per process.
+        // Hook / VmtHookEntry values here can deadlock against another thread waiting on a loader callback. The pinned
+        // module keeps the SafetyHook trampoline pages live for the remainder of the process, so the leaked maps and
+        // their contents stay valid storage even though no one will ever observe them again. HookManager is a singleton
+        // so this branch runs at most once per process.
         //
-        // Heap-allocate each map directly rather than nesting them inside an
-        // outer container. A container of containers would force the standard
-        // library to instantiate a copy-construction fallback for the element
-        // type whenever the element's move constructor is not unconditionally
-        // noexcept, and that copy path would try to copy a move-only member
-        // (VmtHookEntry owns a safetyhook::VmtHook).
+        // Heap-allocate each map directly rather than nesting them inside an outer container. A container of containers
+        // would force the standard library to instantiate a copy-construction fallback for the element type whenever
+        // the element's move constructor is not unconditionally noexcept, and that copy path would try to copy a
+        // move-only member (VmtHookEntry owns a safetyhook::VmtHook).
         //
-        // Default-construct each map on the heap, then swap content in.
-        // std::unordered_map's move constructor is not guaranteed noexcept on
-        // every standard library implementation (some mark it noexcept(false)
-        // so allocator-propagation fallbacks can allocate); invoking it from a
-        // noexcept destructor would risk std::terminate on an unexpected
-        // allocator fallback. With a default std::allocator (stateless,
-        // is_always_equal) and noexcept hasher / comparator, member swap() is
-        // specified noexcept and performs an O(1) pointer swap that allocates
-        // nothing, so it is safe to call from a noexcept context. On
-        // allocation failure the new (std::nothrow) expression returns
-        // nullptr, the source maps keep their contents, and control falls
-        // through to the normal ~HookManager member destruction epilogue.
-        // That epilogue is best-effort under loader lock, but the pinned
-        // module still keeps trampoline code pages live so straggler
-        // trampoline calls land on valid memory.
+        // Default-construct each map on the heap, then swap content in. std::unordered_map's move constructor is not
+        // guaranteed noexcept on every standard library implementation (some mark it noexcept(false) so
+        // allocator-propagation fallbacks can allocate); invoking it from a noexcept destructor would risk
+        // std::terminate on an unexpected allocator fallback. With a default std::allocator (stateless,
+        // is_always_equal) and noexcept hasher / comparator, member swap() is specified noexcept and performs an O(1)
+        // pointer swap that allocates nothing, so it is safe to call from a noexcept context. On allocation failure the
+        // new (std::nothrow) expression returns nullptr, the source maps keep their contents, and control falls through
+        // to the normal ~HookManager member destruction epilogue. That epilogue is best-effort under loader lock, but
+        // the pinned module still keeps trampoline code pages live so straggler trampoline calls land on valid memory.
         auto *leaked_hooks = new (std::nothrow) detail::HookMap();
         auto *leaked_vmt_hooks = new (std::nothrow) detail::VmtHookMap();
         if (leaked_hooks != nullptr)
@@ -201,8 +182,7 @@ HookManager::~HookManager() noexcept
         {
             leaked_vmt_hooks->swap(m_vmt_hooks);
         }
-        // Surface this loader-lock leak so consumers can observe teardown
-        // escape-hatch activity without parsing logs.
+        // Surface this loader-lock leak so consumers can observe teardown escape-hatch activity without parsing logs.
         DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::HookManager);
         m_shutdown_called.store(true, std::memory_order_release);
         return;
@@ -226,23 +206,19 @@ HookManager::~HookManager() noexcept
 
 void HookManager::shutdown()
 {
-    // Serialize with remove_all_hooks() via compare_exchange_strong.
-    // Only one teardown owner proceeds.
+    // Serialize with remove_all_hooks() via compare_exchange_strong. Only one teardown owner proceeds.
     bool expected = false;
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    // Block all mutators (create_*_hook, enable, disable, remove) before
-    // entering phase 1. They hold shared on m_mutator_gate, so acquiring
-    // exclusive here waits for active mutators and blocks new ones.
+    // Block all mutators (create_*_hook, enable, disable, remove) before entering phase 1. They hold shared on
+    // m_mutator_gate, so acquiring exclusive here waits for active mutators and blocks new ones.
     std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
-    // Two-phase shutdown: disable hooks under a shared lock first, then clear
-    // the maps under the exclusive lock. The shared phase lets the kit's own
-    // with_* readers (shared_lock holders) finish; SafetyHook::disable()
-    // relocates only threads caught in the patched prologue and does not drain
-    // threads already in the detour or trampoline body, so the caller must
-    // quiesce the hooked function during teardown to close the residual window.
+    // Two-phase shutdown: disable hooks under a shared lock first, then clear the maps under the exclusive lock. The
+    // shared phase lets the kit's own with_* readers (shared_lock holders) finish; SafetyHook::disable() relocates only
+    // threads caught in the patched prologue and does not drain threads already in the detour or trampoline body, so
+    // the caller must quiesce the hooked function during teardown to close the residual window.
     {
         std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
         for (auto &[name, hook] : m_hooks)
@@ -255,16 +231,13 @@ void HookManager::shutdown()
         m_vmt_hooks.clear();
         m_hooks.clear();
 
-        // Reset under the lock so concurrent create_*_hook calls cannot
-        // observe the flag as true (rejected) and then immediately see it
-        // as false (accepted) before the map is fully cleared.
+        // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
+        // immediately see it as false (accepted) before the map is fully cleared.
         //
-        // This intentionally allows reuse after shutdown (hot-reload).
-        // The exclusive lock on m_mutator_gate serializes the entire
-        // clear-and-reset sequence, so there is no window where a
-        // concurrent create_*_hook can slip through against a half-cleared
-        // map. The mutator_gate exclusive lock is released here, allowing
-        // new mutators to proceed with a fresh m_shutdown_called=false.
+        // This intentionally allows reuse after shutdown (hot-reload). The exclusive lock on m_mutator_gate serializes
+        // the entire clear-and-reset sequence, so there is no window where a concurrent create_*_hook can slip through
+        // against a half-cleared map. The mutator_gate exclusive lock is released here, allowing new mutators to
+        // proceed with a fresh m_shutdown_called=false.
         m_shutdown_called.store(false, std::memory_order_release);
     }
 }
@@ -277,8 +250,8 @@ std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &er
     switch (err.type)
     {
     case safetyhook::InlineHook::Error::BAD_ALLOCATION:
-        return std::format("SafetyHook InlineHook Error (Type: {}): Bad allocation (Allocator error: {})",
-                           type_int, static_cast<int>(err.allocator_error));
+        return std::format("SafetyHook InlineHook Error (Type: {}): Bad allocation (Allocator error: {})", type_int,
+                           static_cast<int>(err.allocator_error));
     case safetyhook::InlineHook::Error::FAILED_TO_DECODE_INSTRUCTION:
         return std::format("SafetyHook InlineHook Error (Type: {}): Failed to decode instruction at address {}",
                            type_int, ip_str);
@@ -289,14 +262,16 @@ std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &er
         return std::format("SafetyHook InlineHook Error (Type: {}): IP-relative instruction out of range at address {}",
                            type_int, ip_str);
     case safetyhook::InlineHook::Error::UNSUPPORTED_INSTRUCTION_IN_TRAMPOLINE:
-        return std::format("SafetyHook InlineHook Error (Type: {}): Unsupported instruction in trampoline at address {}",
-                           type_int, ip_str);
+        return std::format(
+            "SafetyHook InlineHook Error (Type: {}): Unsupported instruction in trampoline at address {}", type_int,
+            ip_str);
     case safetyhook::InlineHook::Error::FAILED_TO_UNPROTECT:
-        return std::format("SafetyHook InlineHook Error (Type: {}): Failed to unprotect memory at address {}",
-                           type_int, ip_str);
+        return std::format("SafetyHook InlineHook Error (Type: {}): Failed to unprotect memory at address {}", type_int,
+                           ip_str);
     case safetyhook::InlineHook::Error::NOT_ENOUGH_SPACE:
-        return std::format("SafetyHook InlineHook Error (Type: {}): Not enough space for the hook (prologue too short) at address {}",
-                           type_int, ip_str);
+        return std::format(
+            "SafetyHook InlineHook Error (Type: {}): Not enough space for the hook (prologue too short) at address {}",
+            type_int, ip_str);
     default:
         return std::format("SafetyHook InlineHook Error (Type: {}): Unknown error type", type_int);
     }
@@ -309,25 +284,21 @@ std::string HookManager::error_to_string(const safetyhook::MidHook::Error &err) 
     switch (err.type)
     {
     case safetyhook::MidHook::Error::BAD_ALLOCATION:
-        return std::format("SafetyHook MidHook Error (Type: {}): Bad allocation (Allocator error: {})",
-                           type_int, static_cast<int>(err.allocator_error));
+        return std::format("SafetyHook MidHook Error (Type: {}): Bad allocation (Allocator error: {})", type_int,
+                           static_cast<int>(err.allocator_error));
     case safetyhook::MidHook::Error::BAD_INLINE_HOOK:
-        return std::format("SafetyHook MidHook Error (Type: {}): Bad underlying inline hook. Details: {}",
-                           type_int, error_to_string(err.inline_hook_error));
+        return std::format("SafetyHook MidHook Error (Type: {}): Bad underlying inline hook. Details: {}", type_int,
+                           error_to_string(err.inline_hook_error));
     default:
         return std::format("SafetyHook MidHook Error (Type: {}): Unknown error type", type_int);
     }
 }
 
-std::expected<std::string, HookError> HookManager::create_inline_hook(
-    std::string_view name,
-    uintptr_t target_address,
-    void *detour_function,
-    void **original_trampoline,
-    const HookConfig &config)
+std::expected<std::string, HookError> HookManager::create_inline_hook(std::string_view name, uintptr_t target_address,
+                                                                      void *detour_function, void **original_trampoline,
+                                                                      const HookConfig &config)
 {
-    // Non-locking fast-fail: avoid acquiring mutator_gate when shutdown
-    // is already in progress.
+    // Non-locking fast-fail: avoid acquiring mutator_gate when shutdown is already in progress.
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         if (original_trampoline)
@@ -336,7 +307,8 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
+    auto [result,
+          deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
@@ -345,27 +317,33 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name), LogLevel::Error}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name),
+                      LogLevel::Error}}};
         }
         if (!m_allocator)
         {
             return {std::unexpected(HookError::AllocatorNotAvailable),
-                    {{std::format("HookManager: Allocator not available. Cannot create inline hook '{}'.", name), LogLevel::Error}}};
+                    {{std::format("HookManager: Allocator not available. Cannot create inline hook '{}'.", name),
+                      LogLevel::Error}}};
         }
         if (target_address == 0)
         {
-            return {std::unexpected(HookError::InvalidTargetAddress),
-                    {{std::format("HookManager: Target address is NULL for inline hook '{}'.", name), LogLevel::Error}}};
+            return {
+                std::unexpected(HookError::InvalidTargetAddress),
+                {{std::format("HookManager: Target address is NULL for inline hook '{}'.", name), LogLevel::Error}}};
         }
         if (detour_function == nullptr)
         {
-            return {std::unexpected(HookError::InvalidDetourFunction),
-                    {{std::format("HookManager: Detour function is NULL for inline hook '{}'.", name), LogLevel::Error}}};
+            return {
+                std::unexpected(HookError::InvalidDetourFunction),
+                {{std::format("HookManager: Detour function is NULL for inline hook '{}'.", name), LogLevel::Error}}};
         }
         if (original_trampoline == nullptr)
         {
-            return {std::unexpected(HookError::InvalidTrampolinePointer),
-                    {{std::format("HookManager: Original trampoline pointer (output) is NULL for inline hook '{}'.", name), LogLevel::Error}}};
+            return {
+                std::unexpected(HookError::InvalidTrampolinePointer),
+                {{std::format("HookManager: Original trampoline pointer (output) is NULL for inline hook '{}'.", name),
+                  LogLevel::Error}}};
         }
         *original_trampoline = nullptr;
 
@@ -376,33 +354,31 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
         }
 
         const auto prehook = detect_existing_inline_hook(target_address);
-        if (prehook.state == PrehookState::HookedByOtherModule &&
-            config.fail_if_already_hooked)
+        if (prehook.state == PrehookState::HookedByOtherModule && config.fail_if_already_hooked)
         {
-            return {std::unexpected(HookError::TargetAlreadyHookedInProcess),
-                    {{std::format("HookManager: Target {} for inline hook '{}' is already inline-hooked by another module (JMP -> {}). Aborting under strict mode.",
-                                  DetourModKit::Format::format_address(target_address), name,
-                                  DetourModKit::Format::format_address(prehook.jmp_destination)),
-                      LogLevel::Error}}};
+            return {
+                std::unexpected(HookError::TargetAlreadyHookedInProcess),
+                {{std::format("HookManager: Target {} for inline hook '{}' is already inline-hooked by another module "
+                              "(JMP -> {}). Aborting under strict mode.",
+                              DetourModKit::Format::format_address(target_address), name,
+                              DetourModKit::Format::format_address(prehook.jmp_destination)),
+                  LogLevel::Error}}};
         }
 
         try
         {
-            auto sh_flags = config.auto_enable
-                                ? safetyhook::InlineHook::Default
-                                : safetyhook::InlineHook::StartDisabled;
+            auto sh_flags =
+                config.auto_enable ? safetyhook::InlineHook::Default : safetyhook::InlineHook::StartDisabled;
 
             auto hook_creation_result = safetyhook::InlineHook::create(
-                m_allocator,
-                reinterpret_cast<void *>(target_address),
-                detour_function,
-                sh_flags);
+                m_allocator, reinterpret_cast<void *>(target_address), detour_function, sh_flags);
 
             if (!hook_creation_result)
             {
                 return {std::unexpected(HookError::SafetyHookError),
                         {{std::format("HookManager: Failed to create SafetyHook::InlineHook for '{}' at {}. Error: {}",
-                                      name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error())),
+                                      name, DetourModKit::Format::format_address(target_address),
+                                      error_to_string(hook_creation_result.error())),
                           LogLevel::Error}}};
             }
 
@@ -411,8 +387,8 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
 
             HookStatus initial_status = sh_inline_hook.enabled() ? HookStatus::Active : HookStatus::Disabled;
 
-            // Pre-build log entries before committing to m_hooks so that
-            // allocation failures in std::format cannot leave a ghost hook.
+            // Pre-build log entries before committing to m_hooks so that allocation failures in std::format cannot
+            // leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
             std::vector<DeferredLogEntry> logs;
             logs.reserve(3);
@@ -422,20 +398,26 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
 
             if (prehook.state == PrehookState::HookedByOtherModule)
             {
-                logs.push_back({std::format("HookManager: Target {} for inline hook '{}' was already inline-hooked by another module (JMP -> {}); SafetyHook layered on top.",
-                                            DetourModKit::Format::format_address(target_address), name,
-                                            DetourModKit::Format::format_address(prehook.jmp_destination)),
-                                LogLevel::Warning});
+                logs.push_back(
+                    {std::format(
+                         "HookManager: Target {} for inline hook '{}' was already inline-hooked by another module "
+                         "(JMP -> {}); SafetyHook layered on top.",
+                         DetourModKit::Format::format_address(target_address), name,
+                         DetourModKit::Format::format_address(prehook.jmp_destination)),
+                     LogLevel::Warning});
             }
 
             if (initial_status == HookStatus::Disabled && config.auto_enable)
             {
-                logs.push_back({std::format("HookManager: Inline hook '{}' was configured for auto-enable but is currently disabled post-creation.", name),
+                logs.push_back({std::format("HookManager: Inline hook '{}' was configured for auto-enable "
+                                            "but is currently disabled post-creation.",
+                                            name),
                                 LogLevel::Warning});
             }
 
             std::string name_str{name};
-            auto managed_hook = std::make_unique<InlineHook>(name_str, target_address, std::move(sh_inline_hook), initial_status);
+            auto managed_hook =
+                std::make_unique<InlineHook>(name_str, target_address, std::move(sh_inline_hook), initial_status);
             m_hooks.emplace(name_str, std::move(managed_hook));
             *original_trampoline = trampoline;
 
@@ -444,14 +426,16 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
         catch (const std::exception &e)
         {
             return {std::unexpected(HookError::UnknownError),
-                    {{std::format("HookManager: An std::exception occurred during inline hook creation for '{}': {}", name, e.what()),
+                    {{std::format("HookManager: An std::exception occurred during inline hook creation for '{}': {}",
+                                  name, e.what()),
                       LogLevel::Error}}};
         }
         catch (...)
         {
-            return {std::unexpected(HookError::UnknownError),
-                    {{std::format("HookManager: An unknown exception occurred during inline hook creation for '{}'.", name),
-                      LogLevel::Error}}};
+            return {
+                std::unexpected(HookError::UnknownError),
+                {{std::format("HookManager: An unknown exception occurred during inline hook creation for '{}'.", name),
+                  LogLevel::Error}}};
         }
     }();
 
@@ -462,50 +446,47 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(
     return result;
 }
 
-std::expected<std::string, HookError> HookManager::create_inline_hook_aob(
-    std::string_view name,
-    uintptr_t module_base,
-    size_t module_size,
-    std::string_view aob_pattern_str,
-    ptrdiff_t aob_offset,
-    void *detour_function,
-    void **original_trampoline,
-    const HookConfig &config)
+std::expected<std::string, HookError>
+HookManager::create_inline_hook_aob(std::string_view name, uintptr_t module_base, size_t module_size,
+                                    std::string_view aob_pattern_str, ptrdiff_t aob_offset, void *detour_function,
+                                    void **original_trampoline, const HookConfig &config)
 {
-    m_logger.debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.",
-                   name, aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
+    m_logger.debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.", name,
+                   aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
 
     auto pattern = parse_aob(aob_pattern_str);
     if (!pattern.has_value())
     {
-        m_logger.error("HookManager: AOB pattern parsing failed for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
+        m_logger.error("HookManager: AOB pattern parsing failed for inline hook '{}'. Pattern: \"{}\".", name,
+                       aob_pattern_str);
         if (original_trampoline)
             *original_trampoline = nullptr;
         return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    const std::byte *found_address_start = find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
+    const std::byte *found_address_start =
+        find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
-        m_logger.error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
+        m_logger.error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name,
+                       aob_pattern_str);
         if (original_trampoline)
             *original_trampoline = nullptr;
         return std::unexpected(HookError::InvalidTargetAddress);
     }
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
-    m_logger.debug("HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                   name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                   DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
+    m_logger.debug(
+        "HookManager: AOB pattern for inline hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
+        name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+        DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
 
     return create_inline_hook(name, target_address, detour_function, original_trampoline, config);
 }
 
-std::expected<std::string, HookError> HookManager::create_mid_hook(
-    std::string_view name,
-    uintptr_t target_address,
-    safetyhook::MidHookFn detour_function,
-    const HookConfig &config)
+std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_view name, uintptr_t target_address,
+                                                                   safetyhook::MidHookFn detour_function,
+                                                                   const HookConfig &config)
 {
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
@@ -513,7 +494,8 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
+    auto [result,
+          deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
@@ -521,12 +503,14 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name), LogLevel::Error}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name),
+                      LogLevel::Error}}};
         }
         if (!m_allocator)
         {
             return {std::unexpected(HookError::AllocatorNotAvailable),
-                    {{std::format("HookManager: Allocator not available. Cannot create mid hook '{}'.", name), LogLevel::Error}}};
+                    {{std::format("HookManager: Allocator not available. Cannot create mid hook '{}'.", name),
+                      LogLevel::Error}}};
         }
         if (target_address == 0)
         {
@@ -547,21 +531,17 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
         try
         {
-            auto sh_flags = config.auto_enable
-                                ? safetyhook::MidHook::Default
-                                : safetyhook::MidHook::StartDisabled;
+            auto sh_flags = config.auto_enable ? safetyhook::MidHook::Default : safetyhook::MidHook::StartDisabled;
 
             auto hook_creation_result = safetyhook::MidHook::create(
-                m_allocator,
-                reinterpret_cast<void *>(target_address),
-                detour_function,
-                sh_flags);
+                m_allocator, reinterpret_cast<void *>(target_address), detour_function, sh_flags);
 
             if (!hook_creation_result)
             {
                 return {std::unexpected(HookError::SafetyHookError),
                         {{std::format("HookManager: Failed to create SafetyHook::MidHook for '{}' at {}. Error: {}",
-                                      name, DetourModKit::Format::format_address(target_address), error_to_string(hook_creation_result.error())),
+                                      name, DetourModKit::Format::format_address(target_address),
+                                      error_to_string(hook_creation_result.error())),
                           LogLevel::Error}}};
             }
 
@@ -569,8 +549,8 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
             HookStatus initial_status = sh_mid_hook.enabled() ? HookStatus::Active : HookStatus::Disabled;
 
-            // Pre-build log entries before committing to m_hooks so that
-            // allocation failures in std::format cannot leave a ghost hook.
+            // Pre-build log entries before committing to m_hooks so that allocation failures in std::format cannot
+            // leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
             std::vector<DeferredLogEntry> logs;
             logs.reserve(2);
@@ -580,12 +560,15 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
 
             if (initial_status == HookStatus::Disabled && config.auto_enable)
             {
-                logs.push_back({std::format("HookManager: Mid hook '{}' was configured for auto-enable but is currently disabled post-creation.", name),
+                logs.push_back({std::format("HookManager: Mid hook '{}' was configured for auto-enable "
+                                            "but is currently disabled post-creation.",
+                                            name),
                                 LogLevel::Warning});
             }
 
             std::string name_str{name};
-            auto managed_hook = std::make_unique<MidHook>(name_str, target_address, std::move(sh_mid_hook), initial_status);
+            auto managed_hook =
+                std::make_unique<MidHook>(name_str, target_address, std::move(sh_mid_hook), initial_status);
             m_hooks.emplace(name_str, std::move(managed_hook));
 
             return {std::move(name_str), std::move(logs)};
@@ -593,14 +576,16 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
         catch (const std::exception &e)
         {
             return {std::unexpected(HookError::UnknownError),
-                    {{std::format("HookManager: An std::exception occurred during mid hook creation for '{}': {}", name, e.what()),
+                    {{std::format("HookManager: An std::exception occurred during mid hook creation for '{}': {}", name,
+                                  e.what()),
                       LogLevel::Error}}};
         }
         catch (...)
         {
-            return {std::unexpected(HookError::UnknownError),
-                    {{std::format("HookManager: An unknown exception occurred during mid hook creation for '{}'.", name),
-                      LogLevel::Error}}};
+            return {
+                std::unexpected(HookError::UnknownError),
+                {{std::format("HookManager: An unknown exception occurred during mid hook creation for '{}'.", name),
+                  LogLevel::Error}}};
         }
     }();
 
@@ -611,26 +596,24 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(
     return result;
 }
 
-std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
-    std::string_view name,
-    uintptr_t module_base,
-    size_t module_size,
-    std::string_view aob_pattern_str,
-    ptrdiff_t aob_offset,
-    safetyhook::MidHookFn detour_function,
-    const HookConfig &config)
+std::expected<std::string, HookError>
+HookManager::create_mid_hook_aob(std::string_view name, uintptr_t module_base, size_t module_size,
+                                 std::string_view aob_pattern_str, ptrdiff_t aob_offset,
+                                 safetyhook::MidHookFn detour_function, const HookConfig &config)
 {
-    m_logger.debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.",
-                   name, aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
+    m_logger.debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.", name,
+                   aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
 
     auto pattern = parse_aob(aob_pattern_str);
     if (!pattern.has_value())
     {
-        m_logger.error("HookManager: AOB pattern parsing failed for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
+        m_logger.error("HookManager: AOB pattern parsing failed for mid hook '{}'. Pattern: \"{}\".", name,
+                       aob_pattern_str);
         return std::unexpected(HookError::InvalidTargetAddress);
     }
 
-    const std::byte *found_address_start = find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
+    const std::byte *found_address_start =
+        find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
     if (!found_address_start)
     {
         m_logger.error("HookManager: AOB pattern not found for mid hook '{}'. Pattern: \"{}\".", name, aob_pattern_str);
@@ -638,9 +621,10 @@ std::expected<std::string, HookError> HookManager::create_mid_hook_aob(
     }
 
     uintptr_t target_address = reinterpret_cast<uintptr_t>(found_address_start) + aob_offset;
-    m_logger.debug("HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
-                   name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
-                   DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
+    m_logger.debug(
+        "HookManager: AOB pattern for mid hook '{}' found at {}. Applying offset {}. Final target hook address: {}.",
+        name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(found_address_start)),
+        DetourModKit::Format::format_hex(aob_offset), DetourModKit::Format::format_address(target_address));
 
     return create_mid_hook(name, target_address, detour_function, config);
 }
@@ -654,8 +638,7 @@ bool HookManager::is_target_already_hooked(uintptr_t target_address) const noexc
     const auto lock = lock_hooks_shared_reentrant();
     for (const auto &[name, hook_ptr] : m_hooks)
     {
-        if (hook_ptr->get_type() == HookType::Inline &&
-            hook_ptr->get_target_address() == target_address)
+        if (hook_ptr->get_type() == HookType::Inline && hook_ptr->get_target_address() == target_address)
         {
             return true;
         }
@@ -676,33 +659,32 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
     {
         std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
-        // Re-check after acquiring the gate. A thread can observe shutdown as
-        // false above, then block here behind remove_all_hooks()'s exclusive
-        // gate; once that releases (with m_shutdown_called reset to false) this
-        // would otherwise proceed against freshly reset reusable state. The
-        // post-gate re-check makes remove uniform with create/enable/disable.
+        // Re-check after acquiring the gate. A thread can observe shutdown as false above, then block here behind
+        // remove_all_hooks()'s exclusive gate; once that releases (with m_shutdown_called reset to false) this would
+        // otherwise proceed against freshly reset reusable state. The post-gate re-check makes remove uniform with
+        // create/enable/disable.
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot remove hook '{}'.", hook_id), LogLevel::Warning}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot remove hook '{}'.", hook_id),
+                      LogLevel::Warning}}};
         }
 
-        // Two-phase removal: disable under the shared lock first, then take the
-        // exclusive lock to erase. The shared phase lets the kit's own
-        // with_inline_hook readers (shared_lock holders) finish before the Hook is
-        // destroyed; SafetyHook's disable()/destructor relocates only threads
-        // caught in the patched prologue, not threads already in the detour or
-        // trampoline body. Sequencing disable() before the exclusive clear also
-        // keeps SafetyHook's own thread-suspend teardown off the exclusive lock.
-        // The caller must ensure no thread is executing the hooked function during
-        // removal to close the residual narrow window.
+        // Two-phase removal: disable under the shared lock first, then take the exclusive lock to erase. The shared
+        // phase lets the kit's own with_inline_hook readers (shared_lock holders) finish before the Hook is destroyed;
+        // SafetyHook's disable()/destructor relocates only threads caught in the patched prologue, not threads already
+        // in the detour or trampoline body. Sequencing disable() before the exclusive clear also keeps SafetyHook's own
+        // thread-suspend teardown off the exclusive lock. The caller must ensure no thread is executing the hooked
+        // function during removal to close the residual narrow window.
         {
             std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
             auto it = m_hooks.find(hook_id);
             if (it == m_hooks.end())
             {
-                return {std::unexpected(HookError::HookNotFound),
-                        {{std::format("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id), LogLevel::Warning}}};
+                return {
+                    std::unexpected(HookError::HookNotFound),
+                    {{std::format("HookManager: Attempted to remove hook with ID '{}', but it was not found.", hook_id),
+                      LogLevel::Warning}}};
             }
             (void)it->second->disable();
         }
@@ -712,24 +694,25 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
         auto it = m_hooks.find(hook_id);
         if (it == m_hooks.end())
         {
-            // The hook existed under the shared phase above but a concurrent
-            // removal erased it before this exclusive erase phase. Report
-            // not-found rather than a false success.
+            // The hook existed under the shared phase above but a concurrent removal erased it before this exclusive
+            // erase phase. Report not-found rather than a false success.
             return {std::unexpected(HookError::HookNotFound),
-                    {{std::format("HookManager: Hook '{}' was concurrently removed before this removal completed.", hook_id),
+                    {{std::format("HookManager: Hook '{}' was concurrently removed before this removal completed.",
+                                  hook_id),
                       LogLevel::Warning}}};
         }
         std::string name_of_removed_hook = it->second->get_name();
         HookType type_of_removed_hook = it->second->get_type();
         m_hooks.erase(it);
-        logs.push_back({std::format("HookManager: Hook '{}' of type '{}' has been removed and unhooked.",
-                                    name_of_removed_hook, (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid")),
-                        LogLevel::Debug});
+        logs.push_back(
+            {std::format("HookManager: Hook '{}' of type '{}' has been removed and unhooked.", name_of_removed_hook,
+                         (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid")),
+             LogLevel::Debug});
         return {std::expected<void, HookError>{}, std::move(logs)};
     }();
 
-    // Emit collected messages after all hook locks are released (deferred
-    // logging keeps the Logger's own locks off this module's critical sections).
+    // Emit collected messages after all hook locks are released (deferred logging keeps the Logger's own locks off this
+    // module's critical sections).
     for (const auto &entry : deferred_logs)
     {
         m_logger.log(entry.level, entry.msg);
@@ -739,24 +722,19 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
 void HookManager::remove_all_hooks()
 {
-    // Serialize with shutdown() via compare_exchange_strong.
-    // Only one teardown owner proceeds.
+    // Serialize with shutdown() via compare_exchange_strong. Only one teardown owner proceeds.
     bool expected = false;
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         return;
 
-    // Block all mutators (create_*_hook, enable, disable, remove) before
-    // entering phase 1. They hold shared on m_mutator_gate, so acquiring
-    // exclusive here waits for active mutators and blocks new ones.
+    // Block all mutators (create_*_hook, enable, disable, remove) before entering phase 1. They hold shared on
+    // m_mutator_gate, so acquiring exclusive here waits for active mutators and blocks new ones.
     std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
 
-    // Two-phase removal: disable hooks under the shared lock first, then take
-    // the exclusive lock to erase. The shared phase lets the kit's own
-    // with_inline_hook readers (shared_lock holders) finish before the Hook is
-    // destroyed; SafetyHook relocates only threads caught in the patched
-    // prologue, not threads already in the detour or trampoline body, so the
-    // caller must quiesce the hooked function during teardown to close the
-    // residual narrow window.
+    // Two-phase removal: disable hooks under the shared lock first, then take the exclusive lock to erase. The shared
+    // phase lets the kit's own with_inline_hook readers (shared_lock holders) finish before the Hook is destroyed;
+    // SafetyHook relocates only threads caught in the patched prologue, not threads already in the detour or trampoline
+    // body, so the caller must quiesce the hooked function during teardown to close the residual narrow window.
     {
         std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
         for (auto &[name, hook] : m_hooks)
@@ -786,11 +764,9 @@ void HookManager::remove_all_hooks()
         m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 
-    // Reset under the lock so concurrent create_*_hook calls cannot
-    // observe the flag as true (rejected) and then immediately see it
-    // as false (accepted) before the map is fully cleared.
-    // The mutator_gate exclusive lock is released here, allowing new
-    // mutators to proceed with a fresh m_shutdown_called=false.
+    // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
+    // immediately see it as false (accepted) before the map is fully cleared. The mutator_gate exclusive lock is
+    // released here, allowing new mutators to proceed with a fresh m_shutdown_called=false.
     m_shutdown_called.store(false, std::memory_order_release);
 }
 
@@ -809,13 +785,15 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id), LogLevel::Warning}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id),
+                      LogLevel::Warning}}};
         }
         auto it = m_hooks.find(hook_id);
         if (it == m_hooks.end())
         {
             return {std::unexpected(HookError::HookNotFound),
-                    {{std::format("HookManager: Hook ID '{}' not found for enable operation.", hook_id), LogLevel::Warning}}};
+                    {{std::format("HookManager: Hook ID '{}' not found for enable operation.", hook_id),
+                      LogLevel::Warning}}};
         }
 
         Hook *hook = it->second.get();
@@ -830,10 +808,13 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
         if (error == HookError::InvalidHookState)
         {
             return {std::unexpected(error),
-                    {{std::format("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status())), LogLevel::Warning}}};
+                    {{std::format("HookManager: Hook '{}' cannot be enabled. Current status: {}", hook_id,
+                                  Hook::status_to_string(hook->get_status())),
+                      LogLevel::Warning}}};
         }
         return {std::unexpected(error),
-                {{std::format("HookManager: Failed to enable hook '{}': {}", hook_id, Hook::error_to_string(error)), LogLevel::Error}}};
+                {{std::format("HookManager: Failed to enable hook '{}': {}", hook_id, Hook::error_to_string(error)),
+                  LogLevel::Error}}};
     }();
 
     // Emit after releasing the gate and hook lock (deferred logging).
@@ -859,13 +840,15 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id), LogLevel::Warning}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id),
+                      LogLevel::Warning}}};
         }
         auto it = m_hooks.find(hook_id);
         if (it == m_hooks.end())
         {
             return {std::unexpected(HookError::HookNotFound),
-                    {{std::format("HookManager: Hook ID '{}' not found for disable operation.", hook_id), LogLevel::Warning}}};
+                    {{std::format("HookManager: Hook ID '{}' not found for disable operation.", hook_id),
+                      LogLevel::Warning}}};
         }
 
         Hook *hook = it->second.get();
@@ -880,10 +863,13 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
         if (error == HookError::InvalidHookState)
         {
             return {std::unexpected(error),
-                    {{std::format("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id, Hook::status_to_string(hook->get_status())), LogLevel::Warning}}};
+                    {{std::format("HookManager: Hook '{}' cannot be disabled. Current status: {}", hook_id,
+                                  Hook::status_to_string(hook->get_status())),
+                      LogLevel::Warning}}};
         }
         return {std::unexpected(error),
-                {{std::format("HookManager: Failed to disable hook '{}': {}", hook_id, Hook::error_to_string(error)), LogLevel::Error}}};
+                {{std::format("HookManager: Failed to disable hook '{}': {}", hook_id, Hook::error_to_string(error)),
+                  LogLevel::Error}}};
     }();
 
     // Emit after releasing the gate and hook lock (deferred logging).
@@ -908,7 +894,8 @@ bool HookManager::toggle_hook_locked(std::string_view hook_id, Hook &hook, bool 
     const auto error = result.error();
     if (error == HookError::InvalidHookState)
     {
-        m_logger.warning("HookManager: Hook '{}' cannot be {}d. Current status: {}", hook_id, verb, Hook::status_to_string(hook.get_status()));
+        m_logger.warning("HookManager: Hook '{}' cannot be {}d. Current status: {}", hook_id, verb,
+                         Hook::status_to_string(hook.get_status()));
     }
     else
     {
@@ -1076,8 +1063,7 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
     return ids;
 }
 
-std::expected<std::string, HookError> HookManager::create_vmt_hook(
-    std::string_view name, void *object)
+std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_view name, void *object)
 {
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
@@ -1085,7 +1071,8 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
         return std::unexpected(HookError::ShutdownInProgress);
     }
 
-    auto [result, deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
+    auto [result,
+          deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
         std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
@@ -1093,7 +1080,8 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot create VMT hook '{}'.", name), LogLevel::Error}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot create VMT hook '{}'.", name),
+                      LogLevel::Error}}};
         }
         if (object == nullptr)
         {
@@ -1102,8 +1090,9 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
         }
         if (vmt_hook_exists_locked(name))
         {
-            return {std::unexpected(HookError::HookAlreadyExists),
-                    {{std::format("HookManager: A VMT hook with the name '{}' already exists.", name), LogLevel::Error}}};
+            return {
+                std::unexpected(HookError::HookAlreadyExists),
+                {{std::format("HookManager: A VMT hook with the name '{}' already exists.", name), LogLevel::Error}}};
         }
 
         try
@@ -1113,22 +1102,20 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(
             if (!vmt_result)
             {
                 return {std::unexpected(HookError::SafetyHookError),
-                        {{std::format("HookManager: Failed to create SafetyHook::VmtHook for '{}' on object {}.",
-                                      name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                        {{std::format("HookManager: Failed to create SafetyHook::VmtHook for '{}' on object {}.", name,
+                                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                           LogLevel::Error}}};
             }
 
             std::string name_str{name};
 
             std::vector<DeferredLogEntry> logs;
-            logs.push_back({std::format("HookManager: Successfully created VMT hook '{}' on object {}.",
-                                        name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+            logs.push_back({std::format("HookManager: Successfully created VMT hook '{}' on object {}.", name,
+                                        DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                             LogLevel::Info});
 
-            m_vmt_hooks.emplace(
-                std::piecewise_construct,
-                std::forward_as_tuple(name_str),
-                std::forward_as_tuple(name_str, std::move(vmt_result.value())));
+            m_vmt_hooks.emplace(std::piecewise_construct, std::forward_as_tuple(name_str),
+                                std::forward_as_tuple(name_str, std::move(vmt_result.value())));
 
             return {std::move(name_str), std::move(logs)};
         }
@@ -1165,13 +1152,13 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
     {
         std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
-        // Re-check after acquiring the gate so a teardown that flipped
-        // m_shutdown_called while we waited is not raced (uniform with the
-        // create/enable/disable mutators).
+        // Re-check after acquiring the gate so a teardown that flipped m_shutdown_called while we waited is not raced
+        // (uniform with the create/enable/disable mutators).
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT hook '{}'.", vmt_name), LogLevel::Warning}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT hook '{}'.", vmt_name),
+                      LogLevel::Warning}}};
         }
         auto it = m_vmt_hooks.find(vmt_name);
         if (it != m_vmt_hooks.end())
@@ -1182,7 +1169,8 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
                     {{std::format("HookManager: VMT hook '{}' has been removed.", removed_name), LogLevel::Debug}}};
         }
         return {std::unexpected(HookError::VmtHookNotFound),
-                {{std::format("HookManager: Attempted to remove VMT hook '{}', but it was not found.", vmt_name), LogLevel::Warning}}};
+                {{std::format("HookManager: Attempted to remove VMT hook '{}', but it was not found.", vmt_name),
+                  LogLevel::Warning}}};
     }();
 
     for (const auto &entry : deferred_logs)
@@ -1207,22 +1195,26 @@ std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view v
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
-                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT method on '{}'.", vmt_name), LogLevel::Warning}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT method on '{}'.", vmt_name),
+                      LogLevel::Warning}}};
         }
         auto it = m_vmt_hooks.find(vmt_name);
         if (it == m_vmt_hooks.end())
         {
             return {std::unexpected(HookError::VmtHookNotFound),
-                    {{std::format("HookManager: VMT hook '{}' not found for method removal.", vmt_name), LogLevel::Warning}}};
+                    {{std::format("HookManager: VMT hook '{}' not found for method removal.", vmt_name),
+                      LogLevel::Warning}}};
         }
 
         if (it->second.remove_method_hook(method_index))
         {
             return {std::expected<void, HookError>{},
-                    {{std::format("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index), LogLevel::Debug}}};
+                    {{std::format("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index),
+                      LogLevel::Debug}}};
         }
         return {std::unexpected(HookError::MethodNotFound),
-                {{std::format("HookManager: VMT '{}' has no hooked method at index {}.", vmt_name, method_index), LogLevel::Warning}}};
+                {{std::format("HookManager: VMT '{}' has no hooked method at index {}.", vmt_name, method_index),
+                  LogLevel::Warning}}};
     }();
 
     for (const auto &entry : deferred_logs)
@@ -1252,7 +1244,8 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {false,
-                    {{std::format("HookManager: Shutdown in progress. Cannot apply VMT hook '{}'.", vmt_name), LogLevel::Warning}}};
+                    {{std::format("HookManager: Shutdown in progress. Cannot apply VMT hook '{}'.", vmt_name),
+                      LogLevel::Warning}}};
         }
         auto it = m_vmt_hooks.find(vmt_name);
         if (it == m_vmt_hooks.end())
@@ -1261,9 +1254,9 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
                     {{std::format("HookManager: VMT hook '{}' not found for apply.", vmt_name), LogLevel::Warning}}};
         }
 
-        // VmtHook::apply tracks the object in an internal container, so it can throw
-        // bad_alloc. Contain it here as every other SafetyHook call site does, so a
-        // failed apply returns false instead of unwinding out through the held locks.
+        // VmtHook::apply tracks the object in an internal container, so it can throw bad_alloc. Contain it here as
+        // every other SafetyHook call site does, so a failed apply returns false instead of unwinding out through the
+        // held locks.
         try
         {
             it->second.vmt_hook().apply(object);
@@ -1271,20 +1264,20 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
         catch (const std::exception &e)
         {
             return {false,
-                    {{std::format("HookManager: Exception applying VMT hook '{}' to object {}: {}",
-                                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)), e.what()),
+                    {{std::format("HookManager: Exception applying VMT hook '{}' to object {}: {}", vmt_name,
+                                  DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)), e.what()),
                       LogLevel::Error}}};
         }
         catch (...)
         {
             return {false,
-                    {{std::format("HookManager: Unknown exception applying VMT hook '{}' to object {}.",
-                                  vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                    {{std::format("HookManager: Unknown exception applying VMT hook '{}' to object {}.", vmt_name,
+                                  DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                       LogLevel::Error}}};
         }
         return {true,
-                {{std::format("HookManager: VMT hook '{}' applied to object {}.",
-                              vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                {{std::format("HookManager: VMT hook '{}' applied to object {}.", vmt_name,
+                              DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                   LogLevel::Debug}}};
     }();
 
@@ -1314,20 +1307,23 @@ bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object
         std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
-            return {false,
-                    {{std::format("HookManager: Shutdown in progress. Cannot remove VMT hook '{}' from object.", vmt_name), LogLevel::Warning}}};
+            return {
+                false,
+                {{std::format("HookManager: Shutdown in progress. Cannot remove VMT hook '{}' from object.", vmt_name),
+                  LogLevel::Warning}}};
         }
         auto it = m_vmt_hooks.find(vmt_name);
         if (it == m_vmt_hooks.end())
         {
             return {false,
-                    {{std::format("HookManager: VMT hook '{}' not found for object removal.", vmt_name), LogLevel::Warning}}};
+                    {{std::format("HookManager: VMT hook '{}' not found for object removal.", vmt_name),
+                      LogLevel::Warning}}};
         }
 
         it->second.vmt_hook().remove(object);
         return {true,
-                {{std::format("HookManager: VMT hook '{}' removed from object {}.",
-                              vmt_name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                {{std::format("HookManager: VMT hook '{}' removed from object {}.", vmt_name,
+                              DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                   LogLevel::Debug}}};
     }();
 
@@ -1356,11 +1352,13 @@ void HookManager::remove_all_vmt_hooks()
         {
             size_t num_hooks = m_vmt_hooks.size();
             m_vmt_hooks.clear();
-            logs.push_back({std::format("HookManager: All {} VMT hooks have been removed.", num_hooks), LogLevel::Debug});
+            logs.push_back(
+                {std::format("HookManager: All {} VMT hooks have been removed.", num_hooks), LogLevel::Debug});
         }
         else
         {
-            logs.push_back({"HookManager: remove_all_vmt_hooks called, but no VMT hooks were active.", LogLevel::Debug});
+            logs.push_back(
+                {"HookManager: remove_all_vmt_hooks called, but no VMT hooks were active.", LogLevel::Debug});
         }
         return logs;
     }();

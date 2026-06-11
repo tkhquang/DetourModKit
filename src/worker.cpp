@@ -7,14 +7,11 @@
 
 namespace DetourModKit
 {
-    StoppableWorker::StoppableWorker(std::string_view name,
-                                     std::function<void(std::stop_token)> body)
-        : m_name(name)
+    StoppableWorker::StoppableWorker(std::string_view name, std::function<void(std::stop_token)> body) : m_name(name)
     {
         if (!body)
         {
-            Logger::get_instance().error(
-                "StoppableWorker '{}': empty body; no thread started.", m_name);
+            Logger::get_instance().error("StoppableWorker '{}': empty body; no thread started.", m_name);
             m_joined.store(true, std::memory_order_release);
             return;
         }
@@ -28,13 +25,11 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    Logger::get_instance().error(
-                        "StoppableWorker '{}': unhandled exception: {}", label, e.what());
+                    Logger::get_instance().error("StoppableWorker '{}': unhandled exception: {}", label, e.what());
                 }
                 catch (...)
                 {
-                    Logger::get_instance().error(
-                        "StoppableWorker '{}': unknown exception escaped body.", label);
+                    Logger::get_instance().error("StoppableWorker '{}': unknown exception escaped body.", label);
                 }
             });
 
@@ -62,8 +57,7 @@ namespace DetourModKit
     void StoppableWorker::shutdown() noexcept
     {
         bool expected = false;
-        if (!m_joined.compare_exchange_strong(expected, true,
-                                              std::memory_order_acq_rel))
+        if (!m_joined.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
         {
             return;
         }

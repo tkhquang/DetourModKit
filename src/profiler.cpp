@@ -20,8 +20,8 @@ namespace DetourModKit
         /**
          * @brief Escapes a string for safe embedding in a JSON value.
          * @details Handles the characters that are special in JSON strings:
-         *          backslash, double quote, and control characters (U+0000..U+001F).
-         *          Forward slash is NOT escaped (legal unescaped in JSON per RFC 8259).
+         *          backslash, double quote, and control characters (U+0000..U+001F). Forward slash is NOT escaped
+         *          (legal unescaped in JSON per RFC 8259).
          * @param input The raw string to escape.
          * @return A JSON-safe escaped string (without surrounding quotes).
          */
@@ -72,19 +72,18 @@ namespace DetourModKit
             }
             return out;
         }
-    } // namespace
+    } // anonymous namespace
 
     // --- Profiler ---
 
     Profiler::Profiler()
-        : m_buffer(std::make_unique<ProfileSample[]>(DEFAULT_CAPACITY)),
-          m_capacity(DEFAULT_CAPACITY),
+        : m_buffer(std::make_unique<ProfileSample[]>(DEFAULT_CAPACITY)), m_capacity(DEFAULT_CAPACITY),
           m_mask(DEFAULT_CAPACITY - 1)
     {
         LARGE_INTEGER freq;
-        // QueryPerformanceFrequency cannot fail and is always non-zero on Windows XP and
-        // later, but guard regardless: a zero frequency would divide-by-zero in record().
-        // Fall back to a 10 MHz tick so durations stay finite if the API ever misbehaves.
+        // QueryPerformanceFrequency cannot fail and is always non-zero on Windows XP and later, but guard regardless: a
+        // zero frequency would divide-by-zero in record(). Fall back to a 10 MHz tick so durations stay finite if the
+        // API ever misbehaves.
         if (QueryPerformanceFrequency(&freq) && freq.QuadPart > 0)
         {
             m_qpc_frequency = freq.QuadPart;
@@ -101,51 +100,39 @@ namespace DetourModKit
         return instance;
     }
 
-    void Profiler::record(const char *name, int64_t start_ticks, int64_t end_ticks,
-                          uint32_t thread_id) noexcept
+    void Profiler::record(const char *name, int64_t start_ticks, int64_t end_ticks, uint32_t thread_id) noexcept
     {
-        // Clamp a non-positive delta (end before start: swapped arguments or a backwards
-        // clock read) to zero so the unsigned cast below cannot wrap a negative value
-        // into a bogus multi-minute duration.
+        // Clamp a non-positive delta (end before start: swapped arguments or a backwards clock read) to zero so the
+        // unsigned cast below cannot wrap a negative value into a bogus multi-minute duration.
         const int64_t delta_ticks = end_ticks > start_ticks ? end_ticks - start_ticks : 0;
 
-        // Convert ticks to microseconds: (delta * 1'000'000) / frequency.
-        // The 64-bit intermediate (delta * 1'000'000) cannot overflow for any realistic
+        // Convert ticks to microseconds: (delta * 1'000'000) / frequency. The 64-bit intermediate (delta * 1'000'000)
+        // cannot overflow for any realistic
         // delta: at a 10 MHz QPC frequency it would take a delta over ~922,000 seconds.
         // duration_us is additionally clamped to UINT32_MAX microseconds (~71 minutes).
         const auto duration_us = static_cast<uint32_t>(
-            std::min<int64_t>((delta_ticks * 1'000'000) / m_qpc_frequency,
-                              static_cast<int64_t>(UINT32_MAX)));
+            std::min<int64_t>((delta_ticks * 1'000'000) / m_qpc_frequency, static_cast<int64_t>(UINT32_MAX)));
 
         const size_t idx = m_write_pos.fetch_add(1, std::memory_order_relaxed) & m_mask;
 
         auto &sample = m_buffer[idx];
 
-        // Open the write window with a monotonic increment. The result is
-        // guaranteed odd because every closed sequence is even (sequence
-        // starts at 0 in the constructor and reset(), and each record()
-        // contributes exactly +2). Using fetch_add avoids the load-then-
-        // store RMW pattern: a producer preempted between a relaxed load
-        // and its first store could otherwise roll the slot's sequence
-        // backwards if another producer completed a full write on the
-        // same slot in the interim. fetch_add forbids that rollback.
+        // Open the write window with a monotonic increment. The result is guaranteed odd because every closed sequence
+        // is even (sequence starts at 0 in the constructor and reset(), and each record() contributes exactly +2).
+        // Using fetch_add avoids the load-then-store RMW pattern: a producer preempted between a relaxed load and its
+        // first store could otherwise roll the slot's sequence backwards if another producer completed a full write on
+        // the same slot in the interim. fetch_add forbids that rollback.
         //
-        // Design note: if a writer is stalled between its fetch_add and
-        // its final sequence store, and 65536 intervening record() calls
-        // advance m_write_pos past a full buffer wrap, a new writer will
-        // land on the same slot and clobber the stalled writer's data.
-        // This requires the stalled writer to be preempted for the
-        // duration of an entire ring buffer cycle, which is unreachable
-        // at game-modding thread counts and frame rates. We accept this
-        // theoretical imprecision to keep the hot path to a single
-        // fetch_add + two stores with no CAS retry loop.
+        // Design note: if a writer is stalled between its fetch_add and its final sequence store, and 65536 intervening
+        // record() calls advance m_write_pos past a full buffer wrap, a new writer will land on the same slot and
+        // clobber the stalled writer's data. This requires the stalled writer to be preempted for the duration of an
+        // entire ring buffer cycle, which is unreachable at game-modding thread counts and frame rates. We accept this
+        // theoretical imprecision to keep the hot path to a single fetch_add + two stores with no CAS retry loop.
         //
         // Monotonicity is unconditionally guaranteed by fetch_add: per
-        // [atomics.types.operations] the counter cannot roll backwards
-        // regardless of how many producers race on the same slot. Do NOT
-        // replace this with a load-then-store RMW: that would re-introduce
-        // the stale-publish race on wrap collision that this protocol
-        // exists to prevent.
+        // [atomics.types.operations] the counter cannot roll backwards regardless of how many producers race on the
+        // same slot. Do NOT replace this with a load-then-store RMW: that would re-introduce the stale-publish race on
+        // wrap collision that this protocol exists to prevent.
         static_assert(std::atomic<uint32_t>::is_always_lock_free,
                       "sequence counter must be lock-free for the seqlock protocol");
         (void)sample.sequence.fetch_add(1, std::memory_order_acq_rel);
@@ -155,17 +142,15 @@ namespace DetourModKit
         sample.duration_us = duration_us;
         sample.thread_id = thread_id;
 
-        // Close the write window. Another +1 keeps the slot's sequence
-        // monotonic and lands it on an even value, signalling a fully
-        // committed sample. Readers that observe an odd value skip this
-        // slot to avoid reading torn fields.
+        // Close the write window. Another +1 keeps the slot's sequence monotonic and lands it on an even value,
+        // signalling a fully committed sample. Readers that observe an odd value skip this slot to avoid reading torn
+        // fields.
         (void)sample.sequence.fetch_add(1, std::memory_order_release);
     }
 
-    // Caller must ensure no concurrent record() calls are in flight.
-    // There is no runtime guard because adding an atomic "recording active"
-    // counter would penalize every record() call on the hot path for a
-    // contract that is only relevant during session boundaries.
+    // Caller must ensure no concurrent record() calls are in flight. There is no runtime guard because adding an atomic
+    // "recording active" counter would penalize every record() call on the hot path for a contract that is only
+    // relevant during session boundaries.
     void Profiler::reset() noexcept
     {
         m_write_pos.store(0, std::memory_order_relaxed);
@@ -190,8 +175,8 @@ namespace DetourModKit
             return "[]";
         }
 
-        // Determine start index: if the buffer has wrapped, start from the
-        // oldest surviving sample; otherwise start from 0.
+        // Determine start index: if the buffer has wrapped, start from the oldest surviving sample; otherwise start
+        // from 0.
         const size_t start_idx = (total > m_capacity) ? (total & m_mask) : 0;
 
         // Pre-allocate: ~120 bytes per JSON event is a reasonable estimate.
@@ -207,16 +192,12 @@ namespace DetourModKit
         {
             const auto &sample = m_buffer[(start_idx + i) & m_mask];
 
-            // Seqlock read: load the sequence, copy the sample fields into
-            // locals, then re-load the sequence. record() opens a write with an
-            // odd sequence and closes it with the next even value, so a sample
-            // is consistent only when the pre-read sequence is even (no
-            // in-flight write) AND the post-read sequence is unchanged (no write
-            // started and finished mid-copy). The acquire fence between the
-            // field copies and the second load stops the copies from being
-            // reordered after it. This runs on the cold export path; the second
-            // load costs nothing measurable and the producer hot path is
-            // untouched.
+            // Seqlock read: load the sequence, copy the sample fields into locals, then re-load the sequence. record()
+            // opens a write with an odd sequence and closes it with the next even value, so a sample is consistent only
+            // when the pre-read sequence is even (no in-flight write) AND the post-read sequence is unchanged (no write
+            // started and finished mid-copy). The acquire fence between the field copies and the second load stops the
+            // copies from being reordered after it. This runs on the cold export path; the second load costs nothing
+            // measurable and the producer hot path is untouched.
             const uint32_t seq_before = sample.sequence.load(std::memory_order_acquire);
             if ((seq_before & 1) != 0 || sample.name == nullptr)
             {
@@ -242,14 +223,12 @@ namespace DetourModKit
             }
             first = false;
 
-            // Chrome Trace Event Format: "X" = complete event (has duration).
-            // Escape the name to produce valid JSON even if the caller passes a
-            // string containing quotes or backslashes.
+            // Chrome Trace Event Format: "X" = complete event (has duration). Escape the name to produce valid JSON
+            // even if the caller passes a string containing quotes or backslashes.
             const double ts = static_cast<double>(start_ticks) * ticks_to_us;
             const std::string escaped_name = escape_json_string(name);
-            json += std::format(
-                R"({{"name":"{}","ph":"X","ts":{:.1f},"dur":{},"pid":1,"tid":{}}})",
-                escaped_name, ts, duration_us, thread_id);
+            json += std::format(R"({{"name":"{}","ph":"X","ts":{:.1f},"dur":{},"pid":1,"tid":{}}})", escaped_name, ts,
+                                duration_us, thread_id);
         }
 
         json += "\n]";
@@ -261,8 +240,7 @@ namespace DetourModKit
         const std::string json = export_chrome_json();
         const std::string path_str(path);
 
-        const auto closer = [](std::FILE *f)
-        { std::fclose(f); };
+        const auto closer = [](std::FILE *f) { std::fclose(f); };
         std::FILE *file_ptr = nullptr;
 
         const errno_t err = fopen_s(&file_ptr, path_str.c_str(), "wb");

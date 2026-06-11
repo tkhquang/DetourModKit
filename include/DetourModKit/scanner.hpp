@@ -58,24 +58,23 @@ namespace DetourModKit
         /**
          * @struct CompiledPattern
          * @brief A pre-compiled AOB pattern with separate bytes and mask.
-         * @details Stores the pattern bytes and a bitmask indicating which bytes
-         *          are wildcards (mask=false) vs. literal values to match (mask=true).
-         *          This design avoids sentinel byte conflicts (e.g., 0xCC is a valid byte).
+         * @details Stores the pattern bytes and a bitmask indicating which bytes are wildcards (mask=false) vs. literal
+         *          values to match (mask=true). This design avoids sentinel byte conflicts (e.g., 0xCC is a valid
+         *          byte).
          */
         struct CompiledPattern
         {
             /**
              * @brief Pattern bytes, one per token in the source AOB string.
-             * @details Entries at wildcard positions (mask byte == 0x00) contain
-             *          arbitrary values and must not be compared against memory.
+             * @details Entries at wildcard positions (mask byte == 0x00) contain arbitrary values and must not be
+             *          compared against memory.
              */
             std::vector<std::byte> bytes;
 
             /**
              * @brief Per-byte match mask paralleling @ref bytes.
-             * @details 0xFF marks a literal byte that must match exactly; 0x00
-             *          marks a wildcard slot to skip. Sized identically to
-             *          @ref bytes.
+             * @details 0xFF marks a literal byte that must match exactly; 0x00 marks a wildcard slot to skip. Sized
+             *          identically to @ref bytes.
              */
             std::vector<std::byte> mask;
 
@@ -85,37 +84,29 @@ namespace DetourModKit
              *          May equal bytes.size() when `|` appears at the end of the
              *          pattern. The offset is non-negative under the current
              *          parser (`|` cannot precede tokens), but the type is
-             *          signed to match pointer-arithmetic conventions
-             *          (C++ Core Guidelines ES.106) and to future-proof against
-             *          negative anchors.
+             *          signed to match pointer-arithmetic conventions (C++ Core Guidelines ES.106) and to future-proof
+             *          against negative anchors.
              */
             std::ptrdiff_t offset = 0;
 
             /**
              * @brief Cached anchor index selected by compile_anchor().
-             * @details find_pattern() drives its memchr sweep on the byte at
-             *          this position. The index is the rarest literal byte in
-             *          the pattern (lowest score in a small frequency table
-             *          tuned for typical x64 .text sections), so a single
-             *          memchr pass produces far fewer false candidate hits
-             *          than anchoring on `bytes[0]` would.
+             * @details find_pattern() drives its memchr sweep on the byte at this position. The index is the rarest
+             *          literal byte in the pattern (lowest score in a small frequency table tuned for typical x64 .text
+             *          sections), so a single memchr pass produces far fewer false candidate hits than anchoring on
+             *          `bytes[0]` would.
              *
              *          Sentinel values:
              *          - `[0, size())`            valid anchor.
              *          - `size()`                 pattern has no literal bytes
-             *                                     (all wildcards); scan
-             *                                     degenerates to "match at start".
+             *                                     (all wildcards); scan degenerates to "match at start".
              *          - `>= size() + 1`          anchor not yet selected;
-             *                                     find_pattern() will pick one
-             *                                     inline (slower path).
+             *                                     find_pattern() will pick one inline (slower path).
              *
-             *          parse_aob() always calls compile_anchor() before
-             *          returning, so patterns produced through the public API
-             *          enter find_pattern() with the cached anchor in place.
-             *          Manually constructed patterns (assigning `bytes`/`mask`
-             *          by hand) start in the "not yet selected" state and
-             *          should call @ref compile_anchor() once after
-             *          population if they will be scanned repeatedly.
+             *          parse_aob() always calls compile_anchor() before returning, so patterns produced through the
+             *          public API enter find_pattern() with the cached anchor in place. Manually constructed patterns
+             *          (assigning `bytes`/`mask` by hand) start in the "not yet selected" state and should call @ref
+             *          compile_anchor() once after population if they will be scanned repeatedly.
              */
             std::size_t anchor = std::numeric_limits<std::size_t>::max();
 
@@ -123,36 +114,28 @@ namespace DetourModKit
              * @brief Returns the size of the pattern.
              * @return size_t The number of bytes in the pattern.
              */
-            size_t size() const noexcept { return bytes.size(); }
+            [[nodiscard]] size_t size() const noexcept { return bytes.size(); }
 
             /**
              * @brief Checks if the pattern is empty.
              * @return true if the pattern has no bytes.
              */
-            bool empty() const noexcept { return bytes.empty(); }
+            [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
 
             /**
-             * @brief Selects and stores the rarest literal byte's index as the
-             *        scan anchor.
-             * @details Walks the pattern once, scoring each literal byte
-             *          against a small byte-frequency table (`0x00`, `0xCC`,
-             *          `0x48`, ... receive high scores; uncommon bytes score
-             *          0), and stores the lowest-scoring index in @ref
-             *          anchor. Ties are broken by first occurrence for
-             *          deterministic behaviour. An all-wildcard pattern sets
-             *          @ref anchor to `size()` so find_pattern() can take its
-             *          degenerate "match at region start" path without a
-             *          second scan.
+             * @brief Selects and stores the rarest literal byte's index as the scan anchor.
+             * @details Walks the pattern once, scoring each literal byte against a small byte-frequency table (`0x00`,
+             *          `0xCC`, `0x48`, ... receive high scores; uncommon bytes score
+             *          0), and stores the lowest-scoring index in @ref anchor. Ties are broken by first occurrence for
+             *          deterministic behaviour. An all-wildcard pattern sets @ref anchor to `size()` so find_pattern()
+             *          can take its degenerate "match at region start" path without a second scan.
              *
-             *          Safe to call repeatedly; the operation is idempotent
-             *          and O(size()). Callers that mutate @ref bytes or
-             *          @ref mask after a prior compile_anchor() MUST call it
-             *          again before the next scan or the cached anchor will
-             *          drift from the pattern contents.
+             *          Safe to call repeatedly; the operation is idempotent and O(size()). Callers that mutate @ref
+             *          bytes or @ref mask after a prior compile_anchor() MUST call it again before the next scan or the
+             *          cached anchor will drift from the pattern contents.
              *
-             *          Not thread-safe with concurrent find_pattern() calls
-             *          on the same CompiledPattern instance; sequence the
-             *          compile step before publishing the pattern to scanners.
+             *          Not thread-safe with concurrent find_pattern() calls on the same CompiledPattern instance;
+             *          sequence the compile step before publishing the pattern to scanners.
              */
             void compile_anchor() noexcept;
         };
@@ -161,8 +144,8 @@ namespace DetourModKit
          * @brief Parses a space-separated AOB string into a compiled pattern.
          * @details Converts hexadecimal strings to byte values and wildcard tokens
          *          ('??' or '?') into mask=false entries. An optional `|` token marks
-         *          the offset within the pattern (stored in CompiledPattern::offset).
-         *          This lets wider patterns precisely target a specific instruction:
+         *          the offset within the pattern (stored in CompiledPattern::offset). This lets wider patterns
+         *          precisely target a specific instruction:
          *          e.g., "48 8B 88 B8 00 00 00 | 48 89 4C 24 68" sets offset=7.
          * @param aob_str The AOB pattern string.
          * @return std::optional<CompiledPattern> The compiled pattern, or std::nullopt on parse failure.
@@ -171,37 +154,32 @@ namespace DetourModKit
 
         /**
          * @brief Scans a specified memory region for a given byte pattern.
-         * @details Uses an optimized search algorithm that finds the first non-wildcard
-         *          byte and uses memchr for fast skipping, then verifies the full pattern.
+         * @details Uses an optimized search algorithm that finds the first non-wildcard byte and uses memchr for fast
+         *          skipping, then verifies the full pattern.
          * @param start_address Pointer to the beginning of the memory region to scan.
          * @param region_size The size (in bytes) of the memory region to scan.
          * @param pattern The compiled pattern to search for.
-         * @return const std::byte* Pointer to the match within the specified region,
-         *         already adjusted by `pattern.offset`. Returns nullptr if pattern
-         *         not found.
-         * @note A pattern with zero literal bytes (every token wildcarded) returns
-         *       `start_address` (plus offset) and emits a warning through the shared
-         *       Logger. This case almost always indicates a caller bug; the behaviour
-         *       is preserved for backwards compatibility but should not be relied upon.
+         * @return const std::byte* Pointer to the match within the specified region, already adjusted by
+         *         `pattern.offset`. Returns nullptr if pattern not found.
+         * @note A pattern with zero literal bytes (every token wildcarded) returns `start_address` (plus offset) and
+         *       emits a warning through the shared
+         *       Logger. This case almost always indicates a caller bug; the behaviour is preserved for backwards
+         *       compatibility but should not be relied upon.
          * @note `pattern.offset` (set by a `|` marker in the AOB string) is applied
-         *       exactly once. When no marker is present `offset == 0` and the returned
-         *       pointer is the match start. Callers must NOT add `pattern.offset`
-         *       manually; doing so double-applies and will miss the intended byte.
+         *       exactly once. When no marker is present `offset == 0` and the returned pointer is the match start.
+         *       Callers must NOT add `pattern.offset` manually; doing so double-applies and will miss the intended
+         *       byte.
          * @warning When `pattern.offset == pattern.size()` (a trailing `|` marker),
-         *          the returned pointer addresses one-past the matched range. Depending
-         *          on where in the region the match landed, this may also be
-         *          one-past the scanned region. The pointer is valid for arithmetic
-         *          and bounds comparisons but MUST NOT be dereferenced without an
-         *          explicit readability check (e.g. `Memory::is_readable`).
-         * @warning READABLE-RANGE PRECONDITION: this raw overload performs no page
-         *          filtering. The caller MUST guarantee the entire span
-         *          `[start_address, start_address + region_size)` is committed and
-         *          readable, because the search reads it with raw `memchr`/SIMD
-         *          loads and an unreadable byte faults the host. Use it only on byte
-         *          buffers or module sections whose readability is already known. To
-         *          scan arbitrary process or module memory, prefer the page-gated
-         *          helpers (`find_pattern_in_module`, `scan_executable_regions`,
-         *          `scan_readable_regions`) which walk `VirtualQuery` and skip guard,
+         *          the returned pointer addresses one-past the matched range. Depending on where in the region the
+         *          match landed, this may also be one-past the scanned region. The pointer is valid for arithmetic and
+         *          bounds comparisons but MUST NOT be dereferenced without an explicit readability check (e.g.
+         *          `Memory::is_readable`).
+         * @warning READABLE-RANGE PRECONDITION: this raw overload performs no page filtering. The caller MUST guarantee
+         *          the entire span `[start_address, start_address + region_size)` is committed and readable, because
+         *          the search reads it with raw `memchr`/SIMD loads and an unreadable byte faults the host. Use it only
+         *          on byte buffers or module sections whose readability is already known. To scan arbitrary process or
+         *          module memory, prefer the page-gated helpers (`scan_executable_regions`, `scan_readable_regions`) or
+         *          the module-scoped cascade (`resolve_cascade_in_module`) which walk `VirtualQuery` and skip guard,
          *          no-access, and non-readable pages.
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
@@ -212,158 +190,137 @@ namespace DetourModKit
          * @param start_address Pointer to the beginning of the memory region to scan.
          * @param region_size The size (in bytes) of the memory region to scan.
          * @param pattern The compiled pattern to search for.
-         * @param occurrence Which occurrence to return (1-based). 1 = first match.
-         *                   Passing 0 returns nullptr.
-         * @return const std::byte* Pointer to the Nth occurrence (already adjusted
-         *         by `pattern.offset`), or nullptr if fewer than N matches exist.
-         * @note Like the single-occurrence overload, `pattern.offset` is applied
-         *       exactly once. Callers must NOT add it manually.
+         * @param occurrence Which occurrence to return (1-based). 1 = first match. Passing 0 returns nullptr.
+         * @return const std::byte* Pointer to the Nth occurrence (already adjusted by `pattern.offset`), or nullptr if
+         *         fewer than N matches exist.
+         * @note Like the single-occurrence overload, `pattern.offset` is applied exactly once. Callers must NOT add it
+         *       manually.
          * @warning A trailing `|` marker produces a one-past pointer identical in
-         *          kind to the single-occurrence overload; do not dereference
-         *          without a bounds or readability check.
-         * @warning READABLE-RANGE PRECONDITION: like the single-occurrence overload,
-         *          this raw overload performs no page filtering. The caller MUST
-         *          guarantee the entire span `[start_address, start_address +
-         *          region_size)` is committed and readable; the scan uses raw
-         *          `memchr`/SIMD loads and an unreadable byte faults the host. For
-         *          arbitrary process or module memory, prefer the page-gated helpers
-         *          (`find_pattern_in_module`, `scan_executable_regions`,
-         *          `scan_readable_regions`).
+         *          kind to the single-occurrence overload; do not dereference without a bounds or readability check.
+         * @warning READABLE-RANGE PRECONDITION: like the single-occurrence overload, this raw overload performs no page
+         *          filtering. The caller MUST guarantee the entire span `[start_address, start_address + region_size)`
+         *          is committed and readable; the scan uses raw `memchr`/SIMD loads and an unreadable byte faults the
+         *          host. For arbitrary process or module memory, prefer the page-gated helpers
+         *          (`scan_executable_regions`, `scan_readable_regions`) or the module-scoped cascade
+         *          (`resolve_cascade_in_module`).
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
                                                     const CompiledPattern &pattern, size_t occurrence);
-        // Common x86-64 RIP-relative opcode prefixes (bytes preceding the disp32 field)
-        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RAX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
-        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RCX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}};
-        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RDX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x15}};
-        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RBX_RIP = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x1D}};
-        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RAX_RIP = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x05}};
-        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RCX_RIP = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x0D}};
-        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RDX_RIP = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x15}};
+        /// Common x86-64 RIP-relative opcode prefixes (bytes preceding the disp32 field).
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RAX_RIP = {std::byte{0x48}, std::byte{0x8B},
+                                                                        std::byte{0x05}};
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RCX_RIP = {std::byte{0x48}, std::byte{0x8B},
+                                                                        std::byte{0x0D}};
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RDX_RIP = {std::byte{0x48}, std::byte{0x8B},
+                                                                        std::byte{0x15}};
+        inline constexpr std::array<std::byte, 3> PREFIX_MOV_RBX_RIP = {std::byte{0x48}, std::byte{0x8B},
+                                                                        std::byte{0x1D}};
+        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RAX_RIP = {std::byte{0x48}, std::byte{0x8D},
+                                                                        std::byte{0x05}};
+        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RCX_RIP = {std::byte{0x48}, std::byte{0x8D},
+                                                                        std::byte{0x0D}};
+        inline constexpr std::array<std::byte, 3> PREFIX_LEA_RDX_RIP = {std::byte{0x48}, std::byte{0x8D},
+                                                                        std::byte{0x15}};
         inline constexpr std::array<std::byte, 1> PREFIX_CALL_REL32 = {std::byte{0xE8}};
         inline constexpr std::array<std::byte, 1> PREFIX_JMP_REL32 = {std::byte{0xE9}};
 
         /**
          * @brief Resolves an absolute address from an x86-64 RIP-relative instruction.
-         * @details Extracts the int32 displacement at the given offset within the instruction
-         *          and computes the absolute target: instruction_address + instruction_length + displacement.
+         * @details Extracts the int32 displacement at the given offset within the instruction and computes the absolute
+         *          target: instruction_address + instruction_length + displacement.
          * @param instruction_address Pointer to the first byte of the instruction.
          * @param displacement_offset Byte offset from instruction_address to the disp32 field.
          * @param instruction_length Total length of the instruction in bytes.
          * @return The resolved absolute address, or RipResolveError on failure.
-         * @note The displacement is read under an SEH fault guard. A resolved
-         *       address that is not a plausible user-mode pointer (a crafted or
-         *       corrupt displacement that resolves to 0, a low guard-page
-         *       address, or a kernel-range address) is rejected with
-         *       RipResolveError::ImplausibleTarget rather than returned as a
-         *       valid result. For `FF 15`/`FF 25` forms the gated value is the
-         *       pointer slot, which is itself an in-image address.
+         * @note The displacement is read under an SEH fault guard. A resolved address that is not a plausible user-mode
+         *       pointer (a crafted or corrupt displacement that resolves to 0, a low guard-page address, or a
+         *       kernel-range address) is rejected with
+         *       RipResolveError::ImplausibleTarget rather than returned as a valid result. For `FF 15`/`FF 25` forms
+         *       the gated value is the pointer slot, which is itself an in-image address.
          */
-        [[nodiscard]] std::expected<uintptr_t, RipResolveError> resolve_rip_relative(
-            const std::byte *instruction_address,
-            size_t displacement_offset,
-            size_t instruction_length);
+        [[nodiscard]] std::expected<uintptr_t, RipResolveError>
+        resolve_rip_relative(const std::byte *instruction_address, size_t displacement_offset,
+                             size_t instruction_length);
 
         /**
          * @brief Scans forward from a starting address for an opcode prefix, then resolves the RIP-relative target.
-         * @details Searches up to search_length bytes for the given opcode prefix. Once found,
-         *          the displacement is assumed to immediately follow the prefix. The absolute address
-         *          is computed as: found_address + instruction_length + displacement.
+         * @details Searches up to search_length bytes for the given opcode prefix. Once found, the displacement is
+         *          assumed to immediately follow the prefix. The absolute address is computed as: found_address +
+         *          instruction_length + displacement.
          * @param search_start Pointer to the beginning of the search region.
          * @param search_length Maximum number of bytes to search forward.
          * @param opcode_prefix The opcode byte sequence to search for (disp32 must follow immediately).
          * @param instruction_length Total length of the instruction in bytes.
          * @return The resolved absolute address, or RipResolveError describing the failure.
-         * @warning For indirect-call / indirect-jump forms (`FF 15 disp32`, `FF 25 disp32`)
-         *          the returned address is the *pointer slot* (the address that stores
-         *          the final target), not the target itself. Dereference it with
-         *          `Memory::read_ptr_unsafe` (or an equivalent checked read) to obtain
-         *          the callee / jump destination.
-         * @note Matching is first-prefix-wins: the scan resolves the first
-         *       location whose bytes equal @p opcode_prefix and does not detect
-         *       whether the prefix occurs more than once. When a signature may
-         *       be ambiguous, anchor it through @ref resolve_cascade (which
-         *       enforces per-candidate uniqueness) instead. The resolved target
-         *       is gated by the same RipResolveError::ImplausibleTarget check as
-         *       @ref resolve_rip_relative.
+         * @warning For indirect-call / indirect-jump forms (`FF 15 disp32`, `FF 25 disp32`) the returned address is the
+         *          *pointer slot* (the address that stores the final target), not the target itself. Dereference it
+         *          with `Memory::read_ptr_unsafe` (or an equivalent checked read) to obtain the callee / jump
+         *          destination.
+         * @note Matching is first-prefix-wins: the scan resolves the first location whose bytes equal @p opcode_prefix
+         *       and does not detect whether the prefix occurs more than once. When a signature may be ambiguous, anchor
+         *       it through @ref resolve_cascade (which enforces per-candidate uniqueness) instead. The resolved target
+         *       is gated by the same RipResolveError::ImplausibleTarget check as @ref resolve_rip_relative.
          */
-        [[nodiscard]] std::expected<uintptr_t, RipResolveError> find_and_resolve_rip_relative(
-            const std::byte *search_start,
-            size_t search_length,
-            std::span<const std::byte> opcode_prefix,
-            size_t instruction_length);
+        [[nodiscard]] std::expected<uintptr_t, RipResolveError>
+        find_and_resolve_rip_relative(const std::byte *search_start, size_t search_length,
+                                      std::span<const std::byte> opcode_prefix, size_t instruction_length);
 
         /**
          * @brief Scans all committed executable memory regions for a byte pattern.
-         * @details Walks the process address space via VirtualQuery, scanning each
-         *          committed region with execute permission. Useful for games with
-         *          packed or protected binaries that unpack code into anonymous pages
+         * @details Walks the process address space via VirtualQuery, scanning each committed region with execute
+         *          permission. Useful for games with packed or protected binaries that unpack code into anonymous pages
          *          outside any loaded module's address range.
          * @param pattern The compiled pattern to search for.
          * @param occurrence Which occurrence to return (1-based). 1 = first match.
          * @return Pointer to the match (adjusted by pattern offset), or nullptr if not found.
          * @note Pure-execute pages (`PAGE_EXECUTE` without any read bit) are skipped:
-         *       they are not guaranteed readable and dereferencing them raises an
-         *       access violation. Only `PAGE_EXECUTE_READ`, `PAGE_EXECUTE_READWRITE`,
-         *       and `PAGE_EXECUTE_WRITECOPY` regions are inspected. Guard and
-         *       no-access pages are skipped unconditionally.
-         * @note `pattern.offset` is applied to the returned pointer, matching
-         *       `find_pattern`. Callers must not add it manually.
+         *       they are not guaranteed readable and dereferencing them raises an access violation. Only
+         *       `PAGE_EXECUTE_READ`, `PAGE_EXECUTE_READWRITE`, and `PAGE_EXECUTE_WRITECOPY` regions are inspected.
+         *       Guard and no-access pages are skipped unconditionally.
+         * @note `pattern.offset` is applied to the returned pointer, matching `find_pattern`. Callers must not add it
+         *       manually.
          * @warning A trailing `|` marker (offset == pattern.size()) yields a
          *          one-past pointer; bounds-check before dereferencing.
-         * @note A pattern that straddles a region boundary (e.g. two separately
-         *       allocated `PAGE_EXECUTE_READ` regions that happen to be adjacent)
-         *       will not be found: each region is scanned independently. PE-loaded
-         *       code does not cross section boundaries so normal module scanning is
-         *       unaffected, but JIT-compiled code (Mono, Unreal AngelScript) or
-         *       heavily unpacked payloads may split contiguous bytes across VAD
-         *       entries.
+         * @note A pattern that straddles a region boundary (e.g. two separately allocated `PAGE_EXECUTE_READ` regions
+         *       that happen to be adjacent) will not be found: each region is scanned independently. PE-loaded code
+         *       does not cross section boundaries so normal module scanning is unaffected, but JIT-compiled code (Mono,
+         *       Unreal AngelScript) or heavily unpacked payloads may split contiguous bytes across VAD entries.
          */
         [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
         /**
          * @brief Scans all committed readable memory regions for a byte pattern.
-         * @details Data-section sibling of scan_executable_regions. Walks the
-         *          process address space via VirtualQuery and scans every
-         *          committed region whose base protection is PAGE_READONLY,
-         *          PAGE_READWRITE, PAGE_WRITECOPY, or one of the three
-         *          execute-readable variants. This reaches .rdata / .data and
-         *          read-only heaps: C++ vtables, RTTI type descriptors, localized
-         *          string pools, and other read-only metadata that the
-         *          executable-only sweep cannot see.
+         * @details Data-section sibling of scan_executable_regions. Walks the process address space via VirtualQuery
+         *          and scans every committed region whose base protection is PAGE_READONLY, PAGE_READWRITE,
+         *          PAGE_WRITECOPY, or one of the three execute-readable variants. This reaches .rdata / .data and
+         *          read-only heaps: C++ vtables, RTTI type descriptors, localized string pools, and other read-only
+         *          metadata that the executable-only sweep cannot see.
          * @param pattern The compiled pattern to search for.
-         * @param occurrence Which occurrence to return (1-based). 1 = first match.
-         *                   Passing 0 returns nullptr.
-         * @return Pointer to the match (adjusted by pattern offset), or nullptr if
-         *         not found.
+         * @param occurrence Which occurrence to return (1-based). 1 = first match. Passing 0 returns nullptr.
+         * @return Pointer to the match (adjusted by pattern offset), or nullptr if not found.
          * @note The accepted protection set is a strict superset of
          *       scan_executable_regions: execute-readable code pages are included,
-         *       so a pattern present in .text is found by both. Callers that
-         *       specifically want non-code matches must post-filter (e.g. against
+         *       so a pattern present in .text is found by both. Callers that specifically want non-code matches must
+         *       post-filter (e.g. against
          *       Memory::module_range_for).
-         * @note Guard pages (PAGE_GUARD), no-access pages (PAGE_NOACCESS), and
-         *       uncommitted regions are skipped: the first two fault on any touch
-         *       and are never dereferenced.
-         * @note `pattern.offset` is applied to the returned pointer, matching
-         *       scan_executable_regions. Callers must not add it manually.
-         * @note The compiled pattern's own `bytes` buffer is itself readable
-         *       memory and would otherwise match the needle against itself. The
-         *       scan excludes any match overlapping that buffer, so it never
-         *       returns the caller's pattern storage. (scan_executable_regions
-         *       is unaffected because that storage is not executable.)
-         * @warning The readable address space is far larger than the executable
-         *          subset (a typical x64 game process maps hundreds of MB of data
-         *          versus tens of MB of code) and .rdata pointer tables look
-         *          random, so a pattern unique in .text may collide in data.
-         *          Supply patterns with enough literal bytes (>= 8) to keep the
-         *          false-positive rate low. An RTTI mangled-name anchor is fully
-         *          ASLR-invariant and far stronger than a raw vtable-header
-         *          signature, whose relocated pointers vary per launch.
+         * @note Guard pages (PAGE_GUARD), no-access pages (PAGE_NOACCESS), and uncommitted regions are skipped: the
+         *       first two fault on any touch and are never dereferenced.
+         * @note `pattern.offset` is applied to the returned pointer, matching scan_executable_regions. Callers must not
+         *       add it manually.
+         * @note The compiled pattern's own `bytes` buffer is itself readable memory and would otherwise match the
+         *       needle against itself. The scan excludes any match overlapping that buffer, so it never returns the
+         *       caller's pattern storage. (scan_executable_regions is unaffected because that storage is not
+         *       executable.)
+         * @warning The readable address space is far larger than the executable subset (a typical x64 game process maps
+         *          hundreds of MB of data versus tens of MB of code) and .rdata pointer tables look random, so a
+         *          pattern unique in .text may collide in data. Supply patterns with enough literal bytes (>= 8) to
+         *          keep the false-positive rate low. An RTTI mangled-name anchor is fully
+         *          ASLR-invariant and far stronger than a raw vtable-header signature, whose relocated pointers vary
+         *          per launch.
          * @warning A trailing `|` marker (offset == pattern.size()) yields a
          *          one-past pointer; bounds-check before dereferencing.
-         * @warning A pattern that straddles a region boundary is not found: each
-         *          region is scanned independently. PE-loaded sections are
-         *          contiguous, so normal module scanning is unaffected.
+         * @warning A pattern that straddles a region boundary is not found: each region is scanned independently.
+         *          PE-loaded sections are contiguous, so normal module scanning is unaffected.
          */
         [[nodiscard]] const std::byte *scan_readable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
@@ -394,11 +351,10 @@ namespace DetourModKit
         /**
          * @struct AddrCandidate
          * @brief One ordered attempt in a cascade.
-         * @details The cascade scans candidates in array order and returns the
-         *          first successful resolution. @p name is echoed back in the
-         *          ResolveHit on success so callers can log which candidate
-         *          won -- useful when multiple patterns cover different game
-         *          versions.
+         * @details The cascade scans candidates in array order and returns the first successful resolution. @p name is
+         *          echoed back in the
+         *          ResolveHit on success so callers can log which candidate won -- useful when multiple patterns cover
+         *          different game versions.
          */
         struct AddrCandidate
         {
@@ -409,32 +365,22 @@ namespace DetourModKit
             std::ptrdiff_t instr_end_offset = 0;
 
             /**
-             * @brief Require the candidate to match exactly once in the scanned
-             *        scope; defaults to true. A second match makes the candidate
-             *        ambiguous and it is skipped.
-             * @details A cascade returns the first candidate that resolves, and a
-             *          single scan returns the lowest-address match. A loose
-             *          pattern that matches several functions would therefore win
-             *          on whichever address sorts first -- usually not the
-             *          intended one, and impossible to recover from after the fact
-             *          (the resolver has already committed). Defaulting this to
-             *          true makes the resolver count the candidate's matches
-             *          within the scanned scope (the module image for the @c
-             *          *_in_module resolvers, the whole process otherwise); if a
-             *          second match exists the candidate falls through to the next
-             *          one. That converts a silent wrong resolution into a clean
-             *          fall-through, and -- when no candidate is provably unique --
-             *          a NoMatch the caller can act on (a signal that the target
-             *          binary changed enough to need new signatures) rather than a
-             *          confidently wrong hit.
+             * @brief Require the candidate to match exactly once in the scanned scope; defaults to true. A second match
+             *        makes the candidate ambiguous and it is skipped.
+             * @details A cascade returns the first candidate that resolves, and a single scan returns the
+             *          lowest-address match. A loose pattern that matches several functions would therefore win on
+             *          whichever address sorts first -- usually not the intended one, and impossible to recover from
+             *          after the fact (the resolver has already committed). Defaulting this to true makes the resolver
+             *          count the candidate's matches within the scanned scope (the module image for the @c *_in_module
+             *          resolvers, the whole process otherwise); if a second match exists the candidate falls through to
+             *          the next one. That converts a silent wrong resolution into a clean fall-through, and -- when no
+             *          candidate is provably unique -- a NoMatch the caller can act on (a signal that the target binary
+             *          changed enough to need new signatures) rather than a confidently wrong hit.
              *
-             *          Set this to false for a candidate that is deliberately
-             *          non-unique and whose first match is the intended one (e.g.
-             *          "first occurrence of a common instruction", or a
-             *          last-resort broad net). The flag is per-candidate, so a
-             *          strict primary anchor keeps the default while a broad
-             *          fallback opts out. The uniqueness scan runs once per
-             *          candidate that already matched; opt out to skip it.
+             *          Set this to false for a candidate that is deliberately non-unique and whose first match is the
+             *          intended one (e.g. "first occurrence of a common instruction", or a last-resort broad net). The
+             *          flag is per-candidate, so a strict primary anchor keeps the default while a broad fallback opts
+             *          out. The uniqueness scan runs once per candidate that already matched; opt out to skip it.
              */
             bool require_unique = true;
         };
@@ -486,9 +432,8 @@ namespace DetourModKit
         /**
          * @struct ResolveHit
          * @brief Successful cascade outcome.
-         * @details @p winning_name aliases the matching candidate's @c name
-         *          field. The underlying storage must outlive the ResolveHit
-         *          (AddrCandidate arrays typically live in static storage).
+         * @details @p winning_name aliases the matching candidate's @c name field. The underlying storage must outlive
+         *          the ResolveHit (AddrCandidate arrays typically live in static storage).
          */
         struct ResolveHit
         {
@@ -498,36 +443,30 @@ namespace DetourModKit
 
         /**
          * @brief Try candidates in order; return the first successful address.
-         * @details Each candidate's pattern is compiled via parse_aob() and
-         *          searched via the scanner selected by @p kind:
-         *          scan_executable_regions() for ScannerKind::Executable (the
-         *          default) or scan_readable_regions() for ScannerKind::Readable
-         *          when the target lives in .rdata / .data. Direct mode returns
-         *          @c match + disp_offset. RipRelative mode treats @c match +
-         *          disp_offset as a disp32 field and resolves against
-         *          @c match + instr_end_offset. On success, the winning
-         *          candidate's name is logged and returned.
+         * @details Each candidate's pattern is compiled via parse_aob() and searched via the scanner selected by @p
+         *          kind:
+         *          scan_executable_regions() for ScannerKind::Executable (the default) or scan_readable_regions() for
+         *          ScannerKind::Readable when the target lives in .rdata / .data. Direct mode returns @c match +
+         *          disp_offset. RipRelative mode treats @c match + disp_offset as a disp32 field and resolves against
+         *          @c match + instr_end_offset. On success, the winning candidate's name is logged and returned.
          *
          *          Logging:
          *          - Debug on first success: "<label> resolved via '<name>' at 0x...".
          *          - Warning per candidate whose pattern fails to parse.
          *          - Warning on total failure.
          *
-         *          The success line is Debug-level, consistent with the other
-         *          resolution diagnostics, so it stays silent at the default
-         *          Info threshold; raise the log level to Debug to surface it
-         *          for build identification. No per-candidate "miss" line is
-         *          produced, so even a long cascade stays quiet at Info and
-         *          above. The implementation does not log again when
-         *          resolve_cascade_with_prologue_fallback() retries, so exactly
+         *          The success line is Debug-level, consistent with the other resolution diagnostics, so it stays
+         *          silent at the default
+         *          Info threshold; raise the log level to Debug to surface it for build identification. No
+         *          per-candidate "miss" line is produced, so even a long cascade stays quiet at Info and above. The
+         *          implementation does not log again when resolve_cascade_with_prologue_fallback() retries, so exactly
          *          one success line is emitted per resolve.
          *
          * @param candidates Ordered list of candidates. Empty -> EmptyCandidates.
          * @param label Human-readable identifier used in log messages.
          * @param kind Which scanner to search with. Defaults to
-         *             ScannerKind::Executable so existing call sites are
-         *             unchanged; pass ScannerKind::Readable for data-section
-         *             targets.
+         *             ScannerKind::Executable so existing call sites are unchanged; pass ScannerKind::Readable for
+         *             data-section targets.
          * @return ResolveHit on success; ResolveError on failure.
          */
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
@@ -536,149 +475,120 @@ namespace DetourModKit
 
         /**
          * @brief Cascade resolver with inline-hooked-prologue recovery.
-         * @details Equivalent to resolve_cascade() on the happy path. If every
-         *          candidate fails, rebuilds each Direct-mode candidate's
-         *          pattern with the first 5 bytes replaced by
-         *          `E9 ?? ?? ?? ??` (the near-JMP signature that SafetyHook
-         *          and MinHook write when another mod already hooked the
-         *          target) and retries. If the recovery path succeeds the
-         *          log line calls this out explicitly.
+         * @details Equivalent to resolve_cascade() on the happy path. If every candidate fails, rebuilds each
+         *          Direct-mode candidate's pattern with the first 5 bytes replaced by `E9 ?? ?? ?? ??` (the near-JMP
+         *          signature that SafetyHook and MinHook write when another mod already hooked the target) and retries.
+         *          If the recovery path succeeds the log line calls this out explicitly.
          *
-         *          RipRelative candidates are skipped in the fallback phase
-         *          since they target instructions deeper than the 5-byte
-         *          prologue and are unaffected by the overwrite.
+         *          RipRelative candidates are skipped in the fallback phase since they target instructions deeper than
+         *          the 5-byte prologue and are unaffected by the overwrite.
          *
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
          * @return ResolveHit on success; ResolveError on failure.
          */
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
-        resolve_cascade_with_prologue_fallback(std::span<const AddrCandidate> candidates,
-                                               std::string_view label);
+        resolve_cascade_with_prologue_fallback(std::span<const AddrCandidate> candidates, std::string_view label);
 
         /**
-         * @brief Module-scoped cascade: like resolve_cascade(), but searches only
-         *        the mapped image [range.base, range.end) and rejects any
-         *        resolution that lands outside it.
-         * @details A whole-process scan (resolve_cascade) returns the first
-         *          candidate that matches anywhere in the address space. For an
-         *          unpacked PE whose every hook target lives inside one module
-         *          that is unsafe: a generic-shaped candidate (a stock compiler
-         *          prologue, a `mov reg,[rip]; ...; ret` epilogue) can false-match
-         *          inside another injected module (a graphics overlay, a sibling
-         *          mod). Because the cascade is first-match-wins, the wrong match
-         *          is returned and shadows the correct in-module one; a caller's
-         *          post-resolution bounds check cannot undo it, since the cascade
-         *          has already committed to the colliding candidate.
+         * @brief Module-scoped cascade: like resolve_cascade(), but searches only the mapped image [range.base,
+         *        range.end) and rejects any resolution that lands outside it.
+         * @details A whole-process scan (resolve_cascade) returns the first candidate that matches anywhere in the
+         *          address space. For an unpacked PE whose every hook target lives inside one module that is unsafe: a
+         *          generic-shaped candidate (a stock compiler prologue, a `mov reg,[rip]; ...; ret` epilogue) can
+         *          false-match inside another injected module (a graphics overlay, a sibling mod). Because the cascade
+         *          is first-match-wins, the wrong match is returned and shadows the correct in-module one; a caller's
+         *          post-resolution bounds check cannot undo it, since the cascade has already committed to the
+         *          colliding candidate.
          *
-         *          This overload moves the scope and bounds decision inside the
-         *          cascade loop. A candidate wins only when it (1) parses, (2)
-         *          matches via a scan confined to [range.base, range.end), and
-         *          (3) resolves (Direct walk or RipRelative disp read) to an
-         *          address for which Memory::contains(range, addr) is true. Any
-         *          failure at any step falls through to the next candidate, so a
+         *          This overload moves the scope and bounds decision inside the cascade loop. A candidate wins only
+         *          when it (1) parses, (2) matches via a scan confined to [range.base, range.end), and (3) resolves
+         *          (Direct walk or RipRelative disp read) to an address for which Memory::contains(range, addr) is
+         *          true. Any failure at any step falls through to the next candidate, so a
          *          P1 that resolves out of module yields to the in-module P2/P3.
          *
          *          One scan of the contiguous image covers both .text and
          *          .rdata / .data candidates, so there is no ScannerKind
          *          parameter: the section split that ScannerKind selects for
-         *          whole-process sweeps is moot inside a single mapped PE. The
-         *          scan reuses the same per-region protection filter as the
-         *          whole-process scanners, so a non-readable interior page (a
-         *          section-alignment gap, a guard page, a sibling VirtualProtect)
-         *          is skipped rather than dereferenced.
+         *          whole-process sweeps is moot inside a single mapped PE. The scan reuses the same per-region
+         *          protection filter as the whole-process scanners, so a non-readable interior page (a
+         *          section-alignment gap, a guard page, a sibling VirtualProtect) is skipped rather than dereferenced.
          *
          * @param candidates Ordered list of candidates. Empty -> EmptyCandidates.
          * @param label Human-readable identifier used in log messages.
          * @param range The mapped image to scan, e.g. from
-         *              Memory::module_range_for(), Memory::own_module_range(), or
-         *              an explicit {base, base + SizeOfImage}.
-         * @return ResolveHit on success; ResolveError on failure. An invalid
-         *         @p range returns ResolveError::InvalidRange and never falls
-         *         back to a whole-process scan.
+         *              Memory::module_range_for(), Memory::own_module_range(), or an explicit {base, base +
+         *              SizeOfImage}.
+         * @return ResolveHit on success; ResolveError on failure. An invalid @p range returns
+         *         ResolveError::InvalidRange and never falls back to a whole-process scan.
          * @note Memory::contains gates reachability, not section identity: a
-         *       RipRelative candidate resolving into .rdata / .data inside the
-         *       image is accepted. Direct candidates that must land on code
-         *       should still be paired with is_likely_function_prologue().
-         * @pre @p range must describe a single contiguous mapped image. Do not
-         *      use this overload for packed or protected targets whose code is
-         *      unpacked into separate VirtualAlloc regions outside the module
-         *      image; use resolve_cascade() for those.
+         *       RipRelative candidate resolving into .rdata / .data inside the image is accepted. Direct candidates
+         *       that must land on code should still be paired with is_likely_function_prologue().
+         * @pre @p range must describe a single contiguous mapped image. Do not use this overload for packed or
+         *      protected targets whose code is unpacked into separate VirtualAlloc regions outside the module image;
+         *      use resolve_cascade() for those.
          */
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
-        resolve_cascade_in_module(std::span<const AddrCandidate> candidates,
-                                  std::string_view label, Memory::ModuleRange range);
+        resolve_cascade_in_module(std::span<const AddrCandidate> candidates, std::string_view label,
+                                  Memory::ModuleRange range);
 
         /**
          * @brief Module-scoped variant of resolve_cascade_with_prologue_fallback().
-         * @details Equivalent to resolve_cascade_in_module() on the happy path. If
-         *          every candidate fails, it rebuilds each Direct-mode candidate's
-         *          prologue as `E9 ?? ?? ?? ??` plus the original literal tail and
+         * @details Equivalent to resolve_cascade_in_module() on the happy path. If every candidate fails, it rebuilds
+         *          each Direct-mode candidate's prologue as `E9 ?? ?? ?? ??` plus the original literal tail and
          *          retries, confining both the uniqueness count and the match to
-         *          [range.base, range.end). The fallback scan is restricted to the
-         *          image's executable pages: a hooked near-JMP overwrites a code
-         *          prologue, never data, so a match in .rdata / .data would be a
-         *          false positive (the data-capable readable sweep is only used for
-         *          the primary candidate pass).
+         *          [range.base, range.end). The fallback scan is restricted to the image's executable pages: a hooked
+         *          near-JMP overwrites a code prologue, never data, so a match in .rdata / .data would be a false
+         *          positive (the data-capable readable sweep is only used for the primary candidate pass).
          *
-         *          The rebuilt near-JMP must be FOUND inside @p range, but its
-         *          jump destination is intentionally NOT constrained to @p range.
-         *          When a sibling mod inline-hooks the target, its E9 jumps to a
-         *          trampoline the sibling allocated outside this image, so the
-         *          destination is validated only against "lies in some loaded
-         *          module" (which still rejects a jump into unmapped or data-only
-         *          memory). Requiring the destination in-range would reject the
-         *          very recovery this path exists to perform.
+         *          The rebuilt near-JMP must be FOUND inside @p range, but its jump destination is intentionally NOT
+         *          constrained to @p range. When a sibling mod inline-hooks the target, its E9 jumps to a trampoline
+         *          the sibling allocated outside this image, so the destination is validated only against "lies in some
+         *          loaded module" (which still rejects a jump into unmapped or data-only memory). Requiring the
+         *          destination in-range would reject the very recovery this path exists to perform.
          *
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
          * @param range The mapped image to scan.
-         * @return ResolveHit on success; ResolveError on failure. An invalid
-         *         @p range returns ResolveError::InvalidRange.
+         * @return ResolveHit on success; ResolveError on failure. An invalid @p range returns
+         *         ResolveError::InvalidRange.
          */
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
-        resolve_cascade_in_module_with_prologue_fallback(
-            std::span<const AddrCandidate> candidates, std::string_view label,
-            Memory::ModuleRange range);
+        resolve_cascade_in_module_with_prologue_fallback(std::span<const AddrCandidate> candidates,
+                                                         std::string_view label, Memory::ModuleRange range);
 
         /**
          * @brief Convenience: resolve_cascade_in_module() scoped to the host EXE.
-         * @details Forwards to resolve_cascade_in_module() with the range of the
-         *          process's main executable image (Memory::host_module_range()).
-         *          This is the overwhelmingly common scope for an injected ASI
-         *          whose target code lives in the game's own EXE, and it removes
-         *          the boilerplate of building the range at every call site.
-         * @warning Use this ONLY when the host executable is the image that holds
-         *          the target code. For a game whose logic lives in a separate
-         *          module (for example an engine DLL loaded by a thin launcher
-         *          EXE), resolve that module's range explicitly and call
-         *          resolve_cascade_in_module(): the host EXE then holds none of
-         *          the target code, so host-scoping would scan the wrong image.
+         * @details Forwards to resolve_cascade_in_module() with the range of the process's main executable image
+         *          (Memory::host_module_range()). This is the overwhelmingly common scope for an injected ASI whose
+         *          target code lives in the game's own EXE, and it removes the boilerplate of building the range at
+         *          every call site.
+         * @warning Use this ONLY when the host executable is the image that holds the target code. For a game whose
+         *          logic lives in a separate module (for example an engine DLL loaded by a thin launcher
+         *          EXE), resolve that module's range explicitly and call resolve_cascade_in_module(): the host EXE then
+         *          holds none of the target code, so host-scoping would scan the wrong image.
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
-         * @return ResolveHit on success; ResolveError on failure. If the host
-         *         module range cannot be determined the result is
+         * @return ResolveHit on success; ResolveError on failure. If the host module range cannot be determined the
+         *         result is
          *         ResolveError::InvalidRange.
          */
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
-        resolve_cascade_in_host_module(std::span<const AddrCandidate> candidates,
-                                       std::string_view label);
+        resolve_cascade_in_host_module(std::span<const AddrCandidate> candidates, std::string_view label);
 
         /**
-         * @brief Host-EXE-scoped variant of
-         *        resolve_cascade_in_module_with_prologue_fallback().
-         * @details Forwards to resolve_cascade_in_module_with_prologue_fallback()
-         *          with Memory::host_module_range(). Same host-scope caveat as
-         *          resolve_cascade_in_host_module() applies.
+         * @brief Host-EXE-scoped variant of resolve_cascade_in_module_with_prologue_fallback().
+         * @details Forwards to resolve_cascade_in_module_with_prologue_fallback() with Memory::host_module_range().
+         *          Same host-scope caveat as resolve_cascade_in_host_module() applies.
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
-         * @return ResolveHit on success; ResolveError on failure. If the host
-         *         module range cannot be determined the result is
+         * @return ResolveHit on success; ResolveError on failure. If the host module range cannot be determined the
+         *         result is
          *         ResolveError::InvalidRange.
          */
         [[nodiscard]] std::expected<ResolveHit, ResolveError>
-        resolve_cascade_in_host_module_with_prologue_fallback(
-            std::span<const AddrCandidate> candidates, std::string_view label);
+        resolve_cascade_in_host_module_with_prologue_fallback(std::span<const AddrCandidate> candidates,
+                                                              std::string_view label);
 
         /**
          * @enum OperandKind
@@ -694,14 +604,12 @@ namespace DetourModKit
 
         /**
          * @struct CodeConstant
-         * @brief Declares a constant encoded in the engine's machine code so DMK
-         *        can re-derive it after a patch instead of hard-coding it.
-         * @details The code-side twin of the RTTI self-heal: where a struct stride
-         *          or field displacement is an immediate or `[reg + disp]` in a
-         *          dispatch loop, declare the AOB-resolved instruction site plus
-         *          which operand to read, and @ref read_code_constant decodes the
-         *          live instruction and returns the current value. A consumer
-         *          stops hand-reading the immediate every patch.
+         * @brief Declares a constant encoded in the engine's machine code so DMK can re-derive it after a patch instead
+         *        of hard-coding it.
+         * @details The code-side twin of the RTTI self-heal: where a struct stride or field displacement is an
+         *          immediate or `[reg + disp]` in a dispatch loop, declare the AOB-resolved instruction site plus which
+         *          operand to read, and @ref read_code_constant decodes the live instruction and returns the current
+         *          value. A consumer stops hand-reading the immediate every patch.
          */
         struct CodeConstant
         {
@@ -720,17 +628,14 @@ namespace DetourModKit
         };
 
         /**
-         * @brief Resolves @p cc.site, decodes the instruction there, and returns
-         *        the requested operand's current value.
+         * @brief Resolves @p cc.site, decodes the instruction there, and returns the requested operand's current value.
          * @details Always decodes and returns the live operand (sign-extended);
-         *          @c cc.nominal is never a short-circuit, so a same-shape /
-         *          different-value drift (e.g. a stride 232 -> 240) is reported as
-         *          the new value, which is the whole point. Self-validating and
+         *          @c cc.nominal is never a short-circuit, so a same-shape / different-value drift (e.g. a stride 232
+         *          -> 240) is reported as the new value, which is the whole point. Self-validating and
          *          fail-closed: a site that no longer decodes, or whose requested
-         *          operand is the wrong kind or out of range, returns a typed error
-         *          rather than a guess. A RIP-relative memory operand is resolved
-         *          to its absolute target (so the return is an absolute address in
-         *          that case); other relative forms are reported as a value as-is.
+         *          operand is the wrong kind or out of range, returns a typed error rather than a guess. A RIP-relative
+         *          memory operand is resolved to its absolute target (so the return is an absolute address in that
+         *          case); other relative forms are reported as a value as-is.
          * @param cc The code-constant declaration.
          * @param range Module image to resolve the site in. Defaults to the host EXE.
          * @return The decoded value, or:
@@ -743,8 +648,7 @@ namespace DetourModKit
          *           requested @c kind (or a memory operand carries no displacement).
          */
         [[nodiscard]] std::expected<std::int64_t, ResolveError>
-        read_code_constant(const CodeConstant &cc,
-                           Memory::ModuleRange range = Memory::host_module_range());
+        read_code_constant(const CodeConstant &cc, Memory::ModuleRange range = Memory::host_module_range());
 
         /**
          * @enum StringEncoding
@@ -823,13 +727,11 @@ namespace DetourModKit
         /**
          * @struct StringRefQuery
          * @brief A string-reference anchor query.
-         * @details Anchors a target on an immutable string literal in the image's
-         *          read-only data, then resolves the unique RIP-relative reference
-         *          to it. Strings survive game updates far better than the
-         *          code bytes around them, so a string xref is the most
-         *          update-resilient anchor source. @ref text is a non-owning view
-         *          into caller storage (a static table), matching the
-         *          @ref AddrCandidate / @ref Rtti::Landmark style.
+         * @details Anchors a target on an immutable string literal in the image's read-only data, then resolves the
+         *          unique RIP-relative reference to it. Strings survive game updates far better than the code bytes
+         *          around them, so a string xref is the most update-resilient anchor source. @ref text is a non-owning
+         *          view into caller storage (a static table), matching the @ref AddrCandidate / @ref Rtti::Landmark
+         *          style.
          */
         struct StringRefQuery
         {
@@ -838,101 +740,80 @@ namespace DetourModKit
             /// How it is stored in the image.
             StringEncoding encoding = StringEncoding::Utf8;
             /**
-             * @brief Match a trailing NUL so a prefix of a longer literal is not
-             *        matched (e.g. "Player" inside "PlayerController").
+             * @brief Match a trailing NUL so a prefix of a longer literal is not matched (e.g. "Player" inside
+             *        "PlayerController").
              */
             bool require_terminator = true;
             /// Selects the exact instruction site or the enclosing function heuristic.
             XrefReturn return_mode = XrefReturn::ReferencingInstruction;
             /**
              * @brief Selects the phase-2 reference scan.
-             * @details false (default) runs the fast, desync-immune all-offset
-             *          shape scan that recognizes only the REX.W
-             *          `lea`/`mov reg, [rip+disp32]` forms. true keeps that scan
-             *          and also runs a Zydis-verified linear sweep that recognizes
-             *          the rarer RIP-relative reference shapes
-             *          (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea`/`mov`,
-             *          ...), at the cost of a full decode per instruction. Both
-             *          scans apply the same exact-target and single-reference
-             *          uniqueness guards, so broad mode adds coverage without
-             *          relaxing fail-closed behaviour.
+             * @details false (default) runs the fast, desync-immune all-offset shape scan that recognizes only the
+             *          REX.W `lea`/`mov reg, [rip+disp32]` forms. true keeps that scan and also runs a Zydis-verified
+             *          linear sweep that recognizes the rarer RIP-relative reference shapes (`cmp [rip+d], imm`, `push
+             *          [rip+d]`, a no-REX `lea`/`mov`, ...), at the cost of a full decode per instruction. Both scans
+             *          apply the same exact-target and single-reference uniqueness guards, so broad mode adds coverage
+             *          without relaxing fail-closed behaviour.
              */
             bool broad_match = false;
         };
 
         /**
          * @brief Resolves a string-reference anchor inside one mapped image.
-         * @details Two fail-closed phases. Phase 1 locates the single occurrence of
-         *          @p query.text in the image's readable pages (zero ->
-         *          StringNotFound, more than one -> StringAmbiguous; the linker
-         *          pools identical literals, so a non-unique string is genuinely
-         *          ambiguous). Phase 2 scans the image's execute-readable pages for
-         *          the single RIP-relative reference whose resolved absolute target
-         *          is that string (zero -> NoReference, more than one ->
-         *          AmbiguousReference). A reference counts only when its resolved
-         *          target exactly equals the located string address, which is
-         *          itself a plausible in-image pointer, so the equality subsumes
-         *          the @ref Memory::plausible_userspace_ptr floor that
-         *          @ref resolve_rip_relative applies, without a separate check. The
-         *          xref is RIP-relative, so the result is ASLR-correct by
-         *          construction (no fixed address is baked in).
+         * @details Two fail-closed phases. Phase 1 locates the single occurrence of @p query.text in the image's
+         *          readable pages (zero ->
+         *          StringNotFound, more than one -> StringAmbiguous; the linker pools identical literals, so a
+         *          non-unique string is genuinely ambiguous). Phase 2 scans the image's execute-readable pages for the
+         *          single RIP-relative reference whose resolved absolute target is that string (zero -> NoReference,
+         *          more than one ->
+         *          AmbiguousReference). A reference counts only when its resolved target exactly equals the located
+         *          string address, which is itself a plausible in-image pointer, so the equality subsumes the @ref
+         *          Memory::plausible_userspace_ptr floor that @ref resolve_rip_relative applies, without a separate
+         *          check. The xref is RIP-relative, so the result is ASLR-correct by construction (no fixed address is
+         *          baked in).
          * @param query The string and how to interpret the reference.
          * @param range Module image to search. Defaults to the host EXE.
          * @return The referencing instruction (or enclosing function) address, or a
          *         StringXrefError.
          * @note By default phase 2 recognizes the dominant 64-bit string-load
          *       forms: REX.W `lea`/`mov reg, [rip+disp32]` (opcodes 8D / 8B with a
-         *       RIP ModRM). Set @ref StringRefQuery::broad_match to keep that
-         *       all-offset shape scan and additionally recognize the rarer
-         *       RIP-relative shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX
-         *       `lea`/`mov`) via a Zydis-verified sweep. Either way, a shape the
-         *       active scans do not model reports NoReference rather than a guess.
-         * @note Choose a string referenced exactly once (a long, specific literal
-         *       such as a format or assert message); short, common strings are
-         *       pooled and shared and will report StringAmbiguous / AmbiguousReference.
-         * @note StringEncoding::Utf16le widens each query character to a
-         *       little-endian 16-bit code unit by zero-extension (Latin-1), which
-         *       covers the ASCII identifiers anchor strings almost always are. A
-         *       non-ASCII character does not match its true UTF-16 encoding and
-         *       reports StringNotFound.
-         * @warning XrefReturn::EnclosingFunction is a bounded heuristic prologue
-         *          back-scan, not control-flow analysis; prefer the default
+         *       RIP ModRM). Set @ref StringRefQuery::broad_match to keep that all-offset shape scan and additionally
+         *       recognize the rarer
+         *       RIP-relative shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea`/`mov`) via a Zydis-verified
+         *       sweep. Either way, a shape the active scans do not model reports NoReference rather than a guess.
+         * @note Choose a string referenced exactly once (a long, specific literal such as a format or assert message);
+         *       short, common strings are pooled and shared and will report StringAmbiguous / AmbiguousReference.
+         * @note StringEncoding::Utf16le widens each query character to a little-endian 16-bit code unit by
+         *       zero-extension (Latin-1), which covers the ASCII identifiers anchor strings almost always are. A
+         *       non-ASCII character does not match its true UTF-16 encoding and reports StringNotFound.
+         * @warning XrefReturn::EnclosingFunction is a bounded heuristic prologue back-scan, not control-flow analysis;
+         *          prefer the default
          *          ReferencingInstruction when an exact site is acceptable.
          */
         [[nodiscard]] std::expected<std::uintptr_t, StringXrefError>
-        find_string_xref(const StringRefQuery &query,
-                         Memory::ModuleRange range = Memory::host_module_range());
+        find_string_xref(const StringRefQuery &query, Memory::ModuleRange range = Memory::host_module_range());
 
         /**
-         * @brief Cheap heuristic: does @p addr look like the first byte of a
-         *        real function body?
-         * @details Reads exactly one byte from @p addr behind a Memory::is_readable()
-         *          gate and rejects a small blacklist of bytes that are never the
-         *          first opcode of a callable x86-64 function:
+         * @brief Cheap heuristic: does @p addr look like the first byte of a real function body?
+         * @details Reads exactly one byte from @p addr under an SEH fault guard (Memory::seh_read) and rejects a small
+         *          blacklist of bytes that are never the first opcode of a callable x86-64 function:
          *
          *          - 0x00       uninitialised page / zero-fill BSS / NULL page
          *          - 0xCC       int3 breakpoint / alignment pad / debugger trap
          *          - 0xC2 0xC3  bare RET (stub, not a callable body)
          *
-         *          Returns true for every other byte, including 0xE9 / 0xEB /
-         *          the 0xFF 0x25 prefix of an indirect JMP, so a target whose
-         *          prologue has already been overwritten by SafetyHook or MinHook
-         *          still passes -- the resolver must succeed for nested-hook
-         *          scenarios.
+         *          Returns true for every other byte, including 0xE9 / 0xEB / the 0xFF 0x25 prefix of an indirect JMP,
+         *          so a target whose prologue has already been overwritten by SafetyHook or MinHook still passes -- the
+         *          resolver must succeed for nested-hook scenarios.
          *
-         *          This is the negative complement to
-         *          resolve_cascade_with_prologue_fallback(), which is a positive
-         *          recovery (rebuild the hooked-prologue pattern and retry). Both
-         *          can be used together: the cascade resolves the target, then
-         *          this helper filters scan poison if the AOB happened to land on
-         *          a zero page or an alignment pad.
+         *          This is the negative complement to resolve_cascade_with_prologue_fallback(), which is a positive
+         *          recovery (rebuild the hooked-prologue pattern and retry). Both can be used together: the cascade
+         *          resolves the target, then this helper filters scan poison if the AOB happened to land on a zero page
+         *          or an alignment pad.
          *
-         * @param addr Absolute address to probe. @p addr == 0 returns false
-         *             without reading memory. An unreadable address returns
-         *             false (the byte could not be read, so the answer is
-         *             "not a prologue").
-         * @return true if the byte at @p addr is not on the poison list and was
-         *         readable; false otherwise.
+         * @param addr Absolute address to probe. @p addr == 0 returns false without reading memory. An unreadable
+         *             address returns false (the byte could not be read, so the answer is "not a prologue").
+         * @return true if the byte at @p addr is not on the poison list and was readable; false otherwise.
          */
         [[nodiscard]] bool is_likely_function_prologue(std::uintptr_t addr) noexcept;
 
@@ -952,8 +833,8 @@ namespace DetourModKit
 
         /**
          * @brief Returns the SIMD tier that find_pattern() will use at runtime.
-         * @details Reflects both compile-time support (intrinsics available) and
-         *          runtime CPU detection (CPUID + OS XGETBV for AVX2).
+         * @details Reflects both compile-time support (intrinsics available) and runtime CPU detection (CPUID + OS
+         *          XGETBV for AVX2).
          */
         [[nodiscard]] SimdLevel active_simd_level() noexcept;
 

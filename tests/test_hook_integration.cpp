@@ -80,15 +80,14 @@ protected:
         s_original_compute_armor = nullptr;
 
         m_dll_handle = LoadLibraryA("hook_target_lib.dll");
-        ASSERT_NE(m_dll_handle, nullptr)
-            << "Failed to load hook_target_lib.dll. Error: " << GetLastError();
+        ASSERT_NE(m_dll_handle, nullptr) << "Failed to load hook_target_lib.dll. Error: " << GetLastError();
 
-        m_fn_compute_damage = reinterpret_cast<ComputeDamageFn>(
-            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_damage")));
-        m_fn_compute_armor = reinterpret_cast<ComputeArmorFn>(
-            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_armor")));
-        m_fn_compute_speed = reinterpret_cast<ComputeSpeedFn>(
-            reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_speed")));
+        m_fn_compute_damage =
+            reinterpret_cast<ComputeDamageFn>(reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_damage")));
+        m_fn_compute_armor =
+            reinterpret_cast<ComputeArmorFn>(reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_armor")));
+        m_fn_compute_speed =
+            reinterpret_cast<ComputeSpeedFn>(reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_speed")));
         m_fn_compute_critical = reinterpret_cast<ComputeCriticalFn>(
             reinterpret_cast<void *>(GetProcAddress(m_dll_handle, "compute_critical")));
 
@@ -98,8 +97,7 @@ protected:
         ASSERT_NE(m_fn_compute_critical, nullptr) << "compute_critical export not found";
 
         MODULEINFO mod_info{};
-        BOOL info_ok = GetModuleInformation(
-            GetCurrentProcess(), m_dll_handle, &mod_info, sizeof(mod_info));
+        BOOL info_ok = GetModuleInformation(GetCurrentProcess(), m_dll_handle, &mod_info, sizeof(mod_info));
         ASSERT_TRUE(info_ok) << "GetModuleInformation failed";
 
         m_module_base = reinterpret_cast<uintptr_t>(mod_info.lpBaseOfDll);
@@ -139,14 +137,10 @@ TEST_F(HookIntegrationTest, InlineHook_AlterReturnValue)
     EXPECT_EQ(m_fn_compute_damage(10, 5), 15);
 
     void *trampoline = nullptr;
-    auto result = m_hook_manager->create_inline_hook(
-        "DamageHook",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &trampoline);
+    auto result = m_hook_manager->create_inline_hook("DamageHook", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                     reinterpret_cast<void *>(&detour_compute_damage), &trampoline);
 
-    ASSERT_TRUE(result.has_value())
-        << "Hook creation failed: " << Hook::error_to_string(result.error());
+    ASSERT_TRUE(result.has_value()) << "Hook creation failed: " << Hook::error_to_string(result.error());
     ASSERT_NE(trampoline, nullptr);
 
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(trampoline);
@@ -159,21 +153,17 @@ TEST_F(HookIntegrationTest, InlineHook_AlterReturnValue)
 TEST_F(HookIntegrationTest, QueryAccessorsAreReentrantFromCallback)
 {
     void *trampoline = nullptr;
-    auto result = m_hook_manager->create_inline_hook(
-        "ReentrantQueryHook",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &trampoline);
-    ASSERT_TRUE(result.has_value())
-        << "Hook creation failed: " << Hook::error_to_string(result.error());
+    auto result =
+        m_hook_manager->create_inline_hook("ReentrantQueryHook", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                           reinterpret_cast<void *>(&detour_compute_damage), &trampoline);
+    ASSERT_TRUE(result.has_value()) << "Hook creation failed: " << Hook::error_to_string(result.error());
 
     const uintptr_t target = reinterpret_cast<uintptr_t>(m_fn_compute_damage);
 
-    // The callback runs while m_hooks_mutex is held shared. Calling the read-only
-    // query accessors from here used to recursively shared-lock the non-recursive
-    // shared_mutex (undefined behavior, deadlock-prone when a writer is queued). The
-    // accessors are now reentrancy-aware: they read under the lock the callback
-    // already holds. The callback must complete and return the correct values.
+    // The callback runs while m_hooks_mutex is held shared. The read-only query accessors are reentrancy-aware: invoked
+    // from inside a with_* callback they read under the lock the callback already holds instead of taking a second
+    // shared_lock on the non-recursive shared_mutex (undefined behavior, and deadlock-prone when a writer is queued
+    // between the two acquisitions). The callback must complete and return the correct values.
     auto status = m_hook_manager->with_inline_hook(
         "ReentrantQueryHook",
         [&](InlineHook &) -> HookStatus
@@ -196,8 +186,7 @@ TEST_F(HookIntegrationTest, QueryAccessorsAreReentrantFromCallback)
             // The VMT query accessor is reentrancy-aware too (no VMT hooks here).
             EXPECT_TRUE(m_hook_manager->get_vmt_hook_names().empty());
 
-            return m_hook_manager->get_hook_status("ReentrantQueryHook")
-                .value_or(HookStatus::Disabled);
+            return m_hook_manager->get_hook_status("ReentrantQueryHook").value_or(HookStatus::Disabled);
         });
 
     ASSERT_TRUE(status.has_value());
@@ -209,11 +198,9 @@ TEST_F(HookIntegrationTest, InlineHook_RemoveRestoresOriginal)
     EXPECT_EQ(m_fn_compute_damage(20, 10), 30);
 
     void *trampoline = nullptr;
-    auto result = m_hook_manager->create_inline_hook(
-        "DamageHookRemove",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &trampoline);
+    auto result =
+        m_hook_manager->create_inline_hook("DamageHookRemove", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                           reinterpret_cast<void *>(&detour_compute_damage), &trampoline);
     ASSERT_TRUE(result.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(trampoline);
 
@@ -235,27 +222,18 @@ TEST_F(HookIntegrationTest, InlineHook_MultipleExports)
     void *tramp_armor = nullptr;
     void *tramp_speed = nullptr;
 
-    auto r1 = m_hook_manager->create_inline_hook(
-        "MultiDamage",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp_damage);
+    auto r1 = m_hook_manager->create_inline_hook("MultiDamage", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                 reinterpret_cast<void *>(&detour_compute_damage), &tramp_damage);
     ASSERT_TRUE(r1.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp_damage);
 
-    auto r2 = m_hook_manager->create_inline_hook(
-        "MultiArmor",
-        reinterpret_cast<uintptr_t>(m_fn_compute_armor),
-        reinterpret_cast<void *>(&detour_compute_armor),
-        &tramp_armor);
+    auto r2 = m_hook_manager->create_inline_hook("MultiArmor", reinterpret_cast<uintptr_t>(m_fn_compute_armor),
+                                                 reinterpret_cast<void *>(&detour_compute_armor), &tramp_armor);
     ASSERT_TRUE(r2.has_value());
     s_original_compute_armor = reinterpret_cast<ComputeArmorFn>(tramp_armor);
 
-    auto r3 = m_hook_manager->create_inline_hook(
-        "MultiSpeed",
-        reinterpret_cast<uintptr_t>(m_fn_compute_speed),
-        reinterpret_cast<void *>(&detour_compute_speed),
-        &tramp_speed);
+    auto r3 = m_hook_manager->create_inline_hook("MultiSpeed", reinterpret_cast<uintptr_t>(m_fn_compute_speed),
+                                                 reinterpret_cast<void *>(&detour_compute_speed), &tramp_speed);
     ASSERT_TRUE(r3.has_value());
 
     EXPECT_EQ(m_fn_compute_damage(5, 3), 16);
@@ -282,13 +260,10 @@ TEST_F(HookIntegrationTest, MidHook_InspectAndModifyArgs)
         ctx.rdx = 2;
     };
 
-    auto result = m_hook_manager->create_mid_hook(
-        "ArmorMidHook",
-        reinterpret_cast<uintptr_t>(m_fn_compute_armor),
-        mid_detour);
+    auto result =
+        m_hook_manager->create_mid_hook("ArmorMidHook", reinterpret_cast<uintptr_t>(m_fn_compute_armor), mid_detour);
 
-    ASSERT_TRUE(result.has_value())
-        << "Mid hook creation failed: " << Hook::error_to_string(result.error());
+    ASSERT_TRUE(result.has_value()) << "Mid hook creation failed: " << Hook::error_to_string(result.error());
 
     int hooked_result = m_fn_compute_armor(5, 10);
     EXPECT_EQ(hooked_result, 200);
@@ -302,24 +277,18 @@ TEST_F(HookIntegrationTest, AOBScan_FindAndHook)
     auto pattern = Scanner::parse_aob(aob_str);
     ASSERT_TRUE(pattern.has_value()) << "Failed to parse AOB pattern: " << aob_str;
 
-    const auto *found = Scanner::find_pattern(
-        reinterpret_cast<const std::byte *>(m_module_base),
-        m_module_size,
-        pattern.value());
+    const auto *found =
+        Scanner::find_pattern(reinterpret_cast<const std::byte *>(m_module_base), m_module_size, pattern.value());
     ASSERT_NE(found, nullptr) << "AOB pattern not found in module";
 
     auto fn_addr = reinterpret_cast<uintptr_t>(m_fn_compute_damage);
     auto found_addr = reinterpret_cast<uintptr_t>(found);
 
-    EXPECT_EQ(found_addr, fn_addr)
-        << "AOB match at " << found_addr << " does not equal export at " << fn_addr;
+    EXPECT_EQ(found_addr, fn_addr) << "AOB match at " << found_addr << " does not equal export at " << fn_addr;
 
     void *trampoline = nullptr;
-    auto result = m_hook_manager->create_inline_hook(
-        "AOBFoundDamageHook",
-        fn_addr,
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &trampoline);
+    auto result = m_hook_manager->create_inline_hook("AOBFoundDamageHook", fn_addr,
+                                                     reinterpret_cast<void *>(&detour_compute_damage), &trampoline);
 
     ASSERT_TRUE(result.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(trampoline);
@@ -335,25 +304,16 @@ TEST_F(HookIntegrationTest, AOBScan_HookManager_EndToEnd)
     auto pattern = Scanner::parse_aob(aob_str);
     ASSERT_TRUE(pattern.has_value()) << "Failed to parse AOB pattern: " << aob_str;
 
-    const auto *found = Scanner::find_pattern(
-        reinterpret_cast<const std::byte *>(m_module_base),
-        m_module_size,
-        pattern.value());
+    const auto *found =
+        Scanner::find_pattern(reinterpret_cast<const std::byte *>(m_module_base), m_module_size, pattern.value());
     ASSERT_NE(found, nullptr) << "AOB pattern not found in module";
     EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(m_fn_compute_damage));
 
     void *trampoline = nullptr;
-    auto result = m_hook_manager->create_inline_hook_aob(
-        "AOBEndToEnd",
-        m_module_base,
-        m_module_size,
-        aob_str,
-        0,
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &trampoline);
+    auto result = m_hook_manager->create_inline_hook_aob("AOBEndToEnd", m_module_base, m_module_size, aob_str, 0,
+                                                         reinterpret_cast<void *>(&detour_compute_damage), &trampoline);
 
-    ASSERT_TRUE(result.has_value())
-        << "AOB end-to-end hook failed with pattern: " << aob_str;
+    ASSERT_TRUE(result.has_value()) << "AOB end-to-end hook failed with pattern: " << aob_str;
     ASSERT_NE(trampoline, nullptr);
 
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(trampoline);
@@ -372,11 +332,8 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
 
     // --- Cycle 1: hook, verify, teardown ---
     void *tramp1 = nullptr;
-    auto r1 = m_hook_manager->create_inline_hook(
-        "HotReloadDamage",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp1);
+    auto r1 = m_hook_manager->create_inline_hook("HotReloadDamage", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                 reinterpret_cast<void *>(&detour_compute_damage), &tramp1);
     ASSERT_TRUE(r1.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp1);
 
@@ -389,11 +346,8 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
 
     // --- Cycle 2: re-hook same function, verify, teardown ---
     void *tramp2 = nullptr;
-    auto r2 = m_hook_manager->create_inline_hook(
-        "HotReloadDamage",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp2);
+    auto r2 = m_hook_manager->create_inline_hook("HotReloadDamage", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                 reinterpret_cast<void *>(&detour_compute_damage), &tramp2);
     ASSERT_TRUE(r2.has_value()) << "Re-hook after remove_all must succeed";
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp2);
 
@@ -410,11 +364,9 @@ TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
     EXPECT_EQ(m_fn_compute_damage(4, 6), 10);
 
     void *tramp = nullptr;
-    auto r1 = m_hook_manager->create_inline_hook(
-        "ShutdownRecreateDmg",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp);
+    auto r1 =
+        m_hook_manager->create_inline_hook("ShutdownRecreateDmg", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                           reinterpret_cast<void *>(&detour_compute_damage), &tramp);
     ASSERT_TRUE(r1.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
@@ -429,11 +381,9 @@ TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
 
     // Simulate re-initialization after hot-reload
     tramp = nullptr;
-    auto r2 = m_hook_manager->create_inline_hook(
-        "ShutdownRecreateDmg",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp);
+    auto r2 =
+        m_hook_manager->create_inline_hook("ShutdownRecreateDmg", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                           reinterpret_cast<void *>(&detour_compute_damage), &tramp);
     ASSERT_TRUE(r2.has_value()) << "Hook recreation after shutdown must succeed";
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
@@ -451,11 +401,8 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
 
     // --- Cycle 1: inline + mid hooks ---
     void *tramp = nullptr;
-    auto r1 = m_hook_manager->create_inline_hook(
-        "ReloadInline",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp);
+    auto r1 = m_hook_manager->create_inline_hook("ReloadInline", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                 reinterpret_cast<void *>(&detour_compute_damage), &tramp);
     ASSERT_TRUE(r1.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
@@ -465,10 +412,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
         ctx.rdx = 1;
     };
 
-    auto r2 = m_hook_manager->create_mid_hook(
-        "ReloadMid",
-        reinterpret_cast<uintptr_t>(m_fn_compute_armor),
-        mid_detour);
+    auto r2 = m_hook_manager->create_mid_hook("ReloadMid", reinterpret_cast<uintptr_t>(m_fn_compute_armor), mid_detour);
     ASSERT_TRUE(r2.has_value());
 
     EXPECT_EQ(m_fn_compute_damage(3, 7), 20);
@@ -487,18 +431,12 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
 
     // --- Cycle 2: recreate both ---
     tramp = nullptr;
-    auto r3 = m_hook_manager->create_inline_hook(
-        "ReloadInline",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp);
+    auto r3 = m_hook_manager->create_inline_hook("ReloadInline", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                 reinterpret_cast<void *>(&detour_compute_damage), &tramp);
     ASSERT_TRUE(r3.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
-    auto r4 = m_hook_manager->create_mid_hook(
-        "ReloadMid",
-        reinterpret_cast<uintptr_t>(m_fn_compute_armor),
-        mid_detour);
+    auto r4 = m_hook_manager->create_mid_hook("ReloadMid", reinterpret_cast<uintptr_t>(m_fn_compute_armor), mid_detour);
     ASSERT_TRUE(r4.has_value());
 
     EXPECT_EQ(m_fn_compute_damage(3, 7), 20);
@@ -510,11 +448,8 @@ TEST_F(HookIntegrationTest, HotReload_EnableDisableCycle)
     EXPECT_EQ(m_fn_compute_damage(2, 3), 5);
 
     void *tramp = nullptr;
-    auto r1 = m_hook_manager->create_inline_hook(
-        "ToggleHook",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp);
+    auto r1 = m_hook_manager->create_inline_hook("ToggleHook", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                 reinterpret_cast<void *>(&detour_compute_damage), &tramp);
     ASSERT_TRUE(r1.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
@@ -536,11 +471,8 @@ TEST_F(HookIntegrationTest, HotReload_EnableDisableCycle)
     EXPECT_EQ(m_fn_compute_damage(2, 3), 5);
 
     tramp = nullptr;
-    auto r2 = m_hook_manager->create_inline_hook(
-        "ToggleHook",
-        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-        reinterpret_cast<void *>(&detour_compute_damage),
-        &tramp);
+    auto r2 = m_hook_manager->create_inline_hook("ToggleHook", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                 reinterpret_cast<void *>(&detour_compute_damage), &tramp);
     ASSERT_TRUE(r2.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
@@ -553,21 +485,15 @@ TEST_F(HookIntegrationTest, HotReload_MultipleCycles)
 
     for (int cycle = 0; cycle < num_cycles; ++cycle)
     {
-        EXPECT_EQ(m_fn_compute_damage(1, 1), 2)
-            << "Original behavior broken before cycle " << cycle;
+        EXPECT_EQ(m_fn_compute_damage(1, 1), 2) << "Original behavior broken before cycle " << cycle;
 
         void *tramp = nullptr;
-        auto result = m_hook_manager->create_inline_hook(
-            "CycleHook",
-            reinterpret_cast<uintptr_t>(m_fn_compute_damage),
-            reinterpret_cast<void *>(&detour_compute_damage),
-            &tramp);
-        ASSERT_TRUE(result.has_value())
-            << "Hook creation failed on cycle " << cycle;
+        auto result = m_hook_manager->create_inline_hook("CycleHook", reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+                                                         reinterpret_cast<void *>(&detour_compute_damage), &tramp);
+        ASSERT_TRUE(result.has_value()) << "Hook creation failed on cycle " << cycle;
         s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
-        EXPECT_EQ(m_fn_compute_damage(1, 1), 4)
-            << "Hooked behavior wrong on cycle " << cycle;
+        EXPECT_EQ(m_fn_compute_damage(1, 1), 4) << "Hooked behavior wrong on cycle " << cycle;
 
         m_hook_manager->remove_all_hooks();
         s_original_compute_damage = nullptr;

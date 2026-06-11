@@ -4,9 +4,9 @@
 /**
  * @file input_codes.hpp
  * @brief Unified input code types for keyboard, mouse, and gamepad inputs.
- * @details Provides a tagged InputCode type that identifies both the device source
- *          and button/key code, along with named key resolution for human-readable
- *          configuration strings. Gamepad codes correspond to XInput button masks.
+ * @details Provides a tagged InputCode type that identifies both the device source and button/key code, along with
+ *          named key resolution for human-readable configuration strings. Gamepad codes correspond to XInput button
+ *          masks.
  */
 
 #include <cstdint>
@@ -53,12 +53,10 @@ namespace DetourModKit
     /**
      * @struct InputCode
      * @brief A tagged input identifier combining a device source and a button/key code.
-     * @details For Keyboard and Mouse sources, the code is a Windows Virtual Key code
-     *          (usable with GetAsyncKeyState). For Gamepad, the code is an XInput
-     *          button bitmask or a synthetic trigger identifier (see GamepadCode).
-     *          For MouseWheel, the code is a WheelCode direction identifier; the
-     *          wheel is an event with no polled key state, so it is captured by the
-     *          input layer's window-procedure hook and surfaced as a momentary
+     * @details For Keyboard and Mouse sources, the code is a Windows Virtual Key code (usable with GetAsyncKeyState).
+     *          For Gamepad, the code is an XInput button bitmask or a synthetic trigger identifier (see GamepadCode).
+     *          For MouseWheel, the code is a WheelCode direction identifier; the wheel is an event with no polled key
+     *          state, so it is captured by the input layer's window-procedure hook and surfaced as a momentary
      *          per-direction pulse (trigger-only, never a held modifier).
      */
     struct InputCode
@@ -76,8 +74,7 @@ namespace DetourModKit
     {
         std::size_t operator()(const InputCode &ic) const noexcept
         {
-            return std::hash<int>{}(ic.code) ^
-                   (std::hash<uint8_t>{}(static_cast<uint8_t>(ic.source)) << 16);
+            return std::hash<int>{}(ic.code) ^ (std::hash<uint8_t>{}(static_cast<uint8_t>(ic.source)) << 16);
         }
     };
 
@@ -124,10 +121,9 @@ namespace DetourModKit
     /**
      * @namespace GamepadCode
      * @brief XInput-compatible gamepad button codes and synthetic analog identifiers.
-     * @details Digital button codes match XInput XINPUT_GAMEPAD_* bitmask values.
-     *          LeftTrigger/RightTrigger and thumbstick direction codes are synthetic
-     *          identifiers for analog inputs treated as digital with configurable
-     *          deadzone thresholds.
+     * @details Digital button codes match XInput XINPUT_GAMEPAD_* bitmask values. LeftTrigger/RightTrigger and
+     *          thumbstick direction codes are synthetic identifiers for analog inputs treated as digital with
+     *          configurable deadzone thresholds.
      */
     namespace GamepadCode
     {
@@ -176,9 +172,8 @@ namespace DetourModKit
     /**
      * @namespace WheelCode
      * @brief Mouse-wheel direction identifiers used by InputSource::MouseWheel codes.
-     * @details Values are 1-based and dense so the input layer can map a code to a
-     *          zero-based direction index with `code - WheelCode::Up`. Up/Down are
-     *          the vertical wheel; Left/Right are the horizontal (tilt) wheel.
+     * @details Values are 1-based and dense so the input layer can map a code to a zero-based direction index with
+     *          `code - WheelCode::Up`. Up/Down are the vertical wheel; Left/Right are the horizontal (tilt) wheel.
      */
     namespace WheelCode
     {
@@ -190,8 +185,8 @@ namespace DetourModKit
 
     /**
      * @brief Attempts to resolve a human-readable name to an InputCode.
-     * @details Performs case-insensitive matching against a built-in table of known
-     *          key, mouse button, and gamepad button names.
+     * @details Performs case-insensitive matching against a built-in table of known key, mouse button, and gamepad
+     *          button names.
      *
      *          Recognized name formats:
      *          - Keyboard: "A"-"Z", "0"-"9", "F1"-"F24", "Ctrl", "Shift", "Alt",
@@ -214,8 +209,8 @@ namespace DetourModKit
 
     /**
      * @brief Formats an InputCode as a human-readable string.
-     * @details Returns the canonical name if the code is in the lookup table,
-     *          otherwise falls back to a hexadecimal representation (e.g., "0x72").
+     * @details Returns the canonical name if the code is in the lookup table, otherwise falls back to a hexadecimal
+     *          representation (e.g., "0x72").
      * @param code The input code to format.
      * @return std::string Formatted string.
      */

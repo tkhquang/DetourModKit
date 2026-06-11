@@ -5,21 +5,14 @@
 using DetourModKit::Diagnostics::LeakSubsystem;
 namespace diag = DetourModKit::Diagnostics;
 
-// The counters are process-global. ctest runs each test in its own process, and
-// the instrumented loader-lock paths never fire under a normal test run, so a
-// reset in SetUp gives each case a clean, deterministic starting point.
+// The counters are process-global. ctest runs each test in its own process, and the instrumented loader-lock paths
+// never fire under a normal test run, so a reset in SetUp gives each case a clean, deterministic starting point.
 class DiagnosticsTest : public ::testing::Test
 {
 protected:
-    void SetUp() override
-    {
-        diag::reset_intentional_leaks();
-    }
+    void SetUp() override { diag::reset_intentional_leaks(); }
 
-    void TearDown() override
-    {
-        diag::reset_intentional_leaks();
-    }
+    void TearDown() override { diag::reset_intentional_leaks(); }
 };
 
 TEST_F(DiagnosticsTest, StartsZeroAfterReset)
@@ -55,8 +48,8 @@ TEST_F(DiagnosticsTest, TotalSumsAcrossSubsystems)
 
 TEST_F(DiagnosticsTest, OutOfRangeSubsystemIsIgnored)
 {
-    // The Count sentinel (and any value at or beyond it) must be a no-op, never an
-    // out-of-bounds write into the counter array.
+    // The Count sentinel (and any value at or beyond it) must be a no-op, never an out-of-bounds write into the counter
+    // array.
     diag::record_intentional_leak(LeakSubsystem::Count);
     EXPECT_EQ(diag::total_intentional_leaks(), 0u);
     EXPECT_EQ(diag::intentional_leak_count(LeakSubsystem::Count), 0u);

@@ -15,8 +15,8 @@ namespace DetourModKit
      * @class WinFileStreamBuf
      * @brief Custom stream buffer using Win32 CreateFile with shared access flags.
      * @details Opens files with FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-     *          allowing external processes to read log files while they are being written.
-     *          Uses an internal buffer to minimize WriteFile syscalls.
+     *          allowing external processes to read log files while they are being written. Uses an internal buffer to
+     *          minimize WriteFile syscalls.
      */
     class WinFileStreamBuf : public std::streambuf
     {
@@ -31,8 +31,8 @@ namespace DetourModKit
         WinFileStreamBuf(WinFileStreamBuf &&) = delete;
         WinFileStreamBuf &operator=(WinFileStreamBuf &&) = delete;
 
-        bool open(const std::string &path, std::ios_base::openmode mode);
-        bool open(const std::wstring &path, std::ios_base::openmode mode);
+        [[nodiscard]] bool open(const std::string &path, std::ios_base::openmode mode);
+        [[nodiscard]] bool open(const std::wstring &path, std::ios_base::openmode mode);
         [[nodiscard]] bool is_open() const noexcept;
         void close();
 
@@ -51,16 +51,14 @@ namespace DetourModKit
     /**
      * @class WinFileStream
      * @brief Output stream backed by Win32 file handles with shared access.
-     * @details Drop-in replacement for std::ofstream that guarantees concurrent
-     *          read access from external processes on Windows. Uses WinFileStreamBuf
-     *          for buffered I/O through the standard streambuf interface.
+     * @details Drop-in replacement for std::ofstream that guarantees concurrent read access from external processes on
+     *          Windows. Uses WinFileStreamBuf for buffered I/O through the standard streambuf interface.
      */
     class WinFileStream : public std::ostream
     {
     public:
         WinFileStream();
-        explicit WinFileStream(const std::string &path,
-                               std::ios_base::openmode mode = std::ios_base::out);
+        explicit WinFileStream(const std::string &path, std::ios_base::openmode mode = std::ios_base::out);
         ~WinFileStream() noexcept override;
 
         WinFileStream(const WinFileStream &) = delete;

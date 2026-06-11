@@ -5,40 +5,32 @@
  * @file event_dispatcher.hpp
  * @brief Typed event dispatcher with RAII subscription management.
  *
- * @details Provides a per-event-type pub/sub dispatcher. Subscribers receive
- *          events by const reference. Subscriptions are RAII objects that
- *          automatically unsubscribe on destruction.
+ * @details Provides a per-event-type pub/sub dispatcher. Subscribers receive events by const reference. Subscriptions
+ *          are RAII objects that automatically unsubscribe on destruction.
  *
  *          **Threading model:**
  *          - `emit()` / `emit_safe()` avoid any `shared_mutex` / reader lock.
- *            The zero-subscriber fast path is wait-free: a single
- *            `memory_order_acquire` load of an atomic counter. When
- *            subscribers exist, an atomic acquire-load of a
- *            `std::shared_ptr<const std::vector<Entry>>` snapshot is
- *            performed, then the contiguous handler vector is iterated.
- *            The snapshot load is genuinely lock-free on toolchains that
- *            provide a DWCAS-backed `std::atomic<std::shared_ptr<T>>`
- *            (for example libstdc++ on x86_64), and may use an
- *            implementation-internal short-critical-section bit lock on
- *            toolchains that do not (notably MSVC's STL).
+ *            The zero-subscriber fast path is wait-free: a single `memory_order_acquire` load of an atomic counter.
+ *            When subscribers exist, an atomic acquire-load of a `std::shared_ptr<const std::vector<Entry>>` snapshot
+ *            is performed, then the contiguous handler vector is iterated. The snapshot load is genuinely lock-free on
+ *            toolchains that provide a DWCAS-backed `std::atomic<std::shared_ptr<T>>` (for example libstdc++ on
+ *            x86_64), and may use an implementation-internal short-critical-section bit lock on toolchains that do not
+ *            (notably MSVC's STL).
  *          - `subscribe()` / manual `unsubscribe()` serialize writers through
- *            a small `std::mutex` and publish a new immutable snapshot via
- *            copy-on-write. Mutation paths allocate; see the `subscribe()`,
- *            `unsubscribe()`, and `clear()` method docs for the OOM contract.
+ *            a small `std::mutex` and publish a new immutable snapshot via copy-on-write. Mutation paths allocate; see
+ *            the `subscribe()`, `unsubscribe()`, and `clear()` method docs for the OOM contract.
  *          - Safe to emit from multiple threads concurrently (e.g., hook callbacks).
  *          - Safe to subscribe/unsubscribe from any thread.
  *
  *          **Performance characteristics:**
  *          - `emit()`: atomic acquire-load of a `shared_ptr` snapshot, then
- *            linear iteration over the contiguous handler vector. No
- *            user-visible mutex acquisition on the hot path. When there are
- *            no subscribers, `emit()` skips the snapshot load entirely via
- *            the atomic counter (wait-free fast path).
+ *            linear iteration over the contiguous handler vector. No user-visible mutex acquisition on the hot path.
+ *            When there are no subscribers, `emit()` skips the snapshot load entirely via the atomic counter (wait-free
+ *            fast path).
  *          - `subscribe()` / `unsubscribe()`: copy-on-write. Each writer
- *            allocates a new handler vector (O(n) in the current subscriber
- *            count), appends or removes an entry, and publishes it atomically.
- *            Typical dispatcher usage is 1-10 subscribers and write-rarely,
- *            so the O(n) publish cost is negligible in practice.
+ *            allocates a new handler vector (O(n) in the current subscriber count), appends or removes an entry, and
+ *            publishes it atomically. Typical dispatcher usage is 1-10 subscribers and write-rarely, so the O(n)
+ *            publish cost is negligible in practice.
  *          - No heap allocation on `emit()` beyond the `shared_ptr` refcount
  *            bump. Handler vector is cache-friendly.
  *
@@ -79,27 +71,21 @@ namespace DetourModKit
     /**
      * @brief RAII subscription guard that unsubscribes on destruction.
      *
-     * @details Move-only. When the guard is destroyed or reset, the associated
-     *          handler is removed from the dispatcher. If the dispatcher has
-     *          already been destroyed, the unsubscribe is silently skipped
-     *          (weak_ptr safety).
+     * @details Move-only. When the guard is destroyed or reset, the associated handler is removed from the dispatcher.
+     *          If the dispatcher has already been destroyed, the unsubscribe is silently skipped (weak_ptr safety).
      */
     class Subscription
     {
     public:
         Subscription() noexcept = default;
 
-        ~Subscription() noexcept
-        {
-            reset();
-        }
+        ~Subscription() noexcept { reset(); }
 
         Subscription(const Subscription &) = delete;
         Subscription &operator=(const Subscription &) = delete;
 
         Subscription(Subscription &&other) noexcept
-            : m_alive(std::move(other.m_alive)),
-              m_unsubscribe(std::move(other.m_unsubscribe))
+            : m_alive(std::move(other.m_alive)), m_unsubscribe(std::move(other.m_unsubscribe))
         {
             other.m_unsubscribe = nullptr;
         }
@@ -118,17 +104,13 @@ namespace DetourModKit
 
         /**
          * @brief Manually unsubscribes. Safe to call multiple times.
-         * @details If called from within a handler on the same dispatcher
-         *          (i.e. emitting_depth > 0 on this thread), the unsubscribe
-         *          is silently skipped and the subscription remains active.
-         *          The m_unsubscribe lambda is retained so that a subsequent
-         *          reset() call outside the emit stack -- including the
-         *          Subscription destructor -- will complete the removal.
-         *          If the Subscription is also destroyed inside the same
-         *          handler scope, the destructor's reset() is likewise
-         *          skipped because emitting_depth is still positive.
-         *          This keeps the no-mutation-during-emit invariant intact
-         *          so the in-flight snapshot iteration remains consistent.
+         * @details If called from within a handler on the same dispatcher (i.e. emitting_depth > 0 on this thread), the
+         *          unsubscribe is silently skipped and the subscription remains active. The m_unsubscribe lambda is
+         *          retained so that a subsequent reset() call outside the emit stack -- including the
+         *          Subscription destructor -- will complete the removal. If the Subscription is also destroyed inside
+         *          the same handler scope, the destructor's reset() is likewise skipped because emitting_depth is still
+         *          positive. This keeps the no-mutation-during-emit invariant intact so the in-flight snapshot
+         *          iteration remains consistent.
          */
         void reset() noexcept
         {
@@ -144,14 +126,10 @@ namespace DetourModKit
         }
 
         /// Returns true if this subscription is still active.
-        [[nodiscard]] bool active() const noexcept
-        {
-            return m_unsubscribe != nullptr && !m_alive.expired();
-        }
+        [[nodiscard]] bool active() const noexcept { return m_unsubscribe != nullptr && !m_alive.expired(); }
 
     private:
-        template <typename E>
-        friend class EventDispatcher;
+        template <typename E> friend class EventDispatcher;
 
         Subscription(std::weak_ptr<void> alive, std::function<bool()> unsub) noexcept
             : m_alive(std::move(alive)), m_unsubscribe(std::move(unsub))
@@ -165,11 +143,10 @@ namespace DetourModKit
     /**
      * @brief Thread-safe typed event dispatcher with RAII subscription management.
      *
-     * @tparam Event The event type. Must be copyable or movable. Handlers receive
-     *               events by const reference.
+     * @tparam Event The event type. Must be copyable or movable. Handlers receive events by const reference.
      *
-     * @details Each EventDispatcher manages a single event type. For multiple event
-     *          types, compose multiple dispatchers:
+     * @details Each EventDispatcher manages a single event type. For multiple event types, compose multiple
+     *          dispatchers:
      *          @code
      *          struct MyEvents {
      *              EventDispatcher<PlayerStateChanged> player_state;
@@ -180,45 +157,38 @@ namespace DetourModKit
      *
      * **Thread safety:**
      * - `emit()` / `emit_safe()`: the zero-subscriber fast path is wait-free
-     *   (single atomic counter load). Otherwise acquires a `shared_ptr`
-     *   snapshot of the immutable handler list and iterates it. The snapshot
-     *   load avoids any reader lock; it is lock-free on toolchains with a
-     *   DWCAS-backed `std::atomic<std::shared_ptr<T>>` and may use an
-     *   implementation-internal bit lock on toolchains that do not.
+     *   (single atomic counter load). Otherwise acquires a `shared_ptr` snapshot of the immutable handler list and
+     *   iterates it. The snapshot load avoids any reader lock; it is lock-free on toolchains with a
+     *   DWCAS-backed `std::atomic<std::shared_ptr<T>>` and may use an implementation-internal bit lock on toolchains
+     *   that do not.
      * - `subscribe()` / `unsubscribe()`: copy-on-write under a small writer
-     *   mutex. Each mutation allocates a new handler vector, appends or
-     *   removes the entry, and publishes the new snapshot atomically. See
-     *   the method docs for the OOM contract.
+     *   mutex. Each mutation allocates a new handler vector, appends or removes the entry, and publishes the new
+     *   snapshot atomically. See the method docs for the OOM contract.
      * - Handlers are invoked while the snapshot's `shared_ptr` keeps the
-     *   vector alive. A thread-local reentrancy guard detects and rejects
-     *   subscribe/unsubscribe calls from within a handler; the guard is what
-     *   guarantees the user's "do not mutate during emit" invariant, not the
-     *   snapshot mechanism.
+     *   vector alive. A thread-local reentrancy guard detects and rejects subscribe/unsubscribe calls from within a
+     *   handler; the guard is what guarantees the user's "do not mutate during emit" invariant, not the snapshot
+     *   mechanism.
      *
-     * **Reentrancy guard scope:** The guard is per-template-instantiation,
-     * not per-instance. Two dispatchers of the same Event type share the
-     * same thread-local counter. Subscribing to a second dispatcher of
-     * the same type from within a handler on the first will be rejected.
-     * Use distinct event types to avoid this (the typical usage pattern).
+     * **Reentrancy guard scope:** The guard is per-template-instantiation, not per-instance. Two dispatchers of the
+     * same Event type share the same thread-local counter. Subscribing to a second dispatcher of the same type from
+     * within a handler on the first will be rejected. Use distinct event types to avoid this (the typical usage
+     * pattern).
      *
-     * **Subscribe/emit ordering invariant:** A subscribe() performs a
-     * release-store on both the snapshot pointer and the atomic handler
-     * count. Any thread that observes the Subscription object returned
-     * from subscribe() (or synchronizes-with the thread that did) will
-     * see the subscription in subsequent emits. Without such a
-     * happens-before edge, a concurrent emit may or may not observe a
-     * freshly-published handler -- this matches the user's own ordering.
+     * **Subscribe/emit ordering invariant:** A subscribe() performs a release-store on both the snapshot pointer and
+     * the atomic handler count. Any thread that observes the Subscription object returned from subscribe() (or
+     * synchronizes-with the thread that did) will see the subscription in subsequent emits. Without such a
+     * happens-before edge, a concurrent emit may or may not observe a freshly-published handler -- this matches the
+     * user's own ordering.
      */
-    template <typename Event>
-    class EventDispatcher
+    template <typename Event> class EventDispatcher
     {
     public:
         /// Handler function signature: receives the event by const reference.
         using Handler = std::function<void(const Event &)>;
 
     private:
-        // Private type aliases surfaced here so they are visible to the
-        // public API's member declarations and constructor below.
+        // Private type aliases surfaced here so they are visible to the public API's member declarations and
+        // constructor below.
         struct Entry
         {
             SubscriptionId id;
@@ -229,11 +199,7 @@ namespace DetourModKit
         using SharedList = std::shared_ptr<const HandlerList>;
 
     public:
-        EventDispatcher()
-            : m_handlers(std::make_shared<const HandlerList>()),
-              m_alive(std::make_shared<char>('\0'))
-        {
-        }
+        EventDispatcher() : m_handlers(std::make_shared<const HandlerList>()), m_alive(std::make_shared<char>('\0')) {}
 
         ~EventDispatcher() noexcept = default;
 
@@ -244,13 +210,11 @@ namespace DetourModKit
 
         /**
          * @brief Subscribes a handler to this event type.
-         * @param handler Callable invoked on each emit(). Must be safe to call
-         *                from any thread.
-         * @return RAII Subscription guard. The handler is removed when the guard
-         *         is destroyed or reset().
+         * @param handler Callable invoked on each emit(). Must be safe to call from any thread.
+         * @return RAII Subscription guard. The handler is removed when the guard is destroyed or reset().
          * @note Copy-on-write: allocates a new handler list of size N+1.
-         *       Acceptable for the expected mutation rate (startup and
-         *       occasional reconfiguration). Do not call from within a handler.
+         *       Acceptable for the expected mutation rate (startup and occasional reconfiguration). Do not call from
+         *       within a handler.
          */
         [[nodiscard]] Subscription subscribe(Handler handler)
         {
@@ -259,42 +223,32 @@ namespace DetourModKit
                 return {};
             }
 
-            const auto id = static_cast<SubscriptionId>(
-                this->m_next_id.fetch_add(1, std::memory_order_relaxed));
+            const auto id = static_cast<SubscriptionId>(this->m_next_id.fetch_add(1, std::memory_order_relaxed));
 
             {
                 std::scoped_lock lock{this->m_writer_mutex};
                 auto current = this->m_handlers.load(std::memory_order_acquire);
                 auto next = std::make_shared<HandlerList>(*current);
                 next->push_back(Entry{id, std::move(handler)});
-                // Publish the new count first so a reader that sees 0 on the
-                // counter and skips the snapshot load cannot miss a handler
-                // that has already been installed in the snapshot.
+                // Publish the new count first so a reader that sees 0 on the counter and skips the snapshot load cannot
+                // miss a handler that has already been installed in the snapshot.
                 this->m_handler_count.store(next->size(), std::memory_order_release);
-                this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)),
-                                       std::memory_order_release);
+                this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
             }
 
             std::weak_ptr<void> weak = this->m_alive;
-            return Subscription(
-                std::move(weak),
-                [this, id]() noexcept -> bool
-                { return this->unsubscribe(id); });
+            return Subscription(std::move(weak), [this, id]() noexcept -> bool { return this->unsubscribe(id); });
         }
 
         /**
          * @brief Emits an event to all subscribers.
          * @param event The event payload, passed by const reference to each handler.
          * @note Lock-free: performs one atomic acquire-load of the snapshot
-         *       pointer and iterates. Multiple threads may emit concurrently
-         *       without contention. Handlers are invoked synchronously in
-         *       subscription order. Exceptions thrown by handlers propagate
-         *       to the caller.
-         * @warning If calling from a game hook callback or any context where an
-         *          unhandled exception would crash the host process, use
-         *          emit_safe() instead. emit() lets handler exceptions propagate
-         *          uncaught, which will terminate the process if no catch frame
-         *          exists above the call site.
+         *       pointer and iterates. Multiple threads may emit concurrently without contention. Handlers are invoked
+         *       synchronously in subscription order. Exceptions thrown by handlers propagate to the caller.
+         * @warning If calling from a game hook callback or any context where an unhandled exception would crash the
+         *          host process, use emit_safe() instead. emit() lets handler exceptions propagate uncaught, which will
+         *          terminate the process if no catch frame exists above the call site.
          */
         void emit(const Event &event) const
         {
@@ -315,11 +269,9 @@ namespace DetourModKit
         /**
          * @brief Emits an event, catching and discarding handler exceptions.
          * @param event The event payload.
-         * @note Same locking semantics as emit() (lock-free). Handlers that
-         *       throw are skipped; remaining handlers still execute.
-         *       Prefer this over emit() when calling from hook callbacks or
-         *       other contexts where an unhandled exception would crash the
-         *       host process.
+         * @note Same locking semantics as emit() (lock-free). Handlers that throw are skipped; remaining handlers still
+         *       execute. Prefer this over emit() when calling from hook callbacks or other contexts where an unhandled
+         *       exception would crash the host process.
          */
         void emit_safe(const Event &event) const noexcept
         {
@@ -328,8 +280,8 @@ namespace DetourModKit
                 return;
             }
 
-            // std::shared_ptr copy-construction and load are noexcept, so the
-            // entire function remains noexcept despite the per-handler catch.
+            // std::shared_ptr copy-construction and load are noexcept, so the entire function remains noexcept despite
+            // the per-handler catch.
             SharedList snap = this->m_handlers.load(std::memory_order_acquire);
             EmitGuard guard{emitting_depth()};
             for (const auto &entry : *snap)
@@ -351,26 +303,20 @@ namespace DetourModKit
         }
 
         /// Returns true if there are no subscribers.
-        [[nodiscard]] bool empty() const noexcept
-        {
-            return this->m_handler_count.load(std::memory_order_acquire) == 0;
-        }
+        [[nodiscard]] bool empty() const noexcept { return this->m_handler_count.load(std::memory_order_acquire) == 0; }
 
         /**
          * @brief Removes all subscribers.
-         * @note Serializes with other writers via the writer mutex; readers
-         *       in flight keep their snapshot alive through their shared_ptr.
-         *       Allocates a fresh empty snapshot. On allocation failure the
-         *       dispatcher state is left unchanged (best-effort no-op) so the
-         *       noexcept contract is never violated by a throwing allocator.
+         * @note Serializes with other writers via the writer mutex; readers in flight keep their snapshot alive through
+         *       their shared_ptr. Allocates a fresh empty snapshot. On allocation failure the dispatcher state is left
+         *       unchanged (best-effort no-op) so the noexcept contract is never violated by a throwing allocator.
          */
         void clear() noexcept
         {
             std::scoped_lock lock{this->m_writer_mutex};
-            // Build the replacement snapshot before touching any published
-            // state so a throwing allocator leaves m_handlers / m_handler_count
-            // in their prior consistent pair. Swallowing bad_alloc keeps
-            // clear() a noexcept best-effort teardown.
+            // Build the replacement snapshot before touching any published state so a throwing allocator leaves
+            // m_handlers / m_handler_count in their prior consistent pair. Swallowing bad_alloc keeps clear() a
+            // noexcept best-effort teardown.
             std::shared_ptr<const HandlerList> empty_snap;
             try
             {
@@ -380,48 +326,40 @@ namespace DetourModKit
             {
                 return;
             }
-            // Counter must go to 0 before publishing the empty snapshot so
-            // an emit that reads 0 on the fast-path counter cannot still see
-            // the non-empty old snapshot afterwards.
+            // Counter must go to 0 before publishing the empty snapshot so an emit that reads 0 on the fast-path
+            // counter cannot still see the non-empty old snapshot afterwards.
             this->m_handler_count.store(0, std::memory_order_release);
             this->m_handlers.store(std::move(empty_snap), std::memory_order_release);
         }
 
 #if defined(DMK_EVENT_DISPATCHER_INTERNAL_TESTING)
         /**
-         * @brief Test-only diagnostic: returns the number of outstanding
-         *        references to the current handler snapshot, excluding the
-         *        temporary this call itself creates. A value of 1 means the
-         *        dispatcher's own atomic is the sole holder (steady state).
-         *        A value >1 indicates an in-flight emit or a leaked snapshot
-         *        reference. Enabled only when
-         *        DMK_EVENT_DISPATCHER_INTERNAL_TESTING is defined by the
-         *        test translation unit. Not part of the public API.
+         * @brief Test-only diagnostic: returns the number of outstanding references to the current handler snapshot,
+         *        excluding the temporary this call itself creates. A value of 1 means the dispatcher's own atomic is
+         *        the sole holder (steady state). A value >1 indicates an in-flight emit or a leaked snapshot reference.
+         *        Enabled only when
+         *        DMK_EVENT_DISPATCHER_INTERNAL_TESTING is defined by the test translation unit. Not part of the public
+         *        API.
          */
         [[nodiscard]] long debug_snapshot_use_count() const noexcept
         {
-            // load() returns a shared_ptr copy that bumps the refcount by 1
-            // for its own lifetime; subtract that so the reported count
-            // reflects only the other holders (the dispatcher atomic and
-            // any in-flight emit snapshots).
+            // load() returns a shared_ptr copy that bumps the refcount by 1 for its own lifetime; subtract that so the
+            // reported count reflects only the other holders (the dispatcher atomic and any in-flight emit snapshots).
             auto snap = this->m_handlers.load(std::memory_order_acquire);
             return snap.use_count() - 1;
         }
 #endif
 
     private:
-        // Returns false when called from within a handler (reentrancy) or
-        // when the replacement snapshot could not be allocated. The
-        // Subscription::reset() caller retains its m_unsubscribe lambda on
-        // false returns and will retry on the next reset() call (including
-        // the destructor). This is safe because the m_alive weak_ptr prevents
-        // calling into a destroyed dispatcher, and on allocation failure the
-        // published state is left untouched so the retry observes the same
-        // entry still present.
+        // Returns false when called from within a handler (reentrancy) or when the replacement snapshot could not be
+        // allocated. The
+        // Subscription::reset() caller retains its m_unsubscribe lambda on false returns and will retry on the next
+        // reset() call (including the destructor). This is safe because the m_alive weak_ptr prevents calling into a
+        // destroyed dispatcher, and on allocation failure the published state is left untouched so the retry observes
+        // the same entry still present.
         //
-        // Allocates (std::make_shared + vector growth). On OOM, leaves the
-        // dispatcher state unchanged and returns false so the RAII retry path
-        // handles it naturally.
+        // Allocates (std::make_shared + vector growth). On OOM, leaves the dispatcher state unchanged and returns false
+        // so the RAII retry path handles it naturally.
         bool unsubscribe(SubscriptionId id) noexcept
         {
             if (emitting_depth() > 0)
@@ -431,20 +369,17 @@ namespace DetourModKit
 
             std::scoped_lock lock{this->m_writer_mutex};
             auto current = this->m_handlers.load(std::memory_order_acquire);
-            auto it = std::find_if(current->begin(), current->end(),
-                                   [id](const Entry &entry)
-                                   { return entry.id == id; });
+            auto it =
+                std::find_if(current->begin(), current->end(), [id](const Entry &entry) { return entry.id == id; });
             if (it == current->end())
             {
                 // Not found; treat as successful (idempotent unsubscribe).
                 return true;
             }
 
-            // Build the replacement snapshot in full before touching any
-            // published state. A throwing allocator (reserve / push_back /
-            // make_shared) must not leave m_handlers and m_handler_count out
-            // of sync, and noexcept forbids propagation, so we catch
-            // bad_alloc and fall through to the false-return retry path.
+            // Build the replacement snapshot in full before touching any published state. A throwing allocator (reserve
+            // / push_back / make_shared) must not leave m_handlers and m_handler_count out of sync, and noexcept
+            // forbids propagation, so we catch bad_alloc and fall through to the false-return retry path.
             std::shared_ptr<HandlerList> next;
             try
             {
@@ -463,25 +398,21 @@ namespace DetourModKit
                 return false;
             }
 
-            // Publish snapshot first, then the counter. An emit that loads a
-            // stale snapshot containing the removed handler is still safe
-            // because the handler callable is retained by the old snapshot.
-            this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)),
-                                   std::memory_order_release);
+            // Publish snapshot first, then the counter. An emit that loads a stale snapshot containing the removed
+            // handler is still safe because the handler callable is retained by the old snapshot.
+            this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
             this->m_handler_count.store(current->size() - 1, std::memory_order_release);
             return true;
         }
 
-        // Thread-local emit depth counter. This is per-template-instantiation
-        // (not per-instance) because making it per-instance would require a
-        // thread_local map keyed by this pointer, adding a hash lookup to
-        // every emit() hot path. The typical usage is one dispatcher per
-        // event type, so the shared counter is the correct tradeoff. See
+        // Thread-local emit depth counter. This is per-template-instantiation (not per-instance) because making it
+        // per-instance would require a thread_local map keyed by this pointer, adding a hash lookup to every emit() hot
+        // path. The typical usage is one dispatcher per event type, so the shared counter is the correct tradeoff. See
         // the class-level doc for details.
         [[nodiscard]] int &emitting_depth() const noexcept
         {
-            // Shared across all dispatcher instances on the same thread.
-            // The reentrancy guard is per-thread (intentional), not per-dispatcher.
+            // Shared across all dispatcher instances on the same thread. The reentrancy guard is per-thread
+            // (intentional), not per-dispatcher.
             thread_local int depth{0};
             return depth;
         }
@@ -490,8 +421,7 @@ namespace DetourModKit
         struct EmitGuard
         {
             int &depth;
-            explicit EmitGuard(int &depth_ref) noexcept
-                : depth(depth_ref) { ++depth; }
+            explicit EmitGuard(int &depth_ref) noexcept : depth(depth_ref) { ++depth; }
             ~EmitGuard() noexcept { --depth; }
             EmitGuard(const EmitGuard &) = delete;
             EmitGuard &operator=(const EmitGuard &) = delete;
@@ -499,15 +429,13 @@ namespace DetourModKit
             EmitGuard &operator=(EmitGuard &&) = delete;
         };
 
-        // alignas(64) keeps the hot atomics on their own cache line so the
-        // writer mutex and shared_ptr control-block traffic do not produce
-        // false sharing with readers doing the fast-path counter load.
+        // alignas(64) keeps the hot atomics on their own cache line so the writer mutex and shared_ptr control-block
+        // traffic do not produce false sharing with readers doing the fast-path counter load.
         alignas(64) mutable std::atomic<SharedList> m_handlers;
         std::atomic<size_t> m_handler_count{0};
         std::atomic<uint64_t> m_next_id{1};
         std::mutex m_writer_mutex; // serializes writers only
-        // Prevents Subscription::reset() from calling unsubscribe() after
-        // dispatcher destruction.
+        // Prevents Subscription::reset() from calling unsubscribe() after dispatcher destruction.
         std::shared_ptr<void> m_alive;
     };
 
