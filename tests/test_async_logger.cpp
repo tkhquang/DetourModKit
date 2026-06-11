@@ -1679,4 +1679,3 @@ TEST(LogMessageMoveTest, MovedFromMessageReturnsEmpty)
 
     EXPECT_TRUE(src.message().empty());
 }
-

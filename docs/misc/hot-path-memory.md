@@ -1,11 +1,6 @@
 # Reading Game Memory in Hot Paths
 
-This guide explains how to read and write game memory from code that runs at
-high frequency (per-frame render hooks, per-input-event detours, per-object
-apply loops) without paying the cost that the validation predicates carry. It is
-the reference for the `seh_*` and `read_ptr_*` primitives in
-[`memory.hpp`](../../include/DetourModKit/memory.hpp) and explains when to use
-each one.
+This guide explains how to read and write game memory from code that runs at high frequency (per-frame render hooks, per-input-event detours, per-object apply loops) without paying the cost that the validation predicates carry. It is the reference for the `seh_*` and `read_ptr_*` primitives in [`memory.hpp`](../../include/DetourModKit/memory.hpp) and explains when to use each one.
 
 ## The rule
 
@@ -13,38 +8,17 @@ each one.
 > dereference on a hot path. Read directly under a single SEH frame, optionally
 > pre-screened by a cheap arithmetic guard.
 
-`is_readable` / `is_writable` exist for one-shot setup validation and
-diagnostics. They are correct there and cheap when called a handful of times.
-They are the wrong tool for a path that runs hundreds or thousands of times per
-frame.
+`is_readable` / `is_writable` exist for one-shot setup validation and diagnostics. They are correct there and cheap when called a handful of times. They are the wrong tool for a path that runs hundreds or thousands of times per frame.
 
 ## Why the predicate is the wrong tool on a hot path
 
 `is_readable(addr, size)` does two things that do not belong in a tight loop:
 
-1. **It is not free, even on a cache hit.** A hit takes a per-shard reader lock
-   and a cache lookup. A miss issues a `VirtualQuery` syscall and rebuilds the
-   cache entry under an exclusive lock. When the addresses you check keep
-   changing (a new game object each iteration), almost every lookup misses, so
-   the cost is dominated by syscalls and lock traffic.
+1. **It is not free, even on a cache hit.** A hit takes a per-shard reader lock and a cache lookup. A miss issues a `VirtualQuery` syscall and rebuilds the cache entry under an exclusive lock. When the addresses you check keep changing (a new game object each iteration), almost every lookup misses, so the cost is dominated by syscalls and lock traffic.
 
-2. **It is a time-of-check to time-of-use illusion.** The page state it reports
-   can change between the check returning `true` and your dereference. A pointer
-   that passes the predicate can still fault, so you need a fault guard around
-   the read anyway. Once the read is inside a fault guard, the predicate adds no
-   safety, only cost.
+2. **It is a time-of-check to time-of-use illusion.** The page state it reports can change between the check returning `true` and your dereference. A pointer that passes the predicate can still fault, so you need a fault guard around the read anyway. Once the read is inside a fault guard, the predicate adds no safety, only cost.
 
-Concretely: a hook that resolves an object and reads eight dependent fields off
-it across a few distinct (cache-missing) objects can cost one to two orders of
-magnitude more per call when each read is gated than when the reads run directly
-under one fault guard. The multiplier is dominated by `VirtualQuery` latency on
-cache misses, the cache-miss rate, and shard-lock contention, so it varies by
-CPU, Windows build, and address-space size. At a few hundred such calls per
-frame that is the difference between imperceptible and a multi-millisecond frame
-spike. Build with `-DDMK_BUILD_BENCHMARKS=ON`, run the `DetourModKit_bench_memory`
-target (Phase 6 of `tests/bench_memory.cpp`), and read the
-`probe_gated_over_direct` value to measure it on your target. Recorded numbers
-and methodology are in [the memory benchmark notes](../analysis/memory_bench_v3.x/README.md).
+Concretely: a hook that resolves an object and reads eight dependent fields off it across a few distinct (cache-missing) objects can cost one to two orders of magnitude more per call when each read is gated than when the reads run directly under one fault guard. The multiplier is dominated by `VirtualQuery` latency on cache misses, the cache-miss rate, and shard-lock contention, so it varies by CPU, Windows build, and address-space size. At a few hundred such calls per frame that is the difference between imperceptible and a multi-millisecond frame spike. Build with `-DDMK_BUILD_BENCHMARKS=ON`, run the `DetourModKit_bench_memory` target (Phase 6 of `tests/bench_memory.cpp`), and read the `probe_gated_over_direct` value to measure it on your target. Recorded numbers and methodology are in [the memory benchmark notes](../analysis/memory_bench_v3.x/README.md).
 
 ## The pattern
 
@@ -88,9 +62,7 @@ bool probe_object(uintptr_t obj, ObjectFields &out) noexcept
 }
 ```
 
-For frame hooks, keep the hook body limited to cached state, branch-only guards,
-and one guarded read path. Resolve signatures, RTTI identities, and offsets
-outside the hook.
+For frame hooks, keep the hook body limited to cached state, branch-only guards, and one guarded read path. Resolve signatures, RTTI identities, and offsets outside the hook.
 
 ```cpp
 namespace Mem = DetourModKit::Memory;
@@ -117,12 +89,7 @@ void camera_update_hook(void *camera, float delta_time)
 }
 ```
 
-For a multi-level pointer chain, resolve the whole chain under one fault guard
-rather than calling `seh_read` once per link. The combined walk is one
-out-of-line call instead of N, keeps each link in a register instead of
-round-tripping it through `std::optional`, and validates its arguments once. (It
-does not save SEH-frame setup: on MSVC/x64 a `__try` success path is
-table-driven and free, so N of them cost nothing extra either.)
+For a multi-level pointer chain, resolve the whole chain under one fault guard rather than calling `seh_read` once per link. The combined walk is one out-of-line call instead of N, keeps each link in a register instead of round-tripping it through `std::optional`, and validates its arguments once. (It does not save SEH-frame setup: on MSVC/x64 a `__try` success path is table-driven and free, so N of them cost nothing extra either.)
 
 ```cpp
 // (*(*(base + 0x10) + 0x28)) + 0x8, read as a float, all under one guard.
@@ -149,12 +116,7 @@ if (value)
 
 ## Toolchain note
 
-The `seh_*` primitives use real `__try` / `__except` on MSVC, where the success
-path is table-driven and costs nothing extra. On MinGW (which has no SEH) they
-fall back to a `VirtualQuery`-guarded read, which is correct but pays a syscall;
-prefer `read_ptr_unchecked` on MinGW hot paths where you can guarantee
-structural validity. Shipping mod builds target MSVC, so the zero-cost path is
-the normal case.
+The `seh_*` primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no SEH) they fall back to a `VirtualQuery`-guarded read, which is correct but pays a syscall; prefer `read_ptr_unchecked` on MinGW hot paths where you can guarantee structural validity. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
 
 ## Anti-patterns to remove
 

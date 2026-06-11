@@ -221,19 +221,19 @@ namespace
         g_sink.fetch_add(reinterpret_cast<std::uintptr_t>(warm_smart),
                          std::memory_order_relaxed);
 
-        const double us_smart = median_us_per_iter(iterations, samples, [&]() {
+        const double us_smart = median_us_per_iter(iterations, samples, [&]()
+                                                   {
             const auto *m =
                 DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), smart);
             g_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m),
-                             std::memory_order_relaxed);
-        });
+                             std::memory_order_relaxed); });
 
-        const double us_naive = median_us_per_iter(iterations, samples, [&]() {
+        const double us_naive = median_us_per_iter(iterations, samples, [&]()
+                                                   {
             const auto *m =
                 DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), naive);
             g_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m),
-                             std::memory_order_relaxed);
-        });
+                             std::memory_order_relaxed); });
 
         const double speedup = us_naive / us_smart;
         const double smart_throughput = 1.0e6 / us_smart;

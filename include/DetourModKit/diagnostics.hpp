@@ -33,7 +33,8 @@ namespace DetourModKit
             MemoryCache,
             Worker,
             Bootstrap,
-            Count ///< Sentinel: the number of tracked subsystems. Not a subsystem.
+            /// Sentinel: the number of tracked subsystems. Not a subsystem.
+            Count
         };
 
         /**

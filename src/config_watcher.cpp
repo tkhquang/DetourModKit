@@ -97,7 +97,8 @@ namespace DetourModKit
             HANDLE h{INVALID_HANDLE_VALUE};
 
             OwnedHandle() = default;
-            explicit OwnedHandle(HANDLE raw) noexcept : h(raw) {}
+            explicit OwnedHandle(HANDLE raw) noexcept
+                : h(raw) {}
 
             OwnedHandle(const OwnedHandle &) = delete;
             OwnedHandle &operator=(const OwnedHandle &) = delete;

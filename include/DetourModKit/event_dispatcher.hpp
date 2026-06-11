@@ -272,13 +272,14 @@ namespace DetourModKit
                 // that has already been installed in the snapshot.
                 this->m_handler_count.store(next->size(), std::memory_order_release);
                 this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)),
-                                      std::memory_order_release);
+                                       std::memory_order_release);
             }
 
             std::weak_ptr<void> weak = this->m_alive;
             return Subscription(
                 std::move(weak),
-                [this, id]() noexcept -> bool { return this->unsubscribe(id); });
+                [this, id]() noexcept -> bool
+                { return this->unsubscribe(id); });
         }
 
         /**
@@ -431,7 +432,8 @@ namespace DetourModKit
             std::scoped_lock lock{this->m_writer_mutex};
             auto current = this->m_handlers.load(std::memory_order_acquire);
             auto it = std::find_if(current->begin(), current->end(),
-                                   [id](const Entry &entry) { return entry.id == id; });
+                                   [id](const Entry &entry)
+                                   { return entry.id == id; });
             if (it == current->end())
             {
                 // Not found; treat as successful (idempotent unsubscribe).
@@ -465,7 +467,7 @@ namespace DetourModKit
             // stale snapshot containing the removed handler is still safe
             // because the handler callable is retained by the old snapshot.
             this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)),
-                                  std::memory_order_release);
+                                   std::memory_order_release);
             this->m_handler_count.store(current->size() - 1, std::memory_order_release);
             return true;
         }
@@ -488,7 +490,8 @@ namespace DetourModKit
         struct EmitGuard
         {
             int &depth;
-            explicit EmitGuard(int &depth_ref) noexcept : depth(depth_ref) { ++depth; }
+            explicit EmitGuard(int &depth_ref) noexcept
+                : depth(depth_ref) { ++depth; }
             ~EmitGuard() noexcept { --depth; }
             EmitGuard(const EmitGuard &) = delete;
             EmitGuard &operator=(const EmitGuard &) = delete;
@@ -503,8 +506,9 @@ namespace DetourModKit
         std::atomic<size_t> m_handler_count{0};
         std::atomic<uint64_t> m_next_id{1};
         std::mutex m_writer_mutex; // serializes writers only
-        std::shared_ptr<void> m_alive; // Prevents Subscription::reset() from calling
-                                      // unsubscribe() after dispatcher destruction.
+        // Prevents Subscription::reset() from calling unsubscribe() after
+        // dispatcher destruction.
+        std::shared_ptr<void> m_alive;
     };
 
 } // namespace DetourModKit

@@ -67,8 +67,10 @@ namespace DetourModKit
              */
             struct ExecutableWindow
             {
-                std::uintptr_t base = 0; ///< Absolute address of the first readable byte.
-                std::size_t span = 0;    ///< Window length in bytes.
+                /// Absolute address of the first readable byte.
+                std::uintptr_t base = 0;
+                /// Window length in bytes.
+                std::size_t span = 0;
             };
 
             /**

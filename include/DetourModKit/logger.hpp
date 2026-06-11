@@ -189,9 +189,11 @@ namespace DetourModKit
             }
         }
 
-        /// @name Convenience log methods
-        /// Shorthand for `log(LogLevel::X, fmt, args...)`. See log() for parameter docs.
-        /// @{
+        /**
+         * @name Convenience log methods
+         * @brief Shorthand for `log(LogLevel::X, fmt, args...)`. See log() for parameter docs.
+         * @{
+         */
         template <typename... Args>
         void trace(std::format_string<Args...> fmt, Args &&...args)
         {
@@ -221,7 +223,7 @@ namespace DetourModKit
         {
             log(LogLevel::Error, fmt, std::forward<Args>(args)...);
         }
-        /// @}
+        /** @} */
 
         /**
          * @brief Converts a log level string to the LogLevel enum.

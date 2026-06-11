@@ -123,12 +123,14 @@ namespace
         // Monotonic counter guarantees insertion-order uniqueness for correct eviction
         std::map<uint64_t, uintptr_t> lru_index;
         // Sorted by base address for O(log n) containment lookup
-        std::vector<std::pair<uintptr_t, uintptr_t>> sorted_ranges; // {base, base+size}
+        // {base, base+size}
+        std::vector<std::pair<uintptr_t, uintptr_t>> sorted_ranges;
         uint64_t entry_counter{0};
         size_t capacity;
         size_t max_capacity;
 
-        CacheShard() : capacity(0), max_capacity(0)
+        CacheShard()
+            : capacity(0), max_capacity(0)
         {
             entries.reserve(64);
             sorted_ranges.reserve(64);
@@ -156,7 +158,7 @@ namespace
     {
         return (static_cast<size_t>((address * 0x9E3779B97F4A7C15ULL) >> 48)) % shard_count;
     }
-}
+} // namespace
 
 // Internal static variables and helper functions for memory cache.
 // Anonymous namespace ensures internal linkage, preventing ODR violations
@@ -227,7 +229,8 @@ namespace
 
     // On-demand cleanup fallback timer (used when background thread is disabled)
     std::atomic<uint64_t> s_lastCleanupTimeNs{0};
-    constexpr uint64_t CLEANUP_INTERVAL_NS = 1'000'000'000ULL; // 1 second in nanoseconds
+    // 1 second in nanoseconds
+    constexpr uint64_t CLEANUP_INTERVAL_NS = 1'000'000'000ULL;
 
     // Always-available cache statistics
     struct CacheStats
@@ -299,7 +302,7 @@ namespace
     {
         auto range = std::make_pair(base_addr, base_addr + region_size);
         auto pos = std::lower_bound(shard.sorted_ranges.begin(),
-                                     shard.sorted_ranges.end(), range);
+                                    shard.sorted_ranges.end(), range);
         shard.sorted_ranges.insert(pos, range);
     }
 
@@ -310,8 +313,8 @@ namespace
     void remove_sorted_range(CacheShard &shard, uintptr_t base_addr) noexcept
     {
         auto it = std::lower_bound(shard.sorted_ranges.begin(),
-                                    shard.sorted_ranges.end(),
-                                    std::make_pair(base_addr, uintptr_t{0}));
+                                   shard.sorted_ranges.end(),
+                                   std::make_pair(base_addr, uintptr_t{0}));
         if (it != shard.sorted_ranges.end() && it->first == base_addr)
             shard.sorted_ranges.erase(it);
     }
@@ -351,8 +354,8 @@ namespace
         // Finds the last range starting at or before the queried address,
         // then verifies containment and entry validity.
         auto range_it = std::upper_bound(shard.sorted_ranges.begin(),
-                                          shard.sorted_ranges.end(),
-                                          std::make_pair(address, UINTPTR_MAX));
+                                         shard.sorted_ranges.end(),
+                                         std::make_pair(address, UINTPTR_MAX));
         if (range_it != shard.sorted_ranges.begin())
         {
             --range_it;
@@ -608,7 +611,8 @@ namespace
             if (!s_cleanupThreadRunning.load(std::memory_order_acquire))
                 break;
 
-            cleanup_expired_entries(true); // force=true to hold state mutex during vector iteration
+            // force=true to hold state mutex during vector iteration
+            cleanup_expired_entries(true);
             s_cleanupRequested.store(false, std::memory_order_relaxed);
         }
     }
@@ -719,7 +723,8 @@ namespace
             shard_count = 1;
 
         const size_t entries_per_shard = (cache_size + shard_count - 1) / shard_count;
-        const size_t hard_max_per_shard = entries_per_shard * 2; // Hard upper bound: 2x capacity
+        // Hard upper bound: 2x capacity
+        const size_t hard_max_per_shard = entries_per_shard * 2;
 
         try
         {
@@ -840,7 +845,7 @@ namespace
         }
     }
 
-} // anonymous namespace (cache internals)
+} // namespace
 
 bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
 {
@@ -1388,7 +1393,8 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
                 {
                     const uint64_t now_ns = current_time_ns();
                     const uint64_t expiry_ns = static_cast<uint64_t>(
-                        s_configuredExpiryMs.load(std::memory_order_acquire)) * 1'000'000ULL;
+                                                   s_configuredExpiryMs.load(std::memory_order_acquire)) *
+                                               1'000'000ULL;
                     CachedMemoryRegionInfo *cached = find_in_shard(
                         s_cacheShards[shard_idx],
                         src, sizeof(uintptr_t), now_ns, expiry_ns);
@@ -1429,7 +1435,7 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
 namespace
 {
     inline constexpr uintptr_t SEH_READ_MIN_VALID_ADDR = 0x10000;
-} // anonymous namespace (seh_read internals)
+} // namespace
 
 bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
 {
@@ -1558,7 +1564,7 @@ namespace
         return true;
 #endif
     }
-} // anonymous namespace (pointer-chain internals)
+} // namespace
 
 std::optional<uintptr_t> DetourModKit::Memory::seh_resolve_chain(
     uintptr_t base, std::span<const ptrdiff_t> offsets) noexcept
@@ -1682,7 +1688,7 @@ namespace
         static ModuleRangeCache cache;
         return cache;
     }
-} // anonymous namespace (module-range internals)
+} // namespace
 
 std::optional<DetourModKit::Memory::ModuleRange>
 DetourModKit::Memory::module_range_for(const void *address) noexcept
@@ -1728,7 +1734,8 @@ DetourModKit::Memory::ModuleRange DetourModKit::Memory::own_module_range() noexc
     // guarded by the C++23 thread-safe-initialization rules. Taking the
     // address of own_module_range itself anchors the lookup in whichever
     // DLL/EXE statically linked this translation unit.
-    static const ModuleRange cached = [] {
+    static const ModuleRange cached = []
+    {
         HMODULE mod = nullptr;
         if (!GetModuleHandleExW(
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
@@ -1746,7 +1753,8 @@ DetourModKit::Memory::ModuleRange DetourModKit::Memory::own_module_range() noexc
 
 DetourModKit::Memory::ModuleRange DetourModKit::Memory::host_module_range() noexcept
 {
-    static const ModuleRange cached = [] {
+    static const ModuleRange cached = []
+    {
         HMODULE mod = GetModuleHandleW(nullptr);
         if (!mod)
             return ModuleRange{};

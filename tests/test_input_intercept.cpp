@@ -29,9 +29,9 @@ using DetourModKit::detail::take_wheel_counts;
 using DetourModKit::detail::uninstall;
 using DetourModKit::detail::WheelPulseState;
 using DetourModKit::detail::wndproc_installed;
-using DetourModKit::detail::XInputGetStateFn;
 using DetourModKit::detail::xinput_installed;
 using DetourModKit::detail::xinput_trampoline;
+using DetourModKit::detail::XInputGetStateFn;
 
 namespace
 {
@@ -450,7 +450,8 @@ namespace
 
     void ensure_test_window_class_registered() noexcept
     {
-        static const bool registered = [] {
+        static const bool registered = []
+        {
             WNDCLASSEXW wc{};
             wc.cbSize = sizeof(wc);
             wc.lpfnWndProc = DefWindowProcW;
@@ -757,7 +758,8 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
     InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
     poller.start();
 
-    const auto cleanup = [&]() noexcept {
+    const auto cleanup = [&]() noexcept
+    {
         poller.shutdown(); // routes through detail::uninstall()
         uninstall();
         if (IsWindow(hwnd))
@@ -770,7 +772,8 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
     // The poll thread lazily subclasses the game window; wait until it lands on OUR
     // window (procedure changes away from the recording predecessor).
     const bool hooked_ours = wait_until(
-        [&] {
+        [&]
+        {
             return wndproc_installed() &&
                    GetWindowLongPtrW(hwnd, GWLP_WNDPROC) != predecessor;
         },
@@ -784,7 +787,8 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
     // Wait until the swallow flag engages: an owned wheel message stops reaching the
     // game's predecessor procedure.
     const bool consume_engaged = wait_until(
-        [&] {
+        [&]
+        {
             const int before = g_forwarded_wheel_msgs.load(std::memory_order_relaxed);
             SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
             return g_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before;
@@ -799,7 +803,8 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
 
     // Wait until the swallow flag disarms: the message is forwarded again.
     const bool consume_disarmed = wait_until(
-        [&] {
+        [&]
+        {
             const int before = g_forwarded_wheel_msgs.load(std::memory_order_relaxed);
             SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
             return g_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before + 1;

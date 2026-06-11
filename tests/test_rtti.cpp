@@ -49,7 +49,10 @@ namespace
         return p;
     }
 
-    void syn_reset() noexcept { g_syn_offset = 0; }
+    void syn_reset() noexcept
+    {
+        g_syn_offset = 0;
+    }
 
     /**
      * @class SyntheticVtable
@@ -171,7 +174,7 @@ namespace
     private:
         std::uintptr_t m_vtable;
     };
-}
+} // namespace
 
 class RttiTest : public ::testing::Test
 {
@@ -564,7 +567,10 @@ TEST_F(RttiTest, ResolveRejectsHeapAllocatedVtable)
     // A vtable whose address is not in any loaded module (here, a heap
     // allocation) must be rejected at the module_range_for step.
     auto buf = std::make_unique<std::array<std::uintptr_t, 4>>();
-    (*buf)[0] = 0; (*buf)[1] = 0; (*buf)[2] = 0; (*buf)[3] = 0;
+    (*buf)[0] = 0;
+    (*buf)[1] = 0;
+    (*buf)[2] = 0;
+    (*buf)[3] = 0;
     const std::uintptr_t fake_vt = reinterpret_cast<std::uintptr_t>(buf->data() + 2);
 
     EXPECT_FALSE(Rtti::type_name_of(fake_vt).has_value());

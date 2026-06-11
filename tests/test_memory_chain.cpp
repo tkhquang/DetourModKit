@@ -47,7 +47,7 @@ TEST(MemorySehResolveChain, TwoLevelResolvesFinalAddress)
 {
     uint64_t target = 0x1122334455667788ull;
     uintptr_t mid = reinterpret_cast<uintptr_t>(&target); // holds &target
-    uintptr_t root = reinterpret_cast<uintptr_t>(&mid);    // holds &mid
+    uintptr_t root = reinterpret_cast<uintptr_t>(&mid);   // holds &mid
 
     // deref(&root) -> &mid, deref(&mid) -> &target; final offset 0 not dereferenced.
     const auto addr = Memory::seh_resolve_chain(reinterpret_cast<uintptr_t>(&root), {0, 0, 0});
@@ -181,7 +181,8 @@ TEST(MemorySehReadChain, ReadsNonDefaultConstructibleType)
         uint32_t a;
         uint32_t b;
         NoDefault() = delete;
-        constexpr NoDefault(uint32_t x, uint32_t y) noexcept : a(x), b(y) {}
+        constexpr NoDefault(uint32_t x, uint32_t y) noexcept
+            : a(x), b(y) {}
     };
     static_assert(std::is_trivially_copyable_v<NoDefault>);
     static_assert(!std::is_default_constructible_v<NoDefault>);

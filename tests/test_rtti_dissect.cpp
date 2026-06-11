@@ -52,11 +52,26 @@ void *operator new(std::size_t size)
     return p;
 }
 
-void *operator new[](std::size_t size) { return operator new(size); }
-void operator delete(void *p) noexcept { std::free(p); }
-void operator delete(void *p, std::size_t) noexcept { std::free(p); }
-void operator delete[](void *p) noexcept { std::free(p); }
-void operator delete[](void *p, std::size_t) noexcept { std::free(p); }
+void *operator new[](std::size_t size)
+{
+    return operator new(size);
+}
+void operator delete(void *p) noexcept
+{
+    std::free(p);
+}
+void operator delete(void *p, std::size_t) noexcept
+{
+    std::free(p);
+}
+void operator delete[](void *p) noexcept
+{
+    std::free(p);
+}
+void operator delete[](void *p, std::size_t) noexcept
+{
+    std::free(p);
+}
 
 namespace
 {
@@ -92,7 +107,10 @@ namespace
         return p;
     }
 
-    void syn_reset() noexcept { g_syn_offset = 0; }
+    void syn_reset() noexcept
+    {
+        g_syn_offset = 0;
+    }
 
     /**
      * @class SyntheticVtable
@@ -399,11 +417,11 @@ TEST_F(RttiDissectTest, ScanBlock_LabelsOnlyRealSlots)
     ASSERT_NE(obj, 0u);
 
     std::array<std::uintptr_t, 5> block{
-        0,                  // garbage null
-        direct.vtable(),    // direct object base
-        0x20000,            // unresolvable
-        obj,                // pointer-to-object
-        0,                  // garbage null
+        0,               // garbage null
+        direct.vtable(), // direct object base
+        0x20000,         // unresolvable
+        obj,             // pointer-to-object
+        0,               // garbage null
     };
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
@@ -451,9 +469,12 @@ TEST_F(RttiDissectTest, ScanBlock_CustomStrideLabelsInterleaved)
     // Layout: { vtable, filler, vtable, filler, vtable, filler }; a 16-byte
     // stride means only every other qword is a probed slot.
     std::array<std::uintptr_t, 6> block{
-        a.vtable(), 0xAAAAAAAAu,
-        b.vtable(), 0xBBBBBBBBu,
-        c.vtable(), 0xCCCCCCCCu,
+        a.vtable(),
+        0xAAAAAAAAu,
+        b.vtable(),
+        0xBBBBBBBBu,
+        c.vtable(),
+        0xCCCCCCCCu,
     };
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
@@ -1027,7 +1048,9 @@ TEST_F(RttiDissectTest, Fingerprint_SecondCopyIsAmbiguousAndOptionalBreaksTie)
     // An optional landmark present only at the delta-0 copy breaks the tie.
     st.put(FP_OD, syn_heap_object(d.vtable()));
     std::array<Rtti::Landmark, 4> fp4{
-        fp3[0], fp3[1], fp3[2],
+        fp3[0],
+        fp3[1],
+        fp3[2],
         Rtti::Landmark{.base = st.base(),
                        .nominal_offset = FP_OD,
                        .expected_mangled = ".?AVFpD@@",

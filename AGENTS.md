@@ -50,8 +50,7 @@ ctest --preset msvc-debug
 
 ### Installed package smoke test
 
-After installing either release preset, verify the exported CMake package with
-the checked-in consumer smoke project:
+After installing either release preset, verify the exported CMake package with the checked-in consumer smoke project:
 
 ```bash
 cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
@@ -87,10 +86,7 @@ PATH="/c/msys64/mingw64/bin:$PATH" cmake --build build/mingw-release \
 ./build/mingw-release/tests/DetourModKit_bench_scanner.exe
 ```
 
-Latest scanner bench numbers and methodology live in
-[docs/analysis/scanner_bench_v3.x/README.md](docs/analysis/scanner_bench_v3.x/README.md).
-Memory validation-vs-direct-read numbers live in
-[docs/analysis/memory_bench_v3.x/README.md](docs/analysis/memory_bench_v3.x/README.md).
+Latest scanner bench numbers and methodology live in [docs/analysis/scanner_bench_v3.x/README.md](docs/analysis/scanner_bench_v3.x/README.md). Memory validation-vs-direct-read numbers live in [docs/analysis/memory_bench_v3.x/README.md](docs/analysis/memory_bench_v3.x/README.md).
 
 ### Sanitizers (MSVC) and coverage (MinGW)
 
@@ -110,21 +106,9 @@ cmake --preset msvc-debug -DDMK_ENABLE_SANITIZERS=ON
 cmake --preset mingw-debug -DDMK_ENABLE_COVERAGE=ON
 ```
 
-AddressSanitizer is the only sanitizer that links on Windows: GCC and Clang on
-mingw-w64 ship no ASan/UBSan runtime for the Windows target, so the sanitizer
-build links only under MSVC, and ASan is the only sanitizer there (no UBSan or
-LSan). MSVC ASan needs `clang_rt.asan_dynamic-x86_64.dll` on `PATH` at run time;
-a Developer Command Prompt provides it. Coverage is separate and works on MinGW
-via gcov. A non-blocking CI probe in `.github/workflows/quality.yml` builds and
-runs the MSVC ASan preset (alongside an advisory clang-format check) so
-regressions in that wiring surface without gating PRs.
+AddressSanitizer is the only sanitizer that links on Windows: GCC and Clang on mingw-w64 ship no ASan/UBSan runtime for the Windows target, so the sanitizer build links only under MSVC, and ASan is the only sanitizer there (no UBSan or LSan). MSVC ASan needs `clang_rt.asan_dynamic-x86_64.dll` on `PATH` at run time; a Developer Command Prompt provides it. Coverage is separate and works on MinGW via gcov. A non-blocking CI probe in `.github/workflows/quality.yml` builds and runs the MSVC ASan preset (alongside an advisory clang-format check) so regressions in that wiring surface without gating PRs.
 
-The AOB scanner and the SEH-guarded probe read deliberately read arbitrary mapped
-process memory, which ASan reports as false-positive overflows when it scans this
-process's own poisoned shadow. They are excluded from ASan entirely under
-`#if defined(__SANITIZE_ADDRESS__)`, so release builds are byte-for-byte
-unchanged; see [docs/misc/asan-memory-scanner.md](docs/misc/asan-memory-scanner.md)
-for the mechanism and the pattern for any new foreign-memory primitive.
+The AOB scanner and the SEH-guarded probe read deliberately read arbitrary mapped process memory, which ASan reports as false-positive overflows when it scans this process's own poisoned shadow. They are excluded from ASan entirely under `#if defined(__SANITIZE_ADDRESS__)`, so release builds are byte-for-byte unchanged; see [docs/misc/asan-memory-scanner.md](docs/misc/asan-memory-scanner.md) for the mechanism and the pattern for any new foreign-memory primitive.
 
 ### Makefile wrapper
 
@@ -178,6 +162,7 @@ tests/                   # GoogleTest suites (one test_*.cpp per module)
 external/                # Git submodules (safetyhook, DirectXMath, simpleini)
 CMakeLists.txt           # Single CMakeLists -- static library target
 CMakePresets.json        # Build presets (mingw-debug/release/coverage, msvc-debug/release/asan)
+scripts/                 # Repo tooling (check_comment_style.py: advisory comment-marker lint)
 ```
 
 ## Code style
@@ -201,9 +186,9 @@ CMakePresets.json        # Build presets (mingw-debug/release/coverage, msvc-deb
 
 ### Comment conventions
 
-Two comment styles are used, each for a distinct purpose:
+Three comment markers are used, each for a distinct purpose. The choice is by *what* is being commented, not by length: `/** */` and `///` document a declaration; `//` explains implementation. Put another way, document the interface and comment the implementation -- a documented or public declaration's contract uses `///` or `/** */` (Doxygen extracts it), while a private or implementation-only member carries at most a plain `//` rationale (ownership, alignment, immutability) and is not given a `///`. A trailing `///<` is never used.
 
-**Doxygen doc-blocks (`/** */`):** Required on all public class/struct/function/method declarations in headers. Always include `@brief`. Add `@details` when behavior is non-trivial. Add `@param`, `@return`, `@note`, `@warning` as applicable. Indent continuation lines with `*` aligned to the first `*`.
+**Doxygen doc-blocks (`/** */`):** The doc-comment form for declarations. Required on all public class/struct/function/method/enum declarations in headers, and used for any documented internal helper, constant, or anonymous-namespace function in `.cpp` files. Always include `@brief`. Add `@details` when behavior is non-trivial. Add `@param`, `@return`, `@note`, `@warning` as applicable. Use a `/** */` block whenever the documentation spans more than one line or carries any structural Doxygen tag. Indent continuation lines with `*` aligned to the first `*`.
 
 ```cpp
 /**
@@ -216,22 +201,28 @@ Two comment styles are used, each for a distinct purpose:
  */
 ```
 
-**Single-line `///` exception:** Permitted only for trivial self-evident members where a full `/** */` block would be noise (e.g. simple getters, size queries). Must still be a complete sentence. Use sparingly. A `///` line must not carry Doxygen tags (`@param`, `@return`, `@note`, `@brief`, `@details`); the moment a tag is needed, switch to a `/** */` block.
+**Single-line `///` exception:** A shorthand for a one-line `/** @brief */`, permitted only for a trivial self-evident declaration where a full block would be noise (e.g. simple getters, size queries, a single named constant). It must be exactly one line -- two consecutive `///` lines are a multi-line doc and belong in a `/** */` block -- and a complete sentence. It may carry inline Doxygen markup that is a link rather than structure (`@ref`, `@c`, `@p`, `@a`), but must not carry a structural/block tag (`@brief`, `@param`, `@return`, `@retval`, `@note`, `@warning`, `@details`, `@throws`, `@name`, `@{`, `@}`); the moment one is needed, switch to a `/** */` block. Place it on the line above the declaration.
 
 ```cpp
 /// Returns the approximate number of items in the queue.
 size_t size() const noexcept;
 ```
 
-If the member needs `@param`, `@return`, `@note`, or multi-line description, use `/** */` instead.
+**No trailing `///<`:** Member documentation goes on the line(s) above the member as a `///` line or a `/** */` block, never as a trailing `///<` on the same line. Trailing docs run lines past a comfortable width and read inconsistently next to above-the-member docs.
 
-**Inline comments (`//`):** Used inside function bodies to explain *why*, not *what*. Place on the line above the code they describe. Multi-line explanations use consecutive `//` lines.
+**Inline comments (`//`):** Used inside function bodies and implementation logic to explain *why*, not *what*. This is the only non-documentation marker: a `//` never documents a declaration (use `///` or `/** */` for that). Place on the line above the code it describes. Multi-line explanations use consecutive `//` lines.
 
 ```cpp
 // Increment before push so flush cannot observe zero while a message
 // is already in the queue but not yet counted.
 m_pending_messages.fetch_add(1, std::memory_order_acq_rel);
 ```
+
+### Formatting and tooling
+
+C++ formatting is codified in the root `.clang-format` (LLVM base, Allman braces for functions/classes, 4-space indent, east-side pointers, includes never reordered). Run clang-format over the changed `*.cpp`/`*.hpp` before committing. CI runs an advisory check in `.github/workflows/quality.yml` (clang-format 18, the version pinned there) over the tracked project sources; submodules under `external/` are never formatted. There is no hard column limit (`ColumnLimit: 0`): long Doxygen and log lines may run past 120, so the formatter never reflows on width. Because width is not enforced, do not chase an 80-column limit -- keep a member's documentation on the line(s) above it (per the comment conventions) instead of letting a trailing comment push the line out. The comment-marker rules above are guarded by an advisory CI step, `scripts/check_comment_style.py` (no trailing `///<`, no multi-line `///`, no block tag on a `///` line).
+
+Markdown files (`*.md`) are **not** hard-wrapped at 80 columns. Write one logical line per paragraph, list item, and blockquote line and let editors soft-wrap; do not insert manual line breaks mid-paragraph. Fenced code blocks, tables, and any line indented four or more spaces (indented code, nested list sub-paragraphs) are kept verbatim. As in code, use `--` rather than an em-dash or en-dash.
 
 ### Type safety and const-correctness
 
@@ -301,13 +292,7 @@ dispatcher.emit_safe(PlayerStateChanged{.health = player->health});
 
 ### Memory access in hook callbacks
 
-Do not add `Memory::is_readable()` or `Memory::is_writable()` before every
-field read in hook callbacks. Use those predicates for setup validation and
-diagnostics. Use `seh_read_chain` for unstable live game pointers, and use
-`read_ptr_unchecked` only when the caller can prove the pointer chain is live
-for the current frame. The full pattern -- worked examples, the primitive
-selection table, and the anti-patterns to remove -- lives in
-[docs/misc/hot-path-memory.md](docs/misc/hot-path-memory.md).
+Do not add `Memory::is_readable()` or `Memory::is_writable()` before every field read in hook callbacks. Use those predicates for setup validation and diagnostics. Use `seh_read_chain` for unstable live game pointers, and use `read_ptr_unchecked` only when the caller can prove the pointer chain is live for the current frame. The full pattern -- worked examples, the primitive selection table, and the anti-patterns to remove -- lives in [docs/misc/hot-path-memory.md](docs/misc/hot-path-memory.md).
 
 ## Testing
 
@@ -401,8 +386,7 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, exc
 - **Do not break** the lock ordering documented in class headers.
 - **Do not weaken** atomic memory orderings without proving correctness.
 - **Do not skip** running the test suite before committing.
-- **Do not publish** release packages before debug tests, release builds, and
-  installed-package smoke tests pass for both MinGW and MSVC.
+- **Do not publish** release packages before debug tests, release builds, and installed-package smoke tests pass for both MinGW and MSVC.
 - **Do not add** Windows API calls without `#ifdef _WIN32` guards in headers (implementation files are Windows-only, but headers should remain clean).
 - **Do not commit** build artifacts, `.exe`, `.a`, `.lib`, `.obj`, or `.pdb` files.
 - **Do not remove** or weaken existing tests. Add new tests for new code.

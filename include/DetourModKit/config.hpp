@@ -244,21 +244,18 @@ namespace DetourModKit
         {
             if constexpr (std::same_as<T, int>)
             {
-                register_int(section, ini_key, log_key_name,
-                             [&out](int v) { out.store(v, std::memory_order_relaxed); },
-                             default_value);
+                register_int(section, ini_key, log_key_name, [&out](int v)
+                             { out.store(v, std::memory_order_relaxed); }, default_value);
             }
             else if constexpr (std::same_as<T, bool>)
             {
-                register_bool(section, ini_key, log_key_name,
-                              [&out](bool v) { out.store(v, std::memory_order_relaxed); },
-                              default_value);
+                register_bool(section, ini_key, log_key_name, [&out](bool v)
+                              { out.store(v, std::memory_order_relaxed); }, default_value);
             }
             else
             {
-                register_float(section, ini_key, log_key_name,
-                               [&out](float v) { out.store(v, std::memory_order_relaxed); },
-                               default_value);
+                register_float(section, ini_key, log_key_name, [&out](float v)
+                               { out.store(v, std::memory_order_relaxed); }, default_value);
             }
         }
 
@@ -401,10 +398,14 @@ namespace DetourModKit
          */
         enum class AutoReloadStatus
         {
-            Started,         ///< Watcher is now running.
-            AlreadyRunning,  ///< Called twice; the existing watcher was kept.
-            NoPriorLoad,     ///< Config::load() was never called; no path to watch.
-            StartFailed      ///< Directory could not be opened or start handshake failed.
+            /// Watcher is now running.
+            Started,
+            /// Called twice; the existing watcher was kept.
+            AlreadyRunning,
+            /// Config::load() was never called; no path to watch.
+            NoPriorLoad,
+            /// Directory could not be opened or start handshake failed.
+            StartFailed
         };
 
         /**

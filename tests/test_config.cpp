@@ -14,9 +14,9 @@
 #include "DetourModKit/input.hpp"
 
 using namespace DetourModKit;
+using DetourModKit::gamepad_button;
 using DetourModKit::keyboard_key;
 using DetourModKit::mouse_button;
-using DetourModKit::gamepad_button;
 
 class ConfigTest : public ::testing::Test
 {
@@ -248,10 +248,8 @@ TEST_F(ConfigTest, KeyCombo_CommentOnlyLineYieldsEmpty)
     ini_file.close();
 
     Config::KeyComboList test_value;
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
-                               [&test_value](const Config::KeyComboList &c)
-                               { test_value = c; },
-                               "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; }, "");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     EXPECT_TRUE(test_value.empty());
 }
@@ -264,10 +262,8 @@ TEST_F(ConfigTest, KeyCombo_EmptyCommaSeparatorsAreSkipped)
     ini_file.close();
 
     Config::KeyComboList test_value;
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
-                               [&test_value](const Config::KeyComboList &c)
-                               { test_value = c; },
-                               "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; }, "");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     ASSERT_EQ(test_value.size(), 2u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
@@ -282,10 +278,8 @@ TEST_F(ConfigTest, KeyCombo_HexWithOnlyPrefixIsSkipped)
     ini_file.close();
 
     Config::KeyComboList test_value;
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
-                               [&test_value](const Config::KeyComboList &c)
-                               { test_value = c; },
-                               "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; }, "");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     ASSERT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x72));
@@ -300,10 +294,8 @@ TEST_F(ConfigTest, KeyCombo_HexValueAboveIntMaxIsSkipped)
     ini_file.close();
 
     Config::KeyComboList test_value;
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
-                               [&test_value](const Config::KeyComboList &c)
-                               { test_value = c; },
-                               "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; }, "");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     ASSERT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x10));
@@ -317,10 +309,8 @@ TEST_F(ConfigTest, KeyCombo_DoublePlusSkipsEmptySegment)
     ini_file.close();
 
     Config::KeyComboList test_value;
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
-                               [&test_value](const Config::KeyComboList &c)
-                               { test_value = c; },
-                               "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; }, "");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     ASSERT_EQ(test_value.size(), 1u);
     ASSERT_EQ(test_value[0].modifiers.size(), 1u);
@@ -339,10 +329,8 @@ TEST_F(ConfigTest, KeyCombo_TrailingPlusParsedAsTrigger)
     ini_file.close();
 
     Config::KeyComboList test_value;
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
-                               [&test_value](const Config::KeyComboList &c)
-                               { test_value = c; },
-                               "");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; }, "");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     ASSERT_EQ(test_value.size(), 1u);
     EXPECT_EQ(test_value[0].keys[0], keyboard_key(0x11));
@@ -357,10 +345,8 @@ TEST_F(ConfigTest, KeyCombo_OnlyPlusSignsYieldsEmpty)
     ini_file.close();
 
     Config::KeyComboList test_value;
-    Config::register_key_combo("TestSection", "TestKeys", "test_keys",
-                               [&test_value](const Config::KeyComboList &c)
-                               { test_value = c; },
-                               "F3");
+    Config::register_key_combo("TestSection", "TestKeys", "test_keys", [&test_value](const Config::KeyComboList &c)
+                               { test_value = c; }, "F3");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
     EXPECT_TRUE(test_value.empty());
 }
@@ -369,10 +355,8 @@ TEST_F(ConfigTest, KeyCombo_DefaultParsesMultipleCombos)
 {
     Config::KeyComboList captured;
 
-    Config::register_key_combo("Hotkeys", "Toggle", "toggle",
-                               [&captured](const Config::KeyComboList &c)
-                               { captured = c; },
-                               "Ctrl+F3,Gamepad_LT+Gamepad_A");
+    Config::register_key_combo("Hotkeys", "Toggle", "toggle", [&captured](const Config::KeyComboList &c)
+                               { captured = c; }, "Ctrl+F3,Gamepad_LT+Gamepad_A");
     EXPECT_NO_THROW(Config::load(test_ini_file_.string()));
 
     ASSERT_EQ(captured.size(), 2u);
@@ -869,7 +853,6 @@ TEST_F(ConfigTest, RegisterString_DefaultValueNotMovedFrom)
     EXPECT_EQ(val, "my_default");
 }
 
-
 TEST_F(ConfigTest, RegisterKeyCombo_SingleKey)
 {
     Config::KeyComboList combo;
@@ -1363,14 +1346,11 @@ TEST_F(ConfigTest, AccumulativeSetterMustBeIdempotent)
 
     std::vector<std::string> items;
 
-    Config::register_string("TestSection", "Items", "items",
-                            [&items](const std::string &v)
+    Config::register_string("TestSection", "Items", "items", [&items](const std::string &v)
                             {
                                 // Idempotent pattern: clear before applying
                                 items.clear();
-                                items.push_back(v);
-                            },
-                            "default_item");
+                                items.push_back(v); }, "default_item");
 
     // After registration: ["default_item"]
     ASSERT_EQ(items.size(), 1u);
@@ -1521,18 +1501,12 @@ TEST_F(ConfigTest, Reload_PreservesRegistrations)
     std::vector<bool> bool_invocations;
     std::vector<std::string> string_invocations;
 
-    Config::register_int("S", "Count", "count",
-                         [&](int v)
-                         { int_invocations.push_back(v); },
-                         0);
-    Config::register_bool("S", "Enabled", "enabled",
-                          [&](bool v)
-                          { bool_invocations.push_back(v); },
-                          false);
-    Config::register_string("S", "Label", "label",
-                            [&](const std::string &v)
-                            { string_invocations.push_back(v); },
-                            std::string("default"));
+    Config::register_int("S", "Count", "count", [&](int v)
+                         { int_invocations.push_back(v); }, 0);
+    Config::register_bool("S", "Enabled", "enabled", [&](bool v)
+                          { bool_invocations.push_back(v); }, false);
+    Config::register_string("S", "Label", "label", [&](const std::string &v)
+                            { string_invocations.push_back(v); }, std::string("default"));
 
     {
         std::ofstream f(test_ini_file_);
@@ -1573,28 +1547,21 @@ TEST_F(ConfigTest, Reload_SetterThrows_RemainingSettersStillRun)
     std::atomic<int> third_value{0};
     std::atomic<int> throw_count{0};
 
-    Config::register_int("S", "First", "first",
-                         [&first_value](int v)
-                         { first_value.store(v, std::memory_order_release); },
-                         0);
+    Config::register_int("S", "First", "first", [&first_value](int v)
+                         { first_value.store(v, std::memory_order_release); }, 0);
     // Setter fires once at register, once at load, once at reload; start
     // throwing only on the third invocation so the failure lands on the
     // reload path.
-    Config::register_int("S", "Middle", "middle",
-                         [&throw_count](int /*v*/)
+    Config::register_int("S", "Middle", "middle", [&throw_count](int /*v*/)
                          {
                              const int calls =
                                  throw_count.fetch_add(1, std::memory_order_relaxed) + 1;
                              if (calls >= 3)
                              {
                                  throw std::runtime_error("middle setter deliberately throws");
-                             }
-                         },
-                         0);
-    Config::register_int("S", "Third", "third",
-                         [&third_value](int v)
-                         { third_value.store(v, std::memory_order_release); },
-                         0);
+                             } }, 0);
+    Config::register_int("S", "Third", "third", [&third_value](int v)
+                         { third_value.store(v, std::memory_order_release); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1621,10 +1588,8 @@ TEST_F(ConfigTest, Reload_AfterClear_ReturnsFalse_BecausePathCleared)
     // clear_registered_items() also clears the remembered INI path, so
     // reload() takes the no-last-loaded-path branch (not a no-items one).
     int value = 0;
-    Config::register_int("S", "K", "k",
-                         [&value](int v)
-                         { value = v; },
-                         1);
+    Config::register_int("S", "K", "k", [&value](int v)
+                         { value = v; }, 1);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1642,10 +1607,8 @@ TEST_F(ConfigTest, ReloadHotkey_RegistersBinding)
     InputManager::get_instance().shutdown();
 
     int value = 0;
-    Config::register_int("S", "K", "k",
-                         [&value](int v)
-                         { value = v; },
-                         1);
+    Config::register_int("S", "K", "k", [&value](int v)
+                         { value = v; }, 1);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1692,10 +1655,8 @@ TEST_F(ConfigTest, ReloadHotkey_ActuallyFiresOnPress)
     InputManager::get_instance().shutdown();
 
     int value = 0;
-    Config::register_int("S", "K", "k",
-                         [&value](int v)
-                         { value = v; },
-                         1);
+    Config::register_int("S", "K", "k", [&value](int v)
+                         { value = v; }, 1);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1738,10 +1699,8 @@ TEST_F(ConfigTest, DisableAutoReload_FromReloadCallback_DoesNotDeadlock)
     Config::disable_auto_reload();
 
     std::atomic<int> current_value{0};
-    Config::register_int("S", "K", "k",
-                         [&](int v)
-                         { current_value.store(v, std::memory_order_release); },
-                         0);
+    Config::register_int("S", "K", "k", [&](int v)
+                         { current_value.store(v, std::memory_order_release); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1791,13 +1750,10 @@ TEST_F(ConfigTest, AutoReload_EndToEnd)
     std::atomic<int> current_value{0};
     std::atomic<int> setter_invocations{0};
 
-    Config::register_int("S", "K", "k",
-                         [&](int v)
+    Config::register_int("S", "K", "k", [&](int v)
                          {
                              current_value.store(v, std::memory_order_release);
-                             setter_invocations.fetch_add(1, std::memory_order_relaxed);
-                         },
-                         0);
+                             setter_invocations.fetch_add(1, std::memory_order_relaxed); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1869,10 +1825,8 @@ TEST_F(ConfigTest, AutoReload_Enable_ReportsAlreadyRunning)
     Config::disable_auto_reload();
 
     int value = 0;
-    Config::register_int("S", "K", "k",
-                         [&value](int v)
-                         { value = v; },
-                         0);
+    Config::register_int("S", "K", "k", [&value](int v)
+                         { value = v; }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1905,10 +1859,8 @@ TEST_F(ConfigTest, AutoReload_Enable_ReportsStartFailed)
     }
 
     int value = 0;
-    Config::register_int("S", "K", "k",
-                         [&value](int v)
-                         { value = v; },
-                         0);
+    Config::register_int("S", "K", "k", [&value](int v)
+                         { value = v; }, 0);
     ASSERT_NO_THROW(Config::load(ini_path.string()));
 
     // Destroy the parent directory so CreateFileW fails inside start().
@@ -1938,10 +1890,8 @@ TEST_F(ConfigTest, AutoReload_Enable_AfterStartFailed_RecoversOnRetry)
     }
 
     int value = 0;
-    Config::register_int("S", "K", "k",
-                         [&value](int v)
-                         { value = v; },
-                         0);
+    Config::register_int("S", "K", "k", [&value](int v)
+                         { value = v; }, 0);
     ASSERT_NO_THROW(Config::load(ini_path.string()));
 
     // Remove the watched directory to drive start() into StartFailed.
@@ -1972,10 +1922,8 @@ TEST_F(ConfigTest, AutoReload_Enable_AfterStartFailed_RecoversOnRetry)
 TEST_F(ConfigTest, Reload_ContentUnchanged_SkipsSetters)
 {
     std::atomic<int> setter_hits{0};
-    Config::register_int("S", "K", "k",
-                         [&](int /*v*/)
-                         { setter_hits.fetch_add(1, std::memory_order_relaxed); },
-                         0);
+    Config::register_int("S", "K", "k", [&](int /*v*/)
+                         { setter_hits.fetch_add(1, std::memory_order_relaxed); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -1994,10 +1942,8 @@ TEST_F(ConfigTest, Reload_ContentUnchanged_SkipsSetters)
 TEST_F(ConfigTest, Reload_ContentChanged_RunsSetters)
 {
     std::atomic<int> setter_hits{0};
-    Config::register_int("S", "K", "k",
-                         [&](int /*v*/)
-                         { setter_hits.fetch_add(1, std::memory_order_relaxed); },
-                         0);
+    Config::register_int("S", "K", "k", [&](int /*v*/)
+                         { setter_hits.fetch_add(1, std::memory_order_relaxed); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -2024,10 +1970,8 @@ TEST_F(ConfigTest, Reload_FileUnreadable_FallsBackToReload)
     // existing contract when SimpleIni itself fails to open the file)
     // and does not crash.
     std::atomic<int> setter_hits{0};
-    Config::register_int("S", "K", "k",
-                         [&](int /*v*/)
-                         { setter_hits.fetch_add(1, std::memory_order_relaxed); },
-                         0);
+    Config::register_int("S", "K", "k", [&](int /*v*/)
+                         { setter_hits.fetch_add(1, std::memory_order_relaxed); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -2055,15 +1999,12 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
     // most once; subsequent unchanged-bytes calls short-circuit on the
     // content hash.
     std::atomic<int> setter_hits{0};
-    Config::register_int("S", "K", "k",
-                         [&](int /*v*/)
+    Config::register_int("S", "K", "k", [&](int /*v*/)
                          {
                              // Sleep so overlapping reload() calls from
                              // multiple threads actually race.
                              std::this_thread::sleep_for(std::chrono::milliseconds{10});
-                             setter_hits.fetch_add(1, std::memory_order_relaxed);
-                         },
-                         0);
+                             setter_hits.fetch_add(1, std::memory_order_relaxed); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -2079,7 +2020,8 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
     threads.reserve(kThreads);
     for (int i = 0; i < kThreads; ++i)
     {
-        threads.emplace_back([] { (void)Config::reload(); });
+        threads.emplace_back([]
+                             { (void)Config::reload(); });
     }
     for (auto &t : threads)
     {
@@ -2091,7 +2033,8 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
     const int delta = setter_hits.load(std::memory_order_relaxed) - baseline;
     EXPECT_LE(delta, 1)
         << "Content-hash skip must collapse concurrent unchanged-bytes reloads "
-           "to at most one setter pass (observed delta=" << delta << ").";
+           "to at most one setter pass (observed delta="
+        << delta << ").";
 }
 
 TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
@@ -2101,10 +2044,8 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
     Config::disable_auto_reload();
 
     std::atomic<int> current_value{0};
-    Config::register_int("S", "K", "k",
-                         [&](int v)
-                         { current_value.store(v, std::memory_order_release); },
-                         0);
+    Config::register_int("S", "K", "k", [&](int v)
+                         { current_value.store(v, std::memory_order_release); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -2182,13 +2123,13 @@ TEST_F(ConfigTest, Reload_EmptyFile_DoesNotCrash)
     // SimpleIni treats a zero-byte buffer as SI_OK with no sections; a
     // subsequent reload() against the same empty bytes must hash-skip.
     std::atomic<int> setter_hits{0};
-    Config::register_int("S", "K", "k",
-                         [&](int /*v*/)
-                         { setter_hits.fetch_add(1, std::memory_order_relaxed); },
-                         7);
+    Config::register_int("S", "K", "k", [&](int /*v*/)
+                         { setter_hits.fetch_add(1, std::memory_order_relaxed); }, 7);
 
     // Create an empty file.
-    { std::ofstream f(test_ini_file_, std::ios::binary); }
+    {
+        std::ofstream f(test_ini_file_, std::ios::binary);
+    }
     ASSERT_TRUE(std::filesystem::exists(test_ini_file_));
     ASSERT_EQ(std::filesystem::file_size(test_ini_file_), 0u);
 
@@ -2212,10 +2153,8 @@ TEST_F(ConfigTest, Reload_HashResetOnLoadFailure)
     // A load() against a missing file must clear the cached content
     // hash so a later successful load() cannot spuriously hash-skip.
     std::atomic<int> setter_hits{0};
-    Config::register_int("S", "K", "k",
-                         [&](int /*v*/)
-                         { setter_hits.fetch_add(1, std::memory_order_relaxed); },
-                         0);
+    Config::register_int("S", "K", "k", [&](int /*v*/)
+                         { setter_hits.fetch_add(1, std::memory_order_relaxed); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -2249,10 +2188,8 @@ TEST_F(ConfigTest, Reload_HashResetOnReadFailure)
     // reload() read failure. A stale hash would let a subsequent
     // identical-bytes reload hash-skip and leave state at defaults.
     std::atomic<int> setter_hits{0};
-    Config::register_int("S", "K", "k",
-                         [&](int /*v*/)
-                         { setter_hits.fetch_add(1, std::memory_order_relaxed); },
-                         0);
+    Config::register_int("S", "K", "k", [&](int /*v*/)
+                         { setter_hits.fetch_add(1, std::memory_order_relaxed); }, 0);
 
     {
         std::ofstream f(test_ini_file_);
@@ -2288,7 +2225,8 @@ TEST_F(ConfigTest, RegisterPressCombo_EmptyDefaultRegistersName)
     auto guard = Config::register_press_combo(
         "Input", "EmptyDefaultKey", "binding with empty default",
         "empty-default-binding",
-        [&]() { press_count.fetch_add(1, std::memory_order_relaxed); },
+        [&]()
+        { press_count.fetch_add(1, std::memory_order_relaxed); },
         "");
 
     EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1))

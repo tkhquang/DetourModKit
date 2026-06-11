@@ -1,7 +1,6 @@
 # DetourModKit
 
-[![Coverage Report ≥ 80%](https://github.com/tkhquang/DetourModKit/actions/workflows/coverage-pages.yml/badge.svg)](https://tkhquang.github.io/DetourModKit/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Coverage Report ≥ 80%](https://github.com/tkhquang/DetourModKit/actions/workflows/coverage-pages.yml/badge.svg)](https://tkhquang.github.io/DetourModKit/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Guides](#guides) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
 
@@ -548,9 +547,7 @@ When `DMK_ENABLE_PROFILING` is OFF (the default), all profiling macros expand to
 
 ### Enabling Sanitizers
 
-AddressSanitizer is available on Windows through **MSVC only**. GCC and Clang on
-mingw-w64 ship no ASan/UBSan runtime for the Windows target, so a MinGW sanitizer
-build cannot link here; UndefinedBehaviorSanitizer is not available on Windows.
+AddressSanitizer is available on Windows through **MSVC only**. GCC and Clang on mingw-w64 ship no ASan/UBSan runtime for the Windows target, so a MinGW sanitizer build cannot link here; UndefinedBehaviorSanitizer is not available on Windows.
 
 ```bash
 # AddressSanitizer via MSVC -- run from a Developer Command Prompt.

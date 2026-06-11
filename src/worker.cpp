@@ -63,7 +63,7 @@ namespace DetourModKit
     {
         bool expected = false;
         if (!m_joined.compare_exchange_strong(expected, true,
-                                             std::memory_order_acq_rel))
+                                              std::memory_order_acq_rel))
         {
             return;
         }

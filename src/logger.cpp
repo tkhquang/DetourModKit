@@ -104,8 +104,8 @@ namespace DetourModKit
         if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
         {
             *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                  << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                                  << "Logger reconfiguring. New file: " << file_name << '\n';
+                                   << "[" << std::setw(7) << std::left << "INFO" << "] :: "
+                                   << "Logger reconfiguring. New file: " << file_name << '\n';
             m_log_file_stream_ptr->flush();
             m_log_file_stream_ptr->close();
         }
@@ -127,8 +127,8 @@ namespace DetourModKit
         else
         {
             *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                  << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                                  << "Logger reconfigured. Now logging to: " << file_name << '\n';
+                                   << "[" << std::setw(7) << std::left << "INFO" << "] :: "
+                                   << "Logger reconfigured. Now logging to: " << file_name << '\n';
         }
     }
 
@@ -156,8 +156,8 @@ namespace DetourModKit
         else
         {
             *m_log_file_stream_ptr << "[" << get_timestamp() << "] ["
-                                  << std::setw(7) << std::left << "INFO"
-                                  << "] :: Logger initialized. Logging to: " << m_log_file_name << '\n';
+                                   << std::setw(7) << std::left << "INFO"
+                                   << "] :: Logger initialized. Logging to: " << m_log_file_name << '\n';
         }
     }
 
@@ -165,7 +165,7 @@ namespace DetourModKit
     {
         bool expected = false;
         if (!m_shutdown_called.compare_exchange_strong(expected, true,
-                                                      std::memory_order_acq_rel))
+                                                       std::memory_order_acq_rel))
         {
             return;
         }
@@ -176,7 +176,7 @@ namespace DetourModKit
     {
         bool expected = false;
         if (!m_shutdown_called.compare_exchange_strong(expected, true,
-                                                      std::memory_order_acq_rel))
+                                                       std::memory_order_acq_rel))
         {
             return;
         }
@@ -288,8 +288,8 @@ namespace DetourModKit
             if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
             {
                 *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                      << "[" << std::setw(7) << std::left << level_str << "] :: "
-                                      << message << '\n';
+                                       << "[" << std::setw(7) << std::left << level_str << "] :: "
+                                       << message << '\n';
 
                 // Flush on warnings/errors to ensure critical messages survive crashes
                 if (level >= LogLevel::Warning)
@@ -314,13 +314,9 @@ namespace DetourModKit
             const auto in_time_t = std::chrono::system_clock::to_time_t(now);
             std::tm timeinfo_struct = {};
 
-#if defined(_MSC_VER)
-            if (localtime_s(&timeinfo_struct, &in_time_t) != 0)
-            {
-                throw std::runtime_error("localtime_s failed to convert time.");
-            }
-#elif defined(__MINGW32__) || defined(__MINGW64__)
-            // MinGW: localtime_s has reversed parameter order (ISO C11 Annex K)
+#if defined(_MSC_VER) || defined(__MINGW32__) || defined(__MINGW64__)
+            // MinGW's localtime_s takes the same (struct tm *, const time_t *) argument
+            // order as MSVC, not the ISO C11 Annex K order, so the call is identical.
             if (localtime_s(&timeinfo_struct, &in_time_t) != 0)
             {
                 throw std::runtime_error("localtime_s failed to convert time.");

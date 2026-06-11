@@ -163,7 +163,7 @@ TEST(CodeConstantTest, ReportsCurrentValueNotStaleNominal)
     cc.site = cands;
     cc.kind = Scanner::OperandKind::Immediate;
     cc.operand_index = 1;
-    cc.nominal = 0xE0;     // a stale last-known value
+    cc.nominal = 0xE0; // a stale last-known value
     cc.has_nominal = true;
 
     // The drift case: nominal differs from the live value; the live value wins.

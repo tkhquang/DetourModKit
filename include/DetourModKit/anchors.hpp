@@ -49,13 +49,20 @@ namespace DetourModKit
          */
         enum class AnchorKind : std::uint8_t
         {
-            VtableIdentity, ///< Rtti::vtable_for_type -> a class vtable address by name.
-            RipGlobal,      ///< Scanner cascade -> an absolute address (Direct or RipRelative candidates).
-            CodeOperand,    ///< Scanner::read_code_constant -> an in-code immediate/displacement value.
-            StringXref,     ///< Scanner::find_string_xref -> the instruction (or function) referencing a string literal.
-            Manual,         ///< A pinned literal; surfaced as at-risk in a report.
-            CallArgHome,    ///< Reserved for a future prologue-dataflow backend; not yet resolvable.
-            Quorum          ///< Two independent sub-anchors that must resolve and agree before acceptance.
+            /// Rtti::vtable_for_type -> a class vtable address by name.
+            VtableIdentity,
+            /// Scanner cascade -> an absolute address (Direct or RipRelative candidates).
+            RipGlobal,
+            /// Scanner::read_code_constant -> an in-code immediate/displacement value.
+            CodeOperand,
+            /// Scanner::find_string_xref -> the instruction (or function) referencing a string literal.
+            StringXref,
+            /// A pinned literal; surfaced as at-risk in a report.
+            Manual,
+            /// Reserved for a future prologue-dataflow backend; not yet resolvable.
+            CallArgHome,
+            /// Two independent sub-anchors that must resolve and agree before acceptance.
+            Quorum
         };
 
         /**
@@ -64,8 +71,10 @@ namespace DetourModKit
          */
         enum class QuorumMatch : std::uint8_t
         {
-            ExactValue,     ///< Both sub-anchors must resolve to the identical value.
-            WithinTolerance ///< Resolved values may differ by at most @ref Anchor::quorum_tolerance.
+            /// Both sub-anchors must resolve to the identical value.
+            ExactValue,
+            /// Resolved values may differ by at most @ref Anchor::quorum_tolerance.
+            WithinTolerance
         };
 
         /**
@@ -74,10 +83,14 @@ namespace DetourModKit
          */
         enum class AnchorStatus : std::uint8_t
         {
-            Unresolved,  ///< Not yet attempted.
-            Resolved,    ///< Resolved; @ref ResolvedAnchor::value is valid.
-            Failed,      ///< The backend failed (fail closed: no value).
-            Unsupported  ///< The kind has no backend yet (CallArgHome).
+            /// Not yet attempted.
+            Unresolved,
+            /// Resolved; @ref ResolvedAnchor::value is valid.
+            Resolved,
+            /// The backend failed (fail closed: no value).
+            Failed,
+            /// The kind has no backend yet (CallArgHome).
+            Unsupported
         };
 
         /**
@@ -108,25 +121,36 @@ namespace DetourModKit
          */
         struct Anchor
         {
-            std::string_view label;                  ///< Human-readable id, echoed in the result.
-            AnchorKind kind = AnchorKind::Manual;    ///< Which backend resolves this anchor.
+            /// Human-readable id, echoed in the result.
+            std::string_view label;
+            /// Which backend resolves this anchor.
+            AnchorKind kind = AnchorKind::Manual;
 
-            std::string_view mangled;                ///< VtableIdentity: the class mangled name.
+            /// VtableIdentity: the class mangled name.
+            std::string_view mangled;
 
-            std::span<const Scanner::AddrCandidate> site; ///< RipGlobal / CodeOperand: the cascade.
-            Scanner::OperandKind operand_kind = Scanner::OperandKind::Immediate; ///< CodeOperand.
-            std::uint8_t operand_index = 0;          ///< CodeOperand: visible operand index.
-            std::uint8_t byte_width = 0;             ///< CodeOperand: 0 = decoded width.
+            /// RipGlobal / CodeOperand: the cascade.
+            std::span<const Scanner::AddrCandidate> site;
+            /// CodeOperand.
+            Scanner::OperandKind operand_kind = Scanner::OperandKind::Immediate;
+            /// CodeOperand: visible operand index.
+            std::uint8_t operand_index = 0;
+            /// CodeOperand: 0 = decoded width.
+            std::uint8_t byte_width = 0;
 
-            std::string_view xref_text;              ///< StringXref: the string literal content.
-            Scanner::StringEncoding xref_encoding =
-                Scanner::StringEncoding::Utf8;       ///< StringXref: how the string is stored.
-            Scanner::XrefReturn xref_return =
-                Scanner::XrefReturn::ReferencingInstruction; ///< StringXref: instruction vs function.
-            bool xref_require_terminator = true;     ///< StringXref: match a trailing NUL.
-            bool xref_broad_match = false;           ///< StringXref: keep lea/mov scan and add Zydis rarer shapes.
+            /// StringXref: the string literal content.
+            std::string_view xref_text;
+            /// StringXref: how the string is stored.
+            Scanner::StringEncoding xref_encoding = Scanner::StringEncoding::Utf8;
+            /// StringXref: instruction vs function.
+            Scanner::XrefReturn xref_return = Scanner::XrefReturn::ReferencingInstruction;
+            /// StringXref: match a trailing NUL.
+            bool xref_require_terminator = true;
+            /// StringXref: keep lea/mov scan and add Zydis rarer shapes.
+            bool xref_broad_match = false;
 
-            std::int64_t manual_value = 0;           ///< Manual: the pinned literal.
+            /// Manual: the pinned literal.
+            std::int64_t manual_value = 0;
 
             /**
              * @brief Optional fail-closed post-resolve check. nullptr (default)
@@ -145,10 +169,14 @@ namespace DetourModKit
             /// Opaque pointer passed verbatim to @ref validator; nullptr if unused.
             const void *validator_context = nullptr;
 
-            const Anchor *quorum_a = nullptr;        ///< Quorum: first independent sub-anchor (non-owning).
-            const Anchor *quorum_b = nullptr;        ///< Quorum: second independent sub-anchor (non-owning).
-            QuorumMatch quorum_match = QuorumMatch::ExactValue; ///< Quorum: how the two values must agree.
-            std::int64_t quorum_tolerance = 0;       ///< Quorum: max |first - second| when WithinTolerance.
+            /// Quorum: first independent sub-anchor (non-owning).
+            const Anchor *quorum_a = nullptr;
+            /// Quorum: second independent sub-anchor (non-owning).
+            const Anchor *quorum_b = nullptr;
+            /// Quorum: how the two values must agree.
+            QuorumMatch quorum_match = QuorumMatch::ExactValue;
+            /// Quorum: max |first - second| when WithinTolerance.
+            std::int64_t quorum_tolerance = 0;
         };
 
         /**

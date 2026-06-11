@@ -42,12 +42,16 @@ namespace DetourModKit
      */
     namespace Rtti
     {
-        /// Hard cap on a self-heal search radius (bytes per side). Bounds the
-        /// worst-case probe count so an accidental SIZE_MAX window cannot hang.
+        /**
+         * @brief Hard cap on a self-heal search radius (bytes per side). Bounds the
+         *        worst-case probe count so an accidental SIZE_MAX window cannot hang.
+         */
         inline constexpr std::size_t MAX_HEAL_WINDOW = 4096;
 
-        /// Hard cap on the number of landmarks in one @ref solve_fingerprint
-        /// template.
+        /**
+         * @brief Hard cap on the number of landmarks in one @ref solve_fingerprint
+         *        template.
+         */
         inline constexpr std::size_t MAX_FINGERPRINT_LANDMARKS = 32;
 
         /**
@@ -64,17 +68,28 @@ namespace DetourModKit
          */
         struct PointeeType
         {
-            std::uintptr_t vtable = 0;        ///< Resolved vtable pointer.
-            std::uintptr_t col_addr = 0;      ///< COL the vtable points back to.
-            std::uintptr_t td_addr = 0;       ///< TypeDescriptor base.
-            std::uintptr_t name_addr = 0;     ///< Mangled-name buffer (td_addr + 0x10).
-            std::uintptr_t object_base = 0;   ///< Start of the resolved (sub)object.
-            std::uintptr_t complete_obj = 0;  ///< object_base - col_offset (underflow-clamped).
-            std::uintptr_t pointer_value = 0; ///< Raw qword read at the probed slot.
-            std::uint32_t col_offset = 0;     ///< COL.offset (+0x04): this vtable's offset in the complete object.
-            bool was_pointer = false;         ///< true when the slot held a pointer-to-object (deref'd once).
-            std::uint16_t name_len = 0;       ///< Length of the mangled name in @ref name_buf.
-            char name_buf[Rtti::MAX_TYPE_NAME_LEN + 1] = {}; ///< NUL-terminated mangled name.
+            /// Resolved vtable pointer.
+            std::uintptr_t vtable = 0;
+            /// COL the vtable points back to.
+            std::uintptr_t col_addr = 0;
+            /// TypeDescriptor base.
+            std::uintptr_t td_addr = 0;
+            /// Mangled-name buffer (td_addr + 0x10).
+            std::uintptr_t name_addr = 0;
+            /// Start of the resolved (sub)object.
+            std::uintptr_t object_base = 0;
+            /// object_base - col_offset (underflow-clamped).
+            std::uintptr_t complete_obj = 0;
+            /// Raw qword read at the probed slot.
+            std::uintptr_t pointer_value = 0;
+            /// COL.offset (+0x04): this vtable's offset in the complete object.
+            std::uint32_t col_offset = 0;
+            /// true when the slot held a pointer-to-object (deref'd once).
+            bool was_pointer = false;
+            /// Length of the mangled name in @ref name_buf.
+            std::uint16_t name_len = 0;
+            /// NUL-terminated mangled name.
+            char name_buf[Rtti::MAX_TYPE_NAME_LEN + 1] = {};
 
             /// Non-owning view of the mangled name held in @ref name_buf.
             [[nodiscard]] std::string_view name() const noexcept
@@ -116,9 +131,12 @@ namespace DetourModKit
          */
         struct LabeledSlot
         {
-            std::uintptr_t slot_addr = 0; ///< Address of the resolved slot.
-            std::size_t slot_index = 0;   ///< Zero-based index of the slot in the swept block.
-            PointeeType type;             ///< Reverse-identified type (carries its own name buffer).
+            /// Address of the resolved slot.
+            std::uintptr_t slot_addr = 0;
+            /// Zero-based index of the slot in the swept block.
+            std::size_t slot_index = 0;
+            /// Reverse-identified type (carries its own name buffer).
+            PointeeType type;
         };
 
         /**
@@ -170,9 +188,12 @@ namespace DetourModKit
          */
         enum class Indirection : std::uint8_t
         {
-            PointerToObject, ///< Match only slots that held a pointer-to-object.
-            ObjectBase,      ///< Match only slots that were a direct object base.
-            Any              ///< Match either shape (use when capture and heal may straddle a DLL boundary).
+            /// Match only slots that held a pointer-to-object.
+            PointerToObject,
+            /// Match only slots that were a direct object base.
+            ObjectBase,
+            /// Match either shape (use when capture and heal may straddle a DLL boundary).
+            Any
         };
 
         /**
@@ -181,9 +202,12 @@ namespace DetourModKit
          */
         enum class HealError : std::uint8_t
         {
-            BadDescriptor, ///< The landmark/fingerprint is malformed; no memory was touched.
-            NoMatch,       ///< No slot in the window resolved to the expected type.
-            Ambiguous      ///< Equidistant slots both match (heal) or tied-score deltas (fingerprint).
+            /// The landmark/fingerprint is malformed; no memory was touched.
+            BadDescriptor,
+            /// No slot in the window resolved to the expected type.
+            NoMatch,
+            /// Equidistant slots both match (heal) or tied-score deltas (fingerprint).
+            Ambiguous
         };
 
         /**
@@ -207,13 +231,20 @@ namespace DetourModKit
          */
         struct Landmark
         {
-            std::uintptr_t base = 0;           ///< Resolved struct base. Filled at call time; never persisted.
-            std::ptrdiff_t nominal_offset = 0; ///< Last known field offset within @ref base.
-            std::size_t window = 0x40;         ///< Search radius per side in bytes (capped at MAX_HEAL_WINDOW).
-            std::string_view expected_mangled; ///< MSVC mangled name to match. Aliases caller storage.
-            Indirection indirection = Indirection::PointerToObject; ///< Required slot shape.
-            std::size_t stride = sizeof(std::uintptr_t);            ///< Probe step (and candidate alignment). Zero -> 8.
-            bool required = true; ///< Consulted only by @ref solve_fingerprint; a required landmark must match.
+            /// Resolved struct base. Filled at call time; never persisted.
+            std::uintptr_t base = 0;
+            /// Last known field offset within @ref base.
+            std::ptrdiff_t nominal_offset = 0;
+            /// Search radius per side in bytes (capped at MAX_HEAL_WINDOW).
+            std::size_t window = 0x40;
+            /// MSVC mangled name to match. Aliases caller storage.
+            std::string_view expected_mangled;
+            /// Required slot shape.
+            Indirection indirection = Indirection::PointerToObject;
+            /// Probe step (and candidate alignment). Zero -> 8.
+            std::size_t stride = sizeof(std::uintptr_t);
+            /// Consulted only by @ref solve_fingerprint; a required landmark must match.
+            bool required = true;
         };
 
         /**
@@ -222,11 +253,16 @@ namespace DetourModKit
          */
         struct HealHit
         {
-            std::ptrdiff_t healed_offset = 0; ///< slot_addr - base: the field offset to use (== nominal_offset on no drift).
-            std::uintptr_t slot_addr = 0;     ///< Address of the matching slot.
-            std::uintptr_t object_addr = 0;   ///< Resolved object base behind the slot.
-            std::uintptr_t vtable = 0;        ///< Resolved vtable of the matched object.
-            bool was_pointer = false;         ///< Shape of the matched slot.
+            /// slot_addr - base: the field offset to use (== nominal_offset on no drift).
+            std::ptrdiff_t healed_offset = 0;
+            /// Address of the matching slot.
+            std::uintptr_t slot_addr = 0;
+            /// Resolved object base behind the slot.
+            std::uintptr_t object_addr = 0;
+            /// Resolved vtable of the matched object.
+            std::uintptr_t vtable = 0;
+            /// Shape of the matched slot.
+            bool was_pointer = false;
         };
 
         /**
@@ -280,9 +316,12 @@ namespace DetourModKit
          */
         struct FingerprintHit
         {
-            std::ptrdiff_t delta = 0;       ///< The single uniform byte shift applied to every landmark offset.
-            std::size_t matched = 0;        ///< Required landmarks satisfied at @ref delta (equals the required count).
-            std::size_t optional_matched = 0; ///< Optional landmarks also satisfied at @ref delta.
+            /// The single uniform byte shift applied to every landmark offset.
+            std::ptrdiff_t delta = 0;
+            /// Required landmarks satisfied at @ref delta (equals the required count).
+            std::size_t matched = 0;
+            /// Optional landmarks also satisfied at @ref delta.
+            std::size_t optional_matched = 0;
         };
 
         /**
@@ -332,12 +371,18 @@ namespace DetourModKit
          */
         struct DriftEntry
         {
-            std::string_view name;             ///< Aliases the landmark's @c expected_mangled.
-            std::ptrdiff_t nominal_offset = 0; ///< The landmark's last-known offset.
-            std::ptrdiff_t healed_offset = 0;  ///< The resolved offset (valid only when @ref ok).
-            std::ptrdiff_t delta = 0;          ///< healed_offset - nominal_offset (valid only when @ref ok).
-            bool ok = false;                   ///< Whether the landmark healed.
-            HealError error{};                 ///< Failure reason; meaningful only when @ref ok is false.
+            /// Aliases the landmark's @c expected_mangled.
+            std::string_view name;
+            /// The landmark's last-known offset.
+            std::ptrdiff_t nominal_offset = 0;
+            /// The resolved offset (valid only when @ref ok).
+            std::ptrdiff_t healed_offset = 0;
+            /// healed_offset - nominal_offset (valid only when @ref ok).
+            std::ptrdiff_t delta = 0;
+            /// Whether the landmark healed.
+            bool ok = false;
+            /// Failure reason; meaningful only when @ref ok is false.
+            HealError error{};
         };
 
         /**

@@ -8,3 +8,8 @@ CMakeUserPresets.json
 # Coverage reports (generated into docs/tests/coverage/)
 docs/tests/coverage/
 !docs/tests/coverage/.gitignore
+.claude/*
+
+# Python bytecode cache (scripts/)
+__pycache__/
+*.pyc

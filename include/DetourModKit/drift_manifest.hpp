@@ -32,12 +32,18 @@ namespace DetourModKit
          */
         struct DriftRecord
         {
-            std::string name;                  ///< The landmark name (owned).
-            std::ptrdiff_t nominal_offset = 0; ///< Last-known offset recorded at write time.
-            std::ptrdiff_t healed_offset = 0;  ///< Resolved offset (meaningful only when @ref ok).
-            std::ptrdiff_t delta = 0;          ///< healed_offset - nominal_offset (meaningful only when @ref ok).
-            bool ok = false;                   ///< Whether the landmark healed.
-            HealError error{};                 ///< Failure reason (meaningful only when @ref ok is false).
+            /// The landmark name (owned).
+            std::string name;
+            /// Last-known offset recorded at write time.
+            std::ptrdiff_t nominal_offset = 0;
+            /// Resolved offset (meaningful only when @ref ok).
+            std::ptrdiff_t healed_offset = 0;
+            /// healed_offset - nominal_offset (meaningful only when @ref ok).
+            std::ptrdiff_t delta = 0;
+            /// Whether the landmark healed.
+            bool ok = false;
+            /// Failure reason (meaningful only when @ref ok is false).
+            HealError error{};
         };
 
         /**
@@ -46,8 +52,10 @@ namespace DetourModKit
          */
         enum class ManifestError : std::uint8_t
         {
-            MissingHeader, ///< The first non-blank line was not the manifest header.
-            MalformedLine  ///< A record line had the wrong field count or an unparseable field.
+            /// The first non-blank line was not the manifest header.
+            MissingHeader,
+            /// A record line had the wrong field count or an unparseable field.
+            MalformedLine
         };
 
         /**

@@ -86,28 +86,40 @@ namespace DetourModKit
      * @param vk The VK code (e.g., 0x41 for 'A').
      * @return InputCode Tagged as Keyboard.
      */
-    constexpr InputCode keyboard_key(int vk) noexcept { return {InputSource::Keyboard, vk}; }
+    constexpr InputCode keyboard_key(int vk) noexcept
+    {
+        return {InputSource::Keyboard, vk};
+    }
 
     /**
      * @brief Creates a mouse InputCode from a Windows Virtual Key code.
      * @param vk The VK code (e.g., 0x01 for VK_LBUTTON).
      * @return InputCode Tagged as Mouse.
      */
-    constexpr InputCode mouse_button(int vk) noexcept { return {InputSource::Mouse, vk}; }
+    constexpr InputCode mouse_button(int vk) noexcept
+    {
+        return {InputSource::Mouse, vk};
+    }
 
     /**
      * @brief Creates a gamepad InputCode from an XInput button code.
      * @param code The XInput button mask or synthetic trigger code (see GamepadCode).
      * @return InputCode Tagged as Gamepad.
      */
-    constexpr InputCode gamepad_button(int code) noexcept { return {InputSource::Gamepad, code}; }
+    constexpr InputCode gamepad_button(int code) noexcept
+    {
+        return {InputSource::Gamepad, code};
+    }
 
     /**
      * @brief Creates a mouse-wheel InputCode from a wheel direction code.
      * @param code The wheel direction identifier (see WheelCode).
      * @return InputCode Tagged as MouseWheel.
      */
-    constexpr InputCode mouse_wheel(int code) noexcept { return {InputSource::MouseWheel, code}; }
+    constexpr InputCode mouse_wheel(int code) noexcept
+    {
+        return {InputSource::MouseWheel, code};
+    }
 
     /**
      * @namespace GamepadCode
@@ -138,8 +150,10 @@ namespace DetourModKit
         inline constexpr int LeftTrigger = 0x10000;
         inline constexpr int RightTrigger = 0x10001;
 
-        /// Synthetic codes for thumbstick axes treated as digital inputs.
-        /// Each direction fires when the axis exceeds the stick deadzone threshold.
+        /**
+         * @brief Synthetic codes for thumbstick axes treated as digital inputs.
+         * @details Each direction fires when the axis exceeds the stick deadzone threshold.
+         */
         inline constexpr int LeftStickUp = 0x10002;
         inline constexpr int LeftStickDown = 0x10003;
         inline constexpr int LeftStickLeft = 0x10004;
@@ -152,8 +166,10 @@ namespace DetourModKit
         /// Default analog trigger threshold (0-255 range, values above are "pressed").
         inline constexpr int TriggerThreshold = 30;
 
-        /// Default thumbstick deadzone threshold (0-32767 range).
-        /// Matches XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE (7849).
+        /**
+         * @brief Default thumbstick deadzone threshold (0-32767 range).
+         * @details Matches XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE (7849).
+         */
         inline constexpr int StickThreshold = 7849;
     } // namespace GamepadCode
 

@@ -57,8 +57,10 @@ namespace DetourModKit::detail
      */
     struct WheelPulseState
     {
-        std::array<int, 4> pending{};  ///< Unconsumed notches per direction.
-        std::array<bool, 4> pulsing{}; ///< Whether the previous cycle emitted a pulse.
+        /// Unconsumed notches per direction.
+        std::array<int, 4> pending{};
+        /// Whether the previous cycle emitted a pulse.
+        std::array<bool, 4> pulsing{};
     };
 
     /**
@@ -75,8 +77,10 @@ namespace DetourModKit::detail
      */
     struct GamepadSuppressState
     {
-        uint16_t armed{0};                      ///< Currently suppressed XInput button bits.
-        std::array<uint64_t, 16> deadline_ms{}; ///< Per-bit release deadline; a held bit uses the sentinel.
+        /// Currently suppressed XInput button bits.
+        uint16_t armed{0};
+        /// Per-bit release deadline; a held bit uses the sentinel.
+        std::array<uint64_t, 16> deadline_ms{};
     };
 
     /**
@@ -117,9 +121,12 @@ namespace DetourModKit::detail
      */
     struct GamepadConsumeRule
     {
-        uint16_t modifier_mask{0};  ///< Digital button bits that must all be held.
-        uint16_t forbidden_mask{0}; ///< Known-modifier bits outside this chord; any held rejects it (strict match).
-        uint16_t trigger_mask{0};   ///< Digital button bits to clear when the chord matches.
+        /// Digital button bits that must all be held.
+        uint16_t modifier_mask{0};
+        /// Known-modifier bits outside this chord; any held rejects it (strict match).
+        uint16_t forbidden_mask{0};
+        /// Digital button bits to clear when the chord matches.
+        uint16_t trigger_mask{0};
     };
 
     /**
