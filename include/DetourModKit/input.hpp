@@ -3,6 +3,7 @@
 
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/config.hpp"
+#include "DetourModKit/srw_shared_mutex.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -11,7 +12,6 @@
 #include <functional>
 #include <memory>
 #include <mutex>
-#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -167,7 +167,8 @@ namespace DetourModKit
         [[nodiscard]] bool is_running() const noexcept;
 
         /**
-         * @brief Returns the number of registered bindings.
+         * @brief Returns the number of registered bindings under the binding reader lock.
+         *
          * @return size_t Number of bindings.
          */
         [[nodiscard]] size_t binding_count() const noexcept;
@@ -312,11 +313,12 @@ namespace DetourModKit
         };
 
         // m_bindings_rw_mutex protects m_bindings, m_name_index, m_known_modifiers, and m_has_gamepad_bindings when a
-        // live update is in flight. The poll
-        // loop holds a shared lock for the duration of one polling cycle;
+        // live update is in flight. The poll loop holds a shared lock across the binding-evaluation pass of each
+        // cycle and releases it before dispatching user callbacks, so callbacks may call binding_count(),
+        // is_binding_active(), or update_binding_combos() without re-acquiring the non-recursive lock;
         // update_combos() holds an exclusive lock across the swap. m_active_states entries are always accessed via
         // atomic ops and need no further guard.
-        mutable std::shared_mutex m_bindings_rw_mutex;
+        mutable detail::SrwSharedMutex m_bindings_rw_mutex;
         std::vector<InputBinding> m_bindings;
         std::unordered_map<std::string, std::vector<size_t>, StringHash, std::equal_to<>> m_name_index;
         std::vector<InputCode> m_known_modifiers;

@@ -162,8 +162,8 @@ TEST_F(HookIntegrationTest, QueryAccessorsAreReentrantFromCallback)
 
     // The callback runs while m_hooks_mutex is held shared. The read-only query accessors are reentrancy-aware: invoked
     // from inside a with_* callback they read under the lock the callback already holds instead of taking a second
-    // shared_lock on the non-recursive shared_mutex (undefined behavior, and deadlock-prone when a writer is queued
-    // between the two acquisitions). The callback must complete and return the correct values.
+    // shared_lock on the non-recursive reader/writer mutex (undefined behavior, and deadlock-prone when a writer is
+    // queued between the two acquisitions). The callback must complete and return the correct values.
     auto status = m_hook_manager->with_inline_hook(
         "ReentrantQueryHook",
         [&](InlineHook &) -> HookStatus

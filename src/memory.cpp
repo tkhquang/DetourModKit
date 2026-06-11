@@ -13,6 +13,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/logger.hpp"
+#include "DetourModKit/srw_shared_mutex.hpp"
 #include "platform.hpp"
 
 #include <windows.h>
@@ -25,6 +26,7 @@
 #include <vector>
 #include <chrono>
 #include <atomic>
+#include <mutex>
 #include <cstdlib>
 #include <sstream>
 #include <iomanip>
@@ -38,6 +40,7 @@ using namespace DetourModKit;
 
 using DetourModKit::detail::is_loader_lock_held;
 using DetourModKit::detail::pin_current_module;
+using DetourModKit::detail::SrwSharedMutex;
 
 // Anonymous namespace for internal helpers and storage
 namespace
@@ -53,33 +56,6 @@ namespace
         static constexpr DWORD WRITE_PERMISSION_FLAGS =
             PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
         static constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
-    };
-
-    /**
-     * @class SrwSharedMutex
-     * @brief Shared mutex backed by Windows SRWLOCK instead of pthread_rwlock_t.
-     * @details MinGW/winpthreads' pthread_rwlock_t corrupts internal state under high reader contention, causing
-     *          assertion failures in lock_shared(). SRWLOCK is kernel-level, lock-free for uncontended cases, and does
-     *          not suffer from this bug.
-     */
-    class SrwSharedMutex
-    {
-    public:
-        SrwSharedMutex() noexcept { InitializeSRWLock(&m_srw); }
-
-        SrwSharedMutex(const SrwSharedMutex &) = delete;
-        SrwSharedMutex &operator=(const SrwSharedMutex &) = delete;
-
-        void lock() noexcept { AcquireSRWLockExclusive(&m_srw); }
-        bool try_lock() noexcept { return TryAcquireSRWLockExclusive(&m_srw) != 0; }
-        void unlock() noexcept { ReleaseSRWLockExclusive(&m_srw); }
-
-        void lock_shared() noexcept { AcquireSRWLockShared(&m_srw); }
-        bool try_lock_shared() noexcept { return TryAcquireSRWLockShared(&m_srw) != 0; }
-        void unlock_shared() noexcept { ReleaseSRWLockShared(&m_srw); }
-
-    private:
-        SRWLOCK m_srw;
     };
 
     /**
@@ -1622,7 +1598,7 @@ namespace
     // DMK_Shutdown() (callers do not query ranges from atexit handlers).
     struct ModuleRangeCache
     {
-        std::shared_mutex mtx;
+        SrwSharedMutex mtx;
         std::unordered_map<HMODULE, DetourModKit::Memory::ModuleRange> entries;
     };
 
@@ -1648,7 +1624,7 @@ std::optional<DetourModKit::Memory::ModuleRange> DetourModKit::Memory::module_ra
 
     auto &cache = get_module_range_cache();
     {
-        std::shared_lock<std::shared_mutex> lock(cache.mtx);
+        std::shared_lock<SrwSharedMutex> lock(cache.mtx);
         const auto it = cache.entries.find(mod);
         if (it != cache.entries.end())
             return it->second;
@@ -1659,7 +1635,7 @@ std::optional<DetourModKit::Memory::ModuleRange> DetourModKit::Memory::module_ra
         return std::nullopt;
 
     {
-        std::unique_lock<std::shared_mutex> lock(cache.mtx);
+        std::unique_lock<SrwSharedMutex> lock(cache.mtx);
         // Another thread may have inserted between our shared/unique transition;
         // emplace skips on collision so we keep the first-resolved entry.
         cache.entries.emplace(mod, range);

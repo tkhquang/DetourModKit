@@ -255,6 +255,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 **Performance:**
 
 - Hash-map-backed `is_binding_active()` query for low-overhead cross-thread state reads (e.g., from render hooks at 60+ fps)
+- SRWLOCK-backed reader/writer synchronization for live binding reshapes, using the same native Windows lock primitive as hook registries and memory caches
 - Multiple bindings per name for multi-combo hotkeys
 - Lock-free `is_running()` via atomic flag
 - O(1) reverse name lookup for `input_code_to_name()`

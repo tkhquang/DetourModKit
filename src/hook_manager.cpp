@@ -188,18 +188,18 @@ HookManager::~HookManager() noexcept
         return;
     }
 
-    std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+    std::unique_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
     m_shutdown_called.store(true, std::memory_order_release);
 
     {
-        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
         for (auto &[name, hook] : m_hooks)
         {
             (void)hook->disable();
         }
     }
 
-    std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
     m_vmt_hooks.clear();
     m_hooks.clear();
 }
@@ -213,21 +213,21 @@ void HookManager::shutdown()
 
     // Block all mutators (create_*_hook, enable, disable, remove) before entering phase 1. They hold shared on
     // m_mutator_gate, so acquiring exclusive here waits for active mutators and blocks new ones.
-    std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+    std::unique_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
 
     // Two-phase shutdown: disable hooks under a shared lock first, then clear the maps under the exclusive lock. The
     // shared phase lets the kit's own with_* readers (shared_lock holders) finish; SafetyHook::disable() relocates only
     // threads caught in the patched prologue and does not drain threads already in the detour or trampoline body, so
     // the caller must quiesce the hooked function during teardown to close the residual window.
     {
-        std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
         for (auto &[name, hook] : m_hooks)
         {
             (void)hook->disable();
         }
     }
     {
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         m_vmt_hooks.clear();
         m_hooks.clear();
 
@@ -310,8 +310,8 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(std::strin
     auto [result,
           deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
 
         // Re-check after acquiring locks (double-checked pattern).
         if (m_shutdown_called.load(std::memory_order_acquire))
@@ -497,8 +497,8 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_v
     auto [result,
           deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
 
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
@@ -657,7 +657,7 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
 
         // Re-check after acquiring the gate. A thread can observe shutdown as false above, then block here behind
         // remove_all_hooks()'s exclusive gate; once that releases (with m_shutdown_called reset to false) this would
@@ -677,7 +677,7 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
         // thread-suspend teardown off the exclusive lock. The caller must ensure no thread is executing the hooked
         // function during removal to close the residual narrow window.
         {
-            std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
             auto it = m_hooks.find(hook_id);
             if (it == m_hooks.end())
             {
@@ -689,7 +689,7 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
             (void)it->second->disable();
         }
 
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         std::vector<DeferredLogEntry> logs;
         auto it = m_hooks.find(hook_id);
         if (it == m_hooks.end())
@@ -732,7 +732,7 @@ void HookManager::remove_all_hooks()
     {
         // Block all mutators (create_*_hook, enable, disable, remove) before entering phase 1. They hold shared on
         // m_mutator_gate, so acquiring exclusive here waits for active mutators and blocks new ones.
-        std::unique_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
 
         // Two-phase removal: disable hooks under the shared lock first, then take the exclusive lock to erase. The
         // shared phase lets the kit's own with_inline_hook readers (shared_lock holders) finish before the Hook is
@@ -740,14 +740,14 @@ void HookManager::remove_all_hooks()
         // detour or trampoline body, so the caller must quiesce the hooked function during teardown to close the
         // residual narrow window.
         {
-            std::shared_lock<std::shared_mutex> shared(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
             for (auto &[name, hook] : m_hooks)
             {
                 (void)hook->disable();
             }
         }
 
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
 
         num_vmt = m_vmt_hooks.size();
         m_vmt_hooks.clear();
@@ -787,8 +787,8 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
@@ -842,8 +842,8 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
@@ -919,8 +919,8 @@ std::size_t HookManager::enable_hooks(std::span<const std::string_view> hook_ids
         return 0;
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         m_logger.warning("HookManager: Shutdown in progress. Cannot enable {} hook(s).", hook_ids.size());
@@ -952,8 +952,8 @@ std::size_t HookManager::disable_hooks(std::span<const std::string_view> hook_id
         return 0;
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         m_logger.warning("HookManager: Shutdown in progress. Cannot disable {} hook(s).", hook_ids.size());
@@ -985,8 +985,8 @@ std::size_t HookManager::enable_all_hooks()
         return 0;
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         m_logger.warning("HookManager: Shutdown in progress. Cannot enable all hooks.");
@@ -1012,8 +1012,8 @@ std::size_t HookManager::disable_all_hooks()
         return 0;
     }
 
-    std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         m_logger.warning("HookManager: Shutdown in progress. Cannot disable all hooks.");
@@ -1081,8 +1081,8 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_v
     auto [result,
           deferred_logs] = [&]() -> std::pair<std::expected<std::string, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
 
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
@@ -1157,8 +1157,8 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         // Re-check after acquiring the gate so a teardown that flipped m_shutdown_called while we waited is not raced
         // (uniform with the create/enable/disable mutators).
         if (m_shutdown_called.load(std::memory_order_acquire))
@@ -1197,8 +1197,8 @@ std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view v
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {std::unexpected(HookError::ShutdownInProgress),
@@ -1246,8 +1246,8 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
 
     auto [result, deferred_logs] = [&]() -> std::pair<bool, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {false,
@@ -1310,8 +1310,8 @@ bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object
 
     auto [result, deferred_logs] = [&]() -> std::pair<bool, std::vector<DeferredLogEntry>>
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         if (m_shutdown_called.load(std::memory_order_acquire))
         {
             return {
@@ -1348,8 +1348,8 @@ void HookManager::remove_all_vmt_hooks()
 
     std::vector<DeferredLogEntry> deferred_logs = [&]()
     {
-        std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-        std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         std::vector<DeferredLogEntry> logs;
         if (m_shutdown_called.load(std::memory_order_acquire))
         {

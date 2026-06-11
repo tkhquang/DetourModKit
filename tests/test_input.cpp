@@ -1942,6 +1942,83 @@ TEST(InputManagerUpdateCombos, ConcurrentUpdateWhilePollerRunning)
     SUCCEED();
 }
 
+TEST(InputManagerUpdateCombos, ConcurrentQueriesAndCardinalityUpdatesWhilePollerRunning)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    Config::KeyComboList initial;
+    initial.push_back({{keyboard_key(0x41)}, {}}); // 'A'
+    im.register_press("update-query-stress", initial, []() {});
+    im.start(std::chrono::milliseconds(1));
+
+    constexpr int READER_THREADS = 4;
+    constexpr int ITERATIONS = 1000;
+    std::atomic<bool> start{false};
+    std::atomic<bool> stop{false};
+    std::atomic<size_t> invalid_counts{0};
+
+    std::vector<std::thread> readers;
+    readers.reserve(READER_THREADS);
+    for (int i = 0; i < READER_THREADS; ++i)
+    {
+        readers.emplace_back(
+            [&im, &start, &stop, &invalid_counts]()
+            {
+                while (!start.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+
+                while (!stop.load(std::memory_order_acquire))
+                {
+                    const size_t count = im.binding_count();
+                    if (count < 1 || count > 2)
+                    {
+                        invalid_counts.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    (void)im.is_binding_active("update-query-stress");
+                }
+            });
+    }
+
+    start.store(true, std::memory_order_release);
+    for (int i = 0; i < ITERATIONS; ++i)
+    {
+        Config::KeyComboList replacement;
+        switch (i % 3)
+        {
+        case 0:
+            replacement.push_back({{keyboard_key(0x41)}, {}}); // 'A'
+            break;
+        case 1:
+            replacement.push_back({{keyboard_key(0x5A)}, {}}); // 'Z'
+            replacement.push_back({{keyboard_key(0x58)}, {}}); // 'X'
+            break;
+        default:
+            break;
+        }
+        im.update_binding_combos("update-query-stress", replacement);
+        if ((i % 32) == 0)
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    stop.store(true, std::memory_order_release);
+    for (auto &reader : readers)
+    {
+        reader.join();
+    }
+
+    EXPECT_EQ(invalid_counts.load(std::memory_order_relaxed), static_cast<size_t>(0));
+    EXPECT_TRUE(im.is_running());
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
 TEST(InputManagerHotReload, RegisterPressWhilePollerRunning)
 {
     auto &im = InputManager::get_instance();
