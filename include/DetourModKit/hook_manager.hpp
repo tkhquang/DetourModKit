@@ -1116,8 +1116,12 @@ namespace DetourModKit
          */
         mutable std::shared_mutex m_mutator_gate;
 
-        // const so the read-only query accessors (which are const) can consult the guard.
-        // The counter is thread-local and independent of object state, so const is honest.
+        /**
+         * @brief Returns the thread-local reentrancy depth counter.
+         * @details Declared const so the const read-only query accessors can consult the
+         *          guard. The counter is thread-local and independent of object state, so
+         *          const is honest here.
+         */
         [[nodiscard]] int &get_reentrancy_guard() const noexcept
         {
             thread_local int reentrancy_counter{0};
