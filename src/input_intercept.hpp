@@ -64,11 +64,34 @@ namespace DetourModKit::detail
     };
 
     /**
+     * @brief Maximum unconsumed notches retained per direction.
+     * @details The pulse stepper drains at most one notch per direction every two
+     *          poll cycles (one cycle pulses, the next forces the re-arm gap), so a
+     *          scroll faster than that drain accumulates a backlog. Capping it bounds
+     *          how long phantom notches can replay after the user stops scrolling; a
+     *          real burst rarely exceeds this, and dropping the tail of an extreme
+     *          burst is preferable to an unbounded replay queue.
+     */
+    inline constexpr int MAX_WHEEL_PENDING = 16;
+
+    /**
      * @brief Advances the wheel pulse state machine by one poll cycle.
      * @param state Per-direction pulse state, carried across cycles.
      * @return Bitmask of directions pressed this cycle (bit 0 = Up .. bit 3 = Right).
      */
     [[nodiscard]] uint8_t step_wheel_pulse(WheelPulseState &state) noexcept;
+
+    /**
+     * @brief Adds freshly drained wheel notches to the pending backlog, capped.
+     * @details Each retained notch still maps to one Press edge via step_wheel_pulse;
+     *          this only bounds the carried-over backlog per direction to
+     *          @ref MAX_WHEEL_PENDING so a sustained fast scroll cannot queue notches
+     *          faster than they drain. Negative inputs are ignored so a corrupt count
+     *          cannot drive pending negative and underflow the drain.
+     * @param state Pulse state whose pending counts are updated in place.
+     * @param taken Notch counts just drained from the detour, indexed 0=Up..3=Right.
+     */
+    void add_wheel_notches(WheelPulseState &state, const std::array<int, 4> &taken) noexcept;
 
     /**
      * @struct GamepadSuppressState

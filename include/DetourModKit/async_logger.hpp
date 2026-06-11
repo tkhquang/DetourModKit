@@ -264,6 +264,10 @@ namespace DetourModKit
         size_t spin_backoff_iterations = DEFAULT_SPIN_BACKOFF_ITERATIONS;
         std::chrono::milliseconds block_timeout_ms{16};
         size_t block_max_spin_iterations{1000};
+        // strftime-style date/time format for the async sink, kept in sync with the
+        // synchronous Logger by Logger::enable_async_mode so both sinks emit identical
+        // timestamps; the trailing ".<ms>" is appended by the writer, not this format.
+        std::string timestamp_format = "%Y-%m-%d %H:%M:%S";
 
         [[nodiscard]] constexpr bool validate() const noexcept
         {

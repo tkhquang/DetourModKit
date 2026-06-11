@@ -635,35 +635,87 @@ namespace
     }
 
     /**
-     * @brief Invalidates cache entries in shards that overlap with the given range.
-     * @details Only invalidates specific entries that overlap, not entire shards.
-     *          Uses retry loop to handle locked shards gracefully.
+     * @brief Evicts every entry in a shard whose region overlaps [address, end_address).
+     * @param shard The cache shard to scan.
+     * @param address Inclusive start of the invalidated range.
+     * @param end_address Exclusive end of the invalidated range (wrap-clamped by the caller).
+     * @return Number of entries evicted.
+     * @note Must be called with the shard mutex held (exclusive).
+     * @note Scans the whole shard rather than probing a single key. An entry is keyed by its
+     *       VirtualQuery region base, but it is stored in the shard chosen from the original
+     *       query address (compute_shard_index mixes the full address, not the region base),
+     *       so one region can be cached in several shards under the same base key. A single
+     *       key/shard probe therefore cannot locate every covering entry; only a per-shard
+     *       containment scan can. The shard is bounded by max_capacity and invalidation runs
+     *       only after a write, so this linear scan is never on a read hot path.
+     */
+    size_t evict_overlapping_entries_in_shard(CacheShard &shard,
+                                              uintptr_t address,
+                                              uintptr_t end_address) noexcept
+    {
+        size_t evicted = 0;
+        auto it = shard.entries.begin();
+        while (it != shard.entries.end())
+        {
+            const CachedMemoryRegionInfo &entry = it->second;
+            const uintptr_t entry_end_address = entry.base_address + entry.region_size;
+            // A VirtualQuery region cannot extend past the address space, but a corrupt
+            // cached size could; treat a wrapped end as covering the top of the space so a
+            // poisoned entry is still evicted rather than skipped.
+            const uintptr_t clamped_entry_end = (entry_end_address < entry.base_address)
+                                                    ? UINTPTR_MAX
+                                                    : entry_end_address;
+            const bool overlaps = entry.valid &&
+                                  address < clamped_entry_end &&
+                                  end_address > entry.base_address;
+            if (overlaps)
+            {
+                // Drop the LRU back-reference by the stored key so no tombstone accumulates.
+                const auto lru_it = shard.lru_index.find(entry.lru_key);
+                if (lru_it != shard.lru_index.end() && lru_it->second == it->first)
+                {
+                    shard.lru_index.erase(lru_it);
+                }
+                remove_sorted_range(shard, entry.base_address);
+                it = shard.entries.erase(it);
+                s_stats.invalidations.fetch_add(1, std::memory_order_relaxed);
+                ++evicted;
+            }
+            else
+            {
+                ++it;
+            }
+        }
+        return evicted;
+    }
+
+    /**
+     * @brief Invalidates cache entries overlapping [address, address + size) across all shards.
+     * @details Every shard is scanned because an entry's storage shard is derived from the
+     *          original query address, not its region base, so a covering entry may live in
+     *          any shard (see evict_overlapping_entries_in_shard). A bounded try-lock retry
+     *          per shard keeps the writer that triggered the invalidation from blocking on a
+     *          momentarily contended shard.
      */
     void invalidate_range_internal(uintptr_t address, size_t size) noexcept
     {
         if (s_cache_shards.empty() || size == 0)
             return;
 
-        // Guard against address + size wrapping around the address space
+        // Guard against address + size wrapping around the address space.
         const uintptr_t end_address = (address + size < address) ? UINTPTR_MAX : address + size;
         const size_t shard_count = s_shard_count.load(std::memory_order_acquire);
 
-        const uintptr_t start_page = address >> 12;
-        const uintptr_t end_page = (end_address == 0 ? address : end_address - 1) >> 12;
-
         constexpr size_t MAX_INVALIDATION_RETRIES = 3;
 
-        for (uintptr_t page = start_page; page <= end_page; ++page)
+        for (size_t shard_idx = 0; shard_idx < shard_count; ++shard_idx)
         {
-            const size_t shard_idx = compute_shard_index(page << 12, shard_count);
-
-            bool invalidated = false;
-            for (size_t retry = 0; retry < MAX_INVALIDATION_RETRIES && !invalidated; ++retry)
+            for (size_t retry = 0; retry < MAX_INVALIDATION_RETRIES; ++retry)
             {
                 std::unique_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx], std::try_to_lock);
                 if (!lock.owns_lock())
                 {
-                    // Shard is locked by another writer - yield and retry
+                    // Shard is held by another writer - yield and retry rather than block.
                     if (retry < MAX_INVALIDATION_RETRIES - 1)
                     {
                         std::this_thread::yield();
@@ -671,44 +723,9 @@ namespace
                     continue;
                 }
 
-                CacheShard &shard = s_cache_shards[shard_idx];
-                const uintptr_t page_base = page << 12;
-
-                auto it = shard.entries.find(page_base);
-                if (it != shard.entries.end())
-                {
-                    CachedMemoryRegionInfo &entry = it->second;
-                    if (!entry.valid)
-                    {
-                        invalidated = true;
-                        continue;
-                    }
-
-                    const uintptr_t entry_end_address = entry.base_address + entry.region_size;
-                    const bool overlaps = address < entry_end_address && end_address > entry.base_address;
-                    if (overlaps)
-                    {
-                        // Remove from LRU index using stored lru_key to avoid tombstone accumulation
-                        const auto lru_it = shard.lru_index.find(entry.lru_key);
-                        if (lru_it != shard.lru_index.end() && lru_it->second == page_base)
-                        {
-                            shard.lru_index.erase(lru_it);
-                        }
-                        // Erase entry immediately instead of leaving tombstone
-                        remove_sorted_range(shard, entry.base_address);
-                        shard.entries.erase(it);
-                        s_stats.invalidations.fetch_add(1, std::memory_order_relaxed);
-                        invalidated = true;
-                    }
-                }
-                else
-                {
-                    invalidated = true;
-                }
-            }
-
-            if (start_page == end_page)
+                evict_overlapping_entries_in_shard(s_cache_shards[shard_idx], address, end_address);
                 break;
+            }
         }
     }
 

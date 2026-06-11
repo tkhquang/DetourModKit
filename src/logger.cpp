@@ -442,8 +442,13 @@ namespace DetourModKit
             {
                 try
                 {
+                    // Override the config's timestamp format with the Logger's own so the
+                    // async sink emits the same timestamps as the synchronous path; callers
+                    // configure the format through the Logger, not the async config.
+                    AsyncLoggerConfig effective_config = config;
+                    effective_config.timestamp_format = m_timestamp_format;
                     m_async_logger.store(
-                        std::make_shared<AsyncLogger>(config, m_log_file_stream_ptr, m_log_mutex_ptr),
+                        std::make_shared<AsyncLogger>(effective_config, m_log_file_stream_ptr, m_log_mutex_ptr),
                         std::memory_order_release);
                     m_async_mode_enabled.store(true, std::memory_order_release);
                     should_log_success = true;

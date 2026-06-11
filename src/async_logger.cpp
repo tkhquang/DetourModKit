@@ -482,29 +482,35 @@ namespace DetourModKit
         if (m_shutdown_requested.load(std::memory_order_acquire))
         {
             std::lock_guard<std::mutex> lock(*m_log_mutex);
-            if (m_file_stream->is_open() && m_file_stream->good())
+            if (!m_file_stream->is_open() || !m_file_stream->good())
             {
-                const auto now = std::chrono::system_clock::now();
-                const auto time_t = std::chrono::system_clock::to_time_t(now);
-                std::tm tm_buf{};
+                // Stream already closed or failed during teardown: the message cannot be
+                // delivered, so report the drop rather than a false success.
+                return false;
+            }
+
+            const auto now = std::chrono::system_clock::now();
+            const auto time_t = std::chrono::system_clock::to_time_t(now);
+            std::tm tm_buf{};
 
 #if defined(_WIN32) || defined(_MSC_VER)
-                localtime_s(&tm_buf, &time_t);
+            localtime_s(&tm_buf, &time_t);
 #else
-                localtime_r(&time_t, &tm_buf);
+            localtime_r(&time_t, &tm_buf);
 #endif
 
-                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    now.time_since_epoch()) %
-                                1000;
-                *m_file_stream << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
-                               << "." << std::setfill('0') << std::setw(3) << ms.count()
-                               << std::setfill(' ') << "] "
-                               << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
-                               << message << '\n';
-                m_file_stream->flush();
-            }
-            return true;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                now.time_since_epoch()) %
+                            1000;
+            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str())
+                           << "." << std::setfill('0') << std::setw(3) << ms.count()
+                           << std::setfill(' ') << "] "
+                           << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: "
+                           << message << '\n';
+            m_file_stream->flush();
+
+            // Surface a write/flush failure through the no-throw delivery bool.
+            return m_file_stream->good();
         }
 
         LogMessage msg(level, message);
@@ -710,7 +716,7 @@ namespace DetourModKit
                                 msg.timestamp.time_since_epoch()) %
                             1000;
 
-            *m_file_stream << "[" << std::put_time(&cached_tm, "%Y-%m-%d %H:%M:%S")
+            *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str())
                            << "." << std::setfill('0') << std::setw(3) << ms.count()
                            << std::setfill(' ') << "] "
                            << "[" << std::setw(7) << std::left << log_level_to_string(msg.level) << "] :: "
@@ -806,7 +812,7 @@ namespace DetourModKit
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                 message.timestamp.time_since_epoch()) %
                             1000;
-            *m_file_stream << "[" << std::put_time(&tm_buf, "%Y-%m-%d %H:%M:%S")
+            *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str())
                            << "." << std::setfill('0') << std::setw(3) << ms.count()
                            << std::setfill(' ') << "] "
                            << "[" << std::setw(7) << std::left << log_level_to_string(message.level) << "] :: "

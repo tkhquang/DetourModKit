@@ -69,10 +69,11 @@ jobs:
         shell: powershell
 
       - name: Run Tests
-        run: |
-          & ".\build\mingw-debug\tests\DetourModKit_tests.exe" --gtest_output=xml:test-results.xml
-          if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE" }
-        shell: powershell
+        # CTest runs each test case in its own process for state isolation between
+        # suites (see pr-check.yml). The per-test .gcda coverage data accumulates
+        # across those processes, so the gcovr step below still sees full coverage.
+        run: ctest --preset mingw-debug
+        shell: bash
 
       - name: Generate HTML Coverage Report
         run: |

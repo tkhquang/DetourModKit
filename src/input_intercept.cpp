@@ -367,6 +367,19 @@ namespace DetourModKit::detail
         return mask;
     }
 
+    void add_wheel_notches(WheelPulseState &state, const std::array<int, 4> &taken) noexcept
+    {
+        for (size_t dir = 0; dir < 4; ++dir)
+        {
+            const int add = taken[dir] > 0 ? taken[dir] : 0;
+            // pending is in [0, MAX_WHEEL_PENDING] by induction, so room is non-negative.
+            // Compare against room before adding so a large burst saturates rather than
+            // overflowing the int sum.
+            const int room = MAX_WHEEL_PENDING - state.pending[dir];
+            state.pending[dir] = (add >= room) ? MAX_WHEEL_PENDING : state.pending[dir] + add;
+        }
+    }
+
     uint16_t step_gamepad_suppress(GamepadSuppressState &state,
                                    uint16_t owned_now,
                                    uint16_t true_buttons,

@@ -234,13 +234,22 @@ namespace DetourModKit
          * @return The pointer-sized value at the address, or 0 if either the source
          *         address or the dereferenced value falls outside the user-mode
          *         window (min_valid, @ref USERSPACE_PTR_MAX).
+         * @note The lower bound is exclusive here, whereas plausible_userspace_ptr
+         *       treats the same bound as inclusive. The difference is intentional:
+         *       this function performs an unguarded dereference, so it is one address
+         *       more conservative and never blindly reads the boundary itself, while
+         *       plausible_userspace_ptr only screens a value arithmetically.
          */
         inline uintptr_t read_ptr_unchecked(uintptr_t base, ptrdiff_t offset,
                                             uintptr_t min_valid = 0x10000) noexcept
         {
             const auto src = base + static_cast<uintptr_t>(offset);
-            // Accept the source only inside the user-mode window
-            // (min_valid, USERSPACE_PTR_MAX). The ceiling rejects kernel-range and
+            // Accept the source only strictly inside the user-mode window
+            // (min_valid, USERSPACE_PTR_MAX). The floor is deliberately exclusive: this
+            // dereference is unguarded in release, so min_valid itself is treated as the
+            // first address NOT trusted for a blind read (one address more conservative
+            // than plausible_userspace_ptr, which is a pure no-deref pre-screen and so is
+            // inclusive at the same bound). The ceiling rejects kernel-range and
             // non-canonical sources; together with the floor it also subsumes any
             // pointer-arithmetic wraparound, because a ptrdiff_t offset is too small
             // to carry base back into this window (a non-negative offset cannot

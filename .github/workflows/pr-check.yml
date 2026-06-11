@@ -76,11 +76,16 @@ jobs:
         shell: powershell
 
       - name: Run Tests
-        timeout-minutes: 5
-        run: |
-          & ".\build\mingw-debug\tests\DetourModKit_tests.exe" --gtest_output=xml:test-results.xml
-          if ($LASTEXITCODE -ne 0) { throw "Tests failed with exit code $LASTEXITCODE" }
-        shell: powershell
+        # Run through CTest so each test case executes in its own process. The
+        # monolithic single-process run shares every singleton and file-scope static
+        # across suites, which lets one suite's teardown contaminate the next (for
+        # example a Bootstrap lifecycle worker still inside DMK_Shutdown when the next
+        # Bootstrap suite starts hooking). Per-process isolation matches the release
+        # and MSVC jobs and removes that class of flake. Coverage .gcda data still
+        # accumulates across the per-test processes for the gcovr step below.
+        timeout-minutes: 12
+        run: ctest --preset mingw-debug
+        shell: bash
 
       - name: Generate Coverage Report
         run: |

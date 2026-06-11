@@ -156,6 +156,54 @@ TEST_F(HookIntegrationTest, InlineHook_AlterReturnValue)
     EXPECT_GE(s_detour_call_count.load(), 1);
 }
 
+TEST_F(HookIntegrationTest, QueryAccessorsAreReentrantFromCallback)
+{
+    void *trampoline = nullptr;
+    auto result = m_hook_manager->create_inline_hook(
+        "ReentrantQueryHook",
+        reinterpret_cast<uintptr_t>(m_fn_compute_damage),
+        reinterpret_cast<void *>(&detour_compute_damage),
+        &trampoline);
+    ASSERT_TRUE(result.has_value())
+        << "Hook creation failed: " << Hook::error_to_string(result.error());
+
+    const uintptr_t target = reinterpret_cast<uintptr_t>(m_fn_compute_damage);
+
+    // The callback runs while m_hooks_mutex is held shared. Calling the read-only
+    // query accessors from here used to recursively shared-lock the non-recursive
+    // shared_mutex (undefined behavior, deadlock-prone when a writer is queued). The
+    // accessors are now reentrancy-aware: they read under the lock the callback
+    // already holds. The callback must complete and return the correct values.
+    auto status = m_hook_manager->with_inline_hook(
+        "ReentrantQueryHook",
+        [&](InlineHook &) -> HookStatus
+        {
+            EXPECT_TRUE(m_hook_manager->is_target_already_hooked(target));
+
+            bool found = false;
+            for (const auto &id : m_hook_manager->get_hook_ids())
+            {
+                if (id == "ReentrantQueryHook")
+                {
+                    found = true;
+                }
+            }
+            EXPECT_TRUE(found);
+
+            const auto counts = m_hook_manager->get_hook_counts();
+            EXPECT_GE(counts.at(HookStatus::Active), 1u);
+
+            // The VMT query accessor is reentrancy-aware too (no VMT hooks here).
+            EXPECT_TRUE(m_hook_manager->get_vmt_hook_names().empty());
+
+            return m_hook_manager->get_hook_status("ReentrantQueryHook")
+                .value_or(HookStatus::Disabled);
+        });
+
+    ASSERT_TRUE(status.has_value());
+    EXPECT_EQ(status.value(), HookStatus::Active);
+}
+
 TEST_F(HookIntegrationTest, InlineHook_RemoveRestoresOriginal)
 {
     EXPECT_EQ(m_fn_compute_damage(20, 10), 30);
