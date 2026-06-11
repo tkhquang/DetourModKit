@@ -527,15 +527,20 @@ if(DMK_ENABLE_SANITIZERS)
     string(REGEX REPLACE "/RTC[1csu]+" "" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
 
     # The vendored SafetyHook is not instrumented, so the MSVC STL ASan container
-    # annotations (annotate_string / annotate_vector) would differ across the link
-    # and fail with LNK2038. Disable those annotations on every instrumented target
-    # so all objects agree (value 0); the core ASan checks (heap/stack/use-after-
-    # free) stay on. The library is instrumented explicitly because it was created
+    # annotations (annotate_string / annotate_vector / annotate_optional) would
+    # differ across the link and fail with LNK2038. Disable those annotations on
+    # every instrumented target so all objects agree (value 0); the core ASan
+    # checks (heap/stack/use-after-free) stay on. _DISABLE_STL_ANNOTATION is the
+    # STL's umbrella switch and auto-defines every per-family disable the toolset
+    # knows, so annotation families added in future STL versions stay covered;
+    # the explicit string/vector macros remain for VS 2022 toolsets that predate
+    # the umbrella. The library is instrumented explicitly because it was created
     # before this block; the tests (added afterwards) pick up the directory options.
     target_compile_options(DetourModKit PRIVATE /fsanitize=address)
-    target_compile_definitions(DetourModKit PRIVATE _DISABLE_STRING_ANNOTATION=1 _DISABLE_VECTOR_ANNOTATION=1)
+    target_compile_definitions(DetourModKit PRIVATE
+      _DISABLE_STL_ANNOTATION=1 _DISABLE_STRING_ANNOTATION=1 _DISABLE_VECTOR_ANNOTATION=1)
     add_compile_options(/fsanitize=address)
-    add_compile_definitions(_DISABLE_STRING_ANNOTATION=1 _DISABLE_VECTOR_ANNOTATION=1)
+    add_compile_definitions(_DISABLE_STL_ANNOTATION=1 _DISABLE_STRING_ANNOTATION=1 _DISABLE_VECTOR_ANNOTATION=1)
     add_link_options(/INCREMENTAL:NO)
     message(STATUS "Sanitizers enabled: ASan (MSVC)")
   elseif(WIN32)

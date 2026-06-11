@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <exception>
 #include <new>
+#include <shared_mutex>
 #include <type_traits>
 #include <unordered_set>
 
@@ -426,6 +427,7 @@ namespace DetourModKit
 
     size_t InputPoller::binding_count() const noexcept
     {
+        std::shared_lock lock(m_bindings_rw_mutex);
         return m_bindings.size();
     }
 
@@ -831,9 +833,10 @@ namespace DetourModKit
             }
 
             // Cardinality-preserving fast path: in-place rewrite of keys and modifiers leaves m_bindings and
-            // m_active_states in lockstep. The poll thread holds a shared_lock for the duration of one tick, so the
-            // unique_lock here serializes against it; concurrent is_binding_active(size_t) reads stay valid because the
-            // binding count and array sizes do not change.
+            // m_active_states in lockstep. The poll thread's binding-evaluation pass and every other reader
+            // (is_binding_active, binding_count) hold the shared lock, so the unique_lock here serializes against
+            // them; concurrent is_binding_active(size_t) reads stay valid because the binding count and array
+            // sizes do not change.
             if (indices.size() == combos.size())
             {
                 std::vector<InputBinding> replacements;
@@ -1424,12 +1427,16 @@ namespace DetourModKit
 
     size_t InputManager::binding_count() const noexcept
     {
-        std::lock_guard lock(m_mutex);
-        if (m_poller)
+        std::shared_ptr<InputPoller> live_poller;
         {
-            return m_poller->binding_count();
+            std::lock_guard lock(m_mutex);
+            if (!m_poller)
+            {
+                return m_pending_bindings.size();
+            }
+            live_poller = m_poller;
         }
-        return m_pending_bindings.size();
+        return live_poller->binding_count();
     }
 
     bool InputManager::is_binding_active(std::string_view name) const noexcept

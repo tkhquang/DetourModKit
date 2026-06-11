@@ -1,26 +1,29 @@
 #ifndef DETOURMODKIT_HOOK_MANAGER_HPP
 #define DETOURMODKIT_HOOK_MANAGER_HPP
 
-#include <string>
-#include <unordered_map>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <shared_mutex>
-#include <optional>
-#include <expected>
-#include <string_view>
-#include <span>
-#include <type_traits>
-#include <concepts>
-#include <atomic>
-#include <utility>
-#include <format>
-
-#include "safetyhook.hpp"
+#include "DetourModKit/format.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/scanner.hpp"
-#include "DetourModKit/format.hpp"
+#include "DetourModKit/srw_shared_mutex.hpp"
+
+#include "safetyhook.hpp"
+
+#include <atomic>
+#include <concepts>
+#include <cstdint>
+#include <expected>
+#include <format>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <shared_mutex>
+#include <span>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <unordered_map>
+#include <utility>
 
 namespace DetourModKit
 {
@@ -566,8 +569,8 @@ namespace DetourModKit
             auto [result,
                   deferred_logs] = [&]() -> std::pair<std::expected<size_t, HookError>, std::vector<DeferredLogEntry>>
             {
-                std::shared_lock<std::shared_mutex> mutator_gate(m_mutator_gate);
-                std::unique_lock<std::shared_mutex> lock(m_hooks_mutex);
+                std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+                std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
 
                 if (m_shutdown_called.load(std::memory_order_acquire))
                 {
@@ -680,7 +683,7 @@ namespace DetourModKit
 
         /**
          * @brief Safely accesses a VmHook (method hook) within a named VMT hook.
-         * @details The callback is invoked while the shared_mutex is held as a reader.
+         * @details The callback is invoked while the hook registry is held under a reader lock.
          * @tparam F Callable type accepting (safetyhook::VmHook&) and returning a value.
          * @param vmt_name The name of the VMT hook.
          * @param method_index The vtable index of the method hook.
@@ -700,7 +703,7 @@ namespace DetourModKit
                                method_index);
                 return std::nullopt;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
             auto vmt_it = m_vmt_hooks.find(vmt_name);
             if (vmt_it != m_vmt_hooks.end())
@@ -733,7 +736,7 @@ namespace DetourModKit
                                method_index);
                 return false;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
             auto vmt_it = m_vmt_hooks.find(vmt_name);
             if (vmt_it != m_vmt_hooks.end())
@@ -857,19 +860,21 @@ namespace DetourModKit
          */
         std::vector<std::string> get_hook_ids(std::optional<HookStatus> status_filter = std::nullopt) const;
 
+        // clang-format off
         /**
          * @brief Safely accesses an InlineHook by its ID while holding the internal lock.
-         * @details The callback is invoked with a reference to the InlineHook while the shared_mutex is held as a
-         *          reader, preventing concurrent removal.
-         * @warning DANGER: Any callback holding m_hooks_mutex must NOT call methods that
-         *          acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook) because those calls
-         *          will deadlock. Perform such mutations outside the callback or use an asynchronous/posted operation
-         *          that does not hold m_hooks_mutex.
+         * @details The callback receives an InlineHook reference while the hook registry is held under a reader lock.
+         * @warning Do not call HookManager mutators from the callback. The callback runs while m_hooks_mutex is held
+         *          shared: remove_hook and create_*_hook acquire that lock exclusively and self-deadlock, while
+         *          enable_hook/disable_hook re-acquire it shared, which is undefined behavior on a non-recursive lock
+         *          and deadlocks when a writer is queued between the two acquisitions. Queue mutations and apply them
+         *          after the callback returns.
          * @tparam F Callable type accepting (InlineHook&) and returning a value.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
-         * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
+         * @return The callback's return value, or std::nullopt if the hook was not found.
          */
+        // clang-format on
         template <typename F>
             requires std::invocable<F, InlineHook &> && (!std::is_void_v<std::invoke_result_t<F, InlineHook &>>) &&
                      (!std::is_reference_v<std::invoke_result_t<F, InlineHook &>>)
@@ -886,7 +891,7 @@ namespace DetourModKit
                     hook_id);
                 return std::nullopt;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
@@ -917,7 +922,7 @@ namespace DetourModKit
                     hook_id);
                 return false;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Inline)
@@ -958,7 +963,7 @@ namespace DetourModKit
                     hook_id);
                 return std::nullopt;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;
@@ -972,19 +977,21 @@ namespace DetourModKit
             return std::nullopt;
         }
 
+        // clang-format off
         /**
          * @brief Safely accesses a MidHook by its ID while holding the internal lock.
-         * @details The callback is invoked with a reference to the MidHook while the shared_mutex is held as a reader,
-         *          preventing concurrent removal.
-         * @warning DANGER: Any callback holding m_hooks_mutex must NOT call methods that
-         *          acquire a unique_lock (remove_hook, enable_hook, disable_hook, create_*_hook) because those calls
-         *          will deadlock. Perform such mutations outside the callback or use an asynchronous/posted operation
-         *          that does not hold m_hooks_mutex.
+         * @details The callback receives a MidHook reference while the hook registry is held under a reader lock.
+         * @warning Do not call HookManager mutators from the callback. The callback runs while m_hooks_mutex is held
+         *          shared: remove_hook and create_*_hook acquire that lock exclusively and self-deadlock, while
+         *          enable_hook/disable_hook re-acquire it shared, which is undefined behavior on a non-recursive lock
+         *          and deadlocks when a writer is queued between the two acquisitions. Queue mutations and apply them
+         *          after the callback returns.
          * @tparam F Callable type accepting (MidHook&) and returning a value.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
-         * @return std::optional<R> The callback's return value, or std::nullopt if hook not found.
+         * @return The callback's return value, or std::nullopt if the hook was not found.
          */
+        // clang-format on
         template <typename F>
             requires std::invocable<F, MidHook &> && (!std::is_void_v<std::invoke_result_t<F, MidHook &>>) &&
                      (!std::is_reference_v<std::invoke_result_t<F, MidHook &>>)
@@ -1001,7 +1008,7 @@ namespace DetourModKit
                     hook_id);
                 return std::nullopt;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
@@ -1032,7 +1039,7 @@ namespace DetourModKit
                     hook_id);
                 return false;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
             ReentrancyGuard guard(get_reentrancy_guard());
             auto it = m_hooks.find(hook_id);
             if (it != m_hooks.end() && it->second->get_type() == HookType::Mid)
@@ -1073,7 +1080,7 @@ namespace DetourModKit
                     hook_id);
                 return std::nullopt;
             }
-            std::shared_lock<std::shared_mutex> lock(m_hooks_mutex, std::try_to_lock);
+            std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex, std::try_to_lock);
             if (!lock.owns_lock())
             {
                 return std::nullopt;
@@ -1096,7 +1103,7 @@ namespace DetourModKit
         };
         explicit HookManager(Logger &logger = Logger::get_instance());
 
-        mutable std::shared_mutex m_hooks_mutex;
+        mutable detail::SrwSharedMutex m_hooks_mutex;
         detail::HookMap m_hooks;
         detail::VmtHookMap m_vmt_hooks;
         Logger &m_logger;
@@ -1108,7 +1115,7 @@ namespace DetourModKit
          *  to block new work. Teardown serialization uses compare_exchange_strong on
          *  m_shutdown_called rather than a separate mutex.
          */
-        mutable std::shared_mutex m_mutator_gate;
+        mutable detail::SrwSharedMutex m_mutator_gate;
 
         /**
          * @brief Returns the thread-local reentrancy depth counter.
@@ -1132,23 +1139,25 @@ namespace DetourModKit
             ReentrancyGuard &operator=(ReentrancyGuard &&) = delete;
         };
 
+        // clang-format off
         /**
          * @brief Acquires m_hooks_mutex shared, or returns a disengaged lock when reentrant.
          * @details A with_* or try_with_* callback already holds m_hooks_mutex shared on this thread and has bumped the
-         *          reentrancy guard. Re-locking a non-recursive std::shared_mutex from the same thread is undefined
-         *          behavior (and can deadlock if a writer is queued between the two acquisitions), so a const query
-         *          accessor invoked from inside such a callback must read under the lock the callback already holds
-         *          instead of taking a second shared lock. When not reentrant (guard == 0) the returned lock owns
-         *          m_hooks_mutex for the caller's scope exactly as a direct shared_lock would.
+         *          reentrancy guard. Re-locking the non-recursive reader/writer mutex from the same thread is undefined
+         *          behavior and can deadlock if a writer is queued between the two acquisitions. A const query accessor
+         *          invoked from inside such a callback must read under the lock the callback already holds instead of
+         *          taking a second shared lock. When not reentrant, the returned lock owns m_hooks_mutex for the
+         *          caller's scope exactly as a direct shared_lock would.
          * @return An engaged shared_lock when guard == 0, otherwise a disengaged one.
          */
-        [[nodiscard]] std::shared_lock<std::shared_mutex> lock_hooks_shared_reentrant() const
+        // clang-format on
+        [[nodiscard]] std::shared_lock<detail::SrwSharedMutex> lock_hooks_shared_reentrant() const
         {
             if (get_reentrancy_guard() > 0)
             {
-                return std::shared_lock<std::shared_mutex>{};
+                return std::shared_lock<detail::SrwSharedMutex>{};
             }
-            return std::shared_lock<std::shared_mutex>(m_hooks_mutex);
+            return std::shared_lock<detail::SrwSharedMutex>(m_hooks_mutex);
         }
 
         std::string error_to_string(const safetyhook::InlineHook::Error &err) const;
