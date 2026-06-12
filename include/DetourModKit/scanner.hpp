@@ -783,9 +783,10 @@ namespace DetourModKit
          *       sweep. Either way, a shape the active scans do not model reports NoReference rather than a guess.
          * @note Choose a string referenced exactly once (a long, specific literal such as a format or assert message);
          *       short, common strings are pooled and shared and will report StringAmbiguous / AmbiguousReference.
-         * @note StringEncoding::Utf16le widens each query character to a little-endian 16-bit code unit by
-         *       zero-extension (Latin-1), which covers the ASCII identifiers anchor strings almost always are. A
-         *       non-ASCII character does not match its true UTF-16 encoding and reports StringNotFound.
+         * @note StringEncoding::Utf16le widens each query byte to a little-endian 16-bit code unit (the byte
+         *       followed by 0x00), treating query bytes as Latin-1 code units; this covers the ASCII identifiers
+         *       anchor strings almost always are. Multi-byte UTF-8 sequences are widened byte by byte, so non-ASCII
+         *       text never matches its true UTF-16LE encoding and in practice reports StringNotFound.
          * @warning XrefReturn::EnclosingFunction is a bounded heuristic prologue back-scan, not control-flow analysis;
          *          prefer the default
          *          ReferencingInstruction when an exact site is acceptable.

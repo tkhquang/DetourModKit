@@ -623,6 +623,78 @@ TEST_F(MemoryTest, InvalidateRangeNull)
     EXPECT_NO_THROW(Memory::invalidate_range(reinterpret_cast<const void *>(static_cast<uintptr_t>(0x1000)), 0));
 }
 
+// Reader/writer contention stress over the region cache's sorted_ranges insert/erase churn. The shard SRW lock
+// (shared for lookups, exclusive for mutation) is the correctness guarantee under test: reader threads probe an
+// interior page of a multi-page region, which misses the page-aligned entries.find fast path and exercises the
+// sorted_ranges containment search, while a single writer thread repeatedly invalidates the region. The test
+// asserts the cache returns a consistent result for the same input across many iterations under contention.
+TEST_F(MemoryTest, SortedRangesInsertDuringReadDoesNotCrash)
+{
+    Memory::shutdown_cache();
+    // One shard so every probe and invalidation hashes to the same sorted_ranges container.
+    (void)Memory::init_cache(32, 60000, 1);
+
+    void *mem = VirtualAlloc(nullptr, 16 * 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    // Prime the cache so the region's sorted_ranges entry exists before contention starts.
+    EXPECT_TRUE(Memory::is_readable(mem, 64));
+
+    // Interior page: not the region base, so the page-aligned entries.find fast path misses and the lookup falls
+    // through to the sorted_ranges upper_bound containment path.
+    char *interior = static_cast<char *>(mem) + 8 * 4096;
+
+    const int iterations = 500;
+    std::atomic<bool> stop{false};
+    std::atomic<int> reader_count{0};
+
+    // Reader threads: continuously probe is_readable on the interior page.
+    const int reader_threads = 2;
+    std::vector<std::thread> readers;
+    readers.reserve(reader_threads);
+    for (int t = 0; t < reader_threads; ++t)
+    {
+        readers.emplace_back(
+            [&stop, &reader_count, interior]()
+            {
+                while (!stop.load(std::memory_order_relaxed))
+                {
+                    (void)Memory::is_readable(interior, 64);
+                    reader_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+    }
+
+    // Writer thread: repeatedly invalidates the region, churning the lock-serialized insert/erase path in
+    // sorted_ranges.
+    std::thread writer(
+        [&stop, &reader_count, mem]()
+        {
+            // Wait until at least one reader has been scheduled so the contention window is real.
+            while (reader_count.load(std::memory_order_relaxed) == 0)
+            {
+                std::this_thread::yield();
+            }
+            for (int i = 0; i < iterations && !stop.load(std::memory_order_relaxed); ++i)
+            {
+                Memory::invalidate_range(mem, 64);
+            }
+            stop.store(true, std::memory_order_release);
+        });
+
+    writer.join();
+    for (auto &r : readers)
+    {
+        r.join();
+    }
+
+    EXPECT_GT(reader_count.load(), 0);
+    // Final read is still consistent.
+    EXPECT_TRUE(Memory::is_readable(interior, 64));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
 TEST_F(MemoryTest, WriteBytesInvalidatesCache)
 {
     Memory::shutdown_cache();

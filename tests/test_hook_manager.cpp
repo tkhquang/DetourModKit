@@ -1667,6 +1667,233 @@ TEST_F(HookManagerTest, VmtHook_RemoveAllVmt)
     EXPECT_TRUE(m_hook_manager->get_vmt_hook_names().empty());
 }
 
+// VmtHookConfig::fail_if_already_hooked is a soft guard: when set, a second create on the same vtable chain
+// (i.e. a vptr already pointing at a clone owned by this HookManager) returns HookError::HookAlreadyExists rather
+// than silently layering a second clone on top of the first. The default false preserves the legacy always-succeed
+// path, so a regular create_vmt_hook(name, object) call without a config still layers.
+TEST_F(HookManagerTest, VmtHookConfig_DefaultMatchesLegacyBehavior)
+{
+    auto target1 = std::make_unique<VmtTestTarget>();
+
+    VmtHookConfig cfg;
+    EXPECT_FALSE(cfg.fail_if_already_hooked);
+    EXPECT_FALSE(cfg.fail_on_non_function_pointer);
+
+    // First clone succeeds with the default config.
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("CfgDefaultA", target1.get(), cfg).has_value());
+
+    // Re-cloning the same vtable again with a different name layers (legacy behavior), no fail-if-already.
+    auto r2 = m_hook_manager->create_vmt_hook("CfgDefaultB", target1.get(), cfg);
+    ASSERT_TRUE(r2.has_value());
+    // The clones are layered on the same object, so they must be removed in reverse creation order: each removal's
+    // conditional restore then writes a vptr that is still alive. An unordered teardown can restore a freed clone
+    // into the object's vptr.
+    EXPECT_TRUE(m_hook_manager->remove_vmt_hook("CfgDefaultB").has_value());
+    EXPECT_TRUE(m_hook_manager->remove_vmt_hook("CfgDefaultA").has_value());
+}
+
+TEST_F(HookManagerTest, VmtHookConfig_FailIfAlreadyHookedRefusesDoubleCreate)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    VmtHookConfig cfg;
+    cfg.fail_if_already_hooked = true;
+
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("FirstVmt", target.get(), cfg).has_value());
+
+    // The vptr is now on the first clone. A second create with fail_if_already_hooked must refuse.
+    auto r2 = m_hook_manager->create_vmt_hook("SecondVmt", target.get(), cfg);
+    ASSERT_FALSE(r2.has_value());
+    EXPECT_EQ(r2.error(), HookError::HookAlreadyExists);
+
+    // The refused create did not add a second VMT hook; only the first one is in the registry.
+    EXPECT_EQ(m_hook_manager->get_vmt_hook_names().size(), 1u);
+    EXPECT_EQ(m_hook_manager->get_vmt_hook_names()[0], "FirstVmt");
+
+    m_hook_manager->remove_all_vmt_hooks();
+}
+
+TEST_F(HookManagerTest, VmtHookConfig_ApplyWithFailIfAlreadyHookedIsNoOp)
+{
+    auto target1 = std::make_unique<VmtTestTarget>();
+    auto target2 = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("ReapplyVmt", target1.get()).has_value());
+
+    // First apply succeeds (target2 was not on the clone).
+    VmtHookConfig cfg;
+    cfg.fail_if_already_hooked = true;
+    EXPECT_TRUE(m_hook_manager->apply_vmt_hook("ReapplyVmt", target2.get(), cfg));
+
+    // Second apply to the same target2 with the same config is a no-op (target2 is now on the clone) -- the apply
+    // is still reported as a success because the desired post-state holds; a warning is logged at Debug.
+    EXPECT_TRUE(m_hook_manager->apply_vmt_hook("ReapplyVmt", target2.get(), cfg));
+
+    m_hook_manager->remove_all_vmt_hooks();
+}
+
+// VMT slot pre-flight refuses to clone an object whose vtable's first slot is an int3 padding/breakpoint byte.
+// The pre-flight is opt-in (default false). A real int3 is the canonical bad case: dispatching through the cloned
+// vtable would call __debugbreak and crash in shipping. The MinGW compiler is free to emit a standard function
+// prologue (push rbp) ahead of an __debugbreak intrinsic, so the test cannot rely on a function symbol starting
+// with 0xCC. Instead the test plants an int3 byte at a known address in a static buffer and points the vtable slot
+// at that buffer.
+namespace
+{
+    // Aligned to a 16-byte boundary so the byte at offset 0 is the absolute function-pointer target the pre-flight
+    // decoder reads. The page the buffer lives in is committed and readable, so the SEH-guarded read in
+    // looks_like_function_vmt_slot succeeds and returns 0xCC.
+    alignas(16) const std::uint8_t INT3_SLOT_BYTES[] = {0xCC, 0xCC, 0xC3, 0x90};
+    alignas(16) const std::uint8_t RET_SLOT_BYTES[] = {0xC3, 0x90, 0x90, 0x90};
+
+    // First byte E9 (jmp rel32) with a displacement that lands a few bytes ahead inside this same buffer. The buffer
+    // lives in the test image's static storage, so the slot address and the resolved jump target map to the same
+    // HMODULE and the pre-flight decoder classifies the slot as a same-module jump stub.
+    alignas(16) const std::uint8_t JMP_STUB_SLOT_BYTES[] = {0xE9, 0x03, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90,
+                                                            0xC3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+
+    // First byte 0x48 (REX.W prefix opening a standard x64 prologue, here sub rsp, 0x28): the decoder must classify
+    // the slot as a function body. A static buffer keeps the byte deterministic across toolchains and linker modes;
+    // a real method symbol can resolve to an incremental-link jump thunk whose first byte is E9, which the decoder
+    // deliberately refuses as a same-module jump stub.
+    alignas(16) const std::uint8_t PROLOGUE_SLOT_BYTES[] = {0x48, 0x83, 0xEC, 0x28, 0xC3, 0x90, 0x90, 0x90};
+} // namespace
+
+TEST_F(HookManagerTest, VmtHookConfig_PreFlightRefusesInt3FirstSlot)
+{
+    struct Int3VTable
+    {
+        void *methods[2];
+    };
+    Int3VTable vtable{};
+    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(INT3_SLOT_BYTES));
+    vtable.methods[1] = const_cast<void *>(static_cast<const void *>(RET_SLOT_BYTES));
+    void *vptr = &vtable;
+
+    VmtHookConfig cfg;
+    cfg.fail_on_non_function_pointer = true;
+    auto result = m_hook_manager->create_vmt_hook("Int3Vmt", &vptr, cfg);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::InvalidObject);
+
+    // The refused create did not touch the vptr: it still points at our local vtable.
+    EXPECT_EQ(vptr, static_cast<void *>(&vtable));
+    EXPECT_TRUE(m_hook_manager->get_vmt_hook_names().empty());
+}
+
+TEST_F(HookManagerTest, VmtHookConfig_PreFlightAcceptsFunctionPrologue)
+{
+    // Slot 0 carries a normal x64 prologue first byte (0x48), so pre-flight on create_vmt_hook with
+    // fail_on_non_function_pointer=true must accept the vtable and the create must succeed end to end. The rtti
+    // member sits at vptr[-1]: SafetyHook's clone copies the RTTI slot ahead of the vtable, so the vptr must point
+    // past an in-bounds leading member.
+    struct PrologueVTable
+    {
+        void *rtti;
+        void *methods[2];
+    };
+    PrologueVTable vtable{};
+    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(PROLOGUE_SLOT_BYTES));
+    void *vptr = &vtable.methods[0];
+
+    VmtHookConfig cfg;
+    cfg.fail_on_non_function_pointer = true;
+    auto result = m_hook_manager->create_vmt_hook("PrologueVmt", &vptr, cfg);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, "PrologueVmt");
+
+    // The accepted create swapped the vptr onto the clone; removal restores the original vtable pointer.
+    m_hook_manager->remove_all_vmt_hooks();
+    EXPECT_EQ(vptr, static_cast<void *>(&vtable.methods[0]));
+}
+
+TEST_F(HookManagerTest, VmtHookConfig_PreFlightOffByDefault)
+{
+    // The default config (fail_on_non_function_pointer = false) does not run the pre-flight, so a synthetic vtable
+    // with a null first slot still creates successfully. This pins the backward-compat guarantee that the new
+    // check is opt-in, not on-by-default. The rtti member sits at vptr[-1]: SafetyHook's clone copies the RTTI slot
+    // ahead of the vtable, so the vptr must point past an in-bounds leading member.
+    struct NullVTable
+    {
+        void *rtti;
+        void *methods[2];
+    };
+    NullVTable vtable{};
+    void *vptr = &vtable.methods[0];
+
+    auto result = m_hook_manager->create_vmt_hook("NullSlotVmt", &vptr);
+    ASSERT_TRUE(result.has_value());
+
+    m_hook_manager->remove_all_vmt_hooks();
+}
+
+TEST_F(HookManagerTest, VmtHookConfig_PreFlightRefusesSameModuleJumpStub)
+{
+    // The synthetic first slot starts with E9 (jmp rel32) whose target lands inside the same static buffer, so the
+    // slot and the jump target resolve to the same module: the decoder must classify it as a jump stub and refuse.
+    struct StubVTable
+    {
+        void *methods[2];
+    };
+    StubVTable vtable{};
+    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(JMP_STUB_SLOT_BYTES));
+    vtable.methods[1] = const_cast<void *>(static_cast<const void *>(RET_SLOT_BYTES));
+    void *vptr = &vtable;
+
+    VmtHookConfig cfg;
+    cfg.fail_on_non_function_pointer = true;
+    auto result = m_hook_manager->create_vmt_hook("JmpStubVmt", &vptr, cfg);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), HookError::InvalidObject);
+
+    // The refused create did not touch the vptr: it still points at our local vtable.
+    EXPECT_EQ(vptr, static_cast<void *>(&vtable));
+    EXPECT_TRUE(m_hook_manager->get_vmt_hook_names().empty());
+}
+
+TEST_F(HookManagerTest, VmtHookConfig_ApplyPreFlightRefusesInt3FirstSlot)
+{
+    // The apply path runs the same slot-0 pre-flight as create: applying an existing hook to an object whose current
+    // vtable starts with an int3 slot must be refused, not installed.
+    auto target = std::make_unique<VmtTestTarget>();
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("ApplyPreFlightVmt", target.get()).has_value());
+
+    struct Int3VTable
+    {
+        void *methods[2];
+    };
+    Int3VTable vtable{};
+    vtable.methods[0] = const_cast<void *>(static_cast<const void *>(INT3_SLOT_BYTES));
+    vtable.methods[1] = const_cast<void *>(static_cast<const void *>(RET_SLOT_BYTES));
+    void *vptr = &vtable;
+
+    VmtHookConfig cfg;
+    cfg.fail_on_non_function_pointer = true;
+    EXPECT_FALSE(m_hook_manager->apply_vmt_hook("ApplyPreFlightVmt", &vptr, cfg));
+
+    // The refused apply did not touch the vptr: it still points at our local vtable.
+    EXPECT_EQ(vptr, static_cast<void *>(&vtable));
+
+    m_hook_manager->remove_all_vmt_hooks();
+}
+
+TEST_F(HookManagerTest, VmtHookConfig_ApplyRefusesObjectOnAnotherHooksClone)
+{
+    // The re-apply guard is registry-wide: an object already on a clone owned by a *different* hook of this manager
+    // must be refused, not silently layered onto.
+    auto target_a = std::make_unique<VmtTestTarget>();
+    auto target_b = std::make_unique<VmtTestTarget>();
+
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("CloneOwnerA", target_a.get()).has_value());
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("CloneOwnerB", target_b.get()).has_value());
+
+    VmtHookConfig cfg;
+    cfg.fail_if_already_hooked = true;
+    EXPECT_FALSE(m_hook_manager->apply_vmt_hook("CloneOwnerA", target_b.get(), cfg));
+
+    m_hook_manager->remove_all_vmt_hooks();
+}
+
 TEST_F(HookManagerTest, VmtHook_RemoveAllHooksClearsVmt)
 {
     auto target = std::make_unique<VmtTestTarget>();
