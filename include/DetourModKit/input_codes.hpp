@@ -190,10 +190,13 @@ namespace DetourModKit
      *
      *          Recognized name formats:
      *          - Keyboard: "A"-"Z", "0"-"9", "F1"-"F24", "Ctrl", "Shift", "Alt",
-     *            "Space", "Enter", "Escape", "Tab", "Backspace", etc.
+     *            "Space", "Enter", "Escape", "Tab", "Backspace", Windows/menu keys ("LWin", "RWin", "Apps"), and OEM
+     *            punctuation ("Grave"/"Backtick"/"Tilde", "Semicolon", "Comma", "Period", "Slash", etc.)
      *          - Mouse: "Mouse1" (left) through "Mouse5" (XButton2)
      *          - Mouse wheel: "WheelUp", "WheelDown", "WheelLeft", "WheelRight"
      *          - Gamepad: "Gamepad_A", "Gamepad_B", "Gamepad_LB", "Gamepad_LT", etc.
+     *          - Source-tagged hex (the inverse of format_input_code's off-table form): "Mouse:0xFE",
+     *            "Gamepad:0x800", "MouseWheel:0x9", "Keyboard:0xFF".
      *
      * @param name The input name to resolve.
      * @return std::optional<InputCode> The resolved code, or std::nullopt if unrecognized.
@@ -209,8 +212,10 @@ namespace DetourModKit
 
     /**
      * @brief Formats an InputCode as a human-readable string.
-     * @details Returns the canonical name if the code is in the lookup table, otherwise falls back to a hexadecimal
-     *          representation (e.g., "0x72").
+     * @details Returns the canonical name if the code is in the lookup table. Off-table codes fall back to hex: a
+     *          Keyboard code emits bare hex ("0x72"), while any other source is tagged with its device name
+     *          ("Mouse:0xFE", "Gamepad:0x800") so the source is not lost and parse_input_name can reconstruct the same
+     *          code on a config round-trip. Untagged bare hex always parses back as Keyboard.
      * @param code The input code to format.
      * @return std::string Formatted string.
      */

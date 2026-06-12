@@ -11,6 +11,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <charconv>
+#include <limits>
 #include <unordered_map>
 
 namespace DetourModKit
@@ -126,6 +128,30 @@ namespace DetourModKit
             {"PrintScreen", {InputSource::Keyboard, 0x2C}},
             {"Pause",       {InputSource::Keyboard, 0x13}},
 
+            // --- Keyboard: Windows / application keys ---
+            {"LWin",        {InputSource::Keyboard, 0x5B}},
+            {"RWin",        {InputSource::Keyboard, 0x5C}},
+            {"Apps",        {InputSource::Keyboard, 0x5D}},
+            {"Menu",        {InputSource::Keyboard, 0x5D}}, // alias for the application/context-menu key
+
+            // --- Keyboard: OEM punctuation (US layout) ---
+            // The canonical name is listed first so the reverse lookup picks it; trailing aliases still parse. Grave
+            // (VK_OEM_3) is the backtick/tilde key many games use to open the console.
+            {"Semicolon",   {InputSource::Keyboard, 0xBA}},
+            {"Equals",      {InputSource::Keyboard, 0xBB}},
+            {"Comma",       {InputSource::Keyboard, 0xBC}},
+            {"Minus",       {InputSource::Keyboard, 0xBD}},
+            {"Period",      {InputSource::Keyboard, 0xBE}},
+            {"Slash",       {InputSource::Keyboard, 0xBF}},
+            {"Grave",       {InputSource::Keyboard, 0xC0}},
+            {"Backtick",    {InputSource::Keyboard, 0xC0}}, // alias for Grave
+            {"Tilde",       {InputSource::Keyboard, 0xC0}}, // alias for Grave
+            {"LBracket",    {InputSource::Keyboard, 0xDB}},
+            {"Backslash",   {InputSource::Keyboard, 0xDC}},
+            {"RBracket",    {InputSource::Keyboard, 0xDD}},
+            {"Apostrophe",  {InputSource::Keyboard, 0xDE}},
+            {"Quote",       {InputSource::Keyboard, 0xDE}}, // alias for Apostrophe
+
             // --- Keyboard: Numpad ---
             {"Numpad0",         {InputSource::Keyboard, 0x60}},
             {"Numpad1",         {InputSource::Keyboard, 0x61}},
@@ -211,6 +237,66 @@ namespace DetourModKit
             return 0;
         }
 
+        /**
+         * @brief Parses a source-tagged hex token such as "Mouse:0xFE" into an InputCode.
+         * @details The inverse of format_input_code's off-table form for non-keyboard sources. The source tag matches
+         *          input_source_to_string ("Keyboard", "Mouse", "Gamepad", "MouseWheel"), case-insensitively, and the
+         *          value parses as hex with or without a 0x prefix.
+         * @param source_token The device-source tag (text before the ':').
+         * @param hex_token The hex value (text after the ':'), with or without a 0x/0X prefix.
+         * @return The resolved InputCode, or std::nullopt if the tag is unknown or the value is not a valid
+         *         non-negative hex int.
+         */
+        std::optional<InputCode> parse_source_tagged_hex(std::string_view source_token,
+                                                         std::string_view hex_token) noexcept
+        {
+            InputSource source = InputSource::Keyboard;
+            if (icompare(source_token, "Keyboard") == 0)
+            {
+                source = InputSource::Keyboard;
+            }
+            else if (icompare(source_token, "Mouse") == 0)
+            {
+                source = InputSource::Mouse;
+            }
+            else if (icompare(source_token, "Gamepad") == 0)
+            {
+                source = InputSource::Gamepad;
+            }
+            else if (icompare(source_token, "MouseWheel") == 0)
+            {
+                source = InputSource::MouseWheel;
+            }
+            else
+            {
+                return std::nullopt;
+            }
+
+            // Strip an optional 0x / 0X prefix; std::from_chars(base 16) does not accept one.
+            if (hex_token.size() >= 2 && hex_token[0] == '0' && (hex_token[1] == 'x' || hex_token[1] == 'X'))
+            {
+                hex_token.remove_prefix(2);
+            }
+            if (hex_token.empty())
+            {
+                return std::nullopt;
+            }
+
+            unsigned long value = 0;
+            const char *const first = hex_token.data();
+            const char *const last = hex_token.data() + hex_token.size();
+            const auto [ptr, ec] = std::from_chars(first, last, value, 16);
+            if (ec != std::errc{} || ptr != last)
+            {
+                return std::nullopt;
+            }
+            if (value > static_cast<unsigned long>(std::numeric_limits<int>::max()))
+            {
+                return std::nullopt;
+            }
+            return InputCode{source, static_cast<int>(value)};
+        }
+
         struct SortedNameIndex
         {
             size_t indices[name_table_size]{};
@@ -256,6 +342,18 @@ namespace DetourModKit
 
     std::optional<InputCode> parse_input_name(std::string_view name)
     {
+        // A source-tagged hex token ("Mouse:0xFE", "Gamepad:0x800") is the inverse of format_input_code's off-table
+        // form: it carries the device source so a non-keyboard code survives a config round-trip. No table name
+        // contains ':', so a token with one is only ever a tag; a malformed tag falls through to the table search
+        // (which cannot match it) and yields nullopt.
+        if (const size_t colon = name.find(':'); colon != std::string_view::npos)
+        {
+            if (const auto tagged = parse_source_tagged_hex(name.substr(0, colon), name.substr(colon + 1)))
+            {
+                return tagged;
+            }
+        }
+
         const auto &idx = get_sorted_index();
         size_t lo = 0;
         size_t hi = idx.count;
@@ -292,12 +390,20 @@ namespace DetourModKit
 
     std::string format_input_code(const InputCode &code)
     {
-        auto name = input_code_to_name(code);
+        const auto name = input_code_to_name(code);
         if (!name.empty())
         {
             return std::string(name);
         }
-        return Format::format_hex(code.code, 2);
+        // Off-table fallback. A Keyboard code emits bare hex ("0xNN"), which round-trips through the config
+        // keyboard hex fallback and preserves the existing serialized form. Any other source is tagged with its
+        // device name ("Mouse:0xNN") so the source is not lost: an untagged hex always parses back as Keyboard,
+        // which would silently turn an off-table Mouse/Gamepad code into a keyboard key on a config round-trip.
+        if (code.source == InputSource::Keyboard)
+        {
+            return Format::format_hex(code.code, 2);
+        }
+        return std::string(input_source_to_string(code.source)) + ':' + Format::format_hex(code.code, 2);
     }
 
 } // namespace DetourModKit

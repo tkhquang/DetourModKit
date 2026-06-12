@@ -4,6 +4,8 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <memory>
+#include <new>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -55,6 +57,56 @@ namespace
         binding.mode = InputMode::Hold;
         return binding;
     }
+
+    class ThrowingCopyCallback
+    {
+    public:
+        explicit ThrowingCopyCallback(std::shared_ptr<std::atomic<bool>> throw_on_copy,
+                                      std::shared_ptr<std::atomic<int>> failed_copies,
+                                      std::shared_ptr<std::atomic<int>> invocations) noexcept
+            : m_throw_on_copy(std::move(throw_on_copy)), m_failed_copies(std::move(failed_copies)),
+              m_invocations(std::move(invocations))
+        {
+        }
+
+        ThrowingCopyCallback(const ThrowingCopyCallback &other)
+            : m_throw_on_copy(other.m_throw_on_copy), m_failed_copies(other.m_failed_copies),
+              m_invocations(other.m_invocations)
+        {
+            throw_if_armed();
+        }
+
+        ThrowingCopyCallback &operator=(const ThrowingCopyCallback &other)
+        {
+            other.throw_if_armed();
+            if (this != &other)
+            {
+                m_throw_on_copy = other.m_throw_on_copy;
+                m_failed_copies = other.m_failed_copies;
+                m_invocations = other.m_invocations;
+            }
+            return *this;
+        }
+
+        ThrowingCopyCallback(ThrowingCopyCallback &&) noexcept = default;
+        ThrowingCopyCallback &operator=(ThrowingCopyCallback &&) noexcept = default;
+
+        void operator()() const noexcept { m_invocations->fetch_add(1, std::memory_order_relaxed); }
+
+    private:
+        void throw_if_armed() const
+        {
+            if (m_throw_on_copy != nullptr && m_throw_on_copy->load(std::memory_order_relaxed))
+            {
+                m_failed_copies->fetch_add(1, std::memory_order_relaxed);
+                throw std::bad_alloc{};
+            }
+        }
+
+        std::shared_ptr<std::atomic<bool>> m_throw_on_copy;
+        std::shared_ptr<std::atomic<int>> m_failed_copies;
+        std::shared_ptr<std::atomic<int>> m_invocations;
+    };
 } // namespace
 
 // --- Control API safe to call without an installed hook ---
@@ -702,6 +754,52 @@ TEST_F(InterceptWndProcTest, UninstallRestoresPredecessorAtTopOfChain)
     uninstall();
     EXPECT_EQ(GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC), predecessor);
     EXPECT_FALSE(wndproc_installed());
+}
+
+TEST_F(InterceptWndProcTest, PollerDropsCallbackStagingCopyFailureAndContinues)
+{
+    const LONG_PTR predecessor = GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC);
+
+    auto throw_on_copy = std::make_shared<std::atomic<bool>>(false);
+    auto failed_copies = std::make_shared<std::atomic<int>>(0);
+    auto invocations = std::make_shared<std::atomic<int>>(0);
+
+    InputBinding binding;
+    binding.name = "wheel_throwing_copy";
+    binding.keys = {mouse_wheel(WheelCode::Up)};
+    binding.mode = InputMode::Press;
+    binding.on_press = ThrowingCopyCallback{throw_on_copy, failed_copies, invocations};
+
+    std::vector<InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+    InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    poller.start();
+
+    const bool hooked_ours =
+        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(m_hwnd, GWLP_WNDPROC) != predecessor; },
+                   std::chrono::seconds(5));
+    if (!hooked_ours)
+    {
+        poller.shutdown();
+        GTEST_SKIP() << "poll thread did not subclass the test window";
+    }
+
+    // The first edge arms the callback's copy constructor to fail while the poll loop stages PendingCallback. The
+    // failure must be contained to that cycle instead of escaping the jthread body.
+    throw_on_copy->store(true, std::memory_order_relaxed);
+    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    EXPECT_TRUE(
+        wait_until([&] { return failed_copies->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
+    EXPECT_TRUE(poller.is_running());
+    EXPECT_EQ(invocations->load(std::memory_order_relaxed), 0);
+
+    // Once copying succeeds again, a later wheel edge should still dispatch. This proves the failed staging pass did
+    // not poison the poller or leave the edge detector permanently armed.
+    throw_on_copy->store(false, std::memory_order_relaxed);
+    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    EXPECT_TRUE(wait_until([&] { return invocations->load(std::memory_order_relaxed) > 0; }, std::chrono::seconds(5)));
+
+    poller.shutdown();
 }
 
 TEST(InterceptXInputTest, InstallHooksExportAndTrampolineRoundTrips)

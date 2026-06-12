@@ -12,6 +12,7 @@
 #include "DetourModKit/config.hpp"
 
 #include "input_intercept.hpp"
+#include "input_key_cache.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::gamepad_button;
@@ -1777,10 +1778,80 @@ TEST(InputCodeHashTest, UsableInUnorderedSet)
     EXPECT_EQ(codes.find(keyboard_key(0x99)), codes.end());
 }
 
-TEST(InputCodeNameTest, FormatInputCode_UnknownMouseCode_FallsBackToHex)
+TEST(InputCodeNameTest, FormatInputCode_UnknownMouseCode_EmitsSourceTaggedHex)
 {
+    // An off-table non-keyboard code carries its device source in the formatted form so the source is not lost; an
+    // untagged hex would parse back as Keyboard.
     InputCode unknown_mouse = mouse_button(0xFE);
-    EXPECT_EQ(format_input_code(unknown_mouse), "0xFE");
+    EXPECT_EQ(format_input_code(unknown_mouse), "Mouse:0xFE");
+}
+
+TEST(InputCodeNameTest, FormatInputCode_UnknownKeyboardCode_StaysBareHex)
+{
+    // Keyboard off-table codes keep the bare-hex form for backward compatibility with existing configs.
+    EXPECT_EQ(format_input_code(keyboard_key(0xFF)), "0xFF");
+}
+
+TEST(InputCodeNameTest, SourceTaggedHexRoundTrip)
+{
+    // format_input_code and parse_input_name are inverses for off-table non-keyboard codes, so a Mouse/Gamepad/Wheel
+    // code written to a config and read back keeps its source instead of decaying to Keyboard.
+    for (const InputCode code : {mouse_button(0xFE), gamepad_button(0x0800), mouse_wheel(0x09)})
+    {
+        const std::string formatted = format_input_code(code);
+        const auto parsed = parse_input_name(formatted);
+        ASSERT_TRUE(parsed.has_value()) << "failed to round-trip " << formatted;
+        EXPECT_EQ(*parsed, code) << "round-trip mismatch for " << formatted;
+    }
+}
+
+TEST(InputCodeNameTest, ParseSourceTaggedHexFormats)
+{
+    EXPECT_EQ(parse_input_name("Mouse:0xFE"), mouse_button(0xFE));
+    EXPECT_EQ(parse_input_name("Gamepad:0x800"), gamepad_button(0x800));
+    EXPECT_EQ(parse_input_name("MouseWheel:0x9"), mouse_wheel(0x9));
+    // Tag and value are case-insensitive in the tag, and the 0x prefix is optional.
+    EXPECT_EQ(parse_input_name("mouse:FE"), mouse_button(0xFE));
+    // An unknown tag or a non-hex value fails closed.
+    EXPECT_FALSE(parse_input_name("Bogus:0x10").has_value());
+    EXPECT_FALSE(parse_input_name("Mouse:0xZZ").has_value());
+    EXPECT_FALSE(parse_input_name("Mouse:").has_value());
+}
+
+TEST(InputCodeNameTest, ParseWindowsAndOemPunctuationNames)
+{
+    EXPECT_EQ(parse_input_name("LWin"), keyboard_key(0x5B));
+    EXPECT_EQ(parse_input_name("RWin"), keyboard_key(0x5C));
+    EXPECT_EQ(parse_input_name("Apps"), keyboard_key(0x5D));
+    EXPECT_EQ(parse_input_name("Menu"), keyboard_key(0x5D));
+    EXPECT_EQ(parse_input_name("Semicolon"), keyboard_key(0xBA));
+    EXPECT_EQ(parse_input_name("Equals"), keyboard_key(0xBB));
+    EXPECT_EQ(parse_input_name("Comma"), keyboard_key(0xBC));
+    EXPECT_EQ(parse_input_name("Minus"), keyboard_key(0xBD));
+    EXPECT_EQ(parse_input_name("Period"), keyboard_key(0xBE));
+    EXPECT_EQ(parse_input_name("Slash"), keyboard_key(0xBF));
+    EXPECT_EQ(parse_input_name("LBracket"), keyboard_key(0xDB));
+    EXPECT_EQ(parse_input_name("Backslash"), keyboard_key(0xDC));
+    EXPECT_EQ(parse_input_name("RBracket"), keyboard_key(0xDD));
+    EXPECT_EQ(parse_input_name("Apostrophe"), keyboard_key(0xDE));
+}
+
+TEST(InputCodeNameTest, ParseGraveConsoleKeyAndAliases)
+{
+    // The backtick/grave/tilde key (VK_OEM_3) is the common console hotkey; every alias resolves to it.
+    EXPECT_EQ(parse_input_name("Grave"), keyboard_key(0xC0));
+    EXPECT_EQ(parse_input_name("Backtick"), keyboard_key(0xC0));
+    EXPECT_EQ(parse_input_name("Tilde"), keyboard_key(0xC0));
+    EXPECT_EQ(parse_input_name("grave"), keyboard_key(0xC0)); // case-insensitive
+}
+
+TEST(InputCodeNameTest, AddedNamesReverseLookupPicksCanonical)
+{
+    // Aliases parse but the reverse lookup yields the canonical (first-listed) name.
+    EXPECT_EQ(input_code_to_name(keyboard_key(0xC0)), "Grave");
+    EXPECT_EQ(input_code_to_name(keyboard_key(0x5D)), "Apps");
+    EXPECT_EQ(input_code_to_name(keyboard_key(0xDE)), "Apostrophe");
+    EXPECT_EQ(input_code_to_name(keyboard_key(0x5B)), "LWin");
 }
 
 TEST(InputSourceTest, UnknownSourceToString)
@@ -2160,6 +2231,109 @@ TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
     EXPECT_FALSE(im.is_binding_active("survive-2"));
     EXPECT_FALSE(im.is_binding_active("survive-3"));
     EXPECT_TRUE(im.is_running());
+
+    im.shutdown();
+    im.set_require_focus(true);
+}
+
+// --- KeyStateCache: per-cycle keyboard memoization ---
+
+TEST(KeyStateCacheTest, ProbesEachDistinctVkOncePerCycle)
+{
+    detail::KeyStateCache cache;
+    int probe_calls = 0;
+    // 'A' reads down, every other VK reads up.
+    auto probe = [&](int vk) noexcept
+    {
+        ++probe_calls;
+        return vk == 0x41;
+    };
+
+    // Repeated reads of one VK within a cycle issue a single probe.
+    EXPECT_TRUE(cache.pressed(0x41, probe));
+    EXPECT_TRUE(cache.pressed(0x41, probe));
+    EXPECT_TRUE(cache.pressed(0x41, probe));
+    EXPECT_EQ(probe_calls, 1);
+
+    // A distinct VK probes exactly once more.
+    EXPECT_FALSE(cache.pressed(0x42, probe));
+    EXPECT_FALSE(cache.pressed(0x42, probe));
+    EXPECT_EQ(probe_calls, 2);
+}
+
+TEST(KeyStateCacheTest, ResetReArmsForNextCycle)
+{
+    detail::KeyStateCache cache;
+    int probe_calls = 0;
+    auto probe = [&](int) noexcept
+    {
+        ++probe_calls;
+        return true;
+    };
+
+    EXPECT_TRUE(cache.pressed(0x10, probe));
+    EXPECT_EQ(probe_calls, 1);
+
+    cache.reset();
+    EXPECT_TRUE(cache.pressed(0x10, probe));
+    EXPECT_EQ(probe_calls, 2);
+}
+
+TEST(KeyStateCacheTest, CachesUpStateWithoutReProbing)
+{
+    // The tri-state must distinguish "probed up" from "not yet probed" so a released key is not re-probed mid-cycle.
+    detail::KeyStateCache cache;
+    int probe_calls = 0;
+    auto probe = [&](int) noexcept
+    {
+        ++probe_calls;
+        return false;
+    };
+
+    EXPECT_FALSE(cache.pressed(0x10, probe));
+    EXPECT_FALSE(cache.pressed(0x10, probe));
+    EXPECT_EQ(probe_calls, 1);
+}
+
+TEST(KeyStateCacheTest, OutOfRangeVkReadsAsNotPressedWithoutProbing)
+{
+    detail::KeyStateCache cache;
+    int probe_calls = 0;
+    auto probe = [&](int) noexcept
+    {
+        ++probe_calls;
+        return true;
+    };
+
+    EXPECT_FALSE(cache.pressed(-1, probe));
+    EXPECT_FALSE(cache.pressed(256, probe));
+    EXPECT_FALSE(cache.pressed(99999, probe));
+    EXPECT_EQ(probe_calls, 0);
+}
+
+// The poll loop re-reserves its deferred-callback staging vector to the live binding count each cycle and stages it
+// under a catch, so growing the binding set far past the startup reserve while the poll thread is running can neither
+// reallocate-then-throw out of the jthread body nor leave the thread dead. Drive a large live growth and assert the
+// poller stays alive with the correct count.
+TEST(InputPollerPollLoopSafety, BindingGrowthPastStartupReserveKeepsPollThreadAlive)
+{
+    auto &im = InputManager::get_instance();
+    im.shutdown();
+    im.set_require_focus(false);
+
+    im.register_press("grow-seed", {keyboard_key(0x41)}, []() {});
+    im.start(std::chrono::milliseconds(1));
+
+    constexpr int extra = 300;
+    for (int i = 0; i < extra; ++i)
+    {
+        im.register_press("grow-" + std::to_string(i), {keyboard_key(0x41 + (i % 20))}, []() {});
+    }
+
+    // Let the poll thread run many cycles against the grown binding set.
+    std::this_thread::sleep_for(std::chrono::milliseconds(40));
+    EXPECT_TRUE(im.is_running());
+    EXPECT_EQ(im.binding_count(), static_cast<size_t>(extra + 1));
 
     im.shutdown();
     im.set_require_focus(true);

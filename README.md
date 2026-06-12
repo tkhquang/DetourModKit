@@ -259,6 +259,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Hash-map-backed `is_binding_active()` query for low-overhead cross-thread state reads (e.g., from render hooks at 60+ fps)
 - SRWLOCK-backed reader/writer synchronization for live binding reshapes, using the same native Windows lock primitive as hook registries and memory caches
 - Multiple bindings per name for multi-combo hotkeys
+- Keyboard and mouse virtual-key reads are memoized once per distinct VK per poll cycle, giving every binding in that cycle one coherent sample while avoiding duplicate `GetAsyncKeyState` calls
 - Lock-free `is_running()` via atomic flag
 - O(1) reverse name lookup for `input_code_to_name()`
 
@@ -1007,13 +1008,15 @@ The configuration system recognizes the following named input codes (case-insens
 | **Function keys** | `F1`-`F24` |
 | **Navigation** | `Left`, `Right`, `Up`, `Down`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete` |
 | **Common** | `Space`, `Enter`, `Escape`, `Tab`, `Backspace`, `CapsLock`, `NumLock`, `ScrollLock`, `PrintScreen`, `Pause` |
+| **Windows / Menu** | `LWin`, `RWin`, `Apps` (alias `Menu`) |
+| **OEM punctuation** | `Semicolon`, `Equals`, `Comma`, `Minus`, `Period`, `Slash`, `Grave` (aliases `Backtick`, `Tilde`; the usual console hotkey), `LBracket`, `Backslash`, `RBracket`, `Apostrophe` (alias `Quote`) |
 | **Numpad** | `Numpad0`-`Numpad9`, `NumpadAdd`, `NumpadSubtract`, `NumpadMultiply`, `NumpadDivide`, `NumpadDecimal` |
 | **Mouse** | `Mouse1` (left), `Mouse2` (right), `Mouse3` (middle), `Mouse4`, `Mouse5` |
 | **Mouse wheel** | `WheelUp`, `WheelDown`, `WheelLeft`, `WheelRight` (trigger-only, Press mode) |
 | **Gamepad** | `Gamepad_A`, `Gamepad_B`, `Gamepad_X`, `Gamepad_Y`, `Gamepad_LB`, `Gamepad_RB`, `Gamepad_LT`, `Gamepad_RT`, `Gamepad_Start`, `Gamepad_Back`, `Gamepad_LS`, `Gamepad_RS`, `Gamepad_DpadUp`, `Gamepad_DpadDown`, `Gamepad_DpadLeft`, `Gamepad_DpadRight` |
 | **Gamepad sticks** | `Gamepad_LSUp`, `Gamepad_LSDown`, `Gamepad_LSLeft`, `Gamepad_LSRight`, `Gamepad_RSUp`, `Gamepad_RSDown`, `Gamepad_RSLeft`, `Gamepad_RSRight` |
 
-Hex VK codes with `0x` prefix (e.g., `0x72` for F3) are also accepted and default to keyboard input.
+Hex VK codes with `0x` prefix (e.g., `0x72` for F3) are also accepted and default to keyboard input. A code that has no table name but is not a keyboard code is written back to the INI in a source-tagged hex form (`Mouse:0xFE`, `Gamepad:0x800`, `MouseWheel:0x9`) and parsed back to the same device source, so a non-keyboard code survives a config round-trip instead of decaying to a keyboard key.
 
 ## Gamepad Compatibility
 
