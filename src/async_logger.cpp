@@ -493,14 +493,14 @@ namespace DetourModKit
 
         // Increment before push so flush cannot observe zero while a message is already in the queue but not yet
         // counted.
-        m_pending_messages.fetch_add(1, std::memory_order_acq_rel);
+        m_pending_messages.fetch_add(1, std::memory_order_seq_cst);
         if (m_queue.try_push(msg))
         {
-            m_flush_cv.notify_one();
+            notify_writer();
             return true;
         }
         // Push failed -- undo the pre-increment before entering overflow handling
-        m_pending_messages.fetch_sub(1, std::memory_order_acq_rel);
+        m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
         return handle_overflow(std::move(msg));
     }
 
@@ -533,7 +533,14 @@ namespace DetourModKit
         }
 
         m_running.store(false, std::memory_order_release);
-        m_flush_cv.notify_all();
+
+        // Wake the writer if it is parked. Taking m_flush_mutex serializes this notify with the writer's
+        // atomic unlock-and-block inside wait_for, so a parked writer observes m_running == false promptly
+        // instead of waiting out the flush interval before it can exit and be joined below.
+        {
+            std::lock_guard<std::mutex> lock(m_flush_mutex);
+            m_flush_cv.notify_all();
+        }
 
         if (m_writer_thread.joinable())
         {
@@ -572,6 +579,11 @@ namespace DetourModKit
         return m_running.load(std::memory_order_acquire);
     }
 
+    bool AsyncLogger::is_writer_waiting() const noexcept
+    {
+        return m_writer_waiting.load(std::memory_order_acquire);
+    }
+
     size_t AsyncLogger::queue_size() const noexcept
     {
         return m_queue.size();
@@ -587,13 +599,33 @@ namespace DetourModKit
         m_dropped_messages.store(0, std::memory_order_release);
     }
 
+    void AsyncLogger::notify_writer() noexcept
+    {
+        // The caller has already incremented m_pending_messages and published the queue slot. In the
+        // seq_cst order, either the writer's pending-count predicate sees that increment before it parks,
+        // or this load sees the writer's waiting flag and wakes it. That closes the lost-wakeup window
+        // without taking m_flush_mutex while the writer is actively draining.
+        if (m_writer_waiting.load(std::memory_order_seq_cst))
+        {
+            // Notify under m_flush_mutex so the wake cannot be lost against the writer's atomic
+            // unlock-and-block, and notify_all (not notify_one) so a flusher blocked on the same condition
+            // variable cannot absorb the single notification and leave the writer asleep.
+            std::lock_guard<std::mutex> lock(m_flush_mutex);
+            m_flush_cv.notify_all();
+        }
+    }
+
     void AsyncLogger::writer_thread_func() noexcept
     {
+        // Per-idle-cycle cap on the cooperative yields the writer spins through when the pending count
+        // shows an in-flight push whose queue slot has not landed yet. Small and fixed so a producer
+        // preempted mid-publish cannot turn the idle path into a tight hot loop.
+        constexpr size_t INFLIGHT_SPIN_LIMIT = 8;
+
         std::vector<LogMessage> batch;
         batch.reserve(m_config.batch_size);
 
-        const auto start_time = std::chrono::steady_clock::now();
-        auto last_flush = start_time;
+        auto last_flush = std::chrono::steady_clock::now();
 
         while (m_running.load(std::memory_order_acquire) || !m_queue.empty())
         {
@@ -615,6 +647,22 @@ namespace DetourModKit
             }
             else
             {
+                // A producer bumps m_pending_messages before it publishes its queue slot, so a non-zero
+                // pending count with an empty pop means a push is in flight. Spin a small, fixed number of
+                // cooperative yields to let that push land; the common in-flight window is a few
+                // instructions, so the producer usually publishes here and the next pop drains it. The cap
+                // bounds the spin: if the producer is preempted past the cap, the loop falls through to the
+                // wait_for below, but with pending still non-zero the predicate is already satisfied, so it
+                // returns without blocking and the next cycle spins again -- bounded each pass rather than a
+                // tight hot loop. The writer only truly blocks once pending reaches zero (the genuinely idle
+                // case), where notify_writer() or the flush-interval timeout wakes it.
+                for (size_t spin = 0; spin < INFLIGHT_SPIN_LIMIT && m_running.load(std::memory_order_acquire) &&
+                                      m_pending_messages.load(std::memory_order_seq_cst) != 0 && m_queue.empty();
+                     ++spin)
+                {
+                    std::this_thread::yield();
+                }
+
                 auto now = std::chrono::steady_clock::now();
                 if (now - last_flush >= m_config.flush_interval)
                 {
@@ -627,8 +675,19 @@ namespace DetourModKit
                 }
 
                 std::unique_lock<std::mutex> lock(m_flush_mutex);
-                m_flush_cv.wait_for(lock, m_config.flush_interval, [this]()
-                                    { return !m_queue.empty() || !m_running.load(std::memory_order_acquire); });
+
+                // Publish that the writer is about to park, then check the producer-maintained pending
+                // count while m_writer_waiting is still true. In the seq_cst order, a racing producer is
+                // either counted here or observes m_writer_waiting in notify_writer() and signals this
+                // condition variable under m_flush_mutex.
+                m_writer_waiting.store(true, std::memory_order_seq_cst);
+                m_flush_cv.wait_for(lock, m_config.flush_interval,
+                                    [this]() noexcept
+                                    {
+                                        return m_pending_messages.load(std::memory_order_seq_cst) != 0 ||
+                                               !m_running.load(std::memory_order_acquire);
+                                    });
+                m_writer_waiting.store(false, std::memory_order_seq_cst);
             }
         }
 
@@ -716,11 +775,11 @@ namespace DetourModKit
                 if (m_queue.try_push(message))
                 {
                     // Net effect on m_pending_messages: pop(-1) + push(+1) = 0
-                    m_flush_cv.notify_one();
+                    notify_writer();
                     return true;
                 }
                 // Pop succeeded but push failed: net -1
-                m_pending_messages.fetch_sub(1, std::memory_order_acq_rel);
+                m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
             }
             // Count the new message as dropped (separate from the evicted oldest above). m_dropped_messages counts
             // individual lost messages, not overflow events.
@@ -734,13 +793,13 @@ namespace DetourModKit
             size_t spin_count = 0;
 
             // Pre-increment so flush sees the in-flight message throughout the retry loop
-            m_pending_messages.fetch_add(1, std::memory_order_acq_rel);
+            m_pending_messages.fetch_add(1, std::memory_order_seq_cst);
 
             while (std::chrono::steady_clock::now() < deadline)
             {
                 if (m_queue.try_push(message))
                 {
-                    m_flush_cv.notify_one();
+                    notify_writer();
                     return true;
                 }
 
@@ -759,7 +818,7 @@ namespace DetourModKit
                 }
             }
             // Timed out -- undo the pre-increment
-            m_pending_messages.fetch_sub(1, std::memory_order_acq_rel);
+            m_pending_messages.fetch_sub(1, std::memory_order_seq_cst);
             m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
             return false;
         }

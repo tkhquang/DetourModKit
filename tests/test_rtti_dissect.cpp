@@ -20,56 +20,10 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
+#include "test_alloc_probe.hpp"
+
 namespace Memory = DetourModKit::Memory;
 namespace Rtti = DetourModKit::Rtti;
-
-namespace
-{
-    // Counts every throwing global operator new across the whole test binary. Only read across a narrow window (the
-    // heal-allocation test) where the module-range cache is already warm, so unrelated allocations elsewhere in the
-    // process do not perturb the measured delta. Constant-initialised so it is zero before any dynamic initialisation
-    // that might allocate.
-    std::atomic<long long> s_new_calls{0};
-} // anonymous namespace
-
-// Replace the throwing global new/delete with malloc/free plus a counter. The aligned (std::align_val_t) forms are
-// deliberately left at their defaults, so over-aligned allocations stay on the runtime's own consistent new/delete pair
-// and never cross-free against these.
-void *operator new(std::size_t size)
-{
-    if (size == 0)
-    {
-        size = 1;
-    }
-    void *p = std::malloc(size);
-    if (!p)
-    {
-        throw std::bad_alloc{};
-    }
-    s_new_calls.fetch_add(1, std::memory_order_relaxed);
-    return p;
-}
-
-void *operator new[](std::size_t size)
-{
-    return operator new(size);
-}
-void operator delete(void *p) noexcept
-{
-    std::free(p);
-}
-void operator delete(void *p, std::size_t) noexcept
-{
-    std::free(p);
-}
-void operator delete[](void *p) noexcept
-{
-    std::free(p);
-}
-void operator delete[](void *p, std::size_t) noexcept
-{
-    std::free(p);
-}
 
 namespace
 {
@@ -871,9 +825,9 @@ TEST_F(RttiDissectTest, Heal_AllocatesNothing)
     // heal_landmark itself must not allocate.
     (void)Rtti::heal_landmark(lm);
 
-    const long long before = s_new_calls.load(std::memory_order_relaxed);
+    const long long before = dmk_test::thread_new_calls();
     const auto hit = Rtti::heal_landmark(lm);
-    const long long after = s_new_calls.load(std::memory_order_relaxed);
+    const long long after = dmk_test::thread_new_calls();
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x10));
@@ -1067,9 +1021,9 @@ TEST_F(RttiDissectTest, Fingerprint_AllocatesNothing)
     // Warm the module-range cache so its one-time per-module insert is not attributed to the measured call.
     (void)Rtti::solve_fingerprint(st.base(), fp, 0x20);
 
-    const long long before = s_new_calls.load(std::memory_order_relaxed);
+    const long long before = dmk_test::thread_new_calls();
     const auto hit = Rtti::solve_fingerprint(st.base(), fp, 0x20);
-    const long long after = s_new_calls.load(std::memory_order_relaxed);
+    const long long after = dmk_test::thread_new_calls();
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->delta, 0x10);

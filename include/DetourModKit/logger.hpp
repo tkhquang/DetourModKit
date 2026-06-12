@@ -5,6 +5,8 @@
 #include <string_view>
 #include <mutex>
 #include <memory>
+#include <array>
+#include <cstddef>
 #include <format>
 #include <atomic>
 
@@ -54,6 +56,14 @@ namespace DetourModKit
     inline constexpr const char *DEFAULT_LOG_PREFIX = "DetourModKit";
     inline constexpr const char *DEFAULT_LOG_FILE_NAME = "DetourModKit_Log.txt";
     inline constexpr const char *DEFAULT_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S";
+
+    // Upper bound, in bytes, on a log line that the formatted log() / try_log() fast path renders without
+    // a heap allocation. Those templates format into a stack buffer of this size and forward a view when
+    // the line fits, so a line up to this length never materializes a heap std::string. It mirrors the
+    // async sink's inline message buffer (LogMessage::MAX_INLINE_SIZE), which likewise stores a line of
+    // this size without touching the StringPool; longer lines take the documented overflow path on both
+    // sides.
+    inline constexpr std::size_t LOG_INLINE_MESSAGE_SIZE = 512;
 
     // Forward declarations
     struct AsyncLoggerConfig;
@@ -202,7 +212,13 @@ namespace DetourModKit
         {
             if (level >= m_current_log_level.load(std::memory_order_acquire))
             {
-                log(level, std::format(fmt, std::forward<Args>(args)...));
+                // Format into a stack buffer instead of through a std::format temporary so a line that fits
+                // the inline buffer never heap-allocates. The view handed to the sink is consumed
+                // synchronously (the async path copies it into LogMessage, the sync path writes it) before
+                // this call returns, so it never outlives the stack buffer.
+                static_cast<void>(format_dispatch([this, level](std::string_view formatted)
+                                                  { return this->log(level, formatted); }, fmt,
+                                                  std::forward<Args>(args)...));
             }
         }
 
@@ -255,7 +271,11 @@ namespace DetourModKit
             }
             try
             {
-                return log_noexcept(level, std::format(fmt, std::forward<Args>(args)...));
+                // Same allocation-free formatting as log(); the try/catch preserves the no-throw contract
+                // because format_to_n and the std::format overflow fallback can both throw.
+                return format_dispatch([this, level](std::string_view formatted) noexcept
+                                       { return this->log_noexcept(level, formatted); }, fmt,
+                                       std::forward<Args>(args)...);
             }
             catch (...)
             {
@@ -295,6 +315,33 @@ namespace DetourModKit
         Logger &operator=(const Logger &) = delete;
         Logger(Logger &&) = delete;
         Logger &operator=(Logger &&) = delete;
+
+        /**
+         * @brief Formats one log line into a stack buffer and hands it to @p sink.
+         * @details Renders into a buffer the size of the async sink's inline message buffer
+         *          (LOG_INLINE_MESSAGE_SIZE). std::format_to_n reports the untruncated length, so a line
+         *          that fits is passed to @p sink as a view into the stack buffer with no heap allocation;
+         *          a std::format temporary would instead allocate for any result past the small-string
+         *          limit, which the async LogMessage then copies into its own inline buffer anyway. A line
+         *          longer than the inline buffer is the documented overflow case (the async sink stores it
+         *          via StringPool / heap up to MAX_MESSAGE_SIZE), so it is re-formatted once through
+         *          std::format to give @p sink the full line. The formatter only reads its arguments (it
+         *          never moves them), so forwarding the same pack to both format_to_n and the std::format
+         *          fallback is safe.
+         * @return Whatever @p sink returns for the line.
+         */
+        template <typename Sink, typename... Args>
+        static auto format_dispatch(Sink &&sink, std::format_string<Args...> fmt, Args &&...args)
+        {
+            std::array<char, LOG_INLINE_MESSAGE_SIZE> buffer;
+            const auto result = std::format_to_n(buffer.data(), buffer.size(), fmt, std::forward<Args>(args)...);
+            const auto formatted = static_cast<std::size_t>(result.size);
+            if (formatted <= buffer.size())
+            {
+                return sink(std::string_view(buffer.data(), formatted));
+            }
+            return sink(std::string_view(std::format(fmt, std::forward<Args>(args)...)));
+        }
 
         /**
          * @brief Shared shutdown logic used by both ~Logger() and shutdown().

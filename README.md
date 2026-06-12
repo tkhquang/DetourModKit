@@ -131,10 +131,10 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <summary><strong>Async Logger</strong></summary>
 
 - Lock-free, bounded queue-based async logger decoupling log production from file I/O
-- Minimal latency on the producer side with batched writes on the consumer thread
+- Minimal latency on the producer side with batched writes on the consumer thread; a parked writer is woken promptly through a pending-count/flag handshake, so no message waits out the flush interval
 - Configurable overflow policies: DropNewest / DropOldest / Block / SyncFallback
 - Bounded Block policy with 16 ms default timeout (one frame at 60 fps) to prevent thread starvation
-- Inline buffer optimization for messages <= 512 bytes
+- Inline buffer optimization for messages <= 512 bytes; a formatted log line that fits is rendered into a stack buffer and never materializes a heap string
 - Message size validation with truncation for messages > 16 MB
 
 </details>
