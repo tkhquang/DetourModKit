@@ -4,6 +4,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -880,4 +882,75 @@ TEST(BootstrapOnLogicDllUnloadAll, ClearsConfigRegisteredItems)
     Bootstrap::on_logic_dll_unload_all();
 
     EXPECT_EQ(sentinel.use_count(), 1L);
+}
+
+namespace
+{
+    // Builds a temp INI and arms the auto-reload watcher over it. Returns the INI path so the caller can clean up.
+    std::filesystem::path arm_auto_reload_watcher(std::string_view item_name)
+    {
+        const auto ini_path = std::filesystem::temp_directory_path() /
+                              ("test_bootstrap_autoreload_" + std::to_string(GetCurrentProcessId()) + "_" +
+                               std::string(item_name) + ".ini");
+        {
+            std::ofstream ofs(ini_path);
+            ofs << "[Section]\nKey=1\n";
+        }
+        Config::register_int("Section", "Key", std::string(item_name), [](int) {}, 1);
+        EXPECT_NO_THROW(Config::load(ini_path.string()));
+        EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started);
+        return ini_path;
+    }
+} // namespace
+
+// The hot-unload helpers must stop the Config auto-reload watcher before clearing the registry: the watcher's on_reload
+// callback and the registered setters live in the unloading Logic DLL, so a survivor would call into unmapped pages and
+// would also make the next attach's enable_auto_reload() report AlreadyRunning instead of starting fresh. A fresh
+// Started after re-loading proves the watcher was stopped.
+TEST(BootstrapOnLogicDllUnload, StopsAutoReloadWatcher)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+    Config::clear_registered_items();
+    Config::disable_auto_reload();
+
+    const auto ini_path = arm_auto_reload_watcher("bootstrap_unload_watcher");
+
+    Bootstrap::on_logic_dll_unload({}, {});
+
+    Config::register_int("Section", "Key", "bootstrap_unload_watcher_2", [](int) {}, 1);
+    EXPECT_NO_THROW(Config::load(ini_path.string()));
+    EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started)
+        << "on_logic_dll_unload must stop the auto-reload watcher; a survivor would report AlreadyRunning";
+
+    Config::disable_auto_reload();
+    Config::clear_registered_items();
+    if (std::filesystem::exists(ini_path))
+    {
+        std::filesystem::remove(ini_path);
+    }
+}
+
+TEST(BootstrapOnLogicDllUnloadAll, StopsAutoReloadWatcher)
+{
+    HookManager::get_instance().remove_all_hooks();
+    InputManager::get_instance().shutdown();
+    Config::clear_registered_items();
+    Config::disable_auto_reload();
+
+    const auto ini_path = arm_auto_reload_watcher("bootstrap_unload_all_watcher");
+
+    Bootstrap::on_logic_dll_unload_all();
+
+    Config::register_int("Section", "Key", "bootstrap_unload_all_watcher_2", [](int) {}, 1);
+    EXPECT_NO_THROW(Config::load(ini_path.string()));
+    EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started)
+        << "on_logic_dll_unload_all must stop the auto-reload watcher; a survivor would report AlreadyRunning";
+
+    Config::disable_auto_reload();
+    Config::clear_registered_items();
+    if (std::filesystem::exists(ini_path))
+    {
+        std::filesystem::remove(ini_path);
+    }
 }

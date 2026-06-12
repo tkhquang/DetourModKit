@@ -410,6 +410,13 @@ namespace DetourModKit::Bootstrap
         // .text segment; once the loader unmaps that segment, every surviving entry becomes a use-after-unload hazard.
         // The next attach's replace_or_append destroys the stale slot before installing the fresh one, which would
         // invoke the old setter's destructor against freed pages.
+        //
+        // Stop the auto-reload watcher before wiping the registry: its worker can fire reload() (running the registered
+        // setters) at any time, and both the user on_reload callback and those setters live in the unloading Logic DLL.
+        // A survivor would call into unmapped pages after the DLL goes away, and would make the next attach's
+        // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
+        // no-op when no watcher is running.
+        Config::disable_auto_reload();
         try
         {
             Config::clear_registered_items();
@@ -510,6 +517,13 @@ namespace DetourModKit::Bootstrap
         // The registered std::function setters' call operators, vtables,
         // and destructors live in the unloading Logic DLL's .text;
         // every surviving entry becomes a use-after-unload hazard the moment the loader reclaims those pages.
+        //
+        // Stop the auto-reload watcher before wiping the registry: its worker can fire reload() (running the registered
+        // setters) at any time, and both the user on_reload callback and those setters live in the unloading Logic DLL.
+        // A survivor would call into unmapped pages after the DLL goes away, and would make the next attach's
+        // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
+        // no-op when no watcher is running.
+        Config::disable_auto_reload();
         try
         {
             Config::clear_registered_items();

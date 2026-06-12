@@ -1098,9 +1098,14 @@ TEST_F(AsyncLoggerTest, DroppedCount_DropOldest)
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
-    static_cast<void>(logger->enqueue(LogLevel::Info, "first_msg"));
-    static_cast<void>(logger->enqueue(LogLevel::Info, "second_msg"));
-    static_cast<void>(logger->enqueue(LogLevel::Info, "third_msg"));
+    // Enqueue far more than the queue can hold so a DropOldest overflow is forced regardless of how fast the writer
+    // thread drains. A handful of quick pushes can be consumed one-by-one and never fill the 2-slot queue, so only a
+    // tight burst well past capacity reliably overruns it and produces drops.
+    constexpr int kFillCount = 100;
+    for (int i = 0; i < kFillCount; ++i)
+    {
+        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+    }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 

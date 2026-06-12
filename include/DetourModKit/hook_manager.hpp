@@ -781,8 +781,9 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a VmHook (method hook) within a named VMT hook.
          * @details The callback is invoked while the hook registry is held under a reader lock.
-         * @warning Do not call HookManager mutators or teardown entry points from the callback. Queue mutations and
-         *          apply them after the callback returns.
+         * @warning Do not call HookManager mutators, teardown entry points, or a nested with_* or try_with_* accessor
+         *          from the callback (each checks the reentrancy guard and fails closed). Queue mutations and apply
+         *          them after the callback returns.
          * @tparam F Callable type accepting (safetyhook::VmHook&) and returning a value.
          * @param vmt_name The name of the VMT hook.
          * @param method_index The vtable index of the method hook.
@@ -819,8 +820,9 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a VmHook for a void-returning callback.
          * @details Same locking and reentrancy semantics as the value-returning overload.
-         * @warning Do not call HookManager mutators or teardown entry points from the callback. Queue mutations and
-         *          apply them after the callback returns.
+         * @warning Do not call HookManager mutators, teardown entry points, or a nested with_* or try_with_* accessor
+         *          from the callback (each checks the reentrancy guard and fails closed). Queue mutations and apply
+         *          them after the callback returns.
          * @param vmt_name The name of the VMT hook.
          * @param method_index The vtable index of the method hook.
          * @param fn The void-returning callback to invoke with the VmHook reference.
@@ -970,10 +972,11 @@ namespace DetourModKit
         /**
          * @brief Safely accesses an InlineHook by its ID while holding the internal lock.
          * @details The callback receives an InlineHook reference while the hook registry is held under a reader lock.
-         * @warning Do not call HookManager mutators or teardown entry points from the callback. The callback runs while
-         *          m_hooks_mutex is held shared: create/remove/teardown paths acquire it exclusively, while toggle
-         *          paths re-acquire it shared, which is undefined behavior on a non-recursive lock and can deadlock.
-         *          Queue mutations and apply them after the callback returns.
+         * @warning Do not call HookManager mutators, teardown entry points, or a nested with_* or try_with_* accessor
+         *          from the callback. The callback holds m_hooks_mutex shared: create/remove/teardown paths acquire it
+         *          exclusively and toggle paths re-acquire it shared (UB on a non-recursive lock), while nested
+         *          accessors check the reentrancy guard and fail closed. Queue mutations and apply them after the
+         *          callback returns.
          * @tparam F Callable type accepting (InlineHook&) and returning a value.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
@@ -1079,10 +1082,11 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a MidHook by its ID while holding the internal lock.
          * @details The callback receives a MidHook reference while the hook registry is held under a reader lock.
-         * @warning Do not call HookManager mutators or teardown entry points from the callback. The callback runs while
-         *          m_hooks_mutex is held shared: create/remove/teardown paths acquire it exclusively, while toggle
-         *          paths re-acquire it shared, which is undefined behavior on a non-recursive lock and can deadlock.
-         *          Queue mutations and apply them after the callback returns.
+         * @warning Do not call HookManager mutators, teardown entry points, or a nested with_* or try_with_* accessor
+         *          from the callback. The callback holds m_hooks_mutex shared: create/remove/teardown paths acquire it
+         *          exclusively and toggle paths re-acquire it shared (UB on a non-recursive lock), while nested
+         *          accessors check the reentrancy guard and fail closed. Queue mutations and apply them after the
+         *          callback returns.
          * @tparam F Callable type accepting (MidHook&) and returning a value.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <latch>
 #include <stop_token>
 #include <thread>
 #include <vector>
@@ -185,13 +186,18 @@ TEST(StoppableWorker, ConcurrentIsRunningAndRequestStopWithShutdown)
         std::this_thread::yield();
     }
 
+    constexpr int poller_count = 3;
     std::atomic<bool> poll_stop{false};
+    std::latch pollers_ready(poller_count);
     std::vector<std::thread> pollers;
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < poller_count; ++i)
     {
         pollers.emplace_back(
-            [&w, &poll_stop]()
+            [&w, &poll_stop, &pollers_ready]()
             {
+                // Signal readiness, then keep polling so every poller is actively observing the worker while the main
+                // thread runs shutdown() (the race window this test guards).
+                pollers_ready.count_down();
                 while (!poll_stop.load(std::memory_order_acquire))
                 {
                     (void)w.is_running();
@@ -200,6 +206,8 @@ TEST(StoppableWorker, ConcurrentIsRunningAndRequestStopWithShutdown)
             });
     }
 
+    // Do not tear the worker down until all pollers have started, so the concurrency is actually exercised.
+    pollers_ready.wait();
     w.shutdown();
     EXPECT_FALSE(w.is_running());
 
