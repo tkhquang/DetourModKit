@@ -1,6 +1,8 @@
 name: Quality Probes
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,10 +18,17 @@ permissions:
 # runtime for the Windows target, so the build links only under MSVC, and ASan is
 # the only sanitizer there). The blocking gate (build, tests, coverage) lives in
 # pr-check.yml and is untouched here.
+#
+# Trigger split (per-job `if` on the event): the clang-format check runs on pull
+# requests so style is caught before merge, while the AddressSanitizer probe -- a full
+# MSVC ASan build and test run, too slow to be worth repeating on every PR push --
+# runs only on push to main (post-merge). workflow_dispatch runs both on demand.
 
 jobs:
   format-check:
     name: clang-format (advisory)
+    # Pull requests (and manual dispatch); skipped on push to main.
+    if: ${{ github.event_name != 'push' }}
     runs-on: windows-latest
     continue-on-error: true
     steps:
@@ -47,6 +56,8 @@ jobs:
 
   sanitizers:
     name: AddressSanitizer probe (MSVC, advisory)
+    # Post-merge only: runs on push to main (and manual dispatch), not on pull requests.
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: windows-latest
     continue-on-error: true
     steps:
