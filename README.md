@@ -145,7 +145,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Functions for checking memory readability/writability and writing bytes to memory
 - Optional memory region cache with sharded SRWLOCK concurrency, LRU eviction, and stampede coalescing
 - `is_readable_nonblocking()` - tri-state (readable/not-readable/unknown) for latency-sensitive threads
-- `read_ptr_unsafe()` - safe pointer reads in hot paths (SEH-protected on MSVC, cache-accelerated with VirtualQuery fallback on MinGW)
+- `read_ptr_unsafe()` - safe pointer reads in hot paths (SEH-protected on MSVC, guarded by a process-wide vectored exception handler on MinGW, so the success path issues no per-call VirtualQuery)
 - `read_ptr_unchecked()` - inline header-only variant with a configurable lower-bound guard plus a `USERSPACE_PTR_MAX` ceiling for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity)
 - `seh_read<T>()` / `seh_read_bytes()` - typed SEH-guarded reads for arbitrary trivially copyable T (and contiguous byte ranges), used to walk torn pointer chains and parse PE headers without per-site `__try` boilerplate. Returns `std::optional<T>` / `bool` so callers can distinguish "read faulted" from "read returned zero"
 - `module_range_for(addr)` / `own_module_range()` / `host_module_range()` - PE image range queries (base + SizeOfImage) for sanity-checking that a resolved vtable or return address lives inside the game image vs the heap or an injected DLL. Per-HMODULE cache for `module_range_for`; magic-static cache for the own and host variants

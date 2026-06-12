@@ -135,7 +135,7 @@ Scoping to one `ModuleRange` (the default is the host EXE) is load-bearing for c
 
 ## Performance notes
 
-- The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read goes through `VirtualQuery`, which is microseconds-class; the batched ColHead read keeps the MinGW cost down to two syscalls instead of four.
+- The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall; the batched ColHead read still matters because it keeps the walker to two guarded calls instead of four.
 - `vtable_is_type` reads `expected.size() + 1` name bytes in a single SEH frame and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
 - `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` on hot paths.
 - `find_in_pointer_table` on a cold cache scans every non-null slot with the full walker. With a warm cache it touches each slot exactly once with a qword compare. For a sparse table of 256 slots and a unique target, the warm-path cost is dominated by the slot dereference, not the RTTI machinery.
@@ -154,6 +154,6 @@ None of these raise an exception; the caller can treat all failure modes uniform
 
 ## MinGW support
 
-The walker works correctly on both MSVC and MinGW builds of DetourModKit when targeting MSVC-compiled binaries (the typical use case for game mods). The underlying `Memory::seh_read_bytes` primitive uses `__try` / `__except` on MSVC and a `VirtualQuery`-based region validation loop on MinGW. The MinGW path is race-prone against concurrent `VirtualProtect` and slower (one syscall per region), but produces identical results for stable game state.
+The walker works correctly on both MSVC and MinGW builds of DetourModKit when targeting MSVC-compiled binaries (the typical use case for game mods). The underlying `Memory::seh_read_bytes` primitive uses `__try` / `__except` on MSVC and the process-wide vectored fault guard on MinGW. Both toolchains fail closed on unreadable RTTI pages and produce identical results for stable game state; MSVC remains faster because its x64 SEH tables add no success-path setup.
 
 Note: the walker reads the MSVC RTTI ABI. If the target object was compiled by GCC or Clang for the Itanium C++ ABI, the layout at `vtable - 8` is different and the walker will fail. This is by design; DetourModKit consumers building mods for MSVC-compiled games (every major Windows game engine since 2010) will not encounter Itanium RTTI in their target processes.

@@ -843,6 +843,254 @@ namespace
 
 } // anonymous namespace
 
+// Lower bound on a valid usermode pointer on x64 Windows. The null page plus the standard NoAccess guard region cover
+// [0, 0x10000); rejecting addresses in this range without a memory access keeps stale or sentinel pointers from raising
+// first-chance exceptions in callers' debuggers. Shared by seh_read_bytes and the MinGW guarded-read entry point.
+namespace
+{
+    inline constexpr uintptr_t SEH_READ_MIN_VALID_ADDR = 0x10000;
+} // anonymous namespace
+
+#ifndef _MSC_VER
+// MinGW/GCC has no __try / __except, so the foreign-read probes in this file cannot wrap their reads in frame-based
+// SEH the way the MSVC paths do. A single process-wide vectored exception handler provides the equivalent fault guard:
+// each guarded read marks the foreign range it is about to touch in a thread-local slot, and a read fault inside that
+// range is intercepted and turned into a clean failure instead of terminating the host. The guarded path avoids a
+// per-call VirtualQuery on successful terminal reads and keeps stale cache entries from authorizing unguarded
+// dereferences after a page is reprotected.
+namespace
+{
+    // VirtualQuery-validated copy. On x64 it is the fallback used only when the vectored handler could not be installed
+    // (it carries a query-to-copy TOCTOU window the handler path does not, so it is never the normal path there); on a
+    // 32-bit MinGW build, where the handler's x64 register redirect is unavailable, it is the only guard. Validates
+    // every region the read spans before copying.
+    bool virtualquery_validated_copy(uintptr_t addr, void *out, size_t bytes) noexcept
+    {
+        size_t copied = 0;
+        while (copied < bytes)
+        {
+            const uintptr_t cur = addr + copied;
+            MEMORY_BASIC_INFORMATION mbi;
+            if (!VirtualQuery(reinterpret_cast<const void *>(cur), &mbi, sizeof(mbi)))
+                return false;
+            if (mbi.State != MEM_COMMIT)
+                return false;
+            if ((mbi.Protect & CachePermissions::READ_PERMISSION_FLAGS) == 0 ||
+                (mbi.Protect & CachePermissions::NOACCESS_GUARD_FLAGS) != 0)
+                return false;
+
+            const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
+            const uintptr_t region_end = region_start + mbi.RegionSize;
+            if (region_end < region_start)
+                return false;
+            if (cur < region_start || cur >= region_end)
+                return false;
+
+            const size_t available = static_cast<size_t>(region_end - cur);
+            const size_t remaining = bytes - copied;
+            const size_t to_copy = (remaining < available) ? remaining : available;
+            std::memcpy(static_cast<std::byte *>(out) + copied, reinterpret_cast<const void *>(cur), to_copy);
+            copied += to_copy;
+        }
+        return true;
+    }
+
+#if defined(_WIN64)
+    // Per-read record describing the foreign range and the recovery snapshot. It lives on the guarded read's own stack
+    // (one per nested-free synchronous read) and is published to the thread's Win32 TLS slot for the duration of the
+    // read; the handler reads that slot. A Win32 TLS slot is used rather than a thread_local / __thread because mingw
+    // lowers thread-locals to __emutls_get_address, which allocates and locks on a thread's first access -- forbidden
+    // in the exception-dispatch context the handler runs in. TlsGetValue is documented to be callable there: it reads
+    // the thread's TLS array with no allocation and no lock, and returns null on any thread that has not armed a read.
+    struct VehReadGuard
+    {
+        void *env[5];       // __builtin_setjmp buffer; the recovery stub longjmps through it (5 words is the GCC ABI)
+        uintptr_t guard_lo; // first byte of the foreign source range being read
+        uintptr_t guard_hi; // one past the last byte of that range
+    };
+
+    std::mutex s_veh_mutex;
+    std::atomic<void *> s_veh_handle{nullptr};
+    // Process-lifetime TLS index, allocated once and reused across install/remove cycles (never freed so a removal can
+    // never invalidate an index a concurrent read still holds). The handler reads it with an acquire load.
+    std::atomic<DWORD> s_veh_tls_index{TLS_OUT_OF_INDEXES};
+    // Count of reads currently on the guarded path. shutdown_cache drains this to zero before unregistering the handler
+    // so a fault can never arrive after the handler is gone.
+    std::atomic<int> s_veh_in_flight{0};
+
+    // Recovery stub the handler redirects a faulting thread into. __builtin_longjmp restores the stack pointer, frame
+    // pointer and program counter from the snapshot the matching __builtin_setjmp captured before the read, so recovery
+    // is correct no matter which frame the fault occurred in and without invoking SEH unwinding (which can abort when
+    // unwound from a vectored-handler-resumed context). The handler passes the buffer in the first-argument register so
+    // the stub touches no thread-local itself. noinline gives it a stable address for the handler to target.
+    [[noreturn]] __attribute__((noinline)) void veh_perform_longjmp(void *env) noexcept
+    {
+        __builtin_longjmp(env, 1);
+    }
+
+    // Vectored exception handler, installed at the front of the list. It claims a fault only when the current thread is
+    // inside a guarded read (the TLS slot is non-null), the code is one a guarded probe owns (is_guarded_read_fault --
+    // the same set the MSVC __except filters use), the record carries a faulting address, and that address falls inside
+    // the foreign range being read. Every other fault is passed straight through, so a fault from the destination
+    // write, a host software exception reusing one of these codes, or any code running outside a guarded read still
+    // reaches the host's own handlers unchanged. On a claimed fault it redirects the thread into veh_perform_longjmp,
+    // which reports the read as failed.
+    LONG NTAPI dmk_veh_read_handler(PEXCEPTION_POINTERS info) noexcept
+    {
+        const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
+        if (slot == TLS_OUT_OF_INDEXES)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        auto *const guard = static_cast<VehReadGuard *>(TlsGetValue(slot));
+        if (guard == nullptr)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        const EXCEPTION_RECORD *const record = info->ExceptionRecord;
+        if (!Memory::detail::is_guarded_read_fault(record->ExceptionCode))
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // A guarded foreign read can only fault with a hardware access-violation, guard-page or in-page-error, all of
+        // which carry the faulting data address in ExceptionInformation[1]. Refuse to claim a record without it: that
+        // rules out a host RaiseException reusing one of these NTSTATUS codes with no address from being hijacked out
+        // of the host's control flow while a guarded read happens to be in flight on this thread.
+        if (record->NumberParameters < 2)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Confine the claim to the foreign source range, so a fault from the destination write (a caller bug, not a
+        // foreign-read fault) reaches the host's handlers instead of being silently swallowed.
+        const uintptr_t fault_address = static_cast<uintptr_t>(record->ExceptionInformation[1]);
+        if (fault_address < guard->guard_lo || fault_address >= guard->guard_hi)
+            return EXCEPTION_CONTINUE_SEARCH;
+
+        // Disarm before resuming so a fault inside the longjmp stub would pass through rather than recurse.
+        TlsSetValue(slot, nullptr);
+
+        // Resume the faulting thread in veh_perform_longjmp(env): instruction pointer to the stub, setjmp buffer in the
+        // Win64 first-argument register (RCX). The stub is entered by an injected RIP change, not a CALL, so the
+        // fault-point RSP is not the ABI-required call alignment; pre-align it (the stub reloads RSP from the snapshot
+        // anyway, so this only protects the stub's own prologue) to keep the resume robust against future codegen that
+        // might touch an aligned stack slot before the reload.
+        CONTEXT *const ctx = info->ContextRecord;
+        ctx->Rsp = (ctx->Rsp & ~static_cast<DWORD64>(15)) - 8;
+        ctx->Rcx = reinterpret_cast<DWORD64>(&guard->env);
+        ctx->Rip = reinterpret_cast<DWORD64>(&veh_perform_longjmp);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    // Install the handler once, lazily. Re-installable across an init/shutdown cycle: shutdown_cache removes it and
+    // clears the handle, so a later guarded read or re-init installs a fresh one. Best-effort: if either TlsAlloc
+    // or AddVectoredExceptionHandler fails (realistic only under exhaustion) the handle stays null and the guarded read
+    // paths fall back to VirtualQuery validation.
+    void ensure_veh_installed() noexcept
+    {
+        if (s_veh_handle.load(std::memory_order_acquire) != nullptr)
+            return;
+        std::lock_guard<std::mutex> lock(s_veh_mutex);
+        if (s_veh_handle.load(std::memory_order_relaxed) != nullptr)
+            return;
+        if (s_veh_tls_index.load(std::memory_order_relaxed) == TLS_OUT_OF_INDEXES)
+        {
+            const DWORD slot = TlsAlloc();
+            if (slot == TLS_OUT_OF_INDEXES)
+                return; // cannot guard; the read paths fall back to VirtualQuery validation
+            s_veh_tls_index.store(slot, std::memory_order_release);
+        }
+        // First in the list (FirstHandler = 1): a guarded read always resolves through this handler before any consumer
+        // VEH or frame-based SEH. Every fault that is not this thread's own in-flight guarded read is passed through
+        // with EXCEPTION_CONTINUE_SEARCH, so being first never starves the host's handlers.
+        void *const handle = AddVectoredExceptionHandler(1, dmk_veh_read_handler);
+        s_veh_handle.store(handle, std::memory_order_release);
+    }
+
+    void remove_veh_handler() noexcept
+    {
+        std::lock_guard<std::mutex> lock(s_veh_mutex);
+        void *const handle = s_veh_handle.load(std::memory_order_relaxed);
+        if (handle == nullptr)
+            return;
+        // Stop new guarded reads from taking the handler path, then wait for any read already committed to it to finish
+        // before unregistering, so a fault cannot arrive after the handler is gone. The seq_cst store pairs with the
+        // seq_cst fetch_add / handle-load in veh_read_bytes (the Dekker protocol the cache reader epoch uses): a read
+        // that observed a live handle is necessarily counted in s_veh_in_flight before this store is observed.
+        s_veh_handle.store(nullptr, std::memory_order_seq_cst);
+        int spins = 0;
+        while (s_veh_in_flight.load(std::memory_order_seq_cst) > 0)
+        {
+            if (spins < 4096)
+                std::this_thread::yield();
+            else
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            ++spins;
+        }
+        RemoveVectoredExceptionHandler(handle);
+    }
+
+    // Copy [src, src + len) into out under the vectored handler. The copy is a single rep movsb emitted as raw inline
+    // assembly: inline asm is invisible to AddressSanitizer, which instruments only compiler-emitted loads, so this
+    // deliberate cross-region read cannot raise an ASan false positive (the same reason the MSVC probe copies via the
+    // __movsb intrinsic). __builtin_setjmp records the recovery point; the guard is then published to this thread's TLS
+    // slot so a read fault is claimable, and the handler longjmps back here so the setjmp expression returns non-zero
+    // and the function reports failure. noinline keeps the read and its setjmp anchor in one self-contained frame.
+    __attribute__((noinline)) bool veh_guarded_copy(void *out, const void *src, size_t len) noexcept
+    {
+        const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
+        VehReadGuard guard;
+        guard.guard_lo = reinterpret_cast<uintptr_t>(src);
+        guard.guard_hi = guard.guard_lo + len;
+
+        if (__builtin_setjmp(guard.env) != 0)
+        {
+            // Reached only when the handler longjmped here after swallowing a read fault; the handler already cleared
+            // the TLS slot. Report the failure.
+            return false;
+        }
+
+        // Arm after the setjmp captures env and before the read, so a fault in the rep movsb below is claimable while a
+        // fault before the buffer is valid is not. TlsSetValue writes the thread's TLS array with no allocation.
+        TlsSetValue(slot, &guard);
+
+        void *dst = out;
+        const void *cur = src;
+        size_t n = len;
+        __asm__ __volatile__("rep movsb" : "+D"(dst), "+S"(cur), "+c"(n) : : "memory");
+
+        TlsSetValue(slot, nullptr);
+        return true;
+    }
+
+    // Single entry point the MinGW read paths share. Rejects a wrapping or low source range first (a wrapped
+    // addr + bytes would invert the handler's [guard_lo, guard_hi) check and let a real fault escape the guard);
+    // mirrors seh_read_bytes' own precheck so read_ptr_unsafe, which has no precheck of its own, is covered too. Counts
+    // the read in the drain epoch around the path decision so a read on the guarded path is always visible to
+    // remove_veh_handler's drain. Falls back to VirtualQuery validation when the handler is unavailable.
+    bool veh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
+    {
+        if (addr < SEH_READ_MIN_VALID_ADDR || addr + bytes < addr)
+            return false;
+
+        ensure_veh_installed();
+
+        s_veh_in_flight.fetch_add(1, std::memory_order_seq_cst);
+        const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
+        const bool ok = armed ? veh_guarded_copy(out, reinterpret_cast<const void *>(addr), bytes)
+                              : virtualquery_validated_copy(addr, out, bytes);
+        s_veh_in_flight.fetch_sub(1, std::memory_order_release);
+        return ok;
+    }
+#else  // !_WIN64
+    // 32-bit MinGW: the handler's recovery redirect rewrites x64 CONTEXT registers (Rcx/Rip) and the longjmp buffer is
+    // x64-sized, so the vectored guard is x64-only. A guarded read here validates every region with VirtualQuery before
+    // copying instead.
+    bool veh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
+    {
+        if (addr < SEH_READ_MIN_VALID_ADDR || addr + bytes < addr)
+            return false;
+        return virtualquery_validated_copy(addr, out, bytes);
+    }
+#endif // _WIN64
+} // anonymous namespace
+#endif // !_MSC_VER
+
 bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
 {
     // Hold state mutex to prevent concurrent clear_cache or shutdown_cache
@@ -862,6 +1110,13 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
             // Initialization failed - s_cache_initialized already reset to false in perform_cache_initialization
             return false;
         }
+
+#if !defined(_MSC_VER) && defined(_WIN64)
+        // MinGW has no frame-based SEH; install the process-wide vectored fault handler the seh_read paths rely on so a
+        // guarded read never has to fall back to a per-call VirtualQuery. Best-effort and independent of cache success:
+        // a failed install only costs the guarded reads their VirtualQuery fallback.
+        ensure_veh_installed();
+#endif
 
         // Try to start background cleanup thread (may fail silently on MinGW)
         s_cleanup_thread_running.store(true, std::memory_order_release);
@@ -890,6 +1145,13 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
                     {
                         if (is_loader_lock_held())
                         {
+#if !defined(_MSC_VER) && defined(_WIN64)
+                            // Remove the vectored fault handler before the module can be unloaded: a list removal is
+                            // safe under loader lock, and leaving the handler registered against soon-to-be-freed code
+                            // is worse than the pinned-thread leak below (it would actively claim faults on a defunct
+                            // subsystem). shutdown_cache is not reached on this branch, so do it here.
+                            remove_veh_handler();
+#endif
                             // Under loader lock (FreeLibrary path): pin the module so code pages remain valid for the
                             // detached thread, then signal it to stop and detach.
                             s_cleanup_thread_running.store(false, std::memory_order_release);
@@ -1038,6 +1300,15 @@ void DetourModKit::Memory::shutdown_cache()
     s_configured_expiry_ms.store(0, std::memory_order_relaxed);
     s_max_entries_per_shard.store(0, std::memory_order_relaxed);
     s_cleanup_requested.store(false, std::memory_order_relaxed);
+
+#if !defined(_MSC_VER) && defined(_WIN64)
+    // Remove the vectored fault handler installed for the MinGW seh_read paths so it cannot dangle into freed code if
+    // the DMK module is unloaded after teardown. remove_veh_handler drains guarded reads still on the handler path
+    // before unregistering, so an in-flight read cannot fault into a missing handler. Idempotent: a no-op when the
+    // handler was never installed (cache used without any guarded read) or already removed. A later guarded read
+    // re-installs it.
+    remove_veh_handler();
+#endif
 
     Logger::get_instance().debug("MemoryCache: Shutdown complete.");
 }
@@ -1364,72 +1635,19 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
         return 0;
     }
 #else
-    // MinGW/GCC lacks __try/__except. Probe the cache with a trylock to avoid a VirtualQuery syscall when the region is
-    // already cached. Falls back to VirtualQuery on cache miss or when cache is off. ActiveReaderGuard is required to
-    // prevent shutdown_cache() from destroying shard vectors between our check and access.
-    const auto src = base + static_cast<uintptr_t>(offset);
-
-    {
-        ActiveReaderGuard reader_guard;
-
-        if (s_cache_initialized.load(std::memory_order_seq_cst))
-        {
-            const size_t shard_count = s_shard_count.load(std::memory_order_acquire);
-            if (shard_count != 0)
-            {
-                const size_t shard_idx = compute_shard_index(src, shard_count);
-                std::shared_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx], std::try_to_lock);
-                if (lock.owns_lock())
-                {
-                    const uint64_t now_ns = current_time_ns();
-                    const uint64_t expiry_ns = configured_expiry_ns();
-                    CachedMemoryRegionInfo *cached =
-                        find_in_shard(s_cache_shards[shard_idx], src, sizeof(uintptr_t), now_ns, expiry_ns);
-                    if (cached)
-                    {
-                        if (check_read_permission(cached->protection))
-                        {
-                            // memcpy for the same misalignment reason as the MSVC path above.
-                            uintptr_t value;
-                            std::memcpy(&value, reinterpret_cast<const void *>(src), sizeof(value));
-                            return value;
-                        }
-                        return 0;
-                    }
-                }
-            }
-        }
-    }
-
-    // Cache miss, lock contention, or cache not initialized
-    MEMORY_BASIC_INFORMATION mbi;
-    if (!VirtualQuery(reinterpret_cast<const void *>(src), &mbi, sizeof(mbi)))
+    // MinGW/GCC lacks __try/__except. Read the pointer-sized value through the process-wide vectored fault guard (see
+    // veh_read_bytes): a fault -- unmapped, PAGE_NOACCESS/guard, or a page reprotected out from under a stale cache
+    // entry -- is swallowed and reported as failure. This matches the MSVC path's "0 on fault" contract without a
+    // per-call VirtualQuery and without trusting cached protection data for an unguarded dereference. memcpy semantics
+    // are preserved (the guarded copy is byte-wise), so a misaligned foreign pointer is read without the undefined
+    // behavior of dereferencing it.
+    const uintptr_t src = base + static_cast<uintptr_t>(offset);
+    uintptr_t value = 0;
+    if (!veh_read_bytes(src, &value, sizeof(value)))
         return 0;
-    if (mbi.State != MEM_COMMIT)
-        return 0;
-    if ((mbi.Protect & CachePermissions::READ_PERMISSION_FLAGS) == 0 ||
-        (mbi.Protect & CachePermissions::NOACCESS_GUARD_FLAGS) != 0)
-        return 0;
-    // Verify the full read fits within the committed region (overflow-safe)
-    const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-    const uintptr_t region_end = region_start + mbi.RegionSize;
-    const uintptr_t read_end = src + sizeof(uintptr_t);
-    if (read_end < src || src < region_start || read_end > region_end)
-        return 0;
-    // memcpy for the same misalignment reason as the MSVC path above.
-    uintptr_t value;
-    std::memcpy(&value, reinterpret_cast<const void *>(src), sizeof(value));
     return value;
 #endif
 }
-
-// Lower bound on a valid usermode pointer on x64 Windows. The null page plus the standard NoAccess guard region cover
-// [0, 0x10000); rejecting addresses in this range without a memory access keeps stale or sentinel pointers from raising
-// first-chance exceptions in callers' debuggers.
-namespace
-{
-    inline constexpr uintptr_t SEH_READ_MIN_VALID_ADDR = 0x10000;
-} // anonymous namespace
 
 bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
 {
@@ -1462,35 +1680,10 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
         return false;
     }
 #else
-    // MinGW lacks __try/__except. Validate every region the read spans with
-    // VirtualQuery before issuing the memcpy. The loop chains across adjacent regions so multi-region reads (which
-    // happen for any buffer that crosses an allocation boundary) succeed when every covered page is committed and
-    // readable.
-    size_t copied = 0;
-    while (copied < bytes)
-    {
-        const uintptr_t cur = addr + copied;
-        MEMORY_BASIC_INFORMATION mbi;
-        if (!VirtualQuery(reinterpret_cast<const void *>(cur), &mbi, sizeof(mbi)))
-            return false;
-        if (mbi.State != MEM_COMMIT)
-            return false;
-        if ((mbi.Protect & CachePermissions::READ_PERMISSION_FLAGS) == 0 ||
-            (mbi.Protect & CachePermissions::NOACCESS_GUARD_FLAGS) != 0)
-            return false;
-
-        const uintptr_t region_start = reinterpret_cast<uintptr_t>(mbi.BaseAddress);
-        const uintptr_t region_end = region_start + mbi.RegionSize;
-        if (cur < region_start || cur >= region_end)
-            return false;
-
-        const size_t available = static_cast<size_t>(region_end - cur);
-        const size_t remaining = bytes - copied;
-        const size_t to_copy = (remaining < available) ? remaining : available;
-        std::memcpy(static_cast<std::byte *>(out) + copied, reinterpret_cast<const void *>(cur), to_copy);
-        copied += to_copy;
-    }
-    return true;
+    // MinGW lacks __try/__except. Read through the process-wide vectored fault guard (see veh_read_bytes): the success
+    // path is a single rep movsb with no syscall, and any read fault across the span -- including a multi-region read
+    // that crosses into unmapped or protected memory -- is swallowed and reported as failure.
+    return veh_read_bytes(addr, out, bytes);
 #endif
 }
 
@@ -1525,8 +1718,8 @@ namespace
             return false;
         }
 #else
-        // MinGW lacks __try/__except. Each intermediate link is read through read_ptr_unsafe (VirtualQuery-guarded,
-        // returns 0 on fault); the plausibility screen also rejects that 0.
+        // MinGW lacks __try/__except. Each intermediate link is read through read_ptr_unsafe, which returns 0 on
+        // fault; the plausibility screen also rejects that 0.
         uintptr_t cur = base;
         for (size_t i = 0; i + 1 < count; ++i)
         {
@@ -1591,8 +1784,8 @@ bool DetourModKit::Memory::seh_read_chain_bytes(uintptr_t base, std::span<const 
         return false;
     }
 #else
-    // MinGW: resolve through the VirtualQuery-guarded helper, then read the
-    // terminal range with seh_read_bytes, which validates every region the read spans before copying.
+    // MinGW: resolve through the shared guarded-link helper, then read the terminal range with seh_read_bytes so the
+    // same vectored fault guard covers the final byte span.
     uintptr_t final_addr = 0;
     if (!resolve_chain_guarded(base, offsets.data(), offsets.size(), final_addr))
         return false;
