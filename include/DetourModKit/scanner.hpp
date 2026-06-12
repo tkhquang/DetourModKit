@@ -477,8 +477,8 @@ namespace DetourModKit
          * @brief Cascade resolver with inline-hooked-prologue recovery.
          * @details Equivalent to resolve_cascade() on the happy path. If every candidate fails, rebuilds each
          *          Direct-mode candidate's pattern with the first 5 bytes replaced by `E9 ?? ?? ?? ??` (the near-JMP
-         *          signature that SafetyHook and MinHook write when another mod already hooked the target) and retries.
-         *          If the recovery path succeeds the log line calls this out explicitly.
+         *          shape used by SafetyHook and other rel32 inline detours) and retries. If the recovery path succeeds
+         *          the log line calls this out explicitly.
          *
          *          RipRelative candidates are skipped in the fallback phase since they target instructions deeper than
          *          the 5-byte prologue and are unaffected by the overwrite.
@@ -541,11 +541,11 @@ namespace DetourModKit
          *          near-JMP overwrites a code prologue, never data, so a match in .rdata / .data would be a false
          *          positive (the data-capable readable sweep is only used for the primary candidate pass).
          *
-         *          The rebuilt near-JMP must be FOUND inside @p range, but its jump destination is intentionally NOT
-         *          constrained to @p range. When a sibling mod inline-hooks the target, its E9 jumps to a trampoline
-         *          the sibling allocated outside this image, so the destination is validated only against "lies in some
-         *          loaded module" (which still rejects a jump into unmapped or data-only memory). Requiring the
-         *          destination in-range would reject the very recovery this path exists to perform.
+         *          The rebuilt near-JMP must be found inside @p range, but its jump destination is intentionally not
+         *          constrained to @p range or to any loaded module. When a sibling mod inline-hooks the target, its E9
+         *          usually jumps to a VirtualAlloc'd trampoline outside every image, so the destination is validated as
+         *          a plausible pointer on a committed, execute-readable page instead. This still rejects jumps into
+         *          unmapped or data-only memory without rejecting the recovery this path exists to perform.
          *
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.

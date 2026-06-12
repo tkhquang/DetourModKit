@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <span>
 #include <string>
 #include <vector>
@@ -2818,9 +2819,22 @@ TEST(ScannerModuleCascade, AllInvalidPatternsReturnsError)
 
 namespace
 {
+    struct VirtualFreeDeleter
+    {
+        void operator()(std::uint8_t *ptr) const noexcept
+        {
+            if (ptr != nullptr)
+            {
+                VirtualFree(ptr, 0, MEM_RELEASE);
+            }
+        }
+    };
+
+    using VirtualPagePtr = std::unique_ptr<std::uint8_t, VirtualFreeDeleter>;
+
     // Allocates an executable page within an int32 rel32 displacement of `anchor`, mirroring how inline-hook trampoline
-    // allocators (MinHook, SafetyHook) place a detour close to its target so a 5-byte E9 can reach it. Returns nullptr
-    // if no free region within range is found; the caller owns a non-null result and must VirtualFree it.
+    // allocators place a detour close to its target so a 5-byte E9 can reach it. Returns nullptr if no free region
+    // within range is found; the caller owns a non-null result and must VirtualFree it.
     std::uint8_t *alloc_exec_near(std::uintptr_t anchor, std::size_t size)
     {
         SYSTEM_INFO si{};
@@ -2862,35 +2876,37 @@ namespace
 
 // Regression guard for the module-scoped prologue fallback: the rewritten near-JMP must be FOUND inside the module, but
 // its destination (a sibling mod's trampoline) lives OUTSIDE it. Constraining the destination to the module range would
-// reject this recovery, so the destination is validated only against "lies in some loaded module". Here the trampoline
-// target is the test executable image, a different module than the scanned scratch buffer, which is allocated within
-// rel32 reach so the E9 can encode the jump.
+// reject this recovery, so the destination is validated only as a committed, execute-readable page. Here the jump
+// target is an executable address in the test image -- a different module than the scanned scratch buffer, which is
+// allocated within rel32 reach so the E9 can encode the jump.
 TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideModule)
 {
-    const auto dest = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    // An executable address in the test image stands in for an in-module detour target; the page is execute-readable,
+    // so the destination gate accepts it while it stays outside the scanned scratch buffer's range.
+    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
 
-    std::uint8_t *region = alloc_exec_near(dest, 0x1000);
-    if (region == nullptr)
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
     {
         GTEST_SKIP() << "no free executable region within rel32 of the test image";
     }
-    std::memset(region, 0xCC, 0x1000);
+    std::memset(region.get(), 0xCC, 0x1000);
 
     constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region) + PLANT_OFFSET;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
     const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
     ASSERT_GE(rel, INT32_MIN);
     ASSERT_LE(rel, INT32_MAX);
 
     constexpr std::uint8_t TAIL_BYTES[] = {0x5A, 0xB4, 0xD1, 0xE7, 0xF9, 0x2B, 0x4D, 0x6F, 0x81, 0x93};
 
-    region[PLANT_OFFSET + 0] = 0xE9;
+    region.get()[PLANT_OFFSET + 0] = 0xE9;
     const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
+    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
 
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region),
-                                    reinterpret_cast<std::uintptr_t>(region) + 0x1000};
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
 
     // The original (unhooked) prologue starts with five REX-prefixed bytes the buffer does not contain (it starts with
     // E9), so the direct pass misses and the fallback rebuilds E9 ?? ?? ?? ?? + tail to match the planted site.
@@ -2902,29 +2918,164 @@ TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideModule)
         Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "trampoline-out-of-module", range);
     ASSERT_TRUE(hit.has_value()) << "module-scoped fallback rejected an out-of-module trampoline destination";
     EXPECT_EQ(hit->address, match_site);
+}
 
-    VirtualFree(region, 0, MEM_RELEASE);
+// A sibling mod's inline-hook trampoline is VirtualAlloc'd outside every loaded module -- the exact SafetyHook case the
+// fallback exists to recover. The destination gate must accept an E9 that lands on a committed, execute-readable page
+// even though it belongs to no module; an in-module requirement defeated recovery for every SafetyHook-hooked target.
+// Here the scanned scratch buffer and the jump destination are two independent VirtualAlloc'd executable pages, so
+// neither is a module and the destination must still be accepted.
+TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideAnyModule)
+{
+    // The trampoline page is the anchor: place the scanned region within rel32 reach of it so the planted E9 can encode
+    // the jump. Fill it with RET so it reads as a plausible trampoline body.
+    VirtualPagePtr trampoline{
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))};
+    ASSERT_NE(trampoline.get(), nullptr);
+    std::memset(trampoline.get(), 0xC3, 0x1000);
+
+    VirtualPagePtr region{alloc_exec_near(reinterpret_cast<std::uintptr_t>(trampoline.get()), 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region within rel32 of the trampoline page";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
+    const auto dest = reinterpret_cast<std::uintptr_t>(trampoline.get());
+    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x3C, 0x7E, 0x91, 0xA2, 0xB3, 0xC4, 0xD5, 0xE6, 0xF7, 0x08};
+
+    region.get()[PLANT_OFFSET + 0] = 0xE9;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 3C 7E 91 A2 B3 C4 D5 E6 F7 08", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "trampoline-no-module", range);
+    ASSERT_TRUE(hit.has_value()) << "fallback rejected a VirtualAlloc'd trampoline destination outside every module";
+    EXPECT_EQ(hit->address, match_site);
+}
+
+// A hooked prologue inside executable code is still rejected when its E9 lands on committed data. This pins the
+// destination half of the gate separately from the page-scope test below, whose purpose is to prove the match scan
+// stays executable-only.
+TEST(ScannerModuleCascade, PrologueFallbackRejectsDataOnlyDestination)
+{
+    VirtualPagePtr destination{
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))};
+    ASSERT_NE(destination.get(), nullptr);
+    std::memset(destination.get(), 0x00, 0x1000);
+
+    VirtualPagePtr region{alloc_exec_near(reinterpret_cast<std::uintptr_t>(destination.get()), 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region within rel32 of the data destination";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
+    const auto dest = reinterpret_cast<std::uintptr_t>(destination.get());
+    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x4A, 0x5B, 0x6C, 0x7D, 0x8E, 0x9F, 0xA0, 0xB1, 0xC2, 0xD3};
+
+    region.get()[PLANT_OFFSET + 0] = 0xE9;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 4A 5B 6C 7D 8E 9F A0 B1 C2 D3", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "data-destination", range);
+    ASSERT_FALSE(hit.has_value()) << "fallback accepted an E9 destination on a data-only page";
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+}
+
+// The fallback rebuilds the signature as `E9 ?? ?? ?? ??` + tail, which compiles with anchor offset 0 even when the
+// original carried a `|` marker. The recovered address must still honor that marker: the direct pass returns
+// (match + anchor offset), so the fallback must agree or a `|`-anchored Direct candidate resolves short by the anchor
+// offset -- a silently wrong address. This plants a hooked prologue with a `|` seven bytes in and asserts the fallback
+// lands on match_site + 7, not the bare match_site.
+TEST(ScannerModuleCascade, PrologueFallbackHonorsAnchorOffsetMarker)
+{
+    // An executable address in the test image is the jump destination, so the destination gate passes and the resolve
+    // (where the anchor offset matters) is reached.
+    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
+
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region within rel32 of the test image";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
+    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x1D, 0x2E, 0x3F, 0x40, 0x51, 0x62, 0x73, 0x84, 0x95, 0xA6};
+
+    region.get()[PLANT_OFFSET + 0] = 0xE9;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    // `|` after the five prologue bytes plus two tail bytes => anchor offset 7. The original prologue (48 89 5C 24 08)
+    // is overwritten by the E9, so the direct pass misses and the fallback engages.
+    Scanner::AddrCandidate cands[] = {
+        {"anchored", "48 89 5C 24 08 1D 2E | 3F 40 51 62 73 84 95 A6", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "anchor-offset", range);
+    ASSERT_TRUE(hit.has_value()) << "fallback failed to recover the hooked prologue";
+    // The unhooked direct pass would resolve to match + 7 (the `|` anchor); the fallback must reproduce that, not the
+    // bare match_site it would land on if the anchor offset were dropped.
+    EXPECT_EQ(hit->address, match_site + 7);
 }
 
 // Page-scope regression guard for the module-scoped prologue fallback: a hooked near-JMP only ever overwrites a code
 // prologue, so the fallback must search the image's executable pages only -- matching the whole-process fallback, which
 // counts and scans through scan_executable_regions. Here the E9 + literal tail is planted in a READ-ONLY data page (the
-// execute bit is stripped after seeding) inside the range, with a rel32 that resolves into a loaded module. The
+// execute bit is stripped after seeding) inside the range, with a rel32 that resolves to executable code. The
 // fallback must NOT resolve it: a hit would mean it scanned a non-code page. (A readable-page mask would resolve it to
 // the data-page address; this pins the executable-only mask.)
 TEST(ScannerModuleCascade, PrologueFallbackIgnoresNonExecutableDataPage)
 {
-    const auto dest = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
 
-    std::uint8_t *region = alloc_exec_near(dest, 0x1000);
-    if (region == nullptr)
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
     {
         GTEST_SKIP() << "no free region within rel32 of the test image";
     }
-    std::memset(region, 0xCC, 0x1000);
+    std::memset(region.get(), 0xCC, 0x1000);
 
     constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region) + PLANT_OFFSET;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
     const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
     ASSERT_GE(rel, INT32_MIN);
     ASSERT_LE(rel, INT32_MAX);
@@ -2933,17 +3084,17 @@ TEST(ScannerModuleCascade, PrologueFallbackIgnoresNonExecutableDataPage)
     // PROLOGUE_FALLBACK_MIN_TAIL_LITERALS.
     constexpr std::uint8_t TAIL_BYTES[] = {0x6C, 0x5D, 0x4E, 0x3F, 0x20, 0x11, 0x02, 0xF3, 0xE4, 0xD5};
 
-    region[PLANT_OFFSET + 0] = 0xE9;
+    region.get()[PLANT_OFFSET + 0] = 0xE9;
     const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
+    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
 
     // Strip execute: the planted bytes now live in a readable, non-executable page.
     DWORD old_protect = 0;
-    ASSERT_TRUE(VirtualProtect(region, 0x1000, PAGE_READONLY, &old_protect));
+    ASSERT_TRUE(VirtualProtect(region.get(), 0x1000, PAGE_READONLY, &old_protect));
 
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region),
-                                    reinterpret_cast<std::uintptr_t>(region) + 0x1000};
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
 
     Scanner::AddrCandidate cands[] = {
         {"hooked", "48 89 5C 24 08 6C 5D 4E 3F 20 11 02 F3 E4 D5", Scanner::ResolveMode::Direct, 0, 0},
@@ -2952,8 +3103,6 @@ TEST(ScannerModuleCascade, PrologueFallbackIgnoresNonExecutableDataPage)
     const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "data-page-fallback", range);
     ASSERT_FALSE(hit.has_value()) << "module fallback matched an E9 prologue in a non-executable data page";
     EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-
-    VirtualFree(region, 0, MEM_RELEASE);
 }
 
 // require_unique: an ambiguous primary (matches more than once in the module) is

@@ -868,6 +868,21 @@ std::vector<Scanner::detail::ExecutableWindow> Scanner::detail::collect_executab
     return windows;
 }
 
+// Single-address sibling of the executable-page gate scan_regions_filtered applies per region. One VirtualQuery,
+// matched against the identical mask (MEM_COMMIT, EXECUTABLE_PAGE_FLAGS, not PAGE_GUARD / PAGE_NOACCESS), so the
+// prologue-recovery fallback can vet a decoded E9 destination without re-deriving the Windows page masks or
+// constraining it to a loaded module (a sibling mod's trampoline is VirtualAlloc'd outside every image).
+bool Scanner::detail::is_executable_address(std::uintptr_t address) noexcept
+{
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (VirtualQuery(reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi)) == 0)
+    {
+        return false;
+    }
+    const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
+    return mbi.State == MEM_COMMIT && (mbi.Protect & EXECUTABLE_PAGE_FLAGS) != 0 && !protection_unsafe;
+}
+
 const std::byte *DetourModKit::Scanner::scan_executable_regions(const CompiledPattern &pattern, size_t occurrence)
 {
     if (pattern.empty() || occurrence == 0)

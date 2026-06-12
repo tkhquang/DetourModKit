@@ -18,7 +18,6 @@
 
 #include "scanner_internal.hpp"
 
-#include <windows.h>
 #include <optional>
 #include <span>
 #include <string>
@@ -77,104 +76,51 @@ namespace
     // tolerating duplicate matches.
     constexpr std::size_t PROLOGUE_FALLBACK_MAX_HITS = 1;
 
-    bool is_wildcard_token(std::string_view token) noexcept
+    // E9 rel32 inline hooks overwrite exactly five bytes: one opcode plus one int32 displacement.
+    constexpr std::size_t PROLOGUE_PATCH_BYTES = 5;
+
+    void append_hex_byte(std::string &out, std::byte value)
     {
-        return token == "?" || token == "??";
+        constexpr char digits[] = "0123456789ABCDEF";
+        const auto byte_value = std::to_integer<unsigned>(value);
+        out.push_back(digits[(byte_value >> 4) & 0xF]);
+        out.push_back(digits[byte_value & 0xF]);
     }
 
-    // Walks the AOB token stream and splits it into (first 5 byte-tokens, tail).
-    // The `|` anchor marker is stripped because the rebuilt pattern targets
-    // the hooked-prologue start. Returns false if the source has fewer than
-    // 5 byte-tokens.
-    struct PrologueSplit
+    // Build from the parsed pattern so parse_aob remains the only token parser. The caller keeps original.offset and
+    // applies it after the fallback scan, which makes `|`-anchored recovery match the direct path exactly.
+    std::string build_hooked_prologue_pattern(const DetourModKit::Scanner::CompiledPattern &original)
     {
-        std::vector<std::string_view> tail_tokens;
-        int literal_tail_count{0};
-    };
-
-    bool split_prologue(std::string_view orig, PrologueSplit &out) noexcept
-    {
-        std::size_t i = 0;
-        int byte_tokens = 0;
-        while (i < orig.size())
-        {
-            while (i < orig.size() && (orig[i] == ' ' || orig[i] == '\t' || orig[i] == '\n' || orig[i] == '\r'))
-            {
-                ++i;
-            }
-            if (i >= orig.size())
-            {
-                break;
-            }
-            if (orig[i] == '|')
-            {
-                ++i;
-                continue;
-            }
-            const std::size_t tok_start = i;
-            while (i < orig.size() && orig[i] != ' ' && orig[i] != '\t' && orig[i] != '\n' && orig[i] != '\r' &&
-                   orig[i] != '|')
-            {
-                ++i;
-            }
-            const std::string_view tok = orig.substr(tok_start, i - tok_start);
-            if (tok.empty())
-            {
-                continue;
-            }
-            if (byte_tokens >= 5)
-            {
-                out.tail_tokens.push_back(tok);
-                if (!is_wildcard_token(tok))
-                {
-                    ++out.literal_tail_count;
-                }
-            }
-            ++byte_tokens;
-        }
-        return byte_tokens >= 5;
-    }
-
-    std::string build_hooked_prologue_pattern(std::string_view orig)
-    {
-        if (orig.empty())
+        if (original.size() < PROLOGUE_PATCH_BYTES)
         {
             return {};
         }
-        PrologueSplit split;
-        if (!split_prologue(orig, split))
+        int literal_tail_count = 0;
+        for (std::size_t i = PROLOGUE_PATCH_BYTES; i < original.size(); ++i)
         {
-            return {};
+            if (original.mask[i] != std::byte{0x00})
+            {
+                ++literal_tail_count;
+            }
         }
-        if (split.literal_tail_count < PROLOGUE_FALLBACK_MIN_TAIL_LITERALS)
+        if (literal_tail_count < PROLOGUE_FALLBACK_MIN_TAIL_LITERALS)
         {
             return {};
         }
         std::string out = "E9 ?? ?? ?? ??";
-        for (const auto &tok : split.tail_tokens)
+        for (std::size_t i = PROLOGUE_PATCH_BYTES; i < original.size(); ++i)
         {
             out.push_back(' ');
-            out.append(tok);
+            if (original.mask[i] == std::byte{0x00})
+            {
+                out.append("??");
+            }
+            else
+            {
+                append_hex_byte(out, original.bytes[i]);
+            }
         }
         return out;
-    }
-
-    // Returns true if `addr` lies inside any currently loaded module's executable image range. Used to reject E9-rel32
-    // destinations that resolve into unmapped or data-only memory.
-    bool is_address_in_module(std::uintptr_t addr) noexcept
-    {
-        if (addr == 0)
-        {
-            return false;
-        }
-        HMODULE mod = nullptr;
-        if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                reinterpret_cast<LPCWSTR>(addr), &mod) ||
-            mod == nullptr)
-        {
-            return false;
-        }
-        return true;
     }
 
     // Counts up to (max_hits + 1) occurrences of `pattern`. When `range` is set the count is confined to that module
@@ -300,7 +246,15 @@ namespace
             {
                 continue;
             }
-            auto hooked = build_hooked_prologue_pattern(candidate.pattern);
+            // Parse the original signature with the same parser the direct pass uses, so the fallback inherits its
+            // token validation and -- critically -- its `|` anchor offset, carried into the resolve below. A malformed
+            // pattern was already reported by the direct pass, so skip it silently here.
+            const auto original = DetourModKit::Scanner::parse_aob(candidate.pattern);
+            if (!original)
+            {
+                continue;
+            }
+            const auto hooked = build_hooked_prologue_pattern(*original);
             if (hooked.empty())
             {
                 logger.debug("Scanner: prologue fallback skipped for '{}' (insufficient literal tail bytes)",
@@ -339,20 +293,30 @@ namespace
                 continue;
             }
             const auto jmp_destination = *decoded;
-            // The rewritten near-JMP itself was FOUND inside the target (the module image when `range` is set, the
-            // process otherwise), but its destination must NOT be constrained to that module. When a sibling mod
-            // inline-hooks the target, its E9 jumps to a trampoline the sibling allocated outside this image, so
-            // requiring the destination in-range would reject the very recovery this path performs. Gate the
-            // destination only on "lies in some loaded module", which still rejects a jump into unmapped or data-only
-            // memory.
-            if (!is_address_in_module(jmp_destination))
+            // The rewritten near-JMP was FOUND inside the target (the module image when `range` is set, the process
+            // otherwise), but its destination must NOT be constrained to that module. When a sibling mod inline-hooks
+            // the target, its E9 can jump to a trampoline the sibling allocated outside every loaded module; SafetyHook
+            // does this for inline hooks. An in-module requirement would reject the very recovery this path exists for.
+            // Gate the destination on "plausible user-space pointer on a committed, execute-readable page" instead:
+            // that still rejects a jump into unmapped or data-only memory (a coincidental E9 match whose tail happened
+            // to align), while the uniqueness ceiling and the literal-tail floor remain the primary false-positive
+            // defense.
+            if (!DetourModKit::Memory::plausible_userspace_ptr(jmp_destination) ||
+                !Scanner::detail::is_executable_address(jmp_destination))
             {
-                logger.debug("Scanner: prologue fallback rejected for '{}': E9 destination {} not in any module",
-                             candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name, jmp_destination);
+                logger.debug("Scanner: prologue fallback rejected for '{}': E9 destination {} is not executable",
+                             candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name,
+                             Format::format_address(jmp_destination));
                 continue;
             }
 
-            const auto addr = resolve_candidate_match(match_addr, candidate);
+            // The rebuilt pattern compiled with offset 0: replacing the prologue with `E9 ?? ?? ?? ??` dropped the
+            // original `|` anchor, so its scan returned the bare match start. Reconstruct the anchored match the direct
+            // pass would have produced (match start plus the original anchor offset) before resolving, so a
+            // `|`-anchored Direct candidate recovered here lands on the same byte as the unhooked direct scan instead
+            // of short by the anchor offset.
+            const auto anchored_match = match_addr + static_cast<std::uintptr_t>(original->offset);
+            const auto addr = resolve_candidate_match(anchored_match, candidate);
             if (!addr)
             {
                 continue;
