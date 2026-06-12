@@ -2348,16 +2348,36 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
     VirtualFree(freed, 0, MEM_RELEASE);
 
     std::atomic<bool> stop{false};
+    std::atomic<int> seen_good{0};
+    std::atomic<int> seen_fault{0};
     std::vector<std::thread> readers;
     for (int t = 0; t < 3; ++t)
     {
         readers.emplace_back(
             [&, t]()
             {
+                void *const target = (t % 2) ? freed : good;
                 while (!stop.load(std::memory_order_acquire))
-                    Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>((t % 2) ? freed : good), 0);
+                {
+                    const uintptr_t v = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(target), 0);
+                    if (target == good)
+                    {
+                        if (v == kSentinel)
+                            seen_good.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else if (v == 0u)
+                    {
+                        seen_fault.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
             });
     }
+
+    // Wait until both guarded-read paths are actually live (one good-path read, one faulting-path read) before racing
+    // teardown, so the shutdown loop deterministically exercises the in-flight-read drain rather than possibly running
+    // before any guarded read happened.
+    while (seen_good.load(std::memory_order_acquire) == 0 || seen_fault.load(std::memory_order_acquire) == 0)
+        std::this_thread::yield();
 
     for (int round = 0; round < 12; ++round)
     {
