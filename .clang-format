@@ -12,6 +12,13 @@ Standard: Latest
 # and a line whose excess is inside one literal is left alone.
 ColumnLimit: 120
 ReflowComments: Always
+# ReflowComments: Always otherwise re-wraps the deep hang-indented continuation lines of a /** */ Doxygen block and
+# mangles them (collapsing the alignment under the @tag, occasionally emitting a stray "* *"). CommentPragmas marks
+# comment lines that must never be reflowed: matching 3+ leading content spaces (the hang indent under a Doxygen tag)
+# protects every continuation line, which inhibits reflow of the whole block, so hand-wrapped doc-blocks are left intact.
+# Plain // implementation comments carry no such indent and are still reflowed to the column limit. The IWYU default
+# pattern is preserved.
+CommentPragmas: '^ IWYU pragma:|^ {3,}'
 BreakStringLiterals: false
 IndentWidth: 4
 TabWidth: 4

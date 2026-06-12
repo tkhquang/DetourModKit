@@ -78,6 +78,21 @@ namespace DetourModKit
              *         empty when @p range is invalid or the image exposes no readable code pages.
              */
             [[nodiscard]] std::vector<ExecutableWindow> collect_executable_windows(Memory::ModuleRange range);
+
+            /**
+             * @brief True when @p address lies on a committed, execute-readable page.
+             * @details Single-address VirtualQuery gate using the same page-protection set the module and
+             *          whole-process executable scans accept (PAGE_EXECUTE_READ / _READWRITE / _WRITECOPY, MEM_COMMIT,
+             *          neither PAGE_GUARD nor PAGE_NOACCESS). The prologue-recovery fallback validates a decoded E9
+             *          destination with it: a sibling mod's inline-hook trampoline is VirtualAlloc'd outside every
+             *          loaded module, so an in-module requirement would reject the exact recovery this path performs,
+             *          while this test still rejects a jump into unmapped or data-only memory. Centralizing it here
+             *          keeps the Windows page masks private to scanner.cpp.
+             * @param address Absolute address to test.
+             * @return true when the page is committed and execute-readable; false otherwise, including an unmapped
+             *         address (VirtualQuery failure) or a guard / no-access page.
+             */
+            [[nodiscard]] bool is_executable_address(std::uintptr_t address) noexcept;
         } // namespace detail
     } // namespace Scanner
 } // namespace DetourModKit
