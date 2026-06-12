@@ -27,29 +27,23 @@ namespace DetourModKit
             close();
         }
 
-        DWORD creation = CREATE_ALWAYS;
-        if (mode & std::ios_base::app)
-        {
-            creation = OPEN_ALWAYS;
-        }
+        const bool append = (mode & std::ios_base::app) != 0;
 
-        m_handle = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                               nullptr, creation, FILE_ATTRIBUTE_NORMAL, nullptr);
+        // Append mode requests FILE_APPEND_DATA so the OS positions every WriteFile at the current end of file
+        // atomically. This lets multiple writers sharing one file (e.g. several log sinks) append without
+        // interleaving or clobbering each other's bytes. A GENERIC_WRITE handle plus a one-time
+        // SetFilePointer(FILE_END) seek cannot guarantee that: the seek positions the file pointer once at open, so a
+        // second writer's WriteFile lands at a stale offset and overwrites the first writer's data. Truncating
+        // ("out") mode keeps GENERIC_WRITE + CREATE_ALWAYS.
+        const DWORD access = append ? FILE_APPEND_DATA : GENERIC_WRITE;
+        const DWORD creation = append ? OPEN_ALWAYS : CREATE_ALWAYS;
+
+        m_handle = CreateFileW(path.c_str(), access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                               creation, FILE_ATTRIBUTE_NORMAL, nullptr);
 
         if (m_handle == INVALID_HANDLE_VALUE)
         {
             return false;
-        }
-
-        if (mode & std::ios_base::app)
-        {
-            if (SetFilePointer(static_cast<HANDLE>(m_handle), 0, nullptr, FILE_END) == INVALID_SET_FILE_POINTER &&
-                GetLastError() != NO_ERROR)
-            {
-                CloseHandle(static_cast<HANDLE>(m_handle));
-                m_handle = INVALID_HANDLE_VALUE;
-                return false;
-            }
         }
 
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);

@@ -303,6 +303,18 @@ These tests enable the test-only `debug_snapshot_use_count()` accessor via `#def
 
 The decoder header lives under `src/` (not the public include tree), so the test file adds `src/` to its include path and uses `DetourModKit::detail::` directly.
 
+## Input Tests
+
+`tests/test_input.cpp` covers public input-code parsing/formatting plus `InputPoller` / `InputManager` lifecycle and live binding reshapes. The poll-loop hot-path helpers are covered with focused tests because the real loop reads process input state:
+
+| Test | What it proves |
+| ---- | -------------- |
+| `KeyStateCacheTest.ProbesEachDistinctVkOncePerCycle` | The per-cycle VK cache invokes the injected probe once for repeated reads of one VK, while distinct VKs get distinct samples. |
+| `KeyStateCacheTest.ResetReArmsForNextCycle` | `reset()` clears the cycle snapshot so the next poll cycle samples the VK again. |
+| `KeyStateCacheTest.CachesUpStateWithoutReProbing` | A released key is cached as a real sampled state, not confused with "not yet probed". |
+| `KeyStateCacheTest.OutOfRangeVkReadsAsNotPressedWithoutProbing` | Invalid VK codes fail closed and never call the probe. |
+| `InputPollerPollLoopSafety.BindingGrowthPastStartupReserveKeepsPollThreadAlive` | Live binding growth past the startup callback-staging reserve does not stop the poll thread. |
+
 ## Input Interception Tests
 
 `tests/test_input_intercept.cpp` exercises the internal header `src/input_intercept.hpp`, the opt-in active-input layer that backs mouse-wheel capture and gamepad passthrough suppression for `InputPoller`. It uses the same `src/`-on-include-path pattern as the decoder tests. The unit tests target the two pure state machines that carry no Win32 dependency, so each is driven by direct calls with hand-supplied state:
@@ -332,6 +344,7 @@ The window-procedure subclass and the `XInputGetState` inline hook are exercised
 | `InterceptWndProcTest.ConsumeSwallowsOwnedWheelMessages` | With consume off the notch is latched and forwarded to the game's predecessor procedure; with consume on it is still latched but swallowed so the game never sees it. |
 | `InterceptWndProcTest.WmNcDestroySelfHealsAndAllowsResubclass` | Destroying the subclassed window marks the subclass uninstalled via `WM_NCDESTROY`, so a recreated window (the fullscreen-toggle case) can be re-subclassed. |
 | `InterceptWndProcTest.UninstallRestoresPredecessorAtTopOfChain` | When the detour is still the top of the window-procedure chain, `uninstall()` restores the exact saved predecessor. |
+| `InterceptWndProcTest.PollerDropsCallbackStagingCopyFailureAndContinues` | A wheel edge drives the poll-loop `PendingCallback` staging path with a callback whose copy throws; the failed callback batch is dropped, the poll thread stays alive, and a later edge dispatches normally. |
 | `InterceptXInputTest.InstallHooksExportAndTrampolineRoundTrips` | Installing hooks the real `XInputGetState` export, publishes a non-null trampoline, is idempotent, routes a call through the detour into the trampoline, and restores the prologue on `uninstall()`. |
 | `InterceptDisarmTest.PollerDisarmsWheelConsumeAfterClearBindings` | A standalone `InputPoller` with a consume wheel binding arms the swallow flag; `clear_bindings(false)` (the loader-lock-safe hot-reload reset) lets the poll loop disarm it on a later cycle so the game regains its wheel. |
 

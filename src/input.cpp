@@ -14,6 +14,7 @@
 
 #include "platform.hpp"
 #include "input_intercept.hpp"
+#include "input_key_cache.hpp"
 
 #include <windows.h>
 #include <Xinput.h>
@@ -36,6 +37,7 @@ namespace DetourModKit
         /**
          * @brief Checks whether a single InputCode is currently pressed.
          * @param code The input code to check.
+         * @param key_cache Per-cycle keyboard/mouse down-state memoization, probed at most once per distinct VK.
          * @param gamepad_state Cached XInput state for the current poll cycle.
          * @param gamepad_connected Whether the gamepad is connected.
          * @param trigger_threshold Analog trigger deadzone threshold.
@@ -44,14 +46,19 @@ namespace DetourModKit
          *        WheelRight), latched once per cycle by the poll loop so repeated reads within a cycle stay consistent.
          * @return true if the input is currently pressed.
          */
-        bool is_code_pressed(const InputCode &code, const XINPUT_STATE &gamepad_state, bool gamepad_connected,
-                             int trigger_threshold, int stick_threshold, uint8_t wheel_pulse) noexcept
+        bool is_code_pressed(const InputCode &code, detail::KeyStateCache &key_cache, const XINPUT_STATE &gamepad_state,
+                             bool gamepad_connected, int trigger_threshold, int stick_threshold,
+                             uint8_t wheel_pulse) noexcept
         {
             switch (code.source)
             {
             case InputSource::Keyboard:
             case InputSource::Mouse:
-                return code.code != 0 && (GetAsyncKeyState(code.code) & 0x8000) != 0;
+                // Route every keyboard/mouse read through the per-cycle cache so a VK referenced by many bindings (and
+                // by the strict known-modifier rescan) costs one GetAsyncKeyState call per cycle, not one per
+                // reference. The probe reads only the high (down) bit and gives the whole cycle one coherent sample.
+                return code.code != 0 && key_cache.pressed(code.code, [](int vk) noexcept
+                                                           { return (GetAsyncKeyState(vk) & 0x8000) != 0; });
             case InputSource::MouseWheel:
             {
                 // The wheel has no held state; the poll loop latches each notch into wheel_pulse. WheelCode values are
@@ -549,6 +556,16 @@ namespace DetourModKit
         detail::WheelPulseState wheel_pulse{};
         detail::GamepadSuppressState gp_suppress{};
 
+        // Reused across cycles so each tick does not re-zero a 16-byte XINPUT_STATE. Poll-thread-private: only this
+        // loop reads or writes it, and a stale value is never observed because is_code_pressed reads it only when
+        // gamepad_connected (recomputed every cycle) is true, which holds only after a successful poll overwrites it.
+        XINPUT_STATE gamepad_state{};
+
+        // Per-cycle keyboard/mouse down-state cache, reset at the top of every cycle so each distinct VK costs one
+        // GetAsyncKeyState call per cycle instead of one per binding reference (see input_key_cache.hpp). Declared
+        // once so its 256-byte table is allocated for the poll thread's lifetime, not rebuilt each cycle.
+        detail::KeyStateCache key_cache;
+
         struct PendingCallback
         {
             std::string name;
@@ -557,14 +574,11 @@ namespace DetourModKit
             bool hold_value;
         };
         std::vector<PendingCallback> pending;
-        {
-            std::shared_lock lock(m_bindings_rw_mutex);
-            pending.reserve(m_bindings.size());
-        }
 
         while (!stop_token.stop_requested())
         {
             pending.clear();
+            key_cache.reset();
             const bool process_focused = !m_require_focus.load(std::memory_order_relaxed) || is_process_foreground();
 
             // Lazily install the active-input hooks the current bindings need. Each call is idempotent and fails
@@ -603,11 +617,12 @@ namespace DetourModKit
             // and published afterwards.
             uint16_t gamepad_owned = 0;
 
-            // Poll gamepad state once per cycle when connected. When disconnected, throttle reconnection attempts to
-            // avoid the per-cycle overhead of XInputGetState on empty slots. Read through the saved trampoline when the
-            // suppression hook is installed so the poll observes the true, unmasked controller state rather than its
-            // own published mask.
-            XINPUT_STATE gamepad_state{};
+            // Poll gamepad state once per cycle when connected, into the hoisted gamepad_state buffer. When
+            // disconnected, throttle reconnection attempts to avoid the per-cycle overhead of XInputGetState on empty
+            // slots. Read through the saved trampoline when the suppression hook is installed so the poll observes the
+            // true, unmasked controller state rather than its own published mask. A successful poll overwrites the
+            // whole struct, and gamepad_state is read only when gamepad_connected is true, so a stale buffer is never
+            // observed.
             bool gamepad_connected = false;
             if (m_has_gamepad_bindings.load(std::memory_order_relaxed) && process_focused)
             {
@@ -625,9 +640,28 @@ namespace DetourModKit
                 gamepad_connected = gamepad_was_connected;
             }
 
-            // Collect callbacks to fire outside the shared lock so user code can call back into update_binding_combos()
-            // without deadlocking.
+            // Stage this cycle's edge callbacks, then dispatch them after releasing the binding lock so user code can
+            // call back into update_binding_combos() without deadlocking. Growing the staging vector can allocate, and
+            // copying each entry's name/std::function can allocate or run a throwing target copy constructor. The whole
+            // staging pass runs under one catch so a failed callback batch is dropped instead of escaping the jthread
+            // body and calling std::terminate. m_active_states may then reflect a partial pass, but the next cycle
+            // re-evaluates from the live physical input, so at most one cycle of edge callbacks is missed under
+            // sustained failure.
+            try
             {
+                // Re-reserve to the current binding count before taking the evaluation lock. add_binding can grow
+                // m_bindings past the startup capacity while the poller runs, so without this the per-cycle push_back
+                // could reallocate the staging vector while the shared lock is held. Reading the count under a short
+                // reader lock and reserving after releasing it keeps that growth allocation out of the evaluation
+                // critical section; the catch above still covers the residual race where a concurrent add_binding
+                // grows the set again before the evaluation lock is taken.
+                size_t reserve_hint = 0;
+                {
+                    std::shared_lock count_lock(m_bindings_rw_mutex);
+                    reserve_hint = m_bindings.size();
+                }
+                pending.reserve(reserve_hint);
+
                 std::shared_lock lock(m_bindings_rw_mutex);
                 const size_t count = m_bindings.size();
                 const auto &known_mods = m_known_modifiers;
@@ -647,8 +681,8 @@ namespace DetourModKit
                         bool modifiers_held = true;
                         for (const auto &mod : binding.modifiers)
                         {
-                            if (!is_code_pressed(mod, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh,
-                                                 wheel_pulse_mask))
+                            if (!is_code_pressed(mod, key_cache, gamepad_state, gamepad_connected, trigger_thresh,
+                                                 stick_thresh, wheel_pulse_mask))
                             {
                                 modifiers_held = false;
                                 break;
@@ -661,8 +695,8 @@ namespace DetourModKit
                             // NOT in this binding's required set is currently held.
                             for (const auto &km : known_mods)
                             {
-                                if (!is_code_pressed(km, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh,
-                                                     wheel_pulse_mask))
+                                if (!is_code_pressed(km, key_cache, gamepad_state, gamepad_connected, trigger_thresh,
+                                                     stick_thresh, wheel_pulse_mask))
                                 {
                                     continue;
                                 }
@@ -688,8 +722,8 @@ namespace DetourModKit
                             for (const auto &key : binding.keys)
                             {
                                 const bool key_pressed =
-                                    is_code_pressed(key, gamepad_state, gamepad_connected, trigger_thresh, stick_thresh,
-                                                    wheel_pulse_mask);
+                                    is_code_pressed(key, key_cache, gamepad_state, gamepad_connected, trigger_thresh,
+                                                    stick_thresh, wheel_pulse_mask);
 
                                 // Pre-arm the consume bit while the binding's modifiers are held, before the trigger
                                 // button itself is pressed. The suppression mask is published one poll cycle behind the
@@ -749,6 +783,16 @@ namespace DetourModKit
                     }
                     }
                 }
+            }
+            catch (...)
+            {
+                // Staging this cycle's edge callbacks failed. Drop the partial callback list (the shared lock has
+                // already been released by stack unwinding, so there is no deadlock) rather than terminating the poll
+                // thread. The gamepad suppression publish below still runs from whatever was accumulated, and
+                // self-heals next cycle.
+                pending.clear();
+                static_cast<void>(Logger::get_instance().try_log(
+                    LogLevel::Error, "InputPoller: failed staging poll-cycle callbacks; callbacks skipped"));
             }
 
             // Publish the gamepad suppression mask for the XInput detour. The consume-until-release latch keeps a

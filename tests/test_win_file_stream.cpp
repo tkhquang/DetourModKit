@@ -1,7 +1,9 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <windows.h>
 
 #include "DetourModKit/win_file_stream.hpp"
@@ -88,6 +90,34 @@ TEST_F(WinFileStreamBufTest, Open_AppendMode_CreatesFile)
 
     const auto content = read_file(m_test_path);
     EXPECT_EQ(content, "firstsecond");
+}
+
+TEST_F(WinFileStreamBufTest, AppendMode_ConcurrentAppendersPreserveEveryByte)
+{
+    // FILE_APPEND_DATA makes each WriteFile land at the current end of file atomically, so two handles appending to
+    // one file preserve every byte regardless of interleave order. A GENERIC_WRITE handle plus a one-time
+    // SetFilePointer(FILE_END) seek would let the second writer's write land at the stale opening offset and clobber
+    // the first writer's region.
+    constexpr int per_writer = 4000;
+
+    auto append_run = [&](char fill)
+    {
+        WinFileStreamBuf buf;
+        ASSERT_TRUE(buf.open(m_test_path.string(), std::ios_base::out | std::ios_base::app));
+        const std::string data(per_writer, fill);
+        buf.sputn(data.c_str(), static_cast<std::streamsize>(data.size()));
+        buf.close();
+    };
+
+    std::thread t1([&] { append_run('A'); });
+    std::thread t2([&] { append_run('B'); });
+    t1.join();
+    t2.join();
+
+    const auto content = read_file(m_test_path);
+    EXPECT_EQ(content.size(), static_cast<size_t>(per_writer * 2));
+    EXPECT_EQ(std::count(content.begin(), content.end(), 'A'), per_writer);
+    EXPECT_EQ(std::count(content.begin(), content.end(), 'B'), per_writer);
 }
 
 TEST_F(WinFileStreamBufTest, Open_AppendMode_NewFile)
