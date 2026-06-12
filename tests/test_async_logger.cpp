@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -1774,4 +1775,71 @@ TEST(LogMessageMoveTest, MovedFromMessageReturnsEmpty)
     LogMessage dst(std::move(src));
 
     EXPECT_TRUE(src.message().empty());
+}
+
+// --- Writer wakeup latency ---
+
+TEST_F(AsyncLoggerTest, EnqueueWakesParkedWriterPromptly)
+{
+    // With a long flush interval the writer drains the empty queue and parks on m_flush_cv. A single
+    // enqueue must wake it well before the interval elapses; if the wakeup were dropped, draining would
+    // stall until the 2 s timeout and flush_with_timeout(500 ms) below would fail.
+    AsyncLoggerConfig config;
+    config.batch_size = 8;
+    config.queue_capacity = 64;
+    config.flush_interval = std::chrono::milliseconds{2000};
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    // Give the writer time to drain the empty queue and park on the long interval.
+    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+
+    const auto start_time = std::chrono::steady_clock::now();
+    ASSERT_TRUE(logger->enqueue(LogLevel::Info, "wake_parked_writer"));
+    ASSERT_TRUE(logger->flush_with_timeout(std::chrono::milliseconds{500}));
+    const auto elapsed = std::chrono::steady_clock::now() - start_time;
+
+    EXPECT_LT(elapsed, config.flush_interval) << "parked writer was not woken before the flush interval elapsed";
+
+    logger->shutdown();
+}
+
+TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
+{
+    // Regression for the producer->writer lost wakeup. With batch_size 1 and a long flush interval the
+    // writer drains a single message and re-parks after almost every enqueue, so each iteration
+    // exercises the window where a push can race the writer's pre-park predicate check. Before the
+    // pending-count/writer-waiting handshake, a push landing in that window slept until the flush-interval
+    // timeout and the per-iteration flush would time out. With the handshake every push is either seen
+    // by the writer's predicate or wakes the parked writer, so each message drains far below the
+    // interval.
+    AsyncLoggerConfig config;
+    config.batch_size = 1;
+    config.queue_capacity = 1024;
+    config.flush_interval = std::chrono::milliseconds{400};
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+    auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+
+    constexpr int ITERATIONS = 128;
+    const auto flush_budget = std::chrono::milliseconds{300}; // strictly below flush_interval
+    auto worst = std::chrono::steady_clock::duration::zero();
+
+    for (int i = 0; i < ITERATIONS; ++i)
+    {
+        const auto start_time = std::chrono::steady_clock::now();
+        ASSERT_TRUE(logger->enqueue(LogLevel::Info, "wake_probe"));
+        ASSERT_TRUE(logger->flush_with_timeout(flush_budget))
+            << "writer did not drain within " << flush_budget.count() << " ms on iteration " << i
+            << " -- a wakeup was lost to the flush-interval timeout";
+        worst = std::max(worst, std::chrono::steady_clock::now() - start_time);
+    }
+
+    EXPECT_LT(worst, config.flush_interval)
+        << "worst-case drain latency reached the flush interval, indicating a lost wakeup";
+
+    logger->shutdown();
 }

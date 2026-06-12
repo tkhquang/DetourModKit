@@ -13,6 +13,8 @@
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/diagnostics.hpp"
 
+#include "test_alloc_probe.hpp"
+
 using namespace DetourModKit;
 
 // The loader-lock fallback in Logger::shutdown_internal and disable_async_mode() retains a
@@ -1612,4 +1614,48 @@ TEST(LoggerConfigureOverload, TwoArgConfigureUsesDefaultTimestamp)
     Logger::get_instance().flush();
     EXPECT_TRUE(std::filesystem::exists(path));
     std::filesystem::remove(path);
+}
+
+TEST_F(LoggerTest, FormattedAsyncLog_FitsInlineBufferWithoutHeapAllocation)
+{
+    // The formatted log() fast path renders into a stack buffer the size of the async inline message
+    // buffer, so a line that fits never materializes a heap std::format temporary. The allocation probe
+    // is thread-local, so it counts only this (producer) thread's allocations and the async writer
+    // thread's are invisible to it.
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Trace);
+
+    AsyncLoggerConfig config;
+    config.flush_interval = std::chrono::milliseconds{2000}; // keep the writer mostly parked
+    logger.enable_async_mode(config);
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+
+    // Warm up so only steady-state per-message cost is measured: the warmup lines exercise the format
+    // facets and the LogMessage inline copy, and flush() drives a producer-thread wait on the flush
+    // condition variable so any one-time lazy initialization of the flush mutex/condition variable
+    // happens before the measured window.
+    for (int i = 0; i < 4; ++i)
+    {
+        logger.info("alloc warmup value={} tag={}", i, "abc");
+    }
+    logger.flush();
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+
+    // Measured: a short formatted line whose rendered length is far below LOG_INLINE_MESSAGE_SIZE.
+    const long long inline_before = dmk_test::thread_new_calls();
+    logger.info("alloc probe value={} count={}", 1234, 5678);
+    const long long inline_allocs = dmk_test::thread_new_calls() - inline_before;
+    EXPECT_EQ(inline_allocs, 0)
+        << "formatting a line that fits the inline buffer must not heap-allocate on the producer thread";
+
+    // Control: a line longer than the inline buffer falls back to a heap std::format string and the
+    // StringPool overflow path, so it must allocate. This proves the probe observes allocations and that
+    // the inline-fit path above genuinely avoided them.
+    const std::string oversized(LOG_INLINE_MESSAGE_SIZE + 64, 'X');
+    const long long control_before = dmk_test::thread_new_calls();
+    logger.info("{}", oversized);
+    const long long control_allocs = dmk_test::thread_new_calls() - control_before;
+    EXPECT_GT(control_allocs, 0) << "a line exceeding the inline buffer is expected to allocate, validating the probe";
+
+    logger.disable_async_mode();
 }

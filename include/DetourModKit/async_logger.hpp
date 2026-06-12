@@ -113,7 +113,7 @@ namespace DetourModKit
         std::chrono::system_clock::time_point timestamp;
         std::thread::id thread_id;
 
-        static constexpr size_t MAX_INLINE_SIZE = 512;
+        static constexpr size_t MAX_INLINE_SIZE = LOG_INLINE_MESSAGE_SIZE;
         static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
         std::array<char, MAX_INLINE_SIZE> buffer;
         size_t length{0};
@@ -371,6 +371,20 @@ namespace DetourModKit
 
         bool handle_overflow(LogMessage &&message) noexcept;
 
+        /**
+         * @brief Wakes the writer thread if it is parked on m_flush_cv after a successful push.
+         * @details A successful producer has already made m_pending_messages non-zero before publishing
+         *          a new queue slot, or preserved it while replacing an old slot. The writer publishes
+         *          m_writer_waiting before checking that same pending count and blocking. Those seq_cst
+         *          operations form a store/load handshake: if the writer misses the pending state, the
+         *          producer observes m_writer_waiting and notifies under m_flush_mutex; if the producer
+         *          observes false, the writer's pending-count predicate sees the work and does not block.
+         *          notify_all (not notify_one) is used so a flusher waiting on the same condition variable
+         *          cannot absorb the notification and leave the writer asleep. When the writer is
+         *          draining, this is a seq_cst flag load with no mutex or syscall.
+         */
+        void notify_writer() noexcept;
+
         DynamicMPMCQueue m_queue;
         AsyncLoggerConfig m_config;
 
@@ -383,6 +397,13 @@ namespace DetourModKit
 
         std::mutex m_flush_mutex;
         std::condition_variable m_flush_cv;
+
+        // Set true by the writer immediately before it parks on m_flush_cv and cleared when it wakes.
+        // Producers read it outside m_flush_mutex after a successful queue push; the seq_cst order shared
+        // with m_pending_messages makes a racing push either visible to the writer's wait predicate or
+        // visible here as a parked-writer wake.
+        std::atomic<bool> m_writer_waiting{false};
+
         std::atomic<size_t> m_pending_messages{0};
         std::atomic<size_t> m_dropped_messages{0};
     };
