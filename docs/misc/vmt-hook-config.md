@@ -31,7 +31,7 @@ struct VmtHookConfig
 };
 ```
 
-Both fields default to `false` to preserve the historical always-succeed semantics of the single-argument overloads. Opt in to the safety net on mods that exclusively target well-formed C++ vtables.
+Both fields default to `false` to preserve the historical permissive semantics of the single-argument overloads: no pre-flight checks, while pre-existing failures (null object, duplicate name, shutdown in progress, SafetyHook errors) still apply. Opt in to the safety net on mods that exclusively target well-formed C++ vtables.
 
 ## 3. `fail_if_already_hooked` semantics
 
@@ -81,7 +81,7 @@ auto r = HookManager::get_instance().create_vmt_hook("MyVmt", object);
 auto r = HookManager::get_instance().create_vmt_hook("MyVmt", object, VmtHookConfig{});
 ```
 
-Existing call sites that build a default `VmtHookConfig` or call the single-arg overloads compile and behave exactly as before. The defaults (`fail_if_already_hooked = false`, `fail_on_non_function_pointer = false`) match the historical always-succeed behavior.
+Existing call sites that build a default `VmtHookConfig` or call the single-arg overloads compile and behave exactly as before. The defaults (`fail_if_already_hooked = false`, `fail_on_non_function_pointer = false`) match the historical permissive behavior.
 
 ## 6. Interaction with `apply_vmt_hook`
 

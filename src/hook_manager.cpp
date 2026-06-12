@@ -200,7 +200,7 @@ HookManager::~HookManager() noexcept
     }
 
     std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-    m_vmt_hooks.clear();
+    clear_vmt_hooks_locked();
     m_hooks.clear();
 }
 
@@ -228,7 +228,7 @@ void HookManager::shutdown()
     }
     {
         std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-        m_vmt_hooks.clear();
+        clear_vmt_hooks_locked();
         m_hooks.clear();
 
         // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
@@ -662,6 +662,17 @@ const std::string *HookManager::find_vmt_owner_of_vptr_locked(std::uintptr_t vpt
     return nullptr;
 }
 
+void HookManager::clear_vmt_hooks_locked() noexcept
+{
+    // Newest-first so layered clones unwind with every conditional vptr restore targeting live memory.
+    for (auto it = m_vmt_creation_order.rbegin(); it != m_vmt_creation_order.rend(); ++it)
+    {
+        m_vmt_hooks.erase(*it);
+    }
+    m_vmt_hooks.clear();
+    m_vmt_creation_order.clear();
+}
+
 bool HookManager::looks_like_function_vmt_slot(std::uintptr_t slot_value) noexcept
 {
     // A zero vtable slot is the RTTI/garbage sentinel SafetyHook itself rejects in VmtHook::create when probing for the
@@ -839,7 +850,7 @@ void HookManager::remove_all_hooks()
         std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
 
         num_vmt = m_vmt_hooks.size();
-        m_vmt_hooks.clear();
+        clear_vmt_hooks_locked();
 
         num_hooks = m_hooks.size();
         m_hooks.clear();
@@ -1278,6 +1289,10 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_v
                                         DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                             LogLevel::Info});
 
+            // Record creation order before emplace: if emplace throws, the stale order entry is a harmless no-op
+            // erase at teardown, whereas a registered hook missing from the order vector would dodge the ordered
+            // teardown.
+            m_vmt_creation_order.push_back(name_str);
             m_vmt_hooks.emplace(std::piecewise_construct, std::forward_as_tuple(name_str),
                                 std::forward_as_tuple(name_str, std::move(vmt_result.value()), new_vptr_base));
 
@@ -1329,6 +1344,7 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
         {
             std::string removed_name = it->second.get_name();
             m_vmt_hooks.erase(it);
+            std::erase(m_vmt_creation_order, removed_name);
             return {std::expected<void, HookError>{},
                     {{std::format("HookManager: VMT hook '{}' has been removed.", removed_name), LogLevel::Debug}}};
         }
@@ -1590,7 +1606,7 @@ void HookManager::remove_all_vmt_hooks()
         if (!m_vmt_hooks.empty())
         {
             size_t num_hooks = m_vmt_hooks.size();
-            m_vmt_hooks.clear();
+            clear_vmt_hooks_locked();
             logs.push_back(
                 {std::format("HookManager: All {} VMT hooks have been removed.", num_hooks), LogLevel::Debug});
         }

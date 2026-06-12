@@ -1669,7 +1669,7 @@ TEST_F(HookManagerTest, VmtHook_RemoveAllVmt)
 
 // VmtHookConfig::fail_if_already_hooked is a soft guard: when set, a second create on the same vtable chain
 // (i.e. a vptr already pointing at a clone owned by this HookManager) returns HookError::HookAlreadyExists rather
-// than silently layering a second clone on top of the first. The default false preserves the legacy always-succeed
+// than silently layering a second clone on top of the first. The default false preserves the legacy permissive
 // path, so a regular create_vmt_hook(name, object) call without a config still layers.
 TEST_F(HookManagerTest, VmtHookConfig_DefaultMatchesLegacyBehavior)
 {
@@ -1690,6 +1690,25 @@ TEST_F(HookManagerTest, VmtHookConfig_DefaultMatchesLegacyBehavior)
     // into the object's vptr.
     EXPECT_TRUE(m_hook_manager->remove_vmt_hook("CfgDefaultB").has_value());
     EXPECT_TRUE(m_hook_manager->remove_vmt_hook("CfgDefaultA").has_value());
+}
+
+// Bulk teardown destroys VMT hooks in reverse creation order. With layered clones on one object, the newer hook
+// records the older hook's clone as its "original" vtable; destroying the older hook first frees that clone and
+// lets the newer hook restore the object's vptr to freed memory. Newest-first destruction unwinds the layers and
+// restores the true original vptr.
+TEST_F(HookManagerTest, VmtHook_RemoveAllUnwindsLayeredClonesInReverseCreationOrder)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    const auto original_vptr = *reinterpret_cast<std::uintptr_t *>(target.get());
+
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("LayerInner", target.get()).has_value());
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("LayerOuter", target.get()).has_value());
+    EXPECT_NE(*reinterpret_cast<std::uintptr_t *>(target.get()), original_vptr);
+
+    m_hook_manager->remove_all_vmt_hooks();
+
+    EXPECT_EQ(*reinterpret_cast<std::uintptr_t *>(target.get()), original_vptr);
+    EXPECT_EQ(target->compute(1, 2), 3);
 }
 
 TEST_F(HookManagerTest, VmtHookConfig_FailIfAlreadyHookedRefusesDoubleCreate)

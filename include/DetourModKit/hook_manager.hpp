@@ -24,6 +24,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace DetourModKit
 {
@@ -111,8 +112,9 @@ namespace DetourModKit
      * @brief Configuration options used during VMT hook creation and apply, symmetric with @ref HookConfig.
      * @details Mirrors @ref HookConfig for VMT hooks so the inline and VMT code paths expose the same operational
      *          surface. The defaults are chosen to preserve the historical single-argument API's behavior exactly
-     *          (always succeed, no pre-flight checks), so existing call sites that build a default config compile and
-     *          run unchanged.
+     *          (no pre-flight checks; pre-existing failures such as a null object, a duplicate name, shutdown in
+     *          progress, or a SafetyHook error still apply), so existing call sites that build a default config
+     *          compile and run unchanged.
      */
     struct VmtHookConfig
     {
@@ -124,7 +126,7 @@ namespace DetourModKit
          *          second mod's "original" and a third call layered on top of the second sees a third level of
          *          redirection. This is the silent "double hook" failure mode the inline hook's
          *          @ref HookConfig::fail_if_already_hooked guards against; VMT cloning is the same shape of risk and
-         *          gets the same knob. Default false preserves the legacy always-succeed behavior.
+         *          gets the same knob. Default false preserves the legacy permissive behavior.
          */
         bool fail_if_already_hooked = false;
 
@@ -139,7 +141,7 @@ namespace DetourModKit
          *          this-adjust instruction, so they pass. The check is intentionally conservative: real functions
          *          (any other first byte, or a tail-call `mov reg,reg; jmp <out-of-module>`) pass. Known false
          *          positive: consumer binaries built with /INCREMENTAL route every function through an ILT jump
-         *          stub, which this check rejects. The default is false to preserve the historical always-clone
+         *          stub, which this check rejects. The default is false to preserve the historical no-pre-flight
          *          behavior; opt in for the safety net on mods that exclusively target well-formed C++ vtables.
          */
         bool fail_on_non_function_pointer = false;
@@ -705,6 +707,11 @@ namespace DetourModKit
 
         /**
          * @brief Removes an entire VMT hook, restoring the original vtable on all applied objects.
+         * @details Bulk teardown (remove_all_vmt_hooks, remove_all_hooks, shutdown, destructor) destroys VMT hooks
+         *          in reverse creation order so clones layered on the same object unwind safely. Explicit removal
+         *          does not reorder for the caller: removing an inner layer while a clone created later on top of it
+         *          is still installed frees the clone that the newer hook recorded as its "original", so remove
+         *          layered hooks newest-first.
          * @param vmt_name The name of the VMT hook to remove.
          * @return Success if removed, or HookError::VmtHookNotFound.
          */
@@ -729,7 +736,8 @@ namespace DetourModKit
         /**
          * @brief Configurable form of @ref apply_vmt_hook, symmetric with @ref create_vmt_hook.
          * @details The two-argument overload above is a thin delegating wrapper that uses a default-constructed
-         *          @ref VmtHookConfig, preserving the historical always-succeed apply semantics.
+         *          @ref VmtHookConfig, preserving the historical permissive apply semantics (apply still returns
+         *          false on shutdown, a null object, an unknown name, or an apply exception).
          * @param vmt_name The name of the VMT hook whose cloned vtable should be installed.
          * @param object The object to apply the cloned vtable to.
          * @param cfg Apply policy. @p cfg.fail_if_already_hooked lets a mod refuse to install its vtable on an
@@ -1186,6 +1194,14 @@ namespace DetourModKit
         mutable detail::SrwSharedMutex m_hooks_mutex;
         detail::HookMap m_hooks;
         detail::VmtHookMap m_vmt_hooks;
+
+        /**
+         * @brief VMT hook names in creation order, maintained under m_hooks_mutex alongside m_vmt_hooks.
+         * @details Bulk teardown walks this vector in reverse via clear_vmt_hooks_locked() so clones layered on the
+         *          same object are destroyed newest-first instead of in unordered_map bucket order.
+         */
+        std::vector<std::string> m_vmt_creation_order;
+
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
@@ -1264,6 +1280,17 @@ namespace DetourModKit
         {
             return m_vmt_hooks.find(name) != m_vmt_hooks.end();
         }
+
+        /**
+         * @brief Destroys every VMT hook entry in reverse creation order and empties the registry.
+         * @details When two hooks layer on the same object, the newer hook records the older hook's clone as its
+         *          "original" vtable. SafetyHook::VmtHook::destroy frees a hook's clone allocation unconditionally
+         *          but restores an object's vptr only when it still points at that hook's own clone, so destroying
+         *          the older hook first would leave the newer hook to restore the object's vptr to freed memory.
+         *          Newest-first destruction unwinds the layers so every restore writes a vptr that is still alive.
+         * @note Must be called with m_hooks_mutex held exclusively.
+         */
+        void clear_vmt_hooks_locked() noexcept;
 
         /**
          * @brief Returns the name of the VMT hook whose cloned vptr matches @p vptr, or nullptr if none.
