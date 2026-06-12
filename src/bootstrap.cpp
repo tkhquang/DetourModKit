@@ -232,6 +232,14 @@ namespace DetourModKit::Bootstrap
             return FALSE;
         }
 
+        // Re-arm the detach gate now that a fresh attach has fully succeeded, so the matching on_dll_detach runs its
+        // teardown instead of no-opping. Without this reset s_detach_called stays true after the first detach and a
+        // second attach/detach cycle would leak the worker thread, shutdown event, and instance mutex (the header
+        // contract promises a subsequent attach starts from a clean slate). Reset only on the success path: early
+        // failures above never set the gate, so they must not clear it either. Release pairs with the acquire in
+        // on_dll_detach's compare_exchange. Both run serialized under the loader lock.
+        s_detach_called.store(false, std::memory_order_release);
+
         return TRUE;
     }
 

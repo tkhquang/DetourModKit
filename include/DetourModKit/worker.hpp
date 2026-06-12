@@ -50,7 +50,9 @@ namespace DetourModKit
         void request_stop() noexcept;
 
         /**
-         * @brief Returns true while the worker thread is still joinable.
+         * @brief Returns true once the worker thread has started and before it has been shut down.
+         * @details Reads liveness from atomics, never the std::jthread handle, so it is race-free against a concurrent
+         *          shutdown() that joins or detaches the thread.
          */
         [[nodiscard]] bool is_running() const noexcept;
 
@@ -70,6 +72,12 @@ namespace DetourModKit
     private:
         std::string m_name;
         std::jthread m_thread;
+        // Stable copy of the jthread stop source. request_stop() signals this shared stop state instead of touching
+        // m_thread while shutdown() may be joining or detaching the handle.
+        std::stop_source m_stop_source;
+        // Liveness snapshot read by is_running()/request_stop(). m_started is set once m_thread and m_stop_source are
+        // both initialized; m_joined is set when shutdown begins (or in the empty-body early return).
+        std::atomic<bool> m_started{false};
         std::atomic<bool> m_joined{false};
     };
 } // namespace DetourModKit

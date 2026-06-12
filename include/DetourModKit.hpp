@@ -83,9 +83,9 @@ using DMKProfileSample = DetourModKit::ProfileSample;
 /**
  * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
  * @details This function should be called before process exit or DLL unload to ensure proper cleanup without
- *          use-after-free errors. It shuts down singletons in reverse dependency order: InputManager, HookManager,
- *          Memory cache, Config, then Logger last. After calling this function, the singletons are in a safe state for
- *          destruction.
+ *          use-after-free errors. It shuts down singletons in reverse dependency order: the Config auto-reload watcher
+ *          first, then InputManager, HookManager, Memory cache, the Config registry, then Logger last. After calling
+ *          this function, the singletons are in a safe state for destruction.
  *
  * @note This function is idempotent - calling it multiple times is safe.
  * @note Each subsystem detects if it is running under the Windows loader lock (e.g. from DllMain/DLL_PROCESS_DETACH or
@@ -98,19 +98,23 @@ using DMKProfileSample = DetourModKit::ProfileSample;
 inline void DMK_Shutdown()
 {
     // Shutdown in reverse dependency order:
-    // 1. InputManager first (polling thread may invoke callbacks that log)
+    // 1. Config auto-reload watcher first: its background thread can fire the user on_reload callback at any moment, so
+    //    it must stop before any consumer state that callback may touch is torn down. Idempotent and noexcept.
+    DetourModKit::Config::disable_auto_reload();
+
+    // 2. InputManager (polling thread may invoke callbacks that log)
     DetourModKit::InputManager::get_instance().shutdown();
 
-    // 2. HookManager (may have been logging via Logger)
+    // 3. HookManager (may have been logging via Logger)
     DetourModKit::HookManager::get_instance().shutdown();
 
-    // 3. Memory cache (background cleanup thread must stop before Logger shuts down)
+    // 4. Memory cache (background cleanup thread must stop before Logger shuts down)
     DetourModKit::Memory::shutdown_cache();
 
-    // 4. Clear registered config items (static vector cleanup)
+    // 5. Clear registered config items (static vector cleanup)
     DetourModKit::Config::clear_registered_items();
 
-    // 5. Logger last (no more logging after this)
+    // 6. Logger last (no more logging after this)
     DetourModKit::Logger::get_instance().shutdown();
 }
 

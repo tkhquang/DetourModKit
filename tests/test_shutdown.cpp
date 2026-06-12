@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <chrono>
+#include <fstream>
 #include <string>
 #include <filesystem>
 #include <process.h>
@@ -57,6 +59,40 @@ TEST_F(DMKShutdownTest, HotReloadScenario)
     EXPECT_EQ(call_count_a, 0);
     EXPECT_EQ(call_count_b, 1);
 
+    if (std::filesystem::exists(ini_path))
+    {
+        std::filesystem::remove(ini_path);
+    }
+}
+
+TEST_F(DMKShutdownTest, DisablesAutoReloadWatcher)
+{
+    // DMK_Shutdown() must stop the Config auto-reload watcher first, before any consumer state a watcher on_reload
+    // callback might touch is torn down. Prove it deterministically by re-enabling after shutdown: a watcher that
+    // survived would report AlreadyRunning, while a fresh Started proves the prior watcher was stopped.
+    const auto ini_path =
+        std::filesystem::temp_directory_path() / ("test_shutdown_autoreload_" + std::to_string(_getpid()) + ".ini");
+    {
+        std::ofstream ofs(ini_path);
+        ofs << "[Section]\nKey=1\n";
+    }
+
+    Config::register_int("Section", "Key", "autoreload_watcher", [](int) {}, 1);
+    ASSERT_NO_THROW(Config::load(ini_path.string()));
+
+    ASSERT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started);
+    ASSERT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::AlreadyRunning);
+
+    DMK_Shutdown();
+
+    // Re-establish a load path (shutdown cleared the registry) and re-enable. A fresh Started proves DMK_Shutdown
+    // disabled the watcher; AlreadyRunning would mean the watcher leaked past shutdown.
+    Config::register_int("Section", "Key", "autoreload_watcher_2", [](int) {}, 1);
+    ASSERT_NO_THROW(Config::load(ini_path.string()));
+    EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started)
+        << "DMK_Shutdown() must stop the auto-reload watcher; a surviving watcher would report AlreadyRunning";
+
+    Config::disable_auto_reload();
     if (std::filesystem::exists(ini_path))
     {
         std::filesystem::remove(ini_path);

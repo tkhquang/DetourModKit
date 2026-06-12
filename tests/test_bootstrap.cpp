@@ -339,16 +339,71 @@ TEST_F(BootstrapIntegrationTest, HappyPathAttachInitShutdown)
     EXPECT_EQ(m_sig.shutdown_calls.load(), 1);
     EXPECT_LT(elapsed, 2s);
 
+    // Leave m_attached = true so the fixture TearDown runs on_dll_detach(FALSE) and clears the static handles, leaving
+    // a clean slate for the next test instead of leaking them for a later drain.
+}
+
+TEST_F(BootstrapIntegrationTest, AttachDetachCyclesAreReentrant)
+{
+    // A successful attach re-arms the detach gate, so attach/detach cycles repeat and each detach runs its teardown
+    // instead of no-opping. Drive two full cycles and assert the second detach actually fired: init and shutdown each
+    // ran once per cycle and the module handle is cleared after every detach (before the gate reset, the second detach
+    // CAS-failed and left the handle set).
+    const std::string exe_name = current_exe_basename();
+    ASSERT_FALSE(exe_name.empty());
+
+    Bootstrap::ModInfo info{};
+    info.prefix = "BS_TEST";
+    info.log_file = "bs_test_reentrant.log";
+    info.game_process_name = exe_name;
+    info.instance_mutex_prefix = "BS_Test_Mutex_Reentrant_";
+
+    auto init_fn = [this]() noexcept
+    {
+        m_sig.init_calls.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard lock(m_sig.m);
+            m_sig.init_done.store(true, std::memory_order_release);
+        }
+        m_sig.cv.notify_all();
+        return true;
+    };
+    auto shutdown_fn = [this]() noexcept
+    {
+        m_sig.shutdown_calls.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard lock(m_sig.m);
+            m_sig.shutdown_done.store(true, std::memory_order_release);
+        }
+        m_sig.cv.notify_all();
+    };
+
+    for (int cycle = 1; cycle <= 2; ++cycle)
+    {
+        m_sig.init_done.store(false, std::memory_order_release);
+        m_sig.shutdown_done.store(false, std::memory_order_release);
+
+        const BOOL attached = Bootstrap::on_dll_attach(GetModuleHandleW(nullptr), info, init_fn, shutdown_fn);
+        ASSERT_EQ(attached, TRUE) << "cycle " << cycle << " attach must succeed";
+        EXPECT_NE(Bootstrap::module_handle(), nullptr);
+
+        ASSERT_TRUE(m_sig.wait_for_init(kTestTimeout)) << "cycle " << cycle << " init_fn did not complete";
+        EXPECT_EQ(m_sig.init_calls.load(), cycle);
+
+        Bootstrap::request_shutdown();
+        ASSERT_TRUE(m_sig.wait_for_shutdown(kTestTimeout)) << "cycle " << cycle << " shutdown_fn did not complete";
+        EXPECT_EQ(m_sig.shutdown_calls.load(), cycle);
+
+        Bootstrap::on_dll_detach(FALSE);
+        EXPECT_EQ(Bootstrap::module_handle(), nullptr) << "cycle " << cycle << " detach must clear the module handle";
+    }
+
+    // The test drove its own attach/detach pairs, so the fixture TearDown must not detach again.
     m_attached = false;
 }
 
 TEST_F(BootstrapIntegrationTest, InitAndShutdownExceptionsAreCaught)
 {
-    // Drain any globals left set by a prior successful attach (HappyPath
-    // leaves s_shutdown_event / s_worker_thread non-null for its design);
-    // this is the first on_dll_detach call in the process and will win the CAS and clear the static handles.
-    Bootstrap::on_dll_detach(FALSE);
-
     const std::string exe_name = current_exe_basename();
     ASSERT_FALSE(exe_name.empty());
 

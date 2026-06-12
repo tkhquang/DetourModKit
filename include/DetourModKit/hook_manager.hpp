@@ -86,6 +86,7 @@ namespace DetourModKit
         MethodAlreadyHooked,
         MethodNotFound,
         TargetAlreadyHookedInProcess,
+        ReentrantCallRejected,
         UnknownError
     };
 
@@ -282,6 +283,8 @@ namespace DetourModKit
                 return "VMT method hook not found";
             case HookError::TargetAlreadyHookedInProcess:
                 return "Target address is already hooked in this process";
+            case HookError::ReentrantCallRejected:
+                return "Mutator called reentrantly from within a with_* callback";
             case HookError::UnknownError:
                 return "Unknown error";
             default:
@@ -630,6 +633,13 @@ namespace DetourModKit
                 m_logger.error("HookManager: Shutdown in progress. Cannot hook VMT method on '{}'.", vmt_name);
                 return std::unexpected(HookError::ShutdownInProgress);
             }
+            if (get_reentrancy_guard() > 0)
+            {
+                m_logger.error("HookManager: Reentrant hook_vmt_method('{}'/{}) from within a with_*/try_with_* "
+                               "callback rejected; defer hook mutation until the callback returns.",
+                               vmt_name, method_index);
+                return std::unexpected(HookError::ReentrantCallRejected);
+            }
 
             auto [result,
                   deferred_logs] = [&]() -> std::pair<std::expected<size_t, HookError>, std::vector<DeferredLogEntry>>
@@ -771,6 +781,8 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a VmHook (method hook) within a named VMT hook.
          * @details The callback is invoked while the hook registry is held under a reader lock.
+         * @warning Do not call HookManager mutators or teardown entry points from the callback. Queue mutations and
+         *          apply them after the callback returns.
          * @tparam F Callable type accepting (safetyhook::VmHook&) and returning a value.
          * @param vmt_name The name of the VMT hook.
          * @param method_index The vtable index of the method hook.
@@ -807,6 +819,8 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a VmHook for a void-returning callback.
          * @details Same locking and reentrancy semantics as the value-returning overload.
+         * @warning Do not call HookManager mutators or teardown entry points from the callback. Queue mutations and
+         *          apply them after the callback returns.
          * @param vmt_name The name of the VMT hook.
          * @param method_index The vtable index of the method hook.
          * @param fn The void-returning callback to invoke with the VmHook reference.
@@ -956,11 +970,10 @@ namespace DetourModKit
         /**
          * @brief Safely accesses an InlineHook by its ID while holding the internal lock.
          * @details The callback receives an InlineHook reference while the hook registry is held under a reader lock.
-         * @warning Do not call HookManager mutators from the callback. The callback runs while m_hooks_mutex is held
-         *          shared: remove_hook and create_*_hook acquire that lock exclusively and self-deadlock, while
-         *          enable_hook/disable_hook re-acquire it shared, which is undefined behavior on a non-recursive lock
-         *          and deadlocks when a writer is queued between the two acquisitions. Queue mutations and apply them
-         *          after the callback returns.
+         * @warning Do not call HookManager mutators or teardown entry points from the callback. The callback runs while
+         *          m_hooks_mutex is held shared: create/remove/teardown paths acquire it exclusively, while toggle
+         *          paths re-acquire it shared, which is undefined behavior on a non-recursive lock and can deadlock.
+         *          Queue mutations and apply them after the callback returns.
          * @tparam F Callable type accepting (InlineHook&) and returning a value.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
@@ -975,12 +988,10 @@ namespace DetourModKit
         {
             if (get_reentrancy_guard() > 0)
             {
-                m_logger.error(
-                    "HookManager: Reentrant callback detected in with_inline_hook('{}')! "
-                    "Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock "
-                    "(remove_hook, enable_hook, disable_hook, create_*_hook). "
-                    "Perform mutations outside the callback or use an asynchronous operation.",
-                    hook_id);
+                m_logger.error("HookManager: Reentrant callback detected in with_inline_hook('{}')! "
+                               "Callback holding m_hooks_mutex must not call HookManager mutators or teardown methods. "
+                               "Perform mutations outside the callback or use an asynchronous operation.",
+                               hook_id);
                 return std::nullopt;
             }
             std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
@@ -1006,12 +1017,10 @@ namespace DetourModKit
         {
             if (get_reentrancy_guard() > 0)
             {
-                m_logger.error(
-                    "HookManager: Reentrant callback detected in with_inline_hook('{}')! "
-                    "Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock "
-                    "(remove_hook, enable_hook, disable_hook, create_*_hook). "
-                    "Perform mutations outside the callback or use an asynchronous operation.",
-                    hook_id);
+                m_logger.error("HookManager: Reentrant callback detected in with_inline_hook('{}')! "
+                               "Callback holding m_hooks_mutex must not call HookManager mutators or teardown methods. "
+                               "Perform mutations outside the callback or use an asynchronous operation.",
+                               hook_id);
                 return false;
             }
             std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
@@ -1029,10 +1038,10 @@ namespace DetourModKit
          * @brief Try-safe access to an InlineHook by its ID using a non-blocking lock.
          * @details Provides a non-blocking alternative to with_inline_hook(). The callback is invoked only if the lock
          *          is immediately acquired via std::try_to_lock. Note: try_to_lock only avoids blocking on initial
-         *          acquisition - it does NOT make callbacks safe to re-enter HookManager methods that also acquire the
-         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback needs to call those
-         *          methods, it must release the lock first or perform those calls asynchronously to avoid deadlock. See
-         *          with_inline_hook for the blocking analogue.
+         *          acquisition - it does NOT make callbacks safe to re-enter HookManager mutators or teardown methods
+         *          that also acquire the same non-recursive mutex. If a callback needs to call those methods, it must
+         *          release the lock first or perform those calls asynchronously to avoid deadlock. See with_inline_hook
+         *          for the blocking analogue.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value. Returns std::nullopt if either the lock could not be
@@ -1046,12 +1055,10 @@ namespace DetourModKit
         {
             if (get_reentrancy_guard() > 0)
             {
-                m_logger.error(
-                    "HookManager: Reentrant callback detected in try_with_inline_hook('{}')! "
-                    "Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock "
-                    "(remove_hook, enable_hook, disable_hook, create_*_hook). "
-                    "Perform mutations outside the callback or use an asynchronous operation.",
-                    hook_id);
+                m_logger.error("HookManager: Reentrant callback detected in try_with_inline_hook('{}')! "
+                               "Callback holding m_hooks_mutex must not call HookManager mutators or teardown methods. "
+                               "Perform mutations outside the callback or use an asynchronous operation.",
+                               hook_id);
                 return std::nullopt;
             }
             std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex, std::try_to_lock);
@@ -1072,11 +1079,10 @@ namespace DetourModKit
         /**
          * @brief Safely accesses a MidHook by its ID while holding the internal lock.
          * @details The callback receives a MidHook reference while the hook registry is held under a reader lock.
-         * @warning Do not call HookManager mutators from the callback. The callback runs while m_hooks_mutex is held
-         *          shared: remove_hook and create_*_hook acquire that lock exclusively and self-deadlock, while
-         *          enable_hook/disable_hook re-acquire it shared, which is undefined behavior on a non-recursive lock
-         *          and deadlocks when a writer is queued between the two acquisitions. Queue mutations and apply them
-         *          after the callback returns.
+         * @warning Do not call HookManager mutators or teardown entry points from the callback. The callback runs while
+         *          m_hooks_mutex is held shared: create/remove/teardown paths acquire it exclusively, while toggle
+         *          paths re-acquire it shared, which is undefined behavior on a non-recursive lock and can deadlock.
+         *          Queue mutations and apply them after the callback returns.
          * @tparam F Callable type accepting (MidHook&) and returning a value.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
@@ -1091,12 +1097,10 @@ namespace DetourModKit
         {
             if (get_reentrancy_guard() > 0)
             {
-                m_logger.error(
-                    "HookManager: Reentrant callback detected in with_mid_hook('{}')! "
-                    "Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock "
-                    "(remove_hook, enable_hook, disable_hook, create_*_hook). "
-                    "Perform mutations outside the callback or use an asynchronous operation.",
-                    hook_id);
+                m_logger.error("HookManager: Reentrant callback detected in with_mid_hook('{}')! "
+                               "Callback holding m_hooks_mutex must not call HookManager mutators or teardown methods. "
+                               "Perform mutations outside the callback or use an asynchronous operation.",
+                               hook_id);
                 return std::nullopt;
             }
             std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
@@ -1122,12 +1126,10 @@ namespace DetourModKit
         {
             if (get_reentrancy_guard() > 0)
             {
-                m_logger.error(
-                    "HookManager: Reentrant callback detected in with_mid_hook('{}')! "
-                    "Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock "
-                    "(remove_hook, enable_hook, disable_hook, create_*_hook). "
-                    "Perform mutations outside the callback or use an asynchronous operation.",
-                    hook_id);
+                m_logger.error("HookManager: Reentrant callback detected in with_mid_hook('{}')! "
+                               "Callback holding m_hooks_mutex must not call HookManager mutators or teardown methods. "
+                               "Perform mutations outside the callback or use an asynchronous operation.",
+                               hook_id);
                 return false;
             }
             std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
@@ -1145,10 +1147,10 @@ namespace DetourModKit
          * @brief Try-safe access to a MidHook by its ID using a non-blocking lock.
          * @details Provides a non-blocking alternative to with_mid_hook(). The callback is invoked only if the lock is
          *          immediately acquired via std::try_to_lock. Note: try_to_lock only avoids blocking on initial
-         *          acquisition - it does NOT make callbacks safe to re-enter HookManager methods that also acquire the
-         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback needs to call those
-         *          methods, it must release the lock first or perform those calls asynchronously to avoid deadlock. See
-         *          with_mid_hook for the blocking analogue.
+         *          acquisition - it does NOT make callbacks safe to re-enter HookManager mutators or teardown methods
+         *          that also acquire the same non-recursive mutex. If a callback needs to call those methods, it must
+         *          release the lock first or perform those calls asynchronously to avoid deadlock. See with_mid_hook
+         *          for the blocking analogue.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value. Returns std::nullopt if either the lock could not be
@@ -1162,12 +1164,10 @@ namespace DetourModKit
         {
             if (get_reentrancy_guard() > 0)
             {
-                m_logger.error(
-                    "HookManager: Reentrant callback detected in try_with_mid_hook('{}')! "
-                    "Callback holding m_hooks_mutex must not call HookManager methods that acquire a unique_lock "
-                    "(remove_hook, enable_hook, disable_hook, create_*_hook). "
-                    "Perform mutations outside the callback or use an asynchronous operation.",
-                    hook_id);
+                m_logger.error("HookManager: Reentrant callback detected in try_with_mid_hook('{}')! "
+                               "Callback holding m_hooks_mutex must not call HookManager mutators or teardown methods. "
+                               "Perform mutations outside the callback or use an asynchronous operation.",
+                               hook_id);
                 return std::nullopt;
             }
             std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex, std::try_to_lock);
@@ -1281,9 +1281,12 @@ namespace DetourModKit
          * @param hook_id The hook's name, used only for logging.
          * @param hook The hook to toggle.
          * @param enable true to enable, false to disable.
+         * @param logs Sink for the outcome message; emitted after the locks release so no logger sink I/O happens
+         *             inside the critical section.
          * @return true if the hook is now in the requested state.
          */
-        [[nodiscard]] bool toggle_hook_locked(std::string_view hook_id, Hook &hook, bool enable);
+        [[nodiscard]] bool toggle_hook_locked(std::string_view hook_id, Hook &hook, bool enable,
+                                              std::vector<DeferredLogEntry> &logs);
 
         [[nodiscard]] bool hook_id_exists_locked(std::string_view hook_id) const
         {

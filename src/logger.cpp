@@ -21,12 +21,65 @@ namespace DetourModKit
 
     namespace
     {
+        constexpr std::size_t EMERGENCY_ASYNC_LOGGER_LEAK_SLOTS = 16;
+
+        struct AsyncLoggerLeakSlot
+        {
+            alignas(std::shared_ptr<AsyncLogger>) unsigned char storage[sizeof(std::shared_ptr<AsyncLogger>)];
+            std::atomic<bool> occupied{false};
+        };
+
         std::atomic<std::shared_ptr<const Logger::StaticConfig>> &static_config_atom()
         {
             static std::atomic<std::shared_ptr<const Logger::StaticConfig>> instance{
                 std::make_shared<const Logger::StaticConfig>(DEFAULT_LOG_PREFIX, DEFAULT_LOG_FILE_NAME,
                                                              DEFAULT_TIMESTAMP_FORMAT)};
             return instance;
+        }
+
+        void leak_async_logger_handle(std::shared_ptr<AsyncLogger> &logger) noexcept
+        {
+            static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
+                          "AsyncLogger leak cells must be nothrow-move-constructible.");
+
+            if (!logger)
+            {
+                return;
+            }
+
+            detail::pin_current_module();
+
+            auto *leaked = new (std::nothrow) std::shared_ptr<AsyncLogger>(std::move(logger));
+            if (leaked != nullptr)
+            {
+                static_cast<void>(leaked);
+                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                return;
+            }
+
+            void *virtual_cell =
+                VirtualAlloc(nullptr, sizeof(std::shared_ptr<AsyncLogger>), MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            if (virtual_cell != nullptr)
+            {
+                new (virtual_cell) std::shared_ptr<AsyncLogger>(std::move(logger));
+                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                return;
+            }
+
+            static AsyncLoggerLeakSlot emergency_slots[EMERGENCY_ASYNC_LOGGER_LEAK_SLOTS];
+            for (auto &slot : emergency_slots)
+            {
+                bool expected = false;
+                if (slot.occupied.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+                {
+                    new (static_cast<void *>(slot.storage)) std::shared_ptr<AsyncLogger>(std::move(logger));
+                    DetourModKit::Diagnostics::record_intentional_leak(
+                        DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                    return;
+                }
+            }
+
+            std::terminate();
         }
     } // anonymous namespace
 
@@ -199,22 +252,14 @@ namespace DetourModKit
         // other owners". Dropping local_logger's ref while a temporary outlives us would let the last temporary's
         // destructor race the detached writer thread.
         //
-        // The leak is per-call and append-only: each invocation allocates its own heap cell, so a process that
+        // The leak is per-call and append-only: each invocation retains its own shared_ptr cell, so a process that
         // re-attaches after shutdown (e.g. hot-reload) and hits loader lock again cannot drop a prior handle whose
-        // writer thread may still be running. Mirrors the
-        // HookManager loader-lock discipline: new (std::nothrow) keeps the noexcept destructor honest by returning
-        // nullptr on OOM rather than turning a std::vector::emplace_back bad_alloc into std::terminate inside this
-        // noexcept context.
+        // writer thread may still be running. The helper first tries new (std::nothrow), then non-CRT permanent storage
+        // fallbacks, so the noexcept destructor never frees the logger merely because the heap cell could not be
+        // allocated.
         if (local_logger && detail::is_loader_lock_held())
         {
-            static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
-                          "Leak cell must be nothrow-move-constructible to keep ~Logger noexcept honest.");
-
-            detail::pin_current_module();
-
-            auto *leaked = new (std::nothrow) std::shared_ptr<AsyncLogger>(std::move(local_logger));
-            static_cast<void>(leaked);
-            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
+            leak_async_logger_handle(local_logger);
         }
 
         {
@@ -462,6 +507,7 @@ namespace DetourModKit
 
     void Logger::disable_async_mode()
     {
+        std::shared_ptr<AsyncLogger> local_async;
         bool should_log = false;
 
         {
@@ -472,7 +518,7 @@ namespace DetourModKit
                 return;
             }
 
-            auto local_async = m_async_logger.exchange(nullptr, std::memory_order_acq_rel);
+            local_async = m_async_logger.exchange(nullptr, std::memory_order_acq_rel);
             if (local_async)
             {
                 local_async->shutdown();
@@ -482,7 +528,22 @@ namespace DetourModKit
             should_log = true;
         }
 
-        if (should_log)
+        // If the writer thread was detached under loader lock it may still be touching AsyncLogger members (m_queue,
+        // m_flush_mutex, etc.). Mirror shutdown_internal's discipline: transfer ownership to permanent heap storage so
+        // the object outlives the detached thread, and pin the module so the code pages it runs from stay mapped.
+        // Dropping the last shared_ptr here instead would let the AsyncLogger destructor race the live writer -- a
+        // use-after-free. The transfer is unconditional under loader lock since concurrent log() callers may still own
+        // temporaries fetched before the exchange, so use_count() is an unreliable "no other owners" proxy. The leak is
+        // per-call and append-only, so a hot-reload cycle (disable -> enable -> disable) that hits loader lock again
+        // cannot drop a prior handle whose writer may still be running. The helper first tries new (std::nothrow), then
+        // non-CRT permanent storage fallbacks, so the object is retained even if the heap cell cannot be allocated.
+        const bool leaked_under_loader_lock = local_async && detail::is_loader_lock_held();
+        if (leaked_under_loader_lock)
+        {
+            leak_async_logger_handle(local_async);
+        }
+
+        if (should_log && !leaked_under_loader_lock)
         {
             log(LogLevel::Info, "Async logging mode disabled. Switched to synchronous mode.");
         }

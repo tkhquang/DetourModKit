@@ -33,6 +33,13 @@ namespace DetourModKit
                 }
             });
 
+        m_stop_source = m_thread.get_stop_source();
+
+        // Publish liveness through an atomic once both the thread handle and stop source are initialized.
+        // is_running() reads only this snapshot, and request_stop() signals m_stop_source, so neither path touches the
+        // std::jthread handle concurrently with shutdown()'s join()/detach().
+        m_started.store(true, std::memory_order_release);
+
         Logger::get_instance().debug("StoppableWorker '{}' started.", m_name);
     }
 
@@ -43,15 +50,17 @@ namespace DetourModKit
 
     void StoppableWorker::request_stop() noexcept
     {
-        if (m_thread.joinable())
+        // Gate on the liveness atomics rather than m_thread.joinable(): a concurrent shutdown() may be inside join()/
+        // detach(), which mutate the handle. Signal the copied stop_source so this path never touches m_thread.
+        if (m_started.load(std::memory_order_acquire) && !m_joined.load(std::memory_order_acquire))
         {
-            m_thread.request_stop();
+            m_stop_source.request_stop();
         }
     }
 
     bool StoppableWorker::is_running() const noexcept
     {
-        return m_thread.joinable() && !m_joined.load(std::memory_order_acquire);
+        return m_started.load(std::memory_order_acquire) && !m_joined.load(std::memory_order_acquire);
     }
 
     void StoppableWorker::shutdown() noexcept
@@ -67,7 +76,7 @@ namespace DetourModKit
             return;
         }
 
-        m_thread.request_stop();
+        m_stop_source.request_stop();
 
         if (detail::is_loader_lock_held())
         {

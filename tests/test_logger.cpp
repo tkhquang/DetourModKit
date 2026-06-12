@@ -11,12 +11,13 @@
 
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/diagnostics.hpp"
 
 using namespace DetourModKit;
 
-// The loader-lock fallback in Logger::shutdown_internal heap-allocates a std::shared_ptr<AsyncLogger> via new
-// (std::nothrow) and leaks the cell to outlive the destructor. Guard the leak cell's move constructor stays noexcept so
-// the call cannot turn the noexcept ~Logger contract into std::terminate via a thrown move.
+// The loader-lock fallback in Logger::shutdown_internal and disable_async_mode() retains a
+// std::shared_ptr<AsyncLogger> in permanent storage. Guard the leak cell's move constructor stays noexcept so the call
+// cannot turn the noexcept ~Logger contract into std::terminate via a thrown move.
 static_assert(std::is_nothrow_move_constructible_v<std::shared_ptr<AsyncLogger>>,
               "std::shared_ptr<AsyncLogger> must be nothrow-move-constructible "
               "for the Logger loader-lock leak path to keep ~Logger noexcept honest.");
@@ -1149,6 +1150,32 @@ TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
     std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     EXPECT_GT(total_logged.load(), 0);
     EXPECT_NE(content.find("CONCURRENT_W0_MSG_"), std::string::npos);
+}
+
+TEST_F(LoggerTest, DisableAsyncMode_NoLeakInNormalContext)
+{
+    // Outside the Windows loader lock, disable_async_mode() joins the writer thread and drops the AsyncLogger normally:
+    // the loader-lock leak/detach path (which records a Logger intentional-leak event) must not run. A spurious leak
+    // here would mean the writer was detached and the object orphaned when a clean join was possible.
+    Logger &logger = Logger::get_instance();
+    logger.set_log_level(LogLevel::Info);
+
+    const std::size_t before = Diagnostics::intentional_leak_count(Diagnostics::LeakSubsystem::Logger);
+
+    logger.enable_async_mode();
+    ASSERT_TRUE(logger.is_async_mode_enabled());
+    logger.info("DISABLE_ASYNC_NOLEAK_MSG");
+    logger.disable_async_mode();
+    EXPECT_FALSE(logger.is_async_mode_enabled());
+    logger.flush();
+
+    EXPECT_EQ(Diagnostics::intentional_leak_count(Diagnostics::LeakSubsystem::Logger), before)
+        << "disable_async_mode() must not take the loader-lock leak path when the loader lock is not held";
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("DISABLE_ASYNC_NOLEAK_MSG"), std::string::npos);
 }
 
 TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
