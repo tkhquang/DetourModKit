@@ -98,11 +98,10 @@ namespace DetourModKit
         bool auto_enable = true;
 
         /**
-         * @brief When true, refuse to inline-hook a target whose first bytes already encode a JMP outside the target's
-         *        module.
-         * @details With the default (false) a warning is logged but the hook proceeds (SafetyHook layers trampolines on
-         *          top of existing inline hooks). Set to true for strict mods that never want to install a second hook
-         *          behind another mod's.
+         * @brief Refuses hooks when the target already appears hooked.
+         * @details Applies to inline and mid hooks. The pre-flight first checks this HookManager's registry for an
+         *          exact same-address hook, then falls back to a foreign JMP prologue heuristic. With the default
+         *          (false), a warning is logged and bulk teardown unwinds managed layers newest-first.
          */
         bool fail_if_already_hooked = false;
     };
@@ -165,8 +164,8 @@ namespace DetourModKit
 
         /**
          * @brief Enables the hook.
-         * @return Success if the hook was enabled or already active. On failure, the
-         *         HookError indicates the reason (SafetyHookError, EnableFailed, InvalidHookState).
+         * @return Success if the hook was enabled or already active. On failure, the HookError indicates the reason
+         *         (SafetyHookError, EnableFailed, InvalidHookState).
          * @note Uses atomic CAS for lock-free status transitions. Thread-safe without requiring external
          *       synchronization. Uses an intermediate Enabling state to prevent other threads from observing a
          *       speculative terminal state while the SafetyHook enable call is in progress.
@@ -196,8 +195,8 @@ namespace DetourModKit
 
         /**
          * @brief Disables the hook.
-         * @return Success if the hook was disabled or already disabled. On failure, the
-         *         HookError indicates the reason (SafetyHookError, DisableFailed, InvalidHookState).
+         * @return Success if the hook was disabled or already disabled. On failure, the HookError indicates the reason
+         *         (SafetyHookError, DisableFailed, InvalidHookState).
          * @note Uses atomic CAS for lock-free status transitions. Thread-safe without requiring external
          *       synchronization. Uses an intermediate Disabling state to prevent other threads from observing a
          *       speculative terminal state while the SafetyHook disable call is in progress.
@@ -282,7 +281,7 @@ namespace DetourModKit
             case HookError::MethodNotFound:
                 return "VMT method hook not found";
             case HookError::TargetAlreadyHookedInProcess:
-                return "Target address is already inline-hooked by another module";
+                return "Target address is already hooked in this process";
             case HookError::UnknownError:
                 return "Unknown error";
             default:
@@ -840,22 +839,25 @@ namespace DetourModKit
         }
 
         /**
-         * @brief Reports whether @p target_address already carries an inline hook installed by this HookManager
-         *        instance.
-         * @details Walks the local hook registry under a shared lock. Local-only by design: hooks installed by other
-         *          statically-linked DMK consumers in the same process are not visible.
+         * @brief Reports whether this manager patches @p target_address.
+         * @details Inline and mid hooks both patch the target prologue, so both are reported here. The query walks only
+         *          this HookManager's registry; hooks installed by other statically-linked DMK consumers in the same
+         *          process are not visible.
          *
-         *          Use this to short-circuit a redundant create_inline_hook call without parsing the prologue bytes. To
-         *          detect inline hooks installed by code outside this HookManager (for example a third-party JMP rel32
-         *          written into the prologue) pass
-         *          HookConfig::fail_if_already_hooked when creating the hook.
+         *          Use this to short-circuit redundant create_inline_hook or create_mid_hook calls. To detect hooks
+         *          installed outside this manager, pass HookConfig::fail_if_already_hooked during creation.
          * @param target_address Function address to query.
-         * @return true if a managed inline hook already targets this address.
+         * @return true if a managed inline or mid hook already targets this address.
          */
         [[nodiscard]] bool is_target_already_hooked(uintptr_t target_address) const noexcept;
 
         /**
          * @brief Removes a hook identified by its name.
+         * @details Bulk teardown (remove_all_hooks, shutdown, destructor) disables and destroys hooks in reverse
+         *          creation order so hooks layered on one target address unwind safely. Explicit single removal does
+         *          not reorder for the caller: removing an older hook while a newer hook layered on the same address is
+         *          still installed restores the prologue to the original bytes underneath the newer hook, leaving its
+         *          entry jump pointing into a trampoline that is about to be freed. Remove layered hooks newest-first.
          * @param hook_id The name of the hook to remove.
          * @return Success if removed, or HookError::HookNotFound.
          */
@@ -864,10 +866,12 @@ namespace DetourModKit
         /**
          * @brief Removes all hooks currently managed by this HookManager instance.
          * @details Uses two-phase removal: disables all hooks under a shared lock first, then clears the maps under an
-         *          exclusive lock. The shared phase lets DetourModKit's own with_* readers finish before Hook storage
-         *          is destroyed. SafetyHook can relocate threads caught in the patched prologue, but it cannot drain
-         *          threads already running the detour or trampoline body; callers must quiesce the hooked function
-         *          during planned teardown to close that residual window.
+         *          exclusive lock. Both phases walk the hooks in reverse creation order so hooks layered on one target
+         *          address unwind newest-first and each prologue restore writes onto still-valid bytes rather than into
+         *          a freed trampoline. The shared phase lets DetourModKit's own with_* readers finish before Hook
+         *          storage is destroyed. SafetyHook can relocate threads caught in the patched prologue, but it cannot
+         *          drain threads already running the detour or trampoline body; callers must quiesce the hooked
+         *          function during planned teardown to close that residual window.
          *
          *          After clearing, resets the internal shutdown flag to false, allowing subsequent create_*_hook()
          *          calls to succeed for hot-reload workflows.
@@ -876,9 +880,9 @@ namespace DetourModKit
 
         /**
          * @brief Enables a previously disabled hook.
-         * @details Idempotent: enabling an already-active hook returns success.
-         *          Returns HookError::InvalidHookState only when the hook is in a transitional state (Enabling or
-         *          Disabling). Other HookError values indicate lookup or SafetyHook failures.
+         * @details Idempotent: enabling an already-active hook returns success. Returns HookError::InvalidHookState
+         *          only when the hook is in a transitional state (Enabling or Disabling). Other HookError values
+         *          indicate lookup or SafetyHook failures.
          * @param hook_id The name of the hook to enable.
          * @return Success if the hook is now active (or was already active), or a HookError describing the failure.
          */
@@ -886,9 +890,9 @@ namespace DetourModKit
 
         /**
          * @brief Disables an active hook temporarily without removing it.
-         * @details Idempotent: disabling an already-disabled hook returns success.
-         *          Returns HookError::InvalidHookState only when the hook is in a transitional state (Enabling or
-         *          Disabling). Other HookError values indicate lookup or SafetyHook failures.
+         * @details Idempotent: disabling an already-disabled hook returns success. Returns HookError::InvalidHookState
+         *          only when the hook is in a transitional state (Enabling or Disabling). Other HookError values
+         *          indicate lookup or SafetyHook failures.
          * @param hook_id The name of the hook to disable.
          * @return Success if the hook is now disabled (or was already disabled), or a HookError describing the failure.
          */
@@ -1024,12 +1028,11 @@ namespace DetourModKit
         /**
          * @brief Try-safe access to an InlineHook by its ID using a non-blocking lock.
          * @details Provides a non-blocking alternative to with_inline_hook(). The callback is invoked only if the lock
-         *          is immediately acquired via std::try_to_lock.
-         *          Note: try_to_lock only avoids blocking on initial acquisition - it does NOT
-         *          make callbacks safe to re-enter HookManager methods that also acquire the same non-recursive mutex
-         *          (e.g., enable_hook, disable_hook). If a callback needs to call those methods, it must release the
-         *          lock first or perform those calls asynchronously to avoid deadlock. See with_inline_hook for the
-         *          blocking analogue.
+         *          is immediately acquired via std::try_to_lock. Note: try_to_lock only avoids blocking on initial
+         *          acquisition - it does NOT make callbacks safe to re-enter HookManager methods that also acquire the
+         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback needs to call those
+         *          methods, it must release the lock first or perform those calls asynchronously to avoid deadlock. See
+         *          with_inline_hook for the blocking analogue.
          * @param hook_id The name of the inline hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value. Returns std::nullopt if either the lock could not be
@@ -1141,12 +1144,11 @@ namespace DetourModKit
         /**
          * @brief Try-safe access to a MidHook by its ID using a non-blocking lock.
          * @details Provides a non-blocking alternative to with_mid_hook(). The callback is invoked only if the lock is
-         *          immediately acquired via std::try_to_lock.
-         *          Note: try_to_lock only avoids blocking on initial acquisition - it does NOT
-         *          make callbacks safe to re-enter HookManager methods that also acquire the same non-recursive mutex
-         *          (e.g., enable_hook, disable_hook). If a callback needs to call those methods, it must release the
-         *          lock first or perform those calls asynchronously to avoid deadlock. See with_mid_hook for the
-         *          blocking analogue.
+         *          immediately acquired via std::try_to_lock. Note: try_to_lock only avoids blocking on initial
+         *          acquisition - it does NOT make callbacks safe to re-enter HookManager methods that also acquire the
+         *          same non-recursive mutex (e.g., enable_hook, disable_hook). If a callback needs to call those
+         *          methods, it must release the lock first or perform those calls asynchronously to avoid deadlock. See
+         *          with_mid_hook for the blocking analogue.
          * @param hook_id The name of the mid hook.
          * @param fn The callback to invoke with the hook reference.
          * @return std::optional<R> The callback's return value. Returns std::nullopt if either the lock could not be
@@ -1202,14 +1204,26 @@ namespace DetourModKit
          */
         std::vector<std::string> m_vmt_creation_order;
 
+        /**
+         * @brief Inline and mid hook names in creation order, maintained under m_hooks_mutex alongside m_hooks.
+         * @details Teardown disables and destroys hooks by walking this vector in reverse (see
+         *          disable_hooks_reverse_order_locked() and clear_hooks_locked()) so hooks layered on one target
+         *          address unwind newest-first. SafetyHook saves the live prologue at create time, so a second hook on
+         *          a target stores "jmp -> first detour" as its own original bytes; restoring oldest-first would
+         *          rewrite the entry to jump into the older hook's about-to-be-freed trampoline. A single global
+         *          reverse walk yields the required per-address LIFO because the hooks on any one address are a
+         *          subsequence of the global creation order.
+         */
+        std::vector<std::string> m_hook_creation_order;
+
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
 
-        /** @brief Gate that mutators (create_*_hook, enable_hook, disable_hook, remove_hook)
-         *  acquire shared on entry, allowing shutdown/remove_all_hooks to acquire exclusive
-         *  to block new work. Teardown serialization uses compare_exchange_strong on
-         *  m_shutdown_called rather than a separate mutex.
+        /**
+         * @brief Gate that mutators (create_*_hook, enable_hook, disable_hook, remove_hook) acquire shared on entry,
+         *        allowing shutdown/remove_all_hooks to acquire exclusive to block new work. Teardown serialization uses
+         *        compare_exchange_strong on m_shutdown_called rather than a separate mutex.
          */
         mutable detail::SrwSharedMutex m_mutator_gate;
 
@@ -1293,6 +1307,29 @@ namespace DetourModKit
         void clear_vmt_hooks_locked() noexcept;
 
         /**
+         * @brief Disables every inline and mid hook in reverse creation order.
+         * @details Phase 1 of teardown. SafetyHook::InlineHook::disable() copies each hook's saved prologue bytes back
+         *          over the target; for hooks layered on one address the newer hook saved "jmp -> older detour" as its
+         *          original, so it must restore first (returning the prologue to that jump) before the older hook
+         *          restores the true original bytes. Disabling oldest-first would instead leave the live prologue
+         *          jumping into the older hook's trampoline, which clear_hooks_locked() then frees -- a use-after-free.
+         *          Hooks on distinct addresses are independent, so one global reverse-creation-order walk yields the
+         *          correct per-address LIFO for all of them at once.
+         * @note Must be called with m_hooks_mutex held (shared is sufficient: this mutates Hook state, not the map).
+         */
+        void disable_hooks_reverse_order_locked() noexcept;
+
+        /**
+         * @brief Destroys every inline and mid hook in reverse creation order and empties the registry.
+         * @details Phase 2 of teardown. By the time this runs disable_hooks_reverse_order_locked() has already restored
+         *          every prologue, so destruction only frees trampolines; freeing them newest-first keeps the order
+         *          uniform with the disable phase and with clear_vmt_hooks_locked() rather than depending on
+         *          unordered_map bucket order.
+         * @note Must be called with m_hooks_mutex held exclusively.
+         */
+        void clear_hooks_locked() noexcept;
+
+        /**
          * @brief Returns the name of the VMT hook whose cloned vptr matches @p vptr, or nullptr if none.
          * @details Walks the live VMT registry under the held m_hooks_mutex shared or exclusive lock and compares the
          *          recorded cloned-vptr base. The check is O(N) over the (small) registry and is the only reliable way
@@ -1303,6 +1340,14 @@ namespace DetourModKit
          *       reentrancy-aware lock use the same primitive.
          */
         [[nodiscard]] const std::string *find_vmt_owner_of_vptr_locked(std::uintptr_t vptr) const noexcept;
+
+        /**
+         * @brief Returns the managed hook installed at @p target_address, or nullptr if none.
+         * @details Inline and mid hooks at the same address patch the same prologue bytes and share the teardown-order
+         *          hazard. The registry check is exact, unlike the prologue-byte heuristic used for foreign hooks.
+         * @note Must be called with m_hooks_mutex held (shared or exclusive).
+         */
+        [[nodiscard]] const std::string *find_hook_owner_of_target_locked(uintptr_t target_address) const noexcept;
 
         /**
          * @brief Decodes the first few bytes of @p slot_value to decide if it looks like a callable function body.

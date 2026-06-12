@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
+#include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -2419,6 +2421,156 @@ TEST_F(HookManagerTest, DuplicateHook_DefaultMode_LayersOnTop)
 
     (void)hm.remove_hook("dup-layer-second");
     (void)hm.remove_hook("dup-layer-first");
+}
+
+namespace
+{
+    // Distinct target whose original body returns a + b. The volatile result plus DMK_TEST_NOINLINE forces a real call
+    // to the patched entry (the same proven pattern the enable/disable tests use), so a post-teardown call observes the
+    // restored prologue rather than a constant-folded 5.
+    DMK_TEST_NOINLINE int layered_teardown_target(int a, int b) noexcept
+    {
+        volatile int result = a + b;
+        return result;
+    }
+
+    int layered_teardown_detour_1(int a, int b) noexcept
+    {
+        return a + b + 100;
+    }
+
+    int layered_teardown_detour_2(int a, int b) noexcept
+    {
+        return a + b + 200;
+    }
+
+    int layered_teardown_detour_3(int a, int b) noexcept
+    {
+        return a + b + 300;
+    }
+} // namespace
+
+// Bulk teardown disables and destroys layered inline hooks newest-first. Three hooks on one target stack jumps:
+// SafetyHook saves the live prologue ("jmp -> previous detour") as each new hook's original bytes, so the entry must be
+// rewound in reverse creation order. An oldest-first unwind would restore the true prologue underneath the newer hooks
+// and then let the newest hook rewrite the entry to a jump into a trampoline the teardown is about to free -- a
+// use-after-free. Reverse-creation-order teardown routes remove_all_hooks through m_hook_creation_order back-to-front,
+// so the prologue is restored byte-for-byte and the target runs its original body again regardless of bucket order.
+TEST_F(HookManagerTest, InlineHook_RemoveAllUnwindsLayeredHooksInReverseCreationOrder)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(&layered_teardown_target);
+
+    // Snapshot the prologue before any hook patches it. 16 bytes spans SafetyHook's 5-byte E9 patch (and any
+    // instruction-boundary rounding) with room to spare; the target is well over 16 bytes of code, so the read stays
+    // inside its body.
+    std::array<std::uint8_t, 16> original_prologue{};
+    std::memcpy(original_prologue.data(), reinterpret_cast<const void *>(target), original_prologue.size());
+
+    void *tramp1 = nullptr;
+    void *tramp2 = nullptr;
+    void *tramp3 = nullptr;
+    ASSERT_TRUE(hm.create_inline_hook("Layer1", target, reinterpret_cast<void *>(&layered_teardown_detour_1), &tramp1)
+                    .has_value());
+    ASSERT_TRUE(hm.create_inline_hook("Layer2", target, reinterpret_cast<void *>(&layered_teardown_detour_2), &tramp2)
+                    .has_value());
+    ASSERT_TRUE(hm.create_inline_hook("Layer3", target, reinterpret_cast<void *>(&layered_teardown_detour_3), &tramp3)
+                    .has_value());
+
+    // The entry is patched now, so the live prologue differs from the snapshot.
+    std::array<std::uint8_t, 16> hooked_prologue{};
+    std::memcpy(hooked_prologue.data(), reinterpret_cast<const void *>(target), hooked_prologue.size());
+    EXPECT_NE(0, std::memcmp(original_prologue.data(), hooked_prologue.data(), original_prologue.size()));
+
+    // Public bulk removal owns the unwind order; it must not depend on unordered_map bucket order.
+    hm.remove_all_hooks();
+
+    // Prologue restored byte-for-byte, with no jump left pointing into a freed trampoline.
+    std::array<std::uint8_t, 16> restored_prologue{};
+    std::memcpy(restored_prologue.data(), reinterpret_cast<const void *>(target), restored_prologue.size());
+    EXPECT_EQ(0, std::memcmp(original_prologue.data(), restored_prologue.data(), original_prologue.size()))
+        << "Layered inline hooks must restore the original prologue on bulk teardown";
+
+    // The target executes its original body again (and does not crash jumping into freed memory).
+    EXPECT_EQ(layered_teardown_target(2, 3), 5);
+}
+
+// Strict-mode same-address layering is refused by the exact registry check (find_hook_owner_of_target_locked), not the
+// prologue-byte heuristic. The refusal does not register a second hook and does not write the output trampoline.
+TEST_F(HookManagerTest, InlineHook_StrictModeRefusesLayeringByRegistry)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(&layered_teardown_target);
+
+    void *tramp1 = nullptr;
+    ASSERT_TRUE(
+        hm.create_inline_hook("StrictBase", target, reinterpret_cast<void *>(&layered_teardown_detour_1), &tramp1)
+            .has_value());
+
+    HookConfig strict;
+    strict.fail_if_already_hooked = true;
+
+    void *const sentinel = reinterpret_cast<void *>(static_cast<uintptr_t>(0xDEADBEEFu));
+    void *tramp2 = sentinel;
+    auto second = hm.create_inline_hook("StrictLayer", target, reinterpret_cast<void *>(&layered_teardown_detour_2),
+                                        &tramp2, strict);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error(), HookError::TargetAlreadyHookedInProcess);
+    EXPECT_EQ(tramp2, nullptr) << "Refused create must clear the output trampoline";
+
+    // Only the first hook is registered; the refused create added nothing.
+    EXPECT_EQ(hm.get_hook_ids().size(), 1u);
+}
+
+// Mid hooks are backed by SafetyHook inline hooks, so they must honor the same exact same-address strict-mode registry
+// check as create_inline_hook().
+TEST_F(HookManagerTest, MidHook_StrictModeRefusesLayeringByRegistry)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(&layered_teardown_target);
+    auto mid_detour = [](safetyhook::Context &) {};
+
+    ASSERT_TRUE(hm.create_mid_hook("StrictMidBase", target, mid_detour).has_value());
+
+    HookConfig strict;
+    strict.fail_if_already_hooked = true;
+
+    auto second = hm.create_mid_hook("StrictMidLayer", target, mid_detour, strict);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error(), HookError::TargetAlreadyHookedInProcess);
+    EXPECT_EQ(hm.get_hook_ids().size(), 1u);
+    EXPECT_TRUE(hm.is_target_already_hooked(target));
+}
+
+// The registry check is type-agnostic: an inline hook and a mid hook at the same address overlap the same prologue
+// bytes, so strict mode must refuse either creation order.
+TEST_F(HookManagerTest, InlineMidHook_StrictModeRefusesCrossTypeLayering)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(&layered_teardown_target);
+    auto mid_detour = [](safetyhook::Context &) {};
+
+    void *trampoline = nullptr;
+    ASSERT_TRUE(hm.create_inline_hook("StrictInlineBase", target, reinterpret_cast<void *>(&layered_teardown_detour_1),
+                                      &trampoline)
+                    .has_value());
+
+    HookConfig strict;
+    strict.fail_if_already_hooked = true;
+    auto mid_second = hm.create_mid_hook("StrictMidOverInline", target, mid_detour, strict);
+    ASSERT_FALSE(mid_second.has_value());
+    EXPECT_EQ(mid_second.error(), HookError::TargetAlreadyHookedInProcess);
+
+    hm.remove_all_hooks();
+
+    ASSERT_TRUE(hm.create_mid_hook("StrictMidBaseForInline", target, mid_detour).has_value());
+    void *inline_trampoline = nullptr;
+    auto inline_second =
+        hm.create_inline_hook("StrictInlineOverMid", target, reinterpret_cast<void *>(&layered_teardown_detour_2),
+                              &inline_trampoline, strict);
+    ASSERT_FALSE(inline_second.has_value());
+    EXPECT_EQ(inline_second.error(), HookError::TargetAlreadyHookedInProcess);
+    EXPECT_EQ(inline_trampoline, nullptr);
 }
 
 namespace

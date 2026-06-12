@@ -55,13 +55,14 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 
 - C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing hooks
 - **Inline hooks** and **mid-function hooks** - target functions by direct address or AOB scan
+  - **Same-address layering is teardown-safe**: when more than one managed hook stacks on one address, bulk teardown (`remove_all_hooks`, `shutdown`, the destructor) disables and destroys them newest-first so each prologue restore lands on still-valid bytes instead of a freed trampoline. `HookConfig::fail_if_already_hooked` refuses a second managed hook on an address this HookManager already hooks (a registry-exact check, in addition to the prologue-byte heuristic that catches foreign-module hooks); explicit single removals must still be ordered newest-first by the caller.
 - **VMT (virtual method table) hooks** - clone an object's vtable and replace individual method slots by index
   - Per-object interception of virtual calls (e.g., D3D device methods, game AI interfaces)
   - Apply a single hooked vtable to multiple objects
   - Safe callback-based access to hooked methods via `with_vmt_method()`
   - **`VmtHookConfig` symmetric with inline `HookConfig`**: opt-in `fail_if_already_hooked` refuses a second create/apply whose vptr is already on a clone owned by this HookManager (the silent double-clone bug class), and opt-in `fail_on_non_function_pointer` pre-flight-decodes the first byte of the original vtable slot to reject int3 padding/breakpoints and same-module jump stubs. Both default to off; the single-arg `create_vmt_hook(name, object)` and `apply_vmt_hook(name, object)` overloads are preserved for backward compatibility.
 - **Convenience helpers**: `try_install_inline` / `try_install_inline_aob` / `try_install_mid` / `try_install_mid_aob` fuse `create_*_hook` with single-line Error logging on failure, returning `optional<string>` of the registered name
-- **Duplicate-target query**: `HookManager::is_target_already_hooked(addr)` reports whether the local registry already inline-hooks a given address (does not see hooks installed by other statically-linked DMK consumers in the same process)
+- **Duplicate-target query**: `HookManager::is_target_already_hooked(addr)` reports whether the local registry already patches a given address with an inline or mid hook (does not see hooks installed by other statically-linked DMK consumers in the same process)
 - **Batch toggling**: `enable_hooks` / `disable_hooks` (by name span) and `enable_all_hooks` / `disable_all_hooks` toggle many hooks under one lock acquisition for startup and hot-reload phases, returning the count affected (ergonomics, not a performance change: SafetyHook installs via a vectored exception handler and does not suspend threads)
 
 </details>
