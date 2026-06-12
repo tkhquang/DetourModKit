@@ -203,6 +203,13 @@ HookManager::~HookManager() noexcept
 
 void HookManager::shutdown()
 {
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant shutdown() from within a with_*/try_with_* callback rejected; defer "
+                         "hook teardown until the callback returns.");
+        return;
+    }
+
     // Serialize with remove_all_hooks() via compare_exchange_strong. Only one teardown owner proceeds.
     bool expected = false;
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -299,6 +306,17 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(std::strin
             *original_trampoline = nullptr;
         m_logger.error("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name);
         return std::unexpected(HookError::ShutdownInProgress);
+    }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        if (original_trampoline)
+            *original_trampoline = nullptr;
+        m_logger.error("HookManager: Reentrant create_inline_hook('{}') from within a with_*/try_with_* callback "
+                       "rejected; defer hook mutation until the callback returns.",
+                       name);
+        return std::unexpected(HookError::ReentrantCallRejected);
     }
 
     auto [result,
@@ -482,6 +500,16 @@ HookManager::create_inline_hook_aob(std::string_view name, uintptr_t module_base
                                     std::string_view aob_pattern_str, ptrdiff_t aob_offset, void *detour_function,
                                     void **original_trampoline, const HookConfig &config)
 {
+    if (get_reentrancy_guard() > 0)
+    {
+        if (original_trampoline)
+            *original_trampoline = nullptr;
+        m_logger.error("HookManager: Reentrant create_inline_hook_aob('{}') from within a with_*/try_with_* callback "
+                       "rejected; defer hook mutation until the callback returns.",
+                       name);
+        return std::unexpected(HookError::ReentrantCallRejected);
+    }
+
     m_logger.debug("HookManager: Attempting AOB scan for inline hook '{}' with pattern: \"{}\", offset: {}.", name,
                    aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
 
@@ -523,6 +551,15 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_v
     {
         m_logger.error("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name);
         return std::unexpected(HookError::ShutdownInProgress);
+    }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.error("HookManager: Reentrant create_mid_hook('{}') from within a with_*/try_with_* callback "
+                       "rejected; defer hook mutation until the callback returns.",
+                       name);
+        return std::unexpected(HookError::ReentrantCallRejected);
     }
 
     auto [result,
@@ -686,6 +723,14 @@ HookManager::create_mid_hook_aob(std::string_view name, uintptr_t module_base, s
                                  std::string_view aob_pattern_str, ptrdiff_t aob_offset,
                                  safetyhook::MidHookFn detour_function, const HookConfig &config)
 {
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.error("HookManager: Reentrant create_mid_hook_aob('{}') from within a with_*/try_with_* callback "
+                       "rejected; defer hook mutation until the callback returns.",
+                       name);
+        return std::unexpected(HookError::ReentrantCallRejected);
+    }
+
     m_logger.debug("HookManager: Attempting AOB scan for mid hook '{}' with pattern: \"{}\", offset: {}.", name,
                    aob_pattern_str, DetourModKit::Format::format_hex(aob_offset));
 
@@ -878,6 +923,15 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
         m_logger.warning("HookManager: Shutdown in progress. Cannot remove hook '{}'.", hook_id);
         return std::unexpected(HookError::ShutdownInProgress);
     }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant remove_hook('{}') from within a with_*/try_with_* callback rejected; "
+                         "defer hook mutation until the callback returns.",
+                         hook_id);
+        return std::unexpected(HookError::ReentrantCallRejected);
+    }
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
@@ -947,6 +1001,13 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
 void HookManager::remove_all_hooks()
 {
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant remove_all_hooks() from within a with_*/try_with_* callback rejected; "
+                         "defer hook teardown until the callback returns.");
+        return;
+    }
+
     // Serialize with shutdown() via compare_exchange_strong. Only one teardown owner proceeds.
     bool expected = false;
     if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -1006,6 +1067,15 @@ std::expected<void, HookError> HookManager::enable_hook(std::string_view hook_id
         m_logger.warning("HookManager: Shutdown in progress. Cannot enable hook '{}'.", hook_id);
         return std::unexpected(HookError::ShutdownInProgress);
     }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant enable_hook('{}') from within a with_*/try_with_* callback rejected; "
+                         "defer hook mutation until the callback returns.",
+                         hook_id);
+        return std::unexpected(HookError::ReentrantCallRejected);
+    }
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
@@ -1061,6 +1131,15 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
         m_logger.warning("HookManager: Shutdown in progress. Cannot disable hook '{}'.", hook_id);
         return std::unexpected(HookError::ShutdownInProgress);
     }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant disable_hook('{}') from within a with_*/try_with_* callback rejected; "
+                         "defer hook mutation until the callback returns.",
+                         hook_id);
+        return std::unexpected(HookError::ReentrantCallRejected);
+    }
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
@@ -1109,26 +1188,30 @@ std::expected<void, HookError> HookManager::disable_hook(std::string_view hook_i
     return result;
 }
 
-bool HookManager::toggle_hook_locked(std::string_view hook_id, Hook &hook, bool enable)
+bool HookManager::toggle_hook_locked(std::string_view hook_id, Hook &hook, bool enable,
+                                     std::vector<DeferredLogEntry> &logs)
 {
     auto result = enable ? hook.enable() : hook.disable();
     // "enable" + 'd' / "disable" + 'd' reads as "enabled" / "disabled" in the log.
     const std::string_view verb = enable ? "enable" : "disable";
     if (result)
     {
-        m_logger.debug("HookManager: Hook '{}' successfully {}d.", hook_id, verb);
+        logs.push_back({std::format("HookManager: Hook '{}' successfully {}d.", hook_id, verb), LogLevel::Debug});
         return true;
     }
 
     const auto error = result.error();
     if (error == HookError::InvalidHookState)
     {
-        m_logger.warning("HookManager: Hook '{}' cannot be {}d. Current status: {}", hook_id, verb,
-                         Hook::status_to_string(hook.get_status()));
+        logs.push_back({std::format("HookManager: Hook '{}' cannot be {}d. Current status: {}", hook_id, verb,
+                                    Hook::status_to_string(hook.get_status())),
+                        LogLevel::Warning});
     }
     else
     {
-        m_logger.error("HookManager: Failed to {} hook '{}': {}", verb, hook_id, Hook::error_to_string(error));
+        logs.push_back(
+            {std::format("HookManager: Failed to {} hook '{}': {}", verb, hook_id, Hook::error_to_string(error)),
+             LogLevel::Error});
     }
     return false;
 }
@@ -1140,28 +1223,51 @@ std::size_t HookManager::enable_hooks(std::span<const std::string_view> hook_ids
         m_logger.warning("HookManager: Shutdown in progress. Cannot enable {} hook(s).", hook_ids.size());
         return 0;
     }
-
-    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-    if (m_shutdown_called.load(std::memory_order_acquire))
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
     {
-        m_logger.warning("HookManager: Shutdown in progress. Cannot enable {} hook(s).", hook_ids.size());
+        m_logger.error("HookManager: Reentrant enable_hooks() from within a with_*/try_with_* callback rejected; defer "
+                       "hook mutation until the callback returns.");
         return 0;
     }
 
-    std::size_t enabled = 0;
-    for (const std::string_view hook_id : hook_ids)
+    auto [enabled, deferred_logs] = [&]() -> std::pair<std::size_t, std::vector<DeferredLogEntry>>
     {
-        auto it = m_hooks.find(hook_id);
-        if (it == m_hooks.end())
+        std::vector<DeferredLogEntry> logs;
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
         {
-            m_logger.warning("HookManager: Hook ID '{}' not found for enable operation.", hook_id);
-            continue;
+            logs.push_back(
+                {std::format("HookManager: Shutdown in progress. Cannot enable {} hook(s).", hook_ids.size()),
+                 LogLevel::Warning});
+            return {0, std::move(logs)};
         }
-        if (toggle_hook_locked(hook_id, *it->second, true))
+
+        std::size_t count = 0;
+        for (const std::string_view hook_id : hook_ids)
         {
-            ++enabled;
+            auto it = m_hooks.find(hook_id);
+            if (it == m_hooks.end())
+            {
+                logs.push_back({std::format("HookManager: Hook ID '{}' not found for enable operation.", hook_id),
+                                LogLevel::Warning});
+                continue;
+            }
+            if (toggle_hook_locked(hook_id, *it->second, true, logs))
+            {
+                ++count;
+            }
         }
+        return {count, std::move(logs)};
+    }();
+
+    // Emit after releasing the gate and hook lock (deferred logging) so a synchronous sink flush or a blocking async
+    // overflow never stalls an exclusive acquirer inside the critical section.
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
     }
     return enabled;
 }
@@ -1173,28 +1279,51 @@ std::size_t HookManager::disable_hooks(std::span<const std::string_view> hook_id
         m_logger.warning("HookManager: Shutdown in progress. Cannot disable {} hook(s).", hook_ids.size());
         return 0;
     }
-
-    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-    if (m_shutdown_called.load(std::memory_order_acquire))
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
     {
-        m_logger.warning("HookManager: Shutdown in progress. Cannot disable {} hook(s).", hook_ids.size());
+        m_logger.error("HookManager: Reentrant disable_hooks() from within a with_*/try_with_* callback rejected; "
+                       "defer hook mutation until the callback returns.");
         return 0;
     }
 
-    std::size_t disabled = 0;
-    for (const std::string_view hook_id : hook_ids)
+    auto [disabled, deferred_logs] = [&]() -> std::pair<std::size_t, std::vector<DeferredLogEntry>>
     {
-        auto it = m_hooks.find(hook_id);
-        if (it == m_hooks.end())
+        std::vector<DeferredLogEntry> logs;
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
         {
-            m_logger.warning("HookManager: Hook ID '{}' not found for disable operation.", hook_id);
-            continue;
+            logs.push_back(
+                {std::format("HookManager: Shutdown in progress. Cannot disable {} hook(s).", hook_ids.size()),
+                 LogLevel::Warning});
+            return {0, std::move(logs)};
         }
-        if (toggle_hook_locked(hook_id, *it->second, false))
+
+        std::size_t count = 0;
+        for (const std::string_view hook_id : hook_ids)
         {
-            ++disabled;
+            auto it = m_hooks.find(hook_id);
+            if (it == m_hooks.end())
+            {
+                logs.push_back({std::format("HookManager: Hook ID '{}' not found for disable operation.", hook_id),
+                                LogLevel::Warning});
+                continue;
+            }
+            if (toggle_hook_locked(hook_id, *it->second, false, logs))
+            {
+                ++count;
+            }
         }
+        return {count, std::move(logs)};
+    }();
+
+    // Emit after releasing the gate and hook lock (deferred logging) so a synchronous sink flush or a blocking async
+    // overflow never stalls an exclusive acquirer inside the critical section.
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
     }
     return disabled;
 }
@@ -1206,22 +1335,42 @@ std::size_t HookManager::enable_all_hooks()
         m_logger.warning("HookManager: Shutdown in progress. Cannot enable all hooks.");
         return 0;
     }
-
-    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-    if (m_shutdown_called.load(std::memory_order_acquire))
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
     {
-        m_logger.warning("HookManager: Shutdown in progress. Cannot enable all hooks.");
+        m_logger.error("HookManager: Reentrant enable_all_hooks() from within a with_*/try_with_* callback rejected; "
+                       "defer hook mutation until the callback returns.");
         return 0;
     }
 
-    std::size_t enabled = 0;
-    for (const auto &[hook_id, hook] : m_hooks)
+    auto [enabled, deferred_logs] = [&]() -> std::pair<std::size_t, std::vector<DeferredLogEntry>>
     {
-        if (toggle_hook_locked(hook_id, *hook, true))
+        std::vector<DeferredLogEntry> logs;
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
         {
-            ++enabled;
+            logs.push_back({"HookManager: Shutdown in progress. Cannot enable all hooks.", LogLevel::Warning});
+            return {0, std::move(logs)};
         }
+
+        std::size_t count = 0;
+        for (const auto &[hook_id, hook] : m_hooks)
+        {
+            if (toggle_hook_locked(hook_id, *hook, true, logs))
+            {
+                ++count;
+            }
+        }
+        return {count, std::move(logs)};
+    }();
+
+    // Emit after releasing the gate and hook lock (deferred logging) so a synchronous sink flush or a blocking async
+    // overflow never stalls an exclusive acquirer inside the critical section.
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
     }
     return enabled;
 }
@@ -1233,22 +1382,42 @@ std::size_t HookManager::disable_all_hooks()
         m_logger.warning("HookManager: Shutdown in progress. Cannot disable all hooks.");
         return 0;
     }
-
-    std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
-    std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-    if (m_shutdown_called.load(std::memory_order_acquire))
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
     {
-        m_logger.warning("HookManager: Shutdown in progress. Cannot disable all hooks.");
+        m_logger.error("HookManager: Reentrant disable_all_hooks() from within a with_*/try_with_* callback rejected; "
+                       "defer hook mutation until the callback returns.");
         return 0;
     }
 
-    std::size_t disabled = 0;
-    for (const auto &[hook_id, hook] : m_hooks)
+    auto [disabled, deferred_logs] = [&]() -> std::pair<std::size_t, std::vector<DeferredLogEntry>>
     {
-        if (toggle_hook_locked(hook_id, *hook, false))
+        std::vector<DeferredLogEntry> logs;
+        std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
+        std::shared_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
+        if (m_shutdown_called.load(std::memory_order_acquire))
         {
-            ++disabled;
+            logs.push_back({"HookManager: Shutdown in progress. Cannot disable all hooks.", LogLevel::Warning});
+            return {0, std::move(logs)};
         }
+
+        std::size_t count = 0;
+        for (const auto &[hook_id, hook] : m_hooks)
+        {
+            if (toggle_hook_locked(hook_id, *hook, false, logs))
+            {
+                ++count;
+            }
+        }
+        return {count, std::move(logs)};
+    }();
+
+    // Emit after releasing the gate and hook lock (deferred logging) so a synchronous sink flush or a blocking async
+    // overflow never stalls an exclusive acquirer inside the critical section.
+    for (const auto &entry : deferred_logs)
+    {
+        m_logger.log(entry.level, entry.msg);
     }
     return disabled;
 }
@@ -1304,6 +1473,15 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_v
     {
         m_logger.error("HookManager: Shutdown in progress. Cannot create VMT hook '{}'.", name);
         return std::unexpected(HookError::ShutdownInProgress);
+    }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.error("HookManager: Reentrant create_vmt_hook('{}') from within a with_*/try_with_* callback "
+                       "rejected; defer hook mutation until the callback returns.",
+                       name);
+        return std::unexpected(HookError::ReentrantCallRejected);
     }
 
     auto [result,
@@ -1448,6 +1626,15 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
         m_logger.warning("HookManager: Shutdown in progress. Cannot remove VMT hook '{}'.", vmt_name);
         return std::unexpected(HookError::ShutdownInProgress);
     }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant remove_vmt_hook('{}') from within a with_*/try_with_* callback "
+                         "rejected; defer hook mutation until the callback returns.",
+                         vmt_name);
+        return std::unexpected(HookError::ReentrantCallRejected);
+    }
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
     {
@@ -1488,6 +1675,15 @@ std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view v
     {
         m_logger.warning("HookManager: Shutdown in progress. Cannot remove VMT method on '{}'.", vmt_name);
         return std::unexpected(HookError::ShutdownInProgress);
+    }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant remove_vmt_method('{}') from within a with_*/try_with_* callback "
+                         "rejected; defer hook mutation until the callback returns.",
+                         vmt_name);
+        return std::unexpected(HookError::ReentrantCallRejected);
     }
 
     auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
@@ -1541,6 +1737,15 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object, const 
     if (object == nullptr)
     {
         m_logger.warning("HookManager: Cannot apply VMT hook '{}' to null object.", vmt_name);
+        return false;
+    }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant apply_vmt_hook('{}') from within a with_*/try_with_* callback "
+                         "rejected; defer hook mutation until the callback returns.",
+                         vmt_name);
         return false;
     }
 
@@ -1677,6 +1882,15 @@ bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object
         m_logger.warning("HookManager: Cannot remove VMT hook '{}' from null object.", vmt_name);
         return false;
     }
+    // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
+    // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning("HookManager: Reentrant remove_vmt_from_object('{}') from within a with_*/try_with_* callback "
+                         "rejected; defer hook mutation until the callback returns.",
+                         vmt_name);
+        return false;
+    }
 
     auto [result, deferred_logs] = [&]() -> std::pair<bool, std::vector<DeferredLogEntry>>
     {
@@ -1713,6 +1927,14 @@ bool HookManager::remove_vmt_from_object(std::string_view vmt_name, void *object
 
 void HookManager::remove_all_vmt_hooks()
 {
+    if (get_reentrancy_guard() > 0)
+    {
+        m_logger.warning(
+            "HookManager: Reentrant remove_all_vmt_hooks() from within a with_*/try_with_* callback rejected; defer "
+            "hook teardown until the callback returns.");
+        return;
+    }
+
     if (m_shutdown_called.load(std::memory_order_acquire))
         return;
 

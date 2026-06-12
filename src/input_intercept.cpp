@@ -582,8 +582,9 @@ namespace DetourModKit::detail
         // wndproc_detour reachable from the window's own message thread the instant it returns; if the predecessor were
         // stored only afterwards, a message dispatched in that gap would read a zero s_prev_wndproc and route to
         // DefWindowProcW instead of the game's real procedure. A top-level window always has a non-null WNDPROC, so a
-        // zero read here means the slot is not readable yet. install_wndproc runs only on the single poll thread, so no
-        // concurrent install can invalidate this predecessor between the read and the swap below.
+        // zero read here means the slot is not readable yet. install_wndproc runs only on the single poll thread, so
+        // DMK never races its own install here; a foreign subclasser that installs in the gap between this read and the
+        // swap is reconciled from SetWindowLongPtrW's returned predecessor below.
         const LONG_PTR current = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
         if (current == 0)
         {
@@ -602,6 +603,17 @@ namespace DetourModKit::detail
             s_hwnd.store(nullptr, std::memory_order_release);
             s_prev_wndproc.store(0, std::memory_order_release);
             return false;
+        }
+
+        // SetWindowLongPtrW returns the WNDPROC it actually displaced. If a foreign subclasser installed itself in the
+        // gap between our GetWindowLongPtrW read and this swap, that returned procedure -- not the predecessor we read
+        // and published -- is the real next link in the chain. Adopt and republish it so wndproc_detour forwards to the
+        // procedure that was on top at swap time, keeping the subclass chain intact rather than silently dropping the
+        // foreign subclasser. The release store pairs with the detour's acquire load of s_prev_wndproc. A genuine zero
+        // predecessor was already rejected as a failure above, so a non-zero mismatch is the only adoption case.
+        if (prev != 0 && prev != current)
+        {
+            s_prev_wndproc.store(prev, std::memory_order_release);
         }
         s_wndproc_installed.store(true, std::memory_order_release);
         return true;

@@ -2,8 +2,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <latch>
 #include <stop_token>
 #include <thread>
+#include <vector>
 
 #include "DetourModKit/worker.hpp"
 
@@ -160,4 +162,58 @@ TEST(StoppableWorker, NameAccessorReturnsConstructionName)
                           }
                       });
     EXPECT_EQ(w.name(), "unit-worker-named");
+}
+
+TEST(StoppableWorker, ConcurrentIsRunningAndRequestStopWithShutdown)
+{
+    // is_running() reads liveness from atomics, and request_stop() signals the copied stop_source instead of the
+    // std::jthread handle that shutdown() mutates via join()/detach(). Poll both from spawned threads while the main
+    // thread tears the worker down: the interleaving must stay race-free, and is_running() must report false once
+    // shutdown() completes.
+    std::atomic<bool> body_entered{false};
+    StoppableWorker w("unit-worker-race",
+                      [&body_entered](std::stop_token st)
+                      {
+                          body_entered.store(true, std::memory_order_release);
+                          while (!st.stop_requested())
+                          {
+                              std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                          }
+                      });
+
+    while (!body_entered.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    constexpr int poller_count = 3;
+    std::atomic<bool> poll_stop{false};
+    std::latch pollers_ready(poller_count);
+    std::vector<std::thread> pollers;
+    for (int i = 0; i < poller_count; ++i)
+    {
+        pollers.emplace_back(
+            [&w, &poll_stop, &pollers_ready]()
+            {
+                // Signal readiness, then keep polling so every poller is actively observing the worker while the main
+                // thread runs shutdown() (the race window this test guards).
+                pollers_ready.count_down();
+                while (!poll_stop.load(std::memory_order_acquire))
+                {
+                    (void)w.is_running();
+                    w.request_stop();
+                }
+            });
+    }
+
+    // Do not tear the worker down until all pollers have started, so the concurrency is actually exercised.
+    pollers_ready.wait();
+    w.shutdown();
+    EXPECT_FALSE(w.is_running());
+
+    poll_stop.store(true, std::memory_order_release);
+    for (auto &t : pollers)
+    {
+        t.join();
+    }
 }

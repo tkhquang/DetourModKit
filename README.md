@@ -918,7 +918,7 @@ void ShutdownMyMod()
     DMKLogger::get_instance().info("MyMod Shutting Down...");
     // DMK_Shutdown() is invoked automatically by on_dll_detach() after this
     // function returns, in the correct order:
-    //   InputManager -> HookManager -> Memory cache -> Config -> Logger
+    //   Config auto-reload watcher -> InputManager -> HookManager -> Memory cache -> Config registry -> Logger
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)

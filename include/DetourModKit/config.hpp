@@ -461,7 +461,9 @@ namespace DetourModKit
 
         /**
          * @brief Clears all currently registered configuration items.
-         * @details Useful if the configuration system needs to be reset without restarting the application.
+         * @details Useful if the configuration system needs to be reset without restarting the application. This does
+         *          NOT stop the auto-reload watcher; call disable_auto_reload() first (DMK_Shutdown() already does so
+         *          in the correct order) so a watcher callback cannot fire against state torn down afterwards.
          */
         void clear_registered_items();
 

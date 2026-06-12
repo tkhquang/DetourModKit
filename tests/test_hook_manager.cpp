@@ -557,6 +557,116 @@ TEST_F(HookManagerTest, RealInlineHook_WithCallback)
     EXPECT_TRUE(callback_called);
 }
 
+TEST_F(HookManagerTest, Reentrancy_MutatorsFromCallbackFailClosed)
+{
+    void *tramp_a = nullptr;
+    void *tramp_b = nullptr;
+    ASSERT_TRUE(m_hook_manager
+                    ->create_inline_hook("ReentryHookA", reinterpret_cast<uintptr_t>(&real_hook_target_add),
+                                         reinterpret_cast<void *>(&real_hook_detour_add), &tramp_a)
+                    .has_value());
+    ASSERT_TRUE(m_hook_manager
+                    ->create_inline_hook("ReentryHookB", reinterpret_cast<uintptr_t>(&real_hook_target_mul),
+                                         reinterpret_cast<void *>(&real_hook_detour_mul), &tramp_b)
+                    .has_value());
+
+    // Every mutator invoked from inside a with_* callback (which holds m_hooks_mutex shared and the reentrancy guard)
+    // must fail closed instead of re-acquiring the non-recursive lock and deadlocking.
+    const auto ran = m_hook_manager->with_inline_hook(
+        "ReentryHookA",
+        [&](InlineHook &) -> bool
+        {
+            // Single-hook toggles re-acquire shared.
+            const auto en = m_hook_manager->enable_hook("ReentryHookB");
+            EXPECT_FALSE(en.has_value());
+            EXPECT_EQ(en.error(), HookError::ReentrantCallRejected);
+
+            const auto dis = m_hook_manager->disable_hook("ReentryHookB");
+            EXPECT_FALSE(dis.has_value());
+            EXPECT_EQ(dis.error(), HookError::ReentrantCallRejected);
+
+            // Creators acquire exclusive; the trampoline out-param must be nulled on the rejected path.
+            void *tramp_c = reinterpret_cast<void *>(static_cast<uintptr_t>(0xDEAD));
+            const auto created =
+                m_hook_manager->create_inline_hook("ReentryHookC", reinterpret_cast<uintptr_t>(&real_hook_target_add),
+                                                   reinterpret_cast<void *>(&real_hook_detour_add), &tramp_c);
+            EXPECT_FALSE(created.has_value());
+            EXPECT_EQ(created.error(), HookError::ReentrantCallRejected);
+            EXPECT_EQ(tramp_c, nullptr);
+
+            void *tramp_d = reinterpret_cast<void *>(static_cast<uintptr_t>(0xBEEF));
+            const auto aob_created = m_hook_manager->create_inline_hook_aob(
+                "ReentryAob", 0, 0, "ZZ", 0, reinterpret_cast<void *>(&real_hook_detour_add), &tramp_d);
+            EXPECT_FALSE(aob_created.has_value());
+            EXPECT_EQ(aob_created.error(), HookError::ReentrantCallRejected);
+            EXPECT_EQ(tramp_d, nullptr);
+
+            const auto mid = m_hook_manager->create_mid_hook(
+                "ReentryMid", reinterpret_cast<uintptr_t>(&real_hook_target_add), [](safetyhook::Context &) {});
+            EXPECT_FALSE(mid.has_value());
+            EXPECT_EQ(mid.error(), HookError::ReentrantCallRejected);
+
+            const auto mid_aob =
+                m_hook_manager->create_mid_hook_aob("ReentryMidAob", 0, 0, "ZZ", 0, [](safetyhook::Context &) {});
+            EXPECT_FALSE(mid_aob.has_value());
+            EXPECT_EQ(mid_aob.error(), HookError::ReentrantCallRejected);
+
+            int dummy_object = 0;
+            const auto vmt = m_hook_manager->create_vmt_hook("ReentryVmt", &dummy_object);
+            EXPECT_FALSE(vmt.has_value());
+            EXPECT_EQ(vmt.error(), HookError::ReentrantCallRejected);
+
+            const auto method = m_hook_manager->hook_vmt_method("ReentryVmt", 0, &real_hook_detour_add);
+            EXPECT_FALSE(method.has_value());
+            EXPECT_EQ(method.error(), HookError::ReentrantCallRejected);
+
+            // Removers acquire exclusive.
+            const auto removed = m_hook_manager->remove_hook("ReentryHookB");
+            EXPECT_FALSE(removed.has_value());
+            EXPECT_EQ(removed.error(), HookError::ReentrantCallRejected);
+
+            const auto removed_vmt = m_hook_manager->remove_vmt_hook("ReentryVmt");
+            EXPECT_FALSE(removed_vmt.has_value());
+            EXPECT_EQ(removed_vmt.error(), HookError::ReentrantCallRejected);
+
+            const auto removed_method = m_hook_manager->remove_vmt_method("ReentryVmt", 0);
+            EXPECT_FALSE(removed_method.has_value());
+            EXPECT_EQ(removed_method.error(), HookError::ReentrantCallRejected);
+
+            EXPECT_FALSE(m_hook_manager->apply_vmt_hook("ReentryVmt", &dummy_object));
+            EXPECT_FALSE(m_hook_manager->remove_vmt_from_object("ReentryVmt", &dummy_object));
+
+            // Batch toggles report zero work done.
+            const std::vector<std::string_view> ids{"ReentryHookB"};
+            EXPECT_EQ(m_hook_manager->enable_hooks(ids), 0u);
+            EXPECT_EQ(m_hook_manager->disable_hooks(ids), 0u);
+            EXPECT_EQ(m_hook_manager->enable_all_hooks(), 0u);
+            EXPECT_EQ(m_hook_manager->disable_all_hooks(), 0u);
+
+            // Bulk teardown has no return value, but it must also no-op under the guard rather than trying to lock the
+            // registry while this callback already holds it shared.
+            m_hook_manager->remove_all_vmt_hooks();
+            m_hook_manager->remove_all_hooks();
+            m_hook_manager->shutdown();
+            return true;
+        });
+
+    EXPECT_TRUE(ran.has_value());
+
+    // The rejected mutations had no effect: both hooks are untouched and the never-created ones are absent.
+    EXPECT_EQ(*m_hook_manager->get_hook_status("ReentryHookA"), HookStatus::Active);
+    EXPECT_EQ(*m_hook_manager->get_hook_status("ReentryHookB"), HookStatus::Active);
+    EXPECT_FALSE(m_hook_manager->get_hook_status("ReentryHookC").has_value());
+    EXPECT_FALSE(m_hook_manager->get_hook_status("ReentryMid").has_value());
+    EXPECT_TRUE(m_hook_manager->get_vmt_hook_names().empty());
+
+    // Outside the callback the guard is back to zero, so the same mutators work normally.
+    EXPECT_TRUE(m_hook_manager->disable_hook("ReentryHookB").has_value());
+    EXPECT_EQ(*m_hook_manager->get_hook_status("ReentryHookB"), HookStatus::Disabled);
+    const std::vector<std::string_view> reenable{"ReentryHookB"};
+    EXPECT_EQ(m_hook_manager->enable_hooks(reenable), 1u);
+}
+
 TEST_F(HookManagerTest, RealInlineHook_RemoveAll)
 {
     void *tramp1 = nullptr, *tramp2 = nullptr;

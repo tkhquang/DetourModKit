@@ -232,6 +232,14 @@ namespace DetourModKit::Bootstrap
             return FALSE;
         }
 
+        // Re-arm the detach gate now that a fresh attach has fully succeeded, so the matching on_dll_detach runs its
+        // teardown instead of no-opping. Without this reset s_detach_called stays true after the first detach and a
+        // second attach/detach cycle would leak the worker thread, shutdown event, and instance mutex (the header
+        // contract promises a subsequent attach starts from a clean slate). Reset only on the success path: early
+        // failures above never set the gate, so they must not clear it either. Release pairs with the acquire in
+        // on_dll_detach's compare_exchange. Both run serialized under the loader lock.
+        s_detach_called.store(false, std::memory_order_release);
+
         return TRUE;
     }
 
@@ -402,6 +410,13 @@ namespace DetourModKit::Bootstrap
         // .text segment; once the loader unmaps that segment, every surviving entry becomes a use-after-unload hazard.
         // The next attach's replace_or_append destroys the stale slot before installing the fresh one, which would
         // invoke the old setter's destructor against freed pages.
+        //
+        // Stop the auto-reload watcher before wiping the registry: its worker can fire reload() (running the registered
+        // setters) at any time, and both the user on_reload callback and those setters live in the unloading Logic DLL.
+        // A survivor would call into unmapped pages after the DLL goes away, and would make the next attach's
+        // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
+        // no-op when no watcher is running.
+        Config::disable_auto_reload();
         try
         {
             Config::clear_registered_items();
@@ -502,6 +517,13 @@ namespace DetourModKit::Bootstrap
         // The registered std::function setters' call operators, vtables,
         // and destructors live in the unloading Logic DLL's .text;
         // every surviving entry becomes a use-after-unload hazard the moment the loader reclaims those pages.
+        //
+        // Stop the auto-reload watcher before wiping the registry: its worker can fire reload() (running the registered
+        // setters) at any time, and both the user on_reload callback and those setters live in the unloading Logic DLL.
+        // A survivor would call into unmapped pages after the DLL goes away, and would make the next attach's
+        // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
+        // no-op when no watcher is running.
+        Config::disable_auto_reload();
         try
         {
             Config::clear_registered_items();
