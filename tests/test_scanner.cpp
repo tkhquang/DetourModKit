@@ -4,11 +4,14 @@
 #include <cstring>
 #include <memory>
 #include <span>
+#include <stop_token>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/memory.hpp"
+#include "scanner_internal.hpp"
 
 // windows.h included after project headers to avoid macro conflicts (e.g., 'small')
 #include <windows.h>
@@ -3368,3 +3371,60 @@ TEST(ScannerHostModuleCascade, EmptyCandidatesReturnsEmptyCandidates)
     ASSERT_FALSE(fallback.has_value());
     EXPECT_EQ(fallback.error(), Scanner::ResolveError::EmptyCandidates);
 }
+
+#ifdef _MSC_VER
+// The per-region VirtualQuery gate in scan_regions_filtered proves a region readable only at gate time.
+// scan_region_guarded backstops a concurrent decommit / reprotect that races the unguarded find_pattern_raw reads:
+// without the __try, the faulting read would terminate the process. This test sweeps a committed range repeatedly
+// (through the module-scoped readable entry point, which routes through scan_regions_filtered) while a second thread
+// decommits and recommits an interior page. A pre-race positive control proves the refactored scan body still finds a
+// planted needle; the loop then asserts the sweep survives every iteration (a crash is the regression) and never
+// reports a false match for an absent needle. A run where the decommit never lands inside the read window is a valid
+// pass for the fault path; the __except / skip-the-region mechanism is pinned deterministically by
+// MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. MSVC-only: MinGW has no
+// structured exception handling, so the race can still fault there until the VEH-based handler lands.
+TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
+    const SIZE_T pages = 16;
+    const SIZE_T size = page * pages;
+
+    VirtualPagePtr allocation(static_cast<std::uint8_t *>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS)));
+    ASSERT_NE(allocation.get(), nullptr);
+    auto *base = allocation.get();
+    ASSERT_NE(VirtualAlloc(base, size, MEM_COMMIT, PAGE_READWRITE), nullptr);
+    std::memset(base, 0xAB, size); // 0xAB never matches the needle below; a fresh-recommitted page reads as 0x00
+
+    auto pattern = Scanner::parse_aob("DE AD BE EF CA FE");
+    ASSERT_TRUE(pattern.has_value());
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
+                                    reinterpret_cast<std::uintptr_t>(base) + size};
+
+    // Positive control: the refactored scan body still finds a planted needle at the right address.
+    const std::uint8_t needle[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE};
+    std::memcpy(base + 0x123, needle, sizeof(needle));
+    const std::byte *found = Scanner::detail::scan_module_readable(*pattern, range, 1);
+    ASSERT_EQ(found, reinterpret_cast<const std::byte *>(base + 0x123));
+    std::memset(base + 0x123, 0xAB, sizeof(needle)); // remove it so the race loop expects nullptr
+
+    const std::uintptr_t middle = reinterpret_cast<std::uintptr_t>(base) + (pages / 2) * page;
+    std::jthread toggler(
+        [middle, page](std::stop_token stop_token)
+        {
+            while (!stop_token.stop_requested())
+            {
+                VirtualFree(reinterpret_cast<void *>(middle), page, MEM_DECOMMIT);
+                VirtualAlloc(reinterpret_cast<void *>(middle), page, MEM_COMMIT, PAGE_READWRITE);
+            }
+        });
+
+    for (int i = 0; i < 5000; ++i)
+    {
+        const std::byte *hit = Scanner::detail::scan_module_readable(*pattern, range, 1);
+        EXPECT_EQ(hit, nullptr);
+    }
+}
+#endif // _MSC_VER

@@ -3,6 +3,9 @@
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <memory>
+#include <stop_token>
+#include <thread>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -14,6 +17,19 @@ using namespace DetourModKit;
 
 namespace
 {
+    struct VirtualFreeDeleter
+    {
+        void operator()(std::uint8_t *ptr) const noexcept
+        {
+            if (ptr != nullptr)
+            {
+                VirtualFree(ptr, 0, MEM_RELEASE);
+            }
+        }
+    };
+
+    using VirtualPagePtr = std::unique_ptr<std::uint8_t, VirtualFreeDeleter>;
+
     // A committed RWX page used as a synthetic module image. find_string_xref scans readable pages for the string
     // (phase 1) and execute-readable pages for the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both masks, so
     // a single page hosts the whole fixture and the ModuleRange spans exactly it. The page is zero-filled by
@@ -744,3 +760,78 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
         EXPECT_FALSE(Scanner::string_xref_error_to_string(error).empty());
     }
 }
+
+#ifdef _MSC_VER
+// Mirror of the scanner region guard for the string-xref window scans. find_string_xref reads each
+// execute-readable window returned by collect_executable_windows with unguarded byte reads (narrow shape scan) and
+// Zydis decoding (broad scan); scan_window_narrow_guarded / scan_window_broad_guarded backstop a concurrent decommit /
+// reprotect that the per-window VirtualQuery gate cannot close. This test resolves a planted anchor in the first
+// executable window while a second thread decommits and recommits a separate trailing executable window. Every
+// iteration must still resolve to the stable site: a faulted trailing window is skipped, and any references collected
+// before a swallowed fault are discarded by the guarded wrappers. A run where the decommit never lands inside the read
+// window is a valid pass for the fault path; the __except / skip-the-window mechanism is pinned deterministically by
+// MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. MSVC-only for the same
+// reason as the scanner guard test.
+TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
+    const SIZE_T pages = 8;
+    const SIZE_T size = page * pages;
+
+    VirtualPagePtr allocation(static_cast<std::uint8_t *>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS)));
+    ASSERT_NE(allocation.get(), nullptr);
+    auto *base = allocation.get();
+    auto *trailing_window = base + (pages - 2) * page;
+    ASSERT_NE(VirtualAlloc(base, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
+    ASSERT_NE(VirtualAlloc(trailing_window, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
+    std::memset(base, 0xCC, page); // INT3 fill: never a RIP-relative string load, never part of the anchor text
+    std::memset(trailing_window, 0xCC, page);
+
+    // A unique anchor in the first page plus a single lea referencing it, so a fault-free resolve has a defined answer.
+    const char anchor[] = "GuardedStringAnchor";
+    std::memcpy(base + 0x40, anchor, sizeof(anchor));
+    std::uint8_t *insn = base + 0x100;
+    insn[0] = 0x48; // REX.W
+    insn[1] = 0x8D; // lea
+    insn[2] = 0x05; // ModRM: RIP-relative
+    const auto next = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(insn) + 7);
+    const auto target = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(base + 0x40));
+    const auto disp = static_cast<std::int32_t>(target - next);
+    std::memcpy(insn + 3, &disp, sizeof(disp));
+    const std::uintptr_t reference_site = reinterpret_cast<std::uintptr_t>(insn);
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
+                                    reinterpret_cast<std::uintptr_t>(base) + size};
+
+    Scanner::StringRefQuery query = utf8_query("GuardedStringAnchor");
+    query.broad_match = true; // exercise both the narrow and the broad guarded window scans
+
+    // Positive control with no contention: the guarded window scans resolve the planted reference to its site.
+    const auto control = Scanner::find_string_xref(query, range);
+    ASSERT_TRUE(control.has_value());
+    EXPECT_EQ(*control, reference_site);
+
+    const std::uintptr_t decommit_page = reinterpret_cast<std::uintptr_t>(trailing_window);
+    std::jthread toggler(
+        [decommit_page, page](std::stop_token stop_token)
+        {
+            while (!stop_token.stop_requested())
+            {
+                VirtualFree(reinterpret_cast<void *>(decommit_page), page, MEM_DECOMMIT);
+                VirtualAlloc(reinterpret_cast<void *>(decommit_page), page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+            }
+        });
+
+    // The toggler races every iteration; a few hundred resolves give the decommit ample chance to land mid-scan while
+    // keeping the broad Zydis sweep's per-iteration cost bounded. Page 0 (anchor + reference) is never decommitted, so
+    // a correct resolve always returns reference_site even when a trailing window faults and is skipped.
+    for (int i = 0; i < 600; ++i)
+    {
+        const auto result = Scanner::find_string_xref(query, range);
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(*result, reference_site);
+    }
+}
+#endif // _MSC_VER

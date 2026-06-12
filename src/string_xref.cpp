@@ -17,8 +17,11 @@
 
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/logger.hpp"
 #include "scanner_internal.hpp"
+#include "memory_internal.hpp"
 
+#include <windows.h>
 #include <Zydis/Zydis.h>
 
 #include <cstddef>
@@ -103,6 +106,94 @@ namespace DetourModKit
             return Scanner::parse_aob(aob);
         }
 
+        // Best-effort diagnosis for executable windows skipped because they faulted mid-scan. A module image is rarely
+        // decommitted under a live resolve, but collect_executable_windows only proves readability at gate time, so the
+        // window scans below guard their reads and a faulted window is skipped, not fatal. try_log is level-gated and
+        // no-throw.
+        void log_faulted_windows(std::size_t faulted_windows) noexcept
+        {
+            if (faulted_windows == 0)
+            {
+                return;
+            }
+            (void)Logger::get_instance().try_log(
+                LogLevel::Debug,
+                "Scanner::find_string_xref: skipped {} executable window(s) that faulted mid-scan (concurrent "
+                "decommit/reprotect).",
+                faulted_windows);
+        }
+
+        // Inner narrow scan of one already-gated executable window (no fault guard). Mutates found_count / first_site,
+        // returning once a second referencing site is seen (found_count == 2) so the caller fails closed on ambiguity.
+        // The recognized instruction shape is documented on scan_string_ref_narrow.
+        void scan_window_narrow_body(const Scanner::detail::ExecutableWindow &window, std::uintptr_t string_addr,
+                                     std::size_t instr_len, std::size_t &found_count,
+                                     std::uintptr_t &first_site) noexcept
+        {
+            const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
+            for (std::size_t i = 0; i + instr_len <= window.span; ++i)
+            {
+                const std::uint8_t rex = bytes[i];
+                const std::uint8_t opcode = bytes[i + 1];
+                const std::uint8_t modrm = bytes[i + 2];
+                if (rex < 0x48 || rex > 0x4F || (opcode != 0x8D && opcode != 0x8B) || (modrm & 0xC7) != 0x05)
+                {
+                    continue;
+                }
+                std::int32_t disp = 0;
+                std::memcpy(&disp, &bytes[i + 3], sizeof(disp));
+                const std::uintptr_t instr_addr = window.base + i;
+                const std::uintptr_t target =
+                    instr_addr + instr_len + static_cast<std::uintptr_t>(static_cast<std::int64_t>(disp));
+                if (target != string_addr)
+                {
+                    continue;
+                }
+                ++found_count;
+                if (found_count == 1)
+                {
+                    first_site = instr_addr;
+                }
+                else
+                {
+                    // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                    return;
+                }
+            }
+        }
+
+        // Window-granular TOCTOU fault guard around scan_window_narrow_body. collect_executable_windows gated each
+        // window with one VirtualQuery; a concurrent decommit / reprotect before these unguarded byte reads complete
+        // would otherwise fault the host. On MSVC the body runs inside a __try / __except that swallows exactly the
+        // foreign-read faults (Memory::detail::is_guarded_read_fault) and reports the window faulted so the sweep skips
+        // it; MinGW has no structured exception handling and runs the body directly (the VirtualQuery gate is the only
+        // guard available there). Mirrors scan_region_guarded in scanner.cpp. Returns true when a fault was swallowed.
+        bool scan_window_narrow_guarded(const Scanner::detail::ExecutableWindow &window, std::uintptr_t string_addr,
+                                        std::size_t instr_len, std::size_t &found_count,
+                                        std::uintptr_t &first_site) noexcept
+        {
+#ifdef _MSC_VER
+            const std::size_t original_found_count = found_count;
+            const std::uintptr_t original_first_site = first_site;
+            __try
+            {
+                scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site);
+                return false;
+            }
+            __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                                : EXCEPTION_CONTINUE_SEARCH)
+            {
+                // The caller skips faulted windows, so discard any reference count collected before the fault.
+                found_count = original_found_count;
+                first_site = original_first_site;
+                return true;
+            }
+#else
+            scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site);
+            return false;
+#endif
+        }
+
         // Phase 2 (default, "narrow") of find_string_xref: scan the image's execute-readable windows for the dominant
         // 64-bit string-load forms whose resolved absolute target is string_addr.
         //
@@ -125,6 +216,7 @@ namespace DetourModKit
             std::uintptr_t first_site = 0;
             // REX.W + opcode + ModRM + disp32.
             constexpr std::size_t instr_len = 7;
+            std::size_t faulted_windows = 0;
 
             for (const auto &window : Scanner::detail::collect_executable_windows(range))
             {
@@ -132,25 +224,68 @@ namespace DetourModKit
                 {
                     continue;
                 }
-                const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
-                for (std::size_t i = 0; i + instr_len <= window.span; ++i)
+                if (scan_window_narrow_guarded(window, string_addr, instr_len, found_count, first_site))
                 {
-                    const std::uint8_t rex = bytes[i];
-                    const std::uint8_t opcode = bytes[i + 1];
-                    const std::uint8_t modrm = bytes[i + 2];
-                    if (rex < 0x48 || rex > 0x4F || (opcode != 0x8D && opcode != 0x8B) || (modrm & 0xC7) != 0x05)
+                    ++faulted_windows;
+                    continue;
+                }
+                if (found_count >= 2)
+                {
+                    // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                    log_faulted_windows(faulted_windows);
+                    return 0;
+                }
+            }
+            log_faulted_windows(faulted_windows);
+            return (found_count == 1) ? first_site : 0;
+        }
+
+        // Inner broad scan of one already-gated executable window (no fault guard). Decodes each position with Zydis,
+        // counting RIP-relative operands whose absolute target equals string_addr; mutates found_count / first_site and
+        // returns once a second referencing site is seen. The decode/recovery contract is documented on
+        // scan_string_ref_broad.
+        void scan_window_broad_body(const ZydisDecoder &decoder, const Scanner::detail::ExecutableWindow &window,
+                                    std::uintptr_t string_addr, std::size_t &found_count,
+                                    std::uintptr_t &first_site) noexcept
+        {
+            const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
+            std::size_t offset = 0;
+            while (offset < window.span)
+            {
+                ZydisDecodedInstruction insn;
+                ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+                const std::uintptr_t instr_addr = window.base + offset;
+                if (!ZYAN_SUCCESS(
+                        ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)))
+                {
+                    // Byte-restart recovery: realign past data / jump tables.
+                    ++offset;
+                    continue;
+                }
+
+                // A referencing instruction has a visible memory operand based on
+                // RIP whose absolute target is the string. Visible operands are ordered first in the array, so
+                // iterating the visible count covers every explicit operand a disassembler would show.
+                bool references_string = false;
+                for (std::size_t op = 0; op < insn.operand_count_visible; ++op)
+                {
+                    const ZydisDecodedOperand &operand = operands[op];
+                    if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || operand.mem.base != ZYDIS_REGISTER_RIP)
                     {
                         continue;
                     }
-                    std::int32_t disp = 0;
-                    std::memcpy(&disp, &bytes[i + 3], sizeof(disp));
-                    const std::uintptr_t instr_addr = window.base + i;
-                    const std::uintptr_t target =
-                        instr_addr + instr_len + static_cast<std::uintptr_t>(static_cast<std::int64_t>(disp));
-                    if (target != string_addr)
+                    ZyanU64 absolute = 0;
+                    if (ZYAN_SUCCESS(
+                            ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(instr_addr), &absolute)) &&
+                        static_cast<std::uintptr_t>(absolute) == string_addr)
                     {
-                        continue;
+                        references_string = true;
+                        break;
                     }
+                }
+
+                if (references_string)
+                {
                     ++found_count;
                     if (found_count == 1)
                     {
@@ -159,11 +294,40 @@ namespace DetourModKit
                     else
                     {
                         // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
-                        return 0;
+                        return;
                     }
                 }
+
+                offset += insn.length;
             }
-            return (found_count == 1) ? first_site : 0;
+        }
+
+        // Window-granular TOCTOU fault guard around scan_window_broad_body; the narrow sibling
+        // scan_window_narrow_guarded documents the rationale. Returns true when a fault was swallowed.
+        bool scan_window_broad_guarded(const ZydisDecoder &decoder, const Scanner::detail::ExecutableWindow &window,
+                                       std::uintptr_t string_addr, std::size_t &found_count,
+                                       std::uintptr_t &first_site) noexcept
+        {
+#ifdef _MSC_VER
+            const std::size_t original_found_count = found_count;
+            const std::uintptr_t original_first_site = first_site;
+            __try
+            {
+                scan_window_broad_body(decoder, window, string_addr, found_count, first_site);
+                return false;
+            }
+            __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                                : EXCEPTION_CONTINUE_SEARCH)
+            {
+                // The caller skips faulted windows, so discard any reference count collected before the fault.
+                found_count = original_found_count;
+                first_site = original_first_site;
+                return true;
+            }
+#else
+            scan_window_broad_body(decoder, window, string_addr, found_count, first_site);
+            return false;
+#endif
         }
 
         // Phase 2 ("broad") add-on for find_string_xref: a Zydis-verified linear sweep that recognizes the rarer
@@ -197,61 +361,22 @@ namespace DetourModKit
                 return 0;
             }
 
+            std::size_t faulted_windows = 0;
             for (const auto &window : Scanner::detail::collect_executable_windows(range))
             {
-                const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
-                std::size_t offset = 0;
-                while (offset < window.span)
+                if (scan_window_broad_guarded(decoder, window, string_addr, found_count, first_site))
                 {
-                    ZydisDecodedInstruction insn;
-                    ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
-                    const std::uintptr_t instr_addr = window.base + offset;
-                    if (!ZYAN_SUCCESS(
-                            ZydisDecoderDecodeFull(&decoder, bytes + offset, window.span - offset, &insn, operands)))
-                    {
-                        // Byte-restart recovery: realign past data / jump tables.
-                        ++offset;
-                        continue;
-                    }
-
-                    // A referencing instruction has a visible memory operand based on
-                    // RIP whose absolute target is the string. Visible operands are ordered first in the array, so
-                    // iterating the visible count covers every explicit operand a disassembler would show.
-                    bool references_string = false;
-                    for (std::size_t op = 0; op < insn.operand_count_visible; ++op)
-                    {
-                        const ZydisDecodedOperand &operand = operands[op];
-                        if (operand.type != ZYDIS_OPERAND_TYPE_MEMORY || operand.mem.base != ZYDIS_REGISTER_RIP)
-                        {
-                            continue;
-                        }
-                        ZyanU64 absolute = 0;
-                        if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &operand, static_cast<ZyanU64>(instr_addr),
-                                                                  &absolute)) &&
-                            static_cast<std::uintptr_t>(absolute) == string_addr)
-                        {
-                            references_string = true;
-                            break;
-                        }
-                    }
-
-                    if (references_string)
-                    {
-                        ++found_count;
-                        if (found_count == 1)
-                        {
-                            first_site = instr_addr;
-                        }
-                        else
-                        {
-                            // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
-                            return 0;
-                        }
-                    }
-
-                    offset += insn.length;
+                    ++faulted_windows;
+                    continue;
+                }
+                if (found_count >= 2)
+                {
+                    // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                    log_faulted_windows(faulted_windows);
+                    return 0;
                 }
             }
+            log_faulted_windows(faulted_windows);
             return (found_count == 1) ? first_site : 0;
         }
 

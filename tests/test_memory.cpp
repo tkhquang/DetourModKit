@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include "DetourModKit/memory.hpp"
+#include "memory_internal.hpp"
 
 using namespace DetourModKit;
 
@@ -2109,4 +2110,76 @@ TEST_F(MemoryTest, ModuleRangeFor_KernelModuleResolves)
     ASSERT_TRUE(range.has_value());
     EXPECT_TRUE(range->valid());
     EXPECT_EQ(range->base, reinterpret_cast<uintptr_t>(kernel));
+}
+
+// Every SEH-guarded foreign read must swallow EXCEPTION_IN_PAGE_ERROR (a file-backed page failing to page in) alongside
+// the access-violation and guard-page faults, or the fault continues the handler search and terminates the host. The
+// four __except filters in memory.cpp and the region/window guards in scanner.cpp / string_xref.cpp share this single
+// predicate, so pinning it pins all of them.
+TEST(MemoryGuardedReadFault, AcceptsForeignReadFaultsAndRejectsOthers)
+{
+    using Memory::detail::is_guarded_read_fault;
+
+    // The three codes a guarded probe owns. Spelled via the Windows macros here to prove the predicate's literals match
+    // the platform values.
+    static_assert(is_guarded_read_fault(static_cast<unsigned long>(EXCEPTION_ACCESS_VIOLATION)));
+    static_assert(is_guarded_read_fault(static_cast<unsigned long>(STATUS_GUARD_PAGE_VIOLATION)));
+    static_assert(is_guarded_read_fault(static_cast<unsigned long>(EXCEPTION_IN_PAGE_ERROR)));
+
+    EXPECT_TRUE(is_guarded_read_fault(0xC0000005ul)); // EXCEPTION_ACCESS_VIOLATION
+    EXPECT_TRUE(is_guarded_read_fault(0x80000001ul)); // STATUS_GUARD_PAGE_VIOLATION
+    EXPECT_TRUE(is_guarded_read_fault(0xC0000006ul)); // EXCEPTION_IN_PAGE_ERROR
+
+    // Codes that did not originate from the probe's own read must continue the search.
+    EXPECT_FALSE(is_guarded_read_fault(0ul));
+    EXPECT_FALSE(is_guarded_read_fault(static_cast<unsigned long>(EXCEPTION_BREAKPOINT)));          // 0x80000003
+    EXPECT_FALSE(is_guarded_read_fault(static_cast<unsigned long>(EXCEPTION_ILLEGAL_INSTRUCTION))); // 0xC000001D
+    EXPECT_FALSE(is_guarded_read_fault(static_cast<unsigned long>(EXCEPTION_STACK_OVERFLOW)));      // 0xC00000FD
+    EXPECT_FALSE(is_guarded_read_fault(static_cast<unsigned long>(EXCEPTION_INT_DIVIDE_BY_ZERO)));  // 0xC0000094
+}
+
+// read_ptr_unsafe reads through std::memcpy rather than a *reinterpret_cast deref, so a misaligned foreign pointer is
+// read without invoking the undefined behavior of dereferencing a misaligned pointer. A pointer-sized value planted at
+// an odd offset must round-trip exactly.
+TEST_F(MemoryTest, ReadPtrUnsafeReadsMisalignedPointer)
+{
+    void *region = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(region, nullptr);
+
+    auto *base = static_cast<std::uint8_t *>(region);
+    constexpr std::uintptr_t kSentinel = 0xDEADBEEFCAFEF00Dull;
+    constexpr ptrdiff_t kMisalignedOffset = 1; // deliberately not a multiple of alignof(uintptr_t)
+    std::memcpy(base + kMisalignedOffset, &kSentinel, sizeof(kSentinel));
+
+    const std::uintptr_t value = Memory::read_ptr_unsafe(reinterpret_cast<std::uintptr_t>(base), kMisalignedOffset);
+    EXPECT_EQ(value, kSentinel);
+
+    // An unmapped low address still fails closed to 0 (the fault is swallowed, not propagated).
+    EXPECT_EQ(Memory::read_ptr_unsafe(0, 0), 0u);
+
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
+// is_readable / is_writable must fall back to a direct VirtualQuery whenever the cache reports zero shards. The
+// externally reachable zero-shard state is "cache not initialized"; the same code path also serves the brief init
+// publication window where s_cache_initialized is true but s_shard_count is still 0. Returning false there would
+// wrongly report a readable region as non-readable, so the fallback must produce correct answers without the cache.
+TEST(MemoryUninitializedCache, PermissionChecksFallBackToDirectQuery)
+{
+    // Force the zero-shard state regardless of prior tests' cache lifecycle.
+    Memory::shutdown_cache();
+
+    void *region = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(region, nullptr);
+
+    EXPECT_TRUE(Memory::is_readable(region, 64));
+    EXPECT_TRUE(Memory::is_writable(region, 64));
+
+    DWORD old_protect = 0;
+    ASSERT_NE(VirtualProtect(region, 4096, PAGE_NOACCESS, &old_protect), 0);
+    EXPECT_FALSE(Memory::is_readable(region, 64));
+    EXPECT_FALSE(Memory::is_writable(region, 64));
+
+    VirtualProtect(region, 4096, old_protect, &old_protect);
+    VirtualFree(region, 0, MEM_RELEASE);
 }
