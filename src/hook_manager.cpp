@@ -193,15 +193,12 @@ HookManager::~HookManager() noexcept
 
     {
         std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
-        for (auto &[name, hook] : m_hooks)
-        {
-            (void)hook->disable();
-        }
+        disable_hooks_reverse_order_locked();
     }
 
     std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
     clear_vmt_hooks_locked();
-    m_hooks.clear();
+    clear_hooks_locked();
 }
 
 void HookManager::shutdown()
@@ -221,15 +218,12 @@ void HookManager::shutdown()
     // the caller must quiesce the hooked function during teardown to close the residual window.
     {
         std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
-        for (auto &[name, hook] : m_hooks)
-        {
-            (void)hook->disable();
-        }
+        disable_hooks_reverse_order_locked();
     }
     {
         std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
         clear_vmt_hooks_locked();
-        m_hooks.clear();
+        clear_hooks_locked();
 
         // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
         // immediately see it as false (accepted) before the map is fully cleared.
@@ -353,16 +347,42 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(std::strin
                     {{std::format("HookManager: A hook with the name '{}' already exists.", name), LogLevel::Error}}};
         }
 
-        const auto prehook = detect_existing_inline_hook(target_address);
-        if (prehook.state == PrehookState::HookedByOtherModule && config.fail_if_already_hooked)
+        // Self-registry pre-flight: does this HookManager already patch this exact address? Layering a second managed
+        // hook onto one target is the use-after-free-on-teardown hazard -- SafetyHook saves the live prologue (a jump
+        // to the first detour) as the second hook's "original" bytes, so the two must unwind newest-first or the entry
+        // is left jumping into a freed trampoline (see disable_hooks_reverse_order_locked). The registry check is
+        // exact, unlike the prologue-byte heuristic below which cannot tell our own patch from a foreign module's.
+        // Refuse under strict mode; otherwise record which managed hook is being layered on for the deferred warning.
+        std::string layered_on_managed_hook;
+        if (const std::string *self_owner = find_hook_owner_of_target_locked(target_address))
         {
-            return {
-                std::unexpected(HookError::TargetAlreadyHookedInProcess),
-                {{std::format("HookManager: Target {} for inline hook '{}' is already inline-hooked by another module "
+            if (config.fail_if_already_hooked)
+            {
+                return {std::unexpected(HookError::TargetAlreadyHookedInProcess),
+                        {{std::format("HookManager: Target {} for inline hook '{}' is already hooked by managed hook "
+                                      "'{}'. Aborting under strict mode.",
+                                      DetourModKit::Format::format_address(target_address), name, *self_owner),
+                          LogLevel::Error}}};
+            }
+            layered_on_managed_hook = *self_owner;
+        }
+
+        // Foreign-module pre-flight: only meaningful when this manager does not already own a hook here. When it does,
+        // the prologue jump is our own patch (handled above) and decoding it would misreport it as another module's.
+        PrehookDetection prehook;
+        if (layered_on_managed_hook.empty())
+        {
+            prehook = detect_existing_inline_hook(target_address);
+            if (prehook.state == PrehookState::HookedByOtherModule && config.fail_if_already_hooked)
+            {
+                return {std::unexpected(HookError::TargetAlreadyHookedInProcess),
+                        {{std::format(
+                              "HookManager: Target {} for inline hook '{}' is already inline-hooked by another module "
                               "(JMP -> {}). Aborting under strict mode.",
                               DetourModKit::Format::format_address(target_address), name,
                               DetourModKit::Format::format_address(prehook.jmp_destination)),
-                  LogLevel::Error}}};
+                          LogLevel::Error}}};
+            }
         }
 
         try
@@ -396,7 +416,15 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(std::strin
                                         status_message, name, DetourModKit::Format::format_address(target_address)),
                             LogLevel::Info});
 
-            if (prehook.state == PrehookState::HookedByOtherModule)
+            if (!layered_on_managed_hook.empty())
+            {
+                logs.push_back(
+                    {std::format("HookManager: Target {} for inline hook '{}' is already hooked by managed hook '{}'; "
+                                 "SafetyHook layered on top. Remove layered hooks newest-first.",
+                                 DetourModKit::Format::format_address(target_address), name, layered_on_managed_hook),
+                     LogLevel::Warning});
+            }
+            else if (prehook.state == PrehookState::HookedByOtherModule)
             {
                 logs.push_back(
                     {std::format(
@@ -418,6 +446,9 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(std::strin
             std::string name_str{name};
             auto managed_hook =
                 std::make_unique<InlineHook>(name_str, target_address, std::move(sh_inline_hook), initial_status);
+            // Record creation order before emplace: if emplace throws, the stale order entry is a harmless skip at
+            // teardown, whereas a registered hook missing from the order vector would dodge the ordered unwind.
+            m_hook_creation_order.push_back(name_str);
             m_hooks.emplace(name_str, std::move(managed_hook));
             *original_trampoline = trampoline;
 
@@ -529,6 +560,38 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_v
                     {{std::format("HookManager: A hook with the name '{}' already exists.", name), LogLevel::Error}}};
         }
 
+        // Mid hooks are implemented as SafetyHook inline hooks at the requested address, so they participate in the
+        // same address-layering rules as create_inline_hook().
+        std::string layered_on_managed_hook;
+        if (const std::string *self_owner = find_hook_owner_of_target_locked(target_address))
+        {
+            if (config.fail_if_already_hooked)
+            {
+                return {std::unexpected(HookError::TargetAlreadyHookedInProcess),
+                        {{std::format("HookManager: Target {} for mid hook '{}' is already hooked by managed hook "
+                                      "'{}'. Aborting under strict mode.",
+                                      DetourModKit::Format::format_address(target_address), name, *self_owner),
+                          LogLevel::Error}}};
+            }
+            layered_on_managed_hook = *self_owner;
+        }
+
+        PrehookDetection prehook;
+        if (layered_on_managed_hook.empty())
+        {
+            prehook = detect_existing_inline_hook(target_address);
+            if (prehook.state == PrehookState::HookedByOtherModule && config.fail_if_already_hooked)
+            {
+                return {
+                    std::unexpected(HookError::TargetAlreadyHookedInProcess),
+                    {{std::format("HookManager: Target {} for mid hook '{}' is already inline-hooked by another module "
+                                  "(JMP -> {}). Aborting under strict mode.",
+                                  DetourModKit::Format::format_address(target_address), name,
+                                  DetourModKit::Format::format_address(prehook.jmp_destination)),
+                      LogLevel::Error}}};
+            }
+        }
+
         try
         {
             auto sh_flags = config.auto_enable ? safetyhook::MidHook::Default : safetyhook::MidHook::StartDisabled;
@@ -553,10 +616,28 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_v
             // leave a ghost hook.
             std::string status_message = (initial_status == HookStatus::Active) ? "and enabled" : "(disabled)";
             std::vector<DeferredLogEntry> logs;
-            logs.reserve(2);
+            logs.reserve(3);
             logs.push_back({std::format("HookManager: Successfully created {} mid hook '{}' targeting {}.",
                                         status_message, name, DetourModKit::Format::format_address(target_address)),
                             LogLevel::Info});
+
+            if (!layered_on_managed_hook.empty())
+            {
+                logs.push_back(
+                    {std::format("HookManager: Target {} for mid hook '{}' is already hooked by managed hook '{}'; "
+                                 "SafetyHook layered on top. Remove layered hooks newest-first.",
+                                 DetourModKit::Format::format_address(target_address), name, layered_on_managed_hook),
+                     LogLevel::Warning});
+            }
+            else if (prehook.state == PrehookState::HookedByOtherModule)
+            {
+                logs.push_back(
+                    {std::format("HookManager: Target {} for mid hook '{}' was already inline-hooked by another "
+                                 "module (JMP -> {}); SafetyHook layered on top.",
+                                 DetourModKit::Format::format_address(target_address), name,
+                                 DetourModKit::Format::format_address(prehook.jmp_destination)),
+                     LogLevel::Warning});
+            }
 
             if (initial_status == HookStatus::Disabled && config.auto_enable)
             {
@@ -569,6 +650,10 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_v
             std::string name_str{name};
             auto managed_hook =
                 std::make_unique<MidHook>(name_str, target_address, std::move(sh_mid_hook), initial_status);
+            // Record creation order before emplace so layered hooks unwind newest-first at teardown; a stale entry from
+            // a throwing emplace is a harmless skip there. Mid hooks share m_hooks and the same prologue-overlap
+            // hazard as inline hooks, so they participate in the same ordered teardown.
+            m_hook_creation_order.push_back(name_str);
             m_hooks.emplace(name_str, std::move(managed_hook));
 
             return {std::move(name_str), std::move(logs)};
@@ -636,14 +721,7 @@ bool HookManager::is_target_already_hooked(uintptr_t target_address) const noexc
         return false;
     }
     const auto lock = lock_hooks_shared_reentrant();
-    for (const auto &[name, hook_ptr] : m_hooks)
-    {
-        if (hook_ptr->get_type() == HookType::Inline && hook_ptr->get_target_address() == target_address)
-        {
-            return true;
-        }
-    }
-    return false;
+    return find_hook_owner_of_target_locked(target_address) != nullptr;
 }
 
 const std::string *HookManager::find_vmt_owner_of_vptr_locked(std::uintptr_t vptr) const noexcept
@@ -662,6 +740,24 @@ const std::string *HookManager::find_vmt_owner_of_vptr_locked(std::uintptr_t vpt
     return nullptr;
 }
 
+const std::string *HookManager::find_hook_owner_of_target_locked(uintptr_t target_address) const noexcept
+{
+    if (target_address == 0)
+    {
+        return nullptr;
+    }
+    // Match on the patched address irrespective of hook type: an inline hook and a mid hook (or two of either) at the
+    // same address overlap the same prologue bytes, so both share the layered-teardown hazard.
+    for (const auto &[name, hook_ptr] : m_hooks)
+    {
+        if (hook_ptr->get_target_address() == target_address)
+        {
+            return &name;
+        }
+    }
+    return nullptr;
+}
+
 void HookManager::clear_vmt_hooks_locked() noexcept
 {
     // Newest-first so layered clones unwind with every conditional vptr restore targeting live memory.
@@ -671,6 +767,34 @@ void HookManager::clear_vmt_hooks_locked() noexcept
     }
     m_vmt_hooks.clear();
     m_vmt_creation_order.clear();
+}
+
+void HookManager::disable_hooks_reverse_order_locked() noexcept
+{
+    // Newest-first restore so a hook layered on a shared target rewrites the prologue to the jump into the older
+    // hook before that older hook restores the true original bytes; see the member doc for the use-after-free this
+    // ordering prevents. Names absent from m_hooks (a creation that failed after recording its order entry) are
+    // skipped harmlessly.
+    for (auto it = m_hook_creation_order.rbegin(); it != m_hook_creation_order.rend(); ++it)
+    {
+        auto hook_it = m_hooks.find(*it);
+        if (hook_it != m_hooks.end())
+        {
+            (void)hook_it->second->disable();
+        }
+    }
+}
+
+void HookManager::clear_hooks_locked() noexcept
+{
+    // Newest-first for symmetry with the disable phase; every hook is already disabled here, so this only frees
+    // trampolines.
+    for (auto it = m_hook_creation_order.rbegin(); it != m_hook_creation_order.rend(); ++it)
+    {
+        m_hooks.erase(*it);
+    }
+    m_hooks.clear();
+    m_hook_creation_order.clear();
 }
 
 bool HookManager::looks_like_function_vmt_slot(std::uintptr_t slot_value) noexcept
@@ -804,6 +928,7 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
         std::string name_of_removed_hook = it->second->get_name();
         HookType type_of_removed_hook = it->second->get_type();
         m_hooks.erase(it);
+        std::erase(m_hook_creation_order, name_of_removed_hook);
         logs.push_back(
             {std::format("HookManager: Hook '{}' of type '{}' has been removed and unhooked.", name_of_removed_hook,
                          (type_of_removed_hook == HookType::Inline ? "Inline" : "Mid")),
@@ -841,10 +966,7 @@ void HookManager::remove_all_hooks()
         // residual narrow window.
         {
             std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
-            for (auto &[name, hook] : m_hooks)
-            {
-                (void)hook->disable();
-            }
+            disable_hooks_reverse_order_locked();
         }
 
         std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
@@ -853,7 +975,7 @@ void HookManager::remove_all_hooks()
         clear_vmt_hooks_locked();
 
         num_hooks = m_hooks.size();
-        m_hooks.clear();
+        clear_hooks_locked();
 
         // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
         // immediately see it as false (accepted) before the maps are fully cleared. Both locks are released when this
