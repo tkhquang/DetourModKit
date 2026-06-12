@@ -40,8 +40,8 @@ bool probe_object(uintptr_t obj, ObjectFields &out) noexcept
     }
 
     // 2. Read every field under a single SEH-guarded chain walk. On MSVC this
-    //    is one __try frame; on MinGW it is VirtualQuery-guarded. Either way a
-    //    fault anywhere in the walk returns nullopt instead of crashing.
+    //    is one __try frame; on MinGW it uses the vectored fault guard. Either
+    //    way a fault anywhere in the walk returns nullopt instead of crashing.
     const auto vtable = Mem::seh_read<uintptr_t>(obj);
     if (!vtable || !Mem::contains(g_host, *vtable))
     {
@@ -116,7 +116,7 @@ if (value)
 
 ## Toolchain note
 
-The `seh_*` primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no SEH) they fall back to a `VirtualQuery`-guarded read, which is correct but pays a syscall; prefer `read_ptr_unchecked` on MinGW hot paths where you can guarantee structural validity. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
+The `seh_*` primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no frame-based SEH) a 64-bit build installs a process-wide vectored exception handler once and runs the read as a guarded copy with no `VirtualQuery` on the success path, recovering a fault as `std::nullopt` / `false` instead of crashing. This is best-effort: `veh_read_bytes` takes the VEH guarded-copy path only when handler installation succeeded (`s_veh_handle` is non-null); if `ensure_veh_installed()` failed, or on a 32-bit MinGW build (`!_WIN64`), it falls back to `virtualquery_validated_copy`, a `VirtualQuery`-validated copy that pays a syscall per region. So MinGW `seh_*` reads are fault-safe either way, using the VEH when available and the VirtualQuery fallback otherwise. `read_ptr_unchecked` is still the fastest choice when you can prove the pointer is live for the current frame; otherwise prefer `seh_read` / `seh_read_chain` for stale or unmapped pointers. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
 
 ## Anti-patterns to remove
 

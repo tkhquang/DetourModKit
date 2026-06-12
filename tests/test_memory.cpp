@@ -1498,7 +1498,8 @@ TEST_F(MemoryTest, ReadPtrUnsafe_GuardPage)
     VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
 
     uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
-    // MSVC SEH catches the guard page exception and returns 0. MinGW VirtualQuery detects PAGE_GUARD and returns 0.
+    // MSVC SEH catches the guard-page exception and returns 0. MinGW's vectored fault handler swallows the same
+    // STATUS_GUARD_PAGE_VIOLATION and returns 0.
     EXPECT_EQ(result, 0u);
 
     VirtualFree(mem, 0, MEM_RELEASE);
@@ -1802,15 +1803,15 @@ TEST_F(MemoryTest, IsReadableNonblocking_LargeValidRegion)
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
-TEST_F(MemoryTest, ReadPtrUnsafe_CacheHitPath)
+TEST_F(MemoryTest, ReadPtrUnsafe_AfterCachePrime)
 {
     uintptr_t value = 0xDEADBEEF;
     auto addr = reinterpret_cast<uintptr_t>(&value);
 
-    // Prime the cache with a readable check
+    // Prime the cache with a readable check. read_ptr_unsafe consults no cache (the fault guard makes a probe
+    // unnecessary), so this only confirms a primed region still reads back its value through the guarded path.
     EXPECT_TRUE(Memory::is_readable(&value, sizeof(uintptr_t)));
 
-    // read_ptr_unsafe should use the cached entry
     uintptr_t result = Memory::read_ptr_unsafe(addr, 0);
     EXPECT_EQ(result, value);
 }
@@ -2182,4 +2183,282 @@ TEST(MemoryUninitializedCache, PermissionChecksFallBackToDirectQuery)
 
     VirtualProtect(region, 4096, old_protect, &old_protect);
     VirtualFree(region, 0, MEM_RELEASE);
+}
+
+// A reserved-but-uncommitted page is backed by no physical storage, so any read of it faults. The guarded read must
+// fail closed rather than terminate the host. On MinGW the vectored handler swallows the access violation; on MSVC the
+// __except filter does.
+TEST_F(MemoryTest, SehReadBytes_ReservedUncommittedReturnsFalse)
+{
+    void *reserved = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(reserved, nullptr);
+
+    uint64_t out = 0;
+    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(reserved), &out, sizeof(out)));
+
+    VirtualFree(reserved, 0, MEM_RELEASE);
+}
+
+// With the cache reporting a page readable, an external reprotect to PAGE_NOACCESS must not crash a subsequent
+// read_ptr_unsafe. The guarded read must ignore stale protection data and fail closed through the same "0 on fault"
+// contract on both toolchains.
+TEST_F(MemoryTest, ReadPtrUnsafeSurvivesStaleCacheReprotect)
+{
+    void *region = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(region, nullptr);
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(region);
+    *reinterpret_cast<uintptr_t *>(region) = 0xABCDEF0123456789ULL;
+
+    // Prime the cache so the region is recorded as readable.
+    EXPECT_TRUE(Memory::is_readable(region, sizeof(uintptr_t)));
+    EXPECT_EQ(Memory::read_ptr_unsafe(addr, 0), 0xABCDEF0123456789ULL);
+
+    // Reprotect out from under the still-readable cache entry. The cache is not invalidated, so a cache-trusting read
+    // would dereference a now-inaccessible page.
+    DWORD old_protect = 0;
+    ASSERT_NE(VirtualProtect(region, 4096, PAGE_NOACCESS, &old_protect), 0);
+
+    // The fault is swallowed and reported as the pointer-read failure value.
+    EXPECT_EQ(Memory::read_ptr_unsafe(addr, 0), 0u);
+
+    VirtualProtect(region, 4096, old_protect, &old_protect);
+    VirtualFree(region, 0, MEM_RELEASE);
+}
+
+namespace
+{
+    // A consumer-style vectored handler that never claims a fault, standing in for an unrelated VEH a host might
+    // register without interfering with the guarded read.
+    LONG CALLBACK consumer_passthrough_veh(PEXCEPTION_POINTERS)
+    {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+} // namespace
+
+// The MinGW guarded read installs a process-wide vectored exception handler, which must coexist with a handler the host
+// registered. Exercise both list orderings (consumer registered before and after DMK's handler exists) and assert the
+// guarded reads still fail closed on bad memory and succeed on live memory. On MSVC there is no DMK VEH; the consumer
+// handler simply passes the first-chance fault through to the frame-based __except, so the test is meaningful on both.
+TEST_F(MemoryTest, VectoredHandlerCoexistsWithConsumerHandler)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    const uintptr_t bad_addr = reinterpret_cast<uintptr_t>(mem);
+    // Now unmapped; any read of bad_addr faults.
+    VirtualFree(mem, 0, MEM_RELEASE);
+
+    const uint64_t live = 0x1122334455667788ULL;
+
+    auto exercise = [&]()
+    {
+        uint64_t out = 0;
+        EXPECT_FALSE(Memory::seh_read_bytes(bad_addr, &out, sizeof(out)));
+        EXPECT_EQ(Memory::read_ptr_unsafe(bad_addr, 0), 0u);
+        out = 0;
+        EXPECT_TRUE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&live), &out, sizeof(out)));
+        EXPECT_EQ(out, live);
+    };
+
+    // Ordering 1: consumer handler registered before DMK performs (and lazily installs) its own guarded read.
+    void *consumer = AddVectoredExceptionHandler(1, consumer_passthrough_veh);
+    ASSERT_NE(consumer, nullptr);
+    exercise();
+    RemoveVectoredExceptionHandler(consumer);
+
+    // Ordering 2: DMK's handler already exists; register the consumer in front of it and repeat.
+    consumer = AddVectoredExceptionHandler(1, consumer_passthrough_veh);
+    ASSERT_NE(consumer, nullptr);
+    exercise();
+    RemoveVectoredExceptionHandler(consumer);
+}
+
+// A wrapping or low source range must fail closed to 0 rather than crash. On MinGW the wrap matters specifically: a
+// source within 8 bytes of UINTPTR_MAX would make the guarded read's [lo, hi) range wrap so the fault-claim check
+// inverts and a real read fault escapes the guard; the shared entry point rejects the wrap before reading. On MSVC the
+// __try simply catches the fault. Both return 0.
+TEST_F(MemoryTest, ReadPtrUnsafeWraparoundAndLowAddressReturnZero)
+{
+    // An 8-byte read would wrap past the top of the address space.
+    EXPECT_EQ(Memory::read_ptr_unsafe(UINTPTR_MAX - 3, 0), 0u);
+
+    // Below the user-mode floor.
+    EXPECT_EQ(Memory::read_ptr_unsafe(0x100, 0), 0u);
+
+    // A low base plus a large negative offset underflows the source to a high, unmapped address; still 0, no crash.
+    EXPECT_EQ(Memory::read_ptr_unsafe(0x20000, -static_cast<ptrdiff_t>(0x30000)), 0u);
+}
+
+// Each guarded read arms its own per-read guard published to a thread-local slot, so concurrent reads of mixed
+// good/bad memory across many threads must each get the right answer with no cross-thread guard corruption and no
+// crash. This pins the per-thread isolation of the fault guard.
+TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
+{
+    void *good = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(good, nullptr);
+    constexpr uintptr_t kSentinel = 0x5151515151515151ULL;
+    *reinterpret_cast<uintptr_t *>(good) = kSentinel;
+
+    void *freed = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(freed, nullptr);
+
+    // Now unmapped; reads of it must fault through the guard to 0.
+    VirtualFree(freed, 0, MEM_RELEASE);
+
+    std::atomic<bool> all_correct{true};
+    std::vector<std::thread> threads;
+    for (int t = 0; t < 8; ++t)
+    {
+        threads.emplace_back(
+            [&, t]()
+            {
+                for (int i = 0; i < 1000; ++i)
+                {
+                    if (t % 2 == 0)
+                    {
+                        if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0) != kSentinel)
+                            all_correct.store(false, std::memory_order_relaxed);
+                    }
+                    else if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(freed), 0) != 0u)
+                    {
+                        all_correct.store(false, std::memory_order_relaxed);
+                    }
+                }
+            });
+    }
+    for (auto &th : threads)
+        th.join();
+
+    EXPECT_TRUE(all_correct.load());
+    VirtualFree(good, 0, MEM_RELEASE);
+}
+
+// shutdown_cache removes the MinGW vectored handler; it must drain reads still on the handler path first, so a fault
+// cannot arrive after the handler is gone. Race continuous guarded reads (some faulting) against repeated
+// shutdown/re-init and assert survival, then that the subsystem still answers. On MSVC there is no handler to remove,
+// so this exercises read_ptr_unsafe / cache-shutdown concurrency.
+TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
+{
+    void *good = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(good, nullptr);
+    constexpr uintptr_t kSentinel = 0xA5A5A5A5A5A5A5A5ULL;
+    *reinterpret_cast<uintptr_t *>(good) = kSentinel;
+
+    void *freed = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(freed, nullptr);
+    VirtualFree(freed, 0, MEM_RELEASE);
+
+    std::atomic<bool> stop{false};
+    std::atomic<int> seen_good{0};
+    std::atomic<int> seen_fault{0};
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 3; ++t)
+    {
+        readers.emplace_back(
+            [&, t]()
+            {
+                void *const target = (t % 2) ? freed : good;
+                while (!stop.load(std::memory_order_acquire))
+                {
+                    const uintptr_t v = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(target), 0);
+                    if (target == good)
+                    {
+                        if (v == kSentinel)
+                            seen_good.fetch_add(1, std::memory_order_relaxed);
+                    }
+                    else if (v == 0u)
+                    {
+                        seen_fault.fetch_add(1, std::memory_order_relaxed);
+                    }
+                }
+            });
+    }
+
+    // Wait until both guarded-read paths are actually live (one good-path read, one faulting-path read) before racing
+    // teardown, so the shutdown loop deterministically exercises the in-flight-read drain rather than possibly running
+    // before any guarded read happened.
+    while (seen_good.load(std::memory_order_acquire) == 0 || seen_fault.load(std::memory_order_acquire) == 0)
+        std::this_thread::yield();
+
+    for (int round = 0; round < 12; ++round)
+    {
+        Memory::shutdown_cache();
+        (void)Memory::init_cache();
+    }
+
+    stop.store(true, std::memory_order_release);
+    for (auto &th : readers)
+        th.join();
+
+    EXPECT_EQ(Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0), kSentinel);
+    VirtualFree(good, 0, MEM_RELEASE);
+}
+
+namespace
+{
+    std::atomic<void *> g_recover_page{nullptr};
+    std::atomic<int> g_recover_hits{0};
+
+    // A consumer handler that recovers an access violation on a registered sentinel page by making it readable and
+    // re-executing the faulting instruction. Used to prove DMK's handler passed an unrelated fault through.
+    LONG CALLBACK recover_noaccess_veh(PEXCEPTION_POINTERS info)
+    {
+        void *const page = g_recover_page.load(std::memory_order_acquire);
+        const EXCEPTION_RECORD *const rec = info->ExceptionRecord;
+        if (page != nullptr && rec->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && rec->NumberParameters >= 2)
+        {
+            const uintptr_t fault = static_cast<uintptr_t>(rec->ExceptionInformation[1]);
+            const uintptr_t base = reinterpret_cast<uintptr_t>(page);
+            if (fault >= base && fault < base + 4096)
+            {
+                DWORD old_protect = 0;
+                VirtualProtect(page, 4096, PAGE_READWRITE, &old_protect);
+                g_recover_hits.fetch_add(1, std::memory_order_relaxed);
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+} // namespace
+
+// DMK's process-wide handler runs on every thread for every fault, including threads that never armed a guarded read.
+// Such a fault must be passed straight through (the handler reads its per-thread slot with an allocation-free
+// TlsGetValue and sees null), never claimed or hijacked. Here a worker thread that has never issued a DMK guarded read
+// faults on a no-access page while DMK's handler is installed; a consumer handler recovers it. A spurious DMK claim
+// (longjmp into a frame that never armed) or a crash would fail this. On MSVC there is no DMK handler, so the consumer
+// simply recovers the fault directly.
+TEST_F(MemoryTest, UnarmedThreadFaultIsPassedThroughNotClaimed)
+{
+    // Arm and disarm DMK's handler on this thread so it is installed for the process.
+    uint64_t probe_src = 0xC3C3C3C3C3C3C3C3ULL;
+    uint64_t probe_out = 0;
+    ASSERT_TRUE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&probe_src), &probe_out, sizeof(probe_out)));
+
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(page, nullptr);
+    g_recover_page.store(page, std::memory_order_release);
+    g_recover_hits.store(0, std::memory_order_release);
+
+    // Last in the list, so DMK's first-in-list handler sees the fault first and must decline it.
+    void *consumer = AddVectoredExceptionHandler(0, recover_noaccess_veh);
+    ASSERT_NE(consumer, nullptr);
+
+    std::atomic<uint32_t> observed{0xFFFFFFFFu};
+    std::thread worker(
+        [&]()
+        {
+            volatile uint32_t *const p = reinterpret_cast<volatile uint32_t *>(page);
+            // Faults once; the consumer handler makes the page readable and retries the instruction.
+            observed.store(*p, std::memory_order_release);
+        });
+    worker.join();
+
+    RemoveVectoredExceptionHandler(consumer);
+    g_recover_page.store(nullptr, std::memory_order_release);
+
+    // The unarmed-thread fault reached the consumer, proving DMK passed it through.
+    EXPECT_GE(g_recover_hits.load(), 1);
+
+    // The recommitted page reads as zero.
+    EXPECT_EQ(observed.load(), 0u);
+    VirtualFree(page, 0, MEM_RELEASE);
 }

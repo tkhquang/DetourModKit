@@ -3382,7 +3382,9 @@ TEST(ScannerHostModuleCascade, EmptyCandidatesReturnsEmptyCandidates)
 // reports a false match for an absent needle. A run where the decommit never lands inside the read window is a valid
 // pass for the fault path; the __except / skip-the-region mechanism is pinned deterministically by
 // MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. MSVC-only: MinGW has no
-// structured exception handling, so the race can still fault there until the VEH-based handler lands.
+// structured exception handling, and the vectored handler that guards the seh_read primitives does not extend to this
+// sweep's bulk find_pattern_raw reads, so the per-region VirtualQuery gate is the only guard there and the race can
+// still fault.
 TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
 {
     SYSTEM_INFO si{};

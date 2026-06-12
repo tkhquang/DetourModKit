@@ -155,12 +155,13 @@ namespace DetourModKit
         /**
          * @brief Reads a pointer-sized value at (base + offset), returning 0 on fault.
          * @details On MSVC, uses SEH (__try/__except) to catch access violations with zero overhead on the success
-         *          path. On MinGW, falls back to a single
-         *          VirtualQuery guard before dereferencing (no cache interaction). Suitable for hot paths that already
-         *          manage their own error recovery.
-         * @note On MinGW the implementation additionally probes the cache via a non-blocking try_lock_shared before
-         *       falling back to VirtualQuery, so cache hits avoid a syscall. This is invisible to callers; the function
-         *       still exposes no caller-observable cache state.
+         *          path. On MinGW, the read runs under a process-wide vectored exception handler (installed lazily), so
+         *          the success path is a guarded copy with no syscall and any fault -- unmapped, PAGE_NOACCESS/guard, or
+         *          a page reprotected out from under a stale cache entry -- is swallowed and returned as 0. Suitable for
+         *          hot paths that already manage their own error recovery.
+         * @note The MinGW path consults no cache; the fault guard makes a cache probe unnecessary. If the vectored
+         *       handler cannot be installed it falls back to VirtualQuery-validated reads. Either way the function
+         *       exposes no caller-observable cache state.
          * @param base The base address to read from.
          * @param offset Byte offset added to base before dereferencing.
          * @return The pointer-sized value at the address, or 0 if the read faults.
@@ -201,7 +202,7 @@ namespace DetourModKit
          *
          *          This function does NOT provide fault protection against unmapped or freed memory above min_valid. If
          *          the pointer chain may reference deallocated heap memory or unmapped regions, use read_ptr_unsafe()
-         *          instead (SEH-protected on MSVC, VirtualQuery-guarded on MinGW).
+         *          instead (SEH-protected on MSVC, vectored-handler-guarded on MinGW).
          *
          *          The "unchecked" in the name refers to the absence of OS-level memory validation in release builds
          *          (no SEH, no VirtualQuery, no cache lookup). Only user-mode range guards are applied. Intended for
@@ -345,9 +346,10 @@ namespace DetourModKit
          * @details On MSVC, the copy runs inside a __try / __except frame whose filter accepts the foreign-read fault
          *          set (EXCEPTION_ACCESS_VIOLATION, STATUS_GUARD_PAGE_VIOLATION, and EXCEPTION_IN_PAGE_ERROR for a
          *          file-backed page that fails to page in), so any such fault in the middle of the copy unwinds cleanly
-         *          and the function returns false. On MinGW the implementation falls back to VirtualQuery-based
-         *          validation of every region the read spans before issuing the memcpy; this is race-prone against
-         *          concurrent VirtualProtect but is the best a non-SEH toolchain can do.
+         *          and the function returns false. On MinGW the copy runs under a process-wide vectored exception
+         *          handler that claims the same fault set (no per-call VirtualQuery on the success path); a fault
+         *          anywhere in the span is swallowed and the function returns false. If the handler cannot be installed
+         *          it falls back to VirtualQuery-based validation of every region the read spans.
          *
          *          The function is the underlying primitive for the typed @ref seh_read template and is exposed
          *          directly for callers that need to read a contiguous buffer of bytes (for example NUL-terminated
@@ -399,7 +401,8 @@ namespace DetourModKit
          *          it is one out-of-line call instead of N, each intermediate link kept in a register instead of
          *          round-tripped through std::optional, and a single argument validation. On MinGW (no SEH) the saving
          *          is concrete: one guarded helper call instead of N, each intermediate link read through @ref
-         *          read_ptr_unsafe (VirtualQuery-guarded) and the final address computed without a read.
+         *          read_ptr_unsafe (guarded by the process-wide vectored handler) and the final address computed
+         *          without a read.
          *
          *          Each intermediate link is screened with @ref plausible_userspace_ptr; a link that faults or yields
          *          an implausible pointer aborts the walk and returns std::nullopt. The returned address is not

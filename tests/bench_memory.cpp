@@ -319,7 +319,7 @@ int main()
 #ifdef _MSC_VER
                 "MSVC (seh_* use __try/__except)"
 #else
-                "non-MSVC (seh_* fall back to VirtualQuery)"
+                "non-MSVC (seh_* use the vectored-handler fault guard)"
 #endif
     );
     std::printf("DEFAULT_CACHE_EXPIRY_MS = %u\n\n", static_cast<unsigned>(DetourModKit::DEFAULT_CACHE_EXPIRY_MS));
