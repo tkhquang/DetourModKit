@@ -52,12 +52,12 @@ namespace DetourModKit
             /**
              * @struct ExecutableWindow
              * @brief One committed, execute-readable slice of a module image.
-             * @details @ref base / @ref span describe live, directly-readable
-             *          bytes: the region passed the same VirtualQuery protection
-             *          gate the whole-process scanners apply (MEM_COMMIT, an execute-readable base protection, not
-             *          PAGE_GUARD /
-             *          PAGE_NOACCESS), so a caller may read [base, base + span) without a fault guard, exactly as
-             *          scan_regions_filtered does.
+             * @details @ref base / @ref span describe bytes that were live and directly readable at gate time: the
+             *          region passed the same VirtualQuery protection gate the whole-process scanners apply
+             *          (MEM_COMMIT, an execute-readable base protection, not PAGE_GUARD / PAGE_NOACCESS). The gate
+             *          proves readability only at that instant, so a caller reading [base, base + span) should still
+             *          wrap the read in a fault guard against a concurrent decommit / reprotect, exactly as
+             *          scan_regions_filtered does via scan_region_guarded.
              */
             struct ExecutableWindow
             {

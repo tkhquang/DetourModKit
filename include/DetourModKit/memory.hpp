@@ -342,12 +342,12 @@ namespace DetourModKit
 
         /**
          * @brief SEH-guarded raw memory copy from @p addr into @p out.
-         * @details On MSVC, the copy runs inside a __try / __except
-         *          (EXCEPTION_ACCESS_VIOLATION | STATUS_GUARD_PAGE_VIOLATION)
-         *          frame, so any access violation in the middle of the copy unwinds cleanly and the function returns
-         *          false. On MinGW the implementation falls back to VirtualQuery-based validation of every region the
-         *          read spans before issuing the memcpy; this is race-prone against concurrent
-         *          VirtualProtect but is the best a non-SEH toolchain can do.
+         * @details On MSVC, the copy runs inside a __try / __except frame whose filter accepts the foreign-read fault
+         *          set (EXCEPTION_ACCESS_VIOLATION, STATUS_GUARD_PAGE_VIOLATION, and EXCEPTION_IN_PAGE_ERROR for a
+         *          file-backed page that fails to page in), so any such fault in the middle of the copy unwinds cleanly
+         *          and the function returns false. On MinGW the implementation falls back to VirtualQuery-based
+         *          validation of every region the read spans before issuing the memcpy; this is race-prone against
+         *          concurrent VirtualProtect but is the best a non-SEH toolchain can do.
          *
          *          The function is the underlying primitive for the typed @ref seh_read template and is exposed
          *          directly for callers that need to read a contiguous buffer of bytes (for example NUL-terminated

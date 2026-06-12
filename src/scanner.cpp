@@ -9,6 +9,7 @@
 #include "DetourModKit/format.hpp"
 
 #include "scanner_internal.hpp"
+#include "memory_internal.hpp"
 
 #include <windows.h>
 #include <vector>
@@ -702,11 +703,73 @@ DetourModKit::Scanner::find_and_resolve_rip_relative(const std::byte *search_sta
 
 namespace
 {
+    // Scan one protection-gated region for the next needed match, decrementing matches_remaining for each non-self
+    // match. Returns the resolved address (match + pattern.offset) when the Nth match lands in this region, or nullptr
+    // when the region is exhausted first. This is the body the TOCTOU fault guard wraps (see scan_region_guarded): it
+    // performs the unguarded find_pattern_raw reads (memchr prefilter + SIMD verify) across [region_start, +scan_size).
+    const std::byte *scan_region_for_match(const std::byte *region_start, size_t scan_size,
+                                           const Scanner::CompiledPattern &pattern, uintptr_t needle_lo,
+                                           uintptr_t needle_hi, size_t &matches_remaining) noexcept
+    {
+        const std::byte *match = find_pattern_raw(region_start, scan_size, pattern);
+        while (match != nullptr)
+        {
+            const auto match_addr = reinterpret_cast<uintptr_t>(match);
+            const bool self_match = match_addr < needle_hi && (match_addr + pattern.size()) > needle_lo;
+            if (!self_match)
+            {
+                --matches_remaining;
+                if (matches_remaining == 0)
+                    return match + pattern.offset;
+            }
+
+            // Continue scanning past the current match.
+            const size_t consumed = static_cast<size_t>(match - region_start) + 1;
+            if (consumed >= scan_size)
+                break;
+            match = find_pattern_raw(match + 1, scan_size - consumed, pattern);
+        }
+        return nullptr;
+    }
+
+    // Region-granular TOCTOU fault guard around scan_region_for_match. The caller's per-region VirtualQuery only proves
+    // the region was committed and readable at gate time; a concurrent decommit / reprotect before these unguarded
+    // reads complete would otherwise fault the host. On MSVC the body runs inside a __try / __except that swallows
+    // exactly the foreign-read faults (Memory::detail::is_guarded_read_fault) and reports the region as faulted, so the
+    // sweep skips it and continues -- the same skip-the-region contract seh_read_bytes follows. MinGW has no structured
+    // exception handling, so the body runs directly and the per-region VirtualQuery gate is the only guard available
+    // there. *out_faulted is set true only when a fault was swallowed.
+    const std::byte *scan_region_guarded(const std::byte *region_start, size_t scan_size,
+                                         const Scanner::CompiledPattern &pattern, uintptr_t needle_lo,
+                                         uintptr_t needle_hi, size_t &matches_remaining, bool &out_faulted) noexcept
+    {
+        out_faulted = false;
+#ifdef _MSC_VER
+        const size_t original_matches_remaining = matches_remaining;
+        __try
+        {
+            return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, matches_remaining);
+        }
+        __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                            : EXCEPTION_CONTINUE_SEARCH)
+        {
+            // Treat a faulted region as skipped, not partially scanned. Matches observed before the fault cannot be
+            // trusted for Nth-occurrence accounting because unreadable tail bytes may hide additional matches.
+            matches_remaining = original_matches_remaining;
+            out_faulted = true;
+            return nullptr;
+        }
+#else
+        return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, matches_remaining);
+#endif
+    }
+
     // Region-walking AOB scan shared by scan_executable_regions, scan_readable_regions, and the module-scoped
     // detail::scan_module_* entry points. Walks the committed regions of [window_lo, window_hi) via VirtualQuery and
-    // runs find_pattern_raw against every region whose base protection is present in accept_mask, returning the Nth
-    // match (1-based, adjusted by pattern.offset) or nullptr. The whole-process scanners pass [0, UINTPTR_MAX); the
-    // module-scoped scan passes the image's [base, end) so only one contiguous image is searched.
+    // runs the per-region scan (scan_region_for_match, behind the fault guard) against every region whose base
+    // protection is present in accept_mask, returning the Nth match (1-based, adjusted by pattern.offset) or nullptr.
+    // The whole-process scanners pass [0, UINTPTR_MAX); the module-scoped scan passes the image's [base, end) so only
+    // one contiguous image is searched.
     //
     // Guard, no-access, and uncommitted regions are always skipped: PAGE_GUARD raises STATUS_GUARD_PAGE_VIOLATION on
     // the first touch and PAGE_NOACCESS faults even for reads, so neither is safe to dereference. The Windows base
@@ -731,6 +794,7 @@ namespace
         const auto needle_hi = needle_lo + pattern.size();
 
         size_t matches_remaining = occurrence;
+        size_t faulted_regions = 0;
         MEMORY_BASIC_INFORMATION mbi{};
         uintptr_t addr = window_lo;
 
@@ -755,24 +819,16 @@ namespace
                 {
                     const auto *region_start = reinterpret_cast<const std::byte *>(scan_lo);
 
-                    const std::byte *match = find_pattern_raw(region_start, scan_size, pattern);
-                    while (match != nullptr)
-                    {
-                        const auto match_addr = reinterpret_cast<uintptr_t>(match);
-                        const bool self_match = match_addr < needle_hi && (match_addr + pattern.size()) > needle_lo;
-                        if (!self_match)
-                        {
-                            --matches_remaining;
-                            if (matches_remaining == 0)
-                                return match + pattern.offset;
-                        }
-
-                        // Continue scanning past the current match.
-                        const size_t consumed = static_cast<size_t>(match - region_start) + 1;
-                        if (consumed >= scan_size)
-                            break;
-                        match = find_pattern_raw(match + 1, scan_size - consumed, pattern);
-                    }
+                    // The protection gate above proved the region readable at gate time; scan_region_guarded backstops
+                    // a concurrent decommit / reprotect that could fault the read after the gate (a TOCTOU the gate
+                    // cannot close). A faulted region is skipped and counted, not fatal.
+                    bool region_faulted = false;
+                    const std::byte *result = scan_region_guarded(region_start, scan_size, pattern, needle_lo,
+                                                                  needle_hi, matches_remaining, region_faulted);
+                    if (result != nullptr)
+                        return result;
+                    if (region_faulted)
+                        ++faulted_regions;
                 }
             }
 
@@ -780,6 +836,15 @@ namespace
             if (region_end <= addr)
                 break; // Overflow guard.
             addr = region_end;
+        }
+
+        if (faulted_regions > 0)
+        {
+            // Best-effort diagnosis only; the sweep already skipped each faulted region and continued. try_log keeps
+            // this noexcept path honest when the Debug level is enabled.
+            (void)Logger::get_instance().try_log(
+                LogLevel::Debug, "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
+                faulted_regions);
         }
 
         return nullptr;
@@ -804,8 +869,9 @@ namespace
 // Nth match (1-based, adjusted by pattern.offset) or nullptr. They are the internal entry points the cascade resolver
 // (its own TU) calls instead of reaching the page-protection masks directly. Both reuse scan_regions_filtered's
 // per-region VirtualQuery protection gate, so a non-readable interior page (a section-alignment gap, a guard page, a
-// sibling VirtualProtect on part of the image) is skipped instead of dereferenced; find_pattern_raw itself does an
-// unguarded memchr / SIMD compare, so that region filter is what keeps a single contiguous scan from faulting the host.
+// sibling VirtualProtect on part of the image) is skipped instead of dereferenced. find_pattern_raw itself does an
+// unguarded memchr / SIMD compare; on the no-fault path the gate is what makes that safe, and scan_region_guarded
+// backstops the gate against a concurrent decommit / reprotect that would fault the read after the gate passed.
 const std::byte *Scanner::detail::scan_module_executable(const Scanner::CompiledPattern &pattern,
                                                          Memory::ModuleRange range, std::size_t occurrence) noexcept
 {
@@ -832,9 +898,10 @@ const std::byte *Scanner::detail::scan_module_readable(const Scanner::CompiledPa
 
 // Centralizes the executable-page protection gate for out-of-TU callers (the string-xref backend): one VirtualQuery
 // walk over [range.base, range.end) that returns each committed, execute-readable region clamped to the range, using
-// the identical mask scan_module_executable applies. Reading the returned windows without a fault guard is safe for the
-// same reason scan_regions_filtered's unguarded compare is: the per-region gate (MEM_COMMIT, EXECUTABLE_PAGE_FLAGS, not
-// PAGE_GUARD / PAGE_NOACCESS) is what guarantees readability.
+// the identical mask scan_module_executable applies. The per-region gate (MEM_COMMIT, EXECUTABLE_PAGE_FLAGS, not
+// PAGE_GUARD / PAGE_NOACCESS) guarantees the window is readable at gate time; the caller still wraps its reads of the
+// window in a fault guard so a concurrent decommit / reprotect between gate and read cannot fault the host, exactly as
+// scan_region_guarded backstops the in-TU sweeps.
 std::vector<Scanner::detail::ExecutableWindow> Scanner::detail::collect_executable_windows(Memory::ModuleRange range)
 {
     std::vector<ExecutableWindow> windows;

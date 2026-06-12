@@ -15,6 +15,7 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/srw_shared_mutex.hpp"
 #include "platform.hpp"
+#include "memory_internal.hpp"
 
 #include <windows.h>
 #if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
@@ -668,8 +669,10 @@ namespace
 
         constexpr size_t MAX_INVALIDATION_RETRIES = 3;
 
+        size_t skipped_shards = 0;
         for (size_t shard_idx = 0; shard_idx < shard_count; ++shard_idx)
         {
+            bool invalidated = false;
             for (size_t retry = 0; retry < MAX_INVALIDATION_RETRIES; ++retry)
             {
                 std::unique_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx], std::try_to_lock);
@@ -684,8 +687,25 @@ namespace
                 }
 
                 evict_overlapping_entries_in_shard(s_cache_shards[shard_idx], address, end_address);
+                invalidated = true;
                 break;
             }
+            if (!invalidated)
+            {
+                ++skipped_shards;
+            }
+        }
+
+        if (skipped_shards > 0)
+        {
+            // A shard that stayed contended across every retry keeps its entries in place, so they answer from the
+            // pre-write protection state until the configured expiry sweeps them. This matters chiefly when the caller
+            // could not restore protection (write_bytes restores on success), so surface it for diagnosis instead of
+            // skipping silently. try_log keeps this noexcept path honest when the level is enabled.
+            (void)Logger::get_instance().try_log(LogLevel::Debug,
+                                                 "MemoryCache: invalidate_range left {} contended shard(s) unswept; "
+                                                 "stale entries persist until expiry.",
+                                                 skipped_shards);
         }
     }
 
@@ -1114,13 +1134,24 @@ namespace
         if (!address || size == 0)
             return false;
 
-        // Construct reader guard BEFORE checking s_cache_initialized to prevent shutdown_cache from destroying data
+        // Construct reader guard BEFORE loading s_cache_initialized to prevent shutdown_cache from destroying data
         // structures between the check and access.
         ActiveReaderGuard reader_guard;
 
-        if (!s_cache_initialized.load(std::memory_order_seq_cst))
+        // Snapshot cache readiness once, under the guard. The guard's seq_cst increment is ordered before this seq_cst
+        // load of s_cache_initialized (the Dekker protocol that lets shutdown_cache drain readers safely). shard_count
+        // is loaded only when initialized, so the cache path below operates on a single consistent value.
+        const bool cache_initialized = s_cache_initialized.load(std::memory_order_seq_cst);
+        const size_t shard_count = cache_initialized ? s_shard_count.load(std::memory_order_acquire) : 0;
+
+        // Fall back to a direct VirtualQuery whenever the cache is unavailable: never initialized, observed in the
+        // brief init publication window where s_cache_initialized is already true but s_shard_count is still 0
+        // (init_cache publishes the flag before perform_cache_initialization stores the count), or a concurrent
+        // shutdown that has already zeroed the count. Treating shard_count == 0 as "use the direct query" -- matching
+        // read_ptr_unsafe and invalidate_range -- avoids wrongly reporting a readable region as non-readable during
+        // that window.
+        if (shard_count == 0)
         {
-            // Cache not initialized -- fall back to direct VirtualQuery
             MEMORY_BASIC_INFORMATION mbi;
             if (!VirtualQuery(address, &mbi, sizeof(mbi)))
                 return false;
@@ -1136,12 +1167,7 @@ namespace
             return query_addr_val >= region_start && query_end <= region_start + mbi.RegionSize;
         }
 
-        // Reader guard already active -- safe to access cache data structures
-
-        const size_t shard_count = s_shard_count.load(std::memory_order_acquire);
-        if (shard_count == 0)
-            return false;
-
+        // Cache is live and shard_count is non-zero -- the reader guard keeps the shard vectors alive for the access.
         const uintptr_t query_addr_val = reinterpret_cast<uintptr_t>(address);
         const size_t shard_idx = compute_shard_index(query_addr_val, shard_count);
         const uint64_t now_ns = current_time_ns();
@@ -1325,11 +1351,15 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
 #ifdef _MSC_VER
     __try
     {
-        return *reinterpret_cast<const uintptr_t *>(base + offset);
+        // memcpy, not a *reinterpret_cast deref: the foreign address may be misaligned, and a cast-deref of a
+        // misaligned pointer is formal undefined behavior. memcpy has identical codegen here (a single mov on x86-64)
+        // and matches the idiom seh_read_bytes already uses for the same reason.
+        uintptr_t value;
+        std::memcpy(&value, reinterpret_cast<const void *>(base + offset), sizeof(value));
+        return value;
     }
-    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
-                  ? EXCEPTION_EXECUTE_HANDLER
-                  : EXCEPTION_CONTINUE_SEARCH)
+    __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                        : EXCEPTION_CONTINUE_SEARCH)
     {
         return 0;
     }
@@ -1358,7 +1388,12 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
                     if (cached)
                     {
                         if (check_read_permission(cached->protection))
-                            return *reinterpret_cast<const uintptr_t *>(src);
+                        {
+                            // memcpy for the same misalignment reason as the MSVC path above.
+                            uintptr_t value;
+                            std::memcpy(&value, reinterpret_cast<const void *>(src), sizeof(value));
+                            return value;
+                        }
                         return 0;
                     }
                 }
@@ -1381,7 +1416,10 @@ uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset
     const uintptr_t read_end = src + sizeof(uintptr_t);
     if (read_end < src || src < region_start || read_end > region_end)
         return 0;
-    return *reinterpret_cast<const uintptr_t *>(src);
+    // memcpy for the same misalignment reason as the MSVC path above.
+    uintptr_t value;
+    std::memcpy(&value, reinterpret_cast<const void *>(src), sizeof(value));
+    return value;
 #endif
 }
 
@@ -1418,9 +1456,8 @@ bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t byte
 #endif
         return true;
     }
-    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
-                  ? EXCEPTION_EXECUTE_HANDLER
-                  : EXCEPTION_CONTINUE_SEARCH)
+    __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                        : EXCEPTION_CONTINUE_SEARCH)
     {
         return false;
     }
@@ -1482,10 +1519,8 @@ namespace
             out_addr = (count == 0) ? cur : cur + static_cast<uintptr_t>(offsets[count - 1]);
             return true;
         }
-        __except (
-            (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
-                ? EXCEPTION_EXECUTE_HANDLER
-                : EXCEPTION_CONTINUE_SEARCH)
+        __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                            : EXCEPTION_CONTINUE_SEARCH)
         {
             return false;
         }
@@ -1550,9 +1585,8 @@ bool DetourModKit::Memory::seh_read_chain_bytes(uintptr_t base, std::span<const 
         std::memcpy(out, reinterpret_cast<const void *>(final_addr), bytes);
         return true;
     }
-    __except ((GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION || GetExceptionCode() == STATUS_GUARD_PAGE_VIOLATION)
-                  ? EXCEPTION_EXECUTE_HANDLER
-                  : EXCEPTION_CONTINUE_SEARCH)
+    __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                        : EXCEPTION_CONTINUE_SEARCH)
     {
         return false;
     }
