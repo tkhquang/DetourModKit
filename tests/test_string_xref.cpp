@@ -815,7 +815,7 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 
     const std::uintptr_t decommit_page = reinterpret_cast<std::uintptr_t>(trailing_window);
     std::jthread toggler(
-        [&](std::stop_token stop_token)
+        [decommit_page, page](std::stop_token stop_token)
         {
             while (!stop_token.stop_requested())
             {

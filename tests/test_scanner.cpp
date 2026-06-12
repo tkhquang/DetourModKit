@@ -3412,7 +3412,7 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
 
     const std::uintptr_t middle = reinterpret_cast<std::uintptr_t>(base) + (pages / 2) * page;
     std::jthread toggler(
-        [&](std::stop_token stop_token)
+        [middle, page](std::stop_token stop_token)
         {
             while (!stop_token.stop_requested())
             {
