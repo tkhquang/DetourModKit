@@ -579,6 +579,11 @@ namespace DetourModKit
         return m_running.load(std::memory_order_acquire);
     }
 
+    bool AsyncLogger::is_writer_waiting() const noexcept
+    {
+        return m_writer_waiting.load(std::memory_order_acquire);
+    }
+
     size_t AsyncLogger::queue_size() const noexcept
     {
         return m_queue.size();

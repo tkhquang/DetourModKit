@@ -343,6 +343,15 @@ namespace DetourModKit
 
         [[nodiscard]] bool is_running() const noexcept;
 
+        /**
+         * @brief Reports whether the writer thread is currently parked on the flush condition variable.
+         * @details Observability accessor for the idle-park state set by the writer immediately before it
+         *          blocks in wait_for and cleared when it wakes. Lets a test or diagnostic confirm the
+         *          writer has reached the parked path deterministically instead of relying on a fixed
+         *          sleep. The flag can flip at any time, so treat the result as a point-in-time snapshot.
+         */
+        [[nodiscard]] bool is_writer_waiting() const noexcept;
+
         [[nodiscard]] size_t queue_size() const noexcept;
 
         /**

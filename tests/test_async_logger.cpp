@@ -1793,8 +1793,15 @@ TEST_F(AsyncLoggerTest, EnqueueWakesParkedWriterPromptly)
     auto log_mutex = std::make_shared<std::mutex>();
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
-    // Give the writer time to drain the empty queue and park on the long interval.
-    std::this_thread::sleep_for(std::chrono::milliseconds{50});
+    // Wait deterministically until the writer has drained the empty queue and parked, instead of
+    // relying on a fixed sleep, so the measurement below genuinely exercises the parked-writer wakeup.
+    // The bounded deadline keeps a stuck writer from hanging the test.
+    const auto park_deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+    while (!logger->is_writer_waiting() && std::chrono::steady_clock::now() < park_deadline)
+    {
+        std::this_thread::sleep_for(std::chrono::milliseconds{1});
+    }
+    ASSERT_TRUE(logger->is_writer_waiting());
 
     const auto start_time = std::chrono::steady_clock::now();
     ASSERT_TRUE(logger->enqueue(LogLevel::Info, "wake_parked_writer"));

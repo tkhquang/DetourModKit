@@ -11,20 +11,20 @@
 namespace
 {
     // Constant-initialised so it reads zero before any dynamic initialisation that might allocate.
-    thread_local long long g_thread_new_calls = 0;
+    thread_local long long s_thread_new_calls = 0;
 } // namespace
 
 namespace dmk_test
 {
     long long thread_new_calls() noexcept
     {
-        return g_thread_new_calls;
+        return s_thread_new_calls;
     }
 } // namespace dmk_test
 
 void *operator new(std::size_t size)
 {
-    ++g_thread_new_calls;
+    ++s_thread_new_calls;
     void *p = std::malloc(size != 0 ? size : 1);
     if (p == nullptr)
     {
