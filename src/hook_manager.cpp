@@ -200,7 +200,7 @@ HookManager::~HookManager() noexcept
     }
 
     std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-    m_vmt_hooks.clear();
+    clear_vmt_hooks_locked();
     m_hooks.clear();
 }
 
@@ -228,7 +228,7 @@ void HookManager::shutdown()
     }
     {
         std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-        m_vmt_hooks.clear();
+        clear_vmt_hooks_locked();
         m_hooks.clear();
 
         // Reset under the lock so concurrent create_*_hook calls cannot observe the flag as true (rejected) and then
@@ -646,6 +646,106 @@ bool HookManager::is_target_already_hooked(uintptr_t target_address) const noexc
     return false;
 }
 
+const std::string *HookManager::find_vmt_owner_of_vptr_locked(std::uintptr_t vptr) const noexcept
+{
+    if (vptr == 0)
+    {
+        return nullptr;
+    }
+    for (const auto &[name, entry] : m_vmt_hooks)
+    {
+        if (entry.cloned_vptr_base() != 0 && entry.cloned_vptr_base() == vptr)
+        {
+            return &name;
+        }
+    }
+    return nullptr;
+}
+
+void HookManager::clear_vmt_hooks_locked() noexcept
+{
+    // Newest-first so layered clones unwind with every conditional vptr restore targeting live memory.
+    for (auto it = m_vmt_creation_order.rbegin(); it != m_vmt_creation_order.rend(); ++it)
+    {
+        m_vmt_hooks.erase(*it);
+    }
+    m_vmt_hooks.clear();
+    m_vmt_creation_order.clear();
+}
+
+bool HookManager::looks_like_function_vmt_slot(std::uintptr_t slot_value) noexcept
+{
+    // A zero vtable slot is the RTTI/garbage sentinel SafetyHook itself rejects in VmtHook::create when probing for the
+    // vtable end. Treat it as a non-function.
+    if (slot_value == 0)
+    {
+        return false;
+    }
+
+    // Reject 0xCC/0xCD padding or breakpoints and bare RETs. A 0x00 first byte is the uninitialised-page sentinel.
+    std::uint8_t first_byte = 0;
+    if (!Memory::seh_read_bytes(slot_value, &first_byte, sizeof(first_byte)))
+    {
+        // Unreadable: cannot prove it is a function, refuse.
+        return false;
+    }
+    switch (first_byte)
+    {
+    case 0x00:
+    case 0xCC:
+    case 0xCD:
+    case 0xC2:
+    case 0xC3:
+        return false;
+    default:
+        break;
+    }
+
+    // Same-module jump-stub check. MSVC x64 adjustor thunks begin with the this-adjust instruction (first byte 0x48),
+    // so they pass this check; a slot whose *first* byte is EB (jmp rel8) or E9 (jmp rel32) landing in the same module
+    // is a jump stub (an incremental-link ILT entry or a patched slot), not a function body. Cloning a stub makes the
+    // new "original" a forwarder rather than the real body. "Same module" means HMODULE identity per
+    // GetModuleHandleExW on the slot and jump-target addresses, not a distance heuristic. Tail-calls that land in a
+    // foreign module (a `mov reg,reg; jmp <foreign>`) are real functions and pass.
+    if (first_byte == 0xEB || first_byte == 0xE9)
+    {
+        HMODULE slot_module = nullptr;
+        HMODULE jmp_module = nullptr;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(slot_value), &slot_module) == 0)
+        {
+            // No module info: cannot prove same-module, let the caller decide. Reject conservatively.
+            return false;
+        }
+        // Resolve the jmp target through the same x86 decode primitives the inline-hook pre-flight uses; that way
+        // EB and E9 share one well-tested decoder path.
+        std::optional<std::uintptr_t> jmp_target;
+        if (first_byte == 0xE9)
+        {
+            jmp_target = detail::decode_e9_rel32(slot_value);
+        }
+        else
+        {
+            jmp_target = detail::decode_eb_rel8(slot_value);
+        }
+        if (!jmp_target)
+        {
+            return false;
+        }
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(*jmp_target), &jmp_module) == 0)
+        {
+            return false;
+        }
+        if (slot_module == jmp_module)
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id)
 {
     // Non-locking fast-fail before acquiring the mutator gate.
@@ -750,7 +850,7 @@ void HookManager::remove_all_hooks()
         std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
 
         num_vmt = m_vmt_hooks.size();
-        m_vmt_hooks.clear();
+        clear_vmt_hooks_locked();
 
         num_hooks = m_hooks.size();
         m_hooks.clear();
@@ -1072,6 +1172,12 @@ std::vector<std::string> HookManager::get_hook_ids(std::optional<HookStatus> sta
 
 std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_view name, void *object)
 {
+    return create_vmt_hook(name, object, VmtHookConfig{});
+}
+
+std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_view name, void *object,
+                                                                   const VmtHookConfig &cfg)
+{
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         m_logger.error("HookManager: Shutdown in progress. Cannot create VMT hook '{}'.", name);
@@ -1102,6 +1208,62 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_v
                 {{std::format("HookManager: A VMT hook with the name '{}' already exists.", name), LogLevel::Error}}};
         }
 
+        // Pre-flight: read the current vptr and reject if it points at a vtable already cloned by this HookManager.
+        // SafetyHook::VmtHook::create silently overwrites the vptr with a pointer into a fresh clone, and a second
+        // call later sees the first clone as the "original" and chains on top of it. The guard makes the failure
+        // mode visible to the consumer. The reads are SEH-guarded: a garbage vptr is exactly what the opt-in flags
+        // exist to reject, so an unreadable object or vtable fails closed instead of faulting. When both flags are
+        // false no read is performed and the legacy path is unchanged.
+        if (cfg.fail_if_already_hooked || cfg.fail_on_non_function_pointer)
+        {
+            const auto current_vptr = Memory::seh_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+            if (!current_vptr)
+            {
+                return {std::unexpected(HookError::InvalidObject),
+                        {{std::format("HookManager: VMT hook '{}' refused: object {} vptr is unreadable.", name,
+                                      DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                          LogLevel::Error}}};
+            }
+            if (cfg.fail_if_already_hooked)
+            {
+                if (const auto *owner = find_vmt_owner_of_vptr_locked(*current_vptr))
+                {
+                    return {
+                        std::unexpected(HookError::HookAlreadyExists),
+                        {{std::format(
+                              "HookManager: VMT hook '{}' refused: object {} is already on the clone owned by '{}'.",
+                              name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)), *owner),
+                          LogLevel::Error}}};
+                }
+            }
+
+            // Pre-flight: refuse to clone when the first slot does not look like a callable function body. A 0xCC
+            // byte is an int3 alignment pad or permanent breakpoint; an EB/E9 same-module slot is a jump stub and
+            // cloning it makes the new "original" a forwarder. Tail-calls to outside the module (a `mov reg,reg; jmp`
+            // to a foreign function) are real functions and pass through.
+            if (cfg.fail_on_non_function_pointer)
+            {
+                const auto slot0 = Memory::seh_read<std::uintptr_t>(*current_vptr);
+                if (!slot0)
+                {
+                    return {std::unexpected(HookError::InvalidObject),
+                            {{std::format("HookManager: VMT hook '{}' refused: object {} vtable is unreadable.", name,
+                                          DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                              LogLevel::Error}}};
+                }
+                if (!looks_like_function_vmt_slot(*slot0))
+                {
+                    return {
+                        std::unexpected(HookError::InvalidObject),
+                        {{std::format("HookManager: VMT hook '{}' refused: object {} first slot {} is not a "
+                                      "function pointer.",
+                                      name, DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)),
+                                      DetourModKit::Format::format_address(*slot0)),
+                          LogLevel::Error}}};
+                }
+            }
+        }
+
         try
         {
             auto vmt_result = safetyhook::VmtHook::create(object);
@@ -1114,6 +1276,12 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_v
                           LogLevel::Error}}};
             }
 
+            // Capture the vptr SafetyHook just installed. After create, *object == &hook.m_new_vmt[1], which is the
+            // value any future apply_vmt_hook call will see on this object. Recording it lets later
+            // fail_if_already_hooked checks recognize "object is on this clone" without poking at SafetyHook's private
+            // layout. The emplace-arg constructor takes the base as a third arg and stores it.
+            const std::uintptr_t new_vptr_base = *reinterpret_cast<std::uintptr_t *>(object);
+
             std::string name_str{name};
 
             std::vector<DeferredLogEntry> logs;
@@ -1121,8 +1289,12 @@ std::expected<std::string, HookError> HookManager::create_vmt_hook(std::string_v
                                         DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
                             LogLevel::Info});
 
+            // Record creation order before emplace: if emplace throws, the stale order entry is a harmless no-op
+            // erase at teardown, whereas a registered hook missing from the order vector would dodge the ordered
+            // teardown.
+            m_vmt_creation_order.push_back(name_str);
             m_vmt_hooks.emplace(std::piecewise_construct, std::forward_as_tuple(name_str),
-                                std::forward_as_tuple(name_str, std::move(vmt_result.value())));
+                                std::forward_as_tuple(name_str, std::move(vmt_result.value()), new_vptr_base));
 
             return {std::move(name_str), std::move(logs)};
         }
@@ -1172,6 +1344,7 @@ std::expected<void, HookError> HookManager::remove_vmt_hook(std::string_view vmt
         {
             std::string removed_name = it->second.get_name();
             m_vmt_hooks.erase(it);
+            std::erase(m_vmt_creation_order, removed_name);
             return {std::expected<void, HookError>{},
                     {{std::format("HookManager: VMT hook '{}' has been removed.", removed_name), LogLevel::Debug}}};
         }
@@ -1233,6 +1406,11 @@ std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view v
 
 bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
 {
+    return apply_vmt_hook(vmt_name, object, VmtHookConfig{});
+}
+
+bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object, const VmtHookConfig &cfg)
+{
     if (m_shutdown_called.load(std::memory_order_acquire))
     {
         m_logger.warning("HookManager: Shutdown in progress. Cannot apply VMT hook '{}'.", vmt_name);
@@ -1259,6 +1437,76 @@ bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
         {
             return {false,
                     {{std::format("HookManager: VMT hook '{}' not found for apply.", vmt_name), LogLevel::Warning}}};
+        }
+
+        // The pre-flight reads are SEH-guarded: a garbage vptr is exactly what the opt-in flags exist to reject, so
+        // an unreadable object or vtable fails closed instead of faulting. When both flags are false no read is
+        // performed and the legacy path is unchanged.
+        if (cfg.fail_if_already_hooked || cfg.fail_on_non_function_pointer)
+        {
+            const auto current_vptr = Memory::seh_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+            if (!current_vptr)
+            {
+                return {
+                    false,
+                    {{std::format("HookManager: VMT hook '{}' apply refused: object {} vptr is unreadable.", vmt_name,
+                                  DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                      LogLevel::Error}}};
+            }
+
+            // Re-apply guard. SafetyHook::VmtHook::apply does m_objects.emplace(object, ...) which is silently
+            // idempotent for a key that already exists; the guard makes the "already on this clone" case observable
+            // for callers that want apply to be a clean no-op rather than a silent no-op. The lookup is registry-wide:
+            // an object already on a clone owned by a *different* hook of this manager must be refused, not layered
+            // onto. Mirrors create_vmt_hook's fail_if_already_hooked semantics.
+            if (cfg.fail_if_already_hooked)
+            {
+                if (const auto *owner = find_vmt_owner_of_vptr_locked(*current_vptr))
+                {
+                    if (*owner == vmt_name)
+                    {
+                        return {
+                            true,
+                            {{std::format("HookManager: VMT hook '{}' already applied to object {}; no-op.", vmt_name,
+                                          DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                              LogLevel::Debug}}};
+                    }
+                    return {false,
+                            {{std::format("HookManager: VMT hook '{}' apply refused: object {} is already on the "
+                                          "clone owned by '{}'.",
+                                          vmt_name,
+                                          DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)),
+                                          *owner),
+                              LogLevel::Error}}};
+                }
+            }
+
+            // Re-run the pre-flight decoder against the vtable currently installed on the object (the one about to
+            // be replaced). apply does not change the *target* vtable shape (only the vptr swap), so the decode is
+            // identical to the create path: reject int3 padding, bare RETs, and same-module jump stubs at the
+            // destination.
+            if (cfg.fail_on_non_function_pointer)
+            {
+                const auto slot0 = Memory::seh_read<std::uintptr_t>(*current_vptr);
+                if (!slot0)
+                {
+                    return {false,
+                            {{std::format("HookManager: VMT hook '{}' apply refused: object {} vtable is unreadable.",
+                                          vmt_name,
+                                          DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),
+                              LogLevel::Error}}};
+                }
+                if (!looks_like_function_vmt_slot(*slot0))
+                {
+                    return {false,
+                            {{std::format("HookManager: VMT hook '{}' apply refused: object {} first slot {} is not "
+                                          "a function pointer.",
+                                          vmt_name,
+                                          DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object)),
+                                          DetourModKit::Format::format_address(*slot0)),
+                              LogLevel::Error}}};
+                }
+            }
         }
 
         // VmtHook::apply tracks the object in an internal container, so it can throw bad_alloc. Contain it here as
@@ -1358,7 +1606,7 @@ void HookManager::remove_all_vmt_hooks()
         if (!m_vmt_hooks.empty())
         {
             size_t num_hooks = m_vmt_hooks.size();
-            m_vmt_hooks.clear();
+            clear_vmt_hooks_locked();
             logs.push_back(
                 {std::format("HookManager: All {} VMT hooks have been removed.", num_hooks), LogLevel::Debug});
         }

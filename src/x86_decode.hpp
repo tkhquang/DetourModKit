@@ -42,8 +42,8 @@ namespace DetourModKit::detail
      * @details Copies the candidate instruction bytes into a local buffer under a single SEH fault guard
      *          (seh_read_bytes), then inspects the copy. Read-then-test on a local buffer closes the time-of-check to
      *          time-of-use gap that is_readable + a raw dereference leaves open: the target page can change protection
-     *          or unmap between the probe and the access, and these decoders run on the nested-hook detection and
-     *          prologue-recovery paths where the page state is most likely to be in flux. A faulting read returns
+     *          or unmap between the probe and the access, and this decoder runs on hook-detection pre-flight paths
+     *          (the VMT slot pre-flight) where the page state is most likely to be in flux. A faulting read returns
      *          nullopt rather than taking down the host.
      * @param address Absolute address of the candidate instruction.
      * @return The absolute jump destination (rel8 sign-extended), or std::nullopt when the bytes are unreadable or the

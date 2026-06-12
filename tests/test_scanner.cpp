@@ -57,6 +57,54 @@ TEST(ScannerTest, find_pattern_found)
     EXPECT_EQ(result - data.data(), 100);
 }
 
+// The AOB prefilter routes through a self-provided dmk_memchr that is ASan-safe in every build. The observable
+// contract pinned here is "first match wins, nullptr when no match, treat n==0 as no match", covered across the
+// boundary cases of the 8-byte qword loop: the unaligned head, the aligned body, and the byte-wise tail. The qword
+// path compiles only under MSVC; other toolchains run the scalar loop against the same assertions.
+TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
+{
+    auto pattern = Scanner::parse_aob("CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    // One buffer per match position so each boundary case is asserted as a true first-match result: position 0
+    // (first byte), 7 (last byte before the first aligned qword), 8 (first byte of the aligned body), 15/16 (the
+    // qword seam), 32 (interior), and 63 (last byte). The filler byte 0xAB shares 0xCC's set high bit so the qword
+    // detect cannot pass on a high-bit-only comparison.
+    const std::size_t match_positions[] = {0, 7, 8, 15, 16, 32, 63};
+    for (const std::size_t pos : match_positions)
+    {
+        std::vector<std::byte> data(64, std::byte{0xAB});
+        data[pos] = std::byte{0xCC};
+
+        auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+        ASSERT_NE(result, nullptr);
+        EXPECT_EQ(static_cast<std::size_t>(result - data.data()), pos);
+
+        // Scanning from a misaligned base exercises the unaligned head loop ahead of the aligned qword body.
+        if (pos >= 1)
+        {
+            auto misaligned = Scanner::find_pattern(data.data() + 1, data.size() - 1, *pattern);
+            ASSERT_NE(misaligned, nullptr);
+            EXPECT_EQ(static_cast<std::size_t>(misaligned - (data.data() + 1)), pos - 1);
+        }
+    }
+
+    // No-match case: a buffer with no occurrence.
+    std::vector<std::byte> empty(64, std::byte{0xAB});
+    auto miss = Scanner::find_pattern(empty.data(), empty.size(), *pattern);
+    EXPECT_EQ(miss, nullptr);
+
+    // n == 0: a zero-size region cannot contain the pattern and must report no match without reading any byte.
+    EXPECT_EQ(Scanner::find_pattern(empty.data(), 0, *pattern), nullptr);
+
+    // An n<8 buffer skips both the alignment head loop and the qword body (`n >= 8` guards both) and runs the
+    // byte-wise tail loop.
+    std::vector<std::byte> tiny{std::byte{0xAB}, std::byte{0xAB}, std::byte{0xCC}, std::byte{0xAB}};
+    auto tiny_result = Scanner::find_pattern(tiny.data(), tiny.size(), *pattern);
+    ASSERT_NE(tiny_result, nullptr);
+    EXPECT_EQ(tiny_result - tiny.data(), 2);
+}
+
 TEST(ScannerTest, find_pattern_not_found)
 {
     std::vector<std::byte> data(256, std::byte{0x00});

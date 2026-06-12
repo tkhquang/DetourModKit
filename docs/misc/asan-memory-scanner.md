@@ -4,7 +4,7 @@
 
 DetourModKit's AOB scanner and SEH-guarded probe read deliberately read arbitrary mapped process memory. Under MSVC AddressSanitizer (the `msvc-debug-asan` preset) those reads land on memory ASan has poisoned for its own bookkeeping and are reported as buffer overflows -- even though every read is in bounds of a committed, readable page and never faults in a release build. They are false positives intrinsic to running a whole-process memory scanner inside an ASan-instrumented process.
 
-The fix excludes only the deliberate foreign-memory readers from ASan, entirely under `#if defined(__SANITIZE_ADDRESS__)`, so release and non-ASan builds are byte-for-byte unchanged and the full test suite still runs -- and passes -- under ASan with the scanner exercised.
+The fix excludes only the deliberate foreign-memory readers from ASan. The AOB byte-search prefilter routes through a self-provided `dmk_memchr` in every build, so it is immune to libc interceptors by construction; only the `no_sanitize_address` attribute and the `__movsb` copy path remain ASan-conditional under `#if defined(__SANITIZE_ADDRESS__)`. The full test suite still runs -- and passes -- under ASan with the scanner exercised.
 
 ## What ASan reports
 
@@ -30,13 +30,13 @@ A function that reads foreign memory trips ASan two different ways, and each nee
 
 ## The fix
 
-Every change is guarded by `#if defined(__SANITIZE_ADDRESS__)`; release and non-ASan builds keep the original `memchr`/`memcpy` and emit identical code.
+The byte-search prefilter is unconditional: every build routes it through a self-provided `dmk_memchr` that performs its own byte comparisons and never calls into libc, so the interceptor has nothing to hot-patch. Only the `DMK_NO_SANITIZE_ADDRESS` attribute and the `__movsb` copy in `seh_read_bytes` are guarded by `#if defined(__SANITIZE_ADDRESS__)`.
 
 `src/scanner.cpp`:
 
 - A translation-unit-local `DMK_NO_SANITIZE_ADDRESS` macro (empty off ASan).
 - `no_sanitize_address` on `find_pattern_raw`, `verify_pattern_avx2`, and the `scan_for_byte` helper -- the functions whose instrumented SIMD/scalar loads read the scanned region.
-- `scan_for_byte` replaces the inner-loop `memchr`. Under ASan it scans inline (no interceptor); otherwise it forwards to `memchr`, so release keeps the optimized path.
+- `scan_for_byte` replaces the inner-loop `memchr`, routing through the self-provided `dmk_memchr` in all builds (an 8-byte qword loop under MSVC x64, a scalar loop elsewhere), so the interceptor never sees the scan in any configuration.
 
 `src/memory.cpp`:
 
@@ -58,7 +58,7 @@ If a new function deliberately reads memory the process does not own:
 
 1. Mark it `DMK_NO_SANITIZE_ADDRESS`, with the attribute on its first declaration (on MSVC, the header prototype for an out-of-line function).
 2. Route any `memchr`/`memcpy`/`memmove`/`memset` it performs on that memory around the interceptor under `#if defined(__SANITIZE_ADDRESS__)` -- an inline loop, or `__movsb`/`__stosb` for bulk copies/fills.
-3. Keep the release path on the original libc call so shipped code is unchanged.
+3. Decide whether the replacement is unconditional or ASan-only. A primitive on a scan path that must behave identically in every build gets a self-provided unconditional replacement (the AOB prefilter's `dmk_memchr`); a primitive whose libc form is fine outside ASan can keep the libc call under the `#else` branch (the `__movsb` copy in `seh_read_bytes`).
 
 ## References
 

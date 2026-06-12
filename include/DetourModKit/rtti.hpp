@@ -29,6 +29,22 @@ namespace DetourModKit
      *          The ABI layout this module relies on (COL at vtable - 8, TypeDescriptor RVA at COL + 0x0C, mangled name
      *          at TD + 0x10, COL.pSelf RVA at COL + 0x14 on x64) has been stable across every release of MSVC since
      *          Visual C++ 2010.
+     *
+     *          RTTI-disabled host binaries: every resolver in this namespace -- @ref type_name_of,
+     *          @ref type_name_into, @ref vtable_is_type, @ref find_in_pointer_table, the reverse-direction
+     *          @ref vtable_for_type / @ref vtables_for_type / @ref TypeIdentity::matches, and the self-heal backends
+     *          in @ref rtti_dissect.hpp (which include @ref identify_pointee_type, @ref reverse_scan_block,
+     *          @ref heal_landmark, @ref heal_offset, and @ref solve_fingerprint) -- is built on the
+     *          COL/TypeDescriptor layout above. When the host binary is compiled with RTTI disabled (`/GR-` for MSVC
+     *          and clang-cl), the TypeDescriptor records DMK needs to read are not emitted, and every RTTI-based
+     *          resolver returns its fail-closed sentinel (`std::nullopt`, `std::unexpected`, `false`, or a zero
+     *          count) rather than a fault or a wrong answer. The forward walker is still safe to call; it just
+     *          cannot identify types.
+     *
+     *          The primary fallback for an RTTI-off consumer is @ref Scanner::find_string_xref or
+     *          @ref Scanner::read_code_constant, which operate on raw bytes and do not require RTTI records. The
+     *          long-form failure-mode discussion for each function is in docs/misc/rtti-walker.md and
+     *          docs/misc/rtti-self-heal.md.
      */
     namespace Rtti
     {

@@ -24,6 +24,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace DetourModKit
 {
@@ -104,6 +105,46 @@ namespace DetourModKit
          *          behind another mod's.
          */
         bool fail_if_already_hooked = false;
+    };
+
+    /**
+     * @struct VmtHookConfig
+     * @brief Configuration options used during VMT hook creation and apply, symmetric with @ref HookConfig.
+     * @details Mirrors @ref HookConfig for VMT hooks so the inline and VMT code paths expose the same operational
+     *          surface. The defaults are chosen to preserve the historical single-argument API's behavior exactly
+     *          (no pre-flight checks; pre-existing failures such as a null object, a duplicate name, shutdown in
+     *          progress, or a SafetyHook error still apply), so existing call sites that build a default config
+     *          compile and run unchanged.
+     */
+    struct VmtHookConfig
+    {
+        /**
+         * @brief When true, refuse to clone an object whose vptr already points at a VMT cloned by this HookManager.
+         * @details SafetyHook::VmtHook::create replaces the object's vptr with a pointer into a freshly-allocated
+         *          cloned vtable. If a second call later clones the same object, the second create reads the first
+         *          clone as if it were the original vtable: the first mod's hooked methods are now baked into the
+         *          second mod's "original" and a third call layered on top of the second sees a third level of
+         *          redirection. This is the silent "double hook" failure mode the inline hook's
+         *          @ref HookConfig::fail_if_already_hooked guards against; VMT cloning is the same shape of risk and
+         *          gets the same knob. Default false preserves the legacy permissive behavior.
+         */
+        bool fail_if_already_hooked = false;
+
+        /**
+         * @brief When true, pre-flight-decode the first byte of the original vtable slot and refuse to clone when
+         *        the byte is an int3/int padding breakpoint or a same-module jump stub.
+         * @details A VMT slot whose first byte is 0xCC is an alignment pad or permanent breakpoint, not a real
+         *          function. Replacing it and dispatching through it yields __debugbreak under the consumer's
+         *          debugger and an instant crash in shipping builds. A VMT slot whose first instruction is `jmp
+         *          rel8/rel32` to a target inside the same module is a jump stub (e.g. an incremental-link ILT
+         *          entry), not a function body; MSVC adjustor thunks for multiple-inheritance vtables start with the
+         *          this-adjust instruction, so they pass. The check is intentionally conservative: real functions
+         *          (any other first byte, or a tail-call `mov reg,reg; jmp <out-of-module>`) pass. Known false
+         *          positive: consumer binaries built with /INCREMENTAL route every function through an ILT jump
+         *          stub, which this check rejects. The default is false to preserve the historical no-pre-flight
+         *          behavior; opt in for the safety net on mods that exclusively target well-formed C++ vtables.
+         */
+        bool fail_on_non_function_pointer = false;
     };
 
     /**
@@ -367,9 +408,13 @@ namespace DetourModKit
              * @brief Constructs an entry that takes ownership of a SafetyHook VMT hook.
              * @param name The registered hook name.
              * @param vmt_hook The VMT hook to own.
+             * @param new_vptr_base The vptr value SafetyHook installed on the seeded object, i.e. `&m_new_vmt[1]`.
+             *                      Stored so subsequent apply_vmt_hook calls can detect "object is already on this
+             *                      clone" without touching the private SafetyHook layout. Zero is reserved for "not
+             *                      recorded" and never matches a real vptr.
              */
-            VmtHookEntry(std::string name, safetyhook::VmtHook vmt_hook)
-                : m_name(std::move(name)), m_vmt_hook(std::move(vmt_hook))
+            VmtHookEntry(std::string name, safetyhook::VmtHook vmt_hook, std::uintptr_t new_vptr_base)
+                : m_name(std::move(name)), m_vmt_hook(std::move(vmt_hook)), m_cloned_vptr_base(new_vptr_base)
             {
             }
 
@@ -378,6 +423,9 @@ namespace DetourModKit
 
             /// Returns the underlying SafetyHook VMT hook.
             safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
+
+            /// Returns the vptr this entry installed on its seed object, or 0 if unknown.
+            std::uintptr_t cloned_vptr_base() const noexcept { return m_cloned_vptr_base; }
 
             /// Returns true if a method at the given vtable index is hooked.
             [[nodiscard]] bool has_method_hook(size_t index) const noexcept
@@ -421,6 +469,7 @@ namespace DetourModKit
         private:
             std::string m_name;
             safetyhook::VmtHook m_vmt_hook;
+            std::uintptr_t m_cloned_vptr_base{0};
             std::unordered_map<size_t, safetyhook::VmHook> m_method_hooks;
         };
 
@@ -549,6 +598,23 @@ namespace DetourModKit
         [[nodiscard]] std::expected<std::string, HookError> create_vmt_hook(std::string_view name, void *object);
 
         /**
+         * @brief Configurable VMT hook creation, symmetric with the inline hook's @ref create_inline_hook overload.
+         * @details Single source of truth for VMT hook policy. The single-argument overload above is a thin delegating
+         *          wrapper around this one with a default-constructed @ref VmtHookConfig, so call sites that only need
+         *          a name and an object compile and behave exactly as before.
+         * @param name A unique, descriptive name for the VMT hook.
+         * @param object Pointer to the polymorphic object whose vptr will be replaced.
+         * @param cfg VMT policy (fail-if-already-hooked, pre-flight slot decoding).
+         * @return std::expected<std::string, HookError> The hook name if successful. @ref HookError::HookAlreadyExists
+         *         is returned when @p cfg.fail_if_already_hooked is set and the object's vptr already points at a
+         *         vtable cloned by this HookManager. @ref HookError::InvalidObject is returned when
+         *         @p cfg.fail_on_non_function_pointer is set and the pre-flight decoder rejects the first byte of
+         *         the vtable, and also when either flag is set and the object's vptr or vtable is unreadable.
+         */
+        [[nodiscard]] std::expected<std::string, HookError> create_vmt_hook(std::string_view name, void *object,
+                                                                            const VmtHookConfig &cfg);
+
+        /**
          * @brief Hooks a specific virtual method by index in a named VMT hook.
          * @tparam T The type of the destination function (function pointer or member function pointer).
          * @param vmt_name The name of the VMT hook (from create_vmt_hook).
@@ -641,6 +707,11 @@ namespace DetourModKit
 
         /**
          * @brief Removes an entire VMT hook, restoring the original vtable on all applied objects.
+         * @details Bulk teardown (remove_all_vmt_hooks, remove_all_hooks, shutdown, destructor) destroys VMT hooks
+         *          in reverse creation order so clones layered on the same object unwind safely. Explicit removal
+         *          does not reorder for the caller: removing an inner layer while a clone created later on top of it
+         *          is still installed frees the clone that the newer hook recorded as its "original", so remove
+         *          layered hooks newest-first.
          * @param vmt_name The name of the VMT hook to remove.
          * @return Success if removed, or HookError::VmtHookNotFound.
          */
@@ -661,6 +732,23 @@ namespace DetourModKit
          * @return true if the VMT hook was found and applied, false otherwise.
          */
         [[nodiscard]] bool apply_vmt_hook(std::string_view vmt_name, void *object);
+
+        /**
+         * @brief Configurable form of @ref apply_vmt_hook, symmetric with @ref create_vmt_hook.
+         * @details The two-argument overload above is a thin delegating wrapper that uses a default-constructed
+         *          @ref VmtHookConfig, preserving the historical permissive apply semantics (apply still returns
+         *          false on shutdown, a null object, an unknown name, or an apply exception).
+         * @param vmt_name The name of the VMT hook whose cloned vtable should be installed.
+         * @param object The object to apply the cloned vtable to.
+         * @param cfg Apply policy. @p cfg.fail_if_already_hooked lets a mod refuse to install its vtable on an
+         *            object that is already on a clone from this HookManager (a re-apply of the same clone is a
+         *            no-op for SafetyHook; the guard exists for symmetry and for callers that want a single
+         *            create/apply that is a no-op on a re-invocation). @p cfg.fail_on_non_function_pointer re-runs
+         *            the pre-flight decoder against the vtable currently installed on the object (the one about to
+         *            be replaced).
+         * @return true if the VMT hook was found and applied, false otherwise.
+         */
+        [[nodiscard]] bool apply_vmt_hook(std::string_view vmt_name, void *object, const VmtHookConfig &cfg);
 
         /**
          * @brief Removes the hooked vtable from a specific object, restoring its original vptr.
@@ -1106,6 +1194,14 @@ namespace DetourModKit
         mutable detail::SrwSharedMutex m_hooks_mutex;
         detail::HookMap m_hooks;
         detail::VmtHookMap m_vmt_hooks;
+
+        /**
+         * @brief VMT hook names in creation order, maintained under m_hooks_mutex alongside m_vmt_hooks.
+         * @details Bulk teardown walks this vector in reverse via clear_vmt_hooks_locked() so clones layered on the
+         *          same object are destroyed newest-first instead of in unordered_map bucket order.
+         */
+        std::vector<std::string> m_vmt_creation_order;
+
         Logger &m_logger;
         std::shared_ptr<safetyhook::Allocator> m_allocator;
         std::atomic<bool> m_shutdown_called{false};
@@ -1184,6 +1280,44 @@ namespace DetourModKit
         {
             return m_vmt_hooks.find(name) != m_vmt_hooks.end();
         }
+
+        /**
+         * @brief Destroys every VMT hook entry in reverse creation order and empties the registry.
+         * @details When two hooks layer on the same object, the newer hook records the older hook's clone as its
+         *          "original" vtable. SafetyHook::VmtHook::destroy frees a hook's clone allocation unconditionally
+         *          but restores an object's vptr only when it still points at that hook's own clone, so destroying
+         *          the older hook first would leave the newer hook to restore the object's vptr to freed memory.
+         *          Newest-first destruction unwinds the layers so every restore writes a vptr that is still alive.
+         * @note Must be called with m_hooks_mutex held exclusively.
+         */
+        void clear_vmt_hooks_locked() noexcept;
+
+        /**
+         * @brief Returns the name of the VMT hook whose cloned vptr matches @p vptr, or nullptr if none.
+         * @details Walks the live VMT registry under the held m_hooks_mutex shared or exclusive lock and compares the
+         *          recorded cloned-vptr base. The check is O(N) over the (small) registry and is the only reliable way
+         *          to detect "object is already on a clone installed by this HookManager" without poking at
+         *          SafetyHook's private VmtHook layout. The caller-supplied @p vptr must already be plausibly a
+         *          userspace address; the comparison is a single qword, so no extra bounds work is needed here.
+         * @note Must be called with m_hooks_mutex held (shared or exclusive). The read-only accessors that need the
+         *       reentrancy-aware lock use the same primitive.
+         */
+        [[nodiscard]] const std::string *find_vmt_owner_of_vptr_locked(std::uintptr_t vptr) const noexcept;
+
+        /**
+         * @brief Decodes the first few bytes of @p slot_value to decide if it looks like a callable function body.
+         * @details Mirrors the inline pre-flight's detail::decode_* blacklist but is applied to a VMT slot value
+         *          directly so the VMT path does not need to round-trip through the scanner module. The first byte
+         *          is read with a single SEH-guarded byte load (no further decoding); when the first byte is one of
+         *          0xCC/0xCD/0xC2/0xC3/0x00 the slot is rejected, when it is 0xEB/0xE9 the next 1-4 bytes are
+         *          inspected to see if the relative jump target is inside the same module per GetModuleHandleEx
+         *          HMODULE identity (heuristic for a jump stub). Everything else passes. Allocation-free, noexcept,
+         *          no logger dependency.
+         * @param slot_value The first pointer-sized value read from the VMT slot.
+         * @return true when the slot is a real function pointer (or a tail-call to outside the same module),
+         *         false when it is a breakpoint, bare RET, or same-module jump stub.
+         */
+        [[nodiscard]] static bool looks_like_function_vmt_slot(std::uintptr_t slot_value) noexcept;
     };
 
     /**

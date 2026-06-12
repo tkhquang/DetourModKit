@@ -24,6 +24,8 @@
 #include <unordered_map>
 #include <map>
 #include <vector>
+#include <deque>
+#include <type_traits>
 #include <chrono>
 #include <atomic>
 #include <mutex>
@@ -94,19 +96,27 @@ namespace
         // Map from monotonic counter -> base_address for O(log n) oldest-entry lookup (LRU)
         // Monotonic counter guarantees insertion-order uniqueness for correct eviction
         std::map<uint64_t, uintptr_t> lru_index;
-        // Sorted by base address for O(log n) containment lookup
+        // Sorted by base address for O(log n) containment lookup. All sorted_ranges access is serialized by the shard
+        // SRW lock (shared for lookups, exclusive for mutation), so iterators never outlive a critical section. The
+        // std::deque is defense-in-depth that prevents wholesale buffer relocation on growth, though interior
+        // insert/erase still invalidates deque iterators per the standard. The hit path is dominated by the direct
+        // entries lookup; the sorted-ranges path is the slow-path fallback for regions larger than one page, and the
+        // deque's extra indirection on random-access iterators is in the noise at the bounded size
+        // (hard_max_per_shard).
         // {base, base+size}
-        std::vector<std::pair<uintptr_t, uintptr_t>> sorted_ranges;
+        std::deque<std::pair<uintptr_t, uintptr_t>> sorted_ranges;
         uint64_t entry_counter{0};
         size_t capacity;
         size_t max_capacity;
 
-        CacheShard() : capacity(0), max_capacity(0)
-        {
-            entries.reserve(64);
-            sorted_ranges.reserve(64);
-        }
+        CacheShard() : capacity(0), max_capacity(0) { entries.reserve(64); }
     };
+
+    // The sorted-ranges container type is pinned as a deliberate refactor tripwire: with a deque, mutation never
+    // relocates the whole buffer under the lock. This is not iterator stability (deque insert/erase invalidates
+    // iterators); the lock is what excludes concurrent access.
+    static_assert(std::is_same_v<decltype(CacheShard::sorted_ranges), std::deque<std::pair<uintptr_t, uintptr_t>>>,
+                  "CacheShard::sorted_ranges is pinned to std::deque so mutation never relocates the whole buffer.");
 
     /**
      * @brief Returns current time in nanoseconds.
@@ -259,7 +269,7 @@ namespace
     }
 
     /**
-     * @brief Inserts a range into the shard's sorted auxiliary vector.
+     * @brief Inserts a range into the shard's sorted auxiliary container.
      * @note Must be called with shard mutex held (exclusive).
      */
     void insert_sorted_range(CacheShard &shard, uintptr_t base_addr, size_t region_size) noexcept
@@ -270,7 +280,7 @@ namespace
     }
 
     /**
-     * @brief Removes a range from the shard's sorted auxiliary vector.
+     * @brief Removes a range from the shard's sorted auxiliary container.
      * @note Must be called with shard mutex held (exclusive).
      */
     void remove_sorted_range(CacheShard &shard, uintptr_t base_addr) noexcept
@@ -701,7 +711,6 @@ namespace
             for (size_t i = 0; i < shard_count; ++i)
             {
                 s_cache_shards[i].entries.reserve(hard_max_per_shard);
-                s_cache_shards[i].sorted_ranges.reserve(hard_max_per_shard);
                 s_cache_shards[i].capacity = entries_per_shard;
                 s_cache_shards[i].max_capacity = hard_max_per_shard;
                 s_shard_mutexes[i] = std::make_unique<SrwSharedMutex>();

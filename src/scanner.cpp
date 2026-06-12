@@ -46,11 +46,11 @@
 // locals and instrumented globals. The AOB scanner deliberately reads across whole readable regions, so under ASan its
 // in-bounds, never-faulting reads land on poisoned shadow and are reported as overflows. DMK_NO_SANITIZE_ADDRESS
 // removes the compiler's load instrumentation from such a function, so the read runs exactly as a release build does.
-// It does
-// NOT stop ASan's libc interceptors (memchr/memcpy are hot-patched at runtime), so those calls are routed around
-// separately under __SANITIZE_ADDRESS__ (see scan_for_byte). ASan links only under MSVC here (mingw-w64 ships no
-// sanitizer runtime), so the attribute is the MSVC __declspec form; the macro is empty in every other build, leaving
-// release codegen unchanged.
+// It does NOT stop ASan's libc interceptors (memchr/memcpy are hot-patched at runtime); the scanner therefore routes
+// the prefilter through a self-provided dmk_memchr that does its own byte comparisons and never calls into libc. The
+// attribute also covers the verify path's instrumented SIMD/scalar loads. ASan links only under MSVC here (mingw-w64
+// ships no sanitizer runtime), so the attribute is the MSVC __declspec form; the macro is empty in every other build,
+// leaving release codegen unchanged.
 #if defined(_MSC_VER) && defined(__SANITIZE_ADDRESS__)
 #define DMK_NO_SANITIZE_ADDRESS __declspec(no_sanitize_address)
 #else
@@ -398,26 +398,87 @@ const std::byte *DetourModKit::Scanner::find_pattern(const std::byte *start_addr
 
 namespace
 {
-    // memchr over [begin, end] for the anchor byte. Under ASan the libc memchr interceptor inspects the whole range
-    // against ASan's shadow and reports a
-    // false overflow when the scanner walks this process's own poisoned memory;
-    // no_sanitize_address does not suppress that runtime interceptor. Scanning inline in a no_sanitize_address function
-    // reads the bytes directly, exactly as the release memchr does. Release builds keep the optimized memchr.
+    // Self-provided memchr over [haystack, haystack + n) for the anchor byte. Routing the prefilter through libc
+    // memchr works in release, but under AddressSanitizer the runtime interceptor inspects the whole range against
+    // ASan's shadow and reports a false overflow when the scanner walks this process's own committed, readable
+    // memory (the poisoned shadow around stack locals and instrumented globals). The runtime interceptor bypasses
+    // any no_sanitize_address attribute on the caller, so a per-function escape hatch is not enough: the function
+    // itself must do the byte comparisons.
+    //
+    // The MSVC implementation processes 8 bytes per iteration through a qword load, with an aligned-body / unaligned-
+    // head / tail structure. Each 8-byte chunk is XOR-ed against a broadcasted copy of the needle and run through the
+    // (x - 0x01...) & ~x & 0x80... zero-byte detect; _BitScanForward64 on the resulting mask yields the byte offset
+    // of the first match.
+    //
+    // GCC/Clang keep a scalar loop, accepting reduced large-haystack throughput versus libc's vectorized memchr in
+    // exchange for ASan-interceptor immunity; a SIMD tier can widen it later. clang-cl also defines _MSC_VER but
+    // applies strict-aliasing TBAA to the type-punned qword load, so it is routed to the scalar loop as well.
     DMK_NO_SANITIZE_ADDRESS
-    const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end, unsigned char target) noexcept
+    const void *dmk_memchr(const void *haystack, unsigned char needle, size_t n) noexcept
     {
-#if defined(__SANITIZE_ADDRESS__)
-        for (const std::byte *p = begin; p <= end; ++p)
+        if (n == 0)
         {
-            if (static_cast<unsigned char>(*p) == target)
+            return nullptr;
+        }
+
+#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)
+        const auto *p = static_cast<const unsigned char *>(haystack);
+        // Process the unaligned prefix one byte at a time so the qword loop can run aligned. Worst case 7 bytes.
+        while (n >= 8 && (reinterpret_cast<std::uintptr_t>(p) & 7u) != 0)
+        {
+            if (*p == needle)
+            {
+                return p;
+            }
+            ++p;
+            --n;
+        }
+        const unsigned long long needle_qw = 0x0101010101010101ULL * needle;
+        for (; n >= 8; p += 8, n -= 8)
+        {
+            // p is 8-byte aligned here (the head loop guarantees it), so the direct load is valid; it also avoids the
+            // memcpy interceptor ASan hot-patches into the CRT, which a real call would reintroduce under /Od.
+            const std::uint64_t chunk = *reinterpret_cast<const std::uint64_t *>(p);
+            // x has a 0x00 byte exactly where chunk equals the needle. (x - 0x01...) borrows into the high bit of
+            // each zero byte, ~x clears bytes whose own high bit was set, so hi_bits has 0x80 only at matching bytes
+            // and BSF yields the first.
+            const std::uint64_t x = chunk ^ needle_qw;
+            const std::uint64_t hi_bits = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
+            if (hi_bits != 0)
+            {
+                unsigned long index = 0;
+                _BitScanForward64(&index, hi_bits);
+                return p + (index >> 3);
+            }
+        }
+        for (; n > 0; ++p, --n)
+        {
+            if (*p == needle)
             {
                 return p;
             }
         }
         return nullptr;
 #else
-        return static_cast<const std::byte *>(memchr(begin, target, static_cast<size_t>(end - begin + 1)));
+        for (const auto *p = static_cast<const unsigned char *>(haystack); n > 0; ++p, --n)
+        {
+            if (*p == needle)
+            {
+                return p;
+            }
+        }
+        return nullptr;
 #endif
+    }
+
+    // memchr over [begin, end] for the anchor byte. Routes through the self-provided dmk_memchr above so the ASan
+    // runtime cannot intercept the call. dmk_memchr returns a pointer into the range or nullptr; the wrapper
+    // re-establishes the [begin, end] inclusive contract the scanner expects.
+    DMK_NO_SANITIZE_ADDRESS
+    const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end, unsigned char target) noexcept
+    {
+        const size_t n = static_cast<size_t>(end - begin + 1);
+        return static_cast<const std::byte *>(dmk_memchr(begin, target, n));
     }
 
     DMK_NO_SANITIZE_ADDRESS
