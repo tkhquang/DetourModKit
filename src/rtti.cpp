@@ -516,6 +516,15 @@ namespace DetourModKit
                 return std::nullopt;
             primary = matches[i].vtable;
         }
+
+        // scan_vtables_for_name saturated its match buffer (match_count reached the cap), so vtables for this name may
+        // exist beyond MAX_REVERSE_MATCHES that the loop above never inspected -- including a second distinct primary
+        // that would make the result ambiguous. The uniqueness guarantee cannot hold across a truncated scan, so fail
+        // closed rather than hand back a primary that might not be the only one. A name with this many sub-object
+        // vtables is already a pathological / ODR-duplicated image; the documented happy case is a handful.
+        if (match_count == MAX_REVERSE_MATCHES && primary)
+            return std::nullopt;
+
         return primary;
     }
 

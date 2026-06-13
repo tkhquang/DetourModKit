@@ -151,6 +151,39 @@ configure_file(
   @ONLY
 )
 
+# --- Static analysis (clang-tidy, opt-in advisory) ---
+# The curated .clang-tidy at the repo root is advisory: it never fails a build (WarningsAsErrors: '') and confines
+# header diagnostics to include/DetourModKit via HeaderFilterRegex. This option wires it into the build so clang-tidy
+# runs alongside compilation of DetourModKit's own sources (and the tests). Off by default so normal consumer and CI
+# builds are unaffected; CI runs it in a continue-on-error lane. Set here -- after the external submodules are added
+# above (line 108) and before the library and test targets below -- so only this project's targets inherit the launcher
+# and SafetyHook / Zydis / Zycore are never analysed.
+option(DMK_ENABLE_CLANG_TIDY "Run clang-tidy on DetourModKit sources during the build (advisory)" OFF)
+
+if(DMK_ENABLE_CLANG_TIDY)
+  find_program(DMK_CLANG_TIDY_EXE NAMES clang-tidy)
+  if(DMK_CLANG_TIDY_EXE)
+    # Export compile_commands.json too, so a standalone `clang-tidy -p <build>` run can reuse the same flags.
+    set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+    set(DMK_CLANG_TIDY_COMMAND "${DMK_CLANG_TIDY_EXE}")
+    # clang-tidy runs its own clang frontend. Under a GCC (MinGW) compiler on Windows it otherwise defaults to the
+    # LLVM/MSVC target triple and fails to parse the MinGW headers and the GCC SIMD target attributes, so pin
+    # clang-tidy's target to the compiler's own triple (from `g++ -dumpmachine`). MSVC selects clang-cl driver mode
+    # automatically, so this adjustment is confined to the GNU toolchain.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -dumpmachine
+        OUTPUT_VARIABLE DMK_GCC_TRIPLE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+      if(DMK_GCC_TRIPLE)
+        list(APPEND DMK_CLANG_TIDY_COMMAND "--extra-arg-before=--target=${DMK_GCC_TRIPLE}")
+      endif()
+    endif()
+    set(CMAKE_CXX_CLANG_TIDY ${DMK_CLANG_TIDY_COMMAND})
+    message(STATUS "clang-tidy enabled (advisory): ${DMK_CLANG_TIDY_COMMAND}")
+  else()
+    message(WARNING "DMK_ENABLE_CLANG_TIDY=ON but no clang-tidy binary was found on PATH; static analysis skipped.")
+  endif()
+endif()
+
 # --- DetourModKit Library Target Definition ---
 # Glob source files. CONFIGURE_DEPENDS helps CMake re-glob on CMakeLists changes.
 # For brand new files, a manual CMake re-run might still be needed.

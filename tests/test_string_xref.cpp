@@ -876,6 +876,72 @@ TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
     EXPECT_EQ(broad.error(), Scanner::StringXrefError::AmbiguousReference);
 }
 
+// Precondition regression: phase-2 reference scanning treats each execute-readable window independently and
+// carries no cross-window overlap (unlike find_pattern). A RIP-relative lea straddling a protection split inside .text
+// -- two adjacent execute-readable regions VirtualQuery reports separately because their base protections differ -- is
+// decoded in neither window, so find_string_xref reports NoReference (a fail-closed miss, never a wrong match). The
+// common case, one contiguous .text window, has no interior boundary and is unaffected.
+TEST(StringXrefTest, ReferenceStraddlingProtectionSplitReportsNoReference)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const std::size_t page = si.dwPageSize;
+
+    // Three contiguous pages from one reservation: page 0 RWX code, page 1 code flipped to a different executable
+    // protection (so VirtualQuery splits the two into separate windows), page 2 RW data holding the anchor string.
+    auto *base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, page * 3, MEM_RESERVE, PAGE_NOACCESS));
+    if (base == nullptr)
+    {
+        GTEST_SKIP() << "could not reserve the protection-split fixture";
+    }
+    VirtualPagePtr owner(base);
+    ASSERT_NE(VirtualAlloc(base, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
+    ASSERT_NE(VirtualAlloc(base + page, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
+    ASSERT_NE(VirtualAlloc(base + page * 2, page, MEM_COMMIT, PAGE_READWRITE), nullptr);
+
+    const char str[] = "StraddleAnchorString";
+    std::memcpy(base + page * 2, str, sizeof(str));
+
+    // Plant a 7-byte `lea rax, [rip+disp32]` straddling the page0/page1 boundary: its opcode bytes (48 8D 05) end page
+    // 0 and its disp32 begins page 1. Window 0's scan stops at span - instr_len so it never reaches the opcode; window
+    // 1's scan starts on the disp32, not the opcode. Neither window decodes the instruction.
+    const std::size_t straddle_off = page - 3;
+    const auto plant_lea = [&](std::size_t off)
+    {
+        std::uint8_t *instr = base + off;
+        instr[0] = 0x48; // REX.W
+        instr[1] = 0x8D; // lea
+        instr[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
+        const auto next = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(instr) + 7);
+        const auto target = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(base + page * 2));
+        const auto disp = static_cast<std::int32_t>(target - next);
+        std::memcpy(instr + 3, &disp, sizeof(disp));
+    };
+    plant_lea(straddle_off);
+
+    // Flip page 1 to a different executable protection so VirtualQuery reports it as a separate window from page 0.
+    // Done after planting so the disp32 bytes in page 1 were writable.
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old_protect));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
+                                    reinterpret_cast<std::uintptr_t>(base) + page * 3};
+
+    // The only reference straddles the window boundary, so phase 2 finds none: fail-closed NoReference, not a wrong
+    // hit.
+    const auto straddled = Scanner::find_string_xref(utf8_query("StraddleAnchorString"), range);
+    ASSERT_FALSE(straddled.has_value());
+    EXPECT_EQ(straddled.error(), Scanner::StringXrefError::NoReference);
+
+    // Positive control: plant a second lea wholly inside window 0. It resolves uniquely, proving the string is findable
+    // and a normal reference decodes -- so the miss above is the straddle, not a broken fixture, and the straddling lea
+    // is not counted (otherwise this would report AmbiguousReference).
+    plant_lea(0x10);
+    const auto in_window = Scanner::find_string_xref(utf8_query("StraddleAnchorString"), range);
+    ASSERT_TRUE(in_window.has_value());
+    EXPECT_EQ(*in_window, reinterpret_cast<std::uintptr_t>(base + 0x10));
+}
+
 TEST(StringXrefTest, StringPointerSlotResolvesStore)
 {
     SyntheticImage img;

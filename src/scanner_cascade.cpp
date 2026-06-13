@@ -92,9 +92,14 @@ namespace DetourModKit
         constexpr std::size_t PROLOGUE_FALLBACK_MAX_HITS = 1;
 
         // Bytes each recognised inline-hook prologue shape overwrites. E9 rel32 is five bytes (one opcode plus one
-        // int32 displacement); FF 25 disp32 is six (a two-byte opcode plus one int32 RIP-relative displacement).
+        // int32 displacement); FF 25 disp32 is six (a two-byte opcode plus one int32 RIP-relative displacement). The
+        // 14-byte FF 25 absolute form is the same two-byte opcode and a disp32 of zero, followed by the 8-byte absolute
+        // target inlined immediately after the instruction (RIP then points at it). The `mov rax, imm64; jmp rax`
+        // absolute jump is twelve bytes: REX.W B8 plus an 8-byte immediate, then the two-byte FF E0.
         constexpr std::size_t PROLOGUE_PATCH_BYTES_E9 = 5;
         constexpr std::size_t PROLOGUE_PATCH_BYTES_FF25 = 6;
+        constexpr std::size_t PROLOGUE_PATCH_BYTES_FF25_ABS64 = 14;
+        constexpr std::size_t PROLOGUE_PATCH_BYTES_MOV_RAX_JMP = 12;
 
         /**
          * @struct PrologueShape
@@ -111,14 +116,28 @@ namespace DetourModKit
         };
 
         // Inline-hook prologue shapes the fallback tries, in order. E9 is the five-byte near jump SafetyHook / MinHook
-        // emit for a trampoline within rel32 reach; FF 25 is the six-byte RIP-relative indirect jump a hook emits when
-        // the trampoline is beyond rel32 reach (a Detours-style far jump stores the absolute target in a slot the
-        // disp32 points at, which decode_ff25_indirect dereferences). E9 is tried first because it is by far the common
-        // case.
-        constexpr std::array<PrologueShape, 2> PROLOGUE_SHAPES = {{
+        // emit for a trampoline within rel32 reach; the rest are the far-jump shapes a hook emits when the trampoline
+        // is beyond rel32 reach:
+        //   - FF 25 disp32: a six-byte RIP-relative indirect jump whose disp32 points at a separate pointer slot
+        //     (a Detours-style far jump) -- decode_ff25_indirect dereferences that slot.
+        //   - FF 25 00000000 <abs64>: the fourteen-byte absolute form, a disp32 of zero so the slot is the 8-byte
+        //     absolute target inlined right after the instruction. It reuses decode_ff25_indirect, which already
+        //     resolves the disp32==0 slot at address+6. A six-byte FF 25 shape cannot recover it: a 14-byte overwrite
+        //     leaves a different surviving tail, so the two shapes are disjoint and never alias.
+        //   - 48 B8 <imm64> FF E0: the twelve-byte `mov rax, imm64; jmp rax` absolute jump some libraries emit instead
+        //     of the FF 25 form -- decode_mov_rax_imm64_jmp_rax returns the inlined imm64 directly (no slot read).
+        // Each shape rebuilds a distinct pattern from the original signature (its own patch_bytes leading drop plus its
+        // jump_prefix), and the prefixes' literal opcode bytes (E9 vs FF 25 vs 48 B8) make the shapes mutually
+        // exclusive at a real hook site, so the try order only affects which is attempted first, never correctness. E9
+        // is first because it is by far the common case; the FF 25 variants precede the rarer mov rax form.
+        constexpr std::array<PrologueShape, 4> PROLOGUE_SHAPES = {{
             {PROLOGUE_PATCH_BYTES_E9, std::string_view{"E9 ?? ?? ?? ??"}, &DetourModKit::detail::decode_e9_rel32},
             {PROLOGUE_PATCH_BYTES_FF25, std::string_view{"FF 25 ?? ?? ?? ??"},
              &DetourModKit::detail::decode_ff25_indirect},
+            {PROLOGUE_PATCH_BYTES_FF25_ABS64, std::string_view{"FF 25 00 00 00 00 ?? ?? ?? ?? ?? ?? ?? ??"},
+             &DetourModKit::detail::decode_ff25_indirect},
+            {PROLOGUE_PATCH_BYTES_MOV_RAX_JMP, std::string_view{"48 B8 ?? ?? ?? ?? ?? ?? ?? ?? FF E0"},
+             &DetourModKit::detail::decode_mov_rax_imm64_jmp_rax},
         }};
 
         void append_hex_byte(std::string &out, std::byte value)

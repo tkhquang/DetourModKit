@@ -631,23 +631,27 @@ namespace DetourModKit
         /**
          * @brief Cascade resolver with inline-hooked-prologue recovery.
          * @details Equivalent to resolve_cascade() on the happy path. If every candidate fails, rebuilds each
-         *          Direct-mode candidate's pattern with the patched prologue replaced by a jump shape and retries. Two
+         *          Direct-mode candidate's pattern with the patched prologue replaced by a jump shape and retries. Four
          *          shapes are tried in order: the 5-byte `E9 ?? ?? ?? ??` near jump (SafetyHook and other rel32 inline
-         *          detours) and the 6-byte `FF 25 ?? ?? ?? ??` RIP-relative indirect jump a detour emits when its
-         *          trampoline is beyond rel32 reach (a Detours-style far jump). The recovered jump destination is gated
-         *          as a plausible, executable address before acceptance. If the recovery path succeeds the log line
-         *          calls this out explicitly.
+         *          detours); the 6-byte `FF 25 ?? ?? ?? ??` RIP-relative indirect jump a detour emits when its
+         *          trampoline is beyond rel32 reach with the absolute target in a separate slot (a Detours-style far
+         *          jump); the 14-byte `FF 25 00 00 00 00 <abs64>` absolute form whose disp32 is zero so the 8-byte
+         *          target is inlined right after the instruction; and the 12-byte `mov rax, imm64; jmp rax`
+         *          (`48 B8 <imm64> FF E0`) absolute jump some libraries emit instead. The recovered jump destination is
+         *          gated as a plausible, executable address before acceptance. If the recovery path succeeds the log
+         *          line calls this out explicitly.
          *
          *          RipRelative candidates are skipped in the fallback phase since they target instructions deeper than
          *          the patched prologue and are unaffected by the overwrite.
          *
-         * @note Recovery covers only the E9 near-jump and FF25 indirect-jump trampoline shapes, and never returns a
-         *       wrong address. Two failure modes are distinct and worth handling separately: NoMatch means the direct
-         *       scan and the rebuilt E9/FF25 fallback both ran and matched nothing (the case for a prologue overwritten
-         *       by an unhandled shape such as a push imm32 / ret thunk, an FF15 call thunk, or a prefixed jump);
-         *       PrologueFallbackNotApplicable means no fallback could be formed in the first place (a Direct-mode
-         *       candidate's literal tail was too short to rebuild a unique pattern around the prologue), so nothing was
-         *       retried. Do not assume every unsupported overwrite collapses to NoMatch.
+         * @note Recovery covers the E9 near-jump and the three far-jump shapes above, and never returns a
+         *       wrong address. Two failure modes are distinct and worth handling separately: NoMatch means the
+         *       direct scan and every rebuilt fallback shape both ran and matched nothing (the case for a
+         *       prologue overwritten by an unhandled shape such as a push imm32 / ret thunk, an FF15 call thunk,
+         *       or a prefixed jump); PrologueFallbackNotApplicable means no fallback could be formed in the
+         *       first place (a Direct-mode candidate's literal tail was too short to rebuild a unique pattern
+         *       around the prologue), so nothing was retried. Do not assume every unsupported overwrite
+         *       collapses to NoMatch.
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
          * @return ResolveHit on success; ResolveError on failure.
@@ -699,18 +703,21 @@ namespace DetourModKit
 
         /**
          * @brief Module-scoped variant of resolve_cascade_with_prologue_fallback().
-         * @details Equivalent to resolve_cascade_in_module() on the happy path. If every candidate fails, it rebuilds
-         *          each Direct-mode candidate's prologue as `E9 ?? ?? ?? ??` plus the original literal tail and
-         *          retries, confining both the uniqueness count and the match to
-         *          [range.base, range.end). The fallback scan is restricted to the image's executable pages: a hooked
-         *          near-JMP overwrites a code prologue, never data, so a match in .rdata / .data would be a false
-         *          positive (the data-capable readable sweep is only used for the primary candidate pass).
+         * @details Equivalent to resolve_cascade_in_module() on the happy path. If every candidate fails, it
+         *          rebuilds each Direct-mode candidate's prologue as each recognised inline-hook jump shape (the
+         *          same four shapes resolve_cascade_with_prologue_fallback() tries: `E9` near jump, `FF 25`
+         *          indirect, `FF 25 00 00 00 00 <abs64>` absolute, and `mov rax, imm64; jmp rax`) plus the
+         *          original literal tail and retries, confining both the uniqueness count and the match to
+         *          [range.base, range.end). The fallback scan is restricted to the image's executable pages: a
+         *          hooked jump overwrites a code prologue, never data, so a match in .rdata / .data would be a
+         *          false positive (the data-capable readable sweep is only used for the primary candidate pass).
          *
-         *          The rebuilt near-JMP must be found inside @p range, but its jump destination is intentionally not
-         *          constrained to @p range or to any loaded module. When a sibling mod inline-hooks the target, its E9
-         *          usually jumps to a VirtualAlloc'd trampoline outside every image, so the destination is validated as
-         *          a plausible pointer on a committed, execute-readable page instead. This still rejects jumps into
-         *          unmapped or data-only memory without rejecting the recovery this path exists to perform.
+         *          The rebuilt jump must be found inside @p range, but its jump destination is intentionally not
+         *          constrained to @p range or to any loaded module. When a sibling mod inline-hooks the target,
+         *          its jump usually targets a VirtualAlloc'd trampoline outside every image, so the destination
+         *          is validated as a plausible pointer on a committed, execute-readable page instead. This still
+         *          rejects jumps into unmapped or data-only memory without rejecting the recovery this path
+         *          exists to perform.
          *
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
