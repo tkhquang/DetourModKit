@@ -1,0 +1,44 @@
+name: AddressSanitizer probe
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only token: this advisory workflow never writes to the repo.
+permissions:
+  contents: read
+
+# MSVC AddressSanitizer is the only sanitizer that works on Windows (GCC and Clang on mingw-w64 ship no ASan/UBSan
+# runtime for the Windows target, so the build links only under MSVC, and ASan is the only sanitizer there). A full
+# ASan build and test run is too slow to repeat on every PR push, so it runs post-merge on push to main (and on
+# manual dispatch). Advisory and non-blocking; the blocking gate (build, tests, coverage) lives in pr-check.yml.
+
+jobs:
+  sanitizers:
+    name: AddressSanitizer probe (MSVC, advisory)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: "recursive"
+          persist-credentials: false
+
+      - name: Set up MSVC (x64) -- puts cl and the ASan runtime on PATH
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Configure (MSVC Debug + ASan)
+        run: cmake --preset msvc-debug-asan
+        shell: pwsh
+
+      - name: Build
+        run: cmake --build --preset msvc-debug-asan --parallel
+        shell: pwsh
+
+      - name: Run tests under ASan
+        run: ctest --preset msvc-debug-asan --output-on-failure
+        shell: pwsh

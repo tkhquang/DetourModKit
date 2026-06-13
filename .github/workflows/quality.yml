@@ -1,8 +1,6 @@
 name: Quality Probes
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -11,24 +9,14 @@ on:
 permissions:
   contents: read
 
-# Both jobs are advisory and non-blocking. The clang-format job verifies the tracked
-# project sources stay formatted against the root .clang-format (clang-format 20, the
-# version pinned below). The sanitizer job uses MSVC AddressSanitizer -- the only
-# sanitizer that works on Windows (GCC and Clang on mingw-w64 ship no ASan/UBSan
-# runtime for the Windows target, so the build links only under MSVC, and ASan is
-# the only sanitizer there). The blocking gate (build, tests, coverage) lives in
-# pr-check.yml and is untouched here.
-#
-# Trigger split (per-job `if` on the event): the clang-format check runs on pull
-# requests so style is caught before merge, while the AddressSanitizer probe -- a full
-# MSVC ASan build and test run, too slow to be worth repeating on every PR push --
-# runs only on push to main (post-merge). workflow_dispatch runs both on demand.
+# Advisory, non-blocking. Verifies the tracked project sources stay formatted against the root .clang-format
+# (clang-format 20, pinned below) and follow the comment-marker conventions. Runs on pull requests so style is caught
+# before merge, and on manual dispatch. The blocking gate (build, tests, coverage) lives in pr-check.yml; the slower
+# AddressSanitizer probe runs post-merge in sanitizers.yml.
 
 jobs:
   format-check:
     name: clang-format (advisory)
-    # Pull requests (and manual dispatch); skipped on push to main.
-    if: ${{ github.event_name != 'push' }}
     runs-on: windows-latest
     continue-on-error: true
     steps:
@@ -53,33 +41,3 @@ jobs:
         if: ${{ !cancelled() }}
         run: python scripts/check_comment_style.py
         shell: bash
-
-  sanitizers:
-    name: AddressSanitizer probe (MSVC, advisory)
-    # Post-merge only: runs on push to main (and manual dispatch), not on pull requests.
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: windows-latest
-    continue-on-error: true
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          submodules: "recursive"
-          persist-credentials: false
-
-      - name: Set up MSVC (x64) -- puts cl and the ASan runtime on PATH
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Configure (MSVC Debug + ASan)
-        run: cmake --preset msvc-debug-asan
-        shell: pwsh
-
-      - name: Build
-        run: cmake --build --preset msvc-debug-asan --parallel
-        shell: pwsh
-
-      - name: Run tests under ASan
-        run: ctest --preset msvc-debug-asan --output-on-failure
-        shell: pwsh
