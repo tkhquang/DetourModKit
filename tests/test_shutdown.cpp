@@ -15,6 +15,12 @@
 using namespace DetourModKit;
 using DetourModKit::keyboard_key;
 
+// DMK_Shutdown() is the documented teardown entry point and runs from loader-lock / DLL_PROCESS_DETACH paths where an
+// escaping exception would terminate the host. Every subsystem teardown it invokes is noexcept, so the wrapper is too;
+// pin that no-throw contract at compile time.
+static_assert(noexcept(DMK_Shutdown()),
+              "DMK_Shutdown() must be noexcept so teardown cannot throw into a host unwinding under the loader lock.");
+
 class DMKShutdownTest : public ::testing::Test
 {
 protected:

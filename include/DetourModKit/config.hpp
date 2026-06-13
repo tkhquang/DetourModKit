@@ -464,8 +464,10 @@ namespace DetourModKit
          * @details Useful if the configuration system needs to be reset without restarting the application. This does
          *          NOT stop the auto-reload watcher; call disable_auto_reload() first (DMK_Shutdown() already does so
          *          in the correct order) so a watcher callback cannot fire against state torn down afterwards.
+         * @note noexcept: clearing the registry and dropping the cached path/hash and reload-servicer refs are all
+         *       no-throw, and any diagnostic logging routes through the best-effort no-throw log path.
          */
-        void clear_registered_items();
+        void clear_registered_items() noexcept;
 
     } // namespace Config
 } // namespace DetourModKit

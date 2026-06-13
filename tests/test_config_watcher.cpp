@@ -144,6 +144,56 @@ namespace
         watcher.stop();
     }
 
+    TEST_F(ConfigWatcherTest, IsWorkerThreadFalseAfterStop)
+    {
+        // The worker publishes its thread id on entry and must clear it again as it exits. Otherwise the stored id
+        // outlives the worker, and a later OS-recycled thread id reusing that value would make is_worker_thread()
+        // return a false positive, suppressing a genuine stop request as a self-call.
+        std::atomic<bool> observed{false};
+        std::atomic<std::thread::id> cb_tid{};
+        ConfigWatcher watcher(m_ini_path.string(), 50ms,
+                              [&]()
+                              {
+                                  cb_tid.store(std::this_thread::get_id(), std::memory_order_release);
+                                  observed.store(true, std::memory_order_release);
+                              });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        std::this_thread::sleep_for(100ms);
+
+        write_ini("[S]\nK=2\n");
+        ASSERT_TRUE(wait_until([&]() { return observed.load(std::memory_order_acquire); }, 3s));
+
+        const std::thread::id worker_tid = cb_tid.load(std::memory_order_acquire);
+        ASSERT_NE(worker_tid, std::thread::id{});
+        EXPECT_TRUE(watcher.is_worker_thread(worker_tid)) << "the worker id must match while the watcher is running";
+
+        watcher.stop();
+        ASSERT_FALSE(watcher.is_running());
+
+        // stop() joins the worker, so by the time it returns the worker has run its exit guard and reset the slot to
+        // the no-thread id. The captured worker id must therefore no longer match.
+        EXPECT_FALSE(watcher.is_worker_thread(worker_tid))
+            << "the stored worker id must reset on worker exit so a recycled thread id cannot suppress a stop";
+        EXPECT_FALSE(watcher.is_worker_thread(std::thread::id{}))
+            << "a default (no-thread) id must never be reported as the worker";
+    }
+
+    TEST_F(ConfigWatcherTest, IsWorkerThreadFalseAfterEarlyExit)
+    {
+        // Covers the worker's early-return path: the id is published on entry, then CreateFileW fails for a
+        // non-existent parent directory and the worker returns before the pump loop. The same scope guard must clear
+        // the id on that return, and start()'s failure path joins the worker before returning, so by the time start()
+        // reports false the slot is back to the no-thread id. Complements IsWorkerThreadFalseAfterStop, which covers
+        // the normal-exit reset with a captured worker id.
+        ConfigWatcher watcher((m_temp_dir / "nonexistent_subdir" / "file.ini").string(), 50ms, []() {});
+
+        EXPECT_FALSE(watcher.start());
+        EXPECT_FALSE(watcher.is_running());
+        EXPECT_FALSE(watcher.is_worker_thread(std::this_thread::get_id()));
+        EXPECT_FALSE(watcher.is_worker_thread(std::thread::id{}));
+    }
+
     TEST_F(ConfigWatcherTest, StopWithoutStartIsSafe)
     {
         ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});

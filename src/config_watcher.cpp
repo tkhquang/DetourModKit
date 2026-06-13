@@ -134,6 +134,25 @@ namespace DetourModKit
             std::vector<BYTE> buffer;
             OVERLAPPED overlapped{};
         };
+
+        // Resets an atomic thread-id slot to the default (no-thread) id when the worker leaves its body, covering every
+        // exit path uniformly: a requested stop, a self-induced error exit, and the early CreateFileW/CreateEventW
+        // failures that return after the id was already published. The worker publishes its own id on entry so
+        // is_worker_thread() can detect setter-induced self-calls; clearing it as the worker exits keeps a later
+        // OS-recycled thread id from matching this dead worker and suppressing a real stop request. The store
+        // happens-before thread termination, so the slot is already cleared before the id can be reused.
+        class WorkerThreadIdGuard
+        {
+        public:
+            explicit WorkerThreadIdGuard(std::atomic<std::thread::id> &id_slot) noexcept : m_slot(id_slot) {}
+            ~WorkerThreadIdGuard() noexcept { m_slot.store(std::thread::id{}, std::memory_order_release); }
+
+            WorkerThreadIdGuard(const WorkerThreadIdGuard &) = delete;
+            WorkerThreadIdGuard &operator=(const WorkerThreadIdGuard &) = delete;
+
+        private:
+            std::atomic<std::thread::id> &m_slot;
+        };
     } // namespace
 
     struct ConfigWatcher::Impl
@@ -236,7 +255,11 @@ namespace DetourModKit
 
     bool ConfigWatcher::is_worker_thread(std::thread::id id) const noexcept
     {
-        return m_impl->worker_thread_id.load(std::memory_order_acquire) == id;
+        const std::thread::id worker = m_impl->worker_thread_id.load(std::memory_order_acquire);
+        // The default (no-thread) id means no worker is currently published -- before start() posts the first read or
+        // after the worker reset the slot on exit. Never report that state as a match, even when the caller passes a
+        // default-constructed id, so a reset slot can never alias a real stop request.
+        return worker != std::thread::id{} && worker == id;
     }
 
     bool ConfigWatcher::start()
@@ -285,8 +308,10 @@ namespace DetourModKit
              callback = std::move(callback), label = std::move(label), open_result, worker_id_slot](std::stop_token st)
             {
                 // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
-                // disable_auto_reload().
+                // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush
+                // callback on every exit path, clears the slot again as the worker exits (see WorkerThreadIdGuard).
                 worker_id_slot->store(std::this_thread::get_id(), std::memory_order_release);
+                const WorkerThreadIdGuard worker_id_guard{*worker_id_slot};
                 auto io = std::make_unique<WatchIoState>();
                 io->buffer.resize(BUFFER_BYTES);
 
