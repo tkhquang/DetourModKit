@@ -1024,9 +1024,12 @@ namespace DetourModKit
         // proves the region was committed and readable at gate time; a concurrent decommit / reprotect before these
         // unguarded reads complete would otherwise fault the host. On MSVC the body runs inside a __try / __except that
         // swallows exactly the foreign-read faults (Memory::detail::is_guarded_read_fault) and reports the region as
-        // faulted, so the sweep skips it and continues -- the same skip-the-region contract seh_read_bytes follows.
-        // MinGW has no structured exception handling, so the body runs directly and the per-region VirtualQuery gate is
-        // the only guard available there. *out_faulted is set true only when a fault was swallowed.
+        // faulted, so the sweep skips it and continues -- the same skip-the-region contract seh_read_bytes follows. On
+        // MinGW x64 the same scan runs through the process-wide vectored read guard
+        // (Memory::detail::run_guarded_region) that the seh_read paths use, so a fault inside the scanned span is
+        // swallowed and the region is skipped + counted there too. On 32-bit MinGW that x64-only vectored guard is
+        // unavailable, so the body runs directly and the per-region VirtualQuery gate is the only guard. *out_faulted
+        // is set true only when a fault was swallowed.
         const std::byte *scan_region_guarded(const std::byte *region_start, size_t scan_size,
                                              const Scanner::CompiledPattern &pattern, uintptr_t needle_lo,
                                              uintptr_t needle_hi, size_t &matches_remaining, bool &out_faulted) noexcept
@@ -1047,6 +1050,41 @@ namespace DetourModKit
                 out_faulted = true;
                 return nullptr;
             }
+#elif defined(_WIN64)
+            // MinGW x64: route the unguarded find_pattern_raw sweep through the same vectored fault guard the foreign-
+            // read primitives use. The guard is armed over exactly the bytes the per-region gate proved readable; a
+            // concurrent decommit / reprotect that faults the sweep is swallowed and the region is skipped + counted,
+            // closing the TOCTOU window the bare gate cannot.
+            struct ScanContext
+            {
+                const std::byte *region_start;
+                size_t scan_size;
+                const Scanner::CompiledPattern *pattern;
+                uintptr_t needle_lo;
+                uintptr_t needle_hi;
+                size_t *matches_remaining;
+                const std::byte *result;
+            } scan_ctx{region_start, scan_size, &pattern, needle_lo, needle_hi, &matches_remaining, nullptr};
+
+            const size_t original_matches_remaining = matches_remaining;
+            const auto run_scan = [](void *opaque) noexcept -> void
+            {
+                auto *context = static_cast<ScanContext *>(opaque);
+                context->result =
+                    scan_region_for_match(context->region_start, context->scan_size, *context->pattern,
+                                          context->needle_lo, context->needle_hi, *context->matches_remaining);
+            };
+
+            const auto span_lo = reinterpret_cast<uintptr_t>(region_start);
+            if (Memory::detail::run_guarded_region(span_lo, span_lo + scan_size, run_scan, &scan_ctx))
+            {
+                return scan_ctx.result;
+            }
+            // A faulted region is skipped, not partially scanned: restore the count so unreadable tail bytes that may
+            // hide additional matches cannot corrupt Nth-occurrence accounting -- the same contract as the MSVC path.
+            matches_remaining = original_matches_remaining;
+            out_faulted = true;
+            return nullptr;
 #else
             return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, matches_remaining);
 #endif

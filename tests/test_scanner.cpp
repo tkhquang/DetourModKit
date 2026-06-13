@@ -3392,6 +3392,89 @@ TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideAnyModule)
     EXPECT_EQ(hit->address, match_site);
 }
 
+// The 14-byte FF 25 00000000 <abs64> absolute indirect jump (a disp32 of zero so the 8-byte target is inlined right
+// after the instruction, the far-jump shape some Detours-style detours emit) is a recognised prologue-recovery
+// shape. The fallback rebuilds `FF 25 00 00 00 00 ?? x8` + the original literal tail; decode_ff25_indirect reads the
+// inlined target at match+6, gated as a committed, execute-readable address. It is disjoint from the 6-byte FF 25 shape
+// because a 14-byte overwrite leaves a different surviving tail, so the two never alias.
+TEST(ScannerModuleCascade, PrologueFallbackRecoversFf25Abs64InlineTarget)
+{
+    VirtualPagePtr region{
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))};
+    ASSERT_NE(region.get(), nullptr);
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    std::uint8_t *plant = region.get() + PLANT_OFFSET;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(plant);
+    // The inlined absolute target stands in for a far trampoline: the region's own base is execute-readable, so the
+    // destination gate accepts it. The 14-byte shape wildcards these 8 bytes, so an address with low zero bytes is
+    // fine.
+    const auto dest = reinterpret_cast<std::uintptr_t>(region.get());
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x6B, 0x1C, 0x2D, 0x3E, 0x4F, 0x5A, 0x6B, 0x7C, 0x8D, 0x9E};
+
+    plant[0] = 0xFF;
+    plant[1] = 0x25;
+    std::memset(plant + 2, 0x00, 4); // disp32 == 0 -> slot is the abs64 inlined at +6
+    std::memcpy(plant + 6, &dest, sizeof(dest));
+    std::memcpy(plant + 14, TAIL_BYTES, sizeof(TAIL_BYTES));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    // The original (unhooked) prologue is 14 arbitrary bytes the buffer does not contain, then the 10-byte literal tail
+    // (>= the literal-tail floor). The direct pass misses; only the 14-byte FF 25 shape's rebuild matches the plant.
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 6B 1C 2D 3E 4F 5A 6B 7C 8D 9E",
+         Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-abs64", range);
+    ASSERT_TRUE(hit.has_value()) << "FF 25 abs64 inline-target prologue was not recovered";
+    EXPECT_EQ(hit->address, match_site);
+}
+
+// The 12-byte `mov rax, imm64; jmp rax` (48 B8 <imm64> FF E0) absolute jump is a recognised prologue-recovery
+// shape some libraries emit instead of FF 25 when the trampoline is beyond rel32 reach. The fallback rebuilds
+// `48 B8 ?? x8 FF E0` + the original literal tail; decode_mov_rax_imm64_jmp_rax returns the inlined imm64 directly (no
+// slot read), gated as a committed, execute-readable address.
+TEST(ScannerModuleCascade, PrologueFallbackRecoversMovRaxJmpRax)
+{
+    VirtualPagePtr region{
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))};
+    ASSERT_NE(region.get(), nullptr);
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    std::uint8_t *plant = region.get() + PLANT_OFFSET;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(plant);
+    const auto dest = reinterpret_cast<std::uintptr_t>(region.get());
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81, 0x92, 0xA3};
+
+    plant[0] = 0x48; // REX.W
+    plant[1] = 0xB8; // mov rax, imm64
+    std::memcpy(plant + 2, &dest, sizeof(dest));
+    plant[10] = 0xFF;
+    plant[11] = 0xE0; // jmp rax
+    std::memcpy(plant + 12, TAIL_BYTES, sizeof(TAIL_BYTES));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    // 12 arbitrary prologue bytes + the 10-byte literal tail. The direct pass misses; the 14-byte FF 25 shape is not
+    // applicable (this tail is too short for its 14-byte drop), so only the 12-byte mov rax shape's rebuild matches.
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 48 89 6C 24 10 48 89 1A 2B 3C 4D 5E 6F 70 81 92 A3", Scanner::ResolveMode::Direct, 0,
+         0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "mov-rax-jmp-rax", range);
+    ASSERT_TRUE(hit.has_value()) << "mov rax, imm64; jmp rax prologue was not recovered";
+    EXPECT_EQ(hit->address, match_site);
+}
+
 // A hooked prologue inside executable code is still rejected when its E9 lands on committed data. This pins the
 // destination half of the gate separately from the page-scope test below, whose purpose is to prove the match scan
 // stays executable-only.

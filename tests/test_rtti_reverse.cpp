@@ -27,8 +27,9 @@ namespace
     constexpr std::size_t REV_VTABLE_OFFSET = REV_COL_PTR_OFFSET + 8;
 
     // Static pool in the test executable's data segment so Memory::module_range_for resolves every synthetic vtable
-    // back to the test exe's PE range, which the shared prelude's bound check requires. Reset between tests.
-    constexpr std::size_t REV_POOL_FIXTURES = 16;
+    // back to the test exe's PE range, which the shared prelude's bound check requires. Reset between tests. Sized to
+    // hold one full MAX_REVERSE_MATCHES (64) saturation set plus the small fixtures every other case builds.
+    constexpr std::size_t REV_POOL_FIXTURES = 64;
     alignas(8) std::array<std::byte, REV_BUF_SIZE * REV_POOL_FIXTURES> s_rev_pool{};
     std::size_t s_rev_used = 0;
 
@@ -161,6 +162,30 @@ TEST_F(RttiReverseTest, AmbiguousPrimaryFailsClosed)
     std::uintptr_t all[4] = {};
     const std::size_t n = Rtti::vtables_for_type(".?AVRevDup@@", all, 4, pool_range());
     EXPECT_EQ(n, 2u);
+}
+
+TEST_F(RttiReverseTest, PrimaryFailsClosedWhenMatchCollectorSaturates)
+{
+    // Saturate the reverse-scan match collector. MAX_REVERSE_MATCHES (64, internal to rtti.cpp) distinct vtables share
+    // one name: a single primary (COL.offset 0) plus enough distinct secondary sub-objects to fill the cap. Because the
+    // collector truncated at the cap, a second distinct primary could exist beyond it that the in-collection uniqueness
+    // check never saw, so the singular resolver must fail closed rather than hand back the one primary it happened to
+    // collect. AmbiguousPrimaryFailsClosed covers the in-collection ambiguity; this pins the truncated-scan case.
+    constexpr std::size_t cap = 64;                     // == MAX_REVERSE_MATCHES in rtti.cpp
+    ASSERT_NE(build_synth(".?AVRevSaturate@@", 0), 0u); // the lone primary the collector does see
+    for (std::size_t i = 1; i < cap; ++i)
+    {
+        // Distinct secondary sub-object vtables (COL.offset != 0), each at a unique address, so all dedupe-distinct and
+        // the collector fills to exactly the cap.
+        ASSERT_NE(build_synth(".?AVRevSaturate@@", 0x10), 0u);
+    }
+
+    EXPECT_FALSE(Rtti::vtable_for_type(".?AVRevSaturate@@", pool_range()).has_value());
+
+    // The plural form does not fail closed -- it is inherently multi-valued -- and reports the saturated count (capped
+    // at MAX_REVERSE_MATCHES) so a caller can detect the truncation itself.
+    std::uintptr_t all[cap] = {};
+    EXPECT_EQ(Rtti::vtables_for_type(".?AVRevSaturate@@", all, cap, pool_range()), cap);
 }
 
 TEST_F(RttiReverseTest, UnknownNameReturnsNullopt)

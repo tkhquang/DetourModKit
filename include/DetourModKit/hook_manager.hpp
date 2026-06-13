@@ -592,6 +592,14 @@ namespace DetourModKit
          * @param original_trampoline Output pointer to store trampoline address.
          * @param config Optional configuration settings for the hook.
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
+         * @note The AOB scan over [module_base, module_base + module_size) is page-filtered: it walks VirtualQuery
+         *       and skips guard, no-access, and non-readable pages, so passing a full SizeOfImage span is safe even
+         *       when the image contains a guard or no-access section -- unlike the raw Scanner::find_pattern
+         *       overloads, which read the span unconditionally and fault the host on an unreadable byte. A signature
+         *       straddling a protection split inside the image is still found, and @p aob_offset is applied to the
+         *       located address. For code that lives outside any mapped module (packed payloads unpacked into
+         *       anonymous pages), resolve the address with the whole-process Scanner sweeps and call
+         *       create_inline_hook with the result instead.
          */
         [[nodiscard]] std::expected<std::string, HookError>
         create_inline_hook_aob(std::string_view name, uintptr_t module_base, size_t module_size,
@@ -621,6 +629,14 @@ namespace DetourModKit
          * @param detour_function The mid-hook detour function.
          * @param config Optional configuration settings for the hook.
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
+         * @note The AOB scan over [module_base, module_base + module_size) is page-filtered: it walks VirtualQuery
+         *       and skips guard, no-access, and non-readable pages, so passing a full SizeOfImage span is safe even
+         *       when the image contains a guard or no-access section -- unlike the raw Scanner::find_pattern
+         *       overloads, which read the span unconditionally and fault the host on an unreadable byte. A signature
+         *       straddling a protection split inside the image is still found, and @p aob_offset is applied to the
+         *       located address. For code that lives outside any mapped module (packed payloads unpacked into
+         *       anonymous pages), resolve the address with the whole-process Scanner sweeps and call
+         *       create_mid_hook with the result instead.
          */
         [[nodiscard]] std::expected<std::string, HookError>
         create_mid_hook_aob(std::string_view name, uintptr_t module_base, size_t module_size,
@@ -1444,7 +1460,8 @@ namespace DetourModKit
      * @brief Convenience wrapper that installs an inline hook by AOB scan.
      * @details Diagnostic logging on failure is delegated to the underlying create_inline_hook_aob call
      *          (pattern-resolution failures and create_inline_hook failures both emit their own Error line), so this
-     *          wrapper does not emit a duplicate.
+     *          wrapper does not emit a duplicate. The AOB scan is page-filtered exactly as create_inline_hook_aob
+     *          documents: a full SizeOfImage span containing a guard or no-access section is safe to pass.
      */
     [[nodiscard]] inline std::optional<std::string>
     try_install_inline_aob(std::string_view name, uintptr_t module_base, size_t module_size,
@@ -1478,7 +1495,9 @@ namespace DetourModKit
 
     /**
      * @brief Convenience wrapper that installs a mid-function hook by AOB scan.
-     * @details Diagnostic logging on failure is delegated to the underlying create_mid_hook_aob call.
+     * @details Diagnostic logging on failure is delegated to the underlying create_mid_hook_aob call. The AOB scan is
+     *          page-filtered exactly as create_mid_hook_aob documents: a full SizeOfImage span containing a guard or
+     *          no-access section is safe to pass.
      */
     [[nodiscard]] inline std::optional<std::string>
     try_install_mid_aob(std::string_view name, uintptr_t module_base, size_t module_size, std::string_view aob_pattern,

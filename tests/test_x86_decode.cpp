@@ -12,6 +12,7 @@
 using DetourModKit::detail::decode_e9_rel32;
 using DetourModKit::detail::decode_eb_rel8;
 using DetourModKit::detail::decode_ff25_indirect;
+using DetourModKit::detail::decode_mov_rax_imm64_jmp_rax;
 
 namespace
 {
@@ -187,4 +188,56 @@ TEST(X86DecodeTest, DecodeFf25Indirect_SlotProducesDestination)
     const auto result = decode_ff25_indirect(base);
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(*result, layout.slot);
+}
+
+TEST(X86DecodeTest, DecodeMovRaxJmpRax_NullAddressRejected)
+{
+    const auto result = decode_mov_rax_imm64_jmp_rax(0);
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(X86DecodeTest, DecodeMovRaxJmpRax_WrongMovOpcodeRejected)
+{
+    // 48 B9 is mov rcx, imm64 (B8+rcx), not the rax form the decoder pins; the trailing jmp rax is present but must not
+    // rescue a non-rax load.
+    std::array<std::uint8_t, 12> buf{0x48, 0xB9, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE0};
+
+    const auto result = decode_mov_rax_imm64_jmp_rax(reinterpret_cast<std::uintptr_t>(buf.data()));
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(X86DecodeTest, DecodeMovRaxJmpRax_WrongJmpOperandRejected)
+{
+    // 48 B8 ... FF E1 is jmp rcx, not jmp rax; the absolute target would be loaded into rax but jumped through a
+    // different register, so the pair is not the recognised shape.
+    std::array<std::uint8_t, 12> buf{0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE1};
+
+    const auto result = decode_mov_rax_imm64_jmp_rax(reinterpret_cast<std::uintptr_t>(buf.data()));
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(X86DecodeTest, DecodeMovRaxJmpRax_ReturnsInlinedImmediate)
+{
+    // 48 B8 <imm64> FF E0: the absolute destination is the imm64 baked directly into the instruction (no slot read).
+    std::array<std::uint8_t, 12> buf{0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xE0};
+    const std::uintptr_t target = static_cast<std::uintptr_t>(0x0123456789ABCDEFull);
+    std::memcpy(buf.data() + 2, &target, sizeof(target));
+
+    const auto result = decode_mov_rax_imm64_jmp_rax(reinterpret_cast<std::uintptr_t>(buf.data()));
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, target);
+}
+
+TEST(X86DecodeTest, DecodeMovRaxJmpRax_UnmappedInstructionRejected)
+{
+    // The 12-byte read is SEH-guarded like the other decoders: an unmapped instruction yields nullopt, not a fault.
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    LPVOID region = VirtualAlloc(nullptr, si.dwPageSize, MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(region, nullptr);
+
+    const auto result = decode_mov_rax_imm64_jmp_rax(reinterpret_cast<std::uintptr_t>(region));
+    EXPECT_FALSE(result.has_value());
+
+    VirtualFree(region, 0, MEM_RELEASE);
 }

@@ -1175,6 +1175,37 @@ namespace DetourModKit
             return true;
         }
 
+        // Runs fn(ctx) with the vectored handler armed over [lo, hi). The sibling of veh_guarded_copy for an in-place
+        // read the caller performs (the scanner's memchr / SIMD sweep) rather than a rep movsb copy: __builtin_setjmp
+        // records the recovery point, the guard is published to this thread's TLS slot so a read fault inside [lo, hi)
+        // is claimable, and the handler longjmps back here so the setjmp expression returns non-zero and the function
+        // reports failure. fn must touch only [lo, hi); a fault outside that range (e.g. a bug in fn) is not claimed
+        // and reaches the host's handlers. fn is abandoned on a fault via __builtin_longjmp without running
+        // destructors, so it must hold no resources that need unwinding -- the scanner sweep is plain POD locals.
+        // noinline keeps the setjmp anchor and the fn call in one self-contained frame.
+        __attribute__((noinline)) bool veh_guarded_region(uintptr_t lo, uintptr_t hi, void (*fn)(void *) noexcept,
+                                                          void *ctx) noexcept
+        {
+            const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
+            VehReadGuard guard;
+            guard.guard_lo = lo;
+            guard.guard_hi = hi;
+
+            if (__builtin_setjmp(guard.env) != 0)
+            {
+                // Reached only when the handler longjmped here after swallowing a read fault inside [lo, hi); the
+                // handler already cleared the TLS slot. Report the failure.
+                return false;
+            }
+
+            // Arm after the setjmp captures env and before invoking the sweep, so a fault in fn's reads is claimable
+            // while a fault before the buffer is valid is not.
+            TlsSetValue(slot, &guard);
+            fn(ctx);
+            TlsSetValue(slot, nullptr);
+            return true;
+        }
+
         // Single entry point the MinGW read paths share. Rejects a wrapping or low source range first (a wrapped
         // addr + bytes would invert the handler's [guard_lo, guard_hi) check and let a real fault escape the guard);
         // mirrors seh_read_bytes' own precheck so read_ptr_unsafe, which has no precheck of its own, is covered too.
@@ -1207,6 +1238,41 @@ namespace DetourModKit
 #endif // _WIN64
     } // anonymous namespace
 #endif // !_MSC_VER
+
+#if !defined(_MSC_VER) && defined(_WIN64)
+    bool DetourModKit::Memory::detail::run_guarded_region(uintptr_t lo, uintptr_t hi, void (*fn)(void *) noexcept,
+                                                          void *ctx) noexcept
+    {
+        // An empty or wrapping range has nothing to guard; run the read directly. A wrapped [lo, hi) would also invert
+        // the handler's range check, the same input veh_read_bytes rejects up front.
+        if (hi <= lo)
+        {
+            fn(ctx);
+            return true;
+        }
+
+        ensure_veh_installed();
+
+        // Count the call in the drain epoch around the path decision (mirroring veh_read_bytes) so a guarded read is
+        // always visible to remove_veh_handler's drain.
+        s_veh_in_flight.fetch_add(1, std::memory_order_seq_cst);
+        const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
+        bool completed = true;
+        if (armed)
+        {
+            completed = veh_guarded_region(lo, hi, fn, ctx);
+        }
+        else
+        {
+            // Handler unavailable (install failed, realistic only under resource exhaustion): run the read unguarded.
+            // The caller's own per-region VirtualQuery gate already proved the region readable at gate time -- the same
+            // fallback posture veh_read_bytes takes when it drops to virtualquery_validated_copy.
+            fn(ctx);
+        }
+        s_veh_in_flight.fetch_sub(1, std::memory_order_release);
+        return completed;
+    }
+#endif // !_MSC_VER && _WIN64
 
     bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms, size_t shard_count)
     {

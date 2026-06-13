@@ -3,6 +3,7 @@
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/memory.hpp"
 #include "platform.hpp"
+#include "scanner_internal.hpp"
 #include "x86_decode.hpp"
 
 #include <windows.h>
@@ -628,8 +629,13 @@ namespace DetourModKit
             return std::unexpected(HookError::InvalidTargetAddress);
         }
 
-        const std::byte *found_address_start =
-            find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
+        // Page-filtered scan over [module_base, module_base + module_size): the module-scoped sweep walks VirtualQuery
+        // and skips guard, no-access, and non-readable pages, so a guard / no-access section inside the SizeOfImage
+        // span cannot fault the host the way a raw find_pattern over the whole span would. A signature straddling a
+        // protection split inside the image is still found (the sweep carries the cross-region overlap), and
+        // pattern.offset is applied exactly once, matching the raw find_pattern contract.
+        const std::byte *found_address_start = Scanner::detail::scan_module_readable(
+            pattern.value(), Memory::ModuleRange{module_base, module_base + module_size}, 1);
         if (!found_address_start)
         {
             m_logger.error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name,
@@ -877,8 +883,13 @@ namespace DetourModKit
             return std::unexpected(HookError::InvalidTargetAddress);
         }
 
-        const std::byte *found_address_start =
-            find_pattern(reinterpret_cast<const std::byte *>(module_base), module_size, pattern.value());
+        // Page-filtered scan over [module_base, module_base + module_size): the module-scoped sweep walks VirtualQuery
+        // and skips guard, no-access, and non-readable pages, so a guard / no-access section inside the SizeOfImage
+        // span cannot fault the host the way a raw find_pattern over the whole span would. A signature straddling a
+        // protection split inside the image is still found (the sweep carries the cross-region overlap), and
+        // pattern.offset is applied exactly once, matching the raw find_pattern contract.
+        const std::byte *found_address_start = Scanner::detail::scan_module_readable(
+            pattern.value(), Memory::ModuleRange{module_base, module_base + module_size}, 1);
         if (!found_address_start)
         {
             m_logger.error("HookManager: AOB pattern not found for mid hook '{}'. Pattern: \"{}\".", name,
