@@ -24,6 +24,7 @@
 
 #include "DetourModKit/rtti.hpp"
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -86,6 +87,30 @@ namespace DetourModKit
         };
 
         /**
+         * @enum IdentifyError
+         * @brief Reason a per-slot reverse-RTTI probe rejected a candidate slot. Every value fails closed.
+         * @details Ordered by the L1 control flow so the earliest failure is the most specific diagnostic a cascade can
+         *          surface. The bool @ref identify_pointee_type collapses all of these to a false return; the typed
+         *          @ref identify_pointee_typed and the @ref identify_pointee_type_or cascade preserve them.
+         */
+        enum class IdentifyError : std::uint8_t
+        {
+            /// The slot address itself was null or below the user-mode floor; no read was attempted.
+            BadSlotAddress,
+            /// The slot read faulted, or the qword held a null/low value.
+            UnreadableSlot,
+            /// The slot resolved to neither a pointer-to-object nor a direct object with a verifiable COL.
+            NoRtti
+        };
+
+        /**
+         * @brief Human-readable mapping for @ref IdentifyError.
+         * @param error The error code.
+         * @return A string view describing the error.
+         */
+        [[nodiscard]] std::string_view identify_error_to_string(IdentifyError error) noexcept;
+
+        /**
          * @brief Reverse-RTTI-identify the object a pointer slot refers to.
          * @details Reads the qword at @p slot_addr, then accepts whichever of two shapes resolves through the verified
          *          COL prelude:
@@ -105,6 +130,72 @@ namespace DetourModKit
          *         resolving.
          */
         [[nodiscard]] bool identify_pointee_type(std::uintptr_t slot_addr, PointeeType &out) noexcept;
+
+        /**
+         * @brief Typed form of @ref identify_pointee_type.
+         * @details Same probe and same @p out contract, but reports the specific fail-closed reason instead of a bool.
+         *          @ref identify_pointee_type is exactly @c has_value() over this -- one probe, one prelude walk, one
+         *          implementation. Use this (or @ref identify_pointee_type_or) when the reason for a miss matters
+         *          (cascade diagnostics, telemetry); use the bool form otherwise.
+         * @param slot_addr Address of the pointer-sized slot to probe.
+         * @param out Receives the identification on success; unspecified on an error return.
+         * @return A value on resolve, or the typed reason on failure.
+         */
+        [[nodiscard]] std::expected<void, IdentifyError> identify_pointee_typed(std::uintptr_t slot_addr,
+                                                                                PointeeType &out) noexcept;
+
+        /**
+         * @concept SlotAddress
+         * @brief A value usable as a probe slot address: convertible to a raw pointer-sized integer.
+         * @details Constrains the @ref identify_pointee_type_or fallback pack so every alternate is a candidate
+         * ADDRESS,
+         *          not a callable or an unrelated type. A raw pointer is intentionally rejected (it is not implicitly
+         *          convertible to std::uintptr_t), steering consumers to pass an explicit reinterpret_cast as the rest
+         *          of the API expects. A hard, readable compile error beats a deep template instantiation failure.
+         */
+        template <typename T>
+        concept SlotAddress = std::convertible_to<T, std::uintptr_t>;
+
+        /**
+         * @brief Reverse-RTTI-identify the first of several candidate slots that resolves.
+         * @details Probes @p candidate, then each fallback address in declaration order, stopping at the first slot
+         * that
+         *          resolves; @p out then holds that slot's identification. When NO candidate resolves, returns the
+         *          FIRST (the @p candidate's) failure -- the earliest, most specific fail-closed reason -- so a cascade
+         *          reports "the primary slot was unreadable" rather than a generic miss. The fold short-circuits, so no
+         *          fallback past the winner is probed and each candidate is probed at most once (no extra prelude walk
+         *          per fallback beyond the single probe the bare primitive performs). The cascade selects the first
+         *          RESOLVING slot, not the "best" one: with several valid-but-different objects, declaration order is
+         *          the only disambiguator -- a consumer needing type discrimination uses @ref heal_landmark / @ref
+         *          solve_fingerprint instead. On any failure return @p out is left as the last probe wrote it and must
+         *          not be read.
+         * @tparam Fallbacks Pack of alternate slot addresses, each convertible to std::uintptr_t.
+         * @param candidate The primary slot address to probe first.
+         * @param out Receives the identification of the first resolving slot. Unspecified on a failure return.
+         * @param fallbacks Alternate slot addresses, tried in order after @p candidate.
+         * @return A value on the first resolve (@p out populated), or the @p candidate's @ref IdentifyError when all
+         *         candidates fail.
+         */
+        template <SlotAddress... Fallbacks>
+        [[nodiscard]] std::expected<void, IdentifyError>
+        identify_pointee_type_or(std::uintptr_t candidate, PointeeType &out, Fallbacks... fallbacks) noexcept
+        {
+            // Capture the primary's typed error before the fold runs so a later probe cannot clobber the value we
+            // preserve; std::expected::error() is a plain enum copy.
+            auto primary = identify_pointee_typed(candidate, out);
+            if (primary)
+            {
+                return {};
+            }
+            // Unary left fold over ||: left-to-right, short-circuiting at the first resolver, so no fallback past the
+            // winner is probed.
+            const bool any = (identify_pointee_typed(static_cast<std::uintptr_t>(fallbacks), out).has_value() || ...);
+            if (any)
+            {
+                return {};
+            }
+            return std::unexpected(primary.error());
+        }
 
         /**
          * @struct LabeledSlot

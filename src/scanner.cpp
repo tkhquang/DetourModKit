@@ -141,10 +141,8 @@ namespace
 #ifdef DMK_HAS_AVX2
     /**
      * @brief Detects AVX2 support at runtime via CPUID.
-     * @details Checks CPUID leaf 1 ECX bit 28 (AVX)
-     * plus CPUID leaf 7 subleaf 0 EBX bit 5 (AVX2), then verifies that
-     *          the OS has enabled SSE and AVX
-     * register state in XCR0. Result is cached in a function-local static.
+     * @details Checks CPUID leaf 1 ECX bit 28 (AVX) plus CPUID leaf 7 subleaf 0 EBX bit 5 (AVX2), then verifies that
+     *          the OS has enabled SSE and AVX register state in XCR0. Result is cached in a function-local static.
      */
     bool cpu_has_avx2() noexcept
     {
@@ -212,14 +210,10 @@ namespace
 #ifdef DMK_HAS_AVX512
     /**
      * @brief Detects AVX-512F + AVX-512BW support at runtime via CPUID and XGETBV.
-     * @details Checks CPUID
-     * leaf 7 subleaf 0, EBX bit 16 (AVX-512F) and bit 30 (AVX-512BW). Byte-granular masked
-     *          compare is a
-     * BW instruction, so both are required. Also verifies the OS has enabled the full opmask /
-     *          ZMM
-     * register state via XGETBV (XCR0 bits 1,2,5,6,7); a CPU that reports AVX-512 while the OS has not
-     * enabled
-     * the state must fail closed. Result is cached in a function-local static.
+     * @details Checks CPUID leaf 7 subleaf 0, EBX bit 16 (AVX-512F) and bit 30 (AVX-512BW). Byte-granular masked
+     *          compare is a BW instruction, so both are required. Also verifies the OS has enabled the full opmask /
+     *          ZMM register state via XGETBV (XCR0 bits 1,2,5,6,7); a CPU that reports AVX-512 while the OS has not
+     *          enabled the state must fail closed. Result is cached in a function-local static.
      */
     bool cpu_has_avx512() noexcept
     {
@@ -327,9 +321,9 @@ namespace
     }
 
     /**
-     * @brief Picks the rarest literal byte's index in a compiled pattern.
-     * @return The byte index in `[0, pattern.size())` with the lowest score, or `pattern.size()` when every position is
-     *         a wildcard.
+     * @brief Picks the rarest fully-known byte's index in a compiled pattern.
+     * @return The byte index in `[0, pattern.size())` with the lowest score, or `pattern.size()` when no position is a
+     *         fully-known literal byte (every position is a wildcard or only partially masked).
      */
     size_t select_pattern_anchor(const Scanner::CompiledPattern &pattern) noexcept
     {
@@ -338,7 +332,10 @@ namespace
         uint8_t best_score = UINT8_MAX;
         for (size_t i = 0; i < pattern_size; ++i)
         {
-            if (pattern.mask[i] == std::byte{0x00})
+            // Only a fully-known byte (mask 0xFF) can anchor the memchr / SIMD prefilter, which searches for one exact
+            // byte value. A wildcard (mask 0x00) or a partially-masked nibble byte (0xF0 / 0x0F) carries no single byte
+            // value to scan for, so it is never an anchor candidate.
+            if (pattern.mask[i] != std::byte{0xFF})
             {
                 continue;
             }
@@ -440,12 +437,29 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
         }
         else if (token.length() == 2)
         {
-            const int hi = hex_char_to_int(token[0]);
-            const int lo = hex_char_to_int(token[1]);
+            const char hi_char = token[0];
+            const char lo_char = token[1];
+            const int hi = hex_char_to_int(hi_char);
+            const int lo = hex_char_to_int(lo_char);
             if (hi >= 0 && lo >= 0)
             {
                 result.bytes.push_back(static_cast<std::byte>((hi << 4) | lo));
                 result.mask.push_back(std::byte{0xFF});
+            }
+            else if (hi >= 0 && lo_char == '?')
+            {
+                // High-nibble token (e.g. "4?"): the high nibble is fixed and the low nibble is a wildcard. Store the
+                // known nibble in place with a zeroed wildcard nibble and a 0xF0 mask, so the masked compare
+                // (mem ^ pat) & mask checks only the high nibble.
+                result.bytes.push_back(static_cast<std::byte>(hi << 4));
+                result.mask.push_back(std::byte{0xF0});
+            }
+            else if (hi_char == '?' && lo >= 0)
+            {
+                // Low-nibble token (e.g. "?5"): the low nibble is fixed and the high nibble is a wildcard. A 0x0F mask
+                // checks only the low nibble.
+                result.bytes.push_back(static_cast<std::byte>(lo));
+                result.mask.push_back(std::byte{0x0F});
             }
             else
             {
@@ -453,7 +467,7 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
                 // ??'  (interpreted as a `|`), which trips -Wtrigraphs on
                 // GCC and would otherwise require disabling the warning TU-wide.
                 logger.error("AOB Parser: Invalid token '{}' at position {}. "
-                             "Expected hex byte (e.g., FF), '?', or '?"
+                             "Expected hex byte (e.g., FF), a per-nibble form (e.g. '4?' or '?5'), '?', or '?"
                              "?'.",
                              token, token_idx);
                 return std::nullopt;
@@ -462,7 +476,7 @@ std::optional<Scanner::CompiledPattern> DetourModKit::Scanner::parse_aob(std::st
         else
         {
             logger.error("AOB Parser: Invalid token '{}' at position {}. "
-                         "Expected hex byte (e.g., FF), '?', or '?"
+                         "Expected hex byte (e.g., FF), a per-nibble form (e.g. '4?' or '?5'), '?', or '?"
                          "?'.",
                          token, token_idx);
             return std::nullopt;
@@ -696,12 +710,40 @@ namespace
         // contract).
         const size_t best_anchor = (pattern.anchor <= pattern_size) ? pattern.anchor : select_pattern_anchor(pattern);
 
-        // All wildcards: the pattern has no literal bytes to anchor on, so the search degenerates to "always match at
-        // region start". The public wrappers log the warning exactly once per call; repeated internal iterations (Nth
-        // occurrence, per-region scans) stay quiet.
+        // No fully-known byte to anchor on. Two sub-cases:
+        //   - The pattern is entirely wildcards (no mask bit set anywhere): the search degenerates to "always match at
+        //     region start", preserved for backward compatibility. The public wrappers log the warning once per call.
+        //   - The pattern carries only partially-masked (nibble) bytes: there is no exact byte for the memchr / SIMD
+        //     prefilter, so fall back to a masked compare at every candidate position. This path is rare -- a real
+        //     signature almost always carries at least one full literal byte -- so a scalar verify is acceptable;
+        //     correctness, not throughput, is the concern here.
         if (best_anchor == pattern_size)
         {
-            return start_address;
+            if (!pattern_has_literal_byte(pattern))
+            {
+                return start_address;
+            }
+            const std::byte *const last_start = start_address + (region_size - pattern_size);
+            for (const std::byte *pos = start_address; pos <= last_start; ++pos)
+            {
+                bool match_found = true;
+                for (size_t j = 0; j < pattern_size; ++j)
+                {
+                    const auto mem = std::to_integer<unsigned>(pos[j]);
+                    const auto pat = std::to_integer<unsigned>(pattern.bytes[j]);
+                    const auto msk = std::to_integer<unsigned>(pattern.mask[j]);
+                    if (((mem ^ pat) & msk) != 0)
+                    {
+                        match_found = false;
+                        break;
+                    }
+                }
+                if (match_found)
+                {
+                    return pos;
+                }
+            }
+            return nullptr;
         }
 
         const std::byte target_byte = pattern.bytes[best_anchor];
@@ -790,7 +832,13 @@ namespace
 
             for (; match_found && j < pattern_size; ++j)
             {
-                if (pattern.mask[j] != std::byte{0x00} && pattern_start[j] != pattern.bytes[j])
+                // Masked compare so a partially-masked nibble byte checks only its known nibble: (mem ^ pat) & mask is
+                // zero exactly when every bit the mask selects agrees. A wildcard (mask 0x00) is trivially satisfied, a
+                // full literal (0xFF) compares the whole byte, and a nibble (0xF0 / 0x0F) compares one nibble.
+                const auto mem = std::to_integer<unsigned>(pattern_start[j]);
+                const auto pat = std::to_integer<unsigned>(pattern.bytes[j]);
+                const auto msk = std::to_integer<unsigned>(pattern.mask[j]);
+                if (((mem ^ pat) & msk) != 0)
                 {
                     match_found = false;
                 }
@@ -1000,8 +1048,14 @@ namespace
     // PAGE_GUARD), so it must be excluded separately or it would satisfy the mask and be scanned.
     //
     // Each region is scanned through the raw helper so the final `+ pattern.offset` applies exactly once (the public
-    // find_pattern already applies offset; calling it here would double-apply). A pattern straddling two adjacent VAD
-    // entries is therefore not found; PE-loaded sections are contiguous, so normal module scanning is unaffected.
+    // find_pattern already applies offset; calling it here would double-apply). To find a signature that straddles a
+    // protection split -- two adjacent accepted regions VirtualQuery reports separately because their base protections
+    // differ (a sibling VirtualProtect carving part of .text into PAGE_EXECUTE_READWRITE is the canonical case;
+    // VirtualQuery never coalesces regions with differing attributes) -- each accepted region's scan is extended back
+    // by up to pattern_size - 1 bytes into the contiguous run of already-accepted regions it abuts. The overlap is
+    // capped at pattern_size - 1 so a match lying wholly inside the previous region (already counted there) can never
+    // be re-counted here, and bounded by the run start so it never reads past the bytes the per-region gate proved
+    // readable.
     const std::byte *scan_regions_filtered(const Scanner::CompiledPattern &pattern, size_t occurrence,
                                            DWORD accept_mask, uintptr_t window_lo, uintptr_t window_hi) noexcept
     {
@@ -1019,6 +1073,14 @@ namespace
         MEMORY_BASIC_INFORMATION mbi{};
         uintptr_t addr = window_lo;
 
+        // Contiguous-accepted-run tracking for the cross-boundary overlap (see the function comment). prev_accept_hi is
+        // the end of the previous accepted region; run_lo is the start of the run of contiguous accepted regions the
+        // current region belongs to. A gap (a skipped, guarded, or non-readable region) breaks the run because the
+        // bytes across it are not proven readable.
+        bool prev_accepted = false;
+        uintptr_t prev_accept_hi = 0;
+        uintptr_t run_lo = 0;
+
         while (addr < window_hi && VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
         {
             const bool protection_unsafe = (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0;
@@ -1035,10 +1097,29 @@ namespace
 
             if (mbi.State == MEM_COMMIT && (mbi.Protect & accept_mask) != 0 && !protection_unsafe && scan_hi > scan_lo)
             {
-                const size_t scan_size = static_cast<size_t>(scan_hi - scan_lo);
+                // Continue the accepted run only when this region begins exactly where the previous accepted one ended;
+                // otherwise restart it here. Done before computing the overlap so run_lo reflects the run scan_lo
+                // joins.
+                if (!prev_accepted || prev_accept_hi != scan_lo)
+                {
+                    run_lo = scan_lo;
+                }
+
+                // Extend the scan back by up to pattern_size - 1 bytes into the contiguous accepted run so a match that
+                // begins in the previous region's tail and ends in this one is found. Bounded by run_lo so the read
+                // stays inside already-gated bytes; capped at pattern_size - 1 so an interior match is not re-counted.
+                uintptr_t effective_scan_lo = scan_lo;
+                if (pattern.size() > 1 && scan_lo > run_lo)
+                {
+                    const uintptr_t max_overlap = static_cast<uintptr_t>(pattern.size() - 1);
+                    const uintptr_t available = scan_lo - run_lo;
+                    effective_scan_lo = scan_lo - ((max_overlap < available) ? max_overlap : available);
+                }
+
+                const size_t scan_size = static_cast<size_t>(scan_hi - effective_scan_lo);
                 if (scan_size >= pattern.size())
                 {
-                    const auto *region_start = reinterpret_cast<const std::byte *>(scan_lo);
+                    const auto *region_start = reinterpret_cast<const std::byte *>(effective_scan_lo);
 
                     // The protection gate above proved the region readable at gate time; scan_region_guarded backstops
                     // a concurrent decommit / reprotect that could fault the read after the gate (a TOCTOU the gate
@@ -1051,6 +1132,13 @@ namespace
                     if (region_faulted)
                         ++faulted_regions;
                 }
+
+                prev_accepted = true;
+                prev_accept_hi = scan_hi;
+            }
+            else
+            {
+                prev_accepted = false;
             }
 
             assert(region_end > addr && "VirtualQuery returned a non-advancing region");

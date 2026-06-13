@@ -206,7 +206,10 @@ namespace DetourModKit
             std::ifstream file(path, std::ios::binary);
             if (!file)
             {
-                return std::unexpected(ManifestError::MissingHeader);
+                // An open failure (missing file, lock, permission, or a directory) is distinct from a
+                // present-but-corrupt manifest: the latter flows through parse_drift_report and reports MissingHeader /
+                // MalformedLine.
+                return std::unexpected(ManifestError::FileOpenFailed);
             }
             const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             return parse_drift_report(text);

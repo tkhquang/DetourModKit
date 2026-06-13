@@ -41,6 +41,19 @@ namespace DetourModKit
             std::size_t count = 0;
         };
 
+        // The matched narrow reference's lea destination register and instruction length, recovered alongside the
+        // unique-site search so the store-xref forward scan needs no second decode of the reference. Valid only when
+        // the unique reference is a REX.W `lea reg, [rip+string]` (is_lea == true); a `mov reg, [rip+string]` load
+        // already delivered the value to a register, so there is no store to model from the lea. reg is the 4-bit
+        // x86-64 register number (REX.R << 3 | ModRM.reg).
+        struct LeaReferenceInfo
+        {
+            std::uint8_t reg = 0;
+            std::size_t instr_len = 0;
+            std::uintptr_t window_end = 0;
+            bool is_lea = false;
+        };
+
         void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::size_t count) noexcept
         {
             if (count == 0)
@@ -128,8 +141,8 @@ namespace DetourModKit
         // returning once a second referencing site is seen (found_count == 2) so the caller fails closed on ambiguity.
         // The recognized instruction shape is documented on scan_string_ref_narrow.
         void scan_window_narrow_body(const Scanner::detail::ExecutableWindow &window, std::uintptr_t string_addr,
-                                     std::size_t instr_len, std::size_t &found_count,
-                                     std::uintptr_t &first_site) noexcept
+                                     std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
+                                     LeaReferenceInfo *info) noexcept
         {
             const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
             for (std::size_t i = 0; i + instr_len <= window.span; ++i)
@@ -154,6 +167,15 @@ namespace DetourModKit
                 if (found_count == 1)
                 {
                     first_site = instr_addr;
+                    if (info != nullptr)
+                    {
+                        // REX.R (bit 2 of the REX byte) is the high bit of the ModRM.reg field; the narrow shape
+                        // accepts REX in 0x48..0x4F, so REX.R may be set for an r8..r15 destination. opcode 0x8D is lea
+                        // (a load whose pointer a following store can cache); 0x8B is a mov load with no such store to
+                        // model.
+                        const std::uint8_t reg = static_cast<std::uint8_t>(((rex & 0x04) << 1) | ((modrm >> 3) & 0x07));
+                        *info = LeaReferenceInfo{reg, instr_len, window.base + window.span, opcode == 0x8D};
+                    }
                 }
                 else
                 {
@@ -170,27 +192,33 @@ namespace DetourModKit
         // it; MinGW has no structured exception handling and runs the body directly (the VirtualQuery gate is the only
         // guard available there). Mirrors scan_region_guarded in scanner.cpp. Returns true when a fault was swallowed.
         bool scan_window_narrow_guarded(const Scanner::detail::ExecutableWindow &window, std::uintptr_t string_addr,
-                                        std::size_t instr_len, std::size_t &found_count,
-                                        std::uintptr_t &first_site) noexcept
+                                        std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
+                                        LeaReferenceInfo *info) noexcept
         {
 #ifdef _MSC_VER
             const std::size_t original_found_count = found_count;
             const std::uintptr_t original_first_site = first_site;
+            const LeaReferenceInfo original_info = (info != nullptr) ? *info : LeaReferenceInfo{};
             __try
             {
-                scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site);
+                scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
                 return false;
             }
             __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
                                                                                 : EXCEPTION_CONTINUE_SEARCH)
             {
-                // The caller skips faulted windows, so discard any reference count collected before the fault.
+                // The caller skips faulted windows, so discard any reference count (and recovered lea info) collected
+                // before the fault, or a partially-scanned window could leak a stale site/register.
                 found_count = original_found_count;
                 first_site = original_first_site;
+                if (info != nullptr)
+                {
+                    *info = original_info;
+                }
                 return true;
             }
 #else
-            scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site);
+            scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
             return false;
 #endif
         }
@@ -211,10 +239,11 @@ namespace DetourModKit
         // equal it) and a coincidental byte sequence resolving to precisely string_addr is not a realistic false
         // positive. Counting stops at the second hit so the caller can fail closed on ambiguity.
         std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr, Memory::ModuleRange range,
-                                              std::size_t &found_count)
+                                              std::size_t &found_count, LeaReferenceInfo &info)
         {
             found_count = 0;
             std::uintptr_t first_site = 0;
+            info = LeaReferenceInfo{};
             // REX.W + opcode + ModRM + disp32.
             constexpr std::size_t instr_len = 7;
             std::size_t faulted_windows = 0;
@@ -225,7 +254,7 @@ namespace DetourModKit
                 {
                     continue;
                 }
-                if (scan_window_narrow_guarded(window, string_addr, instr_len, found_count, first_site))
+                if (scan_window_narrow_guarded(window, string_addr, instr_len, found_count, first_site, &info))
                 {
                     ++faulted_windows;
                     continue;
@@ -239,6 +268,71 @@ namespace DetourModKit
             }
             log_faulted_windows(faulted_windows);
             return (found_count == 1) ? first_site : 0;
+        }
+
+        // Store-xref forward scan: starting just past a `lea reg, [rip+string]`, look for the first `mov [rip+slot],
+        // reg` (same source register) that caches the loaded pointer into a global slot, and return that slot's
+        // RIP-relative effective address. Compilers emit the store within a few instructions of the load (often the
+        // very next), so a small forward window is searched at every byte offset. The store shape is REX.W + 0x89 +
+        // ModRM (mod=00, reg=src, rm=101) + disp32 -- the r/m-is-RIP mirror of the load (0x89 = MOV r/m, r vs 0x8B =
+        // MOV r, r/m). The source register field (REX.R << 3 | ModRM.reg) must equal the lea destination, which is what
+        // proves the store caches *this* loaded pointer rather than an unrelated global write. Returns 0 when no such
+        // store is found in the window, which the caller maps to StoreNotFound. The match is first-within-window, not
+        // uniqueness-checked, and an intervening reuse of the register is not modelled, so the window is kept tight.
+        // Reads are SEH-guarded so a truncated or unmapped tail cannot fault the host.
+        std::uintptr_t scan_store_slot_after_lea(std::uintptr_t lea_site, std::size_t lea_len,
+                                                 std::uintptr_t window_end, std::uint8_t lea_reg,
+                                                 Memory::ModuleRange range) noexcept
+        {
+            // A cached pointer is stored very close to its load; bound the forward scan so a pathological region cannot
+            // scan unboundedly and the store cannot be attributed to a distant, unrelated reuse of the same register.
+            constexpr std::size_t forward_window = 0x80; // 128 bytes.
+            constexpr std::size_t store_len = 7;         // REX.W + 0x89 + ModRM + disp32.
+            const std::uintptr_t scan_lo = lea_site + lea_len;
+            if (scan_lo < lea_site)
+            {
+                return 0;
+            }
+            const std::uintptr_t scan_end = (window_end < range.end) ? window_end : range.end;
+            if (scan_lo >= scan_end)
+            {
+                return 0;
+            }
+            const std::uintptr_t scan_hi = (scan_end - scan_lo < forward_window) ? scan_end : scan_lo + forward_window;
+            if (scan_hi - scan_lo < store_len)
+            {
+                return 0;
+            }
+            const std::uintptr_t scan_last = scan_hi - store_len;
+            for (std::uintptr_t p = scan_lo; p <= scan_last; ++p)
+            {
+                std::array<std::uint8_t, store_len> b{};
+                if (!Memory::seh_read_bytes(p, b.data(), store_len))
+                {
+                    // Unreadable byte: stop. The scan is bounded to the same execute-readable window as the lea, so a
+                    // fault here means the store is not present in mapped code, not that we should keep scanning.
+                    return 0;
+                }
+                const std::uint8_t rex = b[0];
+                const std::uint8_t opcode = b[1];
+                const std::uint8_t modrm = b[2];
+                if (rex < 0x48 || rex > 0x4F || opcode != 0x89 || (modrm & 0xC7) != 0x05)
+                {
+                    continue;
+                }
+                const std::uint8_t src_reg = static_cast<std::uint8_t>(((rex & 0x04) << 1) | ((modrm >> 3) & 0x07));
+                if (src_reg != lea_reg)
+                {
+                    continue;
+                }
+                std::int32_t disp = 0;
+                std::memcpy(&disp, &b[3], sizeof(disp));
+                // Slot effective address: next-instruction address + sign-extended disp32, unsigned modular so it is
+                // well-defined for every input. This is the address of the global pointer the loaded string is cached
+                // into -- the value the caller wants -- not the lea site.
+                return p + store_len + static_cast<std::uintptr_t>(static_cast<std::int64_t>(disp));
+            }
+            return 0;
         }
 
         // Inner broad scan of one already-gated executable window (no fault guard). Decodes each position with Zydis,
@@ -490,7 +584,8 @@ namespace DetourModKit
         // desync-immune default; broad_match keeps that coverage and adds a Zydis sweep for rarer reference shapes.
         ReferenceScanResult references{};
         std::size_t narrow_count = 0;
-        const std::uintptr_t narrow_site = scan_string_ref_narrow(string_addr, range, narrow_count);
+        LeaReferenceInfo lea_info{};
+        const std::uintptr_t narrow_site = scan_string_ref_narrow(string_addr, range, narrow_count, lea_info);
         merge_reference_scan(references, narrow_site, narrow_count);
         if (query.broad_match && references.count < 2)
         {
@@ -506,6 +601,26 @@ namespace DetourModKit
         if (references.count >= 2)
         {
             return std::unexpected(StringXrefError::AmbiguousReference);
+        }
+
+        if (query.return_mode == XrefReturn::StringPointerSlot)
+        {
+            // Store-xref needs the unique reference to be the narrow `lea reg, [rip+string]` whose loaded pointer a
+            // following `mov [rip+slot], reg` caches. A broad-only surviving reference (references.site differs from
+            // the narrow site, so lea_info was never populated for it) or a `mov reg, [rip+string]` load has no such
+            // store to attribute. With broad_match false, references.site == narrow_site whenever count == 1, so the
+            // second guard is a no-op there.
+            if (!lea_info.is_lea || references.site != narrow_site)
+            {
+                return std::unexpected(StringXrefError::StoreNotFound);
+            }
+            const std::uintptr_t slot = scan_store_slot_after_lea(references.site, lea_info.instr_len,
+                                                                  lea_info.window_end, lea_info.reg, range);
+            if (slot == 0)
+            {
+                return std::unexpected(StringXrefError::StoreNotFound);
+            }
+            return slot;
         }
 
         if (query.return_mode == XrefReturn::EnclosingFunction)

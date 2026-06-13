@@ -141,5 +141,51 @@ TEST(DriftManifestTest, ReadMissingFileFailsClosed)
 {
     const auto parsed = rtti::read_drift_report_from_file("dmk_definitely_no_such_manifest.tmp");
     ASSERT_FALSE(parsed.has_value());
+    // A file that cannot be opened is an open failure, distinct from a present-but-corrupt manifest.
+    EXPECT_EQ(parsed.error(), ManifestError::FileOpenFailed);
+}
+
+TEST(DriftManifestTest, ReadPresentButCorruptIsParseError)
+{
+    // The file opens fine, so this is a parse failure (no header), not an open failure.
+    const std::string path = std::string("dmk_drift_corrupt_") + std::to_string(_getpid()) + ".tmp";
+    {
+        std::FILE *f = std::fopen(path.c_str(), "wb");
+        ASSERT_NE(f, nullptr);
+        const char body[] = "not a header\nfoo\t1\t2\n";
+        std::fwrite(body, 1, sizeof(body) - 1, f);
+        std::fclose(f);
+    }
+    const auto parsed = rtti::read_drift_report_from_file(path);
+    std::remove(path.c_str());
+    ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error(), ManifestError::MissingHeader);
+}
+
+TEST(DriftManifestTest, ReadEmptyFileFailsAsCorrupt)
+{
+    // An opened-but-empty file is corrupt (no header seen), not an open failure.
+    const std::string path = std::string("dmk_drift_empty_") + std::to_string(_getpid()) + ".tmp";
+    {
+        std::FILE *f = std::fopen(path.c_str(), "wb");
+        ASSERT_NE(f, nullptr);
+        std::fclose(f);
+    }
+    const auto parsed = rtti::read_drift_report_from_file(path);
+    std::remove(path.c_str());
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error(), ManifestError::MissingHeader);
+}
+
+TEST(DriftManifestTest, ManifestErrorStringsAreDistinct)
+{
+    EXPECT_NE(rtti::manifest_error_to_string(ManifestError::MissingHeader),
+              rtti::manifest_error_to_string(ManifestError::MalformedLine));
+    EXPECT_NE(rtti::manifest_error_to_string(ManifestError::MalformedLine),
+              rtti::manifest_error_to_string(ManifestError::FileOpenFailed));
+    EXPECT_NE(rtti::manifest_error_to_string(ManifestError::MissingHeader),
+              rtti::manifest_error_to_string(ManifestError::FileOpenFailed));
+    EXPECT_FALSE(rtti::manifest_error_to_string(ManifestError::MissingHeader).empty());
+    EXPECT_FALSE(rtti::manifest_error_to_string(ManifestError::MalformedLine).empty());
+    EXPECT_FALSE(rtti::manifest_error_to_string(ManifestError::FileOpenFailed).empty());
 }
