@@ -246,6 +246,13 @@ namespace DetourModKit
             info = LeaReferenceInfo{};
             // REX.W + opcode + ModRM + disp32.
             constexpr std::size_t instr_len = 7;
+            // scan_window_narrow_body reads bytes[i], bytes[i+1], bytes[i+2] and a disp32 at bytes[i+3..i+6], so the
+            // highest index it touches is i+6. The per-window loop only bounds i + instr_len <= span, so instr_len
+            // must cover that widest read or the disp32 fetch could run up to four bytes past the window. Pin the
+            // coupling here, beside the shape's byte count, so a future instr_len change cannot silently reopen it.
+            constexpr std::size_t narrow_max_read_index = 6;
+            static_assert(narrow_max_read_index < instr_len,
+                          "instr_len must span scan_window_narrow_body's disp32 tail read at bytes[i+3..i+6]");
             std::size_t faulted_windows = 0;
 
             for (const auto &window : Scanner::detail::collect_executable_windows(range))

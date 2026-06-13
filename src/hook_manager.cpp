@@ -192,10 +192,12 @@ HookManager::~HookManager() noexcept
     //   1. Flip m_shutdown_called under m_mutator_gate (exclusive) to
     //      block new mutators and serialize with a late shutdown() call.
     //   2. Disable all hooks under shared m_hooks_mutex. SafetyHook::disable()
-    //      restores the original bytes and relocates any thread caught inside
-    //      the patched prologue (thread-suspend + IP fixup); it does NOT drain
-    //      a thread already in the detour or trampoline body. The shared lock
-    //      just lets the kit's own with_* readers coexist with the disable.
+    //      restores the original bytes; while it rewrites them it strips
+    //      execute on the patched page, and a vectored exception handler
+    //      relocates the instruction pointer of any thread that faults in the
+    //      bytes being rewritten (it does NOT suspend threads, and does NOT
+    //      drain a thread already in the detour or trampoline body). The shared
+    //      lock just lets the kit's own with_* readers coexist with the disable.
     //   3. Acquire exclusive m_hooks_mutex to wait out any shared_lock
     //      holder still inside a with_* callback. Only then clear the
     //      maps -- destroying the Hook objects would UAF a live reader.
@@ -1058,10 +1060,11 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
 
         // Two-phase removal: disable under the shared lock first, then take the exclusive lock to erase. The shared
         // phase lets the kit's own with_inline_hook readers (shared_lock holders) finish before the Hook is destroyed;
-        // SafetyHook's disable()/destructor relocates only threads caught in the patched prologue, not threads already
-        // in the detour or trampoline body. Sequencing disable() before the exclusive clear also keeps SafetyHook's own
-        // thread-suspend teardown off the exclusive lock. The caller must ensure no thread is executing the hooked
-        // function during removal to close the residual narrow window.
+        // SafetyHook's disable()/destructor relocates only threads that fault in the bytes being rewritten (via a
+        // vectored exception handler; no thread is suspended), not threads already in the detour or trampoline body.
+        // Sequencing disable() before the exclusive clear also keeps SafetyHook's own page-reprotect-and-relocate
+        // unpatch work off the exclusive lock. The caller must ensure no thread is executing the hooked function
+        // during removal to close the residual narrow window.
         {
             std::shared_lock<detail::SrwSharedMutex> shared(m_hooks_mutex);
             auto it = m_hooks.find(hook_id);

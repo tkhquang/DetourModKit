@@ -47,6 +47,13 @@ namespace DetourModKit
             return false;
         const std::uintptr_t col_addr = *col_ptr_opt;
 
+        // contains() above proved col_addr is in [base, end), but the seh_read<ColHead> below pulls sizeof(ColHead)
+        // bytes, which a COL sitting within that many bytes of the module end would straddle past. The SEH guard
+        // faults cleanly on an unmapped straddle, but reject the whole-span overrun up front so the walk never reads
+        // COL fields out of an adjacent mapped image. (mod_range.end - col_addr cannot underflow: col_addr < end.)
+        if (mod_range.end - col_addr < sizeof(ColHead))
+            return false;
+
         // Batched read: pulling all six COL fields in one SEH frame matters on
         // MinGW where every guarded read translates into a VirtualQuery.
         const auto head_opt = Memory::seh_read<ColHead>(col_addr);

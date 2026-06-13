@@ -641,6 +641,11 @@ namespace DetourModKit
          *          RipRelative candidates are skipped in the fallback phase since they target instructions deeper than
          *          the patched prologue and are unaffected by the overwrite.
          *
+         * @note Recovery covers only the E9 near-jump and FF25 indirect-jump trampoline shapes. A prologue
+         *       overwritten by another inline-hook style (a push imm32 / ret thunk, an FF15 call thunk, or a jump
+         *       carrying a REX or segment prefix) is not decoded, so the request fails closed as an ordinary NoMatch
+         *       rather than recovering a wrong address. Callers needing interop with such foreign hooks resolve by
+         *       other means.
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
          * @return ResolveHit on success; ResolveError on failure.

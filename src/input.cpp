@@ -488,7 +488,11 @@ namespace DetourModKit
         {
             for (const size_t idx : it->second)
             {
-                if (m_active_states[idx].load(std::memory_order_relaxed) != 0)
+                // The shared lock holds m_name_index and m_active_states consistent, so idx is in bounds here. The
+                // explicit bound check is defence in depth against a future reshape that repopulates m_name_index
+                // without resizing m_active_states (the same guard the BindingToken overload carries); it costs one
+                // comparison per matching binding (typically 1-3).
+                if (idx < m_bindings.size() && m_active_states[idx].load(std::memory_order_relaxed) != 0)
                 {
                     return true;
                 }

@@ -633,8 +633,10 @@ namespace DetourModKit
          * @param object Pointer to the polymorphic object whose vptr will be replaced.
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          * @warning VMT hooks have no enable/disable: creation swaps the object's vptr to the cloned table and removal
-         *          restores it. As with the inline hooks, removal cannot drain a thread that is mid-dispatch through a
-         *          hooked slot, so the caller must guarantee no thread is calling a hooked method on @p object across
+         *          restores it. Removal is a bare vptr write with no thread protection at all -- weaker than inline/mid
+         *          teardown, which at least relocates a thread that faults on the patched page via SafetyHook's
+         *          vectored exception handler. A thread already dispatching through the cloned slot can call into the
+         *          freed clone, so the caller must guarantee no thread is calling a hooked method on @p object across
          *          create/remove, and that @p object outlives the hook. The vptr must also stay stable for the hook's
          *          lifetime; if the game reconstructs the object in place (rewriting its vptr) the hook is silently
          *          lost.

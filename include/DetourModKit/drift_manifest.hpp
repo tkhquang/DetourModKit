@@ -103,6 +103,11 @@ namespace DetourModKit
          * @param path Destination file path (UTF-8).
          * @param entries The drift entries to serialize.
          * @return true on success, false if the file could not be opened or written.
+         * @note The write is not atomic: it truncates @p path in place, so a crash or power loss mid-write can leave a
+         *       partial manifest. That is acceptable here because the manifest is a regenerable diagnostic/diff
+         *       artifact (offsets are re-healed every session, never loaded as load-bearing state); a torn file is
+         *       reported as MalformedLine / MissingHeader on the next read and overwritten. Do not route load-bearing
+         *       data through this path without first making the write atomic (temp file + replace).
          */
         [[nodiscard]] bool write_drift_report_to_file(const std::string &path, std::span<const DriftEntry> entries);
 

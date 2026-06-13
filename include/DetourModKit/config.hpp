@@ -195,6 +195,10 @@ namespace DetourModKit
          * @param log_key_name Human-readable name used in log output.
          * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
          * @param default_value Value used when the key is absent or unparsable.
+         * @note The INI is parsed as narrow bytes (the underlying SimpleIni uses SetUnicode(false)), so a value is
+         *       delivered to @p setter verbatim as the bytes on disk -- not transcoded. ASCII values (the common case)
+         *       pass through unchanged; a value with non-ASCII characters arrives as raw bytes (e.g. UTF-8 from a
+         *       UTF-8-saved INI), and any encoding interpretation is the consumer's responsibility.
          */
         void register_string(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
                              std::function<void(const std::string &)> setter, std::string default_value);
