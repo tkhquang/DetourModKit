@@ -91,6 +91,20 @@ if(DMK_BUILD_TESTS)
     ${DIRECTXMATH_INCLUDE_DIR}
   )
 
+  # The tests use ISO C file APIs (std::fopen) for temp-file fixtures; MSVC flags these as C4996 under /W4 /WX.
+  # The shipped library uses none of them, so scope the deprecation opt-out to the test target only.
+  target_compile_definitions(DetourModKit_tests PRIVATE $<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>)
+
+  # Statically link the GCC runtime into the MinGW test binaries. The gtest PRE_TEST discovery launches the test
+  # executable to enumerate cases, and a CI runner can resolve a different libstdc++ / libgcc / winpthread on PATH
+  # than the toolchain that built it -- that launch then fails with STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139) before
+  # any test runs. Embedding the runtime removes the external DLL dependency so discovery and the tests are
+  # PATH-independent. These binaries are never shipped (the installed artifact is the static library archive).
+  if(MINGW)
+    target_link_options(DetourModKit_tests PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_options(hook_target_lib PRIVATE -static-libgcc -static-libstdc++)
+  endif()
+
   # Register tests with CTest
   include(GoogleTest)
   gtest_discover_tests(DetourModKit_tests DISCOVERY_MODE PRE_TEST)
