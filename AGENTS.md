@@ -413,6 +413,7 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, exc
 - **Do not weaken** atomic memory orderings without proving correctness.
 - **Do not skip** running the test suite before committing.
 - **Do not publish** release packages before debug tests, release builds, and installed-package smoke tests pass for both MinGW and MSVC.
+- **Do not tag** a release whose version differs from `CMakeLists.txt` `project(VERSION ...)`. The release version is single-sourced from there: the generated `DetourModKitConfigVersion.cmake` and the `DMK_VERSION_*` macros derive from it, so a tag that disagrees would ship a package whose `find_package` version check and `DMK_VERSION_AT_LEAST` contradict the tag. The `validate-version` job in `.github/workflows/release.yml` fails closed when the dispatch `version` input does not match, so bump `project(VERSION)` first.
 - **Do not add** Windows API calls without `#ifdef _WIN32` guards in headers (implementation files are Windows-only, but headers should remain clean).
 - **Do not commit** build artifacts, `.exe`, `.a`, `.lib`, `.obj`, or `.pdb` files.
 - **Do not remove** or weaken existing tests. Add new tests for new code.

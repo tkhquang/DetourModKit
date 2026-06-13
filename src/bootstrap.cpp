@@ -12,7 +12,7 @@
 #include <windows.h>
 
 #include <atomic>
-#include <cstring>
+#include <cwchar>
 #include <exception>
 
 namespace DetourModKit::Bootstrap
@@ -35,27 +35,39 @@ namespace DetourModKit::Bootstrap
                 return true;
             }
 
-            char exe_path[MAX_PATH]{};
-            const DWORD len = GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
+            // Resolve the running executable path as wide rather than via GetModuleFileNameA: the ANSI form maps the
+            // path through the active code page, so a game whose EXE basename contains non-ASCII characters would be
+            // mangled and could miss (or false-match) the gate. The rest of bootstrap already works in wide for the
+            // instance-mutex name, so the wide module path keeps the process gate consistent with the kit's UTF-8
+            // stance.
+            wchar_t exe_path[MAX_PATH]{};
+            const DWORD len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
             if (len == 0 || len >= MAX_PATH)
             {
                 return false;
             }
 
-            const char *exe_name = std::strrchr(exe_path, '\\');
+            const wchar_t *exe_name = std::wcsrchr(exe_path, L'\\');
             exe_name = exe_name ? exe_name + 1 : exe_path;
 
-            // Copy the caller-supplied name into a bounded stack buffer to get a null-terminated string for _stricmp
-            // without heap allocation: this helper is noexcept and runs on the bootstrap path, so a throwing allocation
-            // would call std::terminate. A name that cannot fit a module file name cannot match the running executable.
+            // Widen the caller-supplied UTF-8 name into a bounded stack buffer for a wide case-insensitive compare.
+            // This helper is noexcept and runs on the bootstrap path, so it avoids a throwing allocation; a name that
+            // cannot fit a module file name cannot match the running executable. MultiByteToWideChar with a fixed
+            // destination and MB_ERR_INVALID_CHARS fails closed (returns 0) on overflow or malformed UTF-8 rather than
+            // truncating into a false match.
             if (expected.size() >= MAX_PATH)
             {
                 return false;
             }
-            char expected_buf[MAX_PATH];
-            std::memcpy(expected_buf, expected.data(), expected.size());
-            expected_buf[expected.size()] = '\0';
-            return _stricmp(exe_name, expected_buf) == 0;
+            wchar_t expected_buf[MAX_PATH];
+            const int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, expected.data(),
+                                                     static_cast<int>(expected.size()), expected_buf, MAX_PATH - 1);
+            if (wide_len <= 0)
+            {
+                return false;
+            }
+            expected_buf[wide_len] = L'\0';
+            return _wcsicmp(exe_name, expected_buf) == 0;
         }
 
         bool acquire_instance_mutex(std::string_view prefix) noexcept

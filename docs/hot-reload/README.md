@@ -343,8 +343,9 @@ static void unload_logic_dll()
     }
 
     // Brief sleep to allow any in-flight hook callbacks to complete.
-    // SafetyHook freezes threads during hook removal, but callbacks
-    // that were already past the hook entry point need time to return.
+    // SafetyHook does not freeze threads during removal: it relocates only a
+    // thread that faults on the patched page during the brief rewrite window,
+    // so a callback already past the hook entry must return on its own.
     Sleep(CALLBACK_DRAIN_MS);
 
     FreeLibrary(s_logic_module);
@@ -653,7 +654,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **Problem:** A hook callback may be executing on the game's thread when you trigger a reload. If the logic DLL is unloaded while a callback is mid-execution, the game crashes (code page unmapped leads to access violation).
 
-**How DMK handles this:** SafetyHook's `remove_all_hooks()` freezes all threads, patches the original bytes back, then resumes threads. Any thread that was inside a hook trampoline will now execute the original function code. This is safe as long as:
+**How DMK handles this:** SafetyHook's `remove_all_hooks()` patches the original bytes back without freezing threads. While it rewrites the prologue it strips execute on the patched page, and a vectored exception handler relocates the instruction pointer of any thread that *faults* on that page during the rewrite window; a thread already running inside the trampoline or detour body is **not** relocated. So removal is safe only if the hooked function is quiescent at that moment, which is why you must drain or quiesce callers before unloading. As long as that holds:
 
 - The hook callback does not store persistent pointers into the logic DLL's code/data segments.
 - The hook callback does not spawn threads that outlive the DLL.
@@ -1216,7 +1217,7 @@ If DMK could only ship one of the two, `DMK_Shutdown` would cover ~90% of consum
 
 ### Pre-unload contract: worker-thread quiescence
 
-`Bootstrap::on_logic_dll_unload(_all)` removes hooks and bindings, but it cannot prove that every consumer-owned worker thread has stopped firing those hooks. A worker thread that calls into a detoured function between `remove_hook` returning and `FreeLibrary` reclaiming the Logic DLL's `.text` pages will execute freed code; the resulting access violation often points at an address that no longer maps to anything, which is hard to triage from a crash dump. SafetyHook freezes game threads while it patches the original prologue back, but it has no visibility into worker threads spawned by the consumer.
+`Bootstrap::on_logic_dll_unload(_all)` removes hooks and bindings, but it cannot prove that every consumer-owned worker thread has stopped firing those hooks. A worker thread that calls into a detoured function between `remove_hook` returning and `FreeLibrary` reclaiming the Logic DLL's `.text` pages will execute freed code; the resulting access violation often points at an address that no longer maps to anything, which is hard to triage from a crash dump. SafetyHook does not freeze threads while it patches the original prologue back; it only relocates a thread that faults on the patched page during the rewrite window, and has no visibility into worker threads spawned by the consumer, so a worker already inside a detour body is never rescued.
 
 Stop and join every consumer-owned worker BEFORE you call the unload helper. The canonical Logic-DLL `Shutdown()` ordering for the persistent-host topology is:
 
@@ -1229,16 +1230,17 @@ extern "C" __declspec(dllexport) void Shutdown()
     s_scan_worker.reset();
     s_telemetry_worker.reset();
 
-    // 2. Now the only remaining callers into the hooks are game threads,
-    //    which SafetyHook will freeze inside remove_hook. Drop the
-    //    DLL-local registrations.
+    // 2. Now the only remaining callers into the hooks are game threads.
+    //    SafetyHook does not freeze them inside remove_hook; it relocates
+    //    only a thread that faults on the patched page during the rewrite,
+    //    so they must be quiescent here. Drop the DLL-local registrations.
     DMKBootstrap::on_logic_dll_unload(hook_names, binding_names);
 
     // 3. Return from Shutdown(). The loader's FreeLibrary call follows.
 }
 ```
 
-A common worker case to watch for: a hook callback runs on a game thread, but a separate consumer-owned thread pool *also* calls into the same detour body (e.g. an off-thread snapshot capture, a deferred re-scan, a periodic poller that touches game state through a hooked accessor). Both paths must be quiet before the unload helper runs. If a worker calls into game-side code that the host module also hooks, joining the worker before unload is sufficient; SafetyHook handles the game-thread side.
+A common worker case to watch for: a hook callback runs on a game thread, but a separate consumer-owned thread pool *also* calls into the same detour body (e.g. an off-thread snapshot capture, a deferred re-scan, a periodic poller that touches game state through a hooked accessor). Both paths must be quiet before the unload helper runs. If a worker calls into game-side code that the host module also hooks, joining the worker before unload handles the worker side; the game-thread side still depends on the hooked function being quiescent during removal, since SafetyHook only relocates threads that fault on the patched page and does not drain a thread already inside a detour.
 
 ---
 

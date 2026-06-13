@@ -189,6 +189,10 @@ namespace DetourModKit
          *       lost: the post-join drain can miss at most one in-flight message per producer thread (an accepted
          *       trade-off documented on AsyncLogger::shutdown). Do not rely on a final diagnostics line reaching the
          *       file if it is emitted while the logger is being torn down.
+         * @note In synchronous mode a Warning or Error force-flushes the file stream under the log mutex, so a hook or
+         *       input callback that logs at those levels every frame stalls the game thread on disk I/O. For per-frame
+         *       hot-path logging, enable_async_mode() first (the lock-free queue is non-blocking and callback-safe), or
+         *       keep the hot path at Debug/Trace, which is gated out unless explicitly enabled.
          */
         bool log(LogLevel level, std::string_view message);
 

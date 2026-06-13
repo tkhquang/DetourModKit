@@ -341,6 +341,11 @@ namespace DetourModKit
          *         - @ref HealError::NoMatch when no slot matched;
          *         - @ref HealError::Ambiguous when both the @c +d and @c -d slots
          *           at the nearest matching distance match (an irreducible tie).
+         * @note For a struct known to hold more than one field of @c expected_mangled's type, prefer @ref
+         *       solve_fingerprint. A single landmark resolves to the uniquely nearest same-typed slot, so a nearer
+         *       same-typed neighbour heals to the wrong field silently (both satisfy the slot shape); the @ref
+         *       HealError::Ambiguous result fires only for an exact +/- distance tie, not for a nearer decoy.
+         *       solve_fingerprint disambiguates structurally because one uniform delta must fit every field at once.
          * @warning Init-time / re-heal-on-miss, not per-frame: each probe runs the syscall-heavy prelude up to twice.
          *          The window cap bounds the worst case. Allocates nothing (one reused stack @ref PointeeType).
          */
@@ -398,6 +403,10 @@ namespace DetourModKit
          *           required landmark;
          *         - @ref HealError::Ambiguous when two or more deltas tie for the
          *           most optional matches.
+         * @note Each landmark in @p fp must have a distinct @c nominal_offset. Corroboration is scored by counting the
+         *       required landmarks satisfied at a delta, so two landmarks sharing a nominal_offset probe the same slot
+         *       and would double-count it, reporting stronger agreement than the template provides. Distinct offsets
+         *       are an author-side invariant of the constexpr template, not validated at runtime.
          * @warning Init-time only: the probe count is (2 * window_bytes / 8 + 1) * fp.size() prelude walks. Allocates
          *          nothing.
          */

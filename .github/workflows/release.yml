@@ -27,9 +27,41 @@ on:
         default: false
 
 jobs:
+  validate-version:
+    name: Validate release version matches CMake
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compare release input against project(VERSION) in CMakeLists.txt
+        run: |
+          # Single-source the release version from CMakeLists.txt project(VERSION ...): the shipped
+          # DetourModKitConfigVersion.cmake and the DMK_VERSION_* macros are generated from that number, so a tag
+          # whose version disagrees with it would publish a package whose find_package check contradicts the tag.
+          # Fail closed here rather than shipping the mismatch.
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          # Strip any pre-release / build suffix (e.g. 3.7.0-beta -> 3.7.0); CMake project() is numeric MAJOR.MINOR.PATCH.
+          INPUT_CORE="${INPUT_VERSION%%-*}"
+          PROJECT_VERSION="$(grep -oP 'project\(DetourModKit\s+VERSION\s+\K[0-9]+\.[0-9]+\.[0-9]+' CMakeLists.txt)"
+          echo "Release input version : ${INPUT_VERSION} (core: ${INPUT_CORE})"
+          echo "CMakeLists project ver: ${PROJECT_VERSION}"
+          if [ -z "${PROJECT_VERSION}" ]; then
+            echo "::error::Could not parse project(VERSION ...) from CMakeLists.txt"
+            exit 1
+          fi
+          if [ "${INPUT_CORE}" != "${PROJECT_VERSION}" ]; then
+            echo "::error::Release version '${INPUT_VERSION}' does not match CMakeLists.txt project(VERSION) '${PROJECT_VERSION}'. Bump project(VERSION) first so the shipped ConfigVersion and DMK_VERSION_* macros match the tag."
+            exit 1
+          fi
+          echo "Version check passed."
+        shell: bash
+
   build-mingw:
     name: Build for MinGW (g++)
     runs-on: windows-latest
+    needs: validate-version
     outputs:
       artifact_name: ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }}
       artifact_zip_filename: ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }}
@@ -138,6 +170,7 @@ jobs:
   build-msvc:
     name: Build for MSVC (Visual Studio)
     runs-on: windows-latest
+    needs: validate-version
     outputs:
       artifact_name: ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }}
       artifact_zip_filename: ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }}
