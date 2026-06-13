@@ -2685,13 +2685,14 @@ TEST_F(HookManagerTest, InlineMidHook_StrictModeRefusesCrossTypeLayering)
 
 namespace
 {
-    // Synthetic prologue buffers for the inline/mid prologue pre-flight. Non-const so the address is a usable hook
-    // target candidate, alignas(16) so the planted first byte sits at a deterministic, readable address across
-    // toolchains. The Fail-policy create refuses at the prologue pre-flight before SafetyHook ever inspects the bytes,
-    // so these need not be relocatable code -- only the first byte is classified.
-    alignas(16) std::uint8_t CALL_PROLOGUE_BYTES[] = {0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3, 0x90, 0x90};
-    alignas(16) std::uint8_t INT3_PROLOGUE_BYTES[] = {0xCC, 0xC3, 0x90, 0x90};
-    alignas(16) std::uint8_t INTN_PROLOGUE_BYTES[] = {0xCD, 0x03, 0xC3, 0x90};
+    // Synthetic prologue buffers for the inline/mid prologue pre-flight. const (the buffers are read-only) and
+    // alignas(16) so the planted first byte sits at a deterministic, readable address across toolchains. The
+    // Fail-policy create refuses at the prologue pre-flight before SafetyHook ever inspects the bytes, so these need
+    // not be relocatable code -- only the first byte is classified, and the hook target is the buffer's address
+    // (reinterpret_cast to uintptr_t), which a const buffer supplies just as well.
+    alignas(16) const std::uint8_t CALL_PROLOGUE_BYTES[] = {0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3, 0x90, 0x90};
+    alignas(16) const std::uint8_t INT3_PROLOGUE_BYTES[] = {0xCC, 0xC3, 0x90, 0x90};
+    alignas(16) const std::uint8_t INTN_PROLOGUE_BYTES[] = {0xCD, 0x03, 0xC3, 0x90};
 } // namespace
 
 TEST(HookProloguePolicy, ProloguePolicyDefaultIsWarn)

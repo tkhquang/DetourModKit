@@ -323,10 +323,13 @@ namespace DetourModKit
          *       manually.
          * @warning A trailing `|` marker (offset == pattern.size()) yields a
          *          one-past pointer; bounds-check before dereferencing.
-         * @note A pattern that straddles a region boundary (e.g. two separately allocated `PAGE_EXECUTE_READ` regions
-         *       that happen to be adjacent) will not be found: each region is scanned independently. PE-loaded code
-         *       does not cross section boundaries so normal module scanning is unaffected, but JIT-compiled code (Mono,
-         *       Unreal AngelScript) or heavily unpacked payloads may split contiguous bytes across VAD entries.
+         * @note A pattern that straddles the boundary between two adjacent accepted regions IS found: the sweep carries
+         *       a `pattern_len - 1` byte overlap across the contiguous run of accepted (execute-readable) regions, so a
+         *       signature split by a sibling VirtualProtect, or spanning two adjacent execute-readable VAD entries
+         *       (JIT-compiled code from Mono / Unreal AngelScript, or heavily unpacked payloads), is still located. The
+         *       overlap is capped at `pattern_len - 1` so an interior match is never re-counted. A straddle is missed
+         *       only when the regions are not contiguous (a gap between them) or an interior region is unreadable,
+         *       which breaks the run.
          */
         [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
@@ -361,8 +364,10 @@ namespace DetourModKit
          *          per launch.
          * @warning A trailing `|` marker (offset == pattern.size()) yields a
          *          one-past pointer; bounds-check before dereferencing.
-         * @warning A pattern that straddles a region boundary is not found: each region is scanned independently.
-         *          PE-loaded sections are contiguous, so normal module scanning is unaffected.
+         * @note A pattern that straddles the boundary between two adjacent accepted regions IS found: the sweep carries
+         *       a `pattern_len - 1` byte overlap across the contiguous run of accepted (readable) regions, capped so an
+         *       interior match is never re-counted. A straddle is missed only across a gap between regions or an
+         *       interior unreadable region that breaks the run.
          */
         [[nodiscard]] const std::byte *scan_readable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
@@ -518,12 +523,15 @@ namespace DetourModKit
         /**
          * @brief Cascade resolver with inline-hooked-prologue recovery.
          * @details Equivalent to resolve_cascade() on the happy path. If every candidate fails, rebuilds each
-         *          Direct-mode candidate's pattern with the first 5 bytes replaced by `E9 ?? ?? ?? ??` (the near-JMP
-         *          shape used by SafetyHook and other rel32 inline detours) and retries. If the recovery path succeeds
-         *          the log line calls this out explicitly.
+         *          Direct-mode candidate's pattern with the patched prologue replaced by a jump shape and retries. Two
+         *          shapes are tried in order: the 5-byte `E9 ?? ?? ?? ??` near jump (SafetyHook and other rel32 inline
+         *          detours) and the 6-byte `FF 25 ?? ?? ?? ??` RIP-relative indirect jump a detour emits when its
+         *          trampoline is beyond rel32 reach (a Detours-style far jump). The recovered jump destination is gated
+         *          as a plausible, executable address before acceptance. If the recovery path succeeds the log line
+         *          calls this out explicitly.
          *
          *          RipRelative candidates are skipped in the fallback phase since they target instructions deeper than
-         *          the 5-byte prologue and are unaffected by the overwrite.
+         *          the patched prologue and are unaffected by the overwrite.
          *
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.

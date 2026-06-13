@@ -932,6 +932,49 @@ TEST(StringXrefTest, StringPointerSlotNoStore)
     EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
 }
 
+TEST(StringXrefTest, StringPointerSlotIgnoresMisalignedStoreShape)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotMisalignedAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA); // lea rax, [rip+string]
+    // A `mov rcx, imm64` whose 8-byte immediate embeds the `48 89 05 <disp32>` store shape (source reg rax, the lea
+    // destination). A raw byte sweep would find that shape misaligned inside the immediate and return a bogus slot; an
+    // instruction-aligned decode steps over the whole `mov rcx, imm64` and never sees it, so the resolve fails closed.
+    const std::uint8_t mov_rcx_with_embedded_store[] = {0x48, 0xB9, 0x48, 0x89, 0x05, 0x11, 0x22, 0x33, 0x44, 0x55};
+    img.write(0x17, mov_rcx_with_embedded_store, sizeof(mov_rcx_with_embedded_store));
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotMisalignedAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotStopsAtRegisterClobber)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotClobberAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA); // lea rax, [rip+string]
+    // `mov rax, rcx` overwrites the loaded pointer before any store, so the later store caches the clobbered value, not
+    // this lea's pointer. The decode stops at the write to the loaded register and fails closed; a raw sweep that
+    // ignored intervening writes would wrongly return the store's slot.
+    const std::uint8_t clobber_rax[] = {0x48, 0x89, 0xC8}; // mov rax, rcx
+    img.write(0x17, clobber_rax, sizeof(clobber_rax));
+    img.plant_rip_store(0x1A, 0x200, 0); // mov [rip+slot], rax, after the clobber
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotClobberAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
 TEST(StringXrefTest, StringPointerSlotDoesNotDecodeDataPageStore)
 {
     SplitImage img;

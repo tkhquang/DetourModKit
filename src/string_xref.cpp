@@ -270,16 +270,19 @@ namespace DetourModKit
             return (found_count == 1) ? first_site : 0;
         }
 
-        // Store-xref forward scan: starting just past a `lea reg, [rip+string]`, look for the first `mov [rip+slot],
-        // reg` (same source register) that caches the loaded pointer into a global slot, and return that slot's
-        // RIP-relative effective address. Compilers emit the store within a few instructions of the load (often the
-        // very next), so a small forward window is searched at every byte offset. The store shape is REX.W + 0x89 +
-        // ModRM (mod=00, reg=src, rm=101) + disp32 -- the r/m-is-RIP mirror of the load (0x89 = MOV r/m, r vs 0x8B =
-        // MOV r, r/m). The source register field (REX.R << 3 | ModRM.reg) must equal the lea destination, which is what
-        // proves the store caches *this* loaded pointer rather than an unrelated global write. Returns 0 when no such
-        // store is found in the window, which the caller maps to StoreNotFound. The match is first-within-window, not
-        // uniqueness-checked, and an intervening reuse of the register is not modelled, so the window is kept tight.
-        // Reads are SEH-guarded so a truncated or unmapped tail cannot fault the host.
+        // Store-xref forward scan: starting just past a `lea reg, [rip+string]`, decode forward instruction by
+        // instruction (Zydis, the same decoder scan_string_ref_broad uses) and return the slot a `mov [rip+slot], reg`
+        // store caches the loaded pointer into, where reg is the lea destination. Decoding rather than a raw byte sweep
+        // keeps the match instruction-aligned -- a `48 89 05 ...` byte run buried inside another instruction's
+        // immediate or displacement is never mistaken for a store -- and lets the scan stop the moment the loaded
+        // register is overwritten, since a store after that would cache a different value, not this lea's pointer. The
+        // store shape is REX.W MOV [rip+disp32], reg64: a RIP-relative memory destination plus the matching 64-bit
+        // source register (the mirror of the REX.W load). The match is first-within-window, not uniqueness-checked, so
+        // the window is kept tight. Returns 0 (the caller maps it to StoreNotFound) on no store, a write to the loaded
+        // register, a CALL (which clobbers the caller-saved set), a decode failure (alignment lost / non-code), an
+        // unreadable byte, or the bound being hit. Reads go through Memory::seh_read_bytes so a truncated or unmapped
+        // tail cannot fault the host. The scan is bounded to the lea's own executable window (window_end), the module
+        // range, and a small forward window.
         std::uintptr_t scan_store_slot_after_lea(std::uintptr_t lea_site, std::size_t lea_len,
                                                  std::uintptr_t window_end, std::uint8_t lea_reg,
                                                  Memory::ModuleRange range) noexcept
@@ -287,7 +290,6 @@ namespace DetourModKit
             // A cached pointer is stored very close to its load; bound the forward scan so a pathological region cannot
             // scan unboundedly and the store cannot be attributed to a distant, unrelated reuse of the same register.
             constexpr std::size_t forward_window = 0x80; // 128 bytes.
-            constexpr std::size_t store_len = 7;         // REX.W + 0x89 + ModRM + disp32.
             const std::uintptr_t scan_lo = lea_site + lea_len;
             if (scan_lo < lea_site)
             {
@@ -299,38 +301,78 @@ namespace DetourModKit
                 return 0;
             }
             const std::uintptr_t scan_hi = (scan_end - scan_lo < forward_window) ? scan_end : scan_lo + forward_window;
-            if (scan_hi - scan_lo < store_len)
+
+            ZydisDecoder decoder;
+            if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)))
             {
                 return 0;
             }
-            const std::uintptr_t scan_last = scan_hi - store_len;
-            for (std::uintptr_t p = scan_lo; p <= scan_last; ++p)
+            // The lea wrote a 64-bit pointer, so the store source and any clobber are tested against the full 64-bit
+            // register. ZydisRegisterEncode maps the x86 register number (REX.R << 3 | ModRM.reg) to the GPR64
+            // register.
+            const ZydisRegister target_reg = ZydisRegisterEncode(ZYDIS_REGCLASS_GPR64, lea_reg);
+            if (target_reg == ZYDIS_REGISTER_NONE)
             {
-                std::array<std::uint8_t, store_len> b{};
-                if (!Memory::seh_read_bytes(p, b.data(), store_len))
+                return 0;
+            }
+
+            std::uintptr_t p = scan_lo;
+            while (p < scan_hi)
+            {
+                std::array<std::uint8_t, ZYDIS_MAX_INSTRUCTION_LENGTH> code{};
+                const std::size_t avail =
+                    (scan_hi - p < code.size()) ? static_cast<std::size_t>(scan_hi - p) : code.size();
+                if (!Memory::seh_read_bytes(p, code.data(), avail))
                 {
-                    // Unreadable byte: stop. The scan is bounded to the same execute-readable window as the lea, so a
-                    // fault here means the store is not present in mapped code, not that we should keep scanning.
+                    // Unreadable byte: the store sits in the same execute-readable window as the lea, so a fault here
+                    // means it is not present in mapped code.
                     return 0;
                 }
-                const std::uint8_t rex = b[0];
-                const std::uint8_t opcode = b[1];
-                const std::uint8_t modrm = b[2];
-                if (rex < 0x48 || rex > 0x4F || opcode != 0x89 || (modrm & 0xC7) != 0x05)
+
+                ZydisDecodedInstruction insn;
+                ZydisDecodedOperand operands[ZYDIS_MAX_OPERAND_COUNT];
+                if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, code.data(), avail, &insn, operands)))
                 {
-                    continue;
+                    // The store must be instruction-aligned with the lea; a decode failure means alignment was lost or
+                    // the bytes are not code. Fail closed rather than accept a misaligned match.
+                    return 0;
                 }
-                const std::uint8_t src_reg = static_cast<std::uint8_t>(((rex & 0x04) << 1) | ((modrm >> 3) & 0x07));
-                if (src_reg != lea_reg)
+
+                // The store: MOV with a RIP-relative memory destination (operand 0) and the matching 64-bit source
+                // register (operand 1). ZydisCalcAbsoluteAddress turns the destination into the slot's effective
+                // address (next-instruction address + sign-extended disp32).
+                if (insn.mnemonic == ZYDIS_MNEMONIC_MOV && insn.operand_count_visible >= 2 &&
+                    operands[0].type == ZYDIS_OPERAND_TYPE_MEMORY && operands[0].mem.base == ZYDIS_REGISTER_RIP &&
+                    operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER && operands[1].reg.value == target_reg)
                 {
-                    continue;
+                    ZyanU64 absolute = 0;
+                    if (ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &operands[0], static_cast<ZyanU64>(p), &absolute)))
+                    {
+                        return static_cast<std::uintptr_t>(absolute);
+                    }
+                    return 0;
                 }
-                std::int32_t disp = 0;
-                std::memcpy(&disp, &b[3], sizeof(disp));
-                // Slot effective address: next-instruction address + sign-extended disp32, unsigned modular so it is
-                // well-defined for every input. This is the address of the global pointer the loaded string is cached
-                // into -- the value the caller wants -- not the lea site.
-                return p + store_len + static_cast<std::uintptr_t>(static_cast<std::int64_t>(disp));
+
+                // A CALL clobbers the caller-saved registers; a store after it cannot be trusted to cache this lea's
+                // pointer, so stop conservatively rather than attribute a post-call store to the wrong value.
+                if (insn.meta.category == ZYDIS_CATEGORY_CALL)
+                {
+                    return 0;
+                }
+                // Any write to the loaded register (at any width -- a 32-bit write zeroes the upper half) means a later
+                // store would cache a different value. Check every operand, including implicit ones.
+                for (std::size_t op = 0; op < insn.operand_count; ++op)
+                {
+                    const ZydisDecodedOperand &operand = operands[op];
+                    if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                        (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0 &&
+                        ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, operand.reg.value) == target_reg)
+                    {
+                        return 0;
+                    }
+                }
+
+                p += insn.length;
             }
             return 0;
         }
