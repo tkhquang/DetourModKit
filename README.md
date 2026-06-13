@@ -558,7 +558,7 @@ cmake --preset mingw-debug -DDMK_ENABLE_AVX512=ON
 cmake --build --preset mingw-debug --parallel
 ```
 
-When `DMK_ENABLE_AVX512` is OFF (the default) the tier compiles out entirely. When ON, the AVX-512 intrinsics are confined to that single function via a per-function `target` attribute (no global `/arch:AVX512` or `-mavx512`), so the rest of the library keeps its AVX2 baseline and the produced binary still runs on CPUs without AVX-512: the tier is selected only when a runtime `CPUID` + `XGETBV` check confirms both the CPU and OS support AVX-512F and AVX-512BW, otherwise the scanner falls back to AVX2. `Scanner::active_simd_level()` reports the tier actually in use. The tier's `>= 30%` throughput gate is hardware-specific and runs in `.github/workflows/avx512.yml` (correctness under Intel SDE on every push; the throughput gate on an opt-in self-hosted AVX-512 runner).
+When `DMK_ENABLE_AVX512` is OFF (the default) the tier compiles out entirely. When ON, the AVX-512 intrinsics are confined to that single function via a per-function `target` attribute (no global `/arch:AVX512` or `-mavx512`), so the rest of the library keeps its AVX2 baseline and the produced binary still runs on CPUs without AVX-512: the tier is selected only when a runtime `CPUID` + `XGETBV` check confirms both the CPU and OS support AVX-512F and AVX-512BW, otherwise the scanner falls back to AVX2. `Scanner::active_simd_level()` reports the tier actually in use. The tier's `>= 30%` throughput gate is hardware-specific and can only be measured on a real AVX-512 host. Per-tier correctness (including AVX-512) runs under Intel SDE on every push to main via `.github/workflows/simd-tier-correctness.yml`.
 
 ### Enabling Sanitizers
 

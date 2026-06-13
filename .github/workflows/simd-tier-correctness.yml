@@ -1,0 +1,104 @@
+name: Scanner SIMD tier correctness
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only token: this workflow never writes to the repo.
+permissions:
+  contents: read
+
+# Per-tier correctness for the runtime-dispatched scanner SIMD verify tiers, run post-merge on push to main and on
+# dispatch (SDE emulation is slow and advisory; the blocking build/test/coverage gate for PRs lives in pr-check.yml).
+# A matrix runs one DMK_ENABLE_AVX512=ON test build under Intel SDE emulating a different CPU per leg, so the runtime
+# gate selects a different verify body each time: -spr (Sapphire Rapids) selects AVX-512, -hsw (Haswell) selects AVX2,
+# -wsm (Westmere) selects SSE2. Each leg runs the full ScannerTest suite (results must match the scalar path) and
+# asserts it actually selected the tier it covers. The Scalar tier is not a leg: on x64 SSE2 is the ABI baseline, so
+# active_simd_level() never returns Scalar and no SDE chip can force it (its code survives as verify tails and the
+# prefilter fallback, exercised within the other legs). Advisory: a leg skips with a warning if SDE cannot be set up.
+
+jobs:
+  tier-correctness-sde:
+    name: ${{ matrix.tier }} scanner correctness (Intel SDE, advisory)
+    runs-on: windows-latest
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - tier: AVX-512
+            chip: spr
+          - tier: AVX2
+            chip: hsw
+          - tier: SSE2
+            chip: wsm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: "recursive"
+          persist-credentials: false
+
+      - name: Set up MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      # One DMK_ENABLE_AVX512=ON build serves every leg: the AVX-512 body is compiled in but only selected once the
+      # emulated CPU advertises AVX-512, so the -hsw / -wsm legs exercise the AVX2 / SSE2 bodies from the same binary.
+      - name: Configure (MSVC Debug + AVX-512 tier)
+        shell: pwsh
+        run: cmake --preset msvc-debug -DDMK_ENABLE_AVX512=ON
+
+      - name: Build tests
+        shell: pwsh
+        run: cmake --build build/msvc-debug --target DetourModKit_tests --parallel 3
+
+      # Intel SDE executes the selected tier on any CPU, so it validates each tier's results without that hardware.
+      # The SHA-pinned setup-sde action exposes the kit in SDE_PATH; if it cannot be set up the run step skips with a
+      # warning rather than failing this advisory job.
+      - name: Set up Intel SDE
+        uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
+        continue-on-error: true
+        with:
+          # SDE 10.8.0 fails to start from some install folders (the runner's extraction path triggers it), so pin a
+          # known-good earlier release. The -spr / -hsw / -wsm CPU models are all available in 9.x.
+          # Ref: https://community.intel.com/t5/Intel-ISA-Extensions/SDE-10-8-fails-to-start-depending-on-the-installation-folder/m-p/1746386
+          sdeVersion: 9.58.0
+          environmentVariableName: SDE_PATH
+
+      - name: Run ScannerTest under Intel SDE (${{ matrix.tier }} via -${{ matrix.chip }})
+        shell: pwsh
+        run: |
+          # Prefer the dedicated 64-bit launcher (sde64.exe) over the auto-detecting sde.exe.
+          $sdeExe = @('sde64.exe', 'sde.exe') |
+                    ForEach-Object { Join-Path "$env:SDE_PATH" $_ } |
+                    Where-Object { Test-Path $_ } |
+                    Select-Object -First 1
+          if (-not $sdeExe)
+          {
+              Write-Output "::warning::Intel SDE not available; skipping the ${{ matrix.tier }} correctness run."
+              exit 0
+          }
+          $exe = (Get-ChildItem -Recurse -Path build/msvc-debug -Filter DetourModKit_tests.exe |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "DetourModKit_tests.exe not found" }
+
+          $out = & "$sdeExe" "-${{ matrix.chip }}" -- "$exe" --gtest_filter="ScannerTest.*"
+          $rc = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+
+          # Assert the emulated CPU actually selected this leg's tier, so a chip that silently picks a different verify
+          # body cannot pass as coverage for the tier this leg is meant to cover.
+          $level = $out | Select-String 'Scanner SIMD level:\s*(\S+)' | Select-Object -First 1
+          if ($level)
+          {
+              $observed = $level.Matches[0].Groups[1].Value
+              Write-Host "Observed tier under -${{ matrix.chip }}: $observed"
+              if ($observed -ne "${{ matrix.tier }}")
+              {
+                  throw "Expected ${{ matrix.tier }} under -${{ matrix.chip }} but the scanner selected $observed"
+              }
+          }
+          if ($rc -ne 0) { throw "ScannerTest failed under -${{ matrix.chip }} (${{ matrix.tier }})" }

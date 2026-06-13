@@ -517,7 +517,7 @@ endif()
 # selected at runtime behind a CPUID + XGETBV gate. The intrinsics are confined to that one tier via a per-function
 # target attribute (GCC/Clang) so the rest of the library stays AVX2-only -- no global /arch:AVX512 or -mavx512 is
 # added, and the produced library still runs on CPUs without AVX-512 (the tier is simply never selected). The runtime
-# >= 30% throughput gate for this tier can only be measured on an AVX-512 host; see the avx512 CI workflow.
+# >= 30% throughput gate for this tier can only be measured on an AVX-512 host (see docs/analysis/avx512_verify_icount).
 option(DMK_ENABLE_AVX512 "Compile the opt-in AVX-512 scanner verify tier (runtime-gated)" OFF)
 
 if(DMK_ENABLE_AVX512)
