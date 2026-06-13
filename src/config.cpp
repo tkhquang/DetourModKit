@@ -924,7 +924,11 @@ DetourModKit::Config::register_press_combo(std::string_view section, std::string
                                            std::function<void()> on_press, std::string_view default_value)
 {
     auto enabled_flag = std::make_shared<std::atomic<bool>>(true);
-    auto current_combos = std::make_shared<KeyComboList>(parse_key_combo_list(std::string(default_value), log_name));
+    // Seed empty: register_key_combo() below parses default_value once and synchronously invokes the setter closure
+    // (the [current_combos, ...] lambda), which writes the parsed default into current_combos before register_press
+    // reads it. Pre-parsing the same default here would be a redundant second parse -- and a duplicate WARNING when the
+    // C++ literal default carries a typo.
+    auto current_combos = std::make_shared<KeyComboList>();
     std::string binding_name_str(input_binding_name);
 
     register_key_combo(
