@@ -466,6 +466,199 @@ TEST(ScannerTest, parse_aob_wildcard_mask)
     EXPECT_EQ(result->mask[3], std::byte{0x00});
 }
 
+// --- Per-nibble wildcard tokens ---
+
+// A high-nibble token ("A?") fixes the high nibble and wildcards the low one: the byte holds the known nibble in place
+// (0xA0) with the unknown nibble zeroed, and the mask is 0xF0 so the masked compare checks only the high nibble.
+TEST(ScannerTest, parse_aob_nibble_high)
+{
+    auto result = Scanner::parse_aob("A?");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->size(), 1u);
+
+    EXPECT_EQ(result->mask[0], std::byte{0xF0});
+    EXPECT_EQ(result->bytes[0], std::byte{0xA0});
+}
+
+// A low-nibble token ("?A") fixes the low nibble: the byte holds 0x0A (high nibble zeroed) with a 0x0F mask.
+TEST(ScannerTest, parse_aob_nibble_low)
+{
+    auto result = Scanner::parse_aob("?A");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->size(), 1u);
+
+    EXPECT_EQ(result->mask[0], std::byte{0x0F});
+    EXPECT_EQ(result->bytes[0], std::byte{0x0A});
+}
+
+// A pattern mixing high-nibble, low-nibble, and full-literal tokens must carry the three distinct masks in order, with
+// bytes and mask sized identically.
+TEST(ScannerTest, parse_aob_nibble_mixed)
+{
+    auto result = Scanner::parse_aob("4? ?B 8B");
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->size(), 3u);
+    EXPECT_EQ(result->bytes.size(), result->mask.size());
+
+    EXPECT_EQ(result->mask[0], std::byte{0xF0});
+    EXPECT_EQ(result->mask[1], std::byte{0x0F});
+    EXPECT_EQ(result->mask[2], std::byte{0xFF});
+
+    EXPECT_EQ(result->bytes[0], std::byte{0x40});
+    EXPECT_EQ(result->bytes[1], std::byte{0x0B});
+    EXPECT_EQ(result->bytes[2], std::byte{0x8B});
+}
+
+// find_pattern verifies a high-nibble token via the masked compare: 0xA3 (high nibble matches) is a hit; 0xB3 (high
+// nibble differs) is a miss, proving only the known nibble is compared and the unknown nibble is ignored.
+TEST(ScannerTest, find_pattern_nibble_high_matches)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[100] = std::byte{0xA3};
+
+    auto pattern = Scanner::parse_aob("A?");
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(hit, nullptr);
+    EXPECT_EQ(hit - data.data(), 100);
+
+    // A byte whose high nibble differs must not match.
+    std::vector<std::byte> miss_data(256, std::byte{0x00});
+    miss_data[100] = std::byte{0xB3};
+    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    EXPECT_EQ(miss, nullptr);
+}
+
+// find_pattern verifies a low-nibble token: 0x53 (low nibble 3 matches) hits; 0x54 (low nibble differs) misses.
+TEST(ScannerTest, find_pattern_nibble_low_matches)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[100] = std::byte{0x53};
+
+    auto pattern = Scanner::parse_aob("?3");
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(hit, nullptr);
+    EXPECT_EQ(hit - data.data(), 100);
+
+    std::vector<std::byte> miss_data(256, std::byte{0x00});
+    miss_data[100] = std::byte{0x54};
+    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    EXPECT_EQ(miss, nullptr);
+}
+
+// Anchor selection must skip a partially-masked nibble byte: the memchr / SIMD prefilter searches for one exact byte
+// value, which a nibble does not provide. With a nibble byte and full wildcards surrounding it, the only fully-known
+// (0xFF) byte is 0x37, so the cached anchor must point there. The pattern then matches a buffer whose nibble byte
+// agrees and rejects one whose known nibble differs.
+TEST(ScannerTest, find_pattern_nibble_anchor_skips_partial)
+{
+    auto pattern = Scanner::parse_aob("A? 37 ?? 5C");
+    ASSERT_TRUE(pattern.has_value());
+
+    ASSERT_LT(pattern->anchor, pattern->size());
+    EXPECT_EQ(pattern->mask[pattern->anchor], std::byte{0xFF});
+    EXPECT_EQ(pattern->bytes[pattern->anchor], std::byte{0x37});
+
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[100] = std::byte{0xA1}; // high nibble A matches the "A?" token
+    data[101] = std::byte{0x37};
+    data[102] = std::byte{0x99}; // wildcard
+    data[103] = std::byte{0x5C};
+
+    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(hit, nullptr);
+    EXPECT_EQ(hit - data.data(), 100);
+
+    // High nibble of the first byte wrong (B instead of A) -> no match.
+    std::vector<std::byte> miss_data(256, std::byte{0x00});
+    miss_data[100] = std::byte{0xB1};
+    miss_data[101] = std::byte{0x37};
+    miss_data[102] = std::byte{0x99};
+    miss_data[103] = std::byte{0x5C};
+    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    EXPECT_EQ(miss, nullptr);
+}
+
+// A pattern with no fully-known byte (only a nibble constraint) still scans correctly: the anchor collapses to size()
+// and the scan falls back to a masked compare at every position, finding the right offset rather than degenerating to
+// the region start. Here the only candidate that satisfies "?A" is at offset 100.
+TEST(ScannerTest, find_pattern_nibble_only_brute_force_scan)
+{
+    auto pattern = Scanner::parse_aob("?A");
+    ASSERT_TRUE(pattern.has_value());
+    // No fully-known byte, so there is no anchor.
+    EXPECT_EQ(pattern->anchor, pattern->size());
+
+    std::vector<std::byte> data(256, std::byte{0x00}); // low nibble 0 everywhere except the plant
+    data[100] = std::byte{0x7A};                       // low nibble A
+
+    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(hit, nullptr);
+    EXPECT_EQ(hit - data.data(), 100);
+}
+
+// A pattern whose ONLY fully-literal byte is rare and surrounded by nibble-masked neighbours must anchor on that rare
+// literal, not on a common nibble. The scan finds the planted site whose nibbles agree and rejects a copy whose tail
+// nibble differs, proving the masked verify runs around the literal anchor.
+TEST(ScannerTest, find_pattern_nibble_neighbours_anchor_on_rare_literal)
+{
+    auto pattern = Scanner::parse_aob("4? 37 ?5");
+    ASSERT_TRUE(pattern.has_value());
+
+    ASSERT_LT(pattern->anchor, pattern->size());
+    EXPECT_EQ(pattern->bytes[pattern->anchor], std::byte{0x37});
+
+    std::vector<std::byte> data(256, std::byte{0x00});
+    data[100] = std::byte{0x41}; // high nibble 4
+    data[101] = std::byte{0x37};
+    data[102] = std::byte{0xC5}; // low nibble 5
+
+    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(hit, nullptr);
+    EXPECT_EQ(hit - data.data(), 100);
+
+    // Tail low nibble wrong (6 instead of 5) -> no match.
+    std::vector<std::byte> miss_data(256, std::byte{0x00});
+    miss_data[100] = std::byte{0x41};
+    miss_data[101] = std::byte{0x37};
+    miss_data[102] = std::byte{0xC6};
+    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    EXPECT_EQ(miss, nullptr);
+}
+
+// A pattern long enough to cross the SIMD verify boundary with a nibble-masked byte in the scalar tail exercises the
+// scalar masked-compare path (a full-byte compare there would be wrong for a nibble). The 20-byte pattern matches when
+// the tail nibble agrees and misses when it differs.
+TEST(ScannerTest, find_pattern_nibble_scalar_tail)
+{
+    std::vector<std::byte> data(256, std::byte{0x00});
+    // Distinctive 20 bytes at offset 64; the last byte (0x9C) carries a known high nibble 9.
+    const std::uint8_t bytes[20] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA,
+                                    0xBB, 0xCC, 0xDD, 0xEE, 0x10, 0x20, 0x30, 0x40, 0x50, 0x9C};
+    for (std::size_t i = 0; i < 20; ++i)
+    {
+        data[64 + i] = static_cast<std::byte>(bytes[i]);
+    }
+
+    // Last token "9?" fixes only the high nibble of the final byte, landing it in the post-SIMD scalar tail of a
+    // 20-byte verify.
+    auto pattern = Scanner::parse_aob("11 22 33 44 55 66 77 88 99 AA BB CC DD EE 10 20 30 40 50 9?");
+    ASSERT_TRUE(pattern.has_value());
+    EXPECT_EQ(pattern->size(), 20u);
+
+    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(hit, nullptr);
+    EXPECT_EQ(hit - data.data(), 64);
+
+    // Flip the final byte's high nibble (0x9C -> 0xAC) so the scalar-tail masked compare must reject it.
+    data[64 + 19] = std::byte{0xAC};
+    const auto *miss = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    EXPECT_EQ(miss, nullptr);
+}
+
 TEST(ScannerTest, find_pattern_wildcard_before_start)
 {
     std::vector<std::byte> data = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x00},
@@ -2499,6 +2692,72 @@ namespace
     };
 } // namespace
 
+// The whole-process Direct cascade path gates its resolved address with plausible_userspace_ptr. A Direct candidate
+// whose disp_offset underflows the match below the user-mode floor (0x10000) must not resolve: the cascade falls
+// through to the next candidate instead of committing to a near-null address the caller cannot dereference. Here P1
+// carries a pathological negative disp_offset computed to push the resolved address to 0x8000 (below the floor); P2 is
+// the same unique signature with disp_offset 0, so it resolves cleanly and wins.
+TEST(ScannerCascade, DirectImplausibleNegativeOffsetFallsThroughToCleanCandidate)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+
+    // A 16-byte signature unique in the process's executable regions (the only executable copy is this buffer; the
+    // compiled needle and any transient stack copy are not executable).
+    constexpr std::size_t PLANT_OFFSET = 0x100;
+    const std::string aob = write_signature(reinterpret_cast<std::byte *>(buf.base) + PLANT_OFFSET, 16, 0xD5);
+
+    auto probe = Scanner::parse_aob(aob);
+    ASSERT_TRUE(probe.has_value());
+    const auto *match = Scanner::scan_executable_regions(*probe);
+    ASSERT_NE(match, nullptr);
+    const auto match_addr = reinterpret_cast<std::uintptr_t>(match);
+
+    // disp_offset chosen so match_addr + disp_offset == 0x8000, which is below USERSPACE_PTR_MIN (0x10000) and
+    // therefore implausible. The arithmetic wraps in uintptr_t exactly as resolve_candidate_match computes it.
+    const auto resolved_floor_target = static_cast<std::uintptr_t>(0x8000);
+    const auto bad_disp = static_cast<std::ptrdiff_t>(resolved_floor_target - match_addr);
+
+    Scanner::AddrCandidate cands[] = {
+        {"p1_implausible", aob, Scanner::ResolveMode::Direct, bad_disp, 0},
+        {"p2_clean", aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade(cands, "direct-plausibility");
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->winning_name, "p2_clean");
+    EXPECT_EQ(hit->address, match_addr);
+}
+
+// When the only candidate's Direct resolution is implausible (underflows below the user-mode floor), the whole-process
+// cascade returns NoMatch rather than a near-null address.
+TEST(ScannerCascade, DirectImplausibleNegativeOffsetSoleCandidateReturnsNoMatch)
+{
+    ExecBuffer buf(0x1000);
+    ASSERT_NE(buf.base, nullptr);
+    std::memset(buf.base, 0xCC, buf.size);
+
+    constexpr std::size_t PLANT_OFFSET = 0x100;
+    const std::string aob = write_signature(reinterpret_cast<std::byte *>(buf.base) + PLANT_OFFSET, 16, 0x2E);
+
+    auto probe = Scanner::parse_aob(aob);
+    ASSERT_TRUE(probe.has_value());
+    const auto *match = Scanner::scan_executable_regions(*probe);
+    ASSERT_NE(match, nullptr);
+    const auto match_addr = reinterpret_cast<std::uintptr_t>(match);
+
+    const auto bad_disp = static_cast<std::ptrdiff_t>(static_cast<std::uintptr_t>(0x8000) - match_addr);
+
+    Scanner::AddrCandidate cands[] = {
+        {"only_implausible", aob, Scanner::ResolveMode::Direct, bad_disp, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade(cands, "direct-plausibility-sole");
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+}
+
 TEST(ScannerCascade, PrologueFallbackHitFindsHookedPrologue)
 {
     ExecBuffer buf(0x1000);
@@ -3223,6 +3482,201 @@ TEST(ScannerModuleCascade, PrologueFallbackHonorsAnchorOffsetMarker)
     EXPECT_EQ(hit->address, match_site + 7);
 }
 
+// The prologue fallback recovers an FF 25 disp32 (RIP-relative indirect JMP) prologue in addition to E9. A trampoline
+// allocator beyond rel32 reach overwrites the prologue with FF 25 disp32 whose disp32 points at an 8-byte slot holding
+// the absolute target. decode_ff25_indirect dereferences the slot, so the destination gate sees the final executable
+// target. This mirrors the E9 trampoline test: plant FF 25 + a disp32 pointing to an in-region slot that holds an
+// executable address, append a 10-literal tail, and assert the fallback resolves to the planted match site.
+TEST(ScannerModuleCascade, PrologueFallbackRecoversFf25Prologue)
+{
+    // An executable address in the test image stands in for the trampoline target stored in the FF25 slot.
+    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
+
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region for the FF25 fallback fixture";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
+
+    // The slot lives later in the same page, clear of the 6-byte FF25 instruction and its literal tail. FF 25 is
+    // RIP-relative: disp32 is added to the address of the next instruction (match_site + 6).
+    constexpr std::size_t SLOT_OFFSET = PLANT_OFFSET + 0x80;
+    const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + SLOT_OFFSET;
+    const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x2A, 0x3B, 0x4C, 0x5D, 0x6E, 0x7F, 0x80, 0x91, 0xA2, 0xB3};
+
+    region.get()[PLANT_OFFSET + 0] = 0xFF;
+    region.get()[PLANT_OFFSET + 1] = 0x25;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region.get() + PLANT_OFFSET + 2, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
+    // The slot holds the absolute (executable) target.
+    std::memcpy(region.get() + SLOT_OFFSET, &dest, sizeof(dest));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    // The original prologue is six REX-prefixed bytes (overwritten by the FF25 instruction), followed by the literal
+    // tail. The direct pass misses (the buffer starts with FF not 48 89 ...), so the FF25 fallback shape rebuilds
+    // FF 25 ?? ?? ?? ?? + tail to match the planted site.
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 33 2A 3B 4C 5D 6E 7F 80 91 A2 B3", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-prologue", range);
+    ASSERT_TRUE(hit.has_value()) << "module-scoped fallback failed to recover an FF25-shaped hooked prologue";
+    EXPECT_EQ(hit->address, match_site);
+}
+
+// An FF25 prologue whose slot holds a non-executable data address must be rejected exactly as the E9 path rejects a
+// data destination. decode_ff25_indirect returns the slot's target, and is_executable_address fails it, so the fallback
+// reports NoMatch.
+TEST(ScannerModuleCascade, PrologueFallbackFf25RejectsDataOnlySlotTarget)
+{
+    VirtualPagePtr destination{
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))};
+    ASSERT_NE(destination.get(), nullptr);
+    std::memset(destination.get(), 0x00, 0x1000);
+    const auto dest = reinterpret_cast<std::uintptr_t>(destination.get());
+
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region for the FF25 data-slot fixture";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
+
+    constexpr std::size_t SLOT_OFFSET = PLANT_OFFSET + 0x80;
+    const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + SLOT_OFFSET;
+    const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81, 0x92, 0xA3};
+
+    region.get()[PLANT_OFFSET + 0] = 0xFF;
+    region.get()[PLANT_OFFSET + 1] = 0x25;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region.get() + PLANT_OFFSET + 2, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
+    // The slot holds a PAGE_READWRITE (non-executable) address, so the destination gate must reject it.
+    std::memcpy(region.get() + SLOT_OFFSET, &dest, sizeof(dest));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    Scanner::AddrCandidate cands[] = {
+        {"hooked", "48 89 5C 24 08 33 1A 2B 3C 4D 5E 6F 70 81 92 A3", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-data-slot", range);
+    ASSERT_FALSE(hit.has_value()) << "FF25 fallback accepted a slot target on a data-only page";
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+}
+
+// An FF25-recovered prologue carrying a `|` marker must honor the original anchor offset, exactly as the E9 path does.
+// The FF25 instruction is six bytes, but the rebuilt pattern still compiles with anchor offset 0; the original offset
+// is reapplied at resolve time, so the recovered address must be match_site + 7.
+TEST(ScannerModuleCascade, PrologueFallbackFf25HonorsAnchorOffsetMarker)
+{
+    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
+
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region for the FF25 anchor-offset fixture";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
+
+    constexpr std::size_t SLOT_OFFSET = PLANT_OFFSET + 0x80;
+    const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + SLOT_OFFSET;
+    const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x0C, 0x1D, 0x2E, 0x3F, 0x40, 0x51, 0x62, 0x73, 0x84, 0x95};
+
+    region.get()[PLANT_OFFSET + 0] = 0xFF;
+    region.get()[PLANT_OFFSET + 1] = 0x25;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region.get() + PLANT_OFFSET + 2, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
+    std::memcpy(region.get() + SLOT_OFFSET, &dest, sizeof(dest));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    // `|` after the six prologue bytes plus one tail byte => anchor offset 7. The original prologue is overwritten by
+    // the FF25 instruction, so the direct pass misses and the FF25 fallback engages.
+    Scanner::AddrCandidate cands[] = {
+        {"anchored", "48 89 5C 24 08 33 0C | 1D 2E 3F 40 51 62 73 84 95", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-anchor-offset", range);
+    ASSERT_TRUE(hit.has_value()) << "FF25 fallback failed to recover the hooked prologue";
+    EXPECT_EQ(hit->address, match_site + 7);
+}
+
+// Two FF25-shaped copies with the same literal tail exceed the uniqueness ceiling (1), so the FF25 fallback shape must
+// reject the ambiguity and report NoMatch, mirroring the E9 ambiguous-tail guard.
+TEST(ScannerModuleCascade, PrologueFallbackFf25RejectsAmbiguousTail)
+{
+    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
+
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region for the FF25 ambiguous-tail fixture";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x5C, 0x6D, 0x7E, 0x8F, 0x90, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5};
+
+    // Plant two identical FF25 + tail copies at distinct offsets. Each slot holds the same executable destination, but
+    // the uniqueness ceiling trips before the destination is even consulted.
+    const std::size_t plant_offsets[] = {0x100, 0x300};
+    for (const std::size_t plant : plant_offsets)
+    {
+        const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + plant;
+        const std::size_t slot_offset = plant + 0x80;
+        const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + slot_offset;
+        const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
+        ASSERT_GE(rel, INT32_MIN);
+        ASSERT_LE(rel, INT32_MAX);
+
+        region.get()[plant + 0] = 0xFF;
+        region.get()[plant + 1] = 0x25;
+        const std::int32_t disp = static_cast<std::int32_t>(rel);
+        std::memcpy(region.get() + plant + 2, &disp, sizeof(disp));
+        std::memcpy(region.get() + plant + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
+        std::memcpy(region.get() + slot_offset, &dest, sizeof(dest));
+    }
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    Scanner::AddrCandidate cands[] = {
+        {"ambiguous", "48 89 5C 24 08 33 5C 6D 7E 8F 90 A1 B2 C3 D4 E5", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-ambiguous", range);
+    ASSERT_FALSE(hit.has_value()) << "FF25 fallback resolved an ambiguous (multi-match) prologue";
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+}
+
 // Page-scope regression guard for the module-scoped prologue fallback: a hooked near-JMP only ever overwrites a code
 // prologue, so the fallback must search the image's executable pages only -- matching the whole-process fallback, which
 // counts and scans through scan_executable_regions. Here the E9 + literal tail is planted in a READ-ONLY data page (the
@@ -3533,6 +3987,53 @@ TEST(ScannerHostModuleCascade, EmptyCandidatesReturnsEmptyCandidates)
     const auto fallback = Scanner::resolve_cascade_in_host_module_with_prologue_fallback(empty, "empty");
     ASSERT_FALSE(fallback.has_value());
     EXPECT_EQ(fallback.error(), Scanner::ResolveError::EmptyCandidates);
+}
+
+// A signature that straddles the boundary between two adjacent accepted executable regions must be found. Two committed
+// pages allocated as one span but given different executable protections (RWX then RX) are reported by VirtualQuery as
+// two separate adjacent regions, because VirtualQuery never coalesces regions with differing attributes. The scanner
+// extends each accepted region's scan back by pattern_size - 1 bytes into the contiguous already-accepted run it abuts,
+// so a match beginning in the first page's tail and ending in the second is recovered. Without that overlap the
+// straddling match would be missed (each region scanned independently). The signature is a rare 16-byte sequence so a
+// process-wide scan returns this planted copy.
+TEST(ScannerBoundaryTest, FindsPatternStraddlingAdjacentExecutableRegions)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
+
+    // One reservation spanning two pages so they are virtually contiguous, committed executable.
+    auto *base =
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, page * 2, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    ASSERT_NE(base, nullptr);
+    std::memset(base, 0xCC, page * 2);
+
+    // A rare 16-byte signature straddling the page boundary: 8 bytes end the first page, 8 begin the second.
+    const std::uint8_t sig[16] = {0x3E, 0x9D, 0x71, 0xC4, 0x06, 0xBA, 0x58, 0xEF,
+                                  0x12, 0xA7, 0x4F, 0x83, 0xDC, 0x6B, 0x90, 0x25};
+    std::uint8_t *const plant = base + page - 8; // last 8 bytes of page 1, first 8 of page 2
+    std::memcpy(plant, sig, sizeof(sig));
+
+    // Force VirtualQuery to report two adjacent regions: flip the second page to a DIFFERENT executable protection so
+    // the attributes differ and the regions are not coalesced. Both remain execute-readable and accepted.
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old_protect));
+
+    auto pattern = Scanner::parse_aob("3E 9D 71 C4 06 BA 58 EF 12 A7 4F 83 DC 6B 90 25");
+    ASSERT_TRUE(pattern.has_value());
+
+    // The straddling match must be found at the plant address even though it begins in the first region and ends in the
+    // second.
+    const std::byte *hit = Scanner::scan_executable_regions(*pattern);
+    ASSERT_NE(hit, nullptr) << "cross-boundary straddling match was missed";
+    EXPECT_EQ(hit, reinterpret_cast<const std::byte *>(plant));
+
+    // The straddling occurrence is reported exactly once: a second occurrence of this unique signature must not exist
+    // (the overlap must not double-count the match by scanning it from both regions).
+    const std::byte *second = Scanner::scan_executable_regions(*pattern, 2);
+    EXPECT_EQ(second, nullptr);
+
+    VirtualFree(base, 0, MEM_RELEASE);
 }
 
 #ifdef _MSC_VER

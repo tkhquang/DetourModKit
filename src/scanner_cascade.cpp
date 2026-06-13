@@ -18,13 +18,14 @@
 
 #include "scanner_internal.hpp"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
-#include <cstddef>
-#include <cstdint>
 
 using namespace DetourModKit;
 
@@ -36,7 +37,17 @@ namespace
         using DetourModKit::Scanner::ResolveMode;
         if (candidate.mode == ResolveMode::Direct)
         {
-            return match_addr + static_cast<std::uintptr_t>(candidate.disp_offset);
+            const auto resolved = match_addr + static_cast<std::uintptr_t>(candidate.disp_offset);
+            // Apply the same plausibility floor the RipRelative path uses below. A Direct result is normally a real
+            // in-process address, but a pathological disp_offset (a large negative value that underflows the match
+            // address, or a crafted candidate table) can resolve to 0, a low guard-page address, or a kernel-range /
+            // non-canonical value. Reject it here rather than commit to a hit the caller cannot later reverse; the
+            // module-scoped path layers a stricter contains() check on top.
+            if (!DetourModKit::Memory::plausible_userspace_ptr(resolved))
+            {
+                return std::nullopt;
+            }
+            return resolved;
         }
         const auto disp_addr = match_addr + static_cast<std::uintptr_t>(candidate.disp_offset);
         // Fault-guarded read instead of is_readable + raw memcpy: the page can change between the check and the copy
@@ -76,8 +87,33 @@ namespace
     // tolerating duplicate matches.
     constexpr std::size_t PROLOGUE_FALLBACK_MAX_HITS = 1;
 
-    // E9 rel32 inline hooks overwrite exactly five bytes: one opcode plus one int32 displacement.
-    constexpr std::size_t PROLOGUE_PATCH_BYTES = 5;
+    // Bytes each recognised inline-hook prologue shape overwrites. E9 rel32 is five bytes (one opcode plus one int32
+    // displacement); FF 25 disp32 is six (a two-byte opcode plus one int32 RIP-relative displacement).
+    constexpr std::size_t PROLOGUE_PATCH_BYTES_E9 = 5;
+    constexpr std::size_t PROLOGUE_PATCH_BYTES_FF25 = 6;
+
+    /**
+     * @struct PrologueShape
+     * @brief One inline-hook prologue shape the fallback can rebuild and recover.
+     * @details @ref patch_bytes is how many leading prologue bytes the hook overwrites; @ref jump_prefix is the AOB
+     *          fragment that replaces them; @ref decode recovers the absolute target the jump redirects to so the
+     *          rebuilt match can be gated as a real hook rather than a coincidental opcode collision.
+     */
+    struct PrologueShape
+    {
+        std::size_t patch_bytes = 0;
+        std::string_view jump_prefix;
+        std::optional<std::uintptr_t> (*decode)(std::uintptr_t) noexcept = nullptr;
+    };
+
+    // Inline-hook prologue shapes the fallback tries, in order. E9 is the five-byte near jump SafetyHook / MinHook emit
+    // for a trampoline within rel32 reach; FF 25 is the six-byte RIP-relative indirect jump a hook emits when the
+    // trampoline is beyond rel32 reach (a Detours-style far jump stores the absolute target in a slot the disp32 points
+    // at, which decode_ff25_indirect dereferences). E9 is tried first because it is by far the common case.
+    constexpr std::array<PrologueShape, 2> PROLOGUE_SHAPES = {{
+        {PROLOGUE_PATCH_BYTES_E9, std::string_view{"E9 ?? ?? ?? ??"}, &DetourModKit::detail::decode_e9_rel32},
+        {PROLOGUE_PATCH_BYTES_FF25, std::string_view{"FF 25 ?? ?? ?? ??"}, &DetourModKit::detail::decode_ff25_indirect},
+    }};
 
     void append_hex_byte(std::string &out, std::byte value)
     {
@@ -87,18 +123,48 @@ namespace
         out.push_back(digits[byte_value & 0xF]);
     }
 
-    // Build from the parsed pattern so parse_aob remains the only token parser. The caller keeps original.offset and
-    // applies it after the fallback scan, which makes `|`-anchored recovery match the direct path exactly.
-    std::string build_hooked_prologue_pattern(const DetourModKit::Scanner::CompiledPattern &original)
+    // Re-emits one parsed (byte, mask) pair as the AOB token parse_aob would accept: a full literal (mask 0xFF), a
+    // per-nibble token (mask 0xF0 / 0x0F), or a full wildcard (mask 0x00). Keeping the round-trip token-exact preserves
+    // a partially-masked tail byte instead of widening it to a full byte (which would over-constrain) or to a wildcard.
+    void append_pattern_token(std::string &out, std::byte value, std::byte mask)
     {
-        if (original.size() < PROLOGUE_PATCH_BYTES)
+        constexpr char digits[] = "0123456789ABCDEF";
+        const auto byte_value = std::to_integer<unsigned>(value);
+        switch (std::to_integer<unsigned>(mask))
+        {
+        case 0xFF:
+            append_hex_byte(out, value);
+            break;
+        case 0xF0:
+            out.push_back(digits[(byte_value >> 4) & 0xF]);
+            out.push_back('?');
+            break;
+        case 0x0F:
+            out.push_back('?');
+            out.push_back(digits[byte_value & 0xF]);
+            break;
+        default:
+            out.append("??");
+            break;
+        }
+    }
+
+    // Build from the parsed pattern so parse_aob remains the only token parser. The caller keeps original.offset and
+    // applies it after the fallback scan, which makes `|`-anchored recovery match the direct path exactly. patch_bytes
+    // leading prologue bytes are replaced by jump_prefix; the surviving literal tail is re-emitted token-exact. Only
+    // fully-known tail bytes count toward the literal-tail floor: a partially-masked nibble byte adds context but not a
+    // full byte of false-positive defense, so the conservative count keeps the uniqueness pre-filter strict.
+    std::string build_hooked_prologue_pattern(const DetourModKit::Scanner::CompiledPattern &original,
+                                              std::size_t patch_bytes, std::string_view jump_prefix)
+    {
+        if (original.size() < patch_bytes)
         {
             return {};
         }
         int literal_tail_count = 0;
-        for (std::size_t i = PROLOGUE_PATCH_BYTES; i < original.size(); ++i)
+        for (std::size_t i = patch_bytes; i < original.size(); ++i)
         {
-            if (original.mask[i] != std::byte{0x00})
+            if (original.mask[i] == std::byte{0xFF})
             {
                 ++literal_tail_count;
             }
@@ -107,18 +173,11 @@ namespace
         {
             return {};
         }
-        std::string out = "E9 ?? ?? ?? ??";
-        for (std::size_t i = PROLOGUE_PATCH_BYTES; i < original.size(); ++i)
+        std::string out(jump_prefix);
+        for (std::size_t i = patch_bytes; i < original.size(); ++i)
         {
             out.push_back(' ');
-            if (original.mask[i] == std::byte{0x00})
-            {
-                out.append("??");
-            }
-            else
-            {
-                append_hex_byte(out, original.bytes[i]);
-            }
+            append_pattern_token(out, original.bytes[i], original.mask[i]);
         }
         return out;
     }
@@ -244,6 +303,83 @@ namespace
         bool not_applicable{true};
     };
 
+    // Attempts one prologue shape for a single Direct candidate: rebuilds the patched prologue as shape.jump_prefix
+    // plus the candidate's surviving literal tail, requires that rebuilt pattern to match exactly once in scope,
+    // decodes the jump to recover the redirected target, and gates that destination as a plausible, executable address.
+    // Returns the resolved attempt on success, or nullopt when this shape does not apply or does not uniquely recover a
+    // target. *applicable is set true once the shape produces a usable rebuilt pattern (enough literal tail),
+    // regardless of whether it then matches, so the caller can distinguish "no shape was applicable" from "applicable
+    // but no match".
+    std::optional<CascadeAttempt> try_prologue_shape(const DetourModKit::Scanner::AddrCandidate &candidate,
+                                                     std::size_t index,
+                                                     const DetourModKit::Scanner::CompiledPattern &original,
+                                                     std::optional<DetourModKit::Memory::ModuleRange> range,
+                                                     const PrologueShape &shape, bool &applicable)
+    {
+        DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
+        const std::string hooked = build_hooked_prologue_pattern(original, shape.patch_bytes, shape.jump_prefix);
+        if (hooked.empty())
+        {
+            return std::nullopt;
+        }
+        auto compiled = DetourModKit::Scanner::parse_aob(hooked);
+        if (!compiled)
+        {
+            return std::nullopt;
+        }
+        applicable = true;
+        const std::byte *first_match = nullptr;
+        const std::size_t hits = count_pattern_hits_bounded(*compiled, PROLOGUE_FALLBACK_MAX_HITS, range, &first_match);
+        if (hits == 0)
+        {
+            return std::nullopt;
+        }
+        if (hits > PROLOGUE_FALLBACK_MAX_HITS)
+        {
+            logger.debug("Scanner: prologue fallback rejected for '{}': {} hits exceed uniqueness ceiling ({})",
+                         candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name, hits,
+                         PROLOGUE_FALLBACK_MAX_HITS);
+            return std::nullopt;
+        }
+        // Reuse the first occurrence the count already located (hits is in [1, PROLOGUE_FALLBACK_MAX_HITS] here, so
+        // first_match is the unique match) instead of re-sweeping the same scope for it.
+        const auto match_addr = reinterpret_cast<std::uintptr_t>(first_match);
+        const auto decoded = shape.decode(match_addr);
+        if (!decoded)
+        {
+            return std::nullopt;
+        }
+        const auto jmp_destination = *decoded;
+        // The rewritten jump was FOUND inside the target (the module image when `range` is set, the process otherwise),
+        // but its destination must NOT be constrained to that module. When a sibling mod inline-hooks the target, its
+        // jump can land on a trampoline the sibling allocated outside every loaded module; SafetyHook does this for
+        // inline hooks, and an FF 25 far jump stores an absolute trampoline address in its slot. An in-module
+        // requirement would reject the very recovery this path exists for. Gate the destination on "plausible
+        // user-space pointer on a committed, execute-readable page" instead: that still rejects a jump into unmapped or
+        // data-only memory (a coincidental opcode match whose tail happened to align), while the uniqueness ceiling and
+        // the literal-tail floor remain the primary false-positive defense.
+        if (!DetourModKit::Memory::plausible_userspace_ptr(jmp_destination) ||
+            !Scanner::detail::is_executable_address(jmp_destination))
+        {
+            logger.debug("Scanner: prologue fallback rejected for '{}': jump destination {} is not executable",
+                         candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name,
+                         Format::format_address(jmp_destination));
+            return std::nullopt;
+        }
+
+        // The rebuilt pattern compiled with offset 0: replacing the prologue with the jump prefix dropped the original
+        // `|` anchor, so its scan returned the bare match start. Reconstruct the anchored match the direct pass would
+        // have produced (match start plus the original anchor offset) before resolving, so a `|`-anchored Direct
+        // candidate recovered here lands on the same byte as the unhooked direct scan instead of short by the offset.
+        const auto anchored_match = match_addr + static_cast<std::uintptr_t>(original.offset);
+        const auto addr = resolve_candidate_match(anchored_match, candidate);
+        if (!addr)
+        {
+            return std::nullopt;
+        }
+        return CascadeAttempt{*addr, index, true};
+    }
+
     PrologueFallbackResult
     scan_candidates_hooked_prologue(std::span<const DetourModKit::Scanner::AddrCandidate> candidates,
                                     std::optional<DetourModKit::Memory::ModuleRange> range = std::nullopt)
@@ -266,72 +402,29 @@ namespace
             {
                 continue;
             }
-            const auto hooked = build_hooked_prologue_pattern(*original);
-            if (hooked.empty())
+            // Try each recognised inline-hook prologue shape in turn. The first that uniquely recovers an executable
+            // target wins; E9 is tried before FF 25 because it is by far the common case.
+            bool any_applicable = false;
+            for (const PrologueShape &shape : PROLOGUE_SHAPES)
+            {
+                bool applicable = false;
+                const auto attempt = try_prologue_shape(candidate, i, *original, range, shape, applicable);
+                if (applicable)
+                {
+                    any_applicable = true;
+                    out.not_applicable = false;
+                }
+                if (attempt)
+                {
+                    out.attempt = *attempt;
+                    return out;
+                }
+            }
+            if (!any_applicable)
             {
                 logger.debug("Scanner: prologue fallback skipped for '{}' (insufficient literal tail bytes)",
                              candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name);
-                continue;
             }
-            auto compiled = DetourModKit::Scanner::parse_aob(hooked);
-            if (!compiled)
-            {
-                continue;
-            }
-            out.not_applicable = false;
-            const std::byte *first_match = nullptr;
-            const std::size_t hits =
-                count_pattern_hits_bounded(*compiled, PROLOGUE_FALLBACK_MAX_HITS, range, &first_match);
-            if (hits == 0)
-            {
-                continue;
-            }
-            if (hits > PROLOGUE_FALLBACK_MAX_HITS)
-            {
-                logger.debug("Scanner: prologue fallback rejected for '{}': {} hits exceed uniqueness ceiling ({})",
-                             candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name, hits,
-                             PROLOGUE_FALLBACK_MAX_HITS);
-                continue;
-            }
-            // Reuse the first occurrence the count already located (hits is in [1, PROLOGUE_FALLBACK_MAX_HITS] here, so
-            // first_match is the unique match) instead of re-sweeping the same scope for it.
-            const auto match_addr = reinterpret_cast<std::uintptr_t>(first_match);
-            const auto decoded = DetourModKit::detail::decode_e9_rel32(match_addr);
-            if (!decoded)
-            {
-                continue;
-            }
-            const auto jmp_destination = *decoded;
-            // The rewritten near-JMP was FOUND inside the target (the module image when `range` is set, the process
-            // otherwise), but its destination must NOT be constrained to that module. When a sibling mod inline-hooks
-            // the target, its E9 can jump to a trampoline the sibling allocated outside every loaded module; SafetyHook
-            // does this for inline hooks. An in-module requirement would reject the very recovery this path exists for.
-            // Gate the destination on "plausible user-space pointer on a committed, execute-readable page" instead:
-            // that still rejects a jump into unmapped or data-only memory (a coincidental E9 match whose tail happened
-            // to align), while the uniqueness ceiling and the literal-tail floor remain the primary false-positive
-            // defense.
-            if (!DetourModKit::Memory::plausible_userspace_ptr(jmp_destination) ||
-                !Scanner::detail::is_executable_address(jmp_destination))
-            {
-                logger.debug("Scanner: prologue fallback rejected for '{}': E9 destination {} is not executable",
-                             candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name,
-                             Format::format_address(jmp_destination));
-                continue;
-            }
-
-            // The rebuilt pattern compiled with offset 0: replacing the prologue with `E9 ?? ?? ?? ??` dropped the
-            // original `|` anchor, so its scan returned the bare match start. Reconstruct the anchored match the direct
-            // pass would have produced (match start plus the original anchor offset) before resolving, so a
-            // `|`-anchored Direct candidate recovered here lands on the same byte as the unhooked direct scan instead
-            // of short by the anchor offset.
-            const auto anchored_match = match_addr + static_cast<std::uintptr_t>(original->offset);
-            const auto addr = resolve_candidate_match(anchored_match, candidate);
-            if (!addr)
-            {
-                continue;
-            }
-            out.attempt = CascadeAttempt{*addr, i, true};
-            return out;
         }
         return out;
     }

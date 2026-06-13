@@ -47,15 +47,36 @@ namespace DetourModKit
 
         /**
          * @enum ManifestError
-         * @brief Why parsing a drift manifest failed. Fails closed: no partial result.
+         * @brief Why reading or parsing a drift manifest failed. Fails closed: no partial result.
          */
         enum class ManifestError : std::uint8_t
         {
-            /// The first non-blank line was not the manifest header.
+            /// The first non-blank line was not the manifest header (file present but corrupt).
             MissingHeader,
-            /// A record line had the wrong field count or an unparseable field.
-            MalformedLine
+            /// A record line had the wrong field count or an unparseable field (file present but corrupt).
+            MalformedLine,
+            /// The file could not be opened (missing, locked, permission denied, or not a regular file).
+            FileOpenFailed
         };
+
+        /**
+         * @brief Human-readable mapping for @ref ManifestError.
+         * @param error The error code.
+         * @return A string view describing the error.
+         */
+        [[nodiscard]] constexpr std::string_view manifest_error_to_string(ManifestError error) noexcept
+        {
+            switch (error)
+            {
+            case ManifestError::MissingHeader:
+                return "Manifest header line is missing or wrong";
+            case ManifestError::MalformedLine:
+                return "A manifest record line is malformed";
+            case ManifestError::FileOpenFailed:
+                return "Manifest file could not be opened";
+            }
+            return "Unknown manifest error";
+        }
 
         /**
          * @brief Serializes a drift report to a durable, line-oriented manifest.
@@ -88,8 +109,10 @@ namespace DetourModKit
         /**
          * @brief Reads and parses a drift manifest file.
          * @param path Source file path (UTF-8).
-         * @return The parsed records, or a @ref ManifestError (MissingHeader is also returned when the file cannot be
-         *         opened or is empty).
+         * @return The parsed records, or a @ref ManifestError: @ref ManifestError::FileOpenFailed when the file cannot
+         *         be opened, or a parse error (@ref ManifestError::MissingHeader / @ref ManifestError::MalformedLine)
+         *         when the file is present but its contents are corrupt. An opened-but-empty file reports
+         *         MissingHeader.
          */
         [[nodiscard]] std::expected<std::vector<DriftRecord>, ManifestError>
         read_drift_report_from_file(const std::string &path);

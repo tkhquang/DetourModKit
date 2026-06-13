@@ -66,14 +66,19 @@ namespace DetourModKit
         {
             /**
              * @brief Pattern bytes, one per token in the source AOB string.
-             * @details Entries at wildcard positions (mask byte == 0x00) contain arbitrary values and must not be
-             *          compared against memory.
+             * @details Each entry is pre-masked to its known bits: a wildcard position (mask 0x00) holds 0, and a
+             *          partially-masked nibble position holds its known nibble with the wildcard nibble zeroed. A plain
+             *          (memory_byte ^ bytes) & mask compare is therefore correct at every position without
+             *          special-casing the wildcard slots.
              */
             std::vector<std::byte> bytes;
 
             /**
              * @brief Per-byte match mask paralleling @ref bytes.
-             * @details 0xFF marks a literal byte that must match exactly; 0x00 marks a wildcard slot to skip. Sized
+             * @details The mask selects which bits of each byte must match: a position passes when
+             *          (memory_byte ^ @ref bytes) & mask == 0. 0xFF marks a fully-literal byte that must match exactly,
+             *          0x00 marks a wildcard slot to skip, and 0xF0 / 0x0F mark a per-nibble wildcard (a high-nibble or
+             *          low-nibble token such as "4?" or "?5") where only the masked nibble must match. Sized
              *          identically to @ref bytes.
              */
             std::vector<std::byte> mask;
@@ -98,8 +103,10 @@ namespace DetourModKit
              *
              *          Sentinel values:
              *          - `[0, size())`            valid anchor.
-             *          - `size()`                 pattern has no literal bytes
-             *                                     (all wildcards); scan degenerates to "match at start".
+             *          - `size()`                 pattern has no fully-known byte to anchor on (all wildcards, or only
+             *                                     nibble constraints); scan degenerates to "match at start" for an
+             *                                     all-wildcard pattern, or a masked compare at every position when only
+             *                                     nibble constraints remain.
              *          - `>= size() + 1`          anchor not yet selected;
              *                                     find_pattern() will pick one inline (slower path).
              *
@@ -123,12 +130,15 @@ namespace DetourModKit
             [[nodiscard]] bool empty() const noexcept { return bytes.empty(); }
 
             /**
-             * @brief Selects and stores the rarest literal byte's index as the scan anchor.
-             * @details Walks the pattern once, scoring each literal byte against a small byte-frequency table (`0x00`,
-             *          `0xCC`, `0x48`, ... receive high scores; uncommon bytes score
-             *          0), and stores the lowest-scoring index in @ref anchor. Ties are broken by first occurrence for
-             *          deterministic behaviour. An all-wildcard pattern sets @ref anchor to `size()` so find_pattern()
-             *          can take its degenerate "match at region start" path without a second scan.
+             * @brief Selects and stores the rarest fully-known byte's index as the scan anchor.
+             * @details Walks the pattern once, scoring each fully-known (mask 0xFF) byte against a small byte-frequency
+             *          table (`0x00`, `0xCC`, `0x48`, ... receive high scores; uncommon bytes score 0), and stores the
+             *          lowest-scoring index in @ref anchor. Partially-masked nibble bytes are skipped: the prefilter
+             *          needs one exact byte value to scan for, which a nibble does not provide. Ties are broken by
+             *          first occurrence for deterministic behaviour. A pattern with no fully-known byte sets @ref
+             *          anchor to `size()`; find_pattern() then either takes the degenerate "match at region start" path
+             *          (an all-wildcard pattern) or, when only nibble constraints remain, a masked compare at every
+             *          position.
              *
              *          Safe to call repeatedly; the operation is idempotent and O(size()). Callers that mutate @ref
              *          bytes or @ref mask after a prior compile_anchor() MUST call it again before the next scan or the
@@ -142,11 +152,12 @@ namespace DetourModKit
 
         /**
          * @brief Parses a space-separated AOB string into a compiled pattern.
-         * @details Converts hexadecimal strings to byte values and wildcard tokens
-         *          ('??' or '?') into mask=false entries. An optional `|` token marks
-         *          the offset within the pattern (stored in CompiledPattern::offset). This lets wider patterns
-         *          precisely target a specific instruction:
-         *          e.g., "48 8B 88 B8 00 00 00 | 48 89 4C 24 68" sets offset=7.
+         * @details Converts hexadecimal byte tokens (e.g. "48") to literal byte values, full-wildcard tokens ('??' or
+         *          '?') to skip slots, and per-nibble tokens ("4?" with a known high nibble, "?5" with a known low
+         *          nibble) to partially-masked bytes. An optional `|` token marks the offset within the pattern (stored
+         *          in CompiledPattern::offset). This lets wider patterns precisely target a specific instruction: e.g.,
+         *          "48 8B 88 B8 00 00 00 | 48 89 4C 24 68" sets offset=7, and "48 8B ?D" matches any ModRM byte whose
+         *          low nibble is D.
          * @param aob_str The AOB pattern string.
          * @return std::optional<CompiledPattern> The compiled pattern, or std::nullopt on parse failure.
          */
@@ -312,10 +323,13 @@ namespace DetourModKit
          *       manually.
          * @warning A trailing `|` marker (offset == pattern.size()) yields a
          *          one-past pointer; bounds-check before dereferencing.
-         * @note A pattern that straddles a region boundary (e.g. two separately allocated `PAGE_EXECUTE_READ` regions
-         *       that happen to be adjacent) will not be found: each region is scanned independently. PE-loaded code
-         *       does not cross section boundaries so normal module scanning is unaffected, but JIT-compiled code (Mono,
-         *       Unreal AngelScript) or heavily unpacked payloads may split contiguous bytes across VAD entries.
+         * @note A pattern that straddles the boundary between two adjacent accepted regions IS found: the sweep carries
+         *       a `pattern_len - 1` byte overlap across the contiguous run of accepted (execute-readable) regions, so a
+         *       signature split by a sibling VirtualProtect, or spanning two adjacent execute-readable VAD entries
+         *       (JIT-compiled code from Mono / Unreal AngelScript, or heavily unpacked payloads), is still located. The
+         *       overlap is capped at `pattern_len - 1` so an interior match is never re-counted. A straddle is missed
+         *       only when the regions are not contiguous (a gap between them) or an interior region is unreadable,
+         *       which breaks the run.
          */
         [[nodiscard]] const std::byte *scan_executable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
@@ -350,8 +364,10 @@ namespace DetourModKit
          *          per launch.
          * @warning A trailing `|` marker (offset == pattern.size()) yields a
          *          one-past pointer; bounds-check before dereferencing.
-         * @warning A pattern that straddles a region boundary is not found: each region is scanned independently.
-         *          PE-loaded sections are contiguous, so normal module scanning is unaffected.
+         * @note A pattern that straddles the boundary between two adjacent accepted regions IS found: the sweep carries
+         *       a `pattern_len - 1` byte overlap across the contiguous run of accepted (readable) regions, capped so an
+         *       interior match is never re-counted. A straddle is missed only across a gap between regions or an
+         *       interior unreadable region that breaks the run.
          */
         [[nodiscard]] const std::byte *scan_readable_regions(const CompiledPattern &pattern, size_t occurrence = 1);
 
@@ -507,12 +523,15 @@ namespace DetourModKit
         /**
          * @brief Cascade resolver with inline-hooked-prologue recovery.
          * @details Equivalent to resolve_cascade() on the happy path. If every candidate fails, rebuilds each
-         *          Direct-mode candidate's pattern with the first 5 bytes replaced by `E9 ?? ?? ?? ??` (the near-JMP
-         *          shape used by SafetyHook and other rel32 inline detours) and retries. If the recovery path succeeds
-         *          the log line calls this out explicitly.
+         *          Direct-mode candidate's pattern with the patched prologue replaced by a jump shape and retries. Two
+         *          shapes are tried in order: the 5-byte `E9 ?? ?? ?? ??` near jump (SafetyHook and other rel32 inline
+         *          detours) and the 6-byte `FF 25 ?? ?? ?? ??` RIP-relative indirect jump a detour emits when its
+         *          trampoline is beyond rel32 reach (a Detours-style far jump). The recovered jump destination is gated
+         *          as a plausible, executable address before acceptance. If the recovery path succeeds the log line
+         *          calls this out explicitly.
          *
          *          RipRelative candidates are skipped in the fallback phase since they target instructions deeper than
-         *          the 5-byte prologue and are unaffected by the overwrite.
+         *          the patched prologue and are unaffected by the overwrite.
          *
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
@@ -702,7 +721,14 @@ namespace DetourModKit
             /// Exact address of the instruction that loads the string.
             ReferencingInstruction,
             /// Best-effort prologue back-scan from the instruction (heuristic).
-            EnclosingFunction
+            EnclosingFunction,
+            /**
+             * @brief Address of the global data slot a `mov [rip+slot], reg` stores the loaded string pointer into.
+             * @details Applies when the unique reference is a `lea reg, [rip+string]` shortly followed by that store.
+             *          Resolves a cached global string pointer rather than the load site. Reports @ref
+             *          StringXrefError::StoreNotFound when no such store follows the reference.
+             */
+            StringPointerSlot
         };
 
         /**
@@ -724,7 +750,9 @@ namespace DetourModKit
             /// More than one instruction references the string.
             AmbiguousReference,
             /// EnclosingFunction mode: no prologue within the back-scan window.
-            FunctionNotFound
+            FunctionNotFound,
+            /// StringPointerSlot mode: no `mov [rip+slot], reg` store of the loaded pointer follows the reference.
+            StoreNotFound
         };
 
         /**
@@ -750,6 +778,8 @@ namespace DetourModKit
                 return "More than one instruction references the string";
             case StringXrefError::FunctionNotFound:
                 return "No enclosing function prologue found in the back-scan window";
+            case StringXrefError::StoreNotFound:
+                return "No store of the loaded string pointer into a global slot follows the reference";
             default:
                 return "Unknown string xref error";
             }
@@ -775,7 +805,7 @@ namespace DetourModKit
              *        "PlayerController").
              */
             bool require_terminator = true;
-            /// Selects the exact instruction site or the enclosing function heuristic.
+            /// Selects the exact instruction site, the enclosing function heuristic, or the cached global pointer slot.
             XrefReturn return_mode = XrefReturn::ReferencingInstruction;
             /**
              * @brief Selects the phase-2 reference scan.
@@ -804,14 +834,18 @@ namespace DetourModKit
          *          baked in).
          * @param query The string and how to interpret the reference.
          * @param range Module image to search. Defaults to the host EXE.
-         * @return The referencing instruction (or enclosing function) address, or a
-         *         StringXrefError.
-         * @note By default phase 2 recognizes the dominant 64-bit string-load
-         *       forms: REX.W `lea`/`mov reg, [rip+disp32]` (opcodes 8D / 8B with a
-         *       RIP ModRM). Set @ref StringRefQuery::broad_match to keep that all-offset shape scan and additionally
-         *       recognize the rarer
-         *       RIP-relative shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea`/`mov`) via a Zydis-verified
-         *       sweep. Either way, a shape the active scans do not model reports NoReference rather than a guess.
+         * @return The referencing instruction (or enclosing function) address, or a StringXrefError.
+         * @note By default phase 2 recognizes the dominant 64-bit string-load forms: REX.W `lea`/`mov reg,
+         *       [rip+disp32]` (opcodes 8D / 8B with a RIP ModRM). Set @ref StringRefQuery::broad_match to keep that
+         *       all-offset shape scan and additionally recognize the rarer RIP-relative shapes (`cmp [rip+d], imm`,
+         *       `push [rip+d]`, a no-REX `lea`/`mov`) via a Zydis-verified sweep. Either way, a shape the active scans
+         *       do not model reports NoReference rather than a guess.
+         * @note XrefReturn::StringPointerSlot requires the unique reference to be a REX.W `lea reg, [rip+string]` and
+         *       returns the effective address of the global slot the first `mov [rip+slot], reg` (same source register)
+         *       within a bounded forward window stores the loaded pointer into. It resolves a cached global string
+         *       pointer rather than the load site. A `mov reg, [rip+string]` load, a broad-only reference, or no
+         *       matching store reports StoreNotFound. The store match is first-within-window (compilers emit it next
+         *       to the load), not uniqueness-checked, and intervening reuse of the register is not modelled.
          * @note Choose a string referenced exactly once (a long, specific literal such as a format or assert message);
          *       short, common strings are pooled and shared and will report StringAmbiguous / AmbiguousReference.
          * @note StringEncoding::Utf16le widens each query byte to a little-endian 16-bit code unit (the byte
@@ -819,8 +853,7 @@ namespace DetourModKit
          *       anchor strings almost always are. Multi-byte UTF-8 sequences are widened byte by byte, so non-ASCII
          *       text never matches its true UTF-16LE encoding and in practice reports StringNotFound.
          * @warning XrefReturn::EnclosingFunction is a bounded heuristic prologue back-scan, not control-flow analysis;
-         *          prefer the default
-         *          ReferencingInstruction when an exact site is acceptable.
+         *          prefer the default ReferencingInstruction when an exact site is acceptable.
          */
         [[nodiscard]] std::expected<std::uintptr_t, StringXrefError>
         find_string_xref(const StringRefQuery &query, Memory::ModuleRange range = Memory::host_module_range());

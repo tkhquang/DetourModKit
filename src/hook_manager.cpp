@@ -101,6 +101,61 @@ namespace
         }
         return result;
     }
+
+    enum class PrologueRisk
+    {
+        None,
+        LeadingCall, // 0xE8 call rel32
+        Breakpoint   // 0xCC int3 / 0xCD int n
+    };
+
+    // Classifies the first opcode byte of an inline/mid hook target. A leading E8 (call rel32) means the prologue is a
+    // relative call whose displacement is computed from the original site; SafetyHook relocates the stolen prologue
+    // into a trampoline at a different address, so the relocated call can dispatch to the wrong absolute target. A
+    // leading 0xCC (int3) or 0xCD (int n) means the entry is already a breakpoint -- a foreign hook's stub, a patched
+    // slot, or alignment padding -- not a real function body. The E9 / FF 25 redirect shapes are owned separately by
+    // detect_existing_inline_hook, and EB rel8 is ordinary short-jump code; this classifier intentionally flags only
+    // the call and breakpoint shapes. The read is SEH-guarded so an unmapped or guarded page yields None rather than
+    // faulting the host (the actual install still goes through SafetyHook, which validates separately).
+    PrologueRisk classify_prologue_risk(std::uintptr_t target_address) noexcept
+    {
+        if (target_address == 0)
+        {
+            return PrologueRisk::None;
+        }
+        std::uint8_t first_byte = 0;
+        if (!Memory::seh_read_bytes(target_address, &first_byte, sizeof(first_byte)))
+        {
+            // Unreadable target: leave the existing create-path validation and SafetyHook create to fail; do not invent
+            // a prologue warning from a read that did not happen.
+            return PrologueRisk::None;
+        }
+        switch (first_byte)
+        {
+        case 0xE8:
+            return PrologueRisk::LeadingCall;
+        case 0xCC:
+        case 0xCD:
+            return PrologueRisk::Breakpoint;
+        default:
+            return PrologueRisk::None;
+        }
+    }
+
+    // Human-readable fragment describing a flagged prologue risk for the deferred log lines.
+    [[nodiscard]] std::string_view prologue_risk_description(PrologueRisk risk) noexcept
+    {
+        switch (risk)
+        {
+        case PrologueRisk::LeadingCall:
+            return "a call (E8)";
+        case PrologueRisk::Breakpoint:
+            return "a breakpoint (0xCC/0xCD)";
+        case PrologueRisk::None:
+            return "an unremarkable byte";
+        }
+        return "an unremarkable byte";
+    }
 } // anonymous namespace
 
 HookManager &HookManager::get_instance()
@@ -406,6 +461,22 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(std::strin
             }
         }
 
+        // Prologue pre-flight: a leading E8 (call rel32) or 0xCC/0xCD breakpoint at the hook site is unsafe to
+        // inline-hook (see classify_prologue_risk). Independent of the layering checks above: a target can be unhooked
+        // yet still begin with a call thunk or a patched int3. The classifier is cheap and host-safe so it always runs;
+        // only escalation is policy-gated. *original_trampoline was nulled above, so the Fail early-return leaves it
+        // null as required.
+        const PrologueRisk prologue_risk = classify_prologue_risk(target_address);
+        if (prologue_risk != PrologueRisk::None && config.prologue_policy == InlineProloguePolicy::Fail)
+        {
+            return {std::unexpected(HookError::TargetPrologueUnsafe),
+                    {{std::format("HookManager: Target {} for inline hook '{}' begins with {}; refusing under Fail "
+                                  "prologue policy.",
+                                  DetourModKit::Format::format_address(target_address), name,
+                                  prologue_risk_description(prologue_risk)),
+                      LogLevel::Error}}};
+        }
+
         try
         {
             auto sh_flags =
@@ -453,6 +524,16 @@ std::expected<std::string, HookError> HookManager::create_inline_hook(std::strin
                          "(JMP -> {}); SafetyHook layered on top.",
                          DetourModKit::Format::format_address(target_address), name,
                          DetourModKit::Format::format_address(prehook.jmp_destination)),
+                     LogLevel::Warning});
+            }
+
+            if (prologue_risk != PrologueRisk::None)
+            {
+                logs.push_back(
+                    {std::format("HookManager: Target {} for inline hook '{}' begins with {}; installed anyway under "
+                                 "Warn prologue policy.",
+                                 DetourModKit::Format::format_address(target_address), name,
+                                 prologue_risk_description(prologue_risk)),
                      LogLevel::Warning});
             }
 
@@ -632,6 +713,20 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_v
             }
         }
 
+        // Prologue pre-flight, identical to create_inline_hook: a mid hook is a SafetyHook inline hook at the address,
+        // so it patches the same prologue and carries the same E8 / breakpoint hazard. Refuse under Fail; warn (the
+        // default) is emitted in the success block below.
+        const PrologueRisk prologue_risk = classify_prologue_risk(target_address);
+        if (prologue_risk != PrologueRisk::None && config.prologue_policy == InlineProloguePolicy::Fail)
+        {
+            return {std::unexpected(HookError::TargetPrologueUnsafe),
+                    {{std::format("HookManager: Target {} for mid hook '{}' begins with {}; refusing under Fail "
+                                  "prologue policy.",
+                                  DetourModKit::Format::format_address(target_address), name,
+                                  prologue_risk_description(prologue_risk)),
+                      LogLevel::Error}}};
+        }
+
         try
         {
             auto sh_flags = config.auto_enable ? safetyhook::MidHook::Default : safetyhook::MidHook::StartDisabled;
@@ -676,6 +771,16 @@ std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_v
                                  "module (JMP -> {}); SafetyHook layered on top.",
                                  DetourModKit::Format::format_address(target_address), name,
                                  DetourModKit::Format::format_address(prehook.jmp_destination)),
+                     LogLevel::Warning});
+            }
+
+            if (prologue_risk != PrologueRisk::None)
+            {
+                logs.push_back(
+                    {std::format("HookManager: Target {} for mid hook '{}' begins with {}; installed anyway under Warn "
+                                 "prologue policy.",
+                                 DetourModKit::Format::format_address(target_address), name,
+                                 prologue_risk_description(prologue_risk)),
                      LogLevel::Warning});
             }
 

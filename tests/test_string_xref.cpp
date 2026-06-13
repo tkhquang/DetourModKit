@@ -80,6 +80,20 @@ namespace
             std::memcpy(p + 3, &disp, sizeof(disp));
         }
 
+        // Plants `<rex> 89 <modrm=00 reg rm=101> <disp32>` (mov [rip+slot], reg), the store mirror of plant_rip_load,
+        // at instr_off whose slot effective address is slot_off. `reg` is the x86-64 source register number (0..15);
+        // for 0..7 REX is 0x48, for 8..15 REX.R is set so the (REX.R << 3 | ModRM.reg) source reconstruction is pinned.
+        void plant_rip_store(std::size_t instr_off, std::size_t slot_off, std::uint8_t reg) noexcept
+        {
+            std::uint8_t *p = m_base + instr_off;
+            p[0] = static_cast<std::uint8_t>(0x48 | (((reg >> 3) & 0x01) << 2)); // REX.W (+REX.R for r8..r15)
+            p[1] = 0x89;                                                         // mov r/m, r
+            p[2] = static_cast<std::uint8_t>(0x05 | ((reg & 0x07) << 3)); // mod=00, reg=src, rm=101 (RIP-relative)
+            const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
+            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(slot_off)) - next);
+            std::memcpy(p + 3, &disp, sizeof(disp));
+        }
+
         [[nodiscard]] Memory::ModuleRange range() const noexcept
         {
             return Memory::ModuleRange{reinterpret_cast<std::uintptr_t>(m_base),
@@ -137,6 +151,13 @@ namespace
         {
             return reinterpret_cast<std::uintptr_t>(m_base + off);
         }
+
+        [[nodiscard]] std::uintptr_t data_addr(std::size_t off) const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base + m_page + off);
+        }
+
+        [[nodiscard]] std::size_t page_size() const noexcept { return m_page; }
 
         // Writes raw bytes into the executable code page (page 0). Used to plant a byte the decoder rejects, exercising
         // the broad sweep's byte-restart recovery, which plant_code_rip_insn (which only plants well-formed
@@ -297,6 +318,13 @@ namespace
     {
         Scanner::StringRefQuery q = utf8_query(text);
         q.broad_match = true;
+        return q;
+    }
+
+    Scanner::StringRefQuery slot_query(std::string_view text)
+    {
+        Scanner::StringRefQuery q = utf8_query(text);
+        q.return_mode = Scanner::XrefReturn::StringPointerSlot;
         return q;
     }
 } // namespace
@@ -848,6 +876,219 @@ TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
     EXPECT_EQ(broad.error(), Scanner::StringXrefError::AmbiguousReference);
 }
 
+TEST(StringXrefTest, StringPointerSlotResolvesStore)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotAnchorString";
+    img.write(0x100, str, sizeof(str));
+    // lea rax, [rip+string] at 0x10 (7 bytes) immediately followed by mov [rip+slot], rax at 0x17 caching the loaded
+    // pointer into the global slot at 0x200. The store's source reg (rax) matches the lea dest, so the slot resolves.
+    img.plant_rip_load(0x10, 0x100, LEA);
+    img.plant_rip_store(0x17, 0x200, 0);
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotAnchorString"), img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, img.addr(0x200));
+}
+
+TEST(StringXrefTest, StringPointerSlotRegisterMismatch)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotMismatchAnchor";
+    img.write(0x100, str, sizeof(str));
+    // The lea loads into rax but the following store's source is rcx (reg 1), so it does not cache *this* pointer. The
+    // source-register equality gate must reject it and the resolve fails closed.
+    img.plant_rip_load(0x10, 0x100, LEA);
+    img.plant_rip_store(0x17, 0x200, 1);
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotMismatchAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotNoStore)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotNoStoreAnchor";
+    img.write(0x100, str, sizeof(str));
+    // A lone lea with no store anywhere in the forward window. The zero-filled page never forms a store shape, so the
+    // forward scan finds nothing.
+    img.plant_rip_load(0x10, 0x100, LEA);
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotNoStoreAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotIgnoresMisalignedStoreShape)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotMisalignedAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA); // lea rax, [rip+string]
+    // A `mov rcx, imm64` whose 8-byte immediate embeds the `48 89 05 <disp32>` store shape (source reg rax, the lea
+    // destination). A raw byte sweep would find that shape misaligned inside the immediate and return a bogus slot; an
+    // instruction-aligned decode steps over the whole `mov rcx, imm64` and never sees it, so the resolve fails closed.
+    const std::uint8_t mov_rcx_with_embedded_store[] = {0x48, 0xB9, 0x48, 0x89, 0x05, 0x11, 0x22, 0x33, 0x44, 0x55};
+    img.write(0x17, mov_rcx_with_embedded_store, sizeof(mov_rcx_with_embedded_store));
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotMisalignedAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotStopsAtRegisterClobber)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotClobberAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA); // lea rax, [rip+string]
+    // `mov rax, rcx` overwrites the loaded pointer before any store, so the later store caches the clobbered value, not
+    // this lea's pointer. The decode stops at the write to the loaded register and fails closed; a raw sweep that
+    // ignored intervening writes would wrongly return the store's slot.
+    const std::uint8_t clobber_rax[] = {0x48, 0x89, 0xC8}; // mov rax, rcx
+    img.write(0x17, clobber_rax, sizeof(clobber_rax));
+    img.plant_rip_store(0x1A, 0x200, 0); // mov [rip+slot], rax, after the clobber
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotClobberAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotDoesNotDecodeDataPageStore)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+
+    const char str[] = "SlotDataPageStoreAnchor";
+    img.write_data(0x40, str, sizeof(str));
+
+    // Put the lea near the end of the executable page. A module-bounded forward scan would reach the next page, but
+    // the slot mode must treat only the executable window as code.
+    const std::size_t lea_off = img.page_size() - 0x20;
+    img.plant_code_rip_insn(lea_off, 0x40, {0x48, 0x8D, 0x05}, 7);
+
+    // Plant store-shaped bytes in the adjacent non-executable data page. They match the `mov [rip+slot], rax` shape
+    // and sit within the 0x80-byte forward bound from the lea, so an implementation that scans past the code window
+    // would return the data slot instead of failing closed.
+    std::uint8_t data_store[] = {0x48, 0x89, 0x05, 0x00, 0x00, 0x00, 0x00};
+    const auto next = static_cast<std::int64_t>(img.data_addr(0) + sizeof(data_store));
+    const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(img.data_addr(0x100)) - next);
+    std::memcpy(data_store + 3, &disp, sizeof(disp));
+    img.write_data(0, data_store, sizeof(data_store));
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotDataPageStoreAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotR8Register)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotR8AnchorString";
+    img.write(0x100, str, sizeof(str));
+    // lea r8, [rip+string]: REX.W + REX.R (0x4C), opcode 0x8D, ModRM 0x05 (reg field 0, REX.R supplies the high bit).
+    // Raw-written because plant_rip_load only emits rax. The store names r8 too (plant_rip_store reg 8), so both sides
+    // must apply (REX.R << 3 | ModRM.reg) -- this pins r8..r15 reconstruction on the load and the store together.
+    const std::uint8_t lea_r8[] = {0x4C, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00};
+    img.write(0x10, lea_r8, sizeof(lea_r8));
+    const auto next = static_cast<std::int64_t>(img.addr(0x10) + 7);
+    const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(img.addr(0x100)) - next);
+    img.write(0x13, &disp, sizeof(disp));
+    img.plant_rip_store(0x17, 0x200, 8);
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotR8AnchorString"), img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, img.addr(0x200));
+}
+
+TEST(StringXrefTest, StringPointerSlotOutOfWindowStore)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotFarStoreAnchor";
+    img.write(0x100, str, sizeof(str));
+    // The store sits more than the 128-byte (0x80) forward window past the lea, so the bounded scan never reaches it
+    // and the store cannot be attributed to this load.
+    img.plant_rip_load(0x10, 0x100, LEA);
+    img.plant_rip_store(0x10 + 7 + 0x80, 0x300, 0);
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotFarStoreAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotMovLoadHasNoStore)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotMovLoadAnchor";
+    img.write(0x100, str, sizeof(str));
+    // The reference is a mov load (0x8B), not a lea, so lea_info.is_lea is false: the loaded value already went to a
+    // register with no modeled store. Even with a matching store present, slot mode rejects the mov-load shape.
+    img.plant_rip_load(0x10, 0x100, MOV);
+    img.plant_rip_store(0x17, 0x200, 0);
+
+    const auto result = Scanner::find_string_xref(slot_query("SlotMovLoadAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
+TEST(StringXrefTest, StringPointerSlotBroadOnlyReferenceFails)
+{
+    SplitImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic split image";
+    }
+    const char str[] = "SlotBroadOnlyAnchor";
+    img.write_data(0x40, str, sizeof(str));
+    // The only reference is a broad-only cmp [rip+string], invisible to the narrow lea scan. With broad_match the
+    // reference survives, but it came from the broad sweep, so lea_info is unpopulated and references.site != narrow
+    // site. Slot mode requires the narrow lea, so it fails closed even though a unique reference exists.
+    // cmp dword ptr [rip+disp], 0x01  ->  83 3D <disp32> 01  (7 bytes)
+    img.plant_code_rip_insn(0x10, 0x40, {0x83, 0x3D}, 7, {0x01});
+
+    Scanner::StringRefQuery q = slot_query("SlotBroadOnlyAnchor");
+    q.broad_match = true;
+    const auto result = Scanner::find_string_xref(q, img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+}
+
 TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 {
     static_assert(noexcept(Scanner::string_xref_error_to_string(Scanner::StringXrefError::EmptyQuery)));
@@ -855,7 +1096,7 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
         Scanner::StringXrefError::EmptyQuery,       Scanner::StringXrefError::InvalidRange,
         Scanner::StringXrefError::StringNotFound,   Scanner::StringXrefError::StringAmbiguous,
         Scanner::StringXrefError::NoReference,      Scanner::StringXrefError::AmbiguousReference,
-        Scanner::StringXrefError::FunctionNotFound,
+        Scanner::StringXrefError::FunctionNotFound, Scanner::StringXrefError::StoreNotFound,
     };
     for (const auto error : all)
     {

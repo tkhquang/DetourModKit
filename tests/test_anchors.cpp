@@ -324,6 +324,8 @@ TEST(AnchorsTest, StatusToStringNonEmpty)
     EXPECT_FALSE(Anchors::anchor_status_to_string(Anchors::AnchorStatus::Resolved).empty());
     EXPECT_FALSE(Anchors::anchor_status_to_string(Anchors::AnchorStatus::Failed).empty());
     EXPECT_FALSE(Anchors::anchor_status_to_string(Anchors::AnchorStatus::Unsupported).empty());
+    EXPECT_FALSE(Anchors::anchor_status_to_string(Anchors::AnchorStatus::QuorumNotIndependent).empty());
+    EXPECT_EQ(Anchors::anchor_status_to_string(Anchors::AnchorStatus::QuorumNotIndependent), "QuorumNotIndependent");
 }
 
 // --- Optional post-resolve validators ---
@@ -420,13 +422,23 @@ TEST(AnchorsTest, ValidatorNotAppliedToCallArgHome)
 
 TEST(AnchorsTest, QuorumAcceptsWhenSignalsAgree)
 {
+    // Independence requires two distinct backends: corroborate a decoded code constant against a pinned literal of the
+    // same value (a dual-Manual pair would be rejected as non-independent before agreement is considered).
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
     Anchors::Anchor first{};
-    first.kind = Anchors::AnchorKind::Manual;
-    first.manual_value = 0x4000;
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
 
     Anchors::Anchor second{};
     second.kind = Anchors::AnchorKind::Manual;
-    second.manual_value = 0x4000;
+    second.manual_value = 0xF0;
 
     Anchors::Anchor quorum{};
     quorum.label = "quorum";
@@ -434,9 +446,9 @@ TEST(AnchorsTest, QuorumAcceptsWhenSignalsAgree)
     quorum.quorum_a = &first;
     quorum.quorum_b = &second;
 
-    const auto result = Anchors::resolve(quorum);
+    const auto result = Anchors::resolve(quorum, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Resolved);
-    EXPECT_EQ(result.value, 0x4000); // the first sub-anchor's value, the two agreeing
+    EXPECT_EQ(result.value, 0xF0); // the first sub-anchor's value, the two agreeing
     EXPECT_EQ(result.kind, Anchors::AnchorKind::Quorum);
 }
 
@@ -472,19 +484,30 @@ TEST(AnchorsTest, QuorumAcceptsAcrossBackends)
 
 TEST(AnchorsTest, QuorumFailsWhenSignalsDisagree)
 {
+    // Two independent backends that resolve to different values: corroboration is impossible, so fail closed (this is
+    // distinct from the non-independence rejection, which would short-circuit before either resolves).
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
     Anchors::Anchor first{};
-    first.kind = Anchors::AnchorKind::Manual;
-    first.manual_value = 0x4000;
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
     Anchors::Anchor second{};
     second.kind = Anchors::AnchorKind::Manual;
-    second.manual_value = 0x5000;
+    second.manual_value = 0x5000; // disagrees with the decoded 0xF0
 
     Anchors::Anchor quorum{};
     quorum.kind = Anchors::AnchorKind::Quorum;
     quorum.quorum_a = &first;
     quorum.quorum_b = &second;
 
-    const auto result = Anchors::resolve(quorum);
+    const auto result = Anchors::resolve(quorum, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Failed);
     EXPECT_EQ(result.value, 0);
 }
@@ -553,12 +576,22 @@ TEST(AnchorsTest, QuorumRejectsNestedQuorum)
 
 TEST(AnchorsTest, QuorumWithinToleranceAcceptsCloseValues)
 {
+    // Two independent backends within tolerance accept: a decoded 0xF0 corroborated by a pinned 0xF8 (delta 8 <= 0x10).
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
     Anchors::Anchor first{};
-    first.kind = Anchors::AnchorKind::Manual;
-    first.manual_value = 0x4000;
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
     Anchors::Anchor second{};
     second.kind = Anchors::AnchorKind::Manual;
-    second.manual_value = 0x4008;
+    second.manual_value = 0xF8;
 
     Anchors::Anchor quorum{};
     quorum.kind = Anchors::AnchorKind::Quorum;
@@ -567,19 +600,30 @@ TEST(AnchorsTest, QuorumWithinToleranceAcceptsCloseValues)
     quorum.quorum_match = Anchors::QuorumMatch::WithinTolerance;
     quorum.quorum_tolerance = 0x10;
 
-    const auto result = Anchors::resolve(quorum);
+    const auto result = Anchors::resolve(quorum, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Resolved);
-    EXPECT_EQ(result.value, 0x4000);
+    EXPECT_EQ(result.value, 0xF0);
 }
 
 TEST(AnchorsTest, QuorumWithinToleranceRejectsDistantValues)
 {
+    // Two independent backends outside tolerance fail closed: a decoded 0xF0 against a pinned 0x1F0 (delta 0x100 >
+    // 0x10).
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
     Anchors::Anchor first{};
-    first.kind = Anchors::AnchorKind::Manual;
-    first.manual_value = 0x4000;
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
     Anchors::Anchor second{};
     second.kind = Anchors::AnchorKind::Manual;
-    second.manual_value = 0x4100;
+    second.manual_value = 0x1F0;
 
     Anchors::Anchor quorum{};
     quorum.kind = Anchors::AnchorKind::Quorum;
@@ -588,20 +632,30 @@ TEST(AnchorsTest, QuorumWithinToleranceRejectsDistantValues)
     quorum.quorum_match = Anchors::QuorumMatch::WithinTolerance;
     quorum.quorum_tolerance = 0x10;
 
-    const auto result = Anchors::resolve(quorum);
+    const auto result = Anchors::resolve(quorum, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Failed);
 }
 
 TEST(AnchorsTest, QuorumRejectsNegativeTolerance)
 {
     // A negative tolerance must fail closed. If it were widened to unsigned it would become a huge bound and wrongly
-    // accept these far-apart values.
+    // accept these far-apart values. Uses two independent backends so the test exercises the tolerance path, not the
+    // independence gate.
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
     Anchors::Anchor first{};
-    first.kind = Anchors::AnchorKind::Manual;
-    first.manual_value = 0x4000;
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
     Anchors::Anchor second{};
     second.kind = Anchors::AnchorKind::Manual;
-    second.manual_value = 0x5000;
+    second.manual_value = 0x1F0;
 
     Anchors::Anchor quorum{};
     quorum.kind = Anchors::AnchorKind::Quorum;
@@ -610,20 +664,29 @@ TEST(AnchorsTest, QuorumRejectsNegativeTolerance)
     quorum.quorum_match = Anchors::QuorumMatch::WithinTolerance;
     quorum.quorum_tolerance = -1;
 
-    const auto result = Anchors::resolve(quorum);
+    const auto result = Anchors::resolve(quorum, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Failed);
 }
 
 TEST(AnchorsTest, QuorumHonoursOwnValidator)
 {
-    // Both signals agree, but the Quorum anchor's own validator rejects the corroborated value: the commit path must
-    // apply it and fail closed.
+    // Two independent signals agree, but the Quorum anchor's own validator rejects the corroborated value: the commit
+    // path must apply it and fail closed.
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
     Anchors::Anchor first{};
-    first.kind = Anchors::AnchorKind::Manual;
-    first.manual_value = 0x4000;
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
     Anchors::Anchor second{};
     second.kind = Anchors::AnchorKind::Manual;
-    second.manual_value = 0x4000;
+    second.manual_value = 0xF0;
 
     Anchors::Anchor quorum{};
     quorum.kind = Anchors::AnchorKind::Quorum;
@@ -631,18 +694,29 @@ TEST(AnchorsTest, QuorumHonoursOwnValidator)
     quorum.quorum_b = &second;
     quorum.validator = always_reject;
 
-    const auto result = Anchors::resolve(quorum);
+    const auto result = Anchors::resolve(quorum, reg.range());
     EXPECT_EQ(result.status, Anchors::AnchorStatus::Failed);
 }
 
 TEST(AnchorsTest, ResolveAllCarriesQuorum)
 {
+    // A Quorum routed through the batch path with two independent signals: a decoded code constant corroborated by a
+    // pinned literal of the same value.
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
     Anchors::Anchor first{};
-    first.kind = Anchors::AnchorKind::Manual;
-    first.manual_value = 0x4000;
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
     Anchors::Anchor second{};
     second.kind = Anchors::AnchorKind::Manual;
-    second.manual_value = 0x4000;
+    second.manual_value = 0xF0;
 
     Anchors::Anchor quorum{};
     quorum.label = "q";
@@ -652,9 +726,281 @@ TEST(AnchorsTest, ResolveAllCarriesQuorum)
 
     const Anchors::Anchor table[] = {quorum};
     Anchors::ResolvedAnchor out[1];
-    const std::size_t n = Anchors::resolve_all(table, out);
+    const std::size_t n = Anchors::resolve_all(table, out, reg.range());
     ASSERT_EQ(n, 1u);
     EXPECT_EQ(out[0].status, Anchors::AnchorStatus::Resolved);
     EXPECT_EQ(out[0].kind, Anchors::AnchorKind::Quorum);
-    EXPECT_EQ(out[0].value, 0x4000);
+    EXPECT_EQ(out[0].value, 0xF0);
+}
+
+// --- Quorum independence: a dependent sub-anchor pair can never masquerade as corroboration ---
+
+TEST(AnchorsTest, QuorumRejectsPointerEqualSubAnchors)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor code{};
+    code.kind = Anchors::AnchorKind::CodeOperand;
+    code.site = cands;
+    code.operand_index = 1;
+
+    // The same object used twice is one signal, not two: reject before resolving.
+    Anchors::Anchor quorum{};
+    quorum.kind = Anchors::AnchorKind::Quorum;
+    quorum.quorum_a = &code;
+    quorum.quorum_b = &code;
+
+    const auto result = Anchors::resolve(quorum, reg.range());
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::QuorumNotIndependent);
+}
+
+TEST(AnchorsTest, QuorumRejectsDualManual)
+{
+    // Two pinned literals agreeing proves only that the author typed the same number twice, not that the live image
+    // corroborates it: reject as non-independent regardless of value.
+    Anchors::Anchor first{};
+    first.kind = Anchors::AnchorKind::Manual;
+    first.manual_value = 0x4000;
+
+    Anchors::Anchor second{};
+    second.kind = Anchors::AnchorKind::Manual;
+    second.manual_value = 0x4000;
+
+    Anchors::Anchor quorum{};
+    quorum.kind = Anchors::AnchorKind::Quorum;
+    quorum.quorum_a = &first;
+    quorum.quorum_b = &second;
+
+    const auto result = Anchors::resolve(quorum);
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::QuorumNotIndependent);
+}
+
+TEST(AnchorsTest, QuorumRejectsSameBackendConfig)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    // Two distinct Anchor objects that share the same candidate array and operand config decode one site twice: the
+    // shared site span (same data() and size()) makes them the same evidence.
+    Anchors::Anchor first{};
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
+    Anchors::Anchor second{};
+    second.kind = Anchors::AnchorKind::CodeOperand;
+    second.site = cands;
+    second.operand_index = 1;
+
+    Anchors::Anchor quorum{};
+    quorum.kind = Anchors::AnchorKind::Quorum;
+    quorum.quorum_a = &first;
+    quorum.quorum_b = &second;
+
+    const auto result = Anchors::resolve(quorum, reg.range());
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::QuorumNotIndependent);
+}
+
+TEST(AnchorsTest, QuorumAcceptsDistinctCandidateArrays)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+    reg.put(0x200,
+            {0x48, 0x81, 0xC1, 0xF0, 0x00, 0x00, 0x00}); // add rcx, 0xF0 -- a distinct encoding of the same value
+
+    // Two SEPARATE candidate arrays (distinct data() pointers) decoding the same 0xF0 are two independent scan sites,
+    // not one: the gate keys on span identity, not pattern equality, so this must resolve. The two encodings differ so
+    // each pattern matches exactly one unique site.
+    Scanner::AddrCandidate cands_a[] = {
+        {"add-imm-a", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate cands_b[] = {
+        {"add-imm-b", "48 81 C1 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor first{};
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands_a;
+    first.operand_index = 1;
+
+    Anchors::Anchor second{};
+    second.kind = Anchors::AnchorKind::CodeOperand;
+    second.site = cands_b;
+    second.operand_index = 1;
+
+    Anchors::Anchor quorum{};
+    quorum.kind = Anchors::AnchorKind::Quorum;
+    quorum.quorum_a = &first;
+    quorum.quorum_b = &second;
+
+    const auto result = Anchors::resolve(quorum, reg.range());
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0xF0);
+}
+
+// --- Opt-in validator policies for Manual and backend kinds ---
+
+TEST(AnchorsTest, ManualValidatorRunsWhenOptedIn)
+{
+    // validate_manual routes a pinned literal through the validator gate. A rejecting validator fails it closed.
+    Anchors::Anchor rejected{};
+    rejected.kind = Anchors::AnchorKind::Manual;
+    rejected.manual_value = 0xF0;
+    rejected.validate_manual = true;
+    rejected.validator = always_reject;
+
+    const auto rejected_result = Anchors::resolve(rejected);
+    EXPECT_EQ(rejected_result.status, Anchors::AnchorStatus::Failed);
+    EXPECT_EQ(rejected_result.value, 0);
+
+    // The same opt-in with an accepting validator that actually inspects the value resolves to the literal.
+    Anchors::Anchor accepted{};
+    accepted.kind = Anchors::AnchorKind::Manual;
+    accepted.manual_value = 0xF0;
+    accepted.validate_manual = true;
+    accepted.validator = expect_value_f0;
+
+    const auto accepted_result = Anchors::resolve(accepted);
+    EXPECT_EQ(accepted_result.status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(accepted_result.value, 0xF0);
+}
+
+TEST(AnchorsTest, ManualValidatorSkippedByDefault)
+{
+    // Without validate_manual the pinned-literal exemption stands: the rejecting validator is never invoked.
+    Anchors::Anchor anchor{};
+    anchor.kind = Anchors::AnchorKind::Manual;
+    anchor.manual_value = 0x1234;
+    anchor.validator = always_reject; // present but not opted in
+
+    const auto result = Anchors::resolve(anchor);
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0x1234);
+}
+
+TEST(AnchorsTest, RequireValidatorRejectsUnverifiedBackend)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    // A backend-resolvable anchor with require_validator set but no validator is treated as unverified: fail closed
+    // even though the backend resolved 0xF0.
+    Anchors::Anchor unverified{};
+    unverified.kind = Anchors::AnchorKind::CodeOperand;
+    unverified.site = cands;
+    unverified.operand_index = 1;
+    unverified.require_validator = true;
+
+    const auto unverified_result = Anchors::resolve(unverified, reg.range());
+    EXPECT_EQ(unverified_result.status, Anchors::AnchorStatus::Failed);
+    EXPECT_EQ(unverified_result.value, 0);
+
+    // Supplying a validator satisfies the policy and the same anchor resolves.
+    Anchors::Anchor verified{};
+    verified.kind = Anchors::AnchorKind::CodeOperand;
+    verified.site = cands;
+    verified.operand_index = 1;
+    verified.require_validator = true;
+    verified.validator = expect_value_f0;
+
+    const auto verified_result = Anchors::resolve(verified, reg.range());
+    EXPECT_EQ(verified_result.status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(verified_result.value, 0xF0);
+}
+
+TEST(AnchorsTest, RequireValidatorIgnoredForManualByDefault)
+{
+    // A Manual that did not opt in via validate_manual never reaches the commit gate, so require_validator does not
+    // apply: the pinned literal resolves unchecked.
+    Anchors::Anchor anchor{};
+    anchor.kind = Anchors::AnchorKind::Manual;
+    anchor.manual_value = 0x1234;
+    anchor.require_validator = true;
+    anchor.validate_manual = false;
+
+    const auto result = Anchors::resolve(anchor);
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0x1234);
+}
+
+TEST(AnchorsTest, QuorumExemptFromRequireValidator)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+
+    Scanner::AddrCandidate cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor first{};
+    first.kind = Anchors::AnchorKind::CodeOperand;
+    first.site = cands;
+    first.operand_index = 1;
+
+    Anchors::Anchor second{};
+    second.kind = Anchors::AnchorKind::Manual;
+    second.manual_value = 0xF0;
+
+    // The Quorum's two-signal corroboration is itself the verification, so require_validator with no validator must not
+    // fail it: the corroborated value resolves.
+    Anchors::Anchor quorum{};
+    quorum.kind = Anchors::AnchorKind::Quorum;
+    quorum.quorum_a = &first;
+    quorum.quorum_b = &second;
+    quorum.require_validator = true;
+
+    const auto result = Anchors::resolve(quorum, reg.range());
+    EXPECT_EQ(result.status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0xF0);
+}
+
+// --- Manifest quality diagnostic ---
+
+TEST(AnchorsTest, AssessQualityTalliesReport)
+{
+    // A hand-built report exercising one of each tallied shape: a self-healing backend, a pinned literal, a backend
+    // miss, and a non-independent quorum.
+    Anchors::ResolvedAnchor report[4]{};
+
+    report[0].label = "backend";
+    report[0].kind = Anchors::AnchorKind::CodeOperand;
+    report[0].status = Anchors::AnchorStatus::Resolved;
+    report[0].value = 0xF0;
+
+    report[1].label = "pinned";
+    report[1].kind = Anchors::AnchorKind::Manual;
+    report[1].status = Anchors::AnchorStatus::Resolved;
+    report[1].value = 0x1234;
+
+    report[2].label = "missed";
+    report[2].kind = Anchors::AnchorKind::RipGlobal;
+    report[2].status = Anchors::AnchorStatus::Failed;
+
+    report[3].label = "dependent";
+    report[3].kind = Anchors::AnchorKind::Quorum;
+    report[3].status = Anchors::AnchorStatus::QuorumNotIndependent;
+
+    const auto quality = Anchors::assess_quality(report);
+    EXPECT_EQ(quality.total, 4u);
+    EXPECT_EQ(quality.resolved, 2u); // the backend and the pinned literal
+    EXPECT_EQ(quality.failed, 1u);   // the backend miss
+    EXPECT_EQ(quality.unsupported, 0u);
+    EXPECT_EQ(quality.not_independent, 1u); // the dependent quorum
+    EXPECT_EQ(quality.manual_at_risk, 1u);  // the pinned literal cannot self-heal
+    EXPECT_EQ(quality.corroborated, 0u);    // no quorum resolved
 }

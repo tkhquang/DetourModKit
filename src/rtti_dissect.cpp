@@ -101,14 +101,15 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    bool Rtti::identify_pointee_type(std::uintptr_t slot_addr, PointeeType &out) noexcept
+    std::expected<void, Rtti::IdentifyError> Rtti::identify_pointee_typed(std::uintptr_t slot_addr,
+                                                                          PointeeType &out) noexcept
     {
         if (slot_addr < detail::MIN_VALID_PTR)
-            return false;
+            return std::unexpected(IdentifyError::BadSlotAddress);
 
         const auto slot_opt = Memory::seh_read<std::uintptr_t>(slot_addr);
         if (!slot_opt || *slot_opt < detail::MIN_VALID_PTR)
-            return false;
+            return std::unexpected(IdentifyError::UnreadableSlot);
         const std::uintptr_t slot_val = *slot_opt;
 
         detail::ColSite site;
@@ -137,14 +138,14 @@ namespace DetourModKit
         }
         else
         {
-            return false;
+            return std::unexpected(IdentifyError::NoRtti);
         }
 
         // Read the name into the output buffer through the same page-bounded copy the forward walker uses. A faulted or
         // empty name is a non-resolution.
         const std::size_t name_len = detail::read_name_seh(site.name_addr, out.name_buf, sizeof(out.name_buf));
         if (name_len == 0)
-            return false;
+            return std::unexpected(IdentifyError::NoRtti);
 
         out.vtable = vtable;
         out.col_addr = site.col_addr;
@@ -159,7 +160,14 @@ namespace DetourModKit
         // Complete object with underflow clamp: a garbage or forged col_offset larger than object_base must not wrap
         // the address; report object_base itself in that (non-physical) case.
         out.complete_obj = (object_base < site.col_offset) ? object_base : object_base - site.col_offset;
-        return true;
+        return {};
+    }
+
+    bool Rtti::identify_pointee_type(std::uintptr_t slot_addr, PointeeType &out) noexcept
+    {
+        // The bool primitive is exactly has_value() over the typed core: one probe, one prelude walk, one
+        // implementation. Callers that need the WHY of a miss use identify_pointee_typed / identify_pointee_type_or.
+        return identify_pointee_typed(slot_addr, out).has_value();
     }
 
     std::size_t Rtti::reverse_scan_block(std::uintptr_t start, std::size_t slot_count, std::vector<LabeledSlot> &out,
@@ -302,6 +310,20 @@ namespace DetourModKit
             return "Equidistant slots both match; offset is ambiguous";
         }
         return "Unknown heal error";
+    }
+
+    std::string_view Rtti::identify_error_to_string(IdentifyError error) noexcept
+    {
+        switch (error)
+        {
+        case IdentifyError::BadSlotAddress:
+            return "Slot address is null or below the user-mode floor";
+        case IdentifyError::UnreadableSlot:
+            return "Slot read faulted or held a null/low value";
+        case IdentifyError::NoRtti:
+            return "Slot resolved to no verifiable RTTI type";
+        }
+        return "Unknown identify error";
     }
 
     std::expected<Rtti::FingerprintHit, Rtti::HealError>

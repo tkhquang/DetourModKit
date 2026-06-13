@@ -2685,6 +2685,127 @@ TEST_F(HookManagerTest, InlineMidHook_StrictModeRefusesCrossTypeLayering)
 
 namespace
 {
+    // Synthetic prologue buffers for the inline/mid prologue pre-flight. const (the buffers are read-only) and
+    // alignas(16) so the planted first byte sits at a deterministic, readable address across toolchains. The
+    // Fail-policy create refuses at the prologue pre-flight before SafetyHook ever inspects the bytes, so these need
+    // not be relocatable code -- only the first byte is classified, and the hook target is the buffer's address
+    // (reinterpret_cast to uintptr_t), which a const buffer supplies just as well.
+    alignas(16) const std::uint8_t CALL_PROLOGUE_BYTES[] = {0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3, 0x90, 0x90};
+    alignas(16) const std::uint8_t INT3_PROLOGUE_BYTES[] = {0xCC, 0xC3, 0x90, 0x90};
+    alignas(16) const std::uint8_t INTN_PROLOGUE_BYTES[] = {0xCD, 0x03, 0xC3, 0x90};
+} // namespace
+
+TEST(HookProloguePolicy, ProloguePolicyDefaultIsWarn)
+{
+    HookConfig cfg;
+    EXPECT_EQ(cfg.prologue_policy, InlineProloguePolicy::Warn);
+}
+
+TEST(HookProloguePolicy, TargetPrologueUnsafeErrorStringExists)
+{
+    const std::string_view msg = Hook::error_to_string(HookError::TargetPrologueUnsafe);
+    EXPECT_FALSE(msg.empty());
+    EXPECT_NE(msg.find("call"), std::string_view::npos);
+}
+
+// A leading 0xE8 (call rel32) prologue is unsafe to inline-hook: SafetyHook relocates the stolen bytes into a
+// trampoline at a different address, so a relocated relative call can dispatch to the wrong absolute target. Under the
+// Fail policy the create must refuse with TargetPrologueUnsafe, leave the output trampoline null, and register no hook.
+TEST_F(HookManagerTest, InlineHook_FailPolicyRefusesLeadingCallPrologue)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(CALL_PROLOGUE_BYTES);
+
+    HookConfig cfg;
+    cfg.prologue_policy = InlineProloguePolicy::Fail;
+
+    void *tramp = reinterpret_cast<void *>(static_cast<uintptr_t>(0xDEADBEEFu));
+    auto r =
+        hm.create_inline_hook("CallPrologue", target, reinterpret_cast<void *>(&duplicate_hook_detour_a), &tramp, cfg);
+
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error(), HookError::TargetPrologueUnsafe);
+    EXPECT_EQ(tramp, nullptr) << "Refused create must clear the output trampoline";
+    EXPECT_TRUE(hm.get_hook_ids().empty());
+}
+
+// A leading 0xCC (int3) prologue is already a breakpoint -- a foreign hook's stub, a patched byte, or alignment
+// padding -- not a real function body. Fail policy must refuse with TargetPrologueUnsafe.
+TEST_F(HookManagerTest, InlineHook_FailPolicyRefusesInt3Prologue)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(INT3_PROLOGUE_BYTES);
+
+    HookConfig cfg;
+    cfg.prologue_policy = InlineProloguePolicy::Fail;
+
+    void *tramp = reinterpret_cast<void *>(static_cast<uintptr_t>(0xDEADBEEFu));
+    auto r =
+        hm.create_inline_hook("Int3Prologue", target, reinterpret_cast<void *>(&duplicate_hook_detour_a), &tramp, cfg);
+
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error(), HookError::TargetPrologueUnsafe);
+    EXPECT_EQ(tramp, nullptr) << "Refused create must clear the output trampoline";
+    EXPECT_TRUE(hm.get_hook_ids().empty());
+}
+
+// A leading 0xCD (int n) prologue is the two-byte breakpoint form; classifying on the first byte alone is sufficient,
+// so Fail policy must refuse with TargetPrologueUnsafe just as for 0xCC.
+TEST_F(HookManagerTest, InlineHook_FailPolicyRefusesIntNPrologue)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(INTN_PROLOGUE_BYTES);
+
+    HookConfig cfg;
+    cfg.prologue_policy = InlineProloguePolicy::Fail;
+
+    void *tramp = reinterpret_cast<void *>(static_cast<uintptr_t>(0xDEADBEEFu));
+    auto r =
+        hm.create_inline_hook("IntNPrologue", target, reinterpret_cast<void *>(&duplicate_hook_detour_a), &tramp, cfg);
+
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error(), HookError::TargetPrologueUnsafe);
+    EXPECT_EQ(tramp, nullptr) << "Refused create must clear the output trampoline";
+    EXPECT_TRUE(hm.get_hook_ids().empty());
+}
+
+// Mid hooks are backed by SafetyHook inline hooks at the address, so they patch the same prologue and must honor the
+// same Fail-policy refusal on a leading call. No trampoline out-param here; assert the error and that nothing
+// registered.
+TEST_F(HookManagerTest, MidHook_FailPolicyRefusesLeadingCallPrologue)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(CALL_PROLOGUE_BYTES);
+    auto mid_detour = [](safetyhook::Context &) {};
+
+    HookConfig cfg;
+    cfg.prologue_policy = InlineProloguePolicy::Fail;
+
+    auto r = hm.create_mid_hook("MidCallPrologue", target, mid_detour, cfg);
+
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error(), HookError::TargetPrologueUnsafe);
+    EXPECT_TRUE(hm.get_hook_ids().empty());
+}
+
+// Backward-compat pin: the default Warn policy must never refuse a normal real-function target. A true E8-leading real
+// function is not portably synthesizable, so the Warn install path is pinned on an ordinary prologue: the create still
+// succeeds (no false TargetPrologueUnsafe) exactly as before the policy was added.
+TEST_F(HookManagerTest, InlineHook_DefaultWarnPolicyInstallsOnNormalTarget)
+{
+    auto &hm = *m_hook_manager;
+    const auto target = reinterpret_cast<std::uintptr_t>(&layered_teardown_target);
+
+    void *tramp = nullptr;
+    auto r = hm.create_inline_hook("WarnNormal", target, reinterpret_cast<void *>(&layered_teardown_detour_1), &tramp);
+
+    ASSERT_TRUE(r.has_value()) << "Default Warn policy must not refuse a normal function prologue";
+    EXPECT_NE(tramp, nullptr);
+    hm.remove_all_hooks();
+}
+
+namespace
+{
     DMK_TEST_NOINLINE void late_destruction_target_function() noexcept
     {
         volatile int x = 0;

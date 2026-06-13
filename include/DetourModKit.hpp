@@ -29,6 +29,7 @@
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/math.hpp"
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/profile.hpp"
 #include "DetourModKit/profiler.hpp"
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"

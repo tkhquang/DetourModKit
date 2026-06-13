@@ -350,6 +350,143 @@ TEST_F(RttiDissectTest, Identify_RejectsGarbageSlotValue)
     EXPECT_FALSE(Rtti::identify_pointee_type(slot_addr, pt));
 }
 
+// --- L1 identify_pointee_type_or (RTTI fallback composition) ---
+
+TEST_F(RttiDissectTest, IdentifyTyped_ResolvesAndMatchesBool)
+{
+    // The typed primitive must resolve the same slot the bool primitive does and report the same identification, since
+    // the bool form is exactly has_value() over the typed core.
+    SyntheticVtable v(".?AVTyped@@");
+    std::array<std::uintptr_t, 1> slot{v.vtable()};
+    const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
+
+    Rtti::PointeeType pt;
+    const auto typed = Rtti::identify_pointee_typed(slot_addr, pt);
+    ASSERT_TRUE(typed.has_value());
+
+    Rtti::PointeeType pt2;
+    EXPECT_TRUE(Rtti::identify_pointee_type(slot_addr, pt2));
+    EXPECT_EQ(pt.name(), pt2.name());
+    EXPECT_EQ(pt.name(), ".?AVTyped@@");
+}
+
+TEST_F(RttiDissectTest, IdentifyTyped_ErrorMatrix)
+{
+    Rtti::PointeeType pt;
+
+    // Null and below-floor slot addresses are rejected before any read.
+    const auto null_slot = Rtti::identify_pointee_typed(0, pt);
+    ASSERT_FALSE(null_slot.has_value());
+    EXPECT_EQ(null_slot.error(), Rtti::IdentifyError::BadSlotAddress);
+
+    const auto low_slot = Rtti::identify_pointee_typed(0x100, pt);
+    ASSERT_FALSE(low_slot.has_value());
+    EXPECT_EQ(low_slot.error(), Rtti::IdentifyError::BadSlotAddress);
+
+    // A committed-then-freed page faults on read.
+    const std::uintptr_t gone = unmapped_addr();
+    ASSERT_NE(gone, 0u);
+    const auto unreadable = Rtti::identify_pointee_typed(gone, pt);
+    ASSERT_FALSE(unreadable.has_value());
+    EXPECT_EQ(unreadable.error(), Rtti::IdentifyError::UnreadableSlot);
+
+    // A readable slot holding a plausible-but-unresolvable pointer resolves to no RTTI type.
+    std::array<std::uintptr_t, 1> garbage{0xDEADBEEFu};
+    const std::uintptr_t garbage_addr = reinterpret_cast<std::uintptr_t>(garbage.data());
+    const auto no_rtti = Rtti::identify_pointee_typed(garbage_addr, pt);
+    ASSERT_FALSE(no_rtti.has_value());
+    EXPECT_EQ(no_rtti.error(), Rtti::IdentifyError::NoRtti);
+}
+
+TEST_F(RttiDissectTest, IdentifyOr_PrimaryWinsNoFallbackProbed)
+{
+    // A resolving primary short-circuits the fold, so the garbage fallback is never selected and out holds the primary.
+    SyntheticVtable primary(".?AVPrimary@@");
+    std::array<std::uintptr_t, 1> primary_slot{primary.vtable()};
+    const std::uintptr_t primary_addr = reinterpret_cast<std::uintptr_t>(primary_slot.data());
+
+    std::array<std::uintptr_t, 1> garbage{0xDEADBEEFu};
+    const std::uintptr_t garbage_addr = reinterpret_cast<std::uintptr_t>(garbage.data());
+
+    Rtti::PointeeType pt;
+    const auto result = Rtti::identify_pointee_type_or(primary_addr, pt, garbage_addr);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(pt.name(), ".?AVPrimary@@");
+}
+
+TEST_F(RttiDissectTest, IdentifyOr_FirstFallbackResolves)
+{
+    // A failing primary falls through to the fallbacks; the fold short-circuits at the FIRST resolving fallback, so the
+    // second (also valid) fallback never overwrites out.
+    std::array<std::uintptr_t, 1> primary_slot{0xDEADBEEFu};
+    const std::uintptr_t primary_addr = reinterpret_cast<std::uintptr_t>(primary_slot.data());
+
+    SyntheticVtable first_good(".?AVFirstGood@@");
+    std::array<std::uintptr_t, 1> first_slot{first_good.vtable()};
+    const std::uintptr_t first_addr = reinterpret_cast<std::uintptr_t>(first_slot.data());
+
+    SyntheticVtable second_good(".?AVSecondGood@@");
+    std::array<std::uintptr_t, 1> second_slot{second_good.vtable()};
+    const std::uintptr_t second_addr = reinterpret_cast<std::uintptr_t>(second_slot.data());
+
+    Rtti::PointeeType pt;
+    const auto result = Rtti::identify_pointee_type_or(primary_addr, pt, first_addr, second_addr);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(pt.name(), ".?AVFirstGood@@");
+}
+
+TEST_F(RttiDissectTest, IdentifyOr_AllFailPreservesFirstError)
+{
+    // The load-bearing contract: when every candidate fails, the cascade returns the FIRST (primary's) error, not a
+    // fallback's. The primary is unmapped (UnreadableSlot) while every fallback is a NoRtti garbage slot, so the two
+    // error kinds are distinguishable and the preserved error must be the primary's.
+    const std::uintptr_t primary_addr = unmapped_addr();
+    ASSERT_NE(primary_addr, 0u);
+
+    std::array<std::uintptr_t, 1> garbage_a{0xDEADBEEFu};
+    std::array<std::uintptr_t, 1> garbage_b{0xDEADBEEFu};
+    const std::uintptr_t garbage_a_addr = reinterpret_cast<std::uintptr_t>(garbage_a.data());
+    const std::uintptr_t garbage_b_addr = reinterpret_cast<std::uintptr_t>(garbage_b.data());
+
+    Rtti::PointeeType pt;
+    const auto result = Rtti::identify_pointee_type_or(primary_addr, pt, garbage_a_addr, garbage_b_addr);
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error(), Rtti::IdentifyError::UnreadableSlot);
+}
+
+TEST_F(RttiDissectTest, IdentifyOr_NoFallbacksDegradesToPrimary)
+{
+    // With zero fallbacks the cascade is just the primary probe: a failing primary surfaces its own error, a resolving
+    // primary returns a value.
+    std::array<std::uintptr_t, 1> garbage{0xDEADBEEFu};
+    const std::uintptr_t garbage_addr = reinterpret_cast<std::uintptr_t>(garbage.data());
+
+    Rtti::PointeeType pt;
+    const auto miss = Rtti::identify_pointee_type_or(garbage_addr, pt);
+    ASSERT_FALSE(miss.has_value());
+    EXPECT_EQ(miss.error(), Rtti::IdentifyError::NoRtti);
+
+    SyntheticVtable v(".?AVNoFallback@@");
+    std::array<std::uintptr_t, 1> good_slot{v.vtable()};
+    const std::uintptr_t good_addr = reinterpret_cast<std::uintptr_t>(good_slot.data());
+    const auto hit = Rtti::identify_pointee_type_or(good_addr, pt);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(pt.name(), ".?AVNoFallback@@");
+}
+
+TEST_F(RttiDissectTest, Identify_ErrorStringsAreDistinct)
+{
+    EXPECT_NE(Rtti::identify_error_to_string(Rtti::IdentifyError::BadSlotAddress),
+              Rtti::identify_error_to_string(Rtti::IdentifyError::UnreadableSlot));
+    EXPECT_NE(Rtti::identify_error_to_string(Rtti::IdentifyError::UnreadableSlot),
+              Rtti::identify_error_to_string(Rtti::IdentifyError::NoRtti));
+    EXPECT_NE(Rtti::identify_error_to_string(Rtti::IdentifyError::BadSlotAddress),
+              Rtti::identify_error_to_string(Rtti::IdentifyError::NoRtti));
+    EXPECT_FALSE(Rtti::identify_error_to_string(Rtti::IdentifyError::BadSlotAddress).empty());
+    EXPECT_FALSE(Rtti::identify_error_to_string(Rtti::IdentifyError::UnreadableSlot).empty());
+    EXPECT_FALSE(Rtti::identify_error_to_string(Rtti::IdentifyError::NoRtti).empty());
+}
+
 // --- L2 reverse_scan_block ---
 
 TEST_F(RttiDissectTest, ScanBlock_LabelsOnlyRealSlots)

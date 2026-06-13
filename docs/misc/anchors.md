@@ -16,7 +16,7 @@ The registry unifies the self-healing backends that resolve from a module range 
 | `CallArgHome` | reserved | Not yet resolvable (reports `Unsupported`) |
 | `Quorum` | two sub-anchors via `resolve` | The corroborated value, accepted only when both independent signals resolve and agree |
 
-A `StringXref` anchor is the most update-resilient kind: it locates an immutable string literal in the image's read-only data and resolves the unique RIP-relative `lea` / `mov` that references it, returning that instruction (or, with `xref_return = XrefReturn::EnclosingFunction`, a best-effort prologue back-scan to the function that uses it). Strings survive game patches far better than the code bytes around them. It fails closed on a missing, duplicated (linker-pooled), or unreferenced string, so pick a long, specific literal that occurs and is referenced exactly once. Set `xref_encoding = StringEncoding::Utf16le` for `wchar_t` literals; `xref_require_terminator` (default true) keeps a prefix of a longer literal from matching ("Player" inside "PlayerController"). `xref_broad_match` (default false) selects the phase-2 reference scan: the default shape scan matches only `REX.W lea` / `mov reg, [rip+disp32]`, while `xref_broad_match = true` keeps that scan and adds a Zydis-verified sweep for rarer shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea` / `mov`). Reach for it only when the default reports a miss for a string you know is referenced. See [String-reference anchors](aob-signatures.md) for the full two-mode model.
+A `StringXref` anchor is the most update-resilient kind: it locates an immutable string literal in the image's read-only data and resolves the unique RIP-relative `lea` / `mov` that references it, returning that instruction (or, with `xref_return = XrefReturn::EnclosingFunction`, a best-effort prologue back-scan to the function that uses it, or with `xref_return = XrefReturn::StringPointerSlot`, the global data slot that a `mov [rip+slot], reg` caches the loaded pointer into -- see [String-reference anchors](aob-signatures.md)). Strings survive game patches far better than the code bytes around them. It fails closed on a missing, duplicated (linker-pooled), or unreferenced string, so pick a long, specific literal that occurs and is referenced exactly once. Set `xref_encoding = StringEncoding::Utf16le` for `wchar_t` literals; `xref_require_terminator` (default true) keeps a prefix of a longer literal from matching ("Player" inside "PlayerController"). `xref_broad_match` (default false) selects the phase-2 reference scan: the default shape scan matches only `REX.W lea` / `mov reg, [rip+disp32]`, while `xref_broad_match = true` keeps that scan and adds a Zydis-verified sweep for rarer shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea` / `mov`). Reach for it only when the default reports a miss for a string you know is referenced. See [String-reference anchors](aob-signatures.md) for the full two-mode model.
 
 `CallArgHome` is a reserved enumerator for a future prologue-dataflow backend (mapping a call argument to its current register or stack home); declaring it now keeps a registry table forward-compatible.
 
@@ -41,9 +41,18 @@ const an::Anchor stride = {
 
 `quorum_a` / `quorum_b` are non-owning pointers into your own anchor storage, so keep the sub-anchors alive across the `resolve` call. `QuorumMatch::ExactValue` (the default) requires the two resolved values to be identical; `QuorumMatch::WithinTolerance` accepts a gap of at most `quorum_tolerance` (a negative tolerance fails closed, never accepts). On success `value` carries the first sub-anchor's value, which by construction equals the second under the policy. It fails closed -- to `AnchorStatus::Failed` -- when either signal fails, the two disagree, a sub-anchor pointer is null, or a sub-anchor is itself a `Quorum` (nesting is bounded to one level).
 
+Before resolving, the two sub-anchors are checked for independence: corroboration only means something if the two signals are genuinely separate evidence. A pair that is the same `Anchor` object used twice (pointer-equal), two pinned `Manual` literals (an author typing the same number twice is not live evidence), or the same backend with the same inputs (the same site decoded twice) reports `AnchorStatus::QuorumNotIndependent` instead of agreeing. The "same inputs" test compares by view/span identity, so two *separately authored* candidate arrays that happen to encode the same pattern still count as two independent scan sites -- it is sharing the same storage, not duplicating the same bytes, that trips the gate.
+
 ### Post-resolve validators
 
 Any backend-resolved anchor (not `Manual` or `CallArgHome`) may carry an optional `validator`: a `bool(*)(std::int64_t value, const void* context) noexcept` predicate run on the resolved value just before it is accepted. Returning `false` fails the anchor closed (`Failed`, value reset to 0), identical to a backend miss, so the caller re-heals by re-running `resolve`. Use it to assert a domain invariant a generic backend cannot know -- the target lies in an expected sub-range, a displacement points into `.rdata`, or the site begins with a plausible prologue (`Scanner::is_likely_function_prologue`). `validator_context` is an opaque pointer forwarded verbatim to the predicate (nullptr if unused). For a `Quorum`, the validator runs once on the corroborated value after both sub-anchors agree.
+
+Two opt-in policy flags harden this further (both default to preserving the existing behaviour):
+
+- `validate_manual = true` runs the `validator` on a `Manual` anchor too, instead of taking the pinned literal unchecked -- so you can assert a domain invariant on a hand-pinned constant.
+- `require_validator = true` rejects a backend-resolvable anchor that carries no `validator` at all (status `Failed`): a function/global target with no domain check is treated as unverified. A `Quorum` is exempt, because its two-signal corroboration already is the verification.
+
+When a target can be expressed more than one way, prefer the most update-resilient backend: `StringXref` > `VtableIdentity` > `RipGlobal` > `CodeOperand`, with `Quorum` over two of those raising confidence further and `Manual` as the last resort.
 
 RTTI pointer-field offset healing (`Rtti::heal_landmark`) is intentionally **not** a registry kind: it needs a runtime struct base that is itself resolved from another anchor, so it is driven directly once that base is known (see [rtti-self-heal.md](rtti-self-heal.md)).
 
@@ -96,6 +105,18 @@ for (std::size_t i = 0; i < n; ++i)
 ```
 
 Every backend already fails closed, so a missing constant surfaces as `AnchorStatus::Failed` (no value invented), and `Manual` anchors stand out as the ones a future patch can silently break.
+
+`Anchors::assess_quality(report)` rolls the same `ResolvedAnchor[]` into an `AnchorQuality` summary in one pass (no re-resolve): how many resolved, failed, are pinned `Manual` literals that cannot self-heal (`manual_at_risk`), or are corroborated quorums (the strongest evidence). It is a cheap, allocation-free way to gate "is this manifest healthy enough to run?" or to log a one-line robustness snapshot per build.
+
+## Per-game scan profile
+
+A `ScanProfile` (in `profile.hpp`) bundles a few setup-only, per-game scan-tuning defaults as a plain value -- no hidden global state. It supplies *defaults* only: an explicit per-call option (a query's `broad_match`, a candidate's order) still wins, so wiring a profile never overrides an explicit choice.
+
+- `default_broad_string_xref` widens the broad string-xref sweep on for `StringXref` anchors (it can only widen, never force off; a per-anchor `xref_broad_match` still wins).
+- `candidate_order` plus the `order_candidates` helper produce a candidate-index permutation (`UniqueFirst` promotes `require_unique` candidates ahead of broad fallbacks). `Anchors::resolve_with_profile` applies this automatically to `RipGlobal` and `CodeOperand` by building a local reordered span, so the caller's static candidate table is not mutated.
+- `deny_backend` is a per-`AnchorKind` deny-list.
+
+Resolve a profile-aware table with `Anchors::resolve_with_profile` / `resolve_all_with_profile`. A denied backend fails *closed* (status `Failed`, value 0) -- it is never silently replaced by a different, possibly-wrong backend -- and the profile threads into `Quorum` sub-anchors, so a denied sub-anchor kind fails the quorum closed and candidate-order / broad-string defaults stay uniform. The plain `resolve` / `resolve_all` are unchanged and equivalent to resolving with an empty profile.
 
 ## Re-heal on a validation miss
 

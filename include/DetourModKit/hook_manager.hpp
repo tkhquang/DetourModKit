@@ -65,6 +65,23 @@ namespace DetourModKit
     };
 
     /**
+     * @enum InlineProloguePolicy
+     * @brief Escalation policy for the inline/mid hook prologue pre-flight.
+     * @details Controls what happens when the target's first opcode is a leading E8 (call rel32) or a breakpoint byte
+     *          (0xCC int3 / 0xCD int n) at create time. A leading call means the inline hook's 5-byte E9 patch would
+     *          steal a relative call whose displacement was computed from the original site, so the relocated
+     *          trampoline copy can dispatch the call to the wrong absolute target; a leading int3 means the slot is
+     *          already a breakpoint -- a foreign hook's stub, a patched byte, or alignment padding -- not a real
+     *          function body. @ref Warn logs and installs anyway (the default, preserving historical behaviour); @ref
+     *          Fail refuses the create with @ref HookError::TargetPrologueUnsafe.
+     */
+    enum class InlineProloguePolicy
+    {
+        Warn,
+        Fail
+    };
+
+    /**
      * @enum HookError
      * @brief Error codes for hook creation/operation failures.
      */
@@ -87,6 +104,7 @@ namespace DetourModKit
         MethodNotFound,
         TargetAlreadyHookedInProcess,
         ReentrantCallRejected,
+        TargetPrologueUnsafe,
         UnknownError
     };
 
@@ -105,6 +123,21 @@ namespace DetourModKit
          *          (false), a warning is logged and bulk teardown unwinds managed layers newest-first.
          */
         bool fail_if_already_hooked = false;
+
+        /**
+         * @brief Escalation policy when the target prologue leads with a call (E8) or a breakpoint (0xCC/0xCD) byte.
+         * @details A leading 0xE8 call rel32 or a 0xCC/0xCD breakpoint at the hook site is the risk this surfaces:
+         *          hooking a prologue that is itself a relative call steals a displacement that was relative to the
+         *          original address (the relocated trampoline copy can then call the wrong absolute target), and
+         *          hooking an int3 byte means the entry is already a breakpoint stub (a foreign hook or a patched /
+         *          padding byte), not a real function body. The pre-flight decodes the first byte under a fault guard
+         *          and, on a match, either logs a warning and installs anyway (@ref InlineProloguePolicy::Warn, the
+         *          default, preserving current behaviour) or refuses with @ref HookError::TargetPrologueUnsafe (@ref
+         *          InlineProloguePolicy::Fail). Applies to inline and mid hooks; both patch the same prologue. A rare
+         *          legitimate function whose true first instruction is a call thunk will warn (harmless) or, under
+         *          Fail, be refused -- opt into Fail only for targets known to be ordinary function bodies.
+         */
+        InlineProloguePolicy prologue_policy = InlineProloguePolicy::Warn;
     };
 
     /**
@@ -285,6 +318,8 @@ namespace DetourModKit
                 return "Target address is already hooked in this process";
             case HookError::ReentrantCallRejected:
                 return "Mutator called reentrantly from within a with_* callback";
+            case HookError::TargetPrologueUnsafe:
+                return "Target prologue leads with a call (E8) or breakpoint (0xCC/0xCD) byte";
             case HookError::UnknownError:
                 return "Unknown error";
             default:
