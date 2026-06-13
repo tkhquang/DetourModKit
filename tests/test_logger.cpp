@@ -460,7 +460,9 @@ TEST_F(LoggerTest, UnicodeCharacters)
     Logger &logger = Logger::get_instance();
 
     EXPECT_NO_THROW(logger.info("Unicode: \u00e9\u00e8\u00ea"));
-    EXPECT_NO_THROW(logger.info("Emoji: \U0001f600"));
+    // U+1F600 (grinning face) as raw UTF-8 bytes so the narrow literal needs no code-page conversion: the
+    // \U0001F600 universal-character-name is unrepresentable in code page 1252 and warns under MSVC (C4566).
+    EXPECT_NO_THROW(logger.info("Emoji: \xF0\x9F\x98\x80"));
 }
 
 TEST_F(LoggerTest, NullPointerInFormat)
