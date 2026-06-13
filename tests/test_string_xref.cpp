@@ -484,6 +484,108 @@ TEST(StringXrefTest, EnclosingFunctionNotFound)
     EXPECT_EQ(result.error(), Scanner::StringXrefError::FunctionNotFound);
 }
 
+TEST(StringXrefTest, EnclosingFunctionBackScanCrossesPageBoundary)
+{
+    // The referencing lea sits in page 1 while the function boundary is near the start of page 0, so the back-scan
+    // window spans more than one page and the buffered read must cover both pages (two page-aligned chunks) to reach
+    // the 0xCC boundary. Pins that the page-wise back-scan finds a boundary in a lower chunk, not just within the
+    // chunk containing the instruction.
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const std::size_t page = si.dwPageSize;
+    auto *base =
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, page * 2, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    if (base == nullptr)
+    {
+        GTEST_SKIP() << "could not allocate a two-page synthetic image";
+    }
+
+    const auto plant_lea = [base](std::size_t instr_off, std::size_t target_off)
+    {
+        std::uint8_t *p = base + instr_off;
+        p[0] = 0x48; // REX.W
+        p[1] = LEA;
+        p[2] = 0x05; // ModRM: RIP-relative, reg = rax
+        const auto next = reinterpret_cast<std::int64_t>(base + instr_off + 7);
+        const auto target = reinterpret_cast<std::int64_t>(base + target_off);
+        const auto disp = static_cast<std::int32_t>(target - next);
+        std::memcpy(p + 3, &disp, sizeof(disp));
+    };
+
+    const std::uint8_t pad[] = {0xCC, 0xCC, 0xCC, 0xCC};
+    std::memcpy(base + 0x40, pad, sizeof(pad)); // boundary near the start of page 0
+    const std::uint8_t prologue[] = {0x55, 0x48, 0x8B, 0xEC};
+    std::memcpy(base + 0x44, prologue, sizeof(prologue));
+    const char str[] = "CrossPageAnchor";
+    std::memcpy(base + 0x800, str, sizeof(str));
+    plant_lea(page + 0x100, 0x800); // lea in page 1 references the page-0 string
+
+    Scanner::StringRefQuery q = utf8_query("CrossPageAnchor");
+    q.return_mode = Scanner::XrefReturn::EnclosingFunction;
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
+                                    reinterpret_cast<std::uintptr_t>(base) + page * 2};
+    const auto result = Scanner::find_string_xref(q, range);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, reinterpret_cast<std::uintptr_t>(base) + 0x44);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+TEST(StringXrefTest, EnclosingFunctionBackScanSkipsUnmappedLowerPage)
+{
+    // The back-scan window from the lea in page 2 reaches down into the reserved (unmapped) page 0, but the boundary
+    // lives in the readable page 1 above it. A correct page-aligned back-scan finds the boundary without faulting the
+    // whole read on the unmapped page below it; a chunk that straddled the readable/unmapped page boundary would
+    // discard the readable page-1 bytes and wrongly report no function (the per-byte walk never faults here because it
+    // finds the boundary before walking down into the gap).
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const std::size_t page = si.dwPageSize;
+    auto *base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, page * 3, MEM_RESERVE, PAGE_NOACCESS));
+    if (base == nullptr)
+    {
+        GTEST_SKIP() << "could not reserve a three-page region";
+    }
+    // Leave page 0 reserved (unmapped); commit pages 1 and 2 as execute-readable.
+    void *p1 = VirtualAlloc(base + page, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    void *p2 = VirtualAlloc(base + page * 2, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (p1 == nullptr || p2 == nullptr)
+    {
+        VirtualFree(base, 0, MEM_RELEASE);
+        GTEST_SKIP() << "could not commit the executable pages";
+    }
+
+    const auto plant_lea = [base](std::size_t instr_off, std::size_t target_off)
+    {
+        std::uint8_t *p = base + instr_off;
+        p[0] = 0x48; // REX.W
+        p[1] = LEA;
+        p[2] = 0x05; // ModRM: RIP-relative, reg = rax
+        const auto next = reinterpret_cast<std::int64_t>(base + instr_off + 7);
+        const auto target = reinterpret_cast<std::int64_t>(base + target_off);
+        const auto disp = static_cast<std::int32_t>(target - next);
+        std::memcpy(p + 3, &disp, sizeof(disp));
+    };
+
+    const std::uint8_t pad[] = {0xCC, 0xCC, 0xCC, 0xCC};
+    std::memcpy(base + page + 0x40, pad, sizeof(pad)); // boundary in the readable page 1
+    const std::uint8_t prologue[] = {0x55, 0x48, 0x8B, 0xEC};
+    std::memcpy(base + page + 0x44, prologue, sizeof(prologue));
+    const char str[] = "SkipGapAnchor";
+    std::memcpy(base + page + 0x800, str, sizeof(str));
+    plant_lea(page * 2 + 0x100, page + 0x800); // lea in page 2 references the page-1 string
+
+    Scanner::StringRefQuery q = utf8_query("SkipGapAnchor");
+    q.return_mode = Scanner::XrefReturn::EnclosingFunction;
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
+                                    reinterpret_cast<std::uintptr_t>(base) + page * 3};
+    const auto result = Scanner::find_string_xref(q, range);
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(*result, reinterpret_cast<std::uintptr_t>(base) + page + 0x44);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
 TEST(StringXrefTest, EmptyQueryAndInvalidRange)
 {
     SyntheticImage img;

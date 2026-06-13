@@ -512,6 +512,19 @@ if(DMK_ENABLE_PROFILING)
   message(STATUS "Profiling instrumentation enabled")
 endif()
 
+# --- AVX-512 scanner verify tier ---
+# Opt-in, off by default. When ON, the scanner compiles an AVX-512F + AVX-512BW verify tier (64 bytes per iteration)
+# selected at runtime behind a CPUID + XGETBV gate. The intrinsics are confined to that one tier via a per-function
+# target attribute (GCC/Clang) so the rest of the library stays AVX2-only -- no global /arch:AVX512 or -mavx512 is
+# added, and the produced library still runs on CPUs without AVX-512 (the tier is simply never selected). The runtime
+# >= 30% throughput gate for this tier can only be measured on an AVX-512 host; see the avx512 CI workflow.
+option(DMK_ENABLE_AVX512 "Compile the opt-in AVX-512 scanner verify tier (runtime-gated)" OFF)
+
+if(DMK_ENABLE_AVX512)
+  target_compile_definitions(DetourModKit PRIVATE DMK_ENABLE_AVX512)
+  message(STATUS "AVX-512 scanner verify tier enabled (runtime-gated by cpu_has_avx512())")
+endif()
+
 # --- Sanitizers ---
 option(DMK_ENABLE_SANITIZERS "Enable AddressSanitizer (and UBSan on GCC/Clang)" OFF)
 

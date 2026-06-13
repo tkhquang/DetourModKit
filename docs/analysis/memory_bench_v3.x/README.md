@@ -98,6 +98,24 @@ build\msvc-release\tests\DetourModKit_bench_memory.exe
 
 The harness prints the human-readable tables above plus a `#TSV` block on stdout for machine parsing (`probe_gated_over_direct` is the headline gated-vs-direct ratio).
 
+## Warm-hit reader contention (striped counters)
+
+Phase `[9]` measures `is_readable` throughput when many threads hammer a small pre-warmed pool, so almost every lookup is a cache hit and the cost is dominated by cross-thread cache-line contention on the per-shard shared lock and the reader-tracking counter. The reader counter is striped across cache-line-padded per-thread counters (summed only at shutdown) instead of one global atomic, so concurrent readers stay off a single shared line; each shard is also `alignas(64)` with its lock and stampede flag inline so different shards never share a line.
+
+Aggregate warm-hit throughput on the representative benchmark host (Intel Core i9-9980HK, 8C/16T), single global counter vs striped counters:
+
+```text
+threads   global counter   striped counters   speedup
+1               0.88              1.22           1.39x
+2               2.02              2.70           1.34x
+4               4.61              7.53           1.63x
+8               5.20             13.86           2.67x
+```
+
+The win grows with thread count: the single seq_cst counter is a hard scaling wall (one cache line ping-pongs across every core that reads it), while the striped counters let throughput keep scaling. The miss-path contention study (phase `[5]`) is `VirtualQuery`-dominated and is unchanged within noise, so the cache-line-hygiene change improves the warm path without regressing the cold one. The seq_cst stripe increment still Dekker-pairs with the `s_cache_initialized` gate, so `shutdown_cache` drains all stripes safely.
+
+A local MinGW release recheck of phase `[9]` reports 1.10/2.47/6.12/13.33 Mops/s at 1/2/4/8 threads. This is not a replacement for the MSVC comparison table above; it is a local toolchain recheck that the warm-hit contention phase is still wired and scaling.
+
 ## Caveats
 
 - Numbers are from a single development machine and are illustrative. The miss-path cost is dominated by `VirtualQuery` latency and shard-lock contention, so it varies by CPU, Windows build, and core count. Run the bench for your own target; the qualitative result (predicate expensive on the hot path, direct read cheap, chain cheap) holds across machines.

@@ -43,6 +43,23 @@
 #define DMK_AVX2_TARGET
 #endif
 
+// AVX-512 verify tier: opt-in, off by default. Gated behind the DMK_ENABLE_AVX512 build option rather than a global
+// /arch:AVX512 or -mavx512 flag, because enabling it must NOT let the compiler emit AVX-512 across the whole TU -- that
+// would fault with #UD on the majority of CPUs that lack AVX-512. When the option is on, the verify tier is compiled
+// with a per-function target attribute on GCC/Clang (exactly like the AVX2 tier), so the rest of the TU stays
+// AVX2-only and runs anywhere; the tier is reached only after the runtime cpu_has_avx512() gate confirms both the CPU
+// and the OS support it. Byte-granular masked compare (_mm512_test_epi8_mask) is an AVX-512BW instruction, so the gate
+// requires AVX-512F + AVX-512BW, not F alone.
+#if defined(DMK_ENABLE_AVX512) && defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+#define DMK_HAS_AVX512 1
+#include <immintrin.h>
+#define DMK_AVX512_TARGET __attribute__((target("avx512f,avx512bw")))
+#elif defined(DMK_ENABLE_AVX512) && defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
+#define DMK_HAS_AVX512 1
+#include <immintrin.h>
+#define DMK_AVX512_TARGET
+#endif
+
 // AddressSanitizer poisons the shadow of this process's own committed, readable memory -- the redzones around stack
 // locals and instrumented globals. The AOB scanner deliberately reads across whole readable regions, so under ASan its
 // in-bounds, never-faulting reads land on poisoned shadow and are reported as overflows. DMK_NO_SANITIZE_ADDRESS
@@ -62,39 +79,90 @@ using namespace DetourModKit;
 
 namespace
 {
+#if defined(DMK_HAS_AVX2) || defined(DMK_HAS_AVX512)
+    constexpr unsigned int CPUID_ECX_XSAVE = 1u << 26;
+    constexpr unsigned int CPUID_ECX_OSXSAVE = 1u << 27;
+    constexpr unsigned int CPUID_ECX_AVX = 1u << 28;
+    constexpr unsigned int XCR0_SSE = 1u << 1;
+    constexpr unsigned int XCR0_AVX = 1u << 2;
+    constexpr unsigned int XCR0_OPMASK = 1u << 5;
+    constexpr unsigned int XCR0_ZMM_HI256 = 1u << 6;
+    constexpr unsigned int XCR0_HI16_ZMM = 1u << 7;
+    constexpr unsigned int XCR0_AVX512_STATE = XCR0_SSE | XCR0_AVX | XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM;
+
+    /**
+     * @brief Tests CPUID leaf 1 ECX feature bits.
+     * @param required_bits Bit mask that must be present in ECX.
+     * @return True when every requested leaf 1 ECX feature bit is set.
+     */
+    bool cpu_leaf1_ecx_has(unsigned int required_bits) noexcept
+    {
+#if defined(__GNUC__) || defined(__clang__)
+        unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+        if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx))
+            return false;
+        return (ecx & required_bits) == required_bits;
+#elif defined(_MSC_VER)
+        int cpui[4]{};
+        __cpuidex(cpui, 1, 0);
+        const unsigned int ecx = static_cast<unsigned int>(cpui[2]);
+        return (ecx & required_bits) == required_bits;
+#else
+        return false;
+#endif
+    }
+
+    /**
+     * @brief Tests whether the OS has enabled the requested XCR0 SIMD register state.
+     * @param required_mask XCR0 bit mask that must be enabled by the OS.
+     * @return True when XGETBV is legal to execute and XCR0 contains every requested bit.
+     */
+    bool xcr0_has_enabled_state(unsigned int required_mask) noexcept
+    {
+        if (!cpu_leaf1_ecx_has(CPUID_ECX_XSAVE | CPUID_ECX_OSXSAVE))
+        {
+            return false;
+        }
+
+#if defined(__GNUC__) || defined(__clang__)
+        unsigned int xcr0_lo = 0, xcr0_hi = 0;
+        __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
+        (void)xcr0_hi;
+        return (xcr0_lo & required_mask) == required_mask;
+#elif defined(_MSC_VER)
+        const unsigned long long xcr0 = _xgetbv(0);
+        return (xcr0 & required_mask) == required_mask;
+#else
+        return false;
+#endif
+    }
+#endif
+
 #ifdef DMK_HAS_AVX2
     /**
      * @brief Detects AVX2 support at runtime via CPUID.
-     * @details Checks CPUID leaf 7 subleaf 0, EBX bit 5 (AVX2) and also verifies that the OS has enabled AVX state
-     *          saving (XGETBV). Result is cached in a function-local static for zero-cost repeated queries.
+     * @details Checks CPUID leaf 1 ECX bit 28 (AVX)
+     * plus CPUID leaf 7 subleaf 0 EBX bit 5 (AVX2), then verifies that
+     *          the OS has enabled SSE and AVX
+     * register state in XCR0. Result is cached in a function-local static.
      */
     bool cpu_has_avx2() noexcept
     {
         static const bool result = []() -> bool
         {
 #if defined(__GNUC__) || defined(__clang__)
-            // Check CPUID is supported and query leaf 7
             unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
             if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
                 return false;
             const bool avx2_flag = (ebx & (1u << 5)) != 0;
 
-            // Verify OS has enabled AVX state saving via XGETBV (ECX=0, bit 2)
-            unsigned int xcr0_lo = 0, xcr0_hi = 0;
-            __asm__ volatile("xgetbv" : "=a"(xcr0_lo), "=d"(xcr0_hi) : "c"(0));
-            const bool os_avx = (xcr0_lo & 0x06) == 0x06; // SSE + AVX state
-
-            return avx2_flag && os_avx;
+            return cpu_leaf1_ecx_has(CPUID_ECX_AVX) && avx2_flag && xcr0_has_enabled_state(XCR0_SSE | XCR0_AVX);
 #elif defined(_MSC_VER)
             int cpui[4]{};
             __cpuidex(cpui, 7, 0);
             const bool avx2_flag = (cpui[1] & (1 << 5)) != 0;
 
-            // Verify OS has enabled AVX state saving
-            const unsigned long long xcr0 = _xgetbv(0);
-            const bool os_avx = (xcr0 & 0x06) == 0x06;
-
-            return avx2_flag && os_avx;
+            return cpu_leaf1_ecx_has(CPUID_ECX_AVX) && avx2_flag && xcr0_has_enabled_state(XCR0_SSE | XCR0_AVX);
 #else
             return false;
 #endif
@@ -140,6 +208,85 @@ namespace
         return j;
     }
 #endif // DMK_HAS_AVX2
+
+#ifdef DMK_HAS_AVX512
+    /**
+     * @brief Detects AVX-512F + AVX-512BW support at runtime via CPUID and XGETBV.
+     * @details Checks CPUID
+     * leaf 7 subleaf 0, EBX bit 16 (AVX-512F) and bit 30 (AVX-512BW). Byte-granular masked
+     *          compare is a
+     * BW instruction, so both are required. Also verifies the OS has enabled the full opmask /
+     *          ZMM
+     * register state via XGETBV (XCR0 bits 1,2,5,6,7); a CPU that reports AVX-512 while the OS has not
+     * enabled
+     * the state must fail closed. Result is cached in a function-local static.
+     */
+    bool cpu_has_avx512() noexcept
+    {
+        static const bool result = []() -> bool
+        {
+#if defined(__GNUC__) || defined(__clang__)
+            unsigned int eax = 0, ebx = 0, ecx = 0, edx = 0;
+            if (!__get_cpuid_count(7, 0, &eax, &ebx, &ecx, &edx))
+                return false;
+            const bool avx512f = (ebx & (1u << 16)) != 0;
+            const bool avx512bw = (ebx & (1u << 30)) != 0;
+
+            return cpu_leaf1_ecx_has(CPUID_ECX_AVX) && avx512f && avx512bw && xcr0_has_enabled_state(XCR0_AVX512_STATE);
+#elif defined(_MSC_VER)
+            int cpui[4]{};
+            __cpuidex(cpui, 7, 0);
+            const bool avx512f = (cpui[1] & (1 << 16)) != 0;
+            const bool avx512bw = (cpui[1] & (1 << 30)) != 0;
+
+            return cpu_leaf1_ecx_has(CPUID_ECX_AVX) && avx512f && avx512bw && xcr0_has_enabled_state(XCR0_AVX512_STATE);
+#else
+            return false;
+#endif
+        }();
+        return result;
+    }
+
+    /**
+     * @brief Verifies a pattern match using AVX-512 (64 bytes per iteration).
+     * @param pattern_start Start of the candidate region in memory.
+     * @param pattern The compiled pattern to verify against.
+     * @param start_offset Byte offset to start verification from (may be non-zero if a previous tier partially
+     *                     verified).
+     * @return The next byte offset to resume verification from on success (equal to start_offset plus a multiple of 64
+     *         once the AVX-512 tier covered whole 64-byte chunks), or std::nullopt when a 64-byte chunk did not match
+     *         and the caller must abandon this candidate position.
+     * @note Compiled with AVX-512F + AVX-512BW codegen via target attribute on GCC/Clang; on MSVC the intrinsics are
+     *       always available. Only entered after cpu_has_avx512() has confirmed CPU and OS support.
+     */
+    DMK_AVX512_TARGET
+    DMK_NO_SANITIZE_ADDRESS
+    std::optional<size_t> verify_pattern_avx512(const std::byte *pattern_start, const Scanner::CompiledPattern &pattern,
+                                                size_t start_offset) noexcept
+    {
+        const size_t pattern_size = pattern.size();
+        size_t j = start_offset;
+
+        for (; j + 64 <= pattern_size; j += 64)
+        {
+            const __m512i mem = _mm512_loadu_si512(reinterpret_cast<const void *>(pattern_start + j));
+            const __m512i pat = _mm512_loadu_si512(reinterpret_cast<const void *>(pattern.bytes.data() + j));
+            const __m512i msk = _mm512_loadu_si512(reinterpret_cast<const void *>(pattern.mask.data() + j));
+
+            // (mem ^ pat) & mask is zero in every matching byte: a wildcard lane (mask 0x00) clears to zero, and a
+            // literal lane (mask 0xFF) keeps the xor, which is zero only on an exact byte match. test_epi8_mask sets a
+            // bit per byte whose masked value is nonzero -- i.e. a mismatch -- so any nonzero result fails the chunk.
+            const __m512i xored = _mm512_xor_si512(mem, pat);
+            const __m512i masked = _mm512_and_si512(xored, msk);
+            if (_mm512_test_epi8_mask(masked, masked) != 0)
+            {
+                return std::nullopt;
+            }
+        }
+
+        return j;
+    }
+#endif // DMK_HAS_AVX512
 
     /**
      * @brief Returns a commonality score for a byte value in typical x64 PE code sections.
@@ -406,50 +553,44 @@ namespace
     // any no_sanitize_address attribute on the caller, so a per-function escape hatch is not enough: the function
     // itself must do the byte comparisons.
     //
-    // The MSVC implementation processes 8 bytes per iteration through a qword load, with an aligned-body / unaligned-
-    // head / tail structure. Each 8-byte chunk is XOR-ed against a broadcasted copy of the needle and run through the
-    // (x - 0x01...) & ~x & 0x80... zero-byte detect; _BitScanForward64 on the resulting mask yields the byte offset
-    // of the first match.
-    //
-    // GCC/Clang keep a scalar loop, accepting reduced large-haystack throughput versus libc's vectorized memchr in
-    // exchange for ASan-interceptor immunity; a SIMD tier can widen it later. clang-cl also defines _MSC_VER but
-    // applies strict-aliasing TBAA to the type-punned qword load, so it is routed to the scalar loop as well.
-    DMK_NO_SANITIZE_ADDRESS
-    const void *dmk_memchr(const void *haystack, unsigned char needle, size_t n) noexcept
-    {
-        if (n == 0)
-        {
-            return nullptr;
-        }
+    // The needle search is tiered the same way the verify path is. On x86-64 the SSE2 body (16 bytes per iteration)
+    // is always available -- SSE2 is part of the x86-64 baseline, so no runtime gate is needed -- and an AVX2 body
+    // (32 bytes per iteration) is selected at runtime through the same cpu_has_avx2() gate the verify tier uses. Each
+    // SIMD body broadcasts the needle into every lane, compares a whole vector against it with one PCMPEQB, and
+    // collapses the per-byte result to a movemask bitmask; count-trailing-zeros on the first nonzero mask gives the
+    // lane index of the first match, so the search keeps libc memchr's "lowest address wins" contract. A scalar byte
+    // loop finishes the sub-vector tail and is the only body on targets without SSE2 (32-bit x86 built without it).
+    // None of the tiers call into libc, so the ASan interceptor never sees the read; the explicit intrinsics also use
+    // unaligned loads, so there is no type-punned qword load for clang-cl's strict-aliasing TBAA to miscompile.
 
-#if defined(_MSC_VER) && defined(_M_X64) && !defined(__clang__)
-        const auto *p = static_cast<const unsigned char *>(haystack);
-        // Process the unaligned prefix one byte at a time so the qword loop can run aligned. Worst case 7 bytes.
-        while (n >= 8 && (reinterpret_cast<std::uintptr_t>(p) & 7u) != 0)
+#if defined(DMK_HAS_SSE2) || defined(DMK_HAS_AVX2)
+    /// Count-trailing-zeros over a known-nonzero movemask result; yields the first matching byte's lane index.
+    inline unsigned dmk_movemask_first_index(unsigned int mask) noexcept
+    {
+#if defined(_MSC_VER) && !defined(__clang__)
+        unsigned long index = 0;
+        _BitScanForward(&index, mask);
+        return static_cast<unsigned>(index);
+#else
+        return static_cast<unsigned>(__builtin_ctz(mask));
+#endif
+    }
+#endif // DMK_HAS_SSE2 || DMK_HAS_AVX2
+
+#ifdef DMK_HAS_SSE2
+    // SSE2 needle search over [p, p + n): a 16-byte body plus a scalar tail. No runtime gate -- DMK_HAS_SSE2 implies
+    // the target is x86-64 (or x86 built with SSE2), where these instructions are always legal.
+    DMK_NO_SANITIZE_ADDRESS
+    const unsigned char *dmk_memchr_sse2(const unsigned char *p, unsigned char needle, size_t n) noexcept
+    {
+        const __m128i needle_vec = _mm_set1_epi8(static_cast<char>(needle));
+        for (; n >= 16; p += 16, n -= 16)
         {
-            if (*p == needle)
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i *>(p));
+            const unsigned int mask = static_cast<unsigned int>(_mm_movemask_epi8(_mm_cmpeq_epi8(chunk, needle_vec)));
+            if (mask != 0)
             {
-                return p;
-            }
-            ++p;
-            --n;
-        }
-        const unsigned long long needle_qw = 0x0101010101010101ULL * needle;
-        for (; n >= 8; p += 8, n -= 8)
-        {
-            // p is 8-byte aligned here (the head loop guarantees it), so the direct load is valid; it also avoids the
-            // memcpy interceptor ASan hot-patches into the CRT, which a real call would reintroduce under /Od.
-            const std::uint64_t chunk = *reinterpret_cast<const std::uint64_t *>(p);
-            // x has a 0x00 byte exactly where chunk equals the needle. (x - 0x01...) borrows into the high bit of
-            // each zero byte, ~x clears bytes whose own high bit was set, so hi_bits has 0x80 only at matching bytes
-            // and BSF yields the first.
-            const std::uint64_t x = chunk ^ needle_qw;
-            const std::uint64_t hi_bits = (x - 0x0101010101010101ULL) & ~x & 0x8080808080808080ULL;
-            if (hi_bits != 0)
-            {
-                unsigned long index = 0;
-                _BitScanForward64(&index, hi_bits);
-                return p + (index >> 3);
+                return p + dmk_movemask_first_index(mask);
             }
         }
         for (; n > 0; ++p, --n)
@@ -460,8 +601,63 @@ namespace
             }
         }
         return nullptr;
+    }
+#endif // DMK_HAS_SSE2
+
+#ifdef DMK_HAS_AVX2
+    // AVX2 needle search over [p, p + n): a 32-byte body plus a scalar tail. Compiled with AVX2 codegen via the target
+    // attribute on GCC/Clang so the rest of the TU stays SSE2-only, and only entered after cpu_has_avx2() has
+    // confirmed both the CPU and the OS support the instructions. The tail is scalar rather than an SSE2 call so the
+    // body emits no legacy-SSE encoding and the compiler has no VEX/legacy transition to reconcile on the way out.
+    DMK_AVX2_TARGET
+    DMK_NO_SANITIZE_ADDRESS
+    const unsigned char *dmk_memchr_avx2(const unsigned char *p, unsigned char needle, size_t n) noexcept
+    {
+        const __m256i needle_vec = _mm256_set1_epi8(static_cast<char>(needle));
+        for (; n >= 32; p += 32, n -= 32)
+        {
+            const __m256i chunk = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(p));
+            const unsigned int mask =
+                static_cast<unsigned int>(_mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, needle_vec)));
+            if (mask != 0)
+            {
+                return p + dmk_movemask_first_index(mask);
+            }
+        }
+        for (; n > 0; ++p, --n)
+        {
+            if (*p == needle)
+            {
+                return p;
+            }
+        }
+        return nullptr;
+    }
+#endif // DMK_HAS_AVX2
+
+    // use_avx2 is hoisted by find_pattern_raw so the per-anchor-hit sweep never re-reads the cpu_has_avx2() static.
+    DMK_NO_SANITIZE_ADDRESS
+    const void *dmk_memchr(const void *haystack, unsigned char needle, size_t n,
+                           [[maybe_unused]] bool use_avx2) noexcept
+    {
+        if (n == 0)
+        {
+            return nullptr;
+        }
+        const auto *p = static_cast<const unsigned char *>(haystack);
+
+#ifdef DMK_HAS_AVX2
+        // The 32-byte body only pays for itself once a full vector is in play; shorter spans skip straight to the
+        // SSE2/scalar bodies, which avoids the target-switch on the tail of a sweep that has nearly run out.
+        if (use_avx2 && n >= 32)
+        {
+            return dmk_memchr_avx2(p, needle, n);
+        }
+#endif
+#ifdef DMK_HAS_SSE2
+        return dmk_memchr_sse2(p, needle, n);
 #else
-        for (const auto *p = static_cast<const unsigned char *>(haystack); n > 0; ++p, --n)
+        for (; n > 0; ++p, --n)
         {
             if (*p == needle)
             {
@@ -474,12 +670,14 @@ namespace
 
     // memchr over [begin, end] for the anchor byte. Routes through the self-provided dmk_memchr above so the ASan
     // runtime cannot intercept the call. dmk_memchr returns a pointer into the range or nullptr; the wrapper
-    // re-establishes the [begin, end] inclusive contract the scanner expects.
+    // re-establishes the [begin, end] inclusive contract the scanner expects. use_avx2 is the caller's hoisted
+    // cpu_has_avx2() result, threaded through so the prefilter does not re-read the static on every anchor hit.
     DMK_NO_SANITIZE_ADDRESS
-    const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end, unsigned char target) noexcept
+    const std::byte *scan_for_byte(const std::byte *begin, const std::byte *end, unsigned char target,
+                                   bool use_avx2) noexcept
     {
         const size_t n = static_cast<size_t>(end - begin + 1);
-        return static_cast<const std::byte *>(dmk_memchr(begin, target, n));
+        return static_cast<const std::byte *>(dmk_memchr(begin, target, n, use_avx2));
     }
 
     DMK_NO_SANITIZE_ADDRESS
@@ -513,15 +711,21 @@ namespace
         const std::byte *const search_end = start_address + (region_size - pattern_size) + best_anchor;
 
         // Hoist runtime CPU detection. The query itself is a function-local static behind a one-shot init, but reading
-        // it on every memchr hit adds an indirect load per false candidate. Caching it once here lets the per-hit
-        // branch use a register-resident bool.
+        // it on every memchr hit and every verify adds an indirect load per false candidate. Caching it once here lets
+        // both the prefilter sweep and the per-candidate verify branch use a register-resident bool. It is defined
+        // unconditionally (false without an AVX2 build) because the prefilter takes it on every call.
 #ifdef DMK_HAS_AVX2
         const bool use_avx2 = cpu_has_avx2();
+#else
+        const bool use_avx2 = false;
+#endif
+#ifdef DMK_HAS_AVX512
+        const bool use_avx512 = cpu_has_avx512();
 #endif
 
         while (search_start <= search_end)
         {
-            const std::byte *current_scan_ptr = scan_for_byte(search_start, search_end, target_val);
+            const std::byte *current_scan_ptr = scan_for_byte(search_start, search_end, target_val, use_avx2);
 
             if (!current_scan_ptr)
             {
@@ -529,14 +733,31 @@ namespace
             }
             const std::byte *pattern_start = current_scan_ptr - best_anchor;
 
-            // Verify the full pattern at this position. Three-tier SIMD: AVX2 (32B) -> SSE2 (16B) -> scalar (1B).
+            // Verify the full pattern at this position. SIMD tiers run widest-first: AVX-512 (64B) -> AVX2 (32B) ->
+            // SSE2 (16B) -> scalar (1B). Each tier resumes from the offset the previous one reached (start_offset j),
+            // so the widest available tiers cover the bulk and the scalar loop only ever finishes a sub-16-byte tail.
             bool match_found = true;
             size_t j = 0;
 
-#ifdef DMK_HAS_AVX2
-            if (use_avx2)
+#ifdef DMK_HAS_AVX512
+            if (use_avx512)
             {
-                const auto next_j = verify_pattern_avx2(pattern_start, pattern, 0);
+                const auto next_j = verify_pattern_avx512(pattern_start, pattern, j);
+                if (next_j.has_value())
+                {
+                    j = *next_j;
+                }
+                else
+                {
+                    match_found = false;
+                }
+            }
+#endif // DMK_HAS_AVX512
+
+#ifdef DMK_HAS_AVX2
+            if (match_found && use_avx2)
+            {
+                const auto next_j = verify_pattern_avx2(pattern_start, pattern, j);
                 if (next_j.has_value())
                 {
                     j = *next_j;
@@ -996,6 +1217,10 @@ const std::byte *DetourModKit::Scanner::scan_readable_regions(const CompiledPatt
 
 Scanner::SimdLevel DetourModKit::Scanner::active_simd_level() noexcept
 {
+#ifdef DMK_HAS_AVX512
+    if (cpu_has_avx512())
+        return SimdLevel::Avx512;
+#endif
 #ifdef DMK_HAS_AVX2
     if (cpu_has_avx2())
         return SimdLevel::Avx2;

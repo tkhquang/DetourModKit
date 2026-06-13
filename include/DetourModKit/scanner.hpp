@@ -829,13 +829,17 @@ namespace DetourModKit
             /// SSE2 (16 bytes per iteration)
             Sse2,
             /// AVX2 (32 bytes per iteration, with SSE2 + scalar tail)
-            Avx2
+            Avx2,
+            /// AVX-512F + AVX-512BW (64 bytes/iteration). Opt-in: DMK_ENABLE_AVX512 build on an AVX-512 host.
+            Avx512
         };
 
         /**
          * @brief Returns the SIMD tier that find_pattern() will use at runtime.
          * @details Reflects both compile-time support (intrinsics available) and runtime CPU detection (CPUID + OS
-         *          XGETBV for AVX2).
+         *          XGETBV). Reports SimdLevel::Avx512 only when the library was built with the opt-in DMK_ENABLE_AVX512
+         *          option and the host has AVX-512F + AVX-512BW; otherwise it reports the highest available lower tier
+         *          (AVX2, then SSE2, then Scalar).
          */
         [[nodiscard]] SimdLevel active_simd_level() noexcept;
 

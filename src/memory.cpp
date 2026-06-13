@@ -28,6 +28,7 @@
 #include <deque>
 #include <type_traits>
 #include <chrono>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <cstdlib>
@@ -86,11 +87,20 @@ namespace
      * @struct CacheShard
      * @brief Individual cache shard with O(1) address lookup and O(log n) LRU eviction.
      * @details Uses unordered_map keyed by region base address for fast lookup. std::map keyed by monotonic counter for
-     *          efficient oldest-entry eviction. SrwSharedMutex allows multiple concurrent readers. in_flight flag
-     *          prevents cache stampede by coalescing concurrent VirtualQuery calls. Mutex is stored separately to allow
-     *          vector resize operations.
+     *          efficient oldest-entry eviction. The per-shard SrwSharedMutex (multiple concurrent readers) and the
+     *          in_flight stampede-coalescing flag are stored inline, and the whole struct is aligned to a cache line,
+     *          so one shard's lock word and in_flight flag never share a line with another shard's: concurrent access
+     *          to different shards stays off each other's cache lines. Inlining the mutex (rather than a separate
+     *          heap-allocated lock per shard) is what fixes the cache-line layout, and it makes the shard non-movable
+     *          -- SrwSharedMutex and std::atomic are non-movable -- so the shards are allocated once as a fixed-size
+     *          array that never relocates, not a resizable std::vector.
      */
-    struct CacheShard
+#if defined(_MSC_VER)
+#pragma warning(push)
+// C4324: CacheShard is intentionally padded to a full cache line by alignas(64) for cache-line hygiene.
+#pragma warning(disable : 4324)
+#endif
+    struct alignas(64) CacheShard
     {
         // Map from base_address -> CachedMemoryRegionInfo for O(1) lookup by address
         std::unordered_map<uintptr_t, CachedMemoryRegionInfo> entries;
@@ -106,12 +116,23 @@ namespace
         // (hard_max_per_shard).
         // {base, base+size}
         std::deque<std::pair<uintptr_t, uintptr_t>> sorted_ranges;
+        // Per-shard reader/writer lock (shared for lookups, exclusive for mutation). Inline so it lives in the shard's
+        // own cache line(s) rather than behind a separately heap-allocated lock word, and is kept off other shards'
+        // lines by the struct's alignas(64).
+        SrwSharedMutex mtx;
+        // Stampede-coalescing flag: the first thread to CAS it from 0 to 1 becomes the VirtualQuery leader for this
+        // shard and the rest coalesce onto its result. Stored inline (not in a shared global array) so it never shares
+        // a cache line with a neighbouring shard's flag.
+        std::atomic<char> in_flight{0};
         uint64_t entry_counter{0};
         size_t capacity;
         size_t max_capacity;
 
         CacheShard() : capacity(0), max_capacity(0) { entries.reserve(64); }
     };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
     // The sorted-ranges container type is pinned as a deliberate refactor tripwire: with a deque, mutation never
     // relocates the whole buffer under the lock. This is not iterator stability (deque insert/erase invalidates
@@ -145,9 +166,11 @@ namespace
 // preventing ODR violations if this translation unit's declarations were ever duplicated.
 namespace
 {
-    std::vector<CacheShard> s_cache_shards;
-    std::vector<std::unique_ptr<SrwSharedMutex>> s_shard_mutexes;
-    std::unique_ptr<std::atomic<char>[]> s_in_flight;
+    // Fixed-size shard array, allocated once by perform_cache_initialization and never resized: CacheShard owns its
+    // SrwSharedMutex and in_flight atomic inline and so is non-movable, which rules out a resizable std::vector. null
+    // until init, reset on shutdown. The per-shard lock and in_flight flag are reached through s_cache_shards[i].mtx
+    // and s_cache_shards[i].in_flight.
+    std::unique_ptr<CacheShard[]> s_cache_shards;
     std::atomic<size_t> s_shard_count{0};
     std::atomic<size_t> s_max_entries_per_shard{0};
     std::atomic<unsigned int> s_configured_expiry_ms{0};
@@ -164,34 +187,82 @@ namespace
     std::mutex s_cache_state_mutex;
 
     // Epoch-based reader tracking to prevent use-after-free during shutdown. Readers increment on entry to
-    // is_readable/is_writable and decrement on exit. shutdown_cache waits for this to reach zero before destroying data
-    // structures.
-    std::atomic<int32_t> s_active_readers{0};
+    // is_readable/is_writable and decrement on exit; shutdown_cache waits for the count to reach zero before
+    // destroying data structures. The count is striped across many cache-line-padded counters rather than a single
+    // global atomic: a single counter is a shared-cache-line hotspot that re-serializes readers despite the sharded
+    // SRWLOCKs, so each thread increments its own stripe and shutdown sums them. Distributing the increment does not
+    // weaken the shutdown drain -- see active_reader_total() and the ActiveReaderGuard Dekker note below.
+    constexpr size_t READER_STRIPE_COUNT = 64;
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+// C4324: ReaderStripe is intentionally padded to a full cache line by alignas(64) so stripes never share a line.
+#pragma warning(disable : 4324)
+#endif
+    struct alignas(64) ReaderStripe
+    {
+        std::atomic<int32_t> count{0};
+    };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+
+    std::array<ReaderStripe, READER_STRIPE_COUNT> s_reader_stripes{};
+
+    /**
+     * @brief Returns this thread's reader stripe, assigned round-robin on first use so concurrent readers spread
+     *        across distinct cache lines instead of contending on one counter.
+     */
+    [[nodiscard]] inline size_t reader_stripe_index() noexcept
+    {
+        static std::atomic<size_t> s_next_stripe{0};
+        thread_local const size_t stripe = s_next_stripe.fetch_add(1, std::memory_order_relaxed) % READER_STRIPE_COUNT;
+        return stripe;
+    }
+
+    /**
+     * @brief Sum of all reader stripes: the number of readers currently inside an ActiveReaderGuard.
+     * @details shutdown_cache spins on this reaching zero (under seq_cst) after publishing s_cache_initialized=false,
+     *          before freeing shard storage.
+     */
+    [[nodiscard]] inline int64_t active_reader_total() noexcept
+    {
+        int64_t total = 0;
+        for (const ReaderStripe &stripe : s_reader_stripes)
+        {
+            total += stripe.count.load(std::memory_order_seq_cst);
+        }
+        return total;
+    }
 
     /**
      * @class ActiveReaderGuard
-     * @brief RAII guard that increments s_active_readers on construction and decrements on destruction, ensuring
-     *        correct pairing on all exit paths.
+     * @brief RAII guard that increments this thread's reader stripe on construction and decrements it on destruction,
+     *        ensuring correct pairing on all exit paths.
      */
     class ActiveReaderGuard
     {
     public:
-        ActiveReaderGuard() noexcept
+        ActiveReaderGuard() noexcept : m_stripe(reader_stripe_index())
         {
             // seq_cst (not acq_rel) so this increment and the reader's subsequent seq_cst load of s_cache_initialized
-            // share the single total order that forbids the store-buffering (Dekker) outcome with
-            // shutdown_cache: shutdown stores s_cache_initialized=false then loads
-            // s_active_readers, while a reader increments s_active_readers then loads s_cache_initialized. Under
-            // seq_cst a reader that observes the cache live was necessarily counted before shutdown reads the reader
-            // count, so shutdown cannot free shard data out from under it. On x86-64 this is the same lock xadd as
-            // acq_rel, so the hot path pays nothing.
-            s_active_readers.fetch_add(1, std::memory_order_seq_cst);
+            // share the single total order that forbids the store-buffering (Dekker) outcome with shutdown_cache:
+            // shutdown stores s_cache_initialized=false then sums every stripe, while a reader increments its stripe
+            // then loads s_cache_initialized. Under seq_cst a reader that observes the cache live was necessarily
+            // counted on its stripe before shutdown reads that stripe, so shutdown cannot free shard data out from
+            // under it -- the per-stripe argument is identical to the single-counter one because each reader touches
+            // exactly one stripe for its whole lifetime. On x86-64 this is the same lock xadd as acq_rel, so the hot
+            // path pays nothing beyond landing on a per-thread cache line instead of one shared line.
+            s_reader_stripes[m_stripe].count.fetch_add(1, std::memory_order_seq_cst);
         }
 
-        ~ActiveReaderGuard() noexcept { s_active_readers.fetch_sub(1, std::memory_order_release); }
+        ~ActiveReaderGuard() noexcept { s_reader_stripes[m_stripe].count.fetch_sub(1, std::memory_order_release); }
 
         ActiveReaderGuard(const ActiveReaderGuard &) = delete;
         ActiveReaderGuard &operator=(const ActiveReaderGuard &) = delete;
+
+    private:
+        const size_t m_stripe;
     };
 
     // Background cleanup thread. Uses std::thread (not jthread) because these are namespace-scope statics:
@@ -510,7 +581,7 @@ namespace
             return; // Shutdown or forced cleanup in progress, skip
         }
 
-        if (s_cache_shards.empty())
+        if (!s_cache_shards)
             return;
 
         const size_t shard_count = s_shard_count.load(std::memory_order_acquire);
@@ -522,7 +593,7 @@ namespace
 
         for (size_t i = 0; i < shard_count; ++i)
         {
-            std::unique_lock<SrwSharedMutex> shard_lock(*s_shard_mutexes[i], std::try_to_lock);
+            std::unique_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx, std::try_to_lock);
             if (shard_lock.owns_lock())
             {
                 cleanup_expired_entries_in_shard(s_cache_shards[i], current_ts, expiry_ns);
@@ -660,7 +731,7 @@ namespace
      */
     void invalidate_range_internal(uintptr_t address, size_t size) noexcept
     {
-        if (s_cache_shards.empty() || size == 0)
+        if (!s_cache_shards || size == 0)
             return;
 
         // Guard against address + size wrapping around the address space.
@@ -675,7 +746,7 @@ namespace
             bool invalidated = false;
             for (size_t retry = 0; retry < MAX_INVALIDATION_RETRIES; ++retry)
             {
-                std::unique_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx], std::try_to_lock);
+                std::unique_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx, std::try_to_lock);
                 if (!lock.owns_lock())
                 {
                     // Shard is held by another writer - yield and retry rather than block.
@@ -725,24 +796,20 @@ namespace
 
         try
         {
-            s_cache_shards.resize(shard_count);
-            s_shard_mutexes.resize(shard_count);
-            s_in_flight = std::make_unique<std::atomic<char>[]>(shard_count);
+            // One allocation for the whole fixed-size array; each shard default-constructs its inline mutex and
+            // in_flight flag in place (no per-shard heap allocation, no relocation).
+            s_cache_shards = std::make_unique<CacheShard[]>(shard_count);
             for (size_t i = 0; i < shard_count; ++i)
             {
                 s_cache_shards[i].entries.reserve(hard_max_per_shard);
                 s_cache_shards[i].capacity = entries_per_shard;
                 s_cache_shards[i].max_capacity = hard_max_per_shard;
-                s_shard_mutexes[i] = std::make_unique<SrwSharedMutex>();
-                s_in_flight[i].store(0, std::memory_order_relaxed);
             }
         }
         catch (const std::bad_alloc &)
         {
             Logger::get_instance().error("MemoryCache: Failed to allocate memory for cache shards.");
-            s_cache_shards.clear();
-            s_shard_mutexes.clear();
-            s_in_flight.reset();
+            s_cache_shards.reset();
             // Reset initialization flag so retry can work
             s_cache_initialized.store(false, std::memory_order_relaxed);
             return false;
@@ -772,7 +839,7 @@ namespace
 
         // Try to claim in-flight status (stampede coalescing)
         char expected = 0;
-        if (s_in_flight[shard_idx].compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+        if (shard.in_flight.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
         {
             // We are the leader - perform VirtualQuery
             const bool result = VirtualQuery(address, &mbi_out, sizeof(mbi_out)) != 0;
@@ -780,12 +847,12 @@ namespace
 
             if (result)
             {
-                std::unique_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx]);
+                std::unique_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx);
                 update_shard_with_region(shard, mbi_out, now_ns);
             }
 
             // Release in-flight status
-            s_in_flight[shard_idx].store(0, std::memory_order_release);
+            shard.in_flight.store(0, std::memory_order_release);
             return result;
         }
         else
@@ -797,11 +864,11 @@ namespace
 
             for (size_t yield_count = 0; yield_count < MAX_FOLLOWER_YIELDS; ++yield_count)
             {
-                if (s_in_flight[shard_idx].load(std::memory_order_acquire) == 0)
+                if (shard.in_flight.load(std::memory_order_acquire) == 0)
                 {
                     // Query completed, check cache
                     const uintptr_t addr_val = reinterpret_cast<uintptr_t>(address);
-                    std::shared_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx]);
+                    std::shared_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx);
                     CachedMemoryRegionInfo *cached = find_in_shard(shard, addr_val, 1, current_time_ns(), expiry_ns);
                     if (cached)
                     {
@@ -823,16 +890,16 @@ namespace
 
             // Retry as leader if follower wait timed out
             expected = 0;
-            if (s_in_flight[shard_idx].compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
+            if (shard.in_flight.compare_exchange_strong(expected, 1, std::memory_order_acq_rel))
             {
                 const bool result = VirtualQuery(address, &mbi_out, sizeof(mbi_out)) != 0;
                 if (result)
                 {
-                    std::unique_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx]);
+                    std::unique_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx);
                     const uint64_t now_ns = current_time_ns();
                     update_shard_with_region(shard, mbi_out, now_ns);
                 }
-                s_in_flight[shard_idx].store(0, std::memory_order_release);
+                shard.in_flight.store(0, std::memory_order_release);
                 return result;
             }
 
@@ -1196,15 +1263,11 @@ void DetourModKit::Memory::clear_cache()
     // deadlocking.
     for (size_t i = 0; i < shard_count; ++i)
     {
-        auto &mutex_ptr = s_shard_mutexes[i];
-        if (mutex_ptr)
-        {
-            std::unique_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
-            s_cache_shards[i].entries.clear();
-            s_cache_shards[i].lru_index.clear();
-            s_cache_shards[i].sorted_ranges.clear();
-            s_in_flight[i].store(0, std::memory_order_relaxed);
-        }
+        std::unique_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
+        s_cache_shards[i].entries.clear();
+        s_cache_shards[i].lru_index.clear();
+        s_cache_shards[i].sorted_ranges.clear();
+        s_cache_shards[i].in_flight.store(0, std::memory_order_relaxed);
     }
 
     s_stats.cache_hits.store(0, std::memory_order_relaxed);
@@ -1251,16 +1314,20 @@ void DetourModKit::Memory::shutdown_cache()
     // protocol so the store-buffering (Dekker) race against the reader-count load below is forbidden by the single
     // total order. s_shard_count stays release because readers only read it after passing the seq_cst
     // s_cache_initialized gate.
+    // Capture the shard count before zeroing it: the destroy loop below needs the array length, and s_cache_shards is
+    // a fixed-size array (no size() of its own). The array is never resized between here and the reset() below.
+    const size_t shard_count = s_shard_count.load(std::memory_order_acquire);
+
     s_cache_initialized.store(false, std::memory_order_seq_cst);
     s_shard_count.store(0, std::memory_order_release);
 
-    // Wait for in-flight readers to finish before destroying data structures. Readers increment s_active_readers on
-    // entry and decrement on exit. ActiveReaderGuard is RAII so readers always decrement; this loop is bounded by the
-    // maximum time a single cache lookup can take. Escalate from yield to sleep to avoid burning CPU if a reader is
-    // preempted by the OS scheduler.
+    // Wait for in-flight readers to finish before destroying data structures. Readers increment their reader stripe on
+    // entry and decrement on exit; active_reader_total() sums the stripes. ActiveReaderGuard is RAII so readers always
+    // decrement; this loop is bounded by the maximum time a single cache lookup can take. Escalate from yield to sleep
+    // to avoid burning CPU if a reader is preempted by the OS scheduler.
     constexpr int yield_spins = 4096;
     int spins = 0;
-    while (s_active_readers.load(std::memory_order_seq_cst) > 0)
+    while (active_reader_total() > 0)
     {
         if (spins < yield_spins)
         {
@@ -1274,21 +1341,15 @@ void DetourModKit::Memory::shutdown_cache()
     }
 
     // All readers have exited - safe to destroy data structures
-    const size_t shard_count = s_cache_shards.size();
     for (size_t i = 0; i < shard_count; ++i)
     {
-        if (s_shard_mutexes[i])
-        {
-            std::unique_lock<SrwSharedMutex> shard_lock(*s_shard_mutexes[i]);
-            s_cache_shards[i].entries.clear();
-            s_cache_shards[i].lru_index.clear();
-            s_cache_shards[i].sorted_ranges.clear();
-        }
+        std::unique_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
+        s_cache_shards[i].entries.clear();
+        s_cache_shards[i].lru_index.clear();
+        s_cache_shards[i].sorted_ranges.clear();
     }
 
-    s_cache_shards.clear();
-    s_shard_mutexes.clear();
-    s_in_flight.reset();
+    s_cache_shards.reset();
 
     // Reset all stats and config so a subsequent init_cache starts from a clean state
     s_stats.cache_hits.store(0, std::memory_order_relaxed);
@@ -1333,15 +1394,13 @@ std::string DetourModKit::Memory::get_cache_stats()
     {
         ActiveReaderGuard reader_guard;
         const size_t active_shard_count = s_shard_count.load(std::memory_order_acquire);
+        // A non-zero shard count implies s_cache_shards is allocated (init publishes the count after the array) and the
+        // reader guard keeps it alive; when the count is zero the loop simply does not run.
         for (size_t i = 0; i < active_shard_count; ++i)
         {
-            auto &mutex_ptr = s_shard_mutexes[i];
-            if (mutex_ptr)
-            {
-                std::shared_lock<SrwSharedMutex> shard_lock(*mutex_ptr);
-                total_entries += s_cache_shards[i].entries.size();
-                total_hard_max += s_cache_shards[i].max_capacity;
-            }
+            std::shared_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
+            total_entries += s_cache_shards[i].entries.size();
+            total_hard_max += s_cache_shards[i].max_capacity;
         }
     }
 
@@ -1385,7 +1444,8 @@ void DetourModKit::Memory::invalidate_range(const void *address, size_t size)
     invalidate_range_internal(addr_val, size);
 
     // request_cleanup may trigger on-demand cleanup_expired_entries(force=false) which iterates shards without
-    // s_cache_state_mutex. Keep s_active_readers > 0 so shutdown_cache cannot destroy shards during the cleanup pass.
+    // s_cache_state_mutex. The ActiveReaderGuard held by this call keeps a reader stripe non-zero so shutdown_cache
+    // cannot destroy shards during the cleanup pass.
     request_cleanup();
 }
 
@@ -1446,7 +1506,7 @@ namespace
 
         // Fast path: blocking shared lock for concurrent read access (multiple readers allowed)
         {
-            std::shared_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx]);
+            std::shared_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx);
             CachedMemoryRegionInfo *cached_info =
                 find_in_shard(s_cache_shards[shard_idx], query_addr_val, size, now_ns, expiry_ns);
             if (cached_info)
@@ -1601,7 +1661,7 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
     const uint64_t expiry_ns = configured_expiry_ns();
 
     // Non-blocking: try_lock_shared to avoid stalling latency-sensitive threads
-    std::shared_lock<SrwSharedMutex> lock(*s_shard_mutexes[shard_idx], std::try_to_lock);
+    std::shared_lock<SrwSharedMutex> lock(s_cache_shards[shard_idx].mtx, std::try_to_lock);
     if (!lock.owns_lock())
         return ReadableStatus::Unknown;
 

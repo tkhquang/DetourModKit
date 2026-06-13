@@ -1341,6 +1341,58 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
+TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
+{
+    // The reader-tracking count is striped across many per-thread cache lines; shutdown_cache must sum every stripe to
+    // drain safely. Drive is_readable from many threads (round-robin stripe assignment puts them on distinct stripes)
+    // overlapping shutdown, then assert every reader finished without a crash -- i.e. shutdown waited for all stripes,
+    // not just one. If the drain summed only a single stripe a reader on another stripe could touch shards freed out
+    // from under it.
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+
+    constexpr unsigned READER_THREADS = 16;
+    constexpr int READS_PER_THREAD = 5000;
+    std::atomic<unsigned> started{0};
+    std::atomic<unsigned> finished{0};
+    std::vector<std::thread> readers;
+    readers.reserve(READER_THREADS);
+    for (unsigned t = 0; t < READER_THREADS; ++t)
+    {
+        readers.emplace_back(
+            [&]()
+            {
+                for (int i = 0; i < READS_PER_THREAD; ++i)
+                {
+                    // Count the thread as started only once it is actually in the read loop, so the main thread's
+                    // wait gates on readers that are hammering reads rather than on threads that have merely spawned.
+                    if (i == 0)
+                    {
+                        started.fetch_add(1, std::memory_order_acq_rel);
+                    }
+                    Memory::is_readable(mem, 4);
+                }
+                finished.fetch_add(1, std::memory_order_acq_rel);
+            });
+    }
+    // Wait until every reader is live and hammering, so shutdown overlaps in-flight reads on many stripes.
+    while (started.load(std::memory_order_acquire) < READER_THREADS)
+    {
+        std::this_thread::yield();
+    }
+
+    Memory::shutdown_cache();
+    for (auto &r : readers)
+    {
+        r.join();
+    }
+    EXPECT_EQ(finished.load(std::memory_order_acquire), READER_THREADS);
+
+    // Re-init for TearDown
+    (void)Memory::init_cache();
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
 TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
 {
     Memory::shutdown_cache();

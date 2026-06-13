@@ -29,8 +29,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <random>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace
@@ -225,6 +227,146 @@ namespace
                     naive_throughput, 1.0 / speedup);
         std::printf("%-32s\t%-6s\t%9zu\t%12s\t%14s\t%9.2fx\n", scenario.name, "ratio", iterations, "-", "-", speedup);
     }
+
+    // Prefilter isolation: measure the dmk_memchr sweep on its own. A sentinel byte is scrubbed out of the whole
+    // buffer and re-planted exactly once near the end, so find_pattern does a single full-buffer prefilter sweep
+    // followed by one verify -- the measured wall time is the prefilter's, not the verify tier's. libc memchr over the
+    // same buffer is the reference bar: the no-regression half of the gate is "not slower than the libc memchr the
+    // earlier libc-backed scanner used", and the SIMD tier must beat the scalar/SWAR build by >= 1.5x. The production
+    // scanner never calls libc memchr (it would re-arm the AddressSanitizer interceptor the self-provided dmk_memchr
+    // exists to avoid); this row exists only to anchor the comparison.
+    void run_prefilter_bench(std::size_t buffer_size, std::uint64_t seed, std::size_t iterations, std::size_t samples)
+    {
+        constexpr std::uint8_t SENTINEL = 0x37;
+        auto buffer = make_codelike_buffer(buffer_size, seed);
+        // Scrub every naturally-occurring sentinel; replace it with a common opcode so the distribution stays
+        // code-like. After the scrub the only sentinel is the one planted below, so the anchor byte is unique and the
+        // sweep walks the whole buffer in one dmk_memchr call.
+        for (auto &b : buffer)
+        {
+            if (b == std::byte{SENTINEL})
+            {
+                b = std::byte{0x90};
+            }
+        }
+        const std::size_t plant_offset = buffer_size - 4096u;
+        plant_signature(buffer, plant_offset, {SENTINEL, 0xDE, 0xAD, 0xBE, 0xEF, 0xC0, 0x1D, 0xF0});
+
+        auto parsed = DetourModKit::Scanner::parse_aob("37 DE AD BE EF C0 1D F0");
+        if (!parsed.has_value())
+        {
+            std::fprintf(stderr, "[bench] prefilter AOB parse failed\n");
+            return;
+        }
+        const CompiledPattern pattern = std::move(*parsed);
+
+        const auto *warm = DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), pattern);
+        if (warm == nullptr)
+        {
+            std::fprintf(stderr, "[bench] prefilter signature not found\n");
+            return;
+        }
+        s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(warm), std::memory_order_relaxed);
+
+        const double us_scanner =
+            median_us_per_iter(iterations, samples,
+                               [&]()
+                               {
+                                   const auto *m =
+                                       DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), pattern);
+                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+                               });
+
+        const double us_libc =
+            median_us_per_iter(iterations, samples,
+                               [&]()
+                               {
+                                   const void *m = std::memchr(buffer.data(), SENTINEL, buffer.size());
+                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+                               });
+
+        const double bytes = static_cast<double>(buffer_size);
+        const auto gib_per_s = [bytes](double us) { return bytes / (us * 1.0e-6) / (1024.0 * 1024.0 * 1024.0); };
+
+        std::printf("\nPrefilter sweep (dmk_memchr isolation, %zu MiB buffer, unique sentinel anchor)\n",
+                    buffer_size / (1024u * 1024u));
+        std::printf("%-22s\t%12s\t%12s\n", "impl", "median_us", "GiB/s");
+        std::printf("%-22s\t%12.3f\t%12.2f\n", "dmk_memchr (scanner)", us_scanner, gib_per_s(us_scanner));
+        std::printf("%-22s\t%12.3f\t%12.2f\n", "libc memchr (ref)", us_libc, gib_per_s(us_libc));
+        std::printf("dmk/libc throughput ratio: %.2fx (>= 1.00x means no regression below libc)\n",
+                    us_libc / us_scanner);
+    }
+
+    /// Returns the human-readable name of the SIMD verify tier find_pattern selects at runtime.
+    const char *active_simd_tier_name()
+    {
+        switch (DetourModKit::Scanner::active_simd_level())
+        {
+        case DetourModKit::Scanner::SimdLevel::Avx512:
+            return "AVX-512";
+        case DetourModKit::Scanner::SimdLevel::Avx2:
+            return "AVX2";
+        case DetourModKit::Scanner::SimdLevel::Sse2:
+            return "SSE2";
+        case DetourModKit::Scanner::SimdLevel::Scalar:
+            return "Scalar";
+        }
+        return "?";
+    }
+
+    // Verify-throughput isolation for the SIMD verify tiers -- the AVX-512 throughput gate harness. The buffer is a
+    // long run of one byte with a different byte sprinkled in at a fixed stride, and the pattern is a long all-literal
+    // run of the majority byte (stride < pattern_len so no position ever fully matches). Every position is an anchor
+    // hit, so the prefilter returns immediately and each candidate's verify proceeds through several SIMD chunks before
+    // it reaches the next sprinkled byte -- the scan is dominated by deep per-candidate verification, not the
+    // prefilter. On an AVX-512 build the 64-byte verify body runs; comparing this throughput between an AVX-512 build
+    // and an AVX2 build on the same AVX-512 host is the verify tier's >= 30% throughput gate (see the avx512 CI
+    // workflow). On a host without AVX-512 it measures the AVX2 tier, which is the fallback the AVX-512 build also uses
+    // there.
+    void run_verify_bench(std::size_t buffer_size, std::size_t pattern_len, std::size_t stride, std::size_t iterations,
+                          std::size_t samples)
+    {
+        constexpr std::uint8_t MAJORITY = 0xAA;
+        constexpr std::uint8_t BREAK = 0xBB;
+        std::vector<std::byte> buffer(buffer_size, std::byte{MAJORITY});
+        for (std::size_t i = stride; i < buffer_size; i += stride)
+        {
+            buffer[i] = std::byte{BREAK};
+        }
+
+        std::string aob;
+        aob.reserve(pattern_len * 3);
+        for (std::size_t i = 0; i < pattern_len; ++i)
+        {
+            aob += "AA ";
+        }
+        auto parsed = DetourModKit::Scanner::parse_aob(aob);
+        if (!parsed.has_value())
+        {
+            std::fprintf(stderr, "[bench] verify AOB parse failed\n");
+            return;
+        }
+        const CompiledPattern pattern = std::move(*parsed);
+
+        const double us =
+            median_us_per_iter(iterations, samples,
+                               [&]()
+                               {
+                                   const auto *m =
+                                       DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), pattern);
+                                   s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
+                               });
+
+        const double bytes = static_cast<double>(buffer_size);
+        const double gib_per_s = bytes / (us * 1.0e-6) / (1024.0 * 1024.0 * 1024.0);
+        std::printf("\nVerify throughput (deep verify, %zu-byte literal pattern, break stride %zu, %zu MiB buffer)\n",
+                    pattern_len, stride, buffer_size / (1024u * 1024u));
+        std::printf("%-22s\t%12s\t%12s\n", "tier", "median_us", "GiB/s");
+        std::printf("%-22s\t%12.3f\t%12.2f\n", active_simd_tier_name(), us, gib_per_s);
+        // Machine-readable line for the AVX-512 throughput-gate CI job (avx512.yml): it greps this from the AVX-512
+        // build and the AVX2 build and asserts the ratio clears the gate.
+        std::printf("#GATE\tverify_gib_per_s\t%.4f\t%s\n", gib_per_s, active_simd_tier_name());
+    }
 } // namespace
 
 int main()
@@ -239,6 +381,9 @@ int main()
     std::printf("SIMD tier: ");
     switch (DetourModKit::Scanner::active_simd_level())
     {
+    case DetourModKit::Scanner::SimdLevel::Avx512:
+        std::printf("AVX-512\n");
+        break;
     case DetourModKit::Scanner::SimdLevel::Avx2:
         std::printf("AVX2\n");
         break;
@@ -261,7 +406,7 @@ int main()
 
     plant_signature(buffer, PLANT_OFFSET, {0x48, 0x8B, 0x05, 0x37, 0xDE, 0xAD, 0xBE, 0xEF});
 
-    // Scenarios. Each runs the planted buffer through both anchor variants of the SAME find_pattern code path.
+    // Scenarios. Each runs the planted buffer through both anchor variants of the same find_pattern code path.
     // Mismatches abort the scenario, which doubles as a correctness check.
     constexpr std::array<Scenario, 6> scenarios = {{
         {"common_first_rare_buried_8", "48 8B 05 37 DE AD BE EF"},
@@ -284,6 +429,21 @@ int main()
     {
         run_scenario(s, buffer, ITERS, SAMPLES);
     }
+
+    // Prefilter-bound isolation on a larger buffer so the dmk_memchr sweep dominates and per-call overhead is
+    // amortized. This isolates the prefilter so a SIMD prefilter change can be gated against the scalar/SWAR baseline
+    // and the libc reference.
+    constexpr std::size_t PREFILTER_BUFFER = 64u * 1024u * 1024u;
+    constexpr std::size_t PREFILTER_ITERS = 20;
+    run_prefilter_bench(PREFILTER_BUFFER, SEED, PREFILTER_ITERS, SAMPLES);
+
+    // Verify-throughput isolation (AVX-512 throughput gate harness). Every byte is an anchor hit so verify dominates;
+    // the 96-byte literal pattern and 64-byte break stride make each candidate cover one-plus full 64-byte chunk.
+    constexpr std::size_t VERIFY_BUFFER = 2u * 1024u * 1024u;
+    constexpr std::size_t VERIFY_PATTERN_LEN = 96;
+    constexpr std::size_t VERIFY_STRIDE = 64;
+    constexpr std::size_t VERIFY_ITERS = 10;
+    run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE, VERIFY_ITERS, SAMPLES);
 
     // Touch the sink so it can never be optimized away.
     std::printf("\n(sink=%llu)\n", static_cast<unsigned long long>(s_sink.load(std::memory_order_relaxed)));

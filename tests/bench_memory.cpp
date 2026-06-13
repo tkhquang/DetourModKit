@@ -228,6 +228,58 @@ namespace
         return percentiles(all);
     }
 
+    // Warm-HIT contention throughput. Every thread hammers is_readable over a small, pre-warmed pool so almost all
+    // lookups hit the cache. With the lookup reduced to a per-shard shared lock plus the reader-tracking counter, the
+    // throughput ceiling is set by cross-thread cache-line contention on those words -- exactly what the striped reader
+    // counters and the per-shard cache-line alignment target. Returns aggregate throughput (million is_readable/s),
+    // the metric that collapses when readers re-serialize on one shared line. A warm address re-misses at most once per
+    // cache TTL, so the periodic re-warm is negligible against the hit stream.
+    double run_warm_contention(const std::vector<void *> &pool, unsigned threads, std::size_t ops_per_thread)
+    {
+        std::atomic<bool> go{false};
+        std::atomic<unsigned> ready{0};
+        std::vector<std::thread> workers;
+        workers.reserve(threads);
+
+        for (unsigned t = 0; t < threads; ++t)
+        {
+            workers.emplace_back(
+                [&, t]()
+                {
+                    std::size_t idx = (t * 1597u) % pool.size();
+                    std::uint32_t local = 0;
+                    ready.fetch_add(1, std::memory_order_acq_rel);
+                    while (!go.load(std::memory_order_acquire))
+                    {
+                    }
+                    for (std::size_t i = 0; i < ops_per_thread; ++i)
+                    {
+                        local += Mem::is_readable(pool[idx], 8) ? 1u : 0u;
+                        ++idx;
+                        if (idx >= pool.size())
+                            idx = 0;
+                    }
+                    sink(local);
+                });
+        }
+
+        // Start timing only once every worker is spun up and waiting, so the window is the parallel work rather than
+        // thread creation.
+        while (ready.load(std::memory_order_acquire) < threads)
+        {
+        }
+        const auto start = Clock::now();
+        go.store(true, std::memory_order_release);
+        for (auto &w : workers)
+            w.join();
+        const auto end = Clock::now();
+
+        const double secs =
+            static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()) / 1.0e9;
+        const double total_ops = static_cast<double>(threads) * static_cast<double>(ops_per_thread);
+        return secs > 0.0 ? (total_ops / secs) / 1.0e6 : 0.0;
+    }
+
     // -----------------------------------------------------------------------
     // Probe model: a hook resolves one object and reads K dependent fields off it, spanning a few distinct heap objects
     // rather than a single page.
@@ -501,6 +553,27 @@ int main()
                                                     });
     report("seh_read_chain<u64>", ns_read_chain);
     std::printf("  gated/seh_read_chain ratio: %.1fx\n", ns_read_chain > 0 ? ns_gated_walk / ns_read_chain : 0.0);
+
+    // --- Phase 9: warm-HIT is_readable throughput under contention. The cache stays on and a small pre-warmed pool
+    // keeps almost every lookup a hit, so this isolates the cross-thread cost of the reader-tracking counter and the
+    // per-shard shared lock -- the path the striped reader counters and cache-line-aligned shards target. Throughput
+    // that keeps scaling with thread count (rather than flattening as readers serialize on one counter line) is the
+    // win this phase measures.
+    {
+        constexpr std::size_t WARM_POOL = 256; // fits the cache (<= 16 shards x 32 hard-max) so all entries stay warm
+        constexpr std::size_t WARM_OPS = 1u << 20; // is_readable calls per thread
+        auto warm_pool = make_churn_pool(WARM_POOL);
+        for (void *p : warm_pool)
+            sink(Mem::is_readable(p, 8) ? 1u : 0u); // pre-warm every entry into the cache
+
+        std::printf("\n[9] is_readable warm-HIT throughput under contention (Mops/s, higher is better)\n");
+        for (const unsigned threads : {1u, 2u, 4u, 8u})
+        {
+            const double mops = run_warm_contention(warm_pool, threads, WARM_OPS);
+            std::printf("  %u thread(s): %10.2f Mops/s\n", threads, mops);
+            std::printf("#TSV\twarm_hit_mops_%u_threads\t%.2f\n", threads, mops);
+        }
+    }
 
     // --- TSV block for machine parsing.
     std::printf("\n#TSV\tscenario\tns_per_call\n");
