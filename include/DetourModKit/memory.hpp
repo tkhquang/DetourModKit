@@ -54,14 +54,18 @@ namespace DetourModKit
         }
     }
 
-    // Maximum write size for write_bytes (64 MiB)
+    /// Maximum write size for write_bytes (64 MiB).
     inline constexpr size_t MAX_WRITE_SIZE = 64 * 1024 * 1024;
 
-    // Memory cache configuration defaults
+    /// Default number of region entries the memory cache holds.
     inline constexpr size_t DEFAULT_CACHE_SIZE = 256;
+    /// Default cache entry lifetime, in milliseconds, before a re-query.
     inline constexpr unsigned int DEFAULT_CACHE_EXPIRY_MS = 50;
+    /// Minimum permitted cache size.
     inline constexpr size_t MIN_CACHE_SIZE = 1;
+    /// Default number of cache shards, striped to reduce reader contention.
     inline constexpr size_t DEFAULT_CACHE_SHARD_COUNT = 16;
+    /// Default multiplier bounding the cache's maximum size relative to its configured size.
     inline constexpr size_t DEFAULT_MAX_CACHE_SIZE_MULTIPLIER = 2;
 
     namespace Memory
@@ -188,11 +192,18 @@ namespace DetourModKit
 
         /**
          * @brief Non-blocking readability check that avoids contention on shared locks.
-         * @details Attempts a try-lock on the cache shard. Returns Unknown if the lock cannot be acquired, allowing
-         *          callers on latency-sensitive threads to fall back to SEH instead of stalling.
+         * @details Non-blocking only once init_cache() has published the cache: it tries a shared try-lock on the
+         *          owning shard and answers from the cached protection on a hit. It returns Unknown -- so a
+         *          latency-sensitive caller can fall back to an SEH-guarded read instead of stalling -- in three
+         *          cases: the shard try-lock is contended, the shard holds no live entry for the range (a cache
+         *          miss; it does not issue a blocking VirtualQuery here), or the cache is mid-publication (the
+         *          initialized flag is set but the shard array is not yet visible). Before init_cache() (or after
+         *          shutdown_cache()) there is no cache to consult, so it falls back to a single blocking
+         *          VirtualQuery and returns a definite Readable or NotReadable, never Unknown.
          * @param address Starting address of the memory region.
          * @param size Number of bytes in the memory region to check.
-         * @return ReadableStatus indicating readable, not readable, or unknown (lock busy).
+         * @return ReadableStatus: Readable, NotReadable, or Unknown (shard lock busy, cache miss, or the
+         *         init-publication window; Unknown is only returned once the cache is initialized).
          */
         [[nodiscard]] ReadableStatus is_readable_nonblocking(const void *address, size_t size);
 

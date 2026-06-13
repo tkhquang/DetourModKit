@@ -19,14 +19,23 @@
 
 namespace DetourModKit
 {
+    /// Default capacity (slot count) of the bounded MPMC message queue.
     inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
+    /// Default number of messages the writer drains per write batch.
     inline constexpr size_t DEFAULT_BATCH_SIZE = 64;
+    /// Default interval between periodic writer flushes.
     inline constexpr auto DEFAULT_FLUSH_INTERVAL = std::chrono::milliseconds(100);
+    /// Maximum length, in bytes, of a single log message.
     inline constexpr size_t MAX_MESSAGE_SIZE = 16777216;
+    /// Default spin-backoff iteration count before a producer yields/parks.
     inline constexpr size_t DEFAULT_SPIN_BACKOFF_ITERATIONS = 32;
+    /// Default timeout for a blocking flush to complete.
     inline constexpr auto DEFAULT_FLUSH_TIMEOUT = std::chrono::milliseconds(500);
+    /// Byte size of one StringPool overflow block.
     inline constexpr size_t MEMORY_POOL_BLOCK_SIZE = 4096;
+    /// Number of overflow blocks the StringPool preallocates.
     inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 64;
+    /// Number of allocation slots carved from each StringPool block.
     inline constexpr size_t POOL_SLOTS_PER_BLOCK = 16;
 
     /**
@@ -116,7 +125,11 @@ namespace DetourModKit
     /**
      * @struct LogMessage
      * @brief A log entry with inline buffer optimization and overflow handling.
-     * @details Messages <= 512 bytes are stored inline. Larger messages use heap allocation via StringPool.
+     * @details Messages <= 512 bytes are stored inline. Larger messages use heap allocation via StringPool. This is a
+     *          move-only transport/value type (copy deleted, move defined) carried by value through the queue; it
+     *          keeps plain field names rather than the m_ member prefix, per the POD-struct naming convention, even
+     *          though @ref overflow is an owned heap pointer -- its lifetime is self-contained, released by reset()
+     *          and the destructor, so no class invariant rides on member encapsulation.
      */
     struct LogMessage
     {

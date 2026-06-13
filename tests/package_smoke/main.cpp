@@ -1,5 +1,11 @@
 #include <DetourModKit.hpp>
 
+// The umbrella header above does not pull in these three public headers. Include them directly so the installed
+// package's non-umbrella-reachable headers are also compile-checked against the consumer toolchain by this smoke test.
+#include <DetourModKit/config_watcher.hpp>
+#include <DetourModKit/srw_shared_mutex.hpp>
+#include <DetourModKit/win_file_stream.hpp>
+
 int main()
 {
     static_assert(DMK_VERSION_AT_LEAST(0, 0, 0));
