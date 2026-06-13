@@ -211,6 +211,69 @@ TEST(AnchorsTest, ResolveAllWritesParallelReport)
     EXPECT_EQ(out[2].kind, Anchors::AnchorKind::CallArgHome);
 }
 
+TEST(AnchorsTest, ResolveAllParallelMatchesSerialReport)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});
+    reg.put(0x200, {0xDE, 0xAD, 0xBE, 0xEF});
+
+    Scanner::AddrCandidate code_cands[] = {
+        {"add-imm", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate global_cands[] = {
+        {"marker", "DE AD BE EF", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate absent_cands[] = {
+        {"absent", "13 57 9B DF 02 46 8A CE", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    Anchors::Anchor manual{};
+    manual.label = "manual";
+    manual.kind = Anchors::AnchorKind::Manual;
+    manual.manual_value = 0x1234;
+
+    Anchors::Anchor code{};
+    code.label = "code";
+    code.kind = Anchors::AnchorKind::CodeOperand;
+    code.site = code_cands;
+    code.operand_index = 1;
+
+    Anchors::Anchor global{};
+    global.label = "global";
+    global.kind = Anchors::AnchorKind::RipGlobal;
+    global.site = global_cands;
+
+    Anchors::Anchor absent{};
+    absent.label = "absent";
+    absent.kind = Anchors::AnchorKind::RipGlobal;
+    absent.site = absent_cands;
+
+    Anchors::Anchor unsupported{};
+    unsupported.label = "future";
+    unsupported.kind = Anchors::AnchorKind::CallArgHome;
+
+    const Anchors::Anchor table[] = {manual, code, global, absent, unsupported};
+    Anchors::ResolvedAnchor serial[5];
+    Anchors::ResolvedAnchor parallel[5];
+
+    const std::size_t serial_count = Anchors::resolve_all(table, serial, reg.range());
+    const std::size_t parallel_count = Anchors::resolve_all_parallel(table, parallel, reg.range(), 4);
+    // Pin both counts to the known table size so the per-entry loop below cannot pass vacuously (a bug that
+    // wrote zero entries would still satisfy a bare serial == parallel check).
+    ASSERT_EQ(serial_count, 5u);
+    ASSERT_EQ(parallel_count, 5u);
+    ASSERT_EQ(parallel_count, serial_count);
+
+    for (std::size_t i = 0; i < serial_count; ++i)
+    {
+        EXPECT_EQ(parallel[i].label, serial[i].label) << "entry=" << i;
+        EXPECT_EQ(parallel[i].kind, serial[i].kind) << "entry=" << i;
+        EXPECT_EQ(parallel[i].status, serial[i].status) << "entry=" << i;
+        EXPECT_EQ(parallel[i].value, serial[i].value) << "entry=" << i;
+    }
+}
+
 TEST(AnchorsTest, ResolveAllRespectsCapacity)
 {
     Anchors::Anchor anchor{};

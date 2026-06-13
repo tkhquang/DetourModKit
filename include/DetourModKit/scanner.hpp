@@ -557,6 +557,46 @@ namespace DetourModKit
         };
 
         /**
+         * @struct CascadeRequest
+         * @brief One cascade resolver request in a parallel batch.
+         * @details A plain-data request over caller-owned storage: @ref candidates and @ref label must outlive the
+         *          batch call, and any successful @ref ResolveHit::winning_name aliases the winning candidate's @ref
+         *          AddrCandidate::name. When @ref range is set the request uses the module-scoped cascade; when it is
+         *          empty the whole-process cascade is used. @ref prologue_fallback selects the matching
+         *          *_with_prologue_fallback resolver. @ref kind applies only to whole-process non-fallback requests;
+         *          module-scoped and prologue-fallback requests keep their existing serial resolver semantics.
+         */
+        struct CascadeRequest
+        {
+            /// Ordered candidates for one target.
+            std::span<const AddrCandidate> candidates;
+            /// Human-readable identifier used in log messages.
+            std::string_view label;
+            /// Optional module image scope; std::nullopt selects the whole-process resolver.
+            std::optional<Memory::ModuleRange> range = std::nullopt;
+            /// Whole-process scanner kind for non-fallback requests.
+            ScannerKind kind = ScannerKind::Executable;
+            /// Enable the hooked-prologue recovery variant for this request.
+            bool prologue_fallback = false;
+        };
+
+        /**
+         * @brief Resolves independent cascade requests concurrently.
+         * @details Fork-join resolver layer over resolve_cascade(), resolve_cascade_in_module(), and their
+         *          prologue-fallback variants. Each request is resolved by exactly one worker through the existing
+         *          serial resolver, preserving candidate order, first-success semantics, uniqueness checks, typed
+         *          errors, and @ref ResolveHit::winning_name aliasing. Results are returned in input order.
+         * @param requests Cascade requests to resolve. An empty span returns an empty vector.
+         * @param max_workers Upper bound on concurrent workers. 0 selects std::thread::hardware_concurrency(), clamped
+         *                    to the request count. The calling thread participates.
+         * @return One expected result per input request, in input order.
+         * @note Setup/control-plane only: spawns threads and allocates. Call from init or a worker thread, never from a
+         *       hook or input callback, and never under the loader lock.
+         */
+        [[nodiscard]] std::vector<std::expected<ResolveHit, ResolveError>>
+        resolve_cascade_batch(std::span<const CascadeRequest> requests, std::size_t max_workers = 0);
+
+        /**
          * @brief Try candidates in order; return the first successful address.
          * @details Each candidate's pattern is compiled via parse_aob() and searched via the scanner selected by @p
          *          kind:

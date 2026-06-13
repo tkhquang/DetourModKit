@@ -258,6 +258,24 @@ namespace DetourModKit
                                               Memory::ModuleRange range = Memory::host_module_range());
 
         /**
+         * @brief Resolves a whole anchor table concurrently.
+         * @details Parallel counterpart to @ref resolve_all. Each anchor is resolved by exactly one worker through the
+         *          same single-anchor @ref resolve path, and results are copied to @p out in input order. The serial
+         *          @ref resolve_all remains available for callers whose validator context is order-dependent.
+         * @param anchors The declarative anchor table.
+         * @param out Destination, parallel to @p anchors. At most @c out.size() entries are written.
+         * @param range Module image to resolve in. Defaults to the host EXE.
+         * @param max_workers Upper bound on concurrent workers. 0 selects std::thread::hardware_concurrency(), clamped
+         *                    to the entry count. The calling thread participates.
+         * @return The number of entries written: @c min(anchors.size(), out.size()).
+         * @note Setup/control-plane only: spawns threads and allocates. Validators may run concurrently, so validator
+         *       functions and their context must be reentrant or externally synchronized.
+         */
+        [[nodiscard]] std::size_t resolve_all_parallel(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
+                                                       Memory::ModuleRange range = Memory::host_module_range(),
+                                                       std::size_t max_workers = 0);
+
+        /**
          * @struct AnchorQuality
          * @brief Robustness summary over a resolved anchor table -- the manifest quality diagnostic.
          * @details A single-pass tally that lets a consumer see, at a glance, how update-resilient a manifest is: how

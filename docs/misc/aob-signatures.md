@@ -327,6 +327,32 @@ Key properties:
 
 > Setup/control-plane only. The batch scanners spawn and join threads, so call them at startup, during a loading screen, or on a background worker -- never from a hook or input callback, and never under the loader lock.
 
+### 4.9 Batch resolving cascades in parallel (`resolve_cascade_batch`)
+
+`scan_regions_batch` is the raw-pattern layer. Most mods resolve startup targets through cascades instead, because a cascade preserves candidate priority, `Direct` versus `RipRelative` address mapping, uniqueness checks, module bounds, and hooked-prologue recovery. `resolve_cascade_batch` lifts the same fork-join model to that resolver layer: one `CascadeRequest` is one logical target, dispatched to the existing serial resolver, with results returned in input order.
+
+```cpp
+namespace sc = DetourModKit::Scanner;
+
+sc::CascadeRequest player{};
+player.candidates = k_player_candidates;
+player.label = "player_update";
+player.range = game_range; // omit for the whole-process resolver
+
+sc::CascadeRequest camera{};
+camera.candidates = k_camera_candidates;
+camera.label = "camera_update";
+camera.range = game_range;
+camera.prologue_fallback = true;
+
+const sc::CascadeRequest requests[] = {player, camera};
+const auto results = sc::resolve_cascade_batch(requests, /*max_workers=*/4);
+```
+
+Each request keeps the serial semantics for its shape. A request with `range` set calls the module-scoped resolver; without `range` it calls the whole-process resolver, using `kind` only for the non-fallback whole-process case. `prologue_fallback = true` selects the matching `*_with_prologue_fallback` resolver. A failure is per-request (`std::expected<ResolveHit, ResolveError>`), so one missing or malformed target does not poison the rest of the batch. The request's spans and strings are non-owning and must outlive the call; `ResolveHit::winning_name` still aliases the winning candidate's `name`.
+
+> Setup/control-plane only, like the raw batch scanners. Do not call `resolve_cascade_batch` from hook callbacks, input callbacks, or DllMain.
+
 ## 5. RIP-relative resolution
 
 x86-64 code uses RIP-relative addressing heavily. The 4-byte displacement stored inside the instruction is relative to the address of the *next* instruction: `target = instruction_address + instruction_length + disp32`. DMK exposes two helpers and a set of prefix constants.
@@ -493,6 +519,19 @@ struct ResolveHit
     std::string_view winning_name;
 };
 
+struct CascadeRequest
+{
+    std::span<const AddrCandidate> candidates;
+    std::string_view label;
+    std::optional<Memory::ModuleRange> range = std::nullopt;
+    ScannerKind kind = ScannerKind::Executable;
+    bool prologue_fallback = false;
+};
+
+[[nodiscard]] std::vector<std::expected<ResolveHit, ResolveError>>
+resolve_cascade_batch(std::span<const CascadeRequest> requests,
+                      std::size_t max_workers = 0);
+
 [[nodiscard]] std::expected<ResolveHit, ResolveError>
 resolve_cascade(std::span<const AddrCandidate> candidates, std::string_view label,
                 ScannerKind kind = ScannerKind::Executable);
@@ -511,7 +550,7 @@ resolve_cascade_in_module_with_prologue_fallback(
     Memory::ModuleRange range);
 ```
 
-All four functions take a span so you can pass a `std::array`, `std::vector`, or any contiguous container. `resolve_cascade` searches with `scan_executable_regions` by default; pass `ScannerKind::Readable` to resolve data-section candidates with `scan_readable_regions` (see [4.7](#47-scanning-data-sections-scan_readable_regions)). `resolve_cascade_with_prologue_fallback` is executable-only by construction. The `_in_module` variants scope the scan to a single mapped image and reject out-of-range resolutions (see [Module-scoped cascade](#module-scoped-cascade-single-unpacked-pe)); an invalid `range` yields `ResolveError::InvalidRange`. The `label` is the human-readable tag used when the winning candidate is logged; the `winning_name` on the returned `ResolveHit` aliases the matched candidate's `name` field, so the storage that holds those `string_view`s must outlive the hit (static string literals or an `std::array` in static storage are the usual patterns). `ResolveHit::address` is the post-resolution absolute address: for `Direct` candidates it equals `match + disp_offset`, and for `RipRelative` candidates it is the target of the displacement already resolved (not the raw match pointer), so callers can hook or call it directly.
+All four serial functions take a span so you can pass a `std::array`, `std::vector`, or any contiguous container. `resolve_cascade` searches with `scan_executable_regions` by default; pass `ScannerKind::Readable` to resolve data-section candidates with `scan_readable_regions` (see [4.7](#47-scanning-data-sections-scan_readable_regions)). `resolve_cascade_with_prologue_fallback` is executable-only by construction. The `_in_module` variants scope the scan to a single mapped image and reject out-of-range resolutions (see [Module-scoped cascade](#module-scoped-cascade-single-unpacked-pe)); an invalid `range` yields `ResolveError::InvalidRange`. `resolve_cascade_batch` dispatches one `CascadeRequest` per target to the matching serial function and returns one expected result per request, in input order. The `label` is the human-readable tag used when the winning candidate is logged; the `winning_name` on the returned `ResolveHit` aliases the matched candidate's `name` field, so the storage that holds those `string_view`s must outlive the hit (static string literals or an `std::array` in static storage are the usual patterns). `ResolveHit::address` is the post-resolution absolute address: for `Direct` candidates it equals `match + disp_offset`, and for `RipRelative` candidates it is the target of the displacement already resolved (not the raw match pointer), so callers can hook or call it directly.
 
 ### 6.3 Basic usage
 

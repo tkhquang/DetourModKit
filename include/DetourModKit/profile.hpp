@@ -190,6 +190,25 @@ namespace DetourModKit
         [[nodiscard]] std::size_t resolve_all_with_profile(std::span<const Anchor> anchors,
                                                            std::span<ResolvedAnchor> out, const ScanProfile &profile,
                                                            Memory::ModuleRange range = Memory::host_module_range());
+
+        /**
+         * @brief Resolves a whole anchor table concurrently, honoring a @ref ScanProfile.
+         * @details Parallel counterpart to @ref resolve_all_with_profile. Each anchor is resolved by exactly one
+         *          worker through @ref resolve_with_profile, and results are copied to @p out in input order. Use the
+         *          serial resolver when validator context is order-dependent.
+         * @param anchors The declarative anchor table.
+         * @param out Destination, parallel to @p anchors. At most @c out.size() entries are written.
+         * @param profile The control-plane defaults and deny-list.
+         * @param range Module image to resolve in. Defaults to the host EXE.
+         * @param max_workers Upper bound on concurrent workers. 0 selects std::thread::hardware_concurrency(), clamped
+         *                    to the entry count. The calling thread participates.
+         * @return The number of entries written: @c min(anchors.size(), out.size()).
+         * @note Setup/control-plane only: spawns threads and allocates. Validators may run concurrently, so validator
+         *       functions and their context must be reentrant or externally synchronized.
+         */
+        [[nodiscard]] std::size_t resolve_all_with_profile_parallel(
+            std::span<const Anchor> anchors, std::span<ResolvedAnchor> out, const ScanProfile &profile,
+            Memory::ModuleRange range = Memory::host_module_range(), std::size_t max_workers = 0);
     } // namespace Anchors
 } // namespace DetourModKit
 

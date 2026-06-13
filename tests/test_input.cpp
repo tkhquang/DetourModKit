@@ -527,7 +527,16 @@ TEST_F(InputPollerTest, MixedKeyboardAndGamepadBindings)
 class InputManagerTest : public ::testing::Test
 {
 protected:
-    void SetUp() override { InputManager::get_instance().shutdown(); }
+    // shutdown() tears down the poller but does not reset require_focus (a persistent setting), so restore the
+    // default here. A test that flips require_focus and then aborts on an ASSERT cannot leak that state into the
+    // next test: ctest already isolates each case in its own process, and this keeps the single-process exe
+    // deterministic too, without a per-test restore that an early ASSERT would skip.
+    void SetUp() override
+    {
+        auto &mgr = InputManager::get_instance();
+        mgr.shutdown();
+        mgr.set_require_focus(true);
+    }
 
     void TearDown() override { InputManager::get_instance().shutdown(); }
 };
@@ -2566,6 +2575,32 @@ TEST_F(InputManagerTest, BindingTokenStaleAfterLiveRegister)
     mgr.register_press("b", {keyboard_key(0x42)}, []() {});
     EXPECT_FALSE(mgr.binding_token_current(token));
     EXPECT_FALSE(mgr.is_binding_active(token));
+
+    mgr.set_require_focus(true);
+}
+
+TEST_F(InputManagerTest, BindingTokenStaleAfterConsumeToggle)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.set_require_focus(false);
+    mgr.register_press("consume_test", {keyboard_key(0x41)}, []() {});
+    mgr.start(std::chrono::milliseconds(2));
+
+    const BindingToken old_token = mgr.acquire_binding_token("consume_test");
+    ASSERT_TRUE(old_token.valid());
+    ASSERT_TRUE(mgr.binding_token_current(old_token));
+
+    mgr.set_consume("consume_test", true);
+    EXPECT_FALSE(mgr.binding_token_current(old_token));
+    EXPECT_FALSE(mgr.is_binding_active(old_token));
+
+    mgr.set_consume("consume_test", false);
+    EXPECT_FALSE(mgr.binding_token_current(old_token));
+    EXPECT_FALSE(mgr.is_binding_active(old_token));
+
+    const BindingToken fresh_token = mgr.acquire_binding_token("consume_test");
+    EXPECT_TRUE(fresh_token.valid());
+    EXPECT_TRUE(mgr.binding_token_current(fresh_token));
 
     mgr.set_require_focus(true);
 }

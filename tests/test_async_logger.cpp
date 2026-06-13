@@ -1825,14 +1825,18 @@ TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
     AsyncLoggerConfig config;
     config.batch_size = 1;
     config.queue_capacity = 1024;
-    config.flush_interval = std::chrono::milliseconds{400};
+    config.flush_interval = std::chrono::milliseconds{2000};
 
     auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
     auto log_mutex = std::make_shared<std::mutex>();
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
     constexpr int ITERATIONS = 128;
-    const auto flush_budget = std::chrono::milliseconds{300}; // strictly below flush_interval
+    // Well below flush_interval, with wide margin on both sides: a lost wakeup waits the full interval
+    // (2000 ms), so a 1000 ms budget still catches it, while the headroom above the sub-millisecond normal
+    // drain absorbs a one-off synchronous-flush or scheduler stall on a loaded runner (batch_size 1 flushes
+    // the file per message).
+    const auto flush_budget = std::chrono::milliseconds{1000};
     auto worst = std::chrono::steady_clock::duration::zero();
 
     for (int i = 0; i < ITERATIONS; ++i)
