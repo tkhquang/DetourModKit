@@ -316,6 +316,7 @@ The decoder header lives under `src/` (not the public include tree), so the test
 | `KeyStateCacheTest.CachesUpStateWithoutReProbing` | A released key is cached as a real sampled state, not confused with "not yet probed". |
 | `KeyStateCacheTest.OutOfRangeVkReadsAsNotPressedWithoutProbing` | Invalid VK codes fail closed and never call the probe. |
 | `InputPollerPollLoopSafety.BindingGrowthPastStartupReserveKeepsPollThreadAlive` | Live binding growth past the startup callback-staging reserve does not stop the poll thread. |
+| `InputManagerTest.BindingTokenStaleAfterConsumeToggle` | Toggling `consume` on a running binding routes through the reshape generation, so an old `BindingToken` fails closed and a freshly acquired token is current. |
 
 ## Input Interception Tests
 
@@ -357,7 +358,7 @@ The one path still validated manually is the gamepad button masking itself: clea
 `DMK_BUILD_BENCHMARKS=ON` builds three standalone microbenchmark executables. Each is deliberately not a gtest binary, so it runs under any build configuration (release, release+PGO, ASan, etc.) without dragging in the gtest runtime, and each prints a tab-separated table on stdout:
 
 - `DetourModKit_bench` (`bench_event_dispatcher.cpp`) -- EventDispatcher emit / subscribe throughput.
-- `DetourModKit_bench_scanner` (`bench_scanner.cpp`) -- `Scanner::find_pattern`, rare-byte anchor vs a naive first-byte anchor.
+- `DetourModKit_bench_scanner` (`bench_scanner.cpp`) -- `Scanner::find_pattern`, rare-byte anchor vs a naive first-byte anchor, prefilter and verify isolation rows, and serial cascade resolution vs `resolve_cascade_batch`.
 - `DetourModKit_bench_memory` (`bench_memory.cpp`) -- the cost of each way to read game memory from a hot path: validation predicate (warm hit / cold miss) vs direct SEH-guarded read vs the pointer-chain primitives, plus per-probe tail-latency and per-frame budget studies.
 
 The option is independent of `DMK_BUILD_TESTS`, so the benches build alone:
@@ -401,7 +402,7 @@ tests/
 ├── main.cpp                    # GoogleTest entry point
 ├── bench_event_dispatcher.cpp  # EventDispatcher emit/subscribe microbench (DMK_BUILD_BENCHMARKS)
 ├── bench_memory.cpp            # Hot-path memory bench: validation predicate vs SEH-guarded read / chain primitives (DMK_BUILD_BENCHMARKS)
-├── bench_scanner.cpp           # Scanner::find_pattern rare-byte-anchor bench (DMK_BUILD_BENCHMARKS)
+├── bench_scanner.cpp           # Scanner find_pattern and resolver-batch bench (DMK_BUILD_BENCHMARKS)
 ├── fixtures/
 │   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
 ├── package_smoke/
@@ -425,6 +426,7 @@ tests/
 ├── test_platform.cpp           # Platform detection and version macro tests
 ├── test_profiler.cpp           # Profiler tests
 ├── test_scanner.cpp            # AOB scanner tests
+├── test_scanner_parallel.cpp   # Parallel scanner and cascade-batch tests
 ├── test_shutdown.cpp           # DMK_Shutdown orchestration tests
 ├── test_string.cpp             # String::trim cases (shares format.hpp with test_format.cpp -- surface split)
 ├── test_win_file_stream.cpp    # Win32 file stream tests

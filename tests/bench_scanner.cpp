@@ -35,6 +35,11 @@
 #include <string>
 #include <vector>
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 namespace
 {
     using Clock = std::chrono::steady_clock;
@@ -122,6 +127,69 @@ namespace
             ++i;
         }
     }
+
+    std::array<std::byte, 16> make_resolver_signature(std::uint32_t seed) noexcept
+    {
+        std::array<std::byte, 16> sig{};
+        std::uint32_t state = 0xA5A55A5Au ^ (seed * 0x9E3779B1u);
+        for (std::byte &b : sig)
+        {
+            state = state * 1664525u + 1013904223u;
+            b = std::byte{static_cast<std::uint8_t>((state >> 24) & 0xFFu)};
+        }
+        return sig;
+    }
+
+    std::string bytes_to_aob(std::span<const std::byte> bytes)
+    {
+        constexpr char digits[] = "0123456789ABCDEF";
+        std::string out;
+        out.reserve(bytes.size() * 3);
+        for (const std::byte b : bytes)
+        {
+            const auto value = std::to_integer<unsigned>(b);
+            out.push_back(digits[(value >> 4) & 0xFu]);
+            out.push_back(digits[value & 0xFu]);
+            out.push_back(' ');
+        }
+        return out;
+    }
+
+    class BenchPage
+    {
+    public:
+        explicit BenchPage(std::size_t bytes)
+            : m_base(VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE)), m_size(bytes)
+        {
+        }
+
+        ~BenchPage()
+        {
+            if (m_base != nullptr)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        BenchPage(const BenchPage &) = delete;
+        BenchPage &operator=(const BenchPage &) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+
+        [[nodiscard]] std::byte *bytes() const noexcept { return static_cast<std::byte *>(m_base); }
+
+        [[nodiscard]] std::size_t size() const noexcept { return m_size; }
+
+        [[nodiscard]] DetourModKit::Memory::ModuleRange range() const noexcept
+        {
+            const auto base = reinterpret_cast<std::uintptr_t>(m_base);
+            return DetourModKit::Memory::ModuleRange{base, base + m_size};
+        }
+
+    private:
+        void *m_base = nullptr;
+        std::size_t m_size = 0;
+    };
 
     // Build a CompiledPattern whose anchor is forced to the first literal byte. This emulates the simpler scanner: it
     // always anchors on the start of the pattern (after skipping leading wildcards), rather than on the rarest literal.
@@ -367,6 +435,100 @@ namespace
         // tier-enabled build and an AVX2 baseline build are compared and the ratio must clear the bar.
         std::printf("#GATE\tverify_gib_per_s\t%.4f\t%s\n", gib_per_s, active_simd_tier_name());
     }
+
+    void run_resolver_batch_bench(std::size_t module_size, std::size_t target_count, std::size_t iterations,
+                                  std::size_t samples, std::size_t max_workers)
+    {
+        BenchPage page(module_size);
+        if (!page.ok())
+        {
+            std::fprintf(stderr, "[bench] resolver page allocation failed\n");
+            return;
+        }
+        std::memset(page.bytes(), 0xCC, page.size());
+
+        std::vector<std::string> labels(target_count);
+        std::vector<std::string> aobs(target_count);
+        std::vector<DetourModKit::Scanner::AddrCandidate> candidates(target_count);
+        std::vector<DetourModKit::Scanner::CascadeRequest> requests(target_count);
+        std::vector<std::uintptr_t> expected(target_count, 0);
+
+        const std::size_t spacing = (module_size - 8192u) / target_count;
+        for (std::size_t i = 0; i < target_count; ++i)
+        {
+            const auto sig = make_resolver_signature(static_cast<std::uint32_t>(5000 + i));
+            const std::size_t offset = 4096u + i * spacing;
+            std::memcpy(page.bytes() + offset, sig.data(), sig.size());
+            expected[i] = reinterpret_cast<std::uintptr_t>(page.bytes() + offset);
+            labels[i] = "resolver_" + std::to_string(i);
+            aobs[i] = bytes_to_aob(sig);
+            candidates[i] = DetourModKit::Scanner::AddrCandidate{labels[i], aobs[i],
+                                                                 DetourModKit::Scanner::ResolveMode::Direct, 0, 0};
+            requests[i].candidates = std::span<const DetourModKit::Scanner::AddrCandidate>(&candidates[i], 1);
+            requests[i].label = labels[i];
+            requests[i].range = page.range();
+        }
+
+        for (std::size_t i = 0; i < target_count; ++i)
+        {
+            const auto serial = DetourModKit::Scanner::resolve_cascade_in_module(requests[i].candidates,
+                                                                                 requests[i].label, *requests[i].range);
+            if (!serial || serial->address != expected[i])
+            {
+                std::fprintf(stderr, "[bench] resolver serial sanity failed at item %zu\n", i);
+                return;
+            }
+        }
+
+        const auto warm_batch = DetourModKit::Scanner::resolve_cascade_batch(requests, max_workers);
+        if (warm_batch.size() != target_count)
+        {
+            std::fprintf(stderr, "[bench] resolver batch sanity returned wrong size\n");
+            return;
+        }
+        for (std::size_t i = 0; i < target_count; ++i)
+        {
+            if (!warm_batch[i] || warm_batch[i]->address != expected[i])
+            {
+                std::fprintf(stderr, "[bench] resolver batch sanity failed at item %zu\n", i);
+                return;
+            }
+            s_sink.fetch_add(warm_batch[i]->address, std::memory_order_relaxed);
+        }
+
+        const double us_serial =
+            median_us_per_iter(iterations, samples,
+                               [&]()
+                               {
+                                   for (const auto &request : requests)
+                                   {
+                                       const auto hit = DetourModKit::Scanner::resolve_cascade_in_module(
+                                           request.candidates, request.label, *request.range);
+                                       s_sink.fetch_add(hit ? hit->address : 0, std::memory_order_relaxed);
+                                   }
+                               });
+
+        const double us_batch =
+            median_us_per_iter(iterations, samples,
+                               [&]()
+                               {
+                                   const auto results =
+                                       DetourModKit::Scanner::resolve_cascade_batch(requests, max_workers);
+                                   for (std::size_t i = 0; i < results.size(); ++i)
+                                   {
+                                       const auto &hit = results[i];
+                                       s_sink.fetch_add(hit ? hit->address : 0, std::memory_order_relaxed);
+                                   }
+                               });
+
+        std::printf("\nStartup resolver batch (%zu module-scoped cascades, %zu MiB module, %zu workers)\n",
+                    target_count, module_size / (1024u * 1024u), max_workers);
+        std::printf("%-22s\t%12s\t%12s\t%12s\n", "mode", "median_us", "targets/s", "speedup");
+        std::printf("%-22s\t%12.3f\t%12.1f\t%12.2f\n", "serial", us_serial,
+                    static_cast<double>(target_count) * 1.0e6 / us_serial, 1.0);
+        std::printf("%-22s\t%12.3f\t%12.1f\t%12.2f\n", "batch", us_batch,
+                    static_cast<double>(target_count) * 1.0e6 / us_batch, us_serial / us_batch);
+    }
 } // namespace
 
 int main(int argc, char **argv)
@@ -461,6 +623,14 @@ int main(int argc, char **argv)
     constexpr std::size_t VERIFY_STRIDE = 64;
     constexpr std::size_t VERIFY_ITERS = 10;
     run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE, VERIFY_ITERS, SAMPLES);
+
+    // Startup-resolution layer benchmark. This times the consumer-facing cascade resolver instead of the raw
+    // CompiledPattern batch, preserving per-target candidate order and uniqueness checks.
+    constexpr std::size_t RESOLVER_MODULE = 8u * 1024u * 1024u;
+    constexpr std::size_t RESOLVER_TARGETS = 16;
+    constexpr std::size_t RESOLVER_ITERS = 5;
+    constexpr std::size_t RESOLVER_WORKERS = 4;
+    run_resolver_batch_bench(RESOLVER_MODULE, RESOLVER_TARGETS, RESOLVER_ITERS, SAMPLES, RESOLVER_WORKERS);
 
     // Touch the sink so it can never be optimized away.
     std::printf("\n(sink=%llu)\n", static_cast<unsigned long long>(s_sink.load(std::memory_order_relaxed)));

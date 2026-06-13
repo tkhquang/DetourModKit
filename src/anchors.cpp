@@ -17,6 +17,8 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/scanner.hpp"
 
+#include "fork_join.hpp"
+
 #include <cstddef>
 #include <span>
 #include <vector>
@@ -146,6 +148,16 @@ namespace DetourModKit
             }
             result.value = value;
             result.status = Anchors::AnchorStatus::Resolved;
+        }
+
+        [[nodiscard]] Anchors::ResolvedAnchor failed_anchor_result(const Anchors::Anchor &anchor) noexcept
+        {
+            Anchors::ResolvedAnchor result{};
+            result.label = anchor.label;
+            result.kind = anchor.kind;
+            result.status = Anchors::AnchorStatus::Failed;
+            result.value = 0;
+            return result;
         }
     } // anonymous namespace
 
@@ -321,6 +333,22 @@ namespace DetourModKit
         return count;
     }
 
+    std::size_t Anchors::resolve_all_parallel(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
+                                              Memory::ModuleRange range, std::size_t max_workers)
+    {
+        const std::size_t count = (anchors.size() < out.size()) ? anchors.size() : out.size();
+        const auto results = DetourModKit::detail::run_fork_join<Anchor, ResolvedAnchor>(
+            anchors.first(count), max_workers,
+            [range](const Anchor &anchor) -> ResolvedAnchor { return resolve(anchor, range); },
+            [](const Anchor &anchor) noexcept -> ResolvedAnchor { return failed_anchor_result(anchor); });
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            out[i] = results[i];
+        }
+        return count;
+    }
+
     std::size_t Anchors::resolve_all_with_profile(std::span<const Anchor> anchors, std::span<ResolvedAnchor> out,
                                                   const ScanProfile &profile, Memory::ModuleRange range)
     {
@@ -328,6 +356,23 @@ namespace DetourModKit
         for (std::size_t i = 0; i < count; ++i)
         {
             out[i] = resolve_with_profile(anchors[i], profile, range);
+        }
+        return count;
+    }
+
+    std::size_t Anchors::resolve_all_with_profile_parallel(std::span<const Anchor> anchors,
+                                                           std::span<ResolvedAnchor> out, const ScanProfile &profile,
+                                                           Memory::ModuleRange range, std::size_t max_workers)
+    {
+        const std::size_t count = (anchors.size() < out.size()) ? anchors.size() : out.size();
+        const auto results = DetourModKit::detail::run_fork_join<Anchor, ResolvedAnchor>(
+            anchors.first(count), max_workers, [&profile, range](const Anchor &anchor) -> ResolvedAnchor
+            { return resolve_with_profile(anchor, profile, range); },
+            [](const Anchor &anchor) noexcept -> ResolvedAnchor { return failed_anchor_result(anchor); });
+
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            out[i] = results[i];
         }
         return count;
     }

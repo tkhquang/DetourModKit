@@ -2570,6 +2570,32 @@ TEST_F(InputManagerTest, BindingTokenStaleAfterLiveRegister)
     mgr.set_require_focus(true);
 }
 
+TEST_F(InputManagerTest, BindingTokenStaleAfterConsumeToggle)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.set_require_focus(false);
+    mgr.register_press("consume_test", {keyboard_key(0x41)}, []() {});
+    mgr.start(std::chrono::milliseconds(2));
+
+    const BindingToken old_token = mgr.acquire_binding_token("consume_test");
+    ASSERT_TRUE(old_token.valid());
+    ASSERT_TRUE(mgr.binding_token_current(old_token));
+
+    mgr.set_consume("consume_test", true);
+    EXPECT_FALSE(mgr.binding_token_current(old_token));
+    EXPECT_FALSE(mgr.is_binding_active(old_token));
+
+    mgr.set_consume("consume_test", false);
+    EXPECT_FALSE(mgr.binding_token_current(old_token));
+    EXPECT_FALSE(mgr.is_binding_active(old_token));
+
+    const BindingToken fresh_token = mgr.acquire_binding_token("consume_test");
+    EXPECT_TRUE(fresh_token.valid());
+    EXPECT_TRUE(mgr.binding_token_current(fresh_token));
+
+    mgr.set_require_focus(true);
+}
+
 TEST_F(InputManagerTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
 {
     auto &mgr = InputManager::get_instance();

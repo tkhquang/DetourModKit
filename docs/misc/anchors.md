@@ -87,6 +87,14 @@ const std::size_t n = an::resolve_all(k_anchors, report);
 
 `resolve_all` writes one `ResolvedAnchor` per input (`{label, kind, status, value}`) and returns the count written. `value` carries the resolved quantity interpreted per kind (a vtable or global address cast to `uintptr_t`, an in-code constant, or the manual literal) and is meaningful only when `status == AnchorStatus::Resolved`.
 
+For startup tables whose anchors are independent, `resolve_all_parallel` resolves the same report through a fork-join worker pool:
+
+```cpp
+const std::size_t n = an::resolve_all_parallel(k_anchors, report, game_range, /*max_workers=*/4);
+```
+
+Each anchor still goes through the single-anchor `resolve` path, so backend failures, validators, quorum checks, and result ordering match `resolve_all`. The parallel resolver is opt-in because validators may run concurrently; use the serial `resolve_all` when a validator context is order-dependent or must be externally serialized.
+
 ## The drift report
 
 The `ResolvedAnchor[]` array *is* the drift report. Walk it once at init to log what resolved, what failed, and what is pinned and therefore at risk:
@@ -116,7 +124,7 @@ A `ScanProfile` (in `profile.hpp`) bundles a few setup-only, per-game scan-tunin
 - `candidate_order` plus the `order_candidates` helper produce a candidate-index permutation (`UniqueFirst` promotes `require_unique` candidates ahead of broad fallbacks). `Anchors::resolve_with_profile` applies this automatically to `RipGlobal` and `CodeOperand` by building a local reordered span, so the caller's static candidate table is not mutated.
 - `deny_backend` is a per-`AnchorKind` deny-list.
 
-Resolve a profile-aware table with `Anchors::resolve_with_profile` / `resolve_all_with_profile`. A denied backend fails *closed* (status `Failed`, value 0) -- it is never silently replaced by a different, possibly-wrong backend -- and the profile threads into `Quorum` sub-anchors, so a denied sub-anchor kind fails the quorum closed and candidate-order / broad-string defaults stay uniform. The plain `resolve` / `resolve_all` are unchanged and equivalent to resolving with an empty profile.
+Resolve a profile-aware table with `Anchors::resolve_with_profile` / `resolve_all_with_profile`; use `resolve_all_with_profile_parallel` when the profile-aware table is safe to dispatch concurrently. A denied backend fails *closed* (status `Failed`, value 0) -- it is never silently replaced by a different, possibly-wrong backend -- and the profile threads into `Quorum` sub-anchors, so a denied sub-anchor kind fails the quorum closed and candidate-order / broad-string defaults stay uniform. The plain `resolve` / `resolve_all` are unchanged and equivalent to resolving with an empty profile.
 
 ## Re-heal on a validation miss
 

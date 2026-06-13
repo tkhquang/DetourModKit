@@ -362,3 +362,143 @@ TEST(ScannerBatchTest, ModuleBatchInvalidRangeFailsClosed)
     EXPECT_EQ(results[0], nullptr);
     EXPECT_EQ(results[1], nullptr);
 }
+
+TEST(ScannerBatchTest, CascadeBatchEmptyReturnsEmpty)
+{
+    const std::vector<Scanner::CascadeRequest> requests;
+    const auto results = Scanner::resolve_cascade_batch(requests);
+    EXPECT_EQ(results.size(), 0u);
+}
+
+TEST(ScannerBatchTest, CascadeBatchMatchesSerialResolvers)
+{
+    CommittedPage code_page(64 * 1024, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(code_page.base, nullptr);
+    std::memset(code_page.bytes(), 0xCC, code_page.size);
+
+    const auto sig_a = make_unique_sig(4000);
+    const auto sig_b = make_unique_sig(4001);
+    std::byte *target_a = code_page.bytes() + 512;
+    std::byte *target_b = code_page.bytes() + 4096;
+    std::memcpy(target_a, sig_a.data(), sig_a.size());
+    std::memcpy(target_b, sig_b.data(), sig_b.size());
+
+    const std::string aob_a = sig_to_aob(sig_a);
+    const std::string aob_b = sig_to_aob(sig_b);
+
+    Scanner::AddrCandidate cands_a[] = {
+        {"module-a", aob_a, Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate cands_b[] = {
+        {"module-b", aob_b, Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto base = reinterpret_cast<std::uintptr_t>(code_page.base);
+    const Memory::ModuleRange range{base, base + code_page.size};
+
+    Scanner::CascadeRequest module_request{};
+    module_request.candidates = cands_a;
+    module_request.label = "module-a";
+    module_request.range = range;
+
+    Scanner::CascadeRequest fallback_request{};
+    fallback_request.candidates = cands_b;
+    fallback_request.label = "module-b-fallback";
+    fallback_request.range = range;
+    fallback_request.prologue_fallback = true;
+
+    Scanner::CascadeRequest whole_process_request{};
+    whole_process_request.candidates = cands_b;
+    whole_process_request.label = "whole-process-b";
+
+    Scanner::CascadeRequest empty_request{};
+    empty_request.label = "empty";
+
+    Scanner::CascadeRequest invalid_range_request{};
+    invalid_range_request.candidates = cands_a;
+    invalid_range_request.label = "invalid-range";
+    invalid_range_request.range = Memory::ModuleRange{};
+
+    const std::vector<Scanner::CascadeRequest> requests{module_request, fallback_request, whole_process_request,
+                                                        empty_request, invalid_range_request};
+
+    const auto results = Scanner::resolve_cascade_batch(requests, 4);
+    ASSERT_EQ(results.size(), requests.size());
+
+    const auto serial_module = Scanner::resolve_cascade_in_module(cands_a, "module-a", range);
+    const auto serial_fallback =
+        Scanner::resolve_cascade_in_module_with_prologue_fallback(cands_b, "module-b-fallback", range);
+    const auto serial_whole = Scanner::resolve_cascade(cands_b, "whole-process-b");
+
+    ASSERT_TRUE(results[0].has_value());
+    ASSERT_TRUE(serial_module.has_value());
+    EXPECT_EQ(results[0]->address, serial_module->address);
+    EXPECT_EQ(results[0]->winning_name, serial_module->winning_name);
+    EXPECT_EQ(results[0]->address, reinterpret_cast<std::uintptr_t>(target_a));
+
+    ASSERT_TRUE(results[1].has_value());
+    ASSERT_TRUE(serial_fallback.has_value());
+    EXPECT_EQ(results[1]->address, serial_fallback->address);
+    EXPECT_EQ(results[1]->winning_name, serial_fallback->winning_name);
+    EXPECT_EQ(results[1]->address, reinterpret_cast<std::uintptr_t>(target_b));
+
+    ASSERT_TRUE(results[2].has_value());
+    ASSERT_TRUE(serial_whole.has_value());
+    EXPECT_EQ(results[2]->address, serial_whole->address);
+    EXPECT_EQ(results[2]->winning_name, serial_whole->winning_name);
+    EXPECT_EQ(results[2]->address, reinterpret_cast<std::uintptr_t>(target_b));
+
+    ASSERT_FALSE(results[3].has_value());
+    EXPECT_EQ(results[3].error(), Scanner::ResolveError::EmptyCandidates);
+
+    ASSERT_FALSE(results[4].has_value());
+    EXPECT_EQ(results[4].error(), Scanner::ResolveError::InvalidRange);
+}
+
+TEST(ScannerBatchTest, CascadeBatchWorkerCountYieldsIdenticalResults)
+{
+    CommittedPage code_page(64 * 1024, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(code_page.base, nullptr);
+    std::memset(code_page.bytes(), 0xCC, code_page.size);
+
+    constexpr std::size_t REQUEST_COUNT = 16;
+    const auto base = reinterpret_cast<std::uintptr_t>(code_page.base);
+    const Memory::ModuleRange range{base, base + code_page.size};
+
+    // Caller-owned storage the requests alias; it must outlive resolve_cascade_batch, so it lives in the test frame and
+    // is sized up front (never reallocated) so the spans and string_views stay valid.
+    std::vector<std::string> labels(REQUEST_COUNT);
+    std::vector<std::string> aobs(REQUEST_COUNT);
+    std::vector<Scanner::AddrCandidate> candidates(REQUEST_COUNT);
+    std::vector<Scanner::CascadeRequest> requests(REQUEST_COUNT);
+    std::array<std::uintptr_t, REQUEST_COUNT> planted{};
+
+    for (std::size_t i = 0; i < REQUEST_COUNT; ++i)
+    {
+        const auto sig = make_unique_sig(static_cast<std::uint32_t>(6000 + i));
+        std::byte *target = code_page.bytes() + 512 + i * 1024;
+        std::memcpy(target, sig.data(), sig.size());
+        planted[i] = reinterpret_cast<std::uintptr_t>(target);
+        labels[i] = "cascade_" + std::to_string(i);
+        aobs[i] = sig_to_aob(sig);
+        candidates[i] = Scanner::AddrCandidate{labels[i], aobs[i], Scanner::ResolveMode::Direct, 0, 0};
+        requests[i].candidates = std::span<const Scanner::AddrCandidate>(&candidates[i], 1);
+        requests[i].label = labels[i];
+        requests[i].range = range;
+    }
+
+    // The concurrent cascade resolver must agree with the planted addresses item for item, and that agreement must be
+    // independent of the worker count: serial (1), a fixed pool (4), an over-count clamp (1024), and auto (0). This
+    // sweep drives many requests through the shared fork-join driver to exercise the work-stealing concurrent path.
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{4}, std::size_t{1024}, std::size_t{0}})
+    {
+        const auto results = Scanner::resolve_cascade_batch(requests, workers);
+        ASSERT_EQ(results.size(), REQUEST_COUNT) << "workers=" << workers;
+        for (std::size_t i = 0; i < REQUEST_COUNT; ++i)
+        {
+            ASSERT_TRUE(results[i].has_value()) << "workers=" << workers << " item=" << i;
+            EXPECT_EQ(results[i]->address, planted[i]) << "workers=" << workers << " item=" << i;
+            EXPECT_EQ(results[i]->winning_name, labels[i]) << "workers=" << workers << " item=" << i;
+        }
+    }
+}

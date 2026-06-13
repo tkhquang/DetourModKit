@@ -318,3 +318,56 @@ TEST(ProfileTest, ProfileResolveAllWithProfileCarriesDeny)
     EXPECT_EQ(out[1].value, 0);
     EXPECT_EQ(out[1].kind, Anchors::AnchorKind::CodeOperand);
 }
+
+TEST(ProfileTest, ResolveAllWithProfileParallelMatchesSerialReport)
+{
+    Region reg;
+    ASSERT_TRUE(reg.ok());
+    reg.put(0x100, {0xAA});
+    reg.put(0x180, {0xAA}); // second broad occurrence
+    reg.put(0x200, {0xBB}); // unique strict occurrence
+
+    Scanner::AddrCandidate cands[] = {
+        {"broad", "AA", Scanner::ResolveMode::Direct, 0, 0, false},
+        {"strict", "BB", Scanner::ResolveMode::Direct, 0, 0, true},
+    };
+
+    Anchors::Anchor manual{};
+    manual.label = "manual";
+    manual.kind = Anchors::AnchorKind::Manual;
+    manual.manual_value = 7;
+
+    Anchors::Anchor ordered{};
+    ordered.label = "ordered-global";
+    ordered.kind = Anchors::AnchorKind::RipGlobal;
+    ordered.site = cands;
+
+    Anchors::Anchor denied{};
+    denied.label = "denied-code";
+    denied.kind = Anchors::AnchorKind::CodeOperand;
+    denied.site = cands;
+
+    const Anchors::Anchor table[] = {manual, ordered, denied};
+
+    ScanProfile profile{};
+    profile.candidate_order = CandidateOrder::UniqueFirst;
+    profile.deny_backend[CODE_OPERAND_SLOT] = true;
+
+    Anchors::ResolvedAnchor serial[3];
+    Anchors::ResolvedAnchor parallel[3];
+    const std::size_t serial_count = Anchors::resolve_all_with_profile(table, serial, profile, reg.range());
+    const std::size_t parallel_count =
+        Anchors::resolve_all_with_profile_parallel(table, parallel, profile, reg.range(), 4);
+    ASSERT_EQ(parallel_count, serial_count);
+
+    for (std::size_t i = 0; i < serial_count; ++i)
+    {
+        EXPECT_EQ(parallel[i].label, serial[i].label) << "entry=" << i;
+        EXPECT_EQ(parallel[i].kind, serial[i].kind) << "entry=" << i;
+        EXPECT_EQ(parallel[i].status, serial[i].status) << "entry=" << i;
+        EXPECT_EQ(parallel[i].value, serial[i].value) << "entry=" << i;
+    }
+    ASSERT_EQ(parallel[1].status, Anchors::AnchorStatus::Resolved);
+    EXPECT_EQ(static_cast<std::uintptr_t>(parallel[1].value), reg.addr(0x200));
+    EXPECT_EQ(parallel[2].status, Anchors::AnchorStatus::Failed);
+}
