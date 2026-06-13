@@ -165,8 +165,20 @@ if(DMK_ENABLE_CLANG_TIDY)
   if(DMK_CLANG_TIDY_EXE)
     # Export compile_commands.json too, so a standalone `clang-tidy -p <build>` run can reuse the same flags.
     set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-    set(CMAKE_CXX_CLANG_TIDY "${DMK_CLANG_TIDY_EXE}")
-    message(STATUS "clang-tidy enabled (advisory): ${DMK_CLANG_TIDY_EXE}")
+    set(DMK_CLANG_TIDY_COMMAND "${DMK_CLANG_TIDY_EXE}")
+    # clang-tidy runs its own clang frontend. Under a GCC (MinGW) compiler on Windows it otherwise defaults to the
+    # LLVM/MSVC target triple and fails to parse the MinGW headers and the GCC SIMD target attributes, so pin
+    # clang-tidy's target to the compiler's own triple (from `g++ -dumpmachine`). MSVC selects clang-cl driver mode
+    # automatically, so this adjustment is confined to the GNU toolchain.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+      execute_process(COMMAND "${CMAKE_CXX_COMPILER}" -dumpmachine
+        OUTPUT_VARIABLE DMK_GCC_TRIPLE OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+      if(DMK_GCC_TRIPLE)
+        list(APPEND DMK_CLANG_TIDY_COMMAND "--extra-arg-before=--target=${DMK_GCC_TRIPLE}")
+      endif()
+    endif()
+    set(CMAKE_CXX_CLANG_TIDY ${DMK_CLANG_TIDY_COMMAND})
+    message(STATUS "clang-tidy enabled (advisory): ${DMK_CLANG_TIDY_COMMAND}")
   else()
     message(WARNING "DMK_ENABLE_CLANG_TIDY=ON but no clang-tidy binary was found on PATH; static analysis skipped.")
   endif()

@@ -74,7 +74,9 @@ jobs:
         shell: bash
 
       - name: Build with clang-tidy (advisory)
-        # Building the library target runs clang-tidy alongside each compile. WarningsAsErrors stays '' so findings are
-        # warnings only; the job is continue-on-error so even a hard clang-tidy failure does not gate the PR.
-        run: cmake --build build/mingw-debug --target DetourModKit --parallel
+        # Building the library target runs clang-tidy alongside each compile; findings print to the log. WarningsAsErrors
+        # stays '' so check findings are warnings only. clang-tidy's clang frontend can still emit a hard parse
+        # diagnostic on a TU under a foreign toolchain layout, which stops the build, so this advisory lane swallows a
+        # non-zero exit -- it surfaces findings without ever gating (the real build/test gate is pr-check.yml).
+        run: cmake --build build/mingw-debug --target DetourModKit --parallel || true
         shell: bash
