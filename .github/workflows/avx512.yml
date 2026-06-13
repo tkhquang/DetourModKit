@@ -16,8 +16,8 @@ on:
 permissions:
   contents: read
 
-# The opt-in AVX-512 scanner verify tier (the DMK_ENABLE_AVX512 build option) has two acceptance halves with
-# different hardware needs, so they are split into two jobs:
+# The opt-in AVX-512 scanner verify tier (the DMK_ENABLE_AVX512 build option) is validated by three jobs with
+# different hardware needs:
 #
 #   correctness-sde -- runs on every push/PR. Builds the tests with the tier enabled and executes them under Intel
 #     SDE emulating a Sapphire Rapids (AVX-512) CPU, so the 64-byte AVX-512 verify body actually runs and must produce
@@ -25,6 +25,12 @@ permissions:
 #     GitHub-hosted runner. Advisory (continue-on-error): it always builds the AVX-512 tier (verifying it compiles on
 #     MSVC) and runs the tests under SDE via the SHA-pinned setup-sde action; if SDE cannot be set up the run skips
 #     cleanly with a warning rather than failing the workflow.
+#
+#   verify-icount-proxy -- runs on every push/PR. A bench signal that needs no AVX-512 hardware: SDE cannot measure
+#     wall-clock (the throughput-gate does that on real silicon), but it counts executed instructions deterministically
+#     on any host. It runs the bench's --verify-icount mode (a single deep-verify pass) under SDE -spr (the AVX-512
+#     verify tier) and -hsw (the AVX2 tier) and reports the ratio of executed instructions. This is a proxy for work
+#     performed, not throughput, so it is advisory and never gates.
 #
 #   throughput-gate -- the ">= 30% verify-throughput gain on an AVX-512F host" half of the gate. SDE timing is not
 #     representative of real silicon, so this can only be measured on a real AVX-512 CPU; GitHub-hosted runners do not
@@ -90,6 +96,104 @@ jobs:
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "DetourModKit_tests.exe not found" }
           & "$sdeExe" -spr -- "$exe" --gtest_filter="ScannerTest.*"
+
+  verify-icount-proxy:
+    name: AVX-512 verify instruction-count proxy (Intel SDE, advisory)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: "recursive"
+          persist-credentials: false
+
+      - name: Set up MSVC (x64)
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Build scanner bench (Release, AVX-512 tier ON)
+        shell: pwsh
+        run: |
+          cmake -S . -B build/icount -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DDMK_BUILD_BENCHMARKS=ON -DDMK_BUILD_TESTS=OFF -DDMK_ENABLE_AVX512=ON
+          cmake --build build/icount --target DetourModKit_bench_scanner --parallel 3
+
+      - name: Set up Intel SDE
+        uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
+        continue-on-error: true
+        with:
+          # Same pin as correctness-sde: SDE 10.8.0 has an install-folder startup bug, so use a known-good 9.x.
+          # Ref: https://community.intel.com/t5/Intel-ISA-Extensions/SDE-10-8-fails-to-start-depending-on-the-installation-folder/m-p/1746386
+          sdeVersion: 9.58.0
+          environmentVariableName: SDE_PATH
+
+      - name: Compare AVX-512 vs AVX2 verify instruction counts under Intel SDE
+        shell: pwsh
+        run: |
+          # The same AVX-512-enabled binary selects its verify tier from the emulated CPU, so running it under -spr
+          # (Sapphire Rapids -> AVX-512 tier) vs -hsw (Haswell -> AVX2 tier) and counting executed instructions via
+          # SDE -mix shows the AVX-512 body doing less work for the same verify pass. This is a hardware-independent
+          # proxy for work performed -- NOT wall-clock throughput (the throughput-gate job measures that on real
+          # silicon, where zmm downclock and port pressure can offset a lower instruction count).
+          $sdeExe = @('sde64.exe', 'sde.exe') |
+                    ForEach-Object { Join-Path "$env:SDE_PATH" $_ } |
+                    Where-Object { Test-Path $_ } |
+                    Select-Object -First 1
+          if (-not $sdeExe)
+          {
+              Write-Output "::warning::Intel SDE not available; skipping the instruction-count proxy."
+              exit 0
+          }
+          $exe = (Get-ChildItem -Recurse -Path build/icount -Filter DetourModKit_bench_scanner.exe |
+                  Select-Object -First 1).FullName
+          if (-not $exe) { throw "DetourModKit_bench_scanner.exe not found" }
+
+          function Get-VerifyIcount([string] $chip)
+          {
+              $outDir = Join-Path $env:RUNNER_TEMP "mix-$chip"
+              Remove-Item -Recurse -Force $outDir -ErrorAction SilentlyContinue
+              New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+              Push-Location $outDir
+              try { $progOut = & "$sdeExe" "-$chip" -mix -- "$exe" --verify-icount }
+              finally { Pop-Location }
+
+              $gate = $progOut | Select-String '^#GATE' | Select-Object -First 1
+              if ($gate) { Write-Host ("[-$chip] bench verify tier: {0}" -f (($gate.Line -split "`t")[-1])) }
+
+              $mixFile = Get-ChildItem -Path $outDir -Filter 'sde-mix-out.txt' -Recurse -ErrorAction SilentlyContinue |
+                         Select-Object -First 1
+              if (-not $mixFile)
+              {
+                  Write-Output "::warning::no sde-mix-out.txt produced for -$chip; skipping the proxy."
+                  return $null
+              }
+              $total = Get-Content $mixFile.FullName |
+                       ForEach-Object { if ($_ -match '^\*total\s+(\d+)') { [int64]$Matches[1] } } |
+                       Sort-Object -Descending | Select-Object -First 1
+              if (-not $total)
+              {
+                  Write-Output "::warning::could not parse a *total instruction count for -$chip."
+                  Get-Content $mixFile.FullName | Select-String -Pattern 'total' |
+                      Select-Object -First 5 | ForEach-Object { Write-Output "::notice::mix: $($_.Line.Trim())" }
+                  return $null
+              }
+              return $total
+          }
+
+          $avx512 = Get-VerifyIcount "spr"
+          $avx2 = Get-VerifyIcount "hsw"
+          if (($null -eq $avx512) -or ($null -eq $avx2)) { exit 0 }
+
+          Write-Host ("AVX-512 (-spr) verify-pass instructions: {0:N0}" -f $avx512)
+          Write-Host ("AVX2    (-hsw) verify-pass instructions: {0:N0}" -f $avx2)
+          if ($avx512 -gt 0)
+          {
+              $ratio = [double]$avx2 / [double]$avx512
+              Write-Host ("instruction-count ratio (AVX2 / AVX-512): {0:F3}x" -f $ratio)
+              Write-Host "NOTE: proxy for work performed, not wall-clock throughput (see throughput-gate)."
+          }
 
   throughput-gate:
     name: AVX-512 throughput gate (>= 30%, self-hosted)

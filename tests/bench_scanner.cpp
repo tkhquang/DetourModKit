@@ -369,8 +369,25 @@ namespace
     }
 } // namespace
 
-int main()
+int main(int argc, char **argv)
 {
+    // Instruction-count proxy mode (the avx512 CI verify-icount job runs this under Intel SDE's -mix). A real
+    // wall-clock verify-throughput comparison needs AVX-512 silicon (the throughput-gate job); without it SDE timing is
+    // meaningless. What SDE can measure hardware-independently is the executed instruction count, so this mode runs a
+    // single deep-verify pass over a small buffer -- skipping the timing-driven full suite, which is far too heavy
+    // under -mix -- and exits. CI runs it under -spr (Sapphire Rapids selects the AVX-512 verify tier) and -hsw
+    // (Haswell selects AVX2) and compares the counts: the 64-byte AVX-512 verify body should execute materially fewer
+    // instructions than the 32-byte AVX2 body for the same work. This is a proxy for work performed, not wall-clock
+    // throughput (zmm downclock and port pressure can make fewer instructions slower on real silicon).
+    if (argc > 1 && std::strcmp(argv[1], "--verify-icount") == 0)
+    {
+        constexpr std::size_t ICOUNT_BUFFER = 1u * 1024u * 1024u;
+        constexpr std::size_t ICOUNT_PATTERN_LEN = 96;
+        constexpr std::size_t ICOUNT_STRIDE = 64;
+        run_verify_bench(ICOUNT_BUFFER, ICOUNT_PATTERN_LEN, ICOUNT_STRIDE, 1, 1);
+        return 0;
+    }
+
     constexpr std::size_t BUFFER_SIZE = 8u * 1024u * 1024u; // 8 MiB
     constexpr std::uint64_t SEED = 0xD37011CDull;
     constexpr std::size_t SAMPLES = 11;
