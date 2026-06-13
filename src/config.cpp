@@ -1374,20 +1374,22 @@ void DetourModKit::Config::log_all()
     }
 }
 
-void DetourModKit::Config::clear_registered_items()
+void DetourModKit::Config::clear_registered_items() noexcept
 {
     std::lock_guard<std::mutex> lock(get_config_mutex());
 
     Logger &logger = Logger::get_instance();
     size_t count = get_registered_config_items().size();
+    // Logging routes through try_log (the no-throw, fail-closed path) rather than debug(): debug() formats through a
+    // potentially-throwing sink, which would break this noexcept contract on a format or sink failure.
     if (count > 0)
     {
         get_registered_config_items().clear();
-        logger.debug("Config: Cleared {} registered configuration items.", count);
+        (void)logger.try_log(LogLevel::Debug, "Config: Cleared {} registered configuration items.", count);
     }
     else
     {
-        logger.debug("Config: clear_registered_items called, but no items were registered.");
+        (void)logger.try_log(LogLevel::Debug, "Config: clear_registered_items called, but no items were registered.");
     }
 
     // Drop the remembered INI path too so reload() does not act on a

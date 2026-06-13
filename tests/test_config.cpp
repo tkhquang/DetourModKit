@@ -18,6 +18,11 @@ using DetourModKit::gamepad_button;
 using DetourModKit::keyboard_key;
 using DetourModKit::mouse_button;
 
+// clear_registered_items() runs inside the noexcept DMK_Shutdown teardown chain, so a throw from it would terminate
+// the host. Its diagnostic logging routes through the no-throw try_log path to keep the contract honest; pin it here.
+static_assert(noexcept(Config::clear_registered_items()),
+              "Config::clear_registered_items() must be noexcept (it runs inside the noexcept teardown chain).");
+
 class ConfigTest : public ::testing::Test
 {
 protected:
@@ -2204,7 +2209,7 @@ namespace
     // RAII helper that redirects the global Logger to a temporary file and exposes the captured contents for
     // assertions. On destruction the Logger is parked on a stable per-process file so the capture file's handle is
     // released and remove() succeeds on Windows; subsequent tests overwrite the parking sink as needed via their own
-    // reconfigure() calls. Sync mode is forced because the tests inspect the file immediately after the logging call
+    // configure() calls. Sync mode is forced because the tests inspect the file immediately after the logging call
     // returns.
     class LoggerFileCapture
     {
@@ -2221,7 +2226,7 @@ namespace
             {
                 logger.disable_async_mode();
             }
-            logger.reconfigure("CAPTURE", m_capture_file.string(), "%H:%M:%S");
+            DetourModKit::Logger::configure("CAPTURE", m_capture_file.string(), "%H:%M:%S");
             m_previous_level = logger.get_log_level();
             logger.set_log_level(DetourModKit::LogLevel::Trace);
         }
@@ -2232,7 +2237,7 @@ namespace
             logger.flush();
             const auto parking =
                 std::filesystem::temp_directory_path() / ("dmk_capture_parked_" + std::to_string(_getpid()) + ".log");
-            logger.reconfigure("PARKED", parking.string(), "%H:%M:%S");
+            DetourModKit::Logger::configure("PARKED", parking.string(), "%H:%M:%S");
             logger.set_log_level(m_previous_level);
             if (m_previous_async)
             {

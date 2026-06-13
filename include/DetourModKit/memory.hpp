@@ -212,11 +212,20 @@ namespace DetourModKit
          */
         [[nodiscard]] uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
 
-        // Canonical x64 user-mode address window. The low 64 KiB is the reserved null-dereference region and is never a
-        // live pointer; mapped user addresses sit below the 47-bit canonical split at
-        // 0x0000'8000'0000'0000. A value outside this window cannot be a valid object pointer, so the bounds reject
-        // stale or sentinel values with no syscall and no memory access.
+        /**
+         * @brief Inclusive lower bound of the canonical x64 user-mode address window.
+         * @details The low 64 KiB is the reserved null-dereference region and is never a live pointer, so any value
+         *          below this bound cannot be a valid object pointer. Paired with @ref USERSPACE_PTR_MAX, the window
+         *          rejects stale or sentinel values with no syscall and no memory access.
+         */
         inline constexpr uintptr_t USERSPACE_PTR_MIN = 0x10000;
+
+        /**
+         * @brief Exclusive upper bound of the canonical x64 user-mode address window.
+         * @details Mapped user addresses sit below the 47-bit canonical split at 0x0000'8000'0000'0000; a value at or
+         *          above this bound is a kernel-range or non-canonical address and cannot be a valid user-mode object
+         *          pointer. Paired with @ref USERSPACE_PTR_MIN.
+         */
         inline constexpr uintptr_t USERSPACE_PTR_MAX = 0x0000800000000000ULL;
 
         /**

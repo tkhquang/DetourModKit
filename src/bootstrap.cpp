@@ -293,30 +293,7 @@ namespace DetourModKit::Bootstrap
                     }
                 }
             }
-            try
-            {
-                DMK_Shutdown();
-            }
-            catch (const std::exception &e)
-            {
-                try
-                {
-                    Logger::get_instance().error("Bootstrap: DMK_Shutdown threw: {}", e.what());
-                }
-                catch (...)
-                {
-                }
-            }
-            catch (...)
-            {
-                try
-                {
-                    Logger::get_instance().error("Bootstrap: DMK_Shutdown threw unknown exception.");
-                }
-                catch (...)
-                {
-                }
-            }
+            DMK_Shutdown();
         }
         else if (s_shutdown_event)
         {
@@ -419,30 +396,7 @@ namespace DetourModKit::Bootstrap
         // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
         // no-op when no watcher is running.
         Config::disable_auto_reload();
-        try
-        {
-            Config::clear_registered_items();
-        }
-        catch (const std::exception &e)
-        {
-            try
-            {
-                logger.error("Bootstrap: on_logic_dll_unload caught exception in clear_registered_items: {}", e.what());
-            }
-            catch (...)
-            {
-            }
-        }
-        catch (...)
-        {
-            try
-            {
-                logger.error("Bootstrap: on_logic_dll_unload caught unknown exception in clear_registered_items.");
-            }
-            catch (...)
-            {
-            }
-        }
+        Config::clear_registered_items();
     }
 
     void on_logic_dll_unload_all() noexcept
@@ -526,30 +480,6 @@ namespace DetourModKit::Bootstrap
         // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
         // no-op when no watcher is running.
         Config::disable_auto_reload();
-        try
-        {
-            Config::clear_registered_items();
-        }
-        catch (const std::exception &e)
-        {
-            try
-            {
-                logger.error("Bootstrap: on_logic_dll_unload_all caught exception in clear_registered_items: {}",
-                             e.what());
-            }
-            catch (...)
-            {
-            }
-        }
-        catch (...)
-        {
-            try
-            {
-                logger.error("Bootstrap: on_logic_dll_unload_all caught unknown exception in clear_registered_items.");
-            }
-            catch (...)
-            {
-            }
-        }
+        Config::clear_registered_items();
     }
 } // namespace DetourModKit::Bootstrap

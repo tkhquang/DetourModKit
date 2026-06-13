@@ -91,6 +91,7 @@ using DMKProfileSample = DetourModKit::ProfileSample;
  *          this function, the singletons are in a safe state for destruction.
  *
  * @note This function is idempotent - calling it multiple times is safe.
+ * @note noexcept: every teardown step it invokes is itself noexcept, so the wrapper carries the no-throw guarantee.
  * @note Each subsystem detects if it is running under the Windows loader lock (e.g. from DllMain/DLL_PROCESS_DETACH or
  *       FreeLibrary) and will detach background threads instead of joining them to avoid deadlock. However, calling
  *       DMK_Shutdown() before DLL_PROCESS_DETACH is still the recommended practice for a clean orderly shutdown.
@@ -98,7 +99,7 @@ using DMKProfileSample = DetourModKit::ProfileSample;
  *       NOT reclaimed by this function; the OS releases the memory at process exit. See DetourModKit::StringPool for
  *       the rationale.
  */
-inline void DMK_Shutdown()
+inline void DMK_Shutdown() noexcept
 {
     // Shutdown in reverse dependency order:
     // 1. Config auto-reload watcher first: its background thread can fire the user on_reload callback at any moment, so
