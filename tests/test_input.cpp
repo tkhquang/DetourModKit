@@ -543,6 +543,26 @@ TEST_F(InputManagerTest, SetConsumeBeforeStartUpdatesPendingBinding)
     EXPECT_EQ(mgr.binding_count(), 1u);
 }
 
+TEST_F(InputManagerTest, RemoveBindingsByName_PluralAliasMatchesSingular)
+{
+    auto &mgr = InputManager::get_instance();
+    // Keyboard bindings install no hook, so this exercises the plural alias without touching real input.
+    mgr.register_press("alias_a", {keyboard_key(0x70)}, [] {});
+    mgr.register_press("alias_b", {keyboard_key(0x71)}, [] {});
+    EXPECT_EQ(mgr.binding_count(), 2u);
+
+    // The plural alias forwards to the singular implementation and returns the removed count.
+    EXPECT_EQ(mgr.remove_bindings_by_name("alias_a"), 1u);
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    // The two-arg plural overload (invoke_callbacks = false) is equally a thin forwarder.
+    EXPECT_EQ(mgr.remove_bindings_by_name("alias_b", false), 1u);
+    EXPECT_EQ(mgr.binding_count(), 0u);
+
+    // Removing an unknown name returns 0, matching the singular behavior.
+    EXPECT_EQ(mgr.remove_bindings_by_name("nonexistent"), 0u);
+}
+
 TEST_F(InputManagerTest, SetConsumeWhileRunningIsSafe)
 {
     auto &mgr = InputManager::get_instance();

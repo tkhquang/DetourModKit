@@ -207,3 +207,24 @@ TEST(FormatTest, FormatHex_PtrdiffMinusOne)
     std::string result = Format::format_hex(value);
     EXPECT_EQ(result, "-0x1");
 }
+
+TEST(FormatTest, FormatHex_UnsignedDisambiguation)
+{
+    // The constrained std::unsigned_integral overload resolves size_t / unsigned / uint64_t arguments that were
+    // previously ambiguous between the int and ptrdiff_t overloads. These calls compiling at all proves the fix.
+    EXPECT_EQ(Format::format_hex(static_cast<std::size_t>(0xDEADBEEF)), "0xDEADBEEF");
+    EXPECT_EQ(Format::format_hex(static_cast<unsigned int>(0xABCD)), "0xABCD");
+    EXPECT_EQ(Format::format_hex(static_cast<std::uint64_t>(0x1122334455667788ULL)), "0x1122334455667788");
+}
+
+TEST(FormatTest, FormatHex_UnsignedWidth)
+{
+    EXPECT_EQ(Format::format_hex(static_cast<std::size_t>(0xFF), 4), "0x00FF");
+    EXPECT_EQ(Format::format_hex(static_cast<unsigned int>(0), 2), "0x00");
+}
+
+TEST(FormatTest, FormatHex_UnsignedFullWidthNoNarrowing)
+{
+    // A value above UINT32_MAX must keep its full width; the signed int overload would have truncated it.
+    EXPECT_EQ(Format::format_hex(static_cast<std::uint64_t>(0xFFFFFFFFFFFFFFFFULL)), "0xFFFFFFFFFFFFFFFF");
+}

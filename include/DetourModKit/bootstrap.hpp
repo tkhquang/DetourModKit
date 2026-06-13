@@ -4,6 +4,9 @@
 /**
  * @file bootstrap.hpp
  * @brief Shared DllMain scaffolding for DMK-native mods.
+ * @note This header does not include <windows.h>. The Win32 module handle and BOOL flags are exposed through the
+ *       opaque Bootstrap::module_handle_t / Bootstrap::bool32_t aliases, so a consumer translation unit that needs
+ *       <windows.h> for its own DllMain must include it directly.
  */
 
 #include "DetourModKit/async_logger.hpp"
@@ -13,7 +16,11 @@
 #include <string>
 #include <string_view>
 
-#include <windows.h>
+// HMODULE is `struct HINSTANCE__ *`. Forward-declaring the incomplete tag lets this public header expose the
+// module-handle type without pulling <windows.h> (and its macro soup) into every consumer translation unit. A TU
+// that also includes <windows.h> sees the identical type, so a real HMODULE binds with no cast. The implementation
+// file (src/bootstrap.cpp) includes <windows.h> directly for the Win32 calls in the function bodies.
+struct HINSTANCE__;
 
 namespace DetourModKit
 {
@@ -25,6 +32,18 @@ namespace DetourModKit
      */
     namespace Bootstrap
     {
+        /**
+         * @brief Opaque Win32 module handle, identical to HMODULE (which is `struct HINSTANCE__ *`).
+         * @details Aliased so the public surface needs no <windows.h>; a real HMODULE binds to it with no cast.
+         */
+        using module_handle_t = ::HINSTANCE__ *;
+
+        /**
+         * @brief Win32 BOOL as a plain 32-bit int (TRUE == 1, FALSE == 0).
+         * @details Aliased so the success/exit flags need no <windows.h>; a real BOOL binds to it with no cast.
+         */
+        using bool32_t = int;
+
         /**
          * @struct ModInfo
          * @brief Identifying strings and async-logger settings for a mod.
@@ -61,11 +80,11 @@ namespace DetourModKit
          * @param info Mod identity and async-logger settings.
          * @param init_fn Called exactly once on the worker thread.
          * @param shutdown_fn Called exactly once before DMK_Shutdown().
-         * @return BOOL TRUE if the worker was started, FALSE if the process gate, instance mutex, or event creation
+         * @return bool32_t TRUE if the worker was started, FALSE if the process gate, instance mutex, or event creation
          *         failed.
          */
-        [[nodiscard]] BOOL on_dll_attach(HMODULE hMod, const ModInfo &info, std::function<bool()> init_fn,
-                                         std::function<void()> shutdown_fn);
+        [[nodiscard]] bool32_t on_dll_attach(module_handle_t hMod, const ModInfo &info, std::function<bool()> init_fn,
+                                             std::function<void()> shutdown_fn);
 
         /**
          * @brief Handles DLL_PROCESS_DETACH.
@@ -93,7 +112,7 @@ namespace DetourModKit
          * @param is_process_exit TRUE when the DLL is unloaded as part of process termination (DllMain @c lpvReserved
          *                        != nullptr).
          */
-        void on_dll_detach(BOOL is_process_exit) noexcept;
+        void on_dll_detach(bool32_t is_process_exit) noexcept;
 
         /**
          * @brief Signals the shutdown event so the worker thread can exit.
@@ -110,7 +129,7 @@ namespace DetourModKit
          * @details Intended for mods that need the handle for resource loading. Returns nullptr before on_dll_attach()
          *          or after on_dll_detach().
          */
-        [[nodiscard]] HMODULE module_handle() noexcept;
+        [[nodiscard]] module_handle_t module_handle() noexcept;
 
         /**
          * @brief Drops the per-Logic-DLL state owned by the caller.

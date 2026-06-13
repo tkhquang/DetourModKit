@@ -35,7 +35,7 @@ namespace DetourModKit
      * @param error The error code.
      * @return A string view describing the error.
      */
-    constexpr std::string_view memory_error_to_string(MemoryError error) noexcept
+    [[nodiscard]] constexpr std::string_view memory_error_to_string(MemoryError error) noexcept
     {
         switch (error)
         {
@@ -87,21 +87,65 @@ namespace DetourModKit
          * @details Invalidates all currently cached memory region information. The background cleanup thread continues
          *          running.
          */
-        void clear_cache();
+        void clear_cache() noexcept;
 
         /**
          * @brief Shuts down the memory cache and stops the background cleanup thread.
          * @details Call this before program exit to cleanly terminate the cleanup thread. After calling shutdown, the
          *          cache cannot be reused without re-initialization.
          */
-        void shutdown_cache();
+        void shutdown_cache() noexcept;
+
+        /**
+         * @struct MemoryStats
+         * @brief Allocation-free snapshot of memory-cache configuration and counters.
+         * @details Every field mirrors a value reported by get_cache_stats(). Counters are loaded with relaxed
+         *          atomics and the live-entry totals are summed under the shard reader guard, so the struct is a
+         *          consistent-per-field but not globally-atomic view. hit_rate_percent is -1.0 when no queries have
+         *          been tracked (hits + misses == 0), matching the formatter's "N/A" branch.
+         */
+        struct MemoryStats
+        {
+            /// Configured number of cache shards.
+            size_t shard_count = 0;
+            /// Configured soft entry capacity per shard.
+            size_t max_entries_per_shard = 0;
+            /// Hard max entries per shard (capacity * multiplier), averaged across shards as the string reports it.
+            size_t hard_max_per_shard = 0;
+            /// Cache-entry expiry window in milliseconds.
+            unsigned int expiry_ms = 0;
+            /// Cumulative cache hits.
+            uint64_t hits = 0;
+            /// Cumulative cache misses.
+            uint64_t misses = 0;
+            /// Cumulative range invalidations.
+            uint64_t invalidations = 0;
+            /// Cumulative in-flight query coalesces.
+            uint64_t coalesced_queries = 0;
+            /// Cumulative on-demand cleanup passes.
+            uint64_t on_demand_cleanups = 0;
+            /// Live entry count summed across all shards at snapshot time.
+            size_t total_entries = 0;
+            /// hits / (hits + misses) * 100, or -1.0 when no queries have been tracked.
+            double hit_rate_percent = -1.0;
+        };
+
+        /**
+         * @brief Returns an allocation-free snapshot of memory-cache statistics.
+         * @details Value-returning counterpart to get_cache_stats(): reads the same counters and walks the shards
+         *          under the same reader guard, but builds no string. Prefer it for telemetry/metrics consumers, and
+         *          use get_cache_stats() for human-readable log lines.
+         * @return MemoryStats POD snapshot.
+         */
+        [[nodiscard]] MemoryStats get_memory_stats() noexcept;
 
         /**
          * @brief Retrieves statistics about the memory cache usage.
-         * @details Returns cache hits, misses, and hit rate information.
+         * @details Returns cache hits, misses, and hit rate information as a human-readable string built over
+         *          get_memory_stats().
          * @return std::string A human-readable string of cache statistics.
          */
-        std::string get_cache_stats();
+        [[nodiscard]] std::string get_cache_stats();
 
         /**
          * @brief Invalidates cache entries that overlap with the specified address range.
@@ -129,7 +173,7 @@ namespace DetourModKit
          *          plausible_userspace_ptr and a module or heap range check. Reserve is_readable for one-shot setup
          *          validation and diagnostics.
          */
-        bool is_readable(const void *address, size_t size);
+        [[nodiscard]] bool is_readable(const void *address, size_t size);
 
         /**
          * @enum ReadableStatus
@@ -150,15 +194,15 @@ namespace DetourModKit
          * @param size Number of bytes in the memory region to check.
          * @return ReadableStatus indicating readable, not readable, or unknown (lock busy).
          */
-        ReadableStatus is_readable_nonblocking(const void *address, size_t size);
+        [[nodiscard]] ReadableStatus is_readable_nonblocking(const void *address, size_t size);
 
         /**
          * @brief Reads a pointer-sized value at (base + offset), returning 0 on fault.
          * @details On MSVC, uses SEH (__try/__except) to catch access violations with zero overhead on the success
          *          path. On MinGW, the read runs under a process-wide vectored exception handler (installed lazily), so
-         *          the success path is a guarded copy with no syscall and any fault -- unmapped, PAGE_NOACCESS/guard, or
-         *          a page reprotected out from under a stale cache entry -- is swallowed and returned as 0. Suitable for
-         *          hot paths that already manage their own error recovery.
+         *          the success path is a guarded copy with no syscall and any fault -- unmapped,
+         *          PAGE_NOACCESS/guard, or a page reprotected out from under a stale cache entry -- is swallowed and
+         *          returned as 0. Suitable for hot paths that already manage their own error recovery.
          * @note The MinGW path consults no cache; the fault guard makes a cache probe unnecessary. If the vectored
          *       handler cannot be installed it falls back to VirtualQuery-validated reads. Either way the function
          *       exposes no caller-observable cache state.
@@ -166,7 +210,7 @@ namespace DetourModKit
          * @param offset Byte offset added to base before dereferencing.
          * @return The pointer-sized value at the address, or 0 if the read faults.
          */
-        uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
+        [[nodiscard]] uintptr_t read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept;
 
         // Canonical x64 user-mode address window. The low 64 KiB is the reserved null-dereference region and is never a
         // live pointer; mapped user addresses sit below the 47-bit canonical split at
@@ -222,7 +266,8 @@ namespace DetourModKit
          *       this function performs an unguarded dereference, so it is one address more conservative and never
          *       blindly reads the boundary itself, while plausible_userspace_ptr only screens a value arithmetically.
          */
-        inline uintptr_t read_ptr_unchecked(uintptr_t base, ptrdiff_t offset, uintptr_t min_valid = 0x10000) noexcept
+        [[nodiscard]] inline uintptr_t read_ptr_unchecked(uintptr_t base, ptrdiff_t offset,
+                                                          uintptr_t min_valid = 0x10000) noexcept
         {
             const auto src = base + static_cast<uintptr_t>(offset);
             // Accept the source only strictly inside the user-mode window (min_valid, USERSPACE_PTR_MAX). The floor is
@@ -261,7 +306,7 @@ namespace DetourModKit
          *          directly (under SEH if the address may be stale) and reserve is_writable for one-shot setup
          *          validation.
          */
-        bool is_writable(void *address, size_t size);
+        [[nodiscard]] bool is_writable(void *address, size_t size);
 
         /**
          * @brief Writes a sequence of bytes to a target memory address.

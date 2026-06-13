@@ -45,7 +45,7 @@
  *              logger.info("Health: {}", e.health);
  *          });
  *
- *          // Emit from a hook callback (lock-free, thread-safe)
+ *          // Emit from a hook callback (no user-visible mutex on the read path, thread-safe)
  *          dispatcher.emit(PlayerStateChanged{.health = 75.0f});
  *          @endcode
  */
@@ -243,7 +243,7 @@ namespace DetourModKit
         /**
          * @brief Emits an event to all subscribers.
          * @param event The event payload, passed by const reference to each handler.
-         * @note Lock-free: performs one atomic acquire-load of the snapshot
+         * @note No user-visible mutex on the read path: performs one atomic acquire-load of the snapshot
          *       pointer and iterates. Multiple threads may emit concurrently without contention. Handlers are invoked
          *       synchronously in subscription order. Exceptions thrown by handlers propagate to the caller.
          * @warning If calling from a game hook callback or any context where an unhandled exception would crash the
@@ -269,9 +269,9 @@ namespace DetourModKit
         /**
          * @brief Emits an event, catching and discarding handler exceptions.
          * @param event The event payload.
-         * @note Same locking semantics as emit() (lock-free). Handlers that throw are skipped; remaining handlers still
-         *       execute. Prefer this over emit() when calling from hook callbacks or other contexts where an unhandled
-         *       exception would crash the host process.
+         * @note Same read-path semantics as emit() (no user-visible mutex). Handlers that throw are skipped; remaining
+         *       handlers still execute. Prefer this over emit() when calling from hook callbacks or other contexts
+         *       where an unhandled exception would crash the host process.
          */
         void emit_safe(const Event &event) const noexcept
         {

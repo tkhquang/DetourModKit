@@ -52,7 +52,7 @@ namespace DetourModKit
             auto *leaked = new (std::nothrow) std::shared_ptr<AsyncLogger>(std::move(logger));
             if (leaked != nullptr)
             {
-                static_cast<void>(leaked);
+                (void)leaked;
                 DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
                 return;
             }
@@ -216,7 +216,7 @@ namespace DetourModKit
         shutdown_internal();
     }
 
-    void Logger::shutdown()
+    void Logger::shutdown() noexcept
     {
         bool expected = false;
         if (!m_shutdown_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -226,7 +226,7 @@ namespace DetourModKit
         shutdown_internal();
     }
 
-    void Logger::shutdown_internal()
+    void Logger::shutdown_internal() noexcept
     {
         std::shared_ptr<AsyncLogger> local_logger;
 
@@ -505,7 +505,7 @@ namespace DetourModKit
         enable_async_mode(AsyncLoggerConfig{});
     }
 
-    void Logger::disable_async_mode()
+    void Logger::disable_async_mode() noexcept
     {
         std::shared_ptr<AsyncLogger> local_async;
         bool should_log = false;
@@ -545,7 +545,15 @@ namespace DetourModKit
 
         if (should_log && !leaked_under_loader_lock)
         {
-            log(LogLevel::Info, "Async logging mode disabled. Switched to synchronous mode.");
+            // disable_async_mode() is noexcept; the synchronous sink can allocate and throw while formatting this
+            // line. Fail closed: drop the diagnostic rather than letting an exception escape the mode switch.
+            try
+            {
+                log(LogLevel::Info, "Async logging mode disabled. Switched to synchronous mode.");
+            }
+            catch (...)
+            {
+            }
         }
     }
 
@@ -554,7 +562,7 @@ namespace DetourModKit
         return m_async_mode_enabled.load(std::memory_order_acquire);
     }
 
-    void Logger::flush()
+    void Logger::flush() noexcept
     {
         if (m_async_mode_enabled.load(std::memory_order_acquire))
         {

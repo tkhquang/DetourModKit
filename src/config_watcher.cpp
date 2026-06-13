@@ -206,11 +206,11 @@ namespace DetourModKit
 
             if (auto *leaked = new (std::nothrow) std::unique_ptr<Impl>(std::move(m_impl)))
             {
-                static_cast<void>(leaked);
+                (void)leaked;
             }
             else
             {
-                static_cast<void>(m_impl.release());
+                (void)m_impl.release();
             }
             DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::ConfigWatcher);
             return;
@@ -542,7 +542,7 @@ namespace DetourModKit
                                                    "not drain after cancel + handle close; leaking the watch "
                                                    "buffer to stay memory-safe.",
                                                    label);
-                    static_cast<void>(io.release());
+                    (void)io.release();
                 }
 
                 // Flush a final debounced callback if we are exiting with a pending change. This intentionally fires

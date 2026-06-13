@@ -76,7 +76,7 @@ namespace DetourModKit
         return m_handle != INVALID_HANDLE_VALUE;
     }
 
-    void WinFileStreamBuf::close()
+    void WinFileStreamBuf::close() noexcept
     {
         if (!is_open())
         {
@@ -154,7 +154,7 @@ namespace DetourModKit
         return written;
     }
 
-    bool WinFileStreamBuf::flush_buffer()
+    bool WinFileStreamBuf::flush_buffer() noexcept
     {
         const auto count = static_cast<DWORD>(pptr() - pbase());
         if (count == 0)
@@ -203,7 +203,7 @@ namespace DetourModKit
         return m_buf.is_open();
     }
 
-    void WinFileStream::close()
+    void WinFileStream::close() noexcept
     {
         m_buf.close();
     }

@@ -61,6 +61,40 @@ TEST(ScannerTest, find_pattern_found)
     EXPECT_EQ(result - data.data(), 100);
 }
 
+TEST(ScannerTest, find_pattern_span_overload)
+{
+    std::vector<std::byte> data(128, std::byte{0x00});
+    data[40] = std::byte{0xAA};
+    data[41] = std::byte{0xBB};
+    data[42] = std::byte{0xCC};
+    // A second occurrence so the Nth-occurrence span overload has something to find.
+    data[90] = std::byte{0xAA};
+    data[91] = std::byte{0xBB};
+    data[92] = std::byte{0xCC};
+
+    auto pattern = Scanner::parse_aob("AA BB CC");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::span<const std::byte> region{data};
+
+    // The span overload must return the identical pointer as the pointer+size form.
+    const std::byte *via_span = Scanner::find_pattern(region, *pattern);
+    const std::byte *via_ptr = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    EXPECT_EQ(via_span, via_ptr);
+    ASSERT_NE(via_span, nullptr);
+    EXPECT_EQ(via_span - data.data(), 40);
+
+    // The Nth-occurrence span overload mirrors the pointer+size form too.
+    const std::byte *second_span = Scanner::find_pattern(region, *pattern, 2);
+    const std::byte *second_ptr = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    EXPECT_EQ(second_span, second_ptr);
+    ASSERT_NE(second_span, nullptr);
+    EXPECT_EQ(second_span - data.data(), 90);
+
+    // An empty span yields nullptr.
+    EXPECT_EQ(Scanner::find_pattern(std::span<const std::byte>{}, *pattern), nullptr);
+}
+
 // The AOB prefilter routes through a self-provided dmk_memchr that is ASan-safe in every build. The observable
 // contract pinned here is "first match wins, nullptr when no match, treat n==0 as no match", covered across the
 // boundary cases of the 8-byte qword loop: the unaligned head, the aligned body, and the byte-wise tail. The qword

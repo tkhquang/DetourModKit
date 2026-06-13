@@ -106,9 +106,9 @@ TEST_F(AsyncLoggerTest, Enqueue)
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
-    static_cast<void>(logger->enqueue(LogLevel::Info, "Test message 1"));
-    static_cast<void>(logger->enqueue(LogLevel::Debug, "Test message 2"));
-    static_cast<void>(logger->enqueue(LogLevel::Warning, "Test message 3"));
+    (void)logger->enqueue(LogLevel::Info, "Test message 1");
+    (void)logger->enqueue(LogLevel::Debug, "Test message 2");
+    (void)logger->enqueue(LogLevel::Warning, "Test message 3");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
@@ -143,7 +143,7 @@ TEST_F(AsyncLoggerTest, HonorsConfiguredTimestampFormat)
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
-    static_cast<void>(logger->enqueue(LogLevel::Info, "formatted"));
+    (void)logger->enqueue(LogLevel::Info, "formatted");
     logger->shutdown(); // drains queued messages before returning
 
     std::ifstream file(m_test_log_file);
@@ -196,7 +196,7 @@ TEST_F(AsyncLoggerTest, Enqueue_ReturnsFalse_WhenDropped)
 
     EXPECT_TRUE(result1);
     EXPECT_TRUE(result2);
-    static_cast<void>(result3_unused);
+    (void)result3_unused;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -234,7 +234,7 @@ TEST_F(AsyncLoggerTest, Flush)
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
 
-    static_cast<void>(logger->enqueue(LogLevel::Info, "Flush test message"));
+    (void)logger->enqueue(LogLevel::Info, "Flush test message");
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
@@ -265,8 +265,8 @@ TEST_F(AsyncLoggerTest, MultiThreadedLogging)
             {
                 for (int j = 0; j < messages_per_thread; ++j)
                 {
-                    static_cast<void>(logger->enqueue(LogLevel::Info,
-                                                      "Thread " + std::to_string(i) + " message " + std::to_string(j)));
+                    (void)logger->enqueue(LogLevel::Info,
+                                          "Thread " + std::to_string(i) + " message " + std::to_string(j));
                 }
             });
     }
@@ -400,7 +400,7 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_DropNewest)
 
     for (int i = 0; i < 200; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "drop_newest_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "drop_newest_" + std::to_string(i));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -423,7 +423,7 @@ TEST_F(AsyncLoggerTest, OverflowPolicy_DropOldest_Full)
 
     for (int i = 0; i < 200; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "drop_oldest_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "drop_oldest_" + std::to_string(i));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -711,7 +711,7 @@ TEST_F(AsyncLoggerTest, MessageContentVerification)
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
-    static_cast<void>(logger->enqueue(LogLevel::Info, "UNIQUE_MARKER_abc123"));
+    (void)logger->enqueue(LogLevel::Info, "UNIQUE_MARKER_abc123");
     logger->shutdown();
     file_stream->close();
 
@@ -730,8 +730,8 @@ TEST_F(AsyncLoggerTest, DestructorFlushGuarantee)
         config.flush_interval = std::chrono::milliseconds{50};
 
         AsyncLogger logger(config, file_stream, log_mutex);
-        static_cast<void>(logger.enqueue(LogLevel::Warning, "DESTRUCTOR_FLUSH_MSG_1"));
-        static_cast<void>(logger.enqueue(LogLevel::Error, "DESTRUCTOR_FLUSH_MSG_2"));
+        (void)logger.enqueue(LogLevel::Warning, "DESTRUCTOR_FLUSH_MSG_1");
+        (void)logger.enqueue(LogLevel::Error, "DESTRUCTOR_FLUSH_MSG_2");
     }
 
     std::ifstream in(m_test_log_file);
@@ -753,7 +753,7 @@ TEST_F(AsyncLoggerTest, BatchBoundaryBehavior)
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
     for (size_t i = 0; i < kBatchSize; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "BATCH_MSG_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "BATCH_MSG_" + std::to_string(i));
     }
     logger->shutdown();
     file_stream->close();
@@ -784,7 +784,7 @@ TEST_F(AsyncLoggerTest, ConcurrentFlushAndEnqueue)
         {
             for (int i = 0; i < 100; ++i)
             {
-                static_cast<void>(logger->enqueue(LogLevel::Info, "CONCURRENT_MSG_" + std::to_string(i)));
+                (void)logger->enqueue(LogLevel::Info, "CONCURRENT_MSG_" + std::to_string(i));
             }
             done.store(true, std::memory_order_release);
         });
@@ -1037,7 +1037,7 @@ TEST_F(AsyncLoggerTest, FlushWithTimeout_Success)
 
     for (int i = 0; i < 10; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "test_msg_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "test_msg_" + std::to_string(i));
     }
 
     bool result = logger->flush_with_timeout(std::chrono::milliseconds(500));
@@ -1077,7 +1077,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_Increment)
 
     for (int i = 0; i < 100; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1105,7 +1105,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_DropOldest)
     constexpr int kFillCount = 100;
     for (int i = 0; i < kFillCount; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1129,7 +1129,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_Reset)
 
     for (int i = 0; i < 50; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1159,7 +1159,7 @@ TEST_F(AsyncLoggerTest, DroppedCount_DropNewest)
     constexpr int kFillCount = 100;
     for (int i = 0; i < kFillCount; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -1183,7 +1183,7 @@ TEST_F(AsyncLoggerTest, QueueSize_Accuracy)
 
     for (int i = 0; i < 8; ++i)
     {
-        static_cast<void>(logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i)));
+        (void)logger->enqueue(LogLevel::Info, "msg_" + std::to_string(i));
     }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1296,13 +1296,13 @@ TEST_F(AsyncLoggerTest, DropOldest_NoCounterUnderflow)
     // Fill the queue
     for (int i = 0; i < 4; ++i)
     {
-        static_cast<void>(logger.enqueue(LogLevel::Info, "fill_" + std::to_string(i)));
+        (void)logger.enqueue(LogLevel::Info, "fill_" + std::to_string(i));
     }
 
     // Overflow: should drop oldest and push new
     for (int i = 0; i < 4; ++i)
     {
-        static_cast<void>(logger.enqueue(LogLevel::Info, "overflow_" + std::to_string(i)));
+        (void)logger.enqueue(LogLevel::Info, "overflow_" + std::to_string(i));
     }
 
     // flush should complete without hanging (no counter underflow)
@@ -1325,8 +1325,8 @@ TEST_F(AsyncLoggerTest, SyncFallback_WritesWhenQueueFull)
     AsyncLogger logger(config, file_stream, log_mutex);
 
     // Fill the queue
-    static_cast<void>(logger.enqueue(LogLevel::Info, "msg1"));
-    static_cast<void>(logger.enqueue(LogLevel::Info, "msg2"));
+    (void)logger.enqueue(LogLevel::Info, "msg1");
+    (void)logger.enqueue(LogLevel::Info, "msg2");
 
     // This should trigger SyncFallback path
     bool result = logger.enqueue(LogLevel::Info, "sync_fallback_message");
@@ -1705,9 +1705,9 @@ TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
     auto log_mutex = std::make_shared<std::mutex>();
 
     auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
-    static_cast<void>(logger->enqueue(LogLevel::Info, "FORMAT_CHECK_INFO_7f3a"));
-    static_cast<void>(logger->enqueue(LogLevel::Debug, "FORMAT_CHECK_DEBUG_8b2c"));
-    static_cast<void>(logger->enqueue(LogLevel::Warning, "FORMAT_CHECK_WARN_9d4e"));
+    (void)logger->enqueue(LogLevel::Info, "FORMAT_CHECK_INFO_7f3a");
+    (void)logger->enqueue(LogLevel::Debug, "FORMAT_CHECK_DEBUG_8b2c");
+    (void)logger->enqueue(LogLevel::Warning, "FORMAT_CHECK_WARN_9d4e");
     logger->shutdown();
     file_stream->close();
 

@@ -29,11 +29,22 @@ namespace DetourModKit
     inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 64;
     inline constexpr size_t POOL_SLOTS_PER_BLOCK = 16;
 
+    /**
+     * @enum OverflowPolicy
+     * @brief Action taken by AsyncLogger::enqueue when the bounded queue is full.
+     * @warning Only DropNewest and DropOldest are callback-safe. Block parks the producer and SyncFallback writes
+     *          synchronously, so neither may be used by a logger that hook or input callbacks emit through; reserve
+     *          them for setup/control-plane logging where a brief stall under sink backpressure is acceptable.
+     */
     enum class OverflowPolicy
     {
+        /// Drop the message being enqueued when the queue is full. Non-blocking and callback-safe.
         DropNewest,
+        /// Evict the oldest queued message to make room for the new one. Non-blocking and callback-safe.
         DropOldest,
+        /// Park the producer until space frees or block_timeout_ms elapses. Not callback-safe (can stall the caller).
         Block,
+        /// Write the message synchronously on the producer thread. Not callback-safe (synchronous sink I/O).
         SyncFallback
     };
 
@@ -109,13 +120,13 @@ namespace DetourModKit
      */
     struct LogMessage
     {
-        LogLevel level;
+        LogLevel level{LogLevel::Info};
         std::chrono::system_clock::time_point timestamp;
         std::thread::id thread_id;
 
         static constexpr size_t MAX_INLINE_SIZE = LOG_INLINE_MESSAGE_SIZE;
         static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
-        std::array<char, MAX_INLINE_SIZE> buffer;
+        std::array<char, MAX_INLINE_SIZE> buffer{};
         size_t length{0};
 
         // Owned: allocated by StringPool, freed by reset().
@@ -160,7 +171,7 @@ namespace DetourModKit
          */
         explicit DynamicMPMCQueue(size_t capacity);
 
-        ~DynamicMPMCQueue() = default;
+        ~DynamicMPMCQueue() noexcept = default;
 
         DynamicMPMCQueue(const DynamicMPMCQueue &) = delete;
         DynamicMPMCQueue &operator=(const DynamicMPMCQueue &) = delete;
@@ -242,6 +253,12 @@ namespace DetourModKit
     /**
      * @struct AsyncLoggerConfig
      * @brief Configuration for the async logger.
+     * @details The default queue holds DEFAULT_QUEUE_CAPACITY (8192) slots; each slot embeds a LogMessage with a
+     *          LOG_INLINE_MESSAGE_SIZE (512) byte inline buffer, so the ring buffer's resident footprint is on the
+     *          order of a few MiB at the default capacity (queue_capacity must stay a power of two). The StringPool
+     *          used for overflow (> 512 byte) messages is a separate, lazily grown allocation bounded to
+     *          MEMORY_POOL_BLOCK_COUNT * MEMORY_POOL_BLOCK_SIZE (256 KiB); see StringPool. Shrink queue_capacity for
+     *          memory-constrained hosts.
      */
     struct AsyncLoggerConfig
     {
@@ -312,8 +329,12 @@ namespace DetourModKit
          * @param level The log level.
          * @param message The message string.
          * @return true if the message was successfully enqueued or written, false if dropped or timed out.
-         * @details This method is non-blocking (unless OverflowPolicy::Block is used). The message will be written to
-         *          the log file by the writer thread.
+         * @details Non-blocking under the DropNewest / DropOldest policies. Under OverflowPolicy::Block a full queue
+         *          parks the caller up to block_timeout_ms, and under OverflowPolicy::SyncFallback a full queue writes
+         *          the message synchronously on the calling thread, so neither of those policies is callback-safe (see
+         *          OverflowPolicy). Otherwise the message is written by the writer thread.
+         * @note Best-effort: never throws and returns false on drop. Callback-safe only under the DropNewest /
+         *       DropOldest policies (see @details).
          */
         [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
 

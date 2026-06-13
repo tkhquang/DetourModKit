@@ -34,7 +34,7 @@ namespace DetourModKit
      * @param error The error code.
      * @return A string view describing the error.
      */
-    constexpr std::string_view rip_resolve_error_to_string(RipResolveError error) noexcept
+    [[nodiscard]] constexpr std::string_view rip_resolve_error_to_string(RipResolveError error) noexcept
     {
         switch (error)
         {
@@ -186,6 +186,21 @@ namespace DetourModKit
                                                     const CompiledPattern &pattern);
 
         /**
+         * @brief std::span convenience overload of the single-occurrence raw scan.
+         * @details Delegates to find_pattern(region.data(), region.size(), pattern). An empty span yields nullptr.
+         *          Carries the same READABLE-RANGE PRECONDITION as the pointer+size overload: the entire span must be
+         *          committed and readable, because the search uses raw memchr/SIMD loads.
+         * @param region Contiguous, committed, readable byte span to scan.
+         * @param pattern The compiled pattern to search for.
+         * @return Pointer to the match within @p region (adjusted by pattern.offset), or nullptr if not found.
+         */
+        [[nodiscard]] inline const std::byte *find_pattern(std::span<const std::byte> region,
+                                                           const CompiledPattern &pattern)
+        {
+            return find_pattern(region.data(), region.size(), pattern);
+        }
+
+        /**
          * @brief Scans a memory region for the Nth occurrence of a byte pattern.
          * @param start_address Pointer to the beginning of the memory region to scan.
          * @param region_size The size (in bytes) of the memory region to scan.
@@ -206,6 +221,22 @@ namespace DetourModKit
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, size_t region_size,
                                                     const CompiledPattern &pattern, size_t occurrence);
+
+        /**
+         * @brief std::span convenience overload of the Nth-occurrence raw scan.
+         * @details Delegates to find_pattern(region.data(), region.size(), pattern, occurrence). Same READABLE-RANGE
+         *          PRECONDITION as the pointer+size overload: the entire span must be committed and readable.
+         * @param region Contiguous, committed, readable byte span to scan.
+         * @param pattern The compiled pattern to search for.
+         * @param occurrence Which occurrence to return (1-based). Passing 0 returns nullptr.
+         * @return Pointer to the Nth occurrence (adjusted by pattern.offset), or nullptr if fewer than N matches.
+         */
+        [[nodiscard]] inline const std::byte *find_pattern(std::span<const std::byte> region,
+                                                           const CompiledPattern &pattern, size_t occurrence)
+        {
+            return find_pattern(region.data(), region.size(), pattern, occurrence);
+        }
+
         /// Common x86-64 RIP-relative opcode prefixes (bytes preceding the disp32 field).
         inline constexpr std::array<std::byte, 3> PREFIX_MOV_RAX_RIP = {std::byte{0x48}, std::byte{0x8B},
                                                                         std::byte{0x05}};
@@ -404,7 +435,7 @@ namespace DetourModKit
         /**
          * @brief Human-readable mapping for ResolveError.
          */
-        constexpr std::string_view resolve_error_to_string(ResolveError error) noexcept
+        [[nodiscard]] constexpr std::string_view resolve_error_to_string(ResolveError error) noexcept
         {
             switch (error)
             {
@@ -701,7 +732,7 @@ namespace DetourModKit
          * @param error The error code.
          * @return A string view describing the error.
          */
-        constexpr std::string_view string_xref_error_to_string(StringXrefError error) noexcept
+        [[nodiscard]] constexpr std::string_view string_xref_error_to_string(StringXrefError error) noexcept
         {
             switch (error)
             {

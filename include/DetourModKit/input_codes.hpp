@@ -34,7 +34,7 @@ namespace DetourModKit
      * @param source The InputSource enum value.
      * @return std::string_view String representation of the source.
      */
-    constexpr std::string_view input_source_to_string(InputSource source) noexcept
+    [[nodiscard]] constexpr std::string_view input_source_to_string(InputSource source) noexcept
     {
         switch (source)
         {
@@ -83,7 +83,7 @@ namespace DetourModKit
      * @param vk The VK code (e.g., 0x41 for 'A').
      * @return InputCode Tagged as Keyboard.
      */
-    constexpr InputCode keyboard_key(int vk) noexcept
+    [[nodiscard]] constexpr InputCode keyboard_key(int vk) noexcept
     {
         return {InputSource::Keyboard, vk};
     }
@@ -93,7 +93,7 @@ namespace DetourModKit
      * @param vk The VK code (e.g., 0x01 for VK_LBUTTON).
      * @return InputCode Tagged as Mouse.
      */
-    constexpr InputCode mouse_button(int vk) noexcept
+    [[nodiscard]] constexpr InputCode mouse_button(int vk) noexcept
     {
         return {InputSource::Mouse, vk};
     }
@@ -103,7 +103,7 @@ namespace DetourModKit
      * @param code The XInput button mask or synthetic trigger code (see GamepadCode).
      * @return InputCode Tagged as Gamepad.
      */
-    constexpr InputCode gamepad_button(int code) noexcept
+    [[nodiscard]] constexpr InputCode gamepad_button(int code) noexcept
     {
         return {InputSource::Gamepad, code};
     }
@@ -113,7 +113,7 @@ namespace DetourModKit
      * @param code The wheel direction identifier (see WheelCode).
      * @return InputCode Tagged as MouseWheel.
      */
-    constexpr InputCode mouse_wheel(int code) noexcept
+    [[nodiscard]] constexpr InputCode mouse_wheel(int code) noexcept
     {
         return {InputSource::MouseWheel, code};
     }
@@ -208,7 +208,7 @@ namespace DetourModKit
      * @param code The input code to look up.
      * @return std::string_view The canonical name, or an empty view if not in the table.
      */
-    std::string_view input_code_to_name(const InputCode &code);
+    [[nodiscard]] std::string_view input_code_to_name(const InputCode &code);
 
     /**
      * @brief Formats an InputCode as a human-readable string.
@@ -219,7 +219,7 @@ namespace DetourModKit
      * @param code The input code to format.
      * @return std::string Formatted string.
      */
-    std::string format_input_code(const InputCode &code);
+    [[nodiscard]] std::string format_input_code(const InputCode &code);
 
 } // namespace DetourModKit
 

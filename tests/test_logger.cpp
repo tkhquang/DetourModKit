@@ -38,7 +38,8 @@ protected:
 
     void TearDown() override
     {
-        auto temp_file = std::filesystem::temp_directory_path() / "test_logger_temp.log";
+        auto temp_file = std::filesystem::temp_directory_path() /
+                         ("test_logger_temp_" + std::to_string(GetCurrentProcessId()) + ".log");
         Logger::configure("TEMP", temp_file.string(), "%Y-%m-%d %H:%M:%S");
 
         try

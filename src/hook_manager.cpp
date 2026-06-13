@@ -201,12 +201,15 @@ HookManager::~HookManager() noexcept
     clear_hooks_locked();
 }
 
-void HookManager::shutdown()
+void HookManager::shutdown() noexcept
 {
     if (get_reentrancy_guard() > 0)
     {
-        m_logger.warning("HookManager: Reentrant shutdown() from within a with_*/try_with_* callback rejected; defer "
-                         "hook teardown until the callback returns.");
+        // shutdown() is noexcept; route the misuse diagnostic through the no-throw try_log so a sink or format
+        // failure cannot escape the rejected reentrant call.
+        (void)m_logger.try_log(LogLevel::Warning,
+                               "HookManager: Reentrant shutdown() from within a with_*/try_with_* callback "
+                               "rejected; defer hook teardown until the callback returns.");
         return;
     }
 
@@ -999,12 +1002,15 @@ std::expected<void, HookError> HookManager::remove_hook(std::string_view hook_id
     return result;
 }
 
-void HookManager::remove_all_hooks()
+void HookManager::remove_all_hooks() noexcept
 {
     if (get_reentrancy_guard() > 0)
     {
-        m_logger.warning("HookManager: Reentrant remove_all_hooks() from within a with_*/try_with_* callback rejected; "
-                         "defer hook teardown until the callback returns.");
+        // remove_all_hooks() is noexcept; route the misuse diagnostic through the no-throw try_log so a sink or
+        // format failure cannot escape the rejected reentrant call.
+        (void)m_logger.try_log(LogLevel::Warning,
+                               "HookManager: Reentrant remove_all_hooks() from within a with_*/try_with_* callback "
+                               "rejected; defer hook teardown until the callback returns.");
         return;
     }
 
@@ -1046,17 +1052,20 @@ void HookManager::remove_all_hooks()
 
     // Emit the teardown logs only after the hooks mutex and the mutator gate are both released, so the logger's sink
     // I/O never extends either critical section (deferred-logging convention, matching the create_*_hook paths).
+    // remove_all_hooks() is noexcept, so each summary line goes through the no-throw try_log path.
     if (num_vmt > 0)
     {
-        m_logger.debug("HookManager: Removed all {} VMT hooks.", num_vmt);
+        (void)m_logger.try_log(LogLevel::Debug, "HookManager: Removed all {} VMT hooks.", num_vmt);
     }
     if (num_hooks > 0)
     {
-        m_logger.debug("HookManager: Removed all {} managed hooks and unhooked them.", num_hooks);
+        (void)m_logger.try_log(LogLevel::Debug, "HookManager: Removed all {} managed hooks and unhooked them.",
+                               num_hooks);
     }
     else if (num_vmt == 0)
     {
-        m_logger.debug("HookManager: remove_all_hooks called, but no hooks were active to remove.");
+        (void)m_logger.try_log(LogLevel::Debug,
+                               "HookManager: remove_all_hooks called, but no hooks were active to remove.");
     }
 }
 

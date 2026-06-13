@@ -22,6 +22,8 @@
 // Module headers
 #include "DetourModKit/anchors.hpp"
 #include "DetourModKit/bootstrap.hpp"
+#include "DetourModKit/diagnostics.hpp"
+#include "DetourModKit/drift_manifest.hpp"
 #include "DetourModKit/event_dispatcher.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"

@@ -33,7 +33,7 @@ namespace DetourModKit
      * @param level The LogLevel enum value.
      * @return std::string_view String representation of the log level.
      */
-    constexpr std::string_view log_level_to_string(LogLevel level) noexcept
+    [[nodiscard]] constexpr std::string_view log_level_to_string(LogLevel level) noexcept
     {
         switch (level)
         {
@@ -95,6 +95,8 @@ namespace DetourModKit
          * @param prefix Default log prefix string.
          * @param file_name Default log file name.
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
+         * @note Setup/control-plane only: reopens the log file and is not callback-safe. Call from init, not a hook
+         *       or input callback.
          */
         static void configure(std::string_view prefix, std::string_view file_name,
                               std::string_view timestamp_fmt = DEFAULT_TIMESTAMP_FORMAT);
@@ -114,6 +116,7 @@ namespace DetourModKit
          * @details When enabled, log messages are queued and written by a dedicated writer thread, reducing latency on
          *          the calling thread.
          * @param config Optional async logger configuration. Uses defaults if not provided.
+         * @note Setup/control-plane only: starts the writer thread and takes m_async_mutex; not callback-safe.
          */
         void enable_async_mode(const AsyncLoggerConfig &config);
         void enable_async_mode();
@@ -125,7 +128,7 @@ namespace DetourModKit
          *          and the module is pinned so the detached thread never outlives the object's storage or code pages;
          *          the event is recorded via Diagnostics::record_intentional_leak.
          */
-        void disable_async_mode();
+        void disable_async_mode() noexcept;
 
         /**
          * @brief Checks if async logging mode is enabled.
@@ -137,7 +140,7 @@ namespace DetourModKit
          * @brief Flushes all pending log messages.
          * @details In async mode, waits for all queued messages to be written. In sync mode, flushes the file stream.
          */
-        void flush();
+        void flush() noexcept;
 
         /**
          * @brief Explicitly shuts down the Logger, closing files without logging.
@@ -145,7 +148,7 @@ namespace DetourModKit
          *          without attempting to log, preventing use-after-free if called after other singletons are destroyed.
          *          After calling shutdown(), the destructor becomes a no-op.
          */
-        void shutdown();
+        void shutdown() noexcept;
 
         /**
          * @brief Gets the current log level.
@@ -182,6 +185,10 @@ namespace DetourModKit
          *         stream in sync mode); false if it was filtered out by level, dropped (queue full), or the file sink
          *         was closed/unhealthy. The return is informational; callers that do not need delivery status may
          *         ignore it.
+         * @note Logging is best-effort. In async mode a message enqueued during or immediately after shutdown() may be
+         *       lost: the post-join drain can miss at most one in-flight message per producer thread (an accepted
+         *       trade-off documented on AsyncLogger::shutdown). Do not rely on a final diagnostics line reaching the
+         *       file if it is emitted while the logger is being torn down.
          */
         bool log(LogLevel level, std::string_view message);
 
@@ -196,6 +203,8 @@ namespace DetourModKit
          * @param message The already-formatted message string.
          * @return true if the message was handed to the sink, false if it was filtered out or an internal failure was
          *         suppressed.
+         * @note Callback-safe and best-effort: non-blocking, fails closed, never throws -- the host-callback logging
+         *       path (with try_log).
          */
         [[nodiscard]] bool log_noexcept(LogLevel level, std::string_view message) noexcept;
 
@@ -216,9 +225,8 @@ namespace DetourModKit
                 // the inline buffer never heap-allocates. The view handed to the sink is consumed
                 // synchronously (the async path copies it into LogMessage, the sync path writes it) before
                 // this call returns, so it never outlives the stack buffer.
-                static_cast<void>(format_dispatch([this, level](std::string_view formatted)
-                                                  { return this->log(level, formatted); }, fmt,
-                                                  std::forward<Args>(args)...));
+                (void)format_dispatch([this, level](std::string_view formatted) { return this->log(level, formatted); },
+                                      fmt, std::forward<Args>(args)...);
             }
         }
 
@@ -261,6 +269,8 @@ namespace DetourModKit
          *          formatted when the level is enabled (lazy evaluation).
          * @return true if the message was handed to the sink, false if it was filtered out or dropped because
          *         formatting/logging failed.
+         * @note Callback-safe and best-effort: formats and logs without throwing -- prefer it over log()/error()
+         *       from hook and input callbacks.
          */
         template <typename... Args>
         [[nodiscard]] bool try_log(LogLevel level, std::format_string<Args...> fmt, Args &&...args) noexcept
@@ -288,12 +298,17 @@ namespace DetourModKit
          * @param level_str The string to convert (case-insensitive).
          * @return The corresponding LogLevel enum. Defaults to LogLevel::Info if unrecognized.
          */
-        static LogLevel string_to_log_level(std::string_view level_str);
+        [[nodiscard]] static LogLevel string_to_log_level(std::string_view level_str);
 
         /**
          * @struct StaticConfig
          * @brief Immutable configuration snapshot for thread-safe static configuration.
-         * @details Stored behind an atomic shared_ptr so readers never need a mutex.
+         * @details Stored behind a std::atomic<std::shared_ptr<const StaticConfig>> and published with an
+         *          acquire/release pair, so a reader takes no DetourModKit-level lock. The load is genuinely lock-free
+         *          on MSVC x64 (128-bit compare-exchange); on MinGW/GCC the standard library may use an
+         *          implementation-internal global mutex for the shared_ptr atomic, which is still correct but not
+         *          strictly lock-free. This path is touched only on (re)configuration and the log() slow path, not
+         *          per-message, so the fallback cost is immaterial.
          */
         struct StaticConfig
         {
@@ -346,7 +361,7 @@ namespace DetourModKit
         /**
          * @brief Shared shutdown logic used by both ~Logger() and shutdown().
          */
-        void shutdown_internal();
+        void shutdown_internal() noexcept;
 
         /**
          * @brief Generates the current timestamp formatted according to m_timestamp_format.

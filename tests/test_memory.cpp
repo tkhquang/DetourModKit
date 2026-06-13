@@ -48,6 +48,35 @@ TEST_F(MemoryTest, GetMemoryCacheStats)
     EXPECT_NE(stats.find("Misses:"), std::string::npos);
 }
 
+TEST_F(MemoryTest, GetMemoryStats_PopulatedAndConsistentWithString)
+{
+    const Memory::MemoryStats stats = Memory::get_memory_stats();
+
+    // SetUp() initialized the cache, so the configuration fields are populated.
+    EXPECT_GT(stats.shard_count, 0u);
+    EXPECT_GT(stats.max_entries_per_shard, 0u);
+
+    // hit_rate_percent is either the documented "no queries" sentinel or a real percentage.
+    EXPECT_TRUE(stats.hit_rate_percent == -1.0 || (stats.hit_rate_percent >= 0.0 && stats.hit_rate_percent <= 100.0));
+
+    // get_cache_stats() is a thin formatter over the same snapshot: the struct's counters appear verbatim.
+    const std::string str = Memory::get_cache_stats();
+    EXPECT_NE(str.find("Shards: " + std::to_string(stats.shard_count)), std::string::npos);
+    EXPECT_NE(str.find("Hits: " + std::to_string(stats.hits)), std::string::npos);
+    EXPECT_NE(str.find("Misses: " + std::to_string(stats.misses)), std::string::npos);
+}
+
+TEST_F(MemoryTest, GetMemoryStats_NoQueriesSentinel)
+{
+    Memory::clear_cache();
+    const Memory::MemoryStats stats = Memory::get_memory_stats();
+    // clear_cache() resets the hit/miss counters and no lookup runs before this read, so the "no queries" state is
+    // deterministic and the sentinel must always hold.
+    EXPECT_EQ(stats.hits + stats.misses, 0u);
+    EXPECT_DOUBLE_EQ(stats.hit_rate_percent, -1.0);
+    EXPECT_NE(Memory::get_cache_stats().find("N/A (no queries tracked)"), std::string::npos);
+}
+
 TEST_F(MemoryTest, IsMemoryReadable_Valid)
 {
     char buffer[100] = {0};
@@ -875,7 +904,7 @@ TEST_F(MemoryTest, ClearCacheResetsAllStats)
     char buffer[100] = {0};
     for (int i = 0; i < 5; ++i)
     {
-        Memory::is_readable(buffer, sizeof(buffer));
+        (void)Memory::is_readable(buffer, sizeof(buffer));
     }
 
     Memory::clear_cache();
@@ -995,7 +1024,7 @@ TEST_F(MemoryTest, ClearCacheResetsOnDemandCleanupStat)
     char buffer[100] = {0};
     for (int i = 0; i < 5; ++i)
     {
-        Memory::is_readable(buffer, sizeof(buffer));
+        (void)Memory::is_readable(buffer, sizeof(buffer));
     }
 
     Memory::clear_cache();
@@ -1087,7 +1116,7 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
                 while (keep_reading.load(std::memory_order_acquire))
                 {
                     // After shutdown, is_readable falls back to direct VirtualQuery
-                    Memory::is_readable(mem, 64);
+                    (void)Memory::is_readable(mem, 64);
                 }
             });
     }
@@ -1319,7 +1348,7 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
             reader_started.store(true);
             for (int i = 0; i < 100; ++i)
             {
-                Memory::is_readable(mem, 4);
+                (void)Memory::is_readable(mem, 4);
             }
             reader_done.store(true);
         });
@@ -1370,7 +1399,7 @@ TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
                     {
                         started.fetch_add(1, std::memory_order_acq_rel);
                     }
-                    Memory::is_readable(mem, 4);
+                    (void)Memory::is_readable(mem, 4);
                 }
                 finished.fetch_add(1, std::memory_order_acq_rel);
             });
@@ -1482,7 +1511,7 @@ TEST_F(MemoryTest, IsReadableNonblocking_NoAccessMemory)
     ASSERT_NE(noaccess, nullptr);
 
     // Prime cache so nonblocking has data
-    Memory::is_readable(noaccess, 1);
+    (void)Memory::is_readable(noaccess, 1);
 
     auto status = Memory::is_readable_nonblocking(noaccess, 1);
     EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
@@ -1644,7 +1673,7 @@ TEST_F(MemoryTest, IsReadableNonblocking_ReservedMemory)
     ASSERT_NE(reserved, nullptr);
 
     // Prime cache
-    Memory::is_readable(reserved, 1);
+    (void)Memory::is_readable(reserved, 1);
 
     auto status = Memory::is_readable_nonblocking(reserved, 1);
     EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
@@ -1662,7 +1691,7 @@ TEST_F(MemoryTest, IsReadableNonblocking_GuardPage)
 
     Memory::clear_cache();
     // Prime cache with guard-page state
-    Memory::is_readable(mem, 1);
+    (void)Memory::is_readable(mem, 1);
 
     auto status = Memory::is_readable_nonblocking(mem, 1);
     EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
@@ -1676,7 +1705,7 @@ TEST_F(MemoryTest, IsReadableNonblocking_ReadOnlyPage)
     ASSERT_NE(mem, nullptr);
 
     // Prime cache
-    Memory::is_readable(mem, 1);
+    (void)Memory::is_readable(mem, 1);
 
     auto status = Memory::is_readable_nonblocking(mem, 1);
     EXPECT_EQ(status, Memory::ReadableStatus::Readable);
@@ -1697,7 +1726,7 @@ TEST_F(MemoryTest, IsReadableNonblocking_HeapAllocation)
     auto buffer = std::make_unique<char[]>(100);
 
     // Prime cache
-    Memory::is_readable(buffer.get(), 100);
+    (void)Memory::is_readable(buffer.get(), 100);
 
     auto status = Memory::is_readable_nonblocking(buffer.get(), 100);
     EXPECT_EQ(status, Memory::ReadableStatus::Readable);

@@ -34,7 +34,7 @@ namespace DetourModKit
         [[nodiscard]] bool open(const std::string &path, std::ios_base::openmode mode);
         [[nodiscard]] bool open(const std::wstring &path, std::ios_base::openmode mode);
         [[nodiscard]] bool is_open() const noexcept;
-        void close();
+        void close() noexcept;
 
     protected:
         int_type overflow(int_type ch) override;
@@ -42,7 +42,7 @@ namespace DetourModKit
         std::streamsize xsputn(const char *s, std::streamsize count) override;
 
     private:
-        bool flush_buffer();
+        bool flush_buffer() noexcept;
 
         win_handle_t m_handle;
         std::array<char, BUFFER_SIZE> m_buffer;
@@ -69,7 +69,7 @@ namespace DetourModKit
         void open(const std::string &path, std::ios_base::openmode mode = std::ios_base::out);
         void open(const std::wstring &path, std::ios_base::openmode mode = std::ios_base::out);
         [[nodiscard]] bool is_open() const noexcept;
-        void close();
+        void close() noexcept;
 
     private:
         WinFileStreamBuf m_buf;

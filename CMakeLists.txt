@@ -2,6 +2,11 @@ cmake_minimum_required(VERSION 3.25)
 
 project(DetourModKit VERSION 3.6.1 LANGUAGES CXX)
 
+# GNUInstallDirs defines CMAKE_INSTALL_LIBDIR / BINDIR / INCLUDEDIR / DOCDIR. It must be included before any
+# install() rule reads those variables; otherwise they expand to empty and components land at the install-prefix
+# root instead of lib/, bin/, include/. The install rules and the package-config block below all depend on it.
+include(GNUInstallDirs)
+
 # --- Standard and Compiler Options ---
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,7 +127,12 @@ else()
     "'git submodule update --init --recursive'")
 endif()
 
-# DirectXMath (header-only library from submodule)
+# DirectXMath (header-only library from submodule).
+# DetourModKit itself does not use DirectXMath in any of its own headers or sources; it is vendored and re-exported
+# as a deliberate convenience so consuming mods can `#include <DirectXMath.h>` (game camera/vector math) without
+# wiring their own submodule. The PUBLIC include interface and the header install below ship it to find_package
+# consumers for that reason. This is intentional: dropping it is a breaking change for any downstream that relies
+# on the transitive include path.
 set(DIRECTXMATH_INCLUDE_DIR "")
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/DirectXMath/Inc/DirectXMath.h")
@@ -160,6 +170,12 @@ endif()
 add_library(DetourModKit STATIC
   ${DETOURMODKIT_SOURCE_FILES}
 )
+
+# Bake the C++23 requirement into the exported/installed target so every find_package(DetourModKit) consumer
+# inherits it through INTERFACE_COMPILE_FEATURES (which survives install(EXPORT)). The global CMAKE_CXX_STANDARD
+# set above governs the in-tree build of the external submodules and tests; this target feature governs the
+# exported contract that the tests/package_smoke consumer proves.
+target_compile_features(DetourModKit PUBLIC cxx_std_23)
 
 # NOMINMAX applied only to DetourModKit (not globally) to avoid
 # redefinition warnings in external dependencies like SafetyHook
@@ -229,7 +245,7 @@ target_include_directories(DetourModKit
   PUBLIC
 
   # For consumers using find_package(DetourModKit) AFTER installation:
-  $<INSTALL_INTERFACE:include>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 
   # For consumers using DetourModKit as a subdirectory (BUILD_INTERFACE):
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -239,7 +255,7 @@ target_include_directories(DetourModKit
 
   # DirectXMath headers for both build and install interfaces
   $<BUILD_INTERFACE:${DIRECTXMATH_INCLUDE_DIR}>
-  $<INSTALL_INTERFACE:include/DirectXMath>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath>
 
   PRIVATE
 
@@ -430,8 +446,7 @@ else()
 endif()
 
 # --- CMake Package Configuration for Consumers ---
-include(CMakePackageConfigHelpers) # Provides helper macros
-include(GNUInstallDirs) # Provides standard CMAKE_INSTALL_*DIR variables
+include(CMakePackageConfigHelpers) # Provides helper macros (GNUInstallDirs is included near the top of this file)
 
 # Define a variable for the CMake package configuration install directory.
 # Common locations are lib/cmake/<PackageName> or share/cmake/<PackageName>.
