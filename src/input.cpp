@@ -20,6 +20,7 @@
 #include <Xinput.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <exception>
 #include <new>
@@ -322,6 +323,18 @@ namespace DetourModKit
         // window (the player relaxing the bumper a frame or two before the thumb leaves the D-pad) without noticeably
         // delaying a deliberate tap that follows.
         constexpr uint64_t GAMEPAD_SUPPRESS_GRACE_MS = 80;
+
+        // Process-wide monotonic source for BindingToken generations. Each InputPoller reshape draws a fresh value, so
+        // a generation is unique across the whole process and across poller lifetimes: a token minted by one poller can
+        // never alias a different poller's state (for example after a shutdown / start cycle swaps the poller). Starts
+        // at 1 so the value 0 stays reserved for an invalid token.
+        std::atomic<std::uint64_t> s_next_binding_generation{1};
+
+        /// Draws the next unique binding generation. Lock-free; relaxed suffices (uniqueness, not ordering, is needed).
+        std::uint64_t next_binding_generation() noexcept
+        {
+            return s_next_binding_generation.fetch_add(1, std::memory_order_relaxed);
+        }
     } // anonymous namespace
 
     static_assert(std::is_nothrow_move_assignable_v<InputBinding>,
@@ -343,6 +356,11 @@ namespace DetourModKit
 
     void InputPoller::recompute_modifier_caches_locked() noexcept
     {
+        // Any call here rebuilds m_name_index, so a cached BindingToken's indices may no longer address the same
+        // bindings. Advance the generation up front -- even if the rebuild below fails into the catch and clears the
+        // caches -- so every outstanding token is conservatively invalidated and fails closed until re-acquired.
+        m_binding_generation = next_binding_generation();
+
         // Rebuild the lookup caches into local containers and commit them with non-throwing moves only after every
         // allocation has succeeded. This helper is noexcept and reachable from loader-lock teardown, so an allocation
         // failure must keep the poller internally consistent rather than letting std::bad_alloc escape and terminate
@@ -477,6 +495,68 @@ namespace DetourModKit
             }
         }
         return false;
+    }
+
+    BindingToken InputPoller::acquire_binding_token(std::string_view name) const noexcept
+    {
+        BindingToken token;
+        try
+        {
+            std::shared_lock lock(m_bindings_rw_mutex);
+            const auto it = m_name_index.find(name);
+            if (it == m_name_index.end())
+            {
+                // Unknown name: leave the token invalid (generation 0).
+                return token;
+            }
+            // Copy the resolved indices first (the only throwing step), then stamp the generation only once the copy
+            // succeeds, so an allocation failure leaves the token invalid rather than valid-but-empty.
+            token.m_indices = it->second;
+            token.m_generation = m_binding_generation;
+        }
+        catch (...)
+        {
+            // Out of memory copying the index set. acquire_binding_token is noexcept; return an invalid token so the
+            // consumer falls back to the name-based query rather than terminating the host.
+            return BindingToken{};
+        }
+        return token;
+    }
+
+    bool InputPoller::is_binding_active(const BindingToken &token) const noexcept
+    {
+        if (!token.valid())
+        {
+            return false;
+        }
+        std::shared_lock lock(m_bindings_rw_mutex);
+        // A reshape since acquisition advanced m_binding_generation, so a mismatch means the cached indices may no
+        // longer address the same bindings (or may be out of bounds): fail closed without touching them.
+        if (token.m_generation != m_binding_generation)
+        {
+            return false;
+        }
+        for (const size_t idx : token.m_indices)
+        {
+            // The generation match proves no reshape resized the binding array since acquisition, so idx is in bounds.
+            // The explicit bound check is defence in depth against a future reshape path that forgets to advance the
+            // generation; it costs one comparison per cached entry (typically 1-3).
+            if (idx < m_bindings.size() && m_active_states[idx].load(std::memory_order_relaxed) != 0)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool InputPoller::binding_token_current(const BindingToken &token) const noexcept
+    {
+        if (!token.valid())
+        {
+            return false;
+        }
+        std::shared_lock lock(m_bindings_rw_mutex);
+        return token.m_generation == m_binding_generation;
     }
 
     void InputPoller::set_require_focus(bool require_focus) noexcept
@@ -1197,6 +1277,9 @@ namespace DetourModKit
             m_bindings.clear();
             m_name_index.clear();
             m_known_modifiers.clear();
+            // clear_bindings does not route through recompute_modifier_caches_locked, so advance the generation here so
+            // outstanding BindingTokens fail closed once the binding set is emptied.
+            m_binding_generation = next_binding_generation();
             m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
             m_has_wheel_bindings.store(false, std::memory_order_relaxed);
             m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
@@ -1489,6 +1572,36 @@ namespace DetourModKit
         if (active_poller)
         {
             return active_poller->is_binding_active(name);
+        }
+        return false;
+    }
+
+    BindingToken InputManager::acquire_binding_token(std::string_view name) const noexcept
+    {
+        auto active_poller = m_active_poller.load(std::memory_order_acquire);
+        if (active_poller)
+        {
+            return active_poller->acquire_binding_token(name);
+        }
+        return BindingToken{};
+    }
+
+    bool InputManager::is_binding_active(const BindingToken &token) const noexcept
+    {
+        auto active_poller = m_active_poller.load(std::memory_order_acquire);
+        if (active_poller)
+        {
+            return active_poller->is_binding_active(token);
+        }
+        return false;
+    }
+
+    bool InputManager::binding_token_current(const BindingToken &token) const noexcept
+    {
+        auto active_poller = m_active_poller.load(std::memory_order_acquire);
+        if (active_poller)
+        {
+            return active_poller->binding_token_current(token);
         }
         return false;
     }
