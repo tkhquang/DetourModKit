@@ -162,11 +162,31 @@ namespace DetourModKit
             return true;
         }
 
-        DWORD bytes_written = 0;
-        const BOOL result = WriteFile(static_cast<HANDLE>(m_handle), pbase(), count, &bytes_written, nullptr);
-        setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
+        // WriteFile may satisfy only part of the request, reporting success with bytes_written < count (a short write
+        // on a near-full volume, a pipe-backed handle, or an interrupted write). A single call that reset the put area
+        // on a count == bytes_written assumption would silently drop the unwritten tail, so drain the remainder in a
+        // loop: advance past what each call wrote and reissue for the rest. Only a hard error (result == 0) or a
+        // zero-byte success (no forward progress is possible, so looping would spin) aborts. The put area is reset
+        // once, after the buffer has fully drained or the write has failed, so a partial failure leaves no stale tail
+        // behind.
+        const char *cursor = pbase();
+        DWORD remaining = count;
+        bool drained = true;
+        while (remaining != 0)
+        {
+            DWORD bytes_written = 0;
+            const BOOL result = WriteFile(static_cast<HANDLE>(m_handle), cursor, remaining, &bytes_written, nullptr);
+            if (result == 0 || bytes_written == 0)
+            {
+                drained = false;
+                break;
+            }
+            cursor += bytes_written;
+            remaining -= bytes_written;
+        }
 
-        return result != 0 && bytes_written == count;
+        setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
+        return drained;
     }
 
     // --- WinFileStream ---

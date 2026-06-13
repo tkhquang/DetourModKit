@@ -955,12 +955,19 @@ namespace DetourModKit
          *       all-offset shape scan and additionally recognize the rarer RIP-relative shapes (`cmp [rip+d], imm`,
          *       `push [rip+d]`, a no-REX `lea`/`mov`) via a Zydis-verified sweep. Either way, a shape the active scans
          *       do not model reports NoReference rather than a guess.
+         * @note Phase 2 scans each execute-readable window from the image independently and, unlike @ref
+         *       find_pattern, carries no cross-window overlap. A RIP-relative reference whose bytes span the
+         *       boundary between two separate executable windows (a protection split inside .text, say) is decoded
+         *       in neither and reports NoReference: a fail-closed miss, never a wrong match. The common case, one
+         *       contiguous executable section, has no interior boundary.
          * @note XrefReturn::StringPointerSlot requires the unique reference to be a REX.W `lea reg, [rip+string]` and
          *       returns the effective address of the global slot the first `mov [rip+slot], reg` (same source register)
          *       within a bounded forward window stores the loaded pointer into. It resolves a cached global string
          *       pointer rather than the load site. A `mov reg, [rip+string]` load, a broad-only reference, or no
-         *       matching store reports StoreNotFound. The store match is first-within-window (compilers emit it next
-         *       to the load), not uniqueness-checked, and intervening reuse of the register is not modelled.
+         *       matching store reports StoreNotFound. The store match is first-within-window (compilers emit it
+         *       next to the load) and is not uniqueness-checked; the forward scan bails to StoreNotFound on a CALL,
+         *       on any write to the loaded register (at any width), or on a decode failure, so a clobbered or
+         *       post-call store is never misattributed.
          * @note Choose a string referenced exactly once (a long, specific literal such as a format or assert message);
          *       short, common strings are pooled and shared and will report StringAmbiguous / AmbiguousReference.
          * @note StringEncoding::Utf16le widens each query byte to a little-endian 16-bit code unit (the byte

@@ -8,6 +8,7 @@
 
 #include "input_intercept.hpp"
 #include "platform.hpp"
+#include "DetourModKit/logger.hpp"
 
 #include "safetyhook.hpp"
 
@@ -43,6 +44,12 @@ namespace DetourModKit::detail
         std::atomic<XInputGetStateFn> s_xinput_original{nullptr};
         std::atomic<XInputGetStateFn> s_xinput_ex_original{nullptr};
         std::atomic<bool> s_xinput_installed{false};
+        // One-shot diagnostics latches: a failed InlineHook::enable() is otherwise swallowed silently, so surface each
+        // failure the first time it happens and stay quiet afterwards (install_xinput is retried every poll cycle, so
+        // an un-latched warning would spam the sink). uninstall() clears both so a later hot-reload re-arm can warn
+        // again.
+        std::atomic<bool> s_xinput_enable_warned{false};
+        std::atomic<bool> s_xinput_ex_enable_warned{false};
         std::atomic<int> s_bound_user_index{0};
         std::atomic<uint16_t> s_suppress_mask{0};
         std::atomic<uint64_t> s_suppress_deadline_ms{0};
@@ -517,6 +524,13 @@ namespace DetourModKit::detail
         {
             s_xinput_original.store(nullptr, std::memory_order_release);
             s_xinput_hook = {};
+            if (!s_xinput_enable_warned.exchange(true, std::memory_order_relaxed))
+            {
+                (void)Logger::get_instance().try_log(
+                    LogLevel::Warning,
+                    "InputIntercept: XInputGetState hook created but enable() failed; gamepad input interception is "
+                    "inactive. The poll loop will retry.");
+            }
             return false;
         }
 
@@ -539,6 +553,13 @@ namespace DetourModKit::detail
                 {
                     s_xinput_ex_original.store(nullptr, std::memory_order_release);
                     s_xinput_ex_hook = {};
+                    if (!s_xinput_ex_enable_warned.exchange(true, std::memory_order_relaxed))
+                    {
+                        (void)Logger::get_instance().try_log(
+                            LogLevel::Warning,
+                            "InputIntercept: XInputGetStateEx (ordinal 100) hook created but enable() failed; the "
+                            "Guide button will not be masked. Primary XInput interception remains active.");
+                    }
                 }
             }
         }
@@ -665,6 +686,9 @@ namespace DetourModKit::detail
         s_xinput_ex_original.store(nullptr, std::memory_order_release);
         s_xinput_original.store(nullptr, std::memory_order_release);
         s_xinput_installed.store(false, std::memory_order_release);
+        // Re-arm the enable()-failure latches so a fresh install after a hot-reload can warn again.
+        s_xinput_enable_warned.store(false, std::memory_order_relaxed);
+        s_xinput_ex_enable_warned.store(false, std::memory_order_relaxed);
     }
 
 } // namespace DetourModKit::detail
