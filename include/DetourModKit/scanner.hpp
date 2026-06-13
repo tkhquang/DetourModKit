@@ -384,6 +384,74 @@ namespace DetourModKit
         };
 
         /**
+         * @struct BatchScanItem
+         * @brief One pattern request in a parallel batch scan.
+         * @details A plain-data request: a non-owning pointer to a caller-owned CompiledPattern plus the 1-based
+         *          occurrence to resolve. @p pattern must outlive the batch call; a null @p pattern resolves to a
+         *          nullptr result slot (fail closed).
+         */
+        struct BatchScanItem
+        {
+            /// Non-owning pointer to a caller-owned, compiled pattern. Must outlive the batch call.
+            const CompiledPattern *pattern = nullptr;
+            /// Which occurrence to resolve (1-based). 1 = first match. 0 yields a nullptr result.
+            std::size_t occurrence = 1;
+        };
+
+        /**
+         * @brief Concurrently resolves a batch of compiled patterns against the whole-process region set.
+         * @details Opt-in fork-join sibling of scan_executable_regions / scan_readable_regions. Each item is scanned
+         *          independently by exactly one worker through the same per-pattern region walk the serial scanners
+         *          use, so a batch of N startup signatures resolves in roughly the time of the slowest single scan
+         *          rather than their sum. Results are returned in input order: result[i] is item[i]'s offset-applied
+         *          match, or nullptr when the item did not match, its @c pattern is null or empty, or its @c
+         *          occurrence is 0.
+         *
+         *          Sharing is read-only: a fully compiled CompiledPattern is immutable during scanning (find_pattern
+         *          and the region walk take it by const reference and never write back -- an un-anchored pattern
+         *          recomputes its anchor into a local, it is not stored), so the workers share the caller's patterns
+         *          without cloning. Compile every pattern (parse_aob calls compile_anchor()) before the batch; a
+         *          pattern whose anchor is not yet selected still scans correctly but each worker redundantly
+         *          recomputes it.
+         *
+         *          The driver allocates the result vector up front and hands each worker disjoint result slots through
+         *          an atomic work cursor, so there is no result race and no allocation on the scan path. A worker that
+         *          throws fails only its own item closed (nullptr); an exception never escapes a worker thread.
+         * @param items The patterns to resolve. An empty span returns an empty vector.
+         * @param kind Which whole-process scanner to use: ScannerKind::Executable (default, execute-readable pages) or
+         *             ScannerKind::Readable (all committed readable pages).
+         * @param max_workers Upper bound on worker threads. 0 (default) selects std::thread::hardware_concurrency(),
+         *                    clamped to the item count. The calling thread participates, so at most @p max_workers
+         *                    threads scan concurrently.
+         * @return One pointer per input item, in input order (offset-applied match or nullptr).
+         * @note Setup/control-plane only: spawns threads and allocates. Call from init or a worker thread, never from a
+         *       hook or input callback, and never under the loader lock (it joins worker threads before returning).
+         */
+        [[nodiscard]] std::vector<const std::byte *> scan_regions_batch(std::span<const BatchScanItem> items,
+                                                                        ScannerKind kind = ScannerKind::Executable,
+                                                                        std::size_t max_workers = 0);
+
+        /**
+         * @brief Module-scoped parallel batch scan: confines every item to one mapped image.
+         * @details Fork-join batch sibling of the module-scoped scanners. Each item is resolved only within
+         *          [range.base, range.end), reusing the same per-region protection gate and TOCTOU fault guard as the
+         *          serial module scans. Threading, result ordering, the immutable-pattern sharing contract, the
+         *          per-item fail-closed behaviour, and the @p max_workers semantics match scan_regions_batch.
+         * @param items The patterns to resolve. An empty span returns an empty vector.
+         * @param range The mapped image to scan. An invalid range yields all-nullptr results (every item fails closed).
+         * @param kind ScannerKind::Readable (default) scans every readable page so one pass covers .text and
+         *             .rdata / .data candidates; ScannerKind::Executable confines matches to execute-readable code
+         *             pages.
+         * @param max_workers Upper bound on worker threads (see scan_regions_batch). 0 selects hardware_concurrency().
+         * @return One pointer per input item, in input order (offset-applied match or nullptr).
+         * @note Setup/control-plane only, same constraints as scan_regions_batch.
+         */
+        [[nodiscard]] std::vector<const std::byte *> scan_module_batch(std::span<const BatchScanItem> items,
+                                                                       Memory::ModuleRange range,
+                                                                       ScannerKind kind = ScannerKind::Readable,
+                                                                       std::size_t max_workers = 0);
+
+        /**
          * @enum ResolveMode
          * @brief How a cascade candidate's pattern maps to a final address.
          */

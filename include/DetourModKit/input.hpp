@@ -101,6 +101,56 @@ namespace DetourModKit
     };
 
     /**
+     * @class BindingToken
+     * @brief Generation-checked handle to a named binding's resolved entry set.
+     * @details A high-frequency consumer (a render thread polling a hotkey every frame) can resolve a binding name to a
+     *          token once with InputManager::acquire_binding_token / InputPoller::acquire_binding_token, then query it
+     *          every frame with the BindingToken overload of is_binding_active. The token caches the name's resolved
+     *          entry indices, so a query skips the per-call name hash lookup the string_view overload performs.
+     *
+     *          The token is stamped with the binding generation it was minted at. Any reshape of the binding set
+     *          (register / remove / clear / combo update / consume change) advances the generation, so a query through
+     *          a stale token fails closed -- it returns false without dereferencing the now-meaningless cached indices,
+     *          rather than reading a different binding's state. The generation is drawn from a process-wide monotonic
+     *          counter, so a token minted by one poller can never alias a different poller (for example after an
+     *          InputManager::shutdown / start cycle replaces the underlying poller): its generation simply never
+     *          matches again.
+     *
+     *          A consumer detects staleness with binding_token_current() (or by re-acquiring after a known reshape such
+     *          as an INI hot-reload) and re-acquires to recover. A default-constructed token, a token for an unknown
+     *          name, and a token whose resolution ran out of memory are all invalid (valid() == false) and always read
+     *          inactive.
+     * @note The token is only meaningful to the poller (or the InputManager wrapping it) that minted it.
+     */
+    class BindingToken
+    {
+    public:
+        BindingToken() = default;
+
+        /**
+         * @brief Reports whether the token resolved a name at acquisition time.
+         * @details true only when acquire_binding_token found the name and resolved its entries. It does NOT imply the
+         *          token is still current: a valid token can be stale after a reshape. Use binding_token_current(), or
+         *          is_binding_active which fails closed, to test currency.
+         * @return true when the token names a resolved binding set; false for a default, unknown-name, or
+         *         allocation-failed token.
+         */
+        [[nodiscard]] bool valid() const noexcept { return m_generation != 0; }
+
+    private:
+        friend class InputPoller;
+
+        // Binding generation this token was minted at; 0 marks an unresolved (invalid) token. A live generation is
+        // always >= 1 (drawn from the process-wide counter that starts at 1), so 0 can never collide with a real one.
+        std::uint64_t m_generation{0};
+
+        // The name's resolved entry indices into the poller's binding array, captured at acquire time. Read only while
+        // m_generation still matches the poller's live generation, which guarantees these indices remain in bounds and
+        // address the same bindings.
+        std::vector<std::size_t> m_indices;
+    };
+
+    /**
      * @class InputPoller
      * @brief RAII input polling engine that monitors key states on a background thread.
      * @details Manages a dedicated polling thread that checks virtual key states via
@@ -203,6 +253,44 @@ namespace DetourModKit
          * @note Thread-safe. Can be called from any thread.
          */
         [[nodiscard]] bool is_binding_active(std::string_view name) const noexcept;
+
+        /**
+         * @brief Resolves a binding name to a generation-checked token for repeated low-overhead queries.
+         * @details Looks the name up once under the binding reader lock and captures its resolved entry indices plus
+         *          the current binding generation. A high-frequency consumer holds the returned token and queries it
+         *          with is_binding_active(const BindingToken &), skipping the name hash lookup the string_view overload
+         *          repeats per call. The token fails closed after any reshape (see BindingToken).
+         * @param name The binding name to resolve.
+         * @return A valid token when the name is registered; an invalid token (BindingToken::valid() == false) when the
+         *         name is unknown or resolution runs out of memory.
+         * @note Thread-safe. Setup/control-plane: resolving a token copies the name's index set and may allocate. Mint
+         *       the token once (or after a reshape), not every frame; the per-frame query path is the BindingToken
+         *       overload of is_binding_active.
+         */
+        [[nodiscard]] BindingToken acquire_binding_token(std::string_view name) const noexcept;
+
+        /**
+         * @brief Queries whether a binding is currently active through a previously acquired token.
+         * @details Callback-safe hot-path query: acquires the binding reader lock, verifies the token's generation
+         *          still matches the live binding generation, and ORs the cached entry indices against the active-state
+         *          array. A stale token (any reshape since acquisition) or an invalid token returns false without
+         *          dereferencing its indices.
+         * @param token A token from acquire_binding_token().
+         * @return true if any entry of the token's binding is currently pressed; false if inactive, stale, or invalid.
+         * @note Thread-safe. Callback-safe: a shared_lock acquire plus a relaxed atomic load per cached entry, no name
+         *       hash and no allocation.
+         */
+        [[nodiscard]] bool is_binding_active(const BindingToken &token) const noexcept;
+
+        /**
+         * @brief Reports whether a token still matches the live binding generation.
+         * @details Lets a consumer detect a reshape and re-acquire instead of silently reading inactive. Equivalent to
+         *          asking whether is_binding_active(token) would evaluate the cached indices rather than fail closed.
+         * @param token A token from acquire_binding_token().
+         * @return true when the token is valid and its generation matches the current binding set; false otherwise.
+         * @note Thread-safe. Callback-safe: a shared_lock acquire and a single integer comparison.
+         */
+        [[nodiscard]] bool binding_token_current(const BindingToken &token) const noexcept;
 
         /**
          * @brief Sets whether the poller requires the current process to own the foreground window before processing
@@ -312,16 +400,20 @@ namespace DetourModKit
             size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
         };
 
-        // m_bindings_rw_mutex protects m_bindings, m_name_index, m_known_modifiers, and m_has_gamepad_bindings when a
-        // live update is in flight. The poll loop holds a shared lock across the binding-evaluation pass of each
-        // cycle and releases it before dispatching user callbacks, so callbacks may call binding_count(),
-        // is_binding_active(), or update_binding_combos() without re-acquiring the non-recursive lock;
-        // update_combos() holds an exclusive lock across the swap. m_active_states entries are always accessed via
-        // atomic ops and need no further guard.
+        // m_bindings_rw_mutex protects m_bindings, m_name_index, m_known_modifiers, m_binding_generation, and
+        // m_has_gamepad_bindings when a live update is in flight. The poll loop holds a shared lock across the
+        // binding-evaluation pass of each cycle and releases it before dispatching user callbacks, so callbacks may
+        // call binding_count(), is_binding_active(), or update_binding_combos() without re-acquiring the non-recursive
+        // lock; update_combos() holds an exclusive lock across the swap. m_active_states entries are always accessed
+        // via atomic ops and need no further guard.
         mutable detail::SrwSharedMutex m_bindings_rw_mutex;
         std::vector<InputBinding> m_bindings;
         std::unordered_map<std::string, std::vector<size_t>, StringHash, std::equal_to<>> m_name_index;
         std::vector<InputCode> m_known_modifiers;
+        // Advances on every binding-set reshape (each rebuild of m_name_index, plus clear_bindings). A BindingToken
+        // captures this value at acquire time; a query whose token generation no longer matches fails closed. Guarded
+        // by m_bindings_rw_mutex, like the binding array it tracks.
+        std::uint64_t m_binding_generation{0};
         std::chrono::milliseconds m_poll_interval;
         std::atomic<bool> m_require_focus;
         std::atomic<bool> m_running{false};
@@ -512,6 +604,37 @@ namespace DetourModKit
          * @note Thread-safe. Can be called from any thread (e.g., render thread).
          */
         [[nodiscard]] bool is_binding_active(std::string_view name) const noexcept;
+
+        /**
+         * @brief Resolves a binding name to a generation-checked token against the running poller.
+         * @details Forwards to InputPoller::acquire_binding_token() on the active poller. Returns an invalid token when
+         *          the poller is not running or the name is unknown, so a token acquired before start() (or after
+         *          shutdown()) is simply invalid.
+         * @param name The binding name to resolve.
+         * @return A valid token when running and the name is registered; an invalid token otherwise.
+         * @note Thread-safe. Setup/control-plane: acquire once, then query with the BindingToken overload of
+         *       is_binding_active. See BindingToken for the staleness contract.
+         */
+        [[nodiscard]] BindingToken acquire_binding_token(std::string_view name) const noexcept;
+
+        /**
+         * @brief Queries whether a binding is currently active through a previously acquired token.
+         * @details Forwards to InputPoller::is_binding_active(const BindingToken &) on the active poller. Returns false
+         *          when the poller is not running, or when the token is stale or invalid.
+         * @param token A token from acquire_binding_token().
+         * @return true if the token's binding is currently pressed; false if inactive, stale, invalid, or not running.
+         * @note Thread-safe. Callback-safe: no name hash and no allocation on the query path.
+         */
+        [[nodiscard]] bool is_binding_active(const BindingToken &token) const noexcept;
+
+        /**
+         * @brief Reports whether a token still matches the running poller's binding generation.
+         * @details Forwards to InputPoller::binding_token_current(). Returns false when the poller is not running.
+         * @param token A token from acquire_binding_token().
+         * @return true when the token is valid and current against the active poller; false otherwise.
+         * @note Thread-safe. Lets a consumer re-acquire only when a reshape has invalidated its token.
+         */
+        [[nodiscard]] bool binding_token_current(const BindingToken &token) const noexcept;
 
         /**
          * @brief Replaces the trigger combos of all bindings sharing @p name.

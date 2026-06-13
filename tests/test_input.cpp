@@ -2382,3 +2382,218 @@ TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
     im.shutdown();
     im.set_require_focus(true);
 }
+
+// --- BindingToken: generation-checked binding handles ---
+
+namespace
+{
+    InputBinding make_token_test_binding(std::string name, InputCode key)
+    {
+        InputBinding binding;
+        binding.name = std::move(name);
+        binding.keys = {key};
+        binding.mode = InputMode::Press;
+        binding.on_press = []() {};
+        return binding;
+    }
+} // namespace
+
+TEST_F(InputPollerTest, BindingTokenDefaultIsInvalid)
+{
+    BindingToken token;
+    EXPECT_FALSE(token.valid());
+
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("a", keyboard_key(0x41)));
+    InputPoller poller(std::move(bindings));
+
+    // A default token is inactive and never current against any poller.
+    EXPECT_FALSE(poller.is_binding_active(token));
+    EXPECT_FALSE(poller.binding_token_current(token));
+}
+
+TEST_F(InputPollerTest, BindingTokenUnknownNameIsInvalid)
+{
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("known", keyboard_key(0x41)));
+    InputPoller poller(std::move(bindings));
+
+    const BindingToken token = poller.acquire_binding_token("missing");
+    EXPECT_FALSE(token.valid());
+    EXPECT_FALSE(poller.binding_token_current(token));
+    EXPECT_FALSE(poller.is_binding_active(token));
+}
+
+TEST_F(InputPollerTest, BindingTokenResolvesKnownNameAndMatchesNameQuery)
+{
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("zoom", keyboard_key(0x41)));
+    InputPoller poller(std::move(bindings));
+
+    const BindingToken token = poller.acquire_binding_token("zoom");
+    EXPECT_TRUE(token.valid());
+    EXPECT_TRUE(poller.binding_token_current(token));
+    // No key is pressed, so both paths agree on inactive. The token path reads the same active-state slots the name
+    // path does, so it tracks the name query for every state.
+    EXPECT_EQ(poller.is_binding_active(token), poller.is_binding_active("zoom"));
+    EXPECT_FALSE(poller.is_binding_active(token));
+}
+
+TEST_F(InputPollerTest, BindingTokenResolvesMultiComboName)
+{
+    // One name, two combos (OR semantics): the token caches both entry indices.
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("multi", keyboard_key(0x41)));
+    bindings.push_back(make_token_test_binding("multi", keyboard_key(0x42)));
+    InputPoller poller(std::move(bindings));
+
+    const BindingToken token = poller.acquire_binding_token("multi");
+    EXPECT_TRUE(token.valid());
+    EXPECT_TRUE(poller.binding_token_current(token));
+    EXPECT_EQ(poller.is_binding_active(token), poller.is_binding_active("multi"));
+}
+
+TEST_F(InputPollerTest, BindingTokenStaleAfterAddBinding)
+{
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("first", keyboard_key(0x41)));
+    InputPoller poller(std::move(bindings));
+
+    BindingToken token = poller.acquire_binding_token("first");
+    ASSERT_TRUE(poller.binding_token_current(token));
+
+    // A reshape advances the generation, so the previously current token now fails closed.
+    poller.add_binding(make_token_test_binding("second", keyboard_key(0x42)));
+    EXPECT_FALSE(poller.binding_token_current(token));
+    EXPECT_FALSE(poller.is_binding_active(token));
+
+    // Re-acquiring recovers a current token.
+    token = poller.acquire_binding_token("first");
+    EXPECT_TRUE(poller.binding_token_current(token));
+}
+
+TEST_F(InputPollerTest, BindingTokenStaleAfterRemoveOfDifferentBinding)
+{
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("survivor", keyboard_key(0x41)));
+    bindings.push_back(make_token_test_binding("victim", keyboard_key(0x42)));
+    InputPoller poller(std::move(bindings));
+
+    const BindingToken token = poller.acquire_binding_token("survivor");
+    ASSERT_TRUE(poller.binding_token_current(token));
+
+    // Removing an unrelated binding still shifts indices, so the conservative generation bump invalidates every
+    // outstanding token, including the survivor's. The token fails closed rather than reading a shifted slot.
+    EXPECT_EQ(poller.remove_bindings_by_name("victim"), 1u);
+    EXPECT_FALSE(poller.binding_token_current(token));
+    EXPECT_FALSE(poller.is_binding_active(token));
+}
+
+TEST_F(InputPollerTest, BindingTokenStaleAfterClear)
+{
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("only", keyboard_key(0x41)));
+    InputPoller poller(std::move(bindings));
+
+    const BindingToken token = poller.acquire_binding_token("only");
+    ASSERT_TRUE(poller.binding_token_current(token));
+
+    poller.clear_bindings();
+    EXPECT_FALSE(poller.binding_token_current(token));
+    EXPECT_FALSE(poller.is_binding_active(token));
+
+    // The name is gone, so a re-acquire is invalid.
+    EXPECT_FALSE(poller.acquire_binding_token("only").valid());
+}
+
+TEST_F(InputPollerTest, BindingTokenStaleAfterUpdateCombos)
+{
+    std::vector<InputBinding> bindings;
+    bindings.push_back(make_token_test_binding("rebind", keyboard_key(0x41)));
+    InputPoller poller(std::move(bindings));
+
+    const BindingToken token = poller.acquire_binding_token("rebind");
+    ASSERT_TRUE(poller.binding_token_current(token));
+
+    // A cardinality-changing combo update rebuilds the binding array under the same name.
+    Config::KeyComboList combos = {{.keys = {keyboard_key(0x42)}, .modifiers = {}},
+                                   {.keys = {keyboard_key(0x43)}, .modifiers = {}}};
+    EXPECT_TRUE(poller.update_combos("rebind", combos));
+    EXPECT_FALSE(poller.binding_token_current(token));
+
+    // The name still exists, so a fresh token resolves and is current.
+    EXPECT_TRUE(poller.acquire_binding_token("rebind").valid());
+}
+
+TEST_F(InputManagerTest, BindingTokenInvalidBeforeStart)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.register_press("pending", {keyboard_key(0x41)}, []() {});
+
+    // No active poller before start(): a token cannot resolve.
+    const BindingToken token = mgr.acquire_binding_token("pending");
+    EXPECT_FALSE(token.valid());
+    EXPECT_FALSE(mgr.binding_token_current(token));
+    EXPECT_FALSE(mgr.is_binding_active(token));
+}
+
+TEST_F(InputManagerTest, BindingTokenResolvesAfterStart)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.set_require_focus(false);
+    mgr.register_press("hotkey", {keyboard_key(0x41)}, []() {});
+    mgr.start(std::chrono::milliseconds(2));
+
+    const BindingToken token = mgr.acquire_binding_token("hotkey");
+    EXPECT_TRUE(token.valid());
+    EXPECT_TRUE(mgr.binding_token_current(token));
+    EXPECT_EQ(mgr.is_binding_active(token), mgr.is_binding_active("hotkey"));
+
+    mgr.set_require_focus(true);
+}
+
+TEST_F(InputManagerTest, BindingTokenStaleAfterLiveRegister)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.set_require_focus(false);
+    mgr.register_press("a", {keyboard_key(0x41)}, []() {});
+    mgr.start(std::chrono::milliseconds(2));
+
+    const BindingToken token = mgr.acquire_binding_token("a");
+    ASSERT_TRUE(mgr.binding_token_current(token));
+
+    // A live registration reshapes the running poller, invalidating the token.
+    mgr.register_press("b", {keyboard_key(0x42)}, []() {});
+    EXPECT_FALSE(mgr.binding_token_current(token));
+    EXPECT_FALSE(mgr.is_binding_active(token));
+
+    mgr.set_require_focus(true);
+}
+
+TEST_F(InputManagerTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
+{
+    auto &mgr = InputManager::get_instance();
+    mgr.set_require_focus(false);
+    mgr.register_press("persist", {keyboard_key(0x41)}, []() {});
+    mgr.start(std::chrono::milliseconds(2));
+
+    const BindingToken old_token = mgr.acquire_binding_token("persist");
+    ASSERT_TRUE(old_token.valid());
+    ASSERT_TRUE(mgr.binding_token_current(old_token));
+
+    // Replace the poller. The process-wide generation counter never reuses a value, so the old token's generation
+    // cannot match the freshly built poller even though the same name is registered.
+    mgr.shutdown();
+    mgr.register_press("persist", {keyboard_key(0x41)}, []() {});
+    mgr.start(std::chrono::milliseconds(2));
+
+    EXPECT_FALSE(mgr.binding_token_current(old_token));
+    EXPECT_FALSE(mgr.is_binding_active(old_token));
+
+    // A fresh token against the new poller is current.
+    const BindingToken new_token = mgr.acquire_binding_token("persist");
+    EXPECT_TRUE(new_token.valid());
+    EXPECT_TRUE(mgr.binding_token_current(new_token));
+
+    mgr.set_require_focus(true);
+}

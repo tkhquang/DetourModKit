@@ -288,6 +288,45 @@ The uniqueness scan runs once per candidate that matches; set `require_unique = 
 
 > Behavior note: the default is uniqueness-required in every scope, including the whole-process `resolve_cascade`. A signature that matches more than once is almost always one that needs tightening, not a target to guess at, so the default surfaces the ambiguity as a `NoMatch` you can act on rather than hooking an arbitrary match. The default whole-process scan looks at executable pages only (`ScannerKind::Executable`), where a real code signature is normally unique. Only set `require_unique = false` on a candidate you have intentionally made non-unique and verified yourself.
 
+### 4.8 Batch scanning many signatures in parallel (`scan_regions_batch`)
+
+When a mod resolves dozens of signatures at startup, running each `scan_executable_regions` / `scan_readable_regions` call back to back pays the full region walk once per signature. `scan_regions_batch` (whole process) and `scan_module_batch` (one mapped image) resolve a whole batch concurrently through an opt-in fork-join worker pool, so the wall-clock cost is roughly the slowest single scan rather than the sum.
+
+```cpp
+namespace sc = DetourModKit::Scanner;
+
+// Compile every signature first (this is what the batch shares read-only across workers).
+std::vector<sc::CompiledPattern> patterns;
+for (std::string_view aob : signature_strings)
+{
+    if (auto compiled = sc::parse_aob(aob))
+    {
+        patterns.push_back(std::move(*compiled));
+    }
+}
+
+// One request per pattern. The pointer is non-owning, so `patterns` must outlive the call.
+std::vector<sc::BatchScanItem> items;
+items.reserve(patterns.size());
+for (const auto& pattern : patterns)
+{
+    items.push_back(sc::BatchScanItem{&pattern, /*occurrence=*/1});
+}
+
+// Results come back in input order: results[i] is items[i]'s offset-applied match, or nullptr.
+const std::vector<const std::byte*> results = sc::scan_regions_batch(items, sc::ScannerKind::Executable);
+```
+
+Key properties:
+
+- **Input-order results.** `results[i]` always corresponds to `items[i]`, regardless of which worker finished first or where the matches sit in memory.
+- **Per-item fail-closed.** An item with a null or empty pattern, a zero occurrence, or no match yields `nullptr` in its slot without affecting the others. A worker that somehow throws fails only its own item.
+- **Read-only sharing, no cloning.** A fully compiled `CompiledPattern` is immutable during scanning (`find_pattern` and the region walk take it by const reference and never write back), so the workers share the caller's patterns directly. Compile every pattern up front -- `parse_aob` calls `compile_anchor()` for you -- so no worker has to re-derive the anchor.
+- **Worker count.** The optional third argument bounds the worker threads; `0` (the default) uses `std::thread::hardware_concurrency()` clamped to the item count, and the calling thread participates. A single-item batch runs inline with no thread spawn.
+- **`scan_module_batch`** takes a `Memory::ModuleRange` and confines every item to that image, defaulting to `ScannerKind::Readable` so one pass covers both code and data candidates (matching the in-module cascade). An invalid range fails every item closed.
+
+> Setup/control-plane only. The batch scanners spawn and join threads, so call them at startup, during a loading screen, or on a background worker -- never from a hook or input callback, and never under the loader lock.
+
 ## 5. RIP-relative resolution
 
 x86-64 code uses RIP-relative addressing heavily. The 4-byte displacement stored inside the instruction is relative to the address of the *next* instruction: `target = instruction_address + instruction_length + disp32`. DMK exposes two helpers and a set of prefix constants.
