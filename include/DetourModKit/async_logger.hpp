@@ -333,6 +333,8 @@ namespace DetourModKit
          *          parks the caller up to block_timeout_ms, and under OverflowPolicy::SyncFallback a full queue writes
          *          the message synchronously on the calling thread, so neither of those policies is callback-safe (see
          *          OverflowPolicy). Otherwise the message is written by the writer thread.
+         * @note Best-effort: never throws and returns false on drop. Callback-safe only under the DropNewest /
+         *       DropOldest policies (see @details).
          */
         [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
 

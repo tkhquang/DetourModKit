@@ -70,11 +70,11 @@ TEST_F(MemoryTest, GetMemoryStats_NoQueriesSentinel)
 {
     Memory::clear_cache();
     const Memory::MemoryStats stats = Memory::get_memory_stats();
-    if (stats.hits + stats.misses == 0)
-    {
-        EXPECT_DOUBLE_EQ(stats.hit_rate_percent, -1.0);
-        EXPECT_NE(Memory::get_cache_stats().find("N/A (no queries tracked)"), std::string::npos);
-    }
+    // clear_cache() resets the hit/miss counters and no lookup runs before this read, so the "no queries" state is
+    // deterministic and the sentinel must always hold.
+    EXPECT_EQ(stats.hits + stats.misses, 0u);
+    EXPECT_DOUBLE_EQ(stats.hit_rate_percent, -1.0);
+    EXPECT_NE(Memory::get_cache_stats().find("N/A (no queries tracked)"), std::string::npos);
 }
 
 TEST_F(MemoryTest, IsMemoryReadable_Valid)

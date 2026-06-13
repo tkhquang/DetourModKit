@@ -17,12 +17,7 @@ cmake --build build/mingw-debug --parallel
 
 ### Run Tests
 
-`ctest` is the canonical runner. `gtest_discover_tests` registers each test case as its own
-ctest test, so ctest runs each case in a separate process. Prefer it -- some suites drive
-process-global singleton state (the `ConfigTest` log-capture cases reconfigure the one
-`Logger::get_instance()` sink) and can interleave when many cases share a single monolithic
-process. The standalone `DetourModKit_tests.exe` is for fast local iteration and `--gtest_filter`
-debugging, not the canonical green/red signal.
+`ctest` is the canonical runner. `gtest_discover_tests` registers each test case as its own ctest test, so ctest runs each case in a separate process. Prefer it -- some suites drive process-global singleton state (the `ConfigTest` log-capture cases reconfigure the one `Logger::get_instance()` sink) and can interleave when many cases share a single monolithic process. The standalone `DetourModKit_tests.exe` is for fast local iteration and `--gtest_filter` debugging, not the canonical green/red signal.
 
 ```bash
 PATH="/c/msys64/mingw64/bin:$PATH"
