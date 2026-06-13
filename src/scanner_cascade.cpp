@@ -126,10 +126,18 @@ namespace
     // Counts up to (max_hits + 1) occurrences of `pattern`. When `range` is set the count is confined to that module
     // image; otherwise it spans the whole process's executable regions. Returning max_hits+1 signals "too many to be
     // unique". The count must use the same scope as the eventual match scan, or a pattern unique inside the target
-    // module but duplicated in a sibling overlay would be wrongly rejected (or accepted) on the wrong evidence.
+    // module but duplicated in a sibling overlay would be wrongly rejected (or accepted) on the wrong evidence. When
+    // first_match_out is non-null it receives the first occurrence (the n == 1 scan result, or nullptr when there were
+    // no hits) so a caller that needs both the count and the first match -- the same scan, same scope -- does not have
+    // to sweep again to fetch it.
     std::size_t count_pattern_hits_bounded(const DetourModKit::Scanner::CompiledPattern &pattern, std::size_t max_hits,
-                                           std::optional<DetourModKit::Memory::ModuleRange> range) noexcept
+                                           std::optional<DetourModKit::Memory::ModuleRange> range,
+                                           const std::byte **first_match_out = nullptr) noexcept
     {
+        if (first_match_out != nullptr)
+        {
+            *first_match_out = nullptr;
+        }
         std::size_t hits = 0;
         for (std::size_t n = 1; n <= max_hits + 1; ++n)
         {
@@ -138,6 +146,10 @@ namespace
             if (match == nullptr)
             {
                 break;
+            }
+            if (n == 1 && first_match_out != nullptr)
+            {
+                *first_match_out = match;
             }
             ++hits;
         }
@@ -267,7 +279,9 @@ namespace
                 continue;
             }
             out.not_applicable = false;
-            const std::size_t hits = count_pattern_hits_bounded(*compiled, PROLOGUE_FALLBACK_MAX_HITS, range);
+            const std::byte *first_match = nullptr;
+            const std::size_t hits =
+                count_pattern_hits_bounded(*compiled, PROLOGUE_FALLBACK_MAX_HITS, range, &first_match);
             if (hits == 0)
             {
                 continue;
@@ -279,14 +293,9 @@ namespace
                              PROLOGUE_FALLBACK_MAX_HITS);
                 continue;
             }
-            const auto *match = range ? Scanner::detail::scan_module_executable(*compiled, *range)
-                                      : DetourModKit::Scanner::scan_executable_regions(*compiled);
-            if (match == nullptr)
-            {
-                continue;
-            }
-
-            const auto match_addr = reinterpret_cast<std::uintptr_t>(match);
+            // Reuse the first occurrence the count already located (hits is in [1, PROLOGUE_FALLBACK_MAX_HITS] here, so
+            // first_match is the unique match) instead of re-sweeping the same scope for it.
+            const auto match_addr = reinterpret_cast<std::uintptr_t>(first_match);
             const auto decoded = DetourModKit::detail::decode_e9_rel32(match_addr);
             if (!decoded)
             {

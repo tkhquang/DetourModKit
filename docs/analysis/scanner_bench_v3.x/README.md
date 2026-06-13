@@ -19,41 +19,41 @@ The buffer is 8 MiB of synthetic bytes drawn from a distribution tuned to typica
 
 ```text
 scenario                          anchor   iters    median_us     scans/sec    speedup
-common_first_rare_buried_8        smart      200      622.664        1606.0      1.00x
-common_first_rare_buried_8        naive      200    14370.049          69.6      0.04x
-common_first_rare_buried_8        ratio      200            -             -     23.08x
-common_first_rare_buried_16       smart      200      553.646        1806.2      1.00x
-common_first_rare_buried_16       naive      200    13910.845          71.9      0.04x
-common_first_rare_buried_16       ratio      200            -             -     25.13x
-all_common_first_no_match         smart      200      578.455        1728.7      1.00x
-all_common_first_no_match         naive      200    16003.189          62.5      0.04x
-all_common_first_no_match         ratio      200            -             -     27.67x
-rare_first_short_no_match         smart      200      575.287        1738.3      1.00x
-rare_first_short_no_match         naive      200      571.359        1750.2      1.01x
-rare_first_short_no_match         ratio      200            -             -      0.99x
-long_mostly_wildcards             smart      200      565.515        1768.3      1.00x
-long_mostly_wildcards             naive      200    14037.218          71.2      0.04x
-long_mostly_wildcards             ratio      200            -             -     24.82x
-verify_heavy_32B_match            smart      200      564.149        1772.6      1.00x
-verify_heavy_32B_match            naive      200    14176.547          70.5      0.04x
-verify_heavy_32B_match            ratio      200            -             -     25.13x
+common_first_rare_buried_8        smart      200      409.214        2443.7      1.00x
+common_first_rare_buried_8        naive      200     7244.500         138.0      0.06x
+common_first_rare_buried_8        ratio      200            -             -     17.70x
+common_first_rare_buried_16       smart      200      462.594        2161.7      1.00x
+common_first_rare_buried_16       naive      200     6912.899         144.7      0.07x
+common_first_rare_buried_16       ratio      200            -             -     14.94x
+all_common_first_no_match         smart      200      467.025        2141.2      1.00x
+all_common_first_no_match         naive      200     8392.462         119.2      0.06x
+all_common_first_no_match         ratio      200            -             -     17.97x
+rare_first_short_no_match         smart      200      467.646        2138.4      1.00x
+rare_first_short_no_match         naive      200      485.314        2060.5      0.96x
+rare_first_short_no_match         ratio      200            -             -      1.04x
+long_mostly_wildcards             smart      200      451.193        2216.3      1.00x
+long_mostly_wildcards             naive      200     6975.918         143.4      0.06x
+long_mostly_wildcards             ratio      200            -             -     15.46x
+verify_heavy_32B_match            smart      200      438.560        2280.2      1.00x
+verify_heavy_32B_match            naive      200     6328.513         158.0      0.07x
+verify_heavy_32B_match            ratio      200            -             -     14.43x
 ```
 
 ## How to read this
 
 | Scenario | Pattern shape | Smart anchor lands on | Naive anchor lands on | Speedup |
 |----------|---------------|-----------------------|-----------------------|---------|
-| `common_first_rare_buried_8` | `48 8B 05 37 DE AD BE EF` | `0x37` (index 3) | `0x48` (index 0) | **23.1x** |
-| `common_first_rare_buried_16` | `48 8B 05 37 DE AD BE EF 90 90 CC CC E8 ?? ?? ??` | `0x37` (index 3) | `0x48` (index 0) | **25.1x** |
-| `all_common_first_no_match` | `48 8B 05 89 0F E8 90 CC` (no match present) | `0xCC` (lowest score in this set, still common) | `0x48` (index 0) | **27.7x** |
-| `rare_first_short_no_match` | `37 6B C1 BA 5E 71` (no match present) | `0x37` (index 0) | `0x37` (index 0) | **0.99x** (identical) |
-| `long_mostly_wildcards` | `48 8B 05 ?? ?? ?? ?? 48 89 ?? ?? ?? ?? 37 DE AD` | `0x37` (index 13) | `0x48` (index 0) | **24.8x** |
-| `verify_heavy_32B_match` | 32-byte pattern starting with `48 8B 05 37 ...` | `0x37` (index 3) | `0x48` (index 0) | **25.1x** |
+| `common_first_rare_buried_8` | `48 8B 05 37 DE AD BE EF` | `0x37` (index 3) | `0x48` (index 0) | **17.7x** |
+| `common_first_rare_buried_16` | `48 8B 05 37 DE AD BE EF 90 90 CC CC E8 ?? ?? ??` | `0x37` (index 3) | `0x48` (index 0) | **14.9x** |
+| `all_common_first_no_match` | `48 8B 05 89 0F E8 90 CC` (no match present) | `0xCC` (lowest score in this set, still common) | `0x48` (index 0) | **18.0x** |
+| `rare_first_short_no_match` | `37 6B C1 BA 5E 71` (no match present) | `0x37` (index 0) | `0x37` (index 0) | **1.04x** (identical within noise) |
+| `long_mostly_wildcards` | `48 8B 05 ?? ?? ?? ?? 48 89 ?? ?? ?? ?? 37 DE AD` | `0x37` (index 13) | `0x48` (index 0) | **15.5x** |
+| `verify_heavy_32B_match` | 32-byte pattern starting with `48 8B 05 37 ...` | `0x37` (index 3) | `0x48` (index 0) | **14.4x** |
 
 A few takeaways:
 
-1. **The anchor choice dominates scan time.** Every false anchor hit costs a SIMD verify, and `0x48` matches roughly 12% of bytes in real x64 `.text` whereas `0x37` matches well under 0.5%. The 23x to 28x ratios shown above are exactly the false-anchor-hit ratio playing out as wall-clock time.
-2. **The verify tier (AVX2 vs scalar) is almost irrelevant to this comparison.** Both runs use the same AVX2 verify path; what differs is how often that path is invoked. Moving from scalar to AVX2 inside the verify might save another 30% on each verify, but the rare-byte anchor saves an order of magnitude on the *number* of verifies. The smart-anchor path is so dominated by the memchr sweep that pattern size barely affects the result (550 to 625 microseconds across all six smart-anchor runs).
+1. **The anchor choice dominates scan time.** Every false anchor hit costs a SIMD verify, and `0x48` matches roughly 12% of bytes in real x64 `.text` whereas `0x37` matches well under 0.5%. The 14x to 18x ratios shown above are the false-anchor-hit ratio playing out as wall-clock time after the SIMD prefilter lowers both paths' sweep cost.
+2. **The verify tier (AVX2 vs scalar) is almost irrelevant to this comparison.** Both runs use the same AVX2 verify path; what differs is how often that path is invoked. Moving from scalar to AVX2 inside the verify might save another 30% on each verify, but the rare-byte anchor saves an order of magnitude on the *number* of verifies. The smart-anchor path is so dominated by the memchr sweep that pattern size barely affects the result (409 to 468 microseconds across all six smart-anchor runs).
 3. **There is no downside on rare-first patterns.** When the pattern already begins with an uncommon byte (the `rare_first_short_no_match` row), both strategies behave identically (within 1% noise). The smart heuristic does not regress in this case because `compile_anchor()` picks the same index the naive strategy would have picked.
 4. **Manually constructed patterns still pay nothing.** `find_pattern()` falls back to inline anchor selection when `CompiledPattern::anchor` is the sentinel; the only cost is a single O(pattern.size()) walk on the first scan. Sub-microsecond on a 16-byte pattern.
 
@@ -70,6 +70,35 @@ PATH="/c/msys64/mingw64/bin:$PATH" cmake --build build/mingw-release \
 ```
 
 The buffer seed is hard-coded so the byte distribution is byte-identical across runs. Variation between runs is therefore purely scheduler / cache noise; the 11-sample median is stable to within roughly 5%.
+
+## Prefilter throughput (SIMD memchr)
+
+`bench_scanner.cpp` also reports a dedicated prefilter-isolation sweep: it scrubs a sentinel byte out of a 64 MiB code-like buffer and re-plants it once near the end, so `find_pattern` does a single full-buffer `dmk_memchr` sweep with one trailing verify and the measured wall time is the prefilter's. `libc memchr` over the same buffer is the reference bar. The production scanner never calls `libc memchr` -- the AddressSanitizer interceptor would fault on the scanner's in-bounds reads of this process's own poisoned shadow -- so the self-provided `dmk_memchr` does its own byte comparisons; that row exists only to anchor the comparison.
+
+The prefilter is tiered like the verify: a runtime AVX2 body (32 bytes/iteration) over an SSE2 baseline (16 bytes/iteration), with a scalar tail. Example AVX2 result from the same benchmark host:
+
+```text
+impl                     median_us         GiB/s
+dmk_memchr (scalar)       32614.8           1.92
+dmk_memchr (SIMD AVX2)     3218.4          19.42
+libc memchr (ref)          3928.5          15.91
+```
+
+The SIMD prefilter is roughly 10.1x faster than the scalar baseline and 1.22x faster than `libc memchr` (which is itself vectorized inside the CRT), so the self-provided prefilter is no longer the large-haystack throughput compromise it was when it dropped to a scalar loop for ASan-interceptor immunity. The gate for landing the SIMD tier was exactly this: beat the scalar baseline by >= 1.5x and never regress below the `libc memchr` the pre-self-provided scanner used.
+
+## AVX-512 verify gate
+
+The bench also includes a deep-verify scenario used by the AVX-512 CI workflow. The buffer is a 2 MiB run of one byte with a different byte at a fixed stride; every position is an anchor hit, so the scanner is dominated by pattern verification instead of the prefilter. A `DMK_ENABLE_AVX512=ON` build reports the active tier in the human table and emits a machine-readable line for CI.
+
+On a host without AVX-512F+BW and OS-enabled ZMM/opmask state, the runtime gate must fall back to AVX2:
+
+```text
+tier                   median_us         GiB/s
+AVX2                   13899.640          0.14
+#GATE  verify_gib_per_s  0.1405  AVX2
+```
+
+The self-hosted AVX-512 runner compares this row between a tier-enabled build and an AVX2 baseline build on the same machine and fails below `1.30x`. Intel SDE is used only for correctness because its timing is not representative of real silicon.
 
 ## Caveats
 

@@ -35,9 +35,9 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 
 - Find array-of-bytes (signatures) in memory with wildcard support
 - Rare-byte anchor heuristic: `parse_aob()` scores every literal byte in the pattern against a small frequency table (`0x00`, `0xCC`, `0x48`, `0x8B`, ...) and caches the rarest byte's index on `CompiledPattern::anchor`. `find_pattern()` drives its `memchr` sweep on that byte, so a signature like `48 8B 05 37 DE AD BE EF` anchors on `0x37` rather than the very common `0x48`, cutting false candidate hits by an order of magnitude on realistic code
-- SIMD-accelerated pattern verification:
-  - AVX2 (32 bytes/iteration, runtime-detected on Haswell+ CPUs)
-  - SSE2 fallback (16 bytes/iteration) for patterns >= 16 bytes
+- SIMD-accelerated prefilter and pattern verification:
+  - The `memchr` anchor prefilter and the verify pass both tier at runtime: AVX2 (32 bytes/iteration, runtime-detected on Haswell+ CPUs) over an SSE2 baseline (16 bytes/iteration), with a scalar tail. The self-provided prefilter does its own byte comparisons (never calling libc) so the AddressSanitizer interceptor cannot fault on the scanner's in-bounds reads
+  - Opt-in AVX-512F + AVX-512BW verify tier (64 bytes/iteration), gated behind the `DMK_ENABLE_AVX512` build option and a runtime CPUID + XGETBV check; off by default and never selected on a CPU that lacks it (it falls back to AVX2)
 - `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7)
 - Nth-occurrence matching (1-based) for patterns that hit multiple locations
 - RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `std::expected` with typed `RipResolveError` for actionable diagnostics)
@@ -143,7 +143,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <summary><strong>Memory Utilities</strong></summary>
 
 - Functions for checking memory readability/writability and writing bytes to memory
-- Optional memory region cache with sharded SRWLOCK concurrency, LRU eviction, and stampede coalescing
+- Optional memory region cache with sharded SRWLOCK concurrency, LRU eviction, and stampede coalescing. Each shard is cache-line-aligned with its lock word and stampede flag stored inline, and in-flight reader liveness is tracked in cache-line-padded per-thread stripes summed at shutdown rather than a single global counter, so concurrent readers do not re-serialize on one shared cache line
 - `is_readable_nonblocking()` - tri-state (readable/not-readable/unknown) for latency-sensitive threads
 - `read_ptr_unsafe()` - safe pointer reads in hot paths (SEH-protected on MSVC, guarded by a process-wide vectored exception handler on MinGW, so the success path issues no per-call VirtualQuery)
 - `read_ptr_unchecked()` - inline header-only variant with a configurable lower-bound guard plus a `USERSPACE_PTR_MAX` ceiling for pointer chain traversal without per-call SEH overhead (caller must guarantee structural pointer validity)
@@ -548,6 +548,17 @@ cmake --build --preset mingw-debug --parallel
 ```
 
 When `DMK_ENABLE_PROFILING` is OFF (the default), all profiling macros expand to `((void)0)` with zero overhead. The `Profiler` class and `ScopedProfile` are still compiled into the library (so tests always work), but the macros that instrument user code are no-ops.
+
+### Enabling the AVX-512 verify tier
+
+The scanner ships an opt-in AVX-512F + AVX-512BW pattern-verification tier (64 bytes per iteration), off by default:
+
+```bash
+cmake --preset mingw-debug -DDMK_ENABLE_AVX512=ON
+cmake --build --preset mingw-debug --parallel
+```
+
+When `DMK_ENABLE_AVX512` is OFF (the default) the tier compiles out entirely. When ON, the AVX-512 intrinsics are confined to that single function via a per-function `target` attribute (no global `/arch:AVX512` or `-mavx512`), so the rest of the library keeps its AVX2 baseline and the produced binary still runs on CPUs without AVX-512: the tier is selected only when a runtime `CPUID` + `XGETBV` check confirms both the CPU and OS support AVX-512F and AVX-512BW, otherwise the scanner falls back to AVX2. `Scanner::active_simd_level()` reports the tier actually in use. The tier's `>= 30%` throughput gate is hardware-specific and runs in `.github/workflows/avx512.yml` (correctness under Intel SDE on every push; the throughput gate on an opt-in self-hosted AVX-512 runner).
 
 ### Enabling Sanitizers
 

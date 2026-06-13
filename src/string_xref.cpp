@@ -24,6 +24,7 @@
 #include <windows.h>
 #include <Zydis/Zydis.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -392,32 +393,59 @@ namespace DetourModKit
             constexpr std::uintptr_t back_scan_window = 0x2000; // 8 KiB.
             const std::uintptr_t floor =
                 (instr_addr - window_lo > back_scan_window) ? instr_addr - back_scan_window : window_lo;
-
-            for (std::uintptr_t probe = instr_addr; probe > floor; --probe)
+            if (instr_addr <= floor)
             {
-                const auto boundary_byte = Memory::seh_read<std::uint8_t>(probe - 1);
-                if (!boundary_byte)
+                return 0;
+            }
+
+            // Buffer the back-scan window once instead of issuing a guarded read per byte. The window is read in
+            // page-sized chunks from high address to low: a chunk that faults stops the read exactly where the
+            // byte-at-a-time walk would have faulted going downward, so any boundary in the already-buffered higher
+            // bytes is still found, and a fault below them returns 0 just as the per-byte version did. This replaces up
+            // to ~8 KiB of guarded reads (a VirtualQuery / SEH-frame each on MinGW) with at most a few. window[k] holds
+            // the byte at floor + k; valid_lo is the lowest address actually buffered, so the scan and the forward
+            // INT3-padding skip operate only over the buffered range [valid_lo, instr_addr) (the skip only moves toward
+            // instr_addr, i.e. into already-buffered higher addresses).
+            std::array<std::uint8_t, static_cast<std::size_t>(back_scan_window)> window{};
+            std::uintptr_t valid_lo = instr_addr;
+            // Windows x86/x64 base page size; seh_read_bytes faults at this granularity. Chunks are page-aligned, not
+            // instr-aligned, so a single guarded read covers at most one page and never straddles a readable/unreadable
+            // page boundary: a fault in a lower page then cannot discard bytes already buffered from a readable higher
+            // page (which is exactly where the byte-at-a-time walk would have found a boundary before reaching the
+            // fault going downward).
+            constexpr std::uintptr_t page_size = 0x1000;
+            for (std::uintptr_t hi = instr_addr; hi > floor;)
+            {
+                const std::uintptr_t page_lo = (hi - 1) & ~(page_size - 1);
+                const std::uintptr_t lo = (page_lo > floor) ? page_lo : floor;
+                const std::size_t len = static_cast<std::size_t>(hi - lo);
+                if (!Memory::seh_read_bytes(lo, window.data() + (lo - floor), len))
                 {
-                    return 0;
+                    // This page is unreadable; stop. The byte-at-a-time walk would fault on the first byte here too,
+                    // after exhausting the readable bytes buffered above it.
+                    break;
                 }
-                if (*boundary_byte != 0xCC && *boundary_byte != 0xC3)
+                valid_lo = lo;
+                hi = lo;
+            }
+            if (valid_lo >= instr_addr)
+            {
+                // Not even the highest chunk was readable: the first probed byte would have faulted.
+                return 0;
+            }
+
+            for (std::uintptr_t probe = instr_addr; probe > valid_lo; --probe)
+            {
+                const std::uint8_t boundary_byte = window[static_cast<std::size_t>(probe - 1 - floor)];
+                if (boundary_byte != 0xCC && boundary_byte != 0xC3)
                 {
                     continue;
                 }
                 // The boundary byte ends the previous function (or its padding); the enclosing function begins at the
                 // first non-INT3 byte after it.
                 std::uintptr_t start = probe;
-                while (start < instr_addr)
+                while (start < instr_addr && window[static_cast<std::size_t>(start - floor)] == 0xCC)
                 {
-                    const auto pad_byte = Memory::seh_read<std::uint8_t>(start);
-                    if (!pad_byte)
-                    {
-                        return 0;
-                    }
-                    if (*pad_byte != 0xCC)
-                    {
-                        break;
-                    }
                     ++start;
                 }
                 return Scanner::is_likely_function_prologue(start) ? start : 0;

@@ -70,12 +70,17 @@ TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
     auto pattern = Scanner::parse_aob("CC");
     ASSERT_TRUE(pattern.has_value());
 
-    // One buffer per match position so each boundary case is asserted as a true first-match result: position 0
-    // (first byte), 7 (last byte before the first aligned qword), 8 (first byte of the aligned body), 15/16 (the
-    // qword seam), 32 (interior), and 63 (last byte). The filler byte 0xAB shares 0xCC's set high bit so the qword
-    // detect cannot pass on a high-bit-only comparison.
-    const std::size_t match_positions[] = {0, 7, 8, 15, 16, 32, 63};
-    for (const std::size_t pos : match_positions)
+    // The prefilter (dmk_memchr) is tiered: an AVX2 32-byte body, an SSE2 16-byte body, and a scalar byte tail.
+    // dmk_memchr routes by span length -- spans of 32 bytes or more take the AVX2 body when the CPU has AVX2, shorter
+    // spans take the SSE2 body, and the sub-16 remainder of either falls to the scalar tail -- so the three buffer
+    // sizes below exercise all three bodies even on an AVX2 host. The filler byte 0xAB differs from the 0xCC needle
+    // while sharing its high bit, so a compare that only tested the sign bit (rather than full-byte equality) would
+    // wrongly match the filler and the test would catch it.
+
+    // 64-byte buffer (>= 32, so the AVX2 body runs on this host). Positions cover the 16-byte SSE-lane seam (15/16),
+    // the 32-byte AVX2 chunk seam (31/32/33), an interior position, and the last byte (63).
+    const std::size_t avx2_positions[] = {0, 1, 15, 16, 17, 31, 32, 33, 47, 63};
+    for (const std::size_t pos : avx2_positions)
     {
         std::vector<std::byte> data(64, std::byte{0xAB});
         data[pos] = std::byte{0xCC};
@@ -84,13 +89,26 @@ TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
         ASSERT_NE(result, nullptr);
         EXPECT_EQ(static_cast<std::size_t>(result - data.data()), pos);
 
-        // Scanning from a misaligned base exercises the unaligned head loop ahead of the aligned qword body.
+        // Scanning from a misaligned base proves the unaligned vector loads (loadu) find the match at any alignment.
         if (pos >= 1)
         {
             auto misaligned = Scanner::find_pattern(data.data() + 1, data.size() - 1, *pattern);
             ASSERT_NE(misaligned, nullptr);
             EXPECT_EQ(static_cast<std::size_t>(misaligned - (data.data() + 1)), pos - 1);
         }
+    }
+
+    // 24-byte buffer (16 <= span < 32) forces the SSE2 body plus scalar tail even when the CPU has AVX2, since the
+    // span is below the AVX2 threshold. Positions cover the 16-byte chunk seam (15/16) and the last byte (23).
+    const std::size_t sse2_positions[] = {0, 15, 16, 23};
+    for (const std::size_t pos : sse2_positions)
+    {
+        std::vector<std::byte> data(24, std::byte{0xAB});
+        data[pos] = std::byte{0xCC};
+
+        auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+        ASSERT_NE(result, nullptr);
+        EXPECT_EQ(static_cast<std::size_t>(result - data.data()), pos);
     }
 
     // No-match case: a buffer with no occurrence.
@@ -101,8 +119,7 @@ TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
     // n == 0: a zero-size region cannot contain the pattern and must report no match without reading any byte.
     EXPECT_EQ(Scanner::find_pattern(empty.data(), 0, *pattern), nullptr);
 
-    // An n<8 buffer skips both the alignment head loop and the qword body (`n >= 8` guards both) and runs the
-    // byte-wise tail loop.
+    // A sub-16 buffer skips both vector bodies and runs only the scalar byte tail.
     std::vector<std::byte> tiny{std::byte{0xAB}, std::byte{0xAB}, std::byte{0xCC}, std::byte{0xAB}};
     auto tiny_result = Scanner::find_pattern(tiny.data(), tiny.size(), *pattern);
     ASSERT_NE(tiny_result, nullptr);
@@ -1706,9 +1723,10 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
 TEST(ScannerTest, active_simd_level_returns_valid_tier)
 {
     const auto level = Scanner::active_simd_level();
-    // Must be one of the three defined tiers
+    // Must be one of the defined tiers. Avx512 is only reachable in a DMK_ENABLE_AVX512 build on AVX-512 hardware;
+    // on every other build/host the runtime gate falls back to a lower tier, which is what this also asserts.
     EXPECT_TRUE(level == Scanner::SimdLevel::Scalar || level == Scanner::SimdLevel::Sse2 ||
-                level == Scanner::SimdLevel::Avx2);
+                level == Scanner::SimdLevel::Avx2 || level == Scanner::SimdLevel::Avx512);
 
     // On x86-64, SSE2 is guaranteed at minimum
 #if defined(__x86_64__) || defined(_M_X64)
@@ -1729,7 +1747,7 @@ TEST(ScannerTest, active_simd_level_print)
     // Diagnostic: prints the active tier so CI logs confirm which path ran.
     // Not a correctness assertion -- purely informational.
     const auto level = Scanner::active_simd_level();
-    const char *names[] = {"Scalar", "SSE2", "AVX2"};
+    const char *names[] = {"Scalar", "SSE2", "AVX2", "AVX-512"};
     std::printf("[  DIAG   ] Scanner SIMD level: %s\n", names[static_cast<int>(level)]);
 }
 
@@ -1807,6 +1825,117 @@ TEST(ScannerTest, find_pattern_avx2_path_64_bytes)
     const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[32]);
+}
+
+// --- AVX-512 path tests (64+ byte patterns) ---
+// Patterns of 64 bytes or more drive the AVX-512 verify body (64 bytes per iteration) when the library is built with
+// DMK_ENABLE_AVX512 and the host has AVX-512F + AVX-512BW; on every other build or host the same patterns fall through
+// to the AVX2 -> SSE2 -> scalar tiers. Each test asserts an identical result regardless of which tier runs, so it
+// validates both the AVX-512 body (on a capable CI host) and the tier-chaining handoff at offsets 64/96 (everywhere).
+
+TEST(ScannerTest, find_pattern_avx512_path_96_bytes)
+{
+    // 96-byte pattern: one AVX-512 iteration (64B) hands off to one AVX2 iteration (32B).
+    std::vector<std::byte> data(160, std::byte{0x11});
+    for (size_t i = 32; i < 128; ++i)
+        data[i] = static_cast<std::byte>((i * 5) & 0xFF);
+
+    std::string aob;
+    for (size_t i = 32; i < 128; ++i)
+    {
+        if (!aob.empty())
+            aob += ' ';
+        aob += std::format("{:02X}", (i * 5) & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 96u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[32]);
+}
+
+TEST(ScannerTest, find_pattern_avx512_path_128_bytes)
+{
+    // 128-byte pattern: two full AVX-512 iterations (no AVX2/SSE2/scalar tail).
+    std::vector<std::byte> data(256, std::byte{0x00});
+    for (size_t i = 64; i < 192; ++i)
+        data[i] = static_cast<std::byte>((i * 3) & 0xFF);
+
+    std::string aob;
+    for (size_t i = 64; i < 192; ++i)
+    {
+        if (!aob.empty())
+            aob += ' ';
+        aob += std::format("{:02X}", (i * 3) & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 128u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[64]);
+}
+
+TEST(ScannerTest, find_pattern_avx512_path_wildcards_across_64_boundary)
+{
+    // 96-byte pattern with wildcards straddling the 64-byte AVX-512 chunk seam (positions 60..67), so the per-lane
+    // mask must be applied correctly on both sides of the AVX-512 -> AVX2 handoff.
+    std::vector<std::byte> data(160, std::byte{0x00});
+    for (size_t i = 0; i < 160; ++i)
+        data[i] = static_cast<std::byte>((i * 9) & 0xFF);
+
+    std::string aob;
+    for (size_t i = 16; i < 112; ++i) // 96-byte pattern anchored at data[16]
+    {
+        if (!aob.empty())
+            aob += ' ';
+        const size_t rel = i - 16;
+        if (rel >= 60 && rel <= 67)
+            aob += "??";
+        else
+            aob += std::format("{:02X}", (i * 9) & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 96u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result, &data[16]);
+}
+
+TEST(ScannerTest, find_pattern_avx512_path_mismatch_after_first_chunk)
+{
+    // 96-byte pattern whose byte at offset 70 (in the AVX2 chunk after the first AVX-512 chunk) cannot match, so the
+    // chained tiers must reject the only anchor-aligned candidate and report no match.
+    std::vector<std::byte> data(160, std::byte{0x00});
+    for (size_t i = 0; i < 160; ++i)
+        data[i] = static_cast<std::byte>((i * 9) & 0xFF);
+
+    std::string aob;
+    for (size_t i = 16; i < 112; ++i)
+    {
+        if (!aob.empty())
+            aob += ' ';
+        const size_t rel = i - 16;
+        if (rel == 70)
+            aob += std::format("{:02X}", (((i * 9) & 0xFF) + 1) & 0xFF); // never equals data[i]
+        else
+            aob += std::format("{:02X}", (i * 9) & 0xFF);
+    }
+
+    const auto pattern = Scanner::parse_aob(aob);
+    ASSERT_TRUE(pattern.has_value());
+    ASSERT_EQ(pattern->size(), 96u);
+
+    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    EXPECT_EQ(result, nullptr);
 }
 
 TEST(ScannerTest, find_pattern_avx2_path_with_wildcards)
