@@ -2350,11 +2350,14 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
     constexpr uintptr_t kSentinel = 0x5151515151515151ULL;
     *reinterpret_cast<uintptr_t *>(good) = kSentinel;
 
-    void *freed = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(freed, nullptr);
-
-    // Now unmapped; reads of it must fault through the guard to 0.
-    VirtualFree(freed, 0, MEM_RELEASE);
+    // A deliberately non-readable page the test owns until teardown. This used to MEM_RELEASE a PAGE_READWRITE region
+    // to get an unmapped address, but a released VA can be recycled and remapped by the allocations that spawning the
+    // reader threads triggers (thread stacks/TEBs, more so under AddressSanitizer); a read then lands on live memory
+    // instead of faulting, so the "must fault to 0" assertion flaked on about one read in many thousands. A committed
+    // PAGE_NOACCESS page the test holds faults deterministically and cannot be recycled, so it exercises the guard's
+    // per-thread fault isolation without that artifact.
+    void *unreadable = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(unreadable, nullptr);
 
     std::atomic<bool> all_correct{true};
     std::vector<std::thread> threads;
@@ -2370,7 +2373,7 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
                         if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0) != kSentinel)
                             all_correct.store(false, std::memory_order_relaxed);
                     }
-                    else if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(freed), 0) != 0u)
+                    else if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(unreadable), 0) != 0u)
                     {
                         all_correct.store(false, std::memory_order_relaxed);
                     }
@@ -2381,6 +2384,7 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
         th.join();
 
     EXPECT_TRUE(all_correct.load());
+    VirtualFree(unreadable, 0, MEM_RELEASE);
     VirtualFree(good, 0, MEM_RELEASE);
 }
 
@@ -2395,9 +2399,11 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
     constexpr uintptr_t kSentinel = 0xA5A5A5A5A5A5A5A5ULL;
     *reinterpret_cast<uintptr_t *>(good) = kSentinel;
 
-    void *freed = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(freed, nullptr);
-    VirtualFree(freed, 0, MEM_RELEASE);
+    // A deliberately non-readable page the test owns until teardown: a committed PAGE_NOACCESS page faults on every
+    // read and cannot be recycled, unlike a MEM_RELEASE'd VA, which the allocations from spawning the reader threads
+    // can remap so a "faulting" read lands on live memory.
+    void *unreadable = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(unreadable, nullptr);
 
     std::atomic<bool> stop{false};
     std::atomic<int> seen_good{0};
@@ -2408,7 +2414,7 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
         readers.emplace_back(
             [&, t]()
             {
-                void *const target = (t % 2) ? freed : good;
+                void *const target = (t % 2) ? unreadable : good;
                 while (!stop.load(std::memory_order_acquire))
                 {
                     const uintptr_t v = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(target), 0);
@@ -2442,6 +2448,7 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
         th.join();
 
     EXPECT_EQ(Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0), kSentinel);
+    VirtualFree(unreadable, 0, MEM_RELEASE);
     VirtualFree(good, 0, MEM_RELEASE);
 }
 
