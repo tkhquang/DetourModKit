@@ -1362,9 +1362,14 @@ TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
         readers.emplace_back(
             [&]()
             {
-                started.fetch_add(1, std::memory_order_acq_rel);
                 for (int i = 0; i < READS_PER_THREAD; ++i)
                 {
+                    // Count the thread as started only once it is actually in the read loop, so the main thread's
+                    // wait gates on readers that are hammering reads rather than on threads that have merely spawned.
+                    if (i == 0)
+                    {
+                        started.fetch_add(1, std::memory_order_acq_rel);
+                    }
                     Memory::is_readable(mem, 4);
                 }
                 finished.fetch_add(1, std::memory_order_acq_rel);

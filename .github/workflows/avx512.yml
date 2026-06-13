@@ -22,8 +22,9 @@ permissions:
 #   correctness-sde -- runs on every push/PR. Builds the tests with the tier enabled and executes them under Intel
 #     SDE emulating a Sapphire Rapids (AVX-512) CPU, so the 64-byte AVX-512 verify body actually runs and must produce
 #     results identical to the scalar/AVX2 path. SDE emulates the ISA, so this is hardware-independent and runs on a
-#     GitHub-hosted runner. Advisory (continue-on-error): the SDE download URL/version needs occasional maintenance,
-#     and a missing kit must not turn the whole workflow red.
+#     GitHub-hosted runner. Advisory (continue-on-error): it always builds the AVX-512 tier (verifying it compiles on
+#     MSVC) and runs the tests under SDE via the SHA-pinned setup-sde action; if SDE cannot be set up the run skips
+#     cleanly with a warning rather than failing the workflow.
 #
 #   throughput-gate -- the ">= 30% verify-throughput gain on an AVX-512F host" half of the gate. SDE timing is not
 #     representative of real silicon, so this can only be measured on a real AVX-512 CPU; GitHub-hosted runners do not
@@ -36,11 +37,6 @@ jobs:
     name: AVX-512 correctness (Intel SDE, advisory)
     runs-on: windows-latest
     continue-on-error: true
-    env:
-      # Intel SDE external kit for Windows. Intel does not publish a stable templated URL, so the full download URL is
-      # pinned here and must be refreshed when a newer kit is released (https://www.intel.com/content/www/us/en/
-      # download/684897/intel-software-development-emulator.html). A stale URL only soft-fails this advisory job.
-      SDE_URL: "https://downloadmirror.intel.com/843185/sde-external-9.48.0-2024-11-25-win.tar.xz"
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -49,17 +45,9 @@ jobs:
           persist-credentials: false
 
       - name: Set up MSVC (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
-
-      - name: Download Intel SDE
-        shell: pwsh
-        run: |
-          curl.exe -L --fail --retry 3 --retry-delay 5 -o sde.tar.xz "$env:SDE_URL"
-          tar -xf sde.tar.xz
-          $dir = (Get-ChildItem -Directory -Filter "sde-external-*-win" | Select-Object -First 1).FullName
-          "SDE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Configure (MSVC Debug + AVX-512 tier)
         shell: pwsh
@@ -69,13 +57,31 @@ jobs:
         shell: pwsh
         run: cmake --build build/msvc-debug --target DetourModKit_tests --parallel 3
 
-      - name: Run scanner tests under SDE (Sapphire Rapids = AVX-512)
+      # SDE correctness run. Intel SDE executes the AVX-512 code path on any CPU, so it validates the tier's results
+      # without AVX-512 hardware. The maintained setup-sde action downloads the SDE Windows kit (pinned by commit SHA
+      # for supply-chain safety) and exposes its directory in SDE_PATH. Both steps are tolerant: if SDE cannot be set
+      # up, the run step skips with a warning rather than failing this advisory job (the AVX-512 build above already
+      # verified the tier compiles).
+      - name: Set up Intel SDE
+        uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
+        continue-on-error: true
+        with:
+          sdeVersion: 10.8.0
+          environmentVariableName: SDE_PATH
+
+      - name: Run scanner tests under Intel SDE (Sapphire Rapids = AVX-512)
         shell: pwsh
         run: |
+          $sdeExe = if ($env:SDE_PATH) { Join-Path $env:SDE_PATH 'sde.exe' } else { '' }
+          if (-not $sdeExe -or -not (Test-Path $sdeExe))
+          {
+              Write-Output "::warning::Intel SDE not available (setup-sde did not provide sde.exe); skipping the SDE correctness run."
+              exit 0
+          }
           $exe = (Get-ChildItem -Recurse -Path build/msvc-debug -Filter DetourModKit_tests.exe |
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "DetourModKit_tests.exe not found" }
-          & "$env:SDE_DIR\sde.exe" -spr -- "$exe" --gtest_filter="ScannerTest.*"
+          & "$sdeExe" -spr -- "$exe" --gtest_filter="ScannerTest.*"
 
   throughput-gate:
     name: AVX-512 throughput gate (>= 30%, self-hosted)
@@ -91,7 +97,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up MSVC (x64)
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
 
