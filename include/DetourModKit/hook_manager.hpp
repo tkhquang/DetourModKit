@@ -632,6 +632,8 @@ namespace DetourModKit
          * @param name A unique, descriptive name for the VMT hook.
          * @param object Pointer to the polymorphic object whose vptr will be replaced.
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
+         * @note Setup/control-plane only: clones a vtable, allocates, and takes the HookManager exclusive lock. Call
+         *       from init/shutdown or a worker thread, never from a hook or input callback.
          * @warning VMT hooks have no enable/disable: creation swaps the object's vptr to the cloned table and removal
          *          restores it. Removal is a bare vptr write with no thread protection at all -- weaker than inline/mid
          *          teardown, which at least relocates a thread that faults on the patched page via SafetyHook's
