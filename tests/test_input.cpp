@@ -527,7 +527,16 @@ TEST_F(InputPollerTest, MixedKeyboardAndGamepadBindings)
 class InputManagerTest : public ::testing::Test
 {
 protected:
-    void SetUp() override { InputManager::get_instance().shutdown(); }
+    // shutdown() tears down the poller but does not reset require_focus (a persistent setting), so restore the
+    // default here. A test that flips require_focus and then aborts on an ASSERT cannot leak that state into the
+    // next test: ctest already isolates each case in its own process, and this keeps the single-process exe
+    // deterministic too, without a per-test restore that an early ASSERT would skip.
+    void SetUp() override
+    {
+        auto &mgr = InputManager::get_instance();
+        mgr.shutdown();
+        mgr.set_require_focus(true);
+    }
 
     void TearDown() override { InputManager::get_instance().shutdown(); }
 };

@@ -259,6 +259,10 @@ TEST(AnchorsTest, ResolveAllParallelMatchesSerialReport)
 
     const std::size_t serial_count = Anchors::resolve_all(table, serial, reg.range());
     const std::size_t parallel_count = Anchors::resolve_all_parallel(table, parallel, reg.range(), 4);
+    // Pin both counts to the known table size so the per-entry loop below cannot pass vacuously (a bug that
+    // wrote zero entries would still satisfy a bare serial == parallel check).
+    ASSERT_EQ(serial_count, 5u);
+    ASSERT_EQ(parallel_count, 5u);
     ASSERT_EQ(parallel_count, serial_count);
 
     for (std::size_t i = 0; i < serial_count; ++i)

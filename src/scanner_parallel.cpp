@@ -41,6 +41,9 @@ namespace DetourModKit
                 items, max_workers,
                 [kind](const BatchScanItem &item) -> const std::byte *
                 {
+                    // The null check guards the *item.pattern dereference below. An empty pattern or
+                    // occurrence == 0 is intentionally not re-checked here: the serial scanners already fail both
+                    // closed (their pattern.empty() / occurrence == 0 guards return nullptr).
                     if (item.pattern == nullptr)
                     {
                         return nullptr;
@@ -59,6 +62,9 @@ namespace DetourModKit
                 items, max_workers,
                 [kind, range](const BatchScanItem &item) -> const std::byte *
                 {
+                    // The null check guards the *item.pattern dereference below. An empty pattern or
+                    // occurrence == 0 is intentionally not re-checked here: the serial module scanners already fail
+                    // both closed (their pattern.empty() / occurrence == 0 guards return nullptr).
                     if (item.pattern == nullptr)
                     {
                         return nullptr;

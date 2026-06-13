@@ -358,6 +358,9 @@ TEST(ProfileTest, ResolveAllWithProfileParallelMatchesSerialReport)
     const std::size_t serial_count = Anchors::resolve_all_with_profile(table, serial, profile, reg.range());
     const std::size_t parallel_count =
         Anchors::resolve_all_with_profile_parallel(table, parallel, profile, reg.range(), 4);
+    // Pin both counts to the known table size so the per-entry loop below cannot pass vacuously.
+    ASSERT_EQ(serial_count, 3u);
+    ASSERT_EQ(parallel_count, 3u);
     ASSERT_EQ(parallel_count, serial_count);
 
     for (std::size_t i = 0; i < serial_count; ++i)
