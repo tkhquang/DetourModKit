@@ -1679,34 +1679,17 @@ Memory::ReadableStatus DetourModKit::Memory::is_readable_nonblocking(const void 
 
 uintptr_t DetourModKit::Memory::read_ptr_unsafe(uintptr_t base, ptrdiff_t offset) noexcept
 {
-#ifdef _MSC_VER
-    __try
-    {
-        // memcpy, not a *reinterpret_cast deref: the foreign address may be misaligned, and a cast-deref of a
-        // misaligned pointer is formal undefined behavior. memcpy has identical codegen here (a single mov on x86-64)
-        // and matches the idiom seh_read_bytes already uses for the same reason.
-        uintptr_t value;
-        std::memcpy(&value, reinterpret_cast<const void *>(base + offset), sizeof(value));
-        return value;
-    }
-    __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
-                                                                        : EXCEPTION_CONTINUE_SEARCH)
-    {
-        return 0;
-    }
-#else
-    // MinGW/GCC lacks __try/__except. Read the pointer-sized value through the process-wide vectored fault guard (see
-    // veh_read_bytes): a fault -- unmapped, PAGE_NOACCESS/guard, or a page reprotected out from under a stale cache
-    // entry -- is swallowed and reported as failure. This matches the MSVC path's "0 on fault" contract without a
-    // per-call VirtualQuery and without trusting cached protection data for an unguarded dereference. memcpy semantics
-    // are preserved (the guarded copy is byte-wise), so a misaligned foreign pointer is read without the undefined
-    // behavior of dereferencing it.
-    const uintptr_t src = base + static_cast<uintptr_t>(offset);
+    // Route the pointer-sized read through the shared guarded-read entry point rather than a private __try/memcpy so a
+    // single implementation owns every safety property: the low/null source floor, the (src + size) wrap rejection, and
+    // -- under AddressSanitizer on MSVC -- the __movsb copy that seh_read_bytes uses because the compiler otherwise
+    // routes std::memcpy through the ASan interceptor, which both false-positives on the foreign mapped memory these
+    // probes legitimately read and aborts on a wrapping source range before the SEH guard can turn the fault into a 0
+    // return. seh_read_bytes' byte-wise copy also keeps a misaligned foreign pointer free of cast-deref undefined
+    // behavior. A rejected or faulting read yields 0; on a hit, value holds the bytes.
     uintptr_t value = 0;
-    if (!veh_read_bytes(src, &value, sizeof(value)))
+    if (!seh_read_bytes(base + static_cast<uintptr_t>(offset), &value, sizeof(value)))
         return 0;
     return value;
-#endif
 }
 
 bool DetourModKit::Memory::seh_read_bytes(uintptr_t addr, void *out, size_t bytes) noexcept
