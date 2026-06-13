@@ -66,18 +66,26 @@ jobs:
         uses: petarpetrovt/setup-sde@31aa4a8e85e109bef00f1d838613fcc6ec421271 # v5.0
         continue-on-error: true
         with:
-          sdeVersion: 10.8.0
+          # SDE 10.8.0 fails to start from some install folders (the runner's extraction path triggers it), so pin a
+          # known-good earlier release; -spr (Sapphire Rapids) AVX-512F + AVX-512BW emulation is available in 9.x.
+          # Ref: https://community.intel.com/t5/Intel-ISA-Extensions/SDE-10-8-fails-to-start-depending-on-the-installation-folder/m-p/1746386
+          sdeVersion: 9.58.0
           environmentVariableName: SDE_PATH
 
       - name: Run scanner tests under Intel SDE (Sapphire Rapids = AVX-512)
         shell: pwsh
         run: |
-          $sdeExe = if ($env:SDE_PATH) { Join-Path $env:SDE_PATH 'sde.exe' } else { '' }
-          if (-not $sdeExe -or -not (Test-Path $sdeExe))
+          # Prefer the dedicated 64-bit launcher (sde64.exe) over the auto-detecting sde.exe.
+          $sdeExe = @('sde64.exe', 'sde.exe') |
+                    ForEach-Object { Join-Path "$env:SDE_PATH" $_ } |
+                    Where-Object { Test-Path $_ } |
+                    Select-Object -First 1
+          if (-not $sdeExe)
           {
-              Write-Output "::warning::Intel SDE not available (setup-sde did not provide sde.exe); skipping the SDE correctness run."
+              Write-Output "::warning::Intel SDE not available (setup-sde did not provide a launcher); skipping the SDE correctness run."
               exit 0
           }
+          Write-Output "SDE launcher: $sdeExe"
           $exe = (Get-ChildItem -Recurse -Path build/msvc-debug -Filter DetourModKit_tests.exe |
                   Select-Object -First 1).FullName
           if (-not $exe) { throw "DetourModKit_tests.exe not found" }

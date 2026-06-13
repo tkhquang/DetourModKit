@@ -80,8 +80,8 @@ The prefilter is tiered like the verify: a runtime AVX2 body (32 bytes/iteration
 ```text
 impl                     median_us         GiB/s
 dmk_memchr (scalar)       32614.8           1.92
-dmk_memchr (SIMD AVX2)     3218.4          19.42
-libc memchr (ref)          3928.5          15.91
+dmk_memchr (SIMD AVX2)     3218.425        19.42
+libc memchr (ref)          3928.470        15.91
 ```
 
 The SIMD prefilter is roughly 10.1x faster than the scalar baseline and 1.22x faster than `libc memchr` (which is itself vectorized inside the CRT), so the self-provided prefilter is no longer the large-haystack throughput compromise it was when it dropped to a scalar loop for ASan-interceptor immunity. The gate for landing the SIMD tier was exactly this: beat the scalar baseline by >= 1.5x and never regress below the `libc memchr` the pre-self-provided scanner used.
