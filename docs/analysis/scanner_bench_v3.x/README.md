@@ -88,7 +88,7 @@ The SIMD prefilter is roughly 10.1x faster than the scalar baseline and 1.22x fa
 
 ## AVX-512 verify gate
 
-The bench also includes a deep-verify scenario used by the AVX-512 CI workflow. The buffer is a 2 MiB run of one byte with a different byte at a fixed stride; every position is an anchor hit, so the scanner is dominated by pattern verification instead of the prefilter. A `DMK_ENABLE_AVX512=ON` build reports the active tier in the human table and emits a machine-readable line for CI.
+The bench also includes a deep-verify scenario for the AVX-512 verify-throughput gate. The buffer is a 2 MiB run of one byte with a different byte at a fixed stride; every position is an anchor hit, so the scanner is dominated by pattern verification instead of the prefilter. A `DMK_ENABLE_AVX512=ON` build reports the active tier in the human table and emits a machine-readable line for CI.
 
 On a host without AVX-512F+BW and OS-enabled ZMM/opmask state, the runtime gate must fall back to AVX2:
 
@@ -98,7 +98,7 @@ AVX2                   13899.640          0.14
 #GATE  verify_gib_per_s  0.1405  AVX2
 ```
 
-The self-hosted AVX-512 runner compares this row between a tier-enabled build and an AVX2 baseline build on the same machine and fails below `1.30x`. Intel SDE is used only for correctness because its timing is not representative of real silicon.
+On a real AVX-512 host this row is compared between a tier-enabled build and an AVX2 baseline build on the same machine, with `1.30x` as the acceptance bar. Intel SDE is used only for correctness because its timing is not representative of real silicon.
 
 ## Caveats
 

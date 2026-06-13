@@ -363,22 +363,22 @@ namespace
                     pattern_len, stride, buffer_size / (1024u * 1024u));
         std::printf("%-22s\t%12s\t%12s\n", "tier", "median_us", "GiB/s");
         std::printf("%-22s\t%12.3f\t%12.2f\n", active_simd_tier_name(), us, gib_per_s);
-        // Machine-readable line for the AVX-512 throughput-gate CI job (avx512.yml): it greps this from the AVX-512
-        // build and the AVX2 build and asserts the ratio clears the gate.
+        // Machine-readable verify-throughput line for the >= 30% AVX-512-vs-AVX2 gate: on a real AVX-512 host a
+        // tier-enabled build and an AVX2 baseline build are compared and the ratio must clear the bar.
         std::printf("#GATE\tverify_gib_per_s\t%.4f\t%s\n", gib_per_s, active_simd_tier_name());
     }
 } // namespace
 
 int main(int argc, char **argv)
 {
-    // Instruction-count proxy mode (the avx512 CI verify-icount job runs this under Intel SDE's -mix). A real
-    // wall-clock verify-throughput comparison needs AVX-512 silicon (the throughput-gate job); without it SDE timing is
-    // meaningless. What SDE can measure hardware-independently is the executed instruction count, so this mode runs a
-    // single deep-verify pass over a small buffer -- skipping the timing-driven full suite, which is far too heavy
-    // under -mix -- and exits. CI runs it under -spr (Sapphire Rapids selects the AVX-512 verify tier) and -hsw
-    // (Haswell selects AVX2) and compares the counts: the 64-byte AVX-512 verify body should execute materially fewer
-    // instructions than the 32-byte AVX2 body for the same work. This is a proxy for work performed, not wall-clock
-    // throughput (zmm downclock and port pressure can make fewer instructions slower on real silicon).
+    // Instruction-count proxy mode (run under Intel SDE's -mix). A real wall-clock verify-throughput comparison needs
+    // AVX-512 silicon; without it SDE timing is meaningless. What SDE can measure hardware-independently is the
+    // executed instruction count, so this mode runs a single deep-verify pass over a small buffer -- skipping the
+    // timing-driven full suite, which is far too heavy under -mix -- and exits. Run it under -spr (Sapphire Rapids
+    // selects the AVX-512 verify tier) and -hsw (Haswell selects AVX2) and compare the counts: the 64-byte AVX-512
+    // verify body should execute materially fewer instructions than the 32-byte AVX2 body for the same work. This is a
+    // proxy for work performed, not wall-clock throughput (zmm downclock and port pressure can make fewer instructions
+    // slower on real silicon).
     if (argc > 1 && std::strcmp(argv[1], "--verify-icount") == 0)
     {
         constexpr std::size_t ICOUNT_BUFFER = 1u * 1024u * 1024u;
