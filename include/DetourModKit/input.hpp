@@ -36,7 +36,7 @@ namespace DetourModKit
      * @param mode The InputMode enum value.
      * @return std::string_view String representation of the mode.
      */
-    constexpr std::string_view input_mode_to_string(InputMode mode) noexcept
+    [[nodiscard]] constexpr std::string_view input_mode_to_string(InputMode mode) noexcept
     {
         switch (mode)
         {
@@ -539,6 +539,16 @@ namespace DetourModKit
         size_t remove_binding_by_name(std::string_view name) noexcept { return remove_binding_by_name(name, true); }
 
         /**
+         * @brief Plural alias for remove_binding_by_name(name); removes every binding sharing @p name.
+         * @details Naming parity with InputPoller::remove_bindings_by_name. Delegates to the singular overload with
+         *          identical behavior. Prefer this spelling: one name maps to many combos, so the call removes all
+         *          bindings registered under the shared name.
+         * @param name Binding name to remove.
+         * @return Number of bindings removed.
+         */
+        size_t remove_bindings_by_name(std::string_view name) noexcept { return remove_binding_by_name(name, true); }
+
+        /**
          * @brief Drops every registered binding without stopping the poller.
          * @details Forwards to the active InputPoller when running and clears pending bindings. Active hold bindings
          *          receive an on_state_change(false) callback before erasure. The poll thread keeps running and can be
@@ -560,6 +570,17 @@ namespace DetourModKit
         size_t remove_binding_by_name(std::string_view name, bool invoke_callbacks) noexcept;
 
         /**
+         * @brief Plural alias for remove_binding_by_name(name, invoke_callbacks).
+         * @param name Binding name to remove.
+         * @param invoke_callbacks When false, drops the on_state_change(false) release callbacks (loader-lock path).
+         * @return Number of bindings removed.
+         */
+        size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept
+        {
+            return remove_binding_by_name(name, invoke_callbacks);
+        }
+
+        /**
          * @brief Variant of clear_bindings that suppresses the on_state_change(false) release callbacks for active
          *        holds.
          * @param invoke_callbacks When true, behaves identically to the public zero-argument overload. When false,
@@ -576,7 +597,7 @@ namespace DetourModKit
 
     private:
         InputManager() = default;
-        ~InputManager() = default;
+        ~InputManager() noexcept = default;
 
         InputManager(const InputManager &) = delete;
         InputManager &operator=(const InputManager &) = delete;

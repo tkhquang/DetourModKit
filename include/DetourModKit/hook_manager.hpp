@@ -156,12 +156,12 @@ namespace DetourModKit
     class Hook
     {
     public:
-        virtual ~Hook() = default;
+        virtual ~Hook() noexcept = default;
 
-        const std::string &get_name() const noexcept { return m_name; }
-        HookType get_type() const noexcept { return m_type; }
-        uintptr_t get_target_address() const noexcept { return m_target_address; }
-        HookStatus get_status() const noexcept { return m_status.load(std::memory_order_acquire); }
+        [[nodiscard]] const std::string &get_name() const noexcept { return m_name; }
+        [[nodiscard]] HookType get_type() const noexcept { return m_type; }
+        [[nodiscard]] uintptr_t get_target_address() const noexcept { return m_target_address; }
+        [[nodiscard]] HookStatus get_status() const noexcept { return m_status.load(std::memory_order_acquire); }
 
         /**
          * @brief Enables the hook.
@@ -230,7 +230,7 @@ namespace DetourModKit
             return m_status.load(std::memory_order_acquire) == HookStatus::Active;
         }
 
-        static constexpr std::string_view status_to_string(HookStatus status) noexcept
+        [[nodiscard]] static constexpr std::string_view status_to_string(HookStatus status) noexcept
         {
             switch (status)
             {
@@ -247,7 +247,7 @@ namespace DetourModKit
             }
         }
 
-        static constexpr std::string_view error_to_string(HookError error) noexcept
+        [[nodiscard]] static constexpr std::string_view error_to_string(HookError error) noexcept
         {
             switch (error)
             {
@@ -313,6 +313,13 @@ namespace DetourModKit
         Hook &operator=(Hook &&) = delete;
     };
 
+    namespace detail
+    {
+        /// Satisfied only by a pointer-to-function type; the valid cast target for InlineHook::get_original.
+        template <typename T>
+        concept FunctionPointer = std::is_pointer_v<T> && std::is_function_v<std::remove_pointer_t<T>>;
+    } // namespace detail
+
     /**
      * @class InlineHook
      * @brief Represents a managed inline hook, wrapping a SafetyHook::InlineHook object.
@@ -332,7 +339,7 @@ namespace DetourModKit
          * @tparam T The function pointer type of the original function.
          * @return A function pointer of type T to the original function's trampoline.
          */
-        template <typename T> T get_original() const noexcept
+        template <detail::FunctionPointer T> [[nodiscard]] T get_original() const noexcept
         {
             return m_safetyhook_impl ? m_safetyhook_impl.original<T>() : nullptr;
         }
@@ -371,7 +378,7 @@ namespace DetourModKit
          * @brief Gets the destination function of this mid-hook.
          * @return safetyhook::MidHookFn The function pointer to the detour.
          */
-        safetyhook::MidHookFn get_destination() const noexcept
+        [[nodiscard]] safetyhook::MidHookFn get_destination() const noexcept
         {
             return m_safetyhook_impl ? m_safetyhook_impl.destination() : nullptr;
         }
@@ -421,13 +428,13 @@ namespace DetourModKit
             }
 
             /// Returns the registered hook name.
-            const std::string &get_name() const noexcept { return m_name; }
+            [[nodiscard]] const std::string &get_name() const noexcept { return m_name; }
 
             /// Returns the underlying SafetyHook VMT hook.
-            safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
+            [[nodiscard]] safetyhook::VmtHook &vmt_hook() noexcept { return m_vmt_hook; }
 
             /// Returns the vptr this entry installed on its seed object, or 0 if unknown.
-            std::uintptr_t cloned_vptr_base() const noexcept { return m_cloned_vptr_base; }
+            [[nodiscard]] std::uintptr_t cloned_vptr_base() const noexcept { return m_cloned_vptr_base; }
 
             /// Returns true if a method at the given vtable index is hooked.
             [[nodiscard]] bool has_method_hook(size_t index) const noexcept
@@ -440,7 +447,7 @@ namespace DetourModKit
              * @param index The vtable index to look up.
              * @return Pointer to the method hook, or nullptr if none is installed.
              */
-            safetyhook::VmHook *get_method_hook(size_t index)
+            [[nodiscard]] safetyhook::VmHook *get_method_hook(size_t index)
             {
                 auto it = m_method_hooks.find(index);
                 return it != m_method_hooks.end() ? &it->second : nullptr;
@@ -518,7 +525,7 @@ namespace DetourModKit
          *          cleared, allowing subsequent hook creation for hot-reload scenarios. The destructor becomes a no-op
          *          only while the flag is set during the shutdown operation itself.
          */
-        void shutdown();
+        void shutdown() noexcept;
 
         // Non-copyable, non-movable (mutex member)
         HookManager(const HookManager &) = delete;
@@ -776,7 +783,7 @@ namespace DetourModKit
          * @brief Returns the names of all active VMT hooks.
          * @return std::vector<std::string> Vector containing the names of the VMT hooks.
          */
-        std::vector<std::string> get_vmt_hook_names() const;
+        [[nodiscard]] std::vector<std::string> get_vmt_hook_names() const;
 
         /**
          * @brief Safely accesses a VmHook (method hook) within a named VMT hook.
@@ -892,7 +899,7 @@ namespace DetourModKit
          *          After clearing, resets the internal shutdown flag to false, allowing subsequent create_*_hook()
          *          calls to succeed for hot-reload workflows.
          */
-        void remove_all_hooks();
+        void remove_all_hooks() noexcept;
 
         /**
          * @brief Enables a previously disabled hook.
@@ -959,14 +966,15 @@ namespace DetourModKit
          * @brief Gets a summary of hook counts categorized by their status.
          * @return std::unordered_map<HookStatus, size_t> Map of statuses to counts.
          */
-        std::unordered_map<HookStatus, size_t> get_hook_counts() const;
+        [[nodiscard]] std::unordered_map<HookStatus, size_t> get_hook_counts() const;
 
         /**
          * @brief Retrieves a list of hook names.
          * @param status_filter Optional status filter for returned hooks.
          * @return std::vector<std::string> Vector containing the names of the hooks.
          */
-        std::vector<std::string> get_hook_ids(std::optional<HookStatus> status_filter = std::nullopt) const;
+        [[nodiscard]] std::vector<std::string>
+        get_hook_ids(std::optional<HookStatus> status_filter = std::nullopt) const;
 
         // clang-format off
         /**

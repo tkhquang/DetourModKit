@@ -17,15 +17,22 @@ cmake --build build/mingw-debug --parallel
 
 ### Run Tests
 
+`ctest` is the canonical runner. `gtest_discover_tests` registers each test case as its own
+ctest test, so ctest runs each case in a separate process. Prefer it -- some suites drive
+process-global singleton state (the `ConfigTest` log-capture cases reconfigure the one
+`Logger::get_instance()` sink) and can interleave when many cases share a single monolithic
+process. The standalone `DetourModKit_tests.exe` is for fast local iteration and `--gtest_filter`
+debugging, not the canonical green/red signal.
+
 ```bash
 PATH="/c/msys64/mingw64/bin:$PATH"
-./build/mingw-debug/tests/DetourModKit_tests.exe
 
-# Run a specific test suite
-./build/mingw-debug/tests/DetourModKit_tests.exe --gtest_filter="LoggerTest.*"
-
-# Run via CTest
+# Canonical: per-case process isolation
 ctest --preset mingw-debug --output-on-failure
+
+# Fast local iteration (single process -- log-capture singleton cases may interleave)
+./build/mingw-debug/tests/DetourModKit_tests.exe
+./build/mingw-debug/tests/DetourModKit_tests.exe --gtest_filter="LoggerTest.*"
 ```
 
 ### Generate Coverage Report
@@ -278,7 +285,7 @@ This is expected when casting `FARPROC` from `GetProcAddress` to a typed functio
 
 ## Event Dispatcher Tests
 
-`tests/test_event_dispatcher.cpp` exercises the lock-free copy-on-write dispatcher. Beyond the basic subscribe/emit/RAII coverage, three tests target the optimized hot path specifically:
+`tests/test_event_dispatcher.cpp` exercises the no-user-visible-mutex copy-on-write dispatcher. Beyond the basic subscribe/emit/RAII coverage, three tests target the optimized hot path specifically:
 
 | Test | What it proves |
 | ---- | -------------- |
@@ -371,7 +378,7 @@ cmake --build build/mingw-release --parallel
 
 - `emit` / `emit_safe` at 0, 1, 8, 64 subscribers (the 0-subscriber rows measure the fast path).
 - `subscribe_unsub_roundtrip` (single-thread RAII churn).
-- `emit_concurrent_4_threads` (contention stress on the lock-free read path).
+- `emit_concurrent_4_threads` (contention stress on the copy-on-write read path).
 - `reentrancy_rejection` (cost of the guard's reject-during-handler path).
 
 `DetourModKit_bench_memory` is documented in [../misc/hot-path-memory.md](../misc/hot-path-memory.md); read the `probe_gated_over_direct` TSV row for the gated-vs-direct multiplier on your machine.
@@ -424,7 +431,7 @@ tests/
 ├── test_profiler.cpp           # Profiler tests
 ├── test_scanner.cpp            # AOB scanner tests
 ├── test_shutdown.cpp           # DMK_Shutdown orchestration tests
-├── test_string.cpp             # String utilities tests
+├── test_string.cpp             # String::trim cases (shares format.hpp with test_format.cpp -- surface split)
 ├── test_win_file_stream.cpp    # Win32 file stream tests
 ├── test_worker.cpp             # StoppableWorker jthread RAII tests
 └── test_x86_decode.cpp         # x86 control-flow instruction decoders (internal)

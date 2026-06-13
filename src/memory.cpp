@@ -1246,7 +1246,7 @@ bool DetourModKit::Memory::init_cache(size_t cache_size, unsigned int expiry_ms,
     return true;
 }
 
-void DetourModKit::Memory::clear_cache()
+void DetourModKit::Memory::clear_cache() noexcept
 {
     // Hold state mutex to serialize with shutdown and cleanup thread
     std::lock_guard<std::mutex> state_lock(s_cache_state_mutex);
@@ -1278,10 +1278,18 @@ void DetourModKit::Memory::clear_cache()
 
     s_last_cleanup_time_ns.store(current_time_ns(), std::memory_order_relaxed);
 
-    Logger::get_instance().debug("MemoryCache: All entries cleared.");
+    // Diagnostic-only tail. The method is noexcept (a cache teardown must not throw), and Logger::debug can format
+    // and flush a sink, so fail closed: a sink or format failure drops the line rather than escaping clear_cache.
+    try
+    {
+        Logger::get_instance().debug("MemoryCache: All entries cleared.");
+    }
+    catch (...)
+    {
+    }
 }
 
-void DetourModKit::Memory::shutdown_cache()
+void DetourModKit::Memory::shutdown_cache() noexcept
 {
     // Signal and join cleanup thread BEFORE acquiring state mutex. The cleanup thread acquires s_cache_state_mutex in
     // cleanup_expired_entries(force=true), so joining while holding the state mutex would deadlock.
@@ -1371,51 +1379,65 @@ void DetourModKit::Memory::shutdown_cache()
     remove_veh_handler();
 #endif
 
-    Logger::get_instance().debug("MemoryCache: Shutdown complete.");
+    // Diagnostic-only tail. shutdown_cache() is noexcept, so a sink or format failure must not escape teardown.
+    try
+    {
+        Logger::get_instance().debug("MemoryCache: Shutdown complete.");
+    }
+    catch (...)
+    {
+    }
+}
+
+DetourModKit::Memory::MemoryStats DetourModKit::Memory::get_memory_stats() noexcept
+{
+    MemoryStats stats{};
+    stats.hits = s_stats.cache_hits.load(std::memory_order_relaxed);
+    stats.misses = s_stats.cache_misses.load(std::memory_order_relaxed);
+    stats.invalidations = s_stats.invalidations.load(std::memory_order_relaxed);
+    stats.coalesced_queries = s_stats.coalesced_queries.load(std::memory_order_relaxed);
+    stats.on_demand_cleanups = s_stats.on_demand_cleanups.load(std::memory_order_relaxed);
+
+    stats.shard_count = s_shard_count.load(std::memory_order_acquire);
+    stats.max_entries_per_shard = s_max_entries_per_shard.load(std::memory_order_acquire);
+    stats.expiry_ms = s_configured_expiry_ms.load(std::memory_order_acquire);
+
+    // Sum live entries and hard-max capacity across shards under the reader guard. A non-zero shard count implies
+    // s_cache_shards is allocated (init publishes the count after the array) and the reader guard keeps it alive;
+    // when the count is zero the loop simply does not run.
+    size_t total_hard_max = 0;
+    {
+        ActiveReaderGuard reader_guard;
+        const size_t active_shard_count = s_shard_count.load(std::memory_order_acquire);
+        for (size_t i = 0; i < active_shard_count; ++i)
+        {
+            std::shared_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
+            stats.total_entries += s_cache_shards[i].entries.size();
+            total_hard_max += s_cache_shards[i].max_capacity;
+        }
+    }
+    stats.hard_max_per_shard = (stats.shard_count > 0) ? total_hard_max / stats.shard_count : 0;
+
+    const uint64_t total_queries = stats.hits + stats.misses;
+    stats.hit_rate_percent =
+        (total_queries > 0) ? (static_cast<double>(stats.hits) / static_cast<double>(total_queries)) * 100.0 : -1.0;
+    return stats;
 }
 
 std::string DetourModKit::Memory::get_cache_stats()
 {
-    const uint64_t hits = s_stats.cache_hits.load(std::memory_order_relaxed);
-    const uint64_t misses = s_stats.cache_misses.load(std::memory_order_relaxed);
-    const uint64_t invalidations = s_stats.invalidations.load(std::memory_order_relaxed);
-    const uint64_t coalesced = s_stats.coalesced_queries.load(std::memory_order_relaxed);
-    const uint64_t on_demand_cleanups = s_stats.on_demand_cleanups.load(std::memory_order_relaxed);
-    const uint64_t total_queries = hits + misses;
-
-    const size_t shard_count = s_shard_count.load(std::memory_order_acquire);
-    const size_t max_entries_per_shard = s_max_entries_per_shard.load(std::memory_order_acquire);
-    const unsigned int expiry_ms = s_configured_expiry_ms.load(std::memory_order_acquire);
-
-    // Calculate total entries and hard max with reader guard
-    size_t total_entries = 0;
-    size_t total_hard_max = 0;
-
-    {
-        ActiveReaderGuard reader_guard;
-        const size_t active_shard_count = s_shard_count.load(std::memory_order_acquire);
-        // A non-zero shard count implies s_cache_shards is allocated (init publishes the count after the array) and the
-        // reader guard keeps it alive; when the count is zero the loop simply does not run.
-        for (size_t i = 0; i < active_shard_count; ++i)
-        {
-            std::shared_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
-            total_entries += s_cache_shards[i].entries.size();
-            total_hard_max += s_cache_shards[i].max_capacity;
-        }
-    }
+    const MemoryStats s = get_memory_stats();
 
     std::ostringstream oss;
-    oss << "MemoryCache Stats (Shards: " << shard_count << ", Entries/Shard: " << max_entries_per_shard
-        << ", HardMax/Shard: " << (shard_count > 0 ? total_hard_max / shard_count : 0) << ", Expiry: " << expiry_ms
-        << "ms) - "
-        << "Hits: " << hits << ", Misses: " << misses << ", Invalidations: " << invalidations
-        << ", Coalesced: " << coalesced << ", OnDemandCleanups: " << on_demand_cleanups
-        << ", TotalEntries: " << total_entries;
+    oss << "MemoryCache Stats (Shards: " << s.shard_count << ", Entries/Shard: " << s.max_entries_per_shard
+        << ", HardMax/Shard: " << s.hard_max_per_shard << ", Expiry: " << s.expiry_ms << "ms) - "
+        << "Hits: " << s.hits << ", Misses: " << s.misses << ", Invalidations: " << s.invalidations
+        << ", Coalesced: " << s.coalesced_queries << ", OnDemandCleanups: " << s.on_demand_cleanups
+        << ", TotalEntries: " << s.total_entries;
 
-    if (total_queries > 0)
+    if (s.hit_rate_percent >= 0.0)
     {
-        const double hit_rate_percent = (static_cast<double>(hits) / static_cast<double>(total_queries)) * 100.0;
-        oss << ", Hit Rate: " << std::fixed << std::setprecision(2) << hit_rate_percent << "%";
+        oss << ", Hit Rate: " << std::fixed << std::setprecision(2) << s.hit_rate_percent << "%";
     }
     else
     {

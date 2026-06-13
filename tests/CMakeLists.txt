@@ -1,17 +1,26 @@
 cmake_minimum_required(VERSION 3.25)
 
 if(DMK_BUILD_TESTS)
-  # Fetch GoogleTest
-  include(FetchContent)
-  FetchContent_Declare(
-    googletest
-    GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG v1.14.0
-  )
+  # Prefer a system/pre-provisioned GoogleTest (>= 1.14) so an offline or CI machine with a system GTest skips the
+  # network fetch; otherwise fall back to a pinned FetchContent clone. Both paths provide the GTest::gtest_main
+  # target the tests link against, so no link-line change is needed for either.
+  find_package(GTest 1.14 QUIET)
 
-  # For Windows: Prevent overriding the parent project's compiler/linker settings
-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-  FetchContent_MakeAvailable(googletest)
+  if(NOT GTest_FOUND OR NOT TARGET GTest::gtest_main)
+    include(FetchContent)
+    FetchContent_Declare(
+      googletest
+      GIT_REPOSITORY https://github.com/google/googletest.git
+      GIT_TAG f8d7d77c06936315286eb55f8de22cd23c188571 # v1.14.0 release commit
+    )
+
+    # For Windows: Prevent overriding the parent project's compiler/linker settings
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+    # GoogleTest is a build-time test dependency only; do not install its headers, libs, or package config through
+    # DetourModKit's install target.
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    FetchContent_MakeAvailable(googletest)
+  endif()
 
   # Suppress warnings from GoogleTest sources
   foreach(_ext_target gtest gtest_main gmock gmock_main)

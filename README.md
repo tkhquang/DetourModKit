@@ -197,7 +197,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 
 - Typed pub/sub event system with RAII subscription management
 - Each `EventDispatcher<Event>` manages a single event type
-- Reader-side lock-free fast path: `emit()` / `emit_safe()` acquire-load a `std::shared_ptr<const vector>` snapshot and iterate with no reader lock; the snapshot load is genuinely lock-free on toolchains with a DWCAS-backed `std::atomic<std::shared_ptr<T>>` and may use an implementation-internal bit lock on toolchains that do not (for example MSVC's STL)
+- Reader-side fast path with no user-visible mutex: `emit()` / `emit_safe()` acquire-load a `std::shared_ptr<const vector>` snapshot and iterate with no reader lock; the snapshot load is genuinely lock-free on toolchains with a DWCAS-backed `std::atomic<std::shared_ptr<T>>` and may use an implementation-internal bit lock on toolchains that do not (for example MSVC's STL)
 - Zero-subscriber fast path: `emit()` / `emit_safe()` short-circuit on a single `memory_order_acquire` counter load, skipping the snapshot load entirely (wait-free on every toolchain)
 - `subscribe()` / `unsubscribe()` are copy-on-write under a small writer mutex
 - Subscriptions auto-unsubscribe on destruction
@@ -478,8 +478,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── common.hpp
     │   │   ├── inline_hook.hpp
     │   │   └── ...
-    │   ├── safetyhook.hpp            <-- Main SafetyHook include
-    │   └── SimpleIni.h               <-- SimpleIni header
+    │   └── safetyhook.hpp            <-- Main SafetyHook include
     ├── lib/
     │   ├── libDetourModKit.a         <-- Static libraries (.a for MinGW, .lib for MSVC)
     │   ├── libsafetyhook.a
@@ -747,9 +746,10 @@ This method uses a pre-built and installed version of DetourModKit.
 // Single include for all DetourModKit functionality
 #include <DetourModKit.hpp>
 
-// SafetyHook and SimpleIni are transitively available
+// SafetyHook headers are installed alongside DetourModKit and are transitively available.
+// SimpleIni is an internal build-time dependency and is NOT installed; do not include <SimpleIni.h>
+// from a find_package consumer. Use the DetourModKit::Config API for INI access instead.
 #include <safetyhook.hpp>
-#include <SimpleIni.h>
 
 // Global variables for your mod's configuration
 struct ModConfiguration

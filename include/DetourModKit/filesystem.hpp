@@ -25,7 +25,7 @@ namespace DetourModKit
          *         Unicode fidelity for paths with non-ASCII characters (e.g. CJK/Cyrillic usernames). Returns L"." on
          *         total failure.
          */
-        std::wstring get_runtime_directory();
+        [[nodiscard]] std::wstring get_runtime_directory();
 
         /**
          * @brief UTF-8 sibling of get_runtime_directory().

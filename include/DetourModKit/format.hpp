@@ -8,6 +8,7 @@
  *          addresses, byte values, and virtual key codes.
  */
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -27,7 +28,7 @@ namespace DetourModKit
          * @return std::string A new string with leading/trailing whitespace removed. Returns an empty string if the
          *         input string is empty or contains only whitespace.
          */
-        inline std::string trim(std::string_view s)
+        [[nodiscard]] inline std::string trim(std::string_view s)
         {
             const char *whitespace_chars = " \t\n\r\f\v";
 
@@ -49,18 +50,21 @@ namespace DetourModKit
          * @param address The memory address to format.
          * @return std::string Formatted address (e.g., "0x00007FFE12345678").
          */
-        inline std::string format_address(uintptr_t address)
+        [[nodiscard]] inline std::string format_address(uintptr_t address)
         {
             return std::format("0x{:0{}X}", address, sizeof(uintptr_t) * 2);
         }
 
         /**
-         * @brief Formats an integer as a hexadecimal string.
+         * @brief Formats a signed integer as an unsigned hexadecimal string.
+         * @details Prints the unsigned two's-complement bit pattern, so a negative value widens to its unsigned
+         *          representation (e.g. -1 -> "0xFFFFFFFF"). Use the ptrdiff_t overload when a leading '-' and the
+         *          signed magnitude are wanted, or the unsigned-integral overload for size_t / unsigned values.
          * @param value The integer value to format.
          * @param width Minimum width of the hex part (0 for no padding).
          * @return std::string Formatted hex string (e.g., "0xFF").
          */
-        inline std::string format_hex(int value, int width = 0)
+        [[nodiscard]] inline std::string format_hex(int value, int width = 0)
         {
             if (width > 0)
                 return std::format("0x{:0{}X}", static_cast<unsigned int>(value), width);
@@ -68,11 +72,29 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Formats any unsigned integer as a hexadecimal string.
+         * @details Constrained to std::unsigned_integral so a size_t / unsigned / uint64_t argument binds here exactly
+         *          instead of being ambiguous between the int and ptrdiff_t overloads. The full value is preserved
+         *          with no narrowing. The signed int and ptrdiff_t overloads are unaffected because a signed argument
+         *          does not satisfy the constraint.
+         * @tparam T The unsigned integral type of the value.
+         * @param value The unsigned value to format.
+         * @param width Minimum width of the hex part (0 for no padding).
+         * @return std::string Formatted hex string (e.g., "0xDEADBEEF").
+         */
+        template <std::unsigned_integral T> [[nodiscard]] inline std::string format_hex(T value, int width = 0)
+        {
+            if (width > 0)
+                return std::format("0x{:0{}X}", value, width);
+            return std::format("0x{:X}", value);
+        }
+
+        /**
          * @brief Formats a ptrdiff_t as a signed hexadecimal string.
          * @param value The value to format.
          * @return std::string Formatted hex string (e.g., "0xFF" or "-0x10").
          */
-        inline std::string format_hex(ptrdiff_t value)
+        [[nodiscard]] inline std::string format_hex(ptrdiff_t value)
         {
             if (value < 0)
             {
@@ -88,7 +110,7 @@ namespace DetourModKit
          * @param b The byte value to format.
          * @return std::string Formatted byte (e.g., "0xCC").
          */
-        inline std::string format_byte(std::byte b)
+        [[nodiscard]] inline std::string format_byte(std::byte b)
         {
             return std::format("0x{:02X}", static_cast<unsigned int>(b));
         }
@@ -98,7 +120,7 @@ namespace DetourModKit
          * @param values The vector of integer values.
          * @return std::string Formatted list (e.g., "[0x72, 0xA0, 0x20]").
          */
-        inline std::string format_int_vector(const std::vector<int> &values)
+        [[nodiscard]] inline std::string format_int_vector(const std::vector<int> &values)
         {
             if (values.empty())
             {
@@ -126,7 +148,7 @@ namespace DetourModKit
          * @param vk_code The virtual key code.
          * @return std::string Formatted VK code (e.g., "0x72").
          */
-        inline std::string format_vkcode(int vk_code)
+        [[nodiscard]] inline std::string format_vkcode(int vk_code)
         {
             return format_hex(vk_code, 2);
         }
@@ -136,7 +158,7 @@ namespace DetourModKit
          * @param keys The vector of VK codes.
          * @return std::string Formatted VK code list.
          */
-        inline std::string format_vkcode_list(const std::vector<int> &keys)
+        [[nodiscard]] inline std::string format_vkcode_list(const std::vector<int> &keys)
         {
             return format_int_vector(keys);
         }

@@ -9,6 +9,8 @@
 
 #include <DetourModKit.hpp>
 
+#include <windows.h>
+
 #include <atomic>
 #include <cstring>
 #include <exception>
@@ -186,8 +188,8 @@ namespace DetourModKit::Bootstrap
         }
     } // anonymous namespace
 
-    [[nodiscard]] BOOL on_dll_attach(HMODULE hMod, const ModInfo &info, std::function<bool()> init_fn,
-                                     std::function<void()> shutdown_fn)
+    [[nodiscard]] bool32_t on_dll_attach(module_handle_t hMod, const ModInfo &info, std::function<bool()> init_fn,
+                                         std::function<void()> shutdown_fn)
     {
         if (s_shutdown_event || s_worker_thread)
         {
@@ -251,7 +253,7 @@ namespace DetourModKit::Bootstrap
         }
     }
 
-    void on_dll_detach(BOOL is_process_exit) noexcept
+    void on_dll_detach(bool32_t is_process_exit) noexcept
     {
         bool expected = false;
         if (!s_detach_called.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -341,7 +343,7 @@ namespace DetourModKit::Bootstrap
         s_module = nullptr;
     }
 
-    HMODULE module_handle() noexcept
+    module_handle_t module_handle() noexcept
     {
         return s_module;
     }

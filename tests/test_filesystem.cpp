@@ -57,7 +57,7 @@ TEST(FilesystemTest, GetRuntimeDirectory_ThreadSafety)
 
 TEST(FilesystemTest, GetRuntimeDirectory_NoThrow)
 {
-    EXPECT_NO_THROW(Filesystem::get_runtime_directory());
+    EXPECT_NO_THROW((void)Filesystem::get_runtime_directory());
 }
 
 TEST(FilesystemTest, GetRuntimeDirectory_IsDirectory)

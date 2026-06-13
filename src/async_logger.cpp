@@ -521,7 +521,7 @@ namespace DetourModKit
 
     void AsyncLogger::flush() noexcept
     {
-        static_cast<void>(flush_with_timeout(DEFAULT_FLUSH_TIMEOUT));
+        (void)flush_with_timeout(DEFAULT_FLUSH_TIMEOUT);
     }
 
     void AsyncLogger::shutdown() noexcept
@@ -632,7 +632,7 @@ namespace DetourModKit
             batch.clear();
             // The popped count is not needed here; the batch.empty() check below decides between the write path and the
             // idle-flush path.
-            static_cast<void>(m_queue.try_pop_batch(batch, m_config.batch_size));
+            (void)m_queue.try_pop_batch(batch, m_config.batch_size);
 
             if (!batch.empty())
             {

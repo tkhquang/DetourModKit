@@ -2,9 +2,9 @@ cmake_minimum_required(VERSION 3.25)
 
 project(DetourModKitPackageSmoke LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+# Intentionally do NOT set CMAKE_CXX_STANDARD here. The installed DetourModKit target carries cxx_std_23 as a
+# PUBLIC compile feature, so linking DetourModKit::DetourModKit must raise this consumer to C++23 on its own.
+# Setting the standard locally would mask a regression where that requirement stopped being exported.
 
 find_package(DetourModKit REQUIRED)
 

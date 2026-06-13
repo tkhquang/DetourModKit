@@ -374,8 +374,44 @@ namespace
         {
         }
 
-        void load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger) override;
-        void log_current_value(Logger &logger) const override;
+        void load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger) override
+        {
+            // One generic body for the scalar/string config types. KeyComboList takes the explicit specialization
+            // below instead, because its parse path differs (nullptr INI value handling, combo-list parsing).
+            if constexpr (std::same_as<T, int>)
+            {
+                current_value = static_cast<int>(ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value));
+            }
+            else if constexpr (std::same_as<T, float>)
+            {
+                current_value = static_cast<float>(
+                    ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
+            }
+            else if constexpr (std::same_as<T, bool>)
+            {
+                current_value = ini.GetBoolValue(section.c_str(), ini_key.c_str(), default_value);
+            }
+            else if constexpr (std::same_as<T, std::string>)
+            {
+                current_value = ini.GetValue(section.c_str(), ini_key.c_str(), default_value.c_str());
+            }
+        }
+
+        void log_current_value(Logger &logger) const override
+        {
+            if constexpr (std::same_as<T, bool>)
+            {
+                logger.debug("Config:   {} = {}", ini_key, current_value ? "true" : "false");
+            }
+            else if constexpr (std::same_as<T, std::string>)
+            {
+                logger.debug("Config:   {} = \"{}\"", ini_key, current_value);
+            }
+            else // int, float
+            {
+                logger.debug("Config:   {} = {}", ini_key, current_value);
+            }
+        }
 
         /// Returns a self-contained callback that invokes setter with current_value.
         [[nodiscard]] std::function<void()> take_deferred_apply() const override
@@ -386,52 +422,8 @@ namespace
         }
     };
 
-    // --- Specializations for CallbackConfigItem<T>::load and ::log_current_value ---
-
-    // For int
-    template <> void CallbackConfigItem<int>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        current_value = static_cast<int>(ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value));
-    }
-
-    template <> void CallbackConfigItem<int>::log_current_value(Logger &logger) const
-    {
-        logger.debug("Config:   {} = {}", ini_key, current_value);
-    }
-
-    // For float
-    template <> void CallbackConfigItem<float>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        current_value = static_cast<float>(
-            ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
-    }
-
-    template <> void CallbackConfigItem<float>::log_current_value(Logger &logger) const
-    {
-        logger.debug("Config:   {} = {}", ini_key, current_value);
-    }
-
-    // For bool
-    template <> void CallbackConfigItem<bool>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        current_value = ini.GetBoolValue(section.c_str(), ini_key.c_str(), default_value);
-    }
-
-    template <> void CallbackConfigItem<bool>::log_current_value(Logger &logger) const
-    {
-        logger.debug("Config:   {} = {}", ini_key, current_value ? "true" : "false");
-    }
-
-    // For std::string
-    template <> void CallbackConfigItem<std::string>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)
-    {
-        current_value = ini.GetValue(section.c_str(), ini_key.c_str(), default_value.c_str());
-    }
-
-    template <> void CallbackConfigItem<std::string>::log_current_value(Logger &logger) const
-    {
-        logger.debug("Config:   {} = \"{}\"", ini_key, current_value);
-    }
+    // load() and log_current_value() use the generic if-constexpr bodies defined in the class above for the
+    // scalar/string types. Only KeyComboList needs an explicit specialization, because its parse path differs.
 
     // For Config::KeyComboList (list of key combinations)
     template <> void CallbackConfigItem<Config::KeyComboList>::load(CSimpleIniA &ini, [[maybe_unused]] Logger &logger)

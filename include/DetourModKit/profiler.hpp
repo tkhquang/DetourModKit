@@ -188,7 +188,7 @@ namespace DetourModKit
 
     private:
         Profiler();
-        ~Profiler() = default;
+        ~Profiler() noexcept = default;
 
         // m_write_pos first to avoid 40 bytes of padding (alignas(64) requirement). This placement ensures cache-line
         // alignment for the lock-free ring buffer.

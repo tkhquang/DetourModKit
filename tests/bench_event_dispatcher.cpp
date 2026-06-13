@@ -52,6 +52,13 @@ namespace
         std::vector<double> per_op;
         per_op.reserve(samples);
 
+        // Warm caches and branch predictors so the first timed sample is not cold, matching the scanner/memory benches.
+        const std::size_t warmup = iterations / 10 + 1;
+        for (std::size_t i = 0; i < warmup; ++i)
+        {
+            op();
+        }
+
         for (std::size_t s = 0; s < samples; ++s)
         {
             const auto start = Clock::now();
