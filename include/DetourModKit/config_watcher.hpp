@@ -104,10 +104,11 @@ namespace DetourModKit
          * @brief Returns true if @p id names the background worker thread.
          * @details Lets callers (in particular Config::disable_auto_reload) detect setter-induced self-calls and avoid
          *          joining the worker from the worker itself, which would otherwise raise
-         *          std::system_error(resource_deadlock_would_occur). The worker publishes its id on entry and clears it
-         *          on exit, so this returns false before start() has posted the first overlapped read and after the
-         *          worker has exited (including after stop() has joined it); a later OS-recycled thread id therefore
-         *          cannot alias a dead worker and suppress a real stop.
+         *          std::system_error(resource_deadlock_would_occur). The worker publishes its id when its thread
+         *          starts (before the first overlapped read is issued) and clears it on exit, so this returns false
+         *          before the worker thread has started and after the worker has exited (including after stop() has
+         *          joined it); a later OS-recycled thread id therefore cannot alias a dead worker and suppress a real
+         *          stop.
          * @param id The thread id to compare against.
          * @return true only while the worker is running and @p id equals its thread id; the default (no-thread) id
          *         never matches.
