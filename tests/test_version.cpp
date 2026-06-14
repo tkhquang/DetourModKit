@@ -13,7 +13,7 @@ namespace
         // version bump must touch in this file. Every other case below is relational so it tracks the macros
         // automatically. The release workflow separately guards that CMakeLists.txt project(VERSION) matches the tag.
         EXPECT_EQ(DMK_VERSION_MAJOR, 3);
-        EXPECT_EQ(DMK_VERSION_MINOR, 7);
+        EXPECT_EQ(DMK_VERSION_MINOR, 8);
         EXPECT_EQ(DMK_VERSION_PATCH, 0);
     }
 

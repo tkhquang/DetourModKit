@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(DetourModKit VERSION 3.7.0 LANGUAGES CXX)
+project(DetourModKit VERSION 3.8.0 LANGUAGES CXX)
 
 # GNUInstallDirs defines CMAKE_INSTALL_LIBDIR / BINDIR / INCLUDEDIR / DOCDIR. It must be included before any
 # install() rule reads those variables; otherwise they expand to empty and components land at the install-prefix
