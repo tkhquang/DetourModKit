@@ -4169,7 +4169,7 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     std::size_t fault_events = 0;
     bool event_payload_ok = true;
     auto fault_sub = Diagnostics::scanner_faults().subscribe(
-        [&](const Diagnostics::ScannerFaultEvent &e)
+        [&fault_events, &event_payload_ok, window_low, window_high](const Diagnostics::ScannerFaultEvent &e)
         {
             ++fault_events;
             if (e.faulted_regions == 0 || e.window_low != window_low || e.window_high != window_high)

@@ -196,9 +196,12 @@ namespace DetourModKit
             return hash;
         }
 
-        // Folds a cascade's address-independent evidence: each candidate's pattern bytes plus its resolve mode,
-        // displacement / instruction-length offsets, and uniqueness flag. The candidate's cosmetic name is excluded
-        // because it never affects which address the cascade resolves.
+        // Folds a cascade's address-independent evidence: each candidate's pattern text as authored plus its resolve
+        // mode, displacement / instruction-length offsets, and uniqueness flag. The pattern is hashed as written rather
+        // than re-parsed to canonical bytes -- that keeps the fingerprint allocation-free and total (a malformed
+        // pattern still hashes), and a cross-version diff reuses the same static anchor table verbatim, so two textual
+        // spellings of one signature never arise in practice. The candidate's cosmetic name is excluded because it
+        // never affects which address the cascade resolves.
         [[nodiscard]] std::uint64_t fnv1a_cascade(std::uint64_t hash,
                                                   std::span<const Scanner::AddrCandidate> site) noexcept
         {

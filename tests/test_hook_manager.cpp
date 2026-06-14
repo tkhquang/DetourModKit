@@ -3068,7 +3068,7 @@ TEST_F(HookManagerTest, LifecycleEventsAreEmitted)
 {
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     void *original_trampoline = nullptr;
@@ -3099,7 +3099,7 @@ TEST_F(HookManagerTest, LifecycleEventReportsMidKind)
 {
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     auto detour_fn = [](safetyhook::Context &) {};
@@ -3115,7 +3115,7 @@ TEST_F(HookManagerTest, LifecycleEventReportsMidKind)
 TEST_F(HookManagerTest, LifecycleEventNotEmittedForMissingHook)
 {
     int count = 0;
-    auto sub = Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &) { ++count; });
+    auto sub = Diagnostics::hook_lifecycle().subscribe([&count](const Diagnostics::HookLifecycleEvent &) { ++count; });
 
     // enable / disable / remove of a hook that does not exist is not a transition, so nothing is emitted.
     EXPECT_FALSE(m_hook_manager->enable_hook("NoSuchHook").has_value());
@@ -3129,7 +3129,7 @@ TEST_F(HookManagerTest, LifecycleEventReportsVmtKind)
     auto target = std::make_unique<VmtTestTarget>();
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     ASSERT_TRUE(m_hook_manager->create_vmt_hook("VmtLifecycleHook", target.get()).has_value());
@@ -3148,7 +3148,7 @@ TEST_F(HookManagerTest, LifecycleEventNotEmittedForNoOpOrFailedTransition)
 {
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     void *original_trampoline = nullptr;

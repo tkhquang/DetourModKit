@@ -84,7 +84,7 @@ TEST(DiagnosticsEventBusTest, ScannerFaultEmitReachesSubscriber)
     diag::ScannerFaultEvent received{};
     int hits = 0;
     auto sub = diag::scanner_faults().subscribe(
-        [&](const diag::ScannerFaultEvent &e)
+        [&received, &hits](const diag::ScannerFaultEvent &e)
         {
             received = e;
             ++hits;
@@ -104,7 +104,7 @@ TEST(DiagnosticsEventBusTest, HookLifecycleEmitReachesSubscriber)
     diag::HookLifecycleEvent received{};
     int hits = 0;
     auto sub = diag::hook_lifecycle().subscribe(
-        [&](const diag::HookLifecycleEvent &e)
+        [&received, &hits](const diag::HookLifecycleEvent &e)
         {
             received = e;
             ++hits;
@@ -123,7 +123,7 @@ TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
 {
     int hits = 0;
     {
-        auto sub = diag::scanner_faults().subscribe([&](const diag::ScannerFaultEvent &) { ++hits; });
+        auto sub = diag::scanner_faults().subscribe([&hits](const diag::ScannerFaultEvent &) { ++hits; });
         diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{.faulted_regions = 1});
     }
     // The RAII subscription is destroyed at the block exit; a later emit must not reach the handler.

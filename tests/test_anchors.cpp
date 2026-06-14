@@ -1355,3 +1355,21 @@ TEST(AnchorFingerprintTest, CascadeFieldBoundariesDoNotAlias)
 
     EXPECT_NE(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
 }
+
+TEST(AnchorFingerprintTest, CascadePatternHashedAsAuthored)
+{
+    // The pattern is fingerprinted as the AOB text the caller wrote, not re-parsed to canonical bytes, so two spellings
+    // of one signature (hex case, spacing) are intentionally distinct -- canonicalizing would cost an allocation and a
+    // parse that can fail. A cross-version diff reuses one static table verbatim, so this never causes a false "new
+    // evidence path" in practice.
+    Scanner::AddrCandidate upper[] = {{"x", "48 8B 05", Scanner::ResolveMode::Direct, 0, 0}};
+    Scanner::AddrCandidate lower[] = {{"x", "48 8b 05", Scanner::ResolveMode::Direct, 0, 0}};
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::RipGlobal;
+    a.site = upper;
+    Anchors::Anchor b{};
+    b.kind = Anchors::AnchorKind::RipGlobal;
+    b.site = lower;
+
+    EXPECT_NE(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+}
