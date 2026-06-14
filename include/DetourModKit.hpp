@@ -23,6 +23,7 @@
 #include "DetourModKit/anchors.hpp"
 #include "DetourModKit/bootstrap.hpp"
 #include "DetourModKit/diagnostics.hpp"
+#include "DetourModKit/diagnostics_dump.hpp"
 #include "DetourModKit/drift_manifest.hpp"
 #include "DetourModKit/event_dispatcher.hpp"
 #include "DetourModKit/filesystem.hpp"

@@ -3,11 +3,15 @@
 
 /**
  * @file diagnostics.hpp
- * @brief Consumer-queryable counters for DMK's intentional leak / detach paths.
+ * @brief Consumer-queryable counters for DMK's intentional leak / detach paths, plus a process-wide diagnostic event
+ *        bus for scanner-fault and hook-lifecycle transitions.
  */
+
+#include "DetourModKit/event_dispatcher.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 namespace DetourModKit
 {
@@ -66,6 +70,92 @@ namespace DetourModKit
          * @details Intended for test isolation; consumers normally only read.
          */
         void reset_intentional_leaks() noexcept;
+
+        /**
+         * @struct ScannerFaultEvent
+         * @brief A region-walking AOB sweep skipped one or more regions that faulted mid-scan.
+         * @details Emitted once per sweep by the page-filtered scanners (the executable and readable region walks and
+         *          the module-scoped sweeps) when a concurrent decommit / reprotect faults a region between the
+         *          per-region VirtualQuery gate and the unguarded read. The sweep already skipped each faulted region
+         *          and continued; the event surfaces the same count the scanner also logs at Debug, so a consumer can
+         *          observe TOCTOU pressure without scraping logs. A clean sweep emits nothing.
+         */
+        struct ScannerFaultEvent
+        {
+            /// Number of regions skipped because they faulted mid-scan.
+            std::size_t faulted_regions = 0;
+            /// Inclusive low bound of the scanned window.
+            std::uintptr_t window_low = 0;
+            /// Exclusive high bound of the scanned window.
+            std::uintptr_t window_high = 0;
+        };
+
+        /**
+         * @enum HookKind
+         * @brief Which hook flavor a @ref HookLifecycleEvent describes.
+         */
+        enum class HookKind : std::uint8_t
+        {
+            Inline,
+            Mid,
+            Vmt
+        };
+
+        /**
+         * @enum HookTransition
+         * @brief The lifecycle transition a @ref HookLifecycleEvent reports.
+         */
+        enum class HookTransition : std::uint8_t
+        {
+            /// A hook was created (installed) by a create_*_hook call.
+            Created,
+            /// An existing hook was enabled.
+            Enabled,
+            /// An existing hook was disabled.
+            Disabled,
+            /// A hook was removed.
+            Removed
+        };
+
+        /**
+         * @struct HookLifecycleEvent
+         * @brief A HookManager hook crossed an install / enable / disable / remove transition.
+         * @details Emitted by @ref DetourModKit::HookManager after the operation completes and its registry locks are
+         *          released. Failed operations and idempotent no-ops emit nothing: every event represents a completed
+         *          state transition. A handler therefore runs outside the hook registry's critical section. If a
+         *          handler performs another hook mutation, that mutation is a new operation and may emit nested
+         *          lifecycle events; avoid unbounded event recursion. @ref name aliases the hook id only for the
+         *          duration of the emit call; copy it if the handler retains it past the call.
+         */
+        struct HookLifecycleEvent
+        {
+            /// The hook id. Valid only for the duration of the emit call; copy to retain.
+            std::string_view name;
+            /// The hook flavor.
+            HookKind kind = HookKind::Inline;
+            /// The transition that occurred.
+            HookTransition transition = HookTransition::Created;
+        };
+
+        /**
+         * @brief Returns the process-wide dispatcher for @ref ScannerFaultEvent.
+         * @details A single shared dispatcher the stateless scanner emits to. Subscribe before running a scan to see
+         *          skipped-region faults. The returned reference is stable for the process lifetime.
+         * @return The shared @ref ScannerFaultEvent dispatcher.
+         * @note Setup/control-plane only on first call: lazily constructs the dispatcher (one heap allocation). Every
+         *       subsequent call only returns the existing reference.
+         */
+        EventDispatcher<ScannerFaultEvent> &scanner_faults();
+
+        /**
+         * @brief Returns the process-wide dispatcher for @ref HookLifecycleEvent.
+         * @details A single shared dispatcher every HookManager emits hook lifecycle transitions to. The returned
+         *          reference is stable for the process lifetime.
+         * @return The shared @ref HookLifecycleEvent dispatcher.
+         * @note Setup/control-plane only on first call: lazily constructs the dispatcher (one heap allocation). Every
+         *       subsequent call only returns the existing reference.
+         */
+        EventDispatcher<HookLifecycleEvent> &hook_lifecycle();
     } // namespace Diagnostics
 } // namespace DetourModKit
 

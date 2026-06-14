@@ -20,7 +20,9 @@
 #include "fork_join.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 namespace DetourModKit
@@ -158,6 +160,100 @@ namespace DetourModKit
             result.status = Anchors::AnchorStatus::Failed;
             result.value = 0;
             return result;
+        }
+
+        // FNV-1a 64 evidence hashing for anchor_fingerprint. The fingerprint must be stable across runs and builds so a
+        // persisted manifest can be diffed, so integers are folded least-significant-byte first (a fixed order
+        // independent of host endianness) and every variable-length field is length-prefixed to keep adjacent fields
+        // unambiguous (the literal "ab" then "" cannot collide with "a" then "b").
+        inline constexpr std::uint64_t FNV1A64_OFFSET = 14695981039346656037ULL;
+        inline constexpr std::uint64_t FNV1A64_PRIME = 1099511628211ULL;
+
+        [[nodiscard]] constexpr std::uint64_t fnv1a_byte(std::uint64_t hash, std::uint8_t value) noexcept
+        {
+            return (hash ^ value) * FNV1A64_PRIME;
+        }
+
+        template <typename T> [[nodiscard]] constexpr std::uint64_t fnv1a_int(std::uint64_t hash, T value) noexcept
+        {
+            auto bits = static_cast<std::make_unsigned_t<T>>(value);
+            for (std::size_t i = 0; i < sizeof(T); ++i)
+            {
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(bits & 0xFFu));
+                bits >>= 8;
+            }
+            return hash;
+        }
+
+        // Length-prefixed variable-length byte field, so two adjacent variable fields cannot alias one another.
+        [[nodiscard]] std::uint64_t fnv1a_field(std::uint64_t hash, std::string_view bytes) noexcept
+        {
+            hash = fnv1a_int(hash, bytes.size());
+            for (const char ch : bytes)
+            {
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(ch));
+            }
+            return hash;
+        }
+
+        // Folds a cascade's address-independent evidence: each candidate's pattern text as authored plus its resolve
+        // mode, displacement / instruction-length offsets, and uniqueness flag. The pattern is hashed as written rather
+        // than re-parsed to canonical bytes -- that keeps the fingerprint allocation-free and total (a malformed
+        // pattern still hashes), and a cross-version diff reuses the same static anchor table verbatim, so two textual
+        // spellings of one signature never arise in practice. The candidate's cosmetic name is excluded because it
+        // never affects which address the cascade resolves.
+        [[nodiscard]] std::uint64_t fnv1a_cascade(std::uint64_t hash,
+                                                  std::span<const Scanner::AddrCandidate> site) noexcept
+        {
+            hash = fnv1a_int(hash, site.size());
+            for (const Scanner::AddrCandidate &candidate : site)
+            {
+                hash = fnv1a_field(hash, candidate.pattern);
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(candidate.mode));
+                hash = fnv1a_int(hash, static_cast<std::int64_t>(candidate.disp_offset));
+                hash = fnv1a_int(hash, static_cast<std::int64_t>(candidate.instr_end_offset));
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(candidate.require_unique));
+            }
+            return hash;
+        }
+
+        // Hashes one anchor's own evidence with no quorum recursion. A Quorum reaching here -- which the public entry
+        // point only allows for a malformed sub-anchor, since nesting is rejected at resolve time -- contributes only
+        // its kind, which bounds recursion to a single level.
+        [[nodiscard]] std::uint64_t fingerprint_evidence(const Anchors::Anchor &anchor) noexcept
+        {
+            using Anchors::AnchorKind;
+            std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(anchor.kind));
+            switch (anchor.kind)
+            {
+            case AnchorKind::VtableIdentity:
+                hash = fnv1a_field(hash, anchor.mangled);
+                break;
+            case AnchorKind::RipGlobal:
+                hash = fnv1a_cascade(hash, anchor.site);
+                break;
+            case AnchorKind::CodeOperand:
+                hash = fnv1a_cascade(hash, anchor.site);
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.operand_kind));
+                hash = fnv1a_byte(hash, anchor.operand_index);
+                hash = fnv1a_byte(hash, anchor.byte_width);
+                break;
+            case AnchorKind::StringXref:
+                hash = fnv1a_field(hash, anchor.xref_text);
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.xref_encoding));
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.xref_return));
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.xref_require_terminator));
+                hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.xref_broad_match));
+                break;
+            case AnchorKind::Manual:
+                hash = fnv1a_int(hash, anchor.manual_value);
+                break;
+            case AnchorKind::CallArgHome:
+            case AnchorKind::Quorum:
+                // No address-independent evidence beyond the kind byte already folded above.
+                break;
+            }
+            return hash;
         }
     } // anonymous namespace
 
@@ -412,6 +508,31 @@ namespace DetourModKit
             }
         }
         return quality;
+    }
+
+    std::uint64_t Anchors::anchor_fingerprint(const Anchor &anchor) noexcept
+    {
+        if (anchor.kind != AnchorKind::Quorum)
+        {
+            return fingerprint_evidence(anchor);
+        }
+
+        // A quorum's evidence is its two sub-anchors, combined order-independently (the resolver treats the pair
+        // symmetrically when checking agreement, so swapping quorum_a / quorum_b must not change the fingerprint). A
+        // null sub-anchor -- which fails closed at resolve time -- contributes a fixed sentinel so the result stays
+        // defined rather than dereferencing through nullptr.
+        constexpr std::uint64_t NULL_SUB_ANCHOR = 0;
+        const std::uint64_t fp_a = anchor.quorum_a ? fingerprint_evidence(*anchor.quorum_a) : NULL_SUB_ANCHOR;
+        const std::uint64_t fp_b = anchor.quorum_b ? fingerprint_evidence(*anchor.quorum_b) : NULL_SUB_ANCHOR;
+        const std::uint64_t lo = fp_a < fp_b ? fp_a : fp_b;
+        const std::uint64_t hi = fp_a < fp_b ? fp_b : fp_a;
+
+        std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(AnchorKind::Quorum));
+        hash = fnv1a_int(hash, lo);
+        hash = fnv1a_int(hash, hi);
+        hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.quorum_match));
+        hash = fnv1a_int(hash, anchor.quorum_tolerance);
+        return hash;
     }
 
     std::string_view Anchors::anchor_status_to_string(AnchorStatus status) noexcept

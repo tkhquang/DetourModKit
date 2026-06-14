@@ -64,3 +64,69 @@ TEST_F(DiagnosticsTest, ResetZeroesEverySubsystem)
     EXPECT_EQ(diag::intentional_leak_count(LeakSubsystem::Input), 0u);
     EXPECT_EQ(diag::intentional_leak_count(LeakSubsystem::Bootstrap), 0u);
 }
+
+// ---- Diagnostic event bus: scanner-fault / hook-lifecycle dispatchers ----
+
+TEST(DiagnosticsEventBusTest, ScannerFaultDispatcherIsStable)
+{
+    // The process-wide dispatcher must be the same instance on every call so the stateless scanner and a consumer share
+    // one subscriber set.
+    EXPECT_EQ(&diag::scanner_faults(), &diag::scanner_faults());
+}
+
+TEST(DiagnosticsEventBusTest, HookLifecycleDispatcherIsStable)
+{
+    EXPECT_EQ(&diag::hook_lifecycle(), &diag::hook_lifecycle());
+}
+
+TEST(DiagnosticsEventBusTest, ScannerFaultEmitReachesSubscriber)
+{
+    diag::ScannerFaultEvent received{};
+    int hits = 0;
+    auto sub = diag::scanner_faults().subscribe(
+        [&received, &hits](const diag::ScannerFaultEvent &e)
+        {
+            received = e;
+            ++hits;
+        });
+
+    diag::scanner_faults().emit_safe(
+        diag::ScannerFaultEvent{.faulted_regions = 5, .window_low = 0x1000, .window_high = 0x2000});
+
+    EXPECT_EQ(hits, 1);
+    EXPECT_EQ(received.faulted_regions, 5u);
+    EXPECT_EQ(received.window_low, 0x1000u);
+    EXPECT_EQ(received.window_high, 0x2000u);
+}
+
+TEST(DiagnosticsEventBusTest, HookLifecycleEmitReachesSubscriber)
+{
+    diag::HookLifecycleEvent received{};
+    int hits = 0;
+    auto sub = diag::hook_lifecycle().subscribe(
+        [&received, &hits](const diag::HookLifecycleEvent &e)
+        {
+            received = e;
+            ++hits;
+        });
+
+    diag::hook_lifecycle().emit_safe(diag::HookLifecycleEvent{
+        .name = "camera", .kind = diag::HookKind::Mid, .transition = diag::HookTransition::Enabled});
+
+    EXPECT_EQ(hits, 1);
+    EXPECT_EQ(received.name, "camera");
+    EXPECT_EQ(received.kind, diag::HookKind::Mid);
+    EXPECT_EQ(received.transition, diag::HookTransition::Enabled);
+}
+
+TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
+{
+    int hits = 0;
+    {
+        auto sub = diag::scanner_faults().subscribe([&hits](const diag::ScannerFaultEvent &) { ++hits; });
+        diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{.faulted_regions = 1});
+    }
+    // The RAII subscription is destroyed at the block exit; a later emit must not reach the handler.
+    diag::scanner_faults().emit_safe(diag::ScannerFaultEvent{.faulted_regions = 1});
+    EXPECT_EQ(hits, 1);
+}

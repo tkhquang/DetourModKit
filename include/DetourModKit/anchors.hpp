@@ -311,6 +311,33 @@ namespace DetourModKit
         [[nodiscard]] AnchorQuality assess_quality(std::span<const ResolvedAnchor> report) noexcept;
 
         /**
+         * @brief Computes an address-independent fingerprint of an anchor's resolution evidence.
+         * @details Hashes only the declarative inputs a backend uses to resolve @p anchor -- its @ref AnchorKind plus
+         *          the kind's evidence (the @ref VtableIdentity mangled name, the @ref RipGlobal / @ref CodeOperand
+         *          cascade pattern text as authored plus decode parameters, the @ref StringXref literal and shape
+         *          flags, or the @ref AnchorKind::Manual literal) -- and deliberately excludes any resolved address.
+         *          Two anchors that resolve the same target through the same evidence therefore share a fingerprint
+         *          even when the target moved to a new address between game versions, so a future manifest diff can
+         *          tell "same evidence, new address" (expected drift the anchor self-healed) from "new evidence path"
+         *          (the signature itself was rewritten). A candidate's cosmetic @ref Scanner::AddrCandidate::name is
+         *          excluded because it never affects which address resolves. For @ref AnchorKind::Quorum the two
+         *          sub-anchors' fingerprints are combined order-independently with the agreement mode and tolerance; a
+         *          null sub-anchor contributes a fixed sentinel. @ref AnchorKind::CallArgHome has no resolvable
+         *          evidence yet, so its fingerprint reflects only the kind.
+         * @param anchor The anchor declaration to fingerprint.
+         * @return A 64-bit FNV-1a hash of the evidence inputs. Stable across runs and builds on a given platform; not a
+         *         cryptographic digest.
+         * @note The cascade pattern is hashed as the AOB text the caller authored, not canonicalized to its parsed
+         *       bytes, so two textual spellings of one signature (hex case, spacing) fingerprint differently. This is
+         *       intentional: it keeps the function allocation-free and total (a malformed pattern still hashes), and a
+         *       manifest diff reuses one static anchor table verbatim, so a reformat is a deliberate edit to the
+         *       declaration.
+         * @note Reads only the anchor's declarative views (caller storage), resolves nothing, and performs no
+         *       allocation; safe to call from any context.
+         */
+        [[nodiscard]] std::uint64_t anchor_fingerprint(const Anchor &anchor) noexcept;
+
+        /**
          * @brief Human-readable mapping for @ref AnchorStatus.
          * @param status The status.
          * @return A string view describing the status.

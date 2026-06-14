@@ -18,7 +18,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads, PE module range queries | `memory.hpp` |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | `rtti.hpp` |
 | RTTI Self-Heal | Reverse-identify the object behind a pointer slot (typed-error and ordered candidate-fallback forms); self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver; drift-telemetry report with a durable, diffable manifest (open-failure distinguished from corrupt) | `rtti_dissect.hpp`, `drift_manifest.hpp` |
-| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) plus two-signal quorum corroboration with sub-anchor independence checks, optional post-resolve validators and opt-in validator policies, a manifest quality diagnostic, opt-in parallel table resolution, and a per-game scan profile (broad-mode default, candidate order, backend deny-list), resolved and reported in a single pass | `anchors.hpp`, `profile.hpp` |
+| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) plus two-signal quorum corroboration with sub-anchor independence checks, optional post-resolve validators and opt-in validator policies, a manifest quality diagnostic, an address-independent evidence fingerprint for manifest diffing, opt-in parallel table resolution, and a per-game scan profile (broad-mode default, candidate order, backend deny-list), resolved and reported in a single pass | `anchors.hpp`, `profile.hpp` |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
@@ -27,7 +27,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Version Macros | Compile-time version checking generated from CMake | `version.hpp` |
 | Input System | Hotkey monitoring with background polling (keyboard/mouse/gamepad) | `input.hpp`, `input_codes.hpp` |
 | Mod Bootstrap | DllMain scaffolding, instance mutex, process gate, lifecycle worker | `bootstrap.hpp` |
-| Diagnostics | Consumer-queryable counters for intentional loader-lock leak/detach events, per subsystem | `diagnostics.hpp` |
+| Diagnostics | Consumer-queryable counters for intentional loader-lock leak/detach events per subsystem, a process-wide typed event bus for scanner-fault and hook install/enable/disable/remove transitions, and a one-call snapshot aggregator over the counters, hook counts, anchor quality, and drift report | `diagnostics.hpp`, `diagnostics_dump.hpp` |
 | Stoppable Worker | RAII named `std::jthread` wrapper, loader-lock-safe teardown | `worker.hpp` |
 
 <details>
@@ -193,6 +193,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Any backend-resolved anchor may carry an optional `validator` (`bool(*)(value, context) noexcept`) that screens the resolved value and fails the anchor closed when it returns false, letting a caller assert a domain invariant a generic backend cannot know
 - `Anchors::resolve(anchor, range?)` resolves one entry; `resolve_all(anchors, out, range?)` fills a `ResolvedAnchor` report (`{label, kind, status, value}`), and `resolve_all_parallel` does the same work through an opt-in fork-join table resolver. Profile-aware callers have matching `resolve_all_with_profile` and `resolve_all_with_profile_parallel` entry points. Resolution is idempotent and side-effect-free, so re-heal-on-miss is just re-running `resolve` on the failing anchor
 - RTTI pointer-field offset healing (`heal_landmark`) is intentionally not a registry kind: it needs a runtime struct base resolved from another anchor, so it is driven directly once that base is known
+- `Anchors::anchor_fingerprint(anchor)` hashes only an anchor's declarative resolution evidence -- its kind plus the kind's inputs (vtable mangled name, cascade pattern bytes and decode params, string-xref literal and shape flags, or the `Manual` literal) -- and deliberately excludes any resolved address. Two anchors that resolve the same target through the same evidence share a fingerprint even when the target moved between game versions, so a future manifest diff can tell "same evidence, new address" (expected drift the anchor self-healed) from "new evidence path" (the signature itself was rewritten). A `Quorum` combines its two sub-anchors' fingerprints order-independently; the result is a stable 64-bit FNV-1a hash, not a cryptographic digest
 
 </details>
 
@@ -327,6 +328,15 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Destructor (and explicit `shutdown()`) requests stop and joins the thread; when called under the Windows loader lock the thread is detached instead, pinning the module so code pages stay mapped
 - Non-copyable and non-movable: the name, stop state, and thread handle form a single invariant
 - Replaces the hand-rolled `std::atomic<bool>` + `std::thread` + bounded-join pattern typically written for mod background tasks (deferred scanning, periodic polling, async I/O)
+
+</details>
+
+<details>
+<summary><strong>Diagnostics</strong></summary>
+
+- `Diagnostics::record_intentional_leak` / `intentional_leak_count` / `total_intentional_leaks` / `reset_intentional_leaks` -- per-subsystem tallies for the deliberate leak/detach paths DMK takes under the Windows loader lock (a teardown where a join or free would risk deadlock or use-after-unmap). Each site fires at most once per process; relaxed atomics, allocation-free, safe from a `noexcept` destructor
+- Process-wide typed event bus: `Diagnostics::scanner_faults()` and `Diagnostics::hook_lifecycle()` each return one stable `EventDispatcher<>` for the process lifetime. The stateless scanner emits a `ScannerFaultEvent` (skipped-region count + scanned window) once per sweep that skips a region faulting mid-scan; every `HookManager` emits a `HookLifecycleEvent` (`name`, `HookKind`, `HookTransition`) after a create / enable / disable / remove transition completes and its registry locks are released, so a handler runs outside the critical section. Failed operations and idempotent no-ops emit nothing. Both use `emit_safe`, so with no subscribers the cost is a single atomic load after the dispatcher has been constructed
+- `Diagnostics::collect(hooks, anchor_report?, drift_report?)` aggregates the live diagnostics into one `Diagnostics::Snapshot` -- the leak tallies, `get_hook_counts()` folded into active / disabled / total, `assess_quality()` over a resolved anchor report, and a healed/failed count over a `heal_report()` drift report -- so a diagnostics command can capture a one-shot health view in a single call. Setup/control-plane only (it takes a shared lock to read hook counts)
 
 </details>
 
