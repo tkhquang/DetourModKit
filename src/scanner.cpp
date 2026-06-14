@@ -7,6 +7,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/format.hpp"
+#include "DetourModKit/diagnostics.hpp"
 
 #include "scanner_internal.hpp"
 #include "memory_internal.hpp"
@@ -1214,6 +1215,17 @@ namespace DetourModKit
                     LogLevel::Debug,
                     "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
                     faulted_regions);
+
+                // Surface the same skipped-region count to subscribers as a typed event. The dispatcher is lazy and can
+                // allocate on first use, so diagnostics must never change the scan result.
+                try
+                {
+                    Diagnostics::scanner_faults().emit_safe(Diagnostics::ScannerFaultEvent{
+                        .faulted_regions = faulted_regions, .window_low = window_lo, .window_high = window_hi});
+                }
+                catch (...)
+                {
+                }
             }
 
             return nullptr;

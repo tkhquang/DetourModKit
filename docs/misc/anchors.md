@@ -116,6 +116,17 @@ Every backend already fails closed, so a missing constant surfaces as `AnchorSta
 
 `Anchors::assess_quality(report)` rolls the same `ResolvedAnchor[]` into an `AnchorQuality` summary in one pass (no re-resolve): how many resolved, failed, are pinned `Manual` literals that cannot self-heal (`manual_at_risk`), or are corroborated quorums (the strongest evidence). It is a cheap, allocation-free way to gate "is this manifest healthy enough to run?" or to log a one-line robustness snapshot per build.
 
+## Anchor fingerprints
+
+`Anchors::anchor_fingerprint(anchor)` hashes only an anchor's *resolution evidence* -- its `AnchorKind` plus the inputs that backend uses (the `VtableIdentity` mangled name, the `RipGlobal` / `CodeOperand` cascade pattern bytes and decode parameters, the `StringXref` literal and shape flags, or the `Manual` literal) -- and deliberately excludes the resolved address. A candidate's cosmetic `name` and the anchor's `label` are excluded too, because neither changes which address resolves.
+
+The point is a diffable identity that is stable when only the address drifts. Persist a fingerprint next to each resolved value, and on the next game version a manifest diff can tell two cases apart:
+
+- **Same evidence, new address** -- the fingerprint matches but the resolved value moved. This is expected drift the anchor self-healed; nothing to do.
+- **New evidence path** -- the fingerprint changed, so the signature itself was rewritten (a new pattern, a renamed type, a different string). This is the entry to re-review.
+
+A `Quorum` combines its two sub-anchors' fingerprints order-independently (swapping `quorum_a` / `quorum_b` does not change the result) and folds in the agreement mode and tolerance; a null sub-anchor contributes a fixed sentinel. `CallArgHome` has no resolvable evidence yet, so its fingerprint reflects only the kind. The result is a 64-bit FNV-1a hash, stable across runs and builds on a given platform -- a diff key, not a cryptographic digest. The function reads only the anchor's declarative views, resolves nothing, and allocates nothing.
+
 ## Per-game scan profile
 
 A `ScanProfile` (in `profile.hpp`) bundles a few setup-only, per-game scan-tuning defaults as a plain value -- no hidden global state. It supplies *defaults* only: an explicit per-call option (a query's `broad_match`, a candidate's order) still wins, so wiring a profile never overrides an explicit choice.

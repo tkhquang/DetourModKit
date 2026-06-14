@@ -60,5 +60,19 @@ namespace DetourModKit
                 counter.store(0, std::memory_order_relaxed);
             }
         }
+
+        EventDispatcher<ScannerFaultEvent> &scanner_faults()
+        {
+            // Function-local static: a single process-wide dispatcher constructed on first use, so the stateless
+            // scanner and any consumer share the same subscriber set without a static-init-order dependency.
+            static EventDispatcher<ScannerFaultEvent> dispatcher;
+            return dispatcher;
+        }
+
+        EventDispatcher<HookLifecycleEvent> &hook_lifecycle()
+        {
+            static EventDispatcher<HookLifecycleEvent> dispatcher;
+            return dispatcher;
+        }
     } // namespace Diagnostics
 } // namespace DetourModKit

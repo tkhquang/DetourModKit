@@ -17,6 +17,7 @@
 #include <vector>
 #include <windows.h>
 
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/logger.hpp"
 
@@ -3049,4 +3050,117 @@ TEST_F(HookManagerTest, TryInstallMidAob_LogsOnceOnPatternFailure)
         "FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF", 0, +[](safetyhook::Context &) {});
     EXPECT_FALSE(name.has_value());
     EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
+}
+
+// ---- Hook lifecycle events: typed transitions on the diagnostic bus ----
+
+namespace
+{
+    struct CapturedLifecycle
+    {
+        std::string name;
+        Diagnostics::HookKind kind;
+        Diagnostics::HookTransition transition;
+    };
+} // namespace
+
+TEST_F(HookManagerTest, LifecycleEventsAreEmitted)
+{
+    std::vector<CapturedLifecycle> events;
+    auto sub =
+        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+                                                { events.push_back({std::string(e.name), e.kind, e.transition}); });
+
+    void *original_trampoline = nullptr;
+    HookConfig config;
+    config.auto_enable = false; // create disabled so enable / disable produce their own transitions
+
+    ASSERT_TRUE(m_hook_manager
+                    ->create_inline_hook("LifecycleHook", reinterpret_cast<uintptr_t>(&real_hook_target_add),
+                                         reinterpret_cast<void *>(&real_hook_detour_add), &original_trampoline, config)
+                    .has_value());
+    ASSERT_TRUE(m_hook_manager->enable_hook("LifecycleHook").has_value());
+    ASSERT_TRUE(m_hook_manager->disable_hook("LifecycleHook").has_value());
+    ASSERT_TRUE(m_hook_manager->remove_hook("LifecycleHook").has_value());
+
+    ASSERT_EQ(events.size(), 4u);
+    EXPECT_EQ(events[0].transition, Diagnostics::HookTransition::Created);
+    EXPECT_EQ(events[1].transition, Diagnostics::HookTransition::Enabled);
+    EXPECT_EQ(events[2].transition, Diagnostics::HookTransition::Disabled);
+    EXPECT_EQ(events[3].transition, Diagnostics::HookTransition::Removed);
+    for (const auto &e : events)
+    {
+        EXPECT_EQ(e.name, "LifecycleHook");
+        EXPECT_EQ(e.kind, Diagnostics::HookKind::Inline);
+    }
+}
+
+TEST_F(HookManagerTest, LifecycleEventReportsMidKind)
+{
+    std::vector<CapturedLifecycle> events;
+    auto sub =
+        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+                                                { events.push_back({std::string(e.name), e.kind, e.transition}); });
+
+    auto detour_fn = [](safetyhook::Context &) {};
+    ASSERT_TRUE(m_hook_manager
+                    ->create_mid_hook("MidLifecycleHook", reinterpret_cast<uintptr_t>(&real_hook_target_mul), detour_fn)
+                    .has_value());
+
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].transition, Diagnostics::HookTransition::Created);
+    EXPECT_EQ(events[0].kind, Diagnostics::HookKind::Mid);
+}
+
+TEST_F(HookManagerTest, LifecycleEventNotEmittedForMissingHook)
+{
+    int count = 0;
+    auto sub = Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &) { ++count; });
+
+    // enable / disable / remove of a hook that does not exist is not a transition, so nothing is emitted.
+    EXPECT_FALSE(m_hook_manager->enable_hook("NoSuchHook").has_value());
+    EXPECT_FALSE(m_hook_manager->disable_hook("NoSuchHook").has_value());
+    EXPECT_FALSE(m_hook_manager->remove_hook("NoSuchHook").has_value());
+    EXPECT_EQ(count, 0);
+}
+
+TEST_F(HookManagerTest, LifecycleEventReportsVmtKind)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    std::vector<CapturedLifecycle> events;
+    auto sub =
+        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+                                                { events.push_back({std::string(e.name), e.kind, e.transition}); });
+
+    ASSERT_TRUE(m_hook_manager->create_vmt_hook("VmtLifecycleHook", target.get()).has_value());
+    ASSERT_TRUE(m_hook_manager->remove_vmt_hook("VmtLifecycleHook").has_value());
+
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_EQ(events[0].name, "VmtLifecycleHook");
+    EXPECT_EQ(events[0].kind, Diagnostics::HookKind::Vmt);
+    EXPECT_EQ(events[0].transition, Diagnostics::HookTransition::Created);
+    EXPECT_EQ(events[1].name, "VmtLifecycleHook");
+    EXPECT_EQ(events[1].kind, Diagnostics::HookKind::Vmt);
+    EXPECT_EQ(events[1].transition, Diagnostics::HookTransition::Removed);
+}
+
+TEST_F(HookManagerTest, LifecycleEventNotEmittedForNoOpOrFailedTransition)
+{
+    std::vector<CapturedLifecycle> events;
+    auto sub =
+        Diagnostics::hook_lifecycle().subscribe([&](const Diagnostics::HookLifecycleEvent &e)
+                                                { events.push_back({std::string(e.name), e.kind, e.transition}); });
+
+    void *original_trampoline = nullptr;
+    ASSERT_TRUE(m_hook_manager
+                    ->create_inline_hook("NoOpLifecycleHook", reinterpret_cast<uintptr_t>(&real_hook_target_add),
+                                         reinterpret_cast<void *>(&real_hook_detour_add), &original_trampoline)
+                    .has_value());
+    ASSERT_EQ(events.size(), 1u);
+
+    ASSERT_TRUE(m_hook_manager->enable_hook("NoOpLifecycleHook").has_value());
+    EXPECT_EQ(events.size(), 1u);
+
+    ASSERT_FALSE(m_hook_manager->create_vmt_hook("FailedVmtLifecycleHook", nullptr).has_value());
+    EXPECT_EQ(events.size(), 1u);
 }

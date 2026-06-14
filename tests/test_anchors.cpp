@@ -1067,3 +1067,291 @@ TEST(AnchorsTest, AssessQualityTalliesReport)
     EXPECT_EQ(quality.manual_at_risk, 1u);  // the pinned literal cannot self-heal
     EXPECT_EQ(quality.corroborated, 0u);    // no quorum resolved
 }
+
+// ---- anchor_fingerprint: address-independent evidence hash ----
+
+TEST(AnchorFingerprintTest, DeterministicForSameEvidence)
+{
+    Anchors::Anchor anchor{};
+    anchor.label = "vt";
+    anchor.kind = Anchors::AnchorKind::VtableIdentity;
+    anchor.mangled = ".?AVCAIPlayer@@";
+
+    EXPECT_EQ(Anchors::anchor_fingerprint(anchor), Anchors::anchor_fingerprint(anchor));
+}
+
+TEST(AnchorFingerprintTest, IgnoresLabel)
+{
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::VtableIdentity;
+    a.mangled = ".?AVFoo@@";
+    a.label = "first";
+
+    Anchors::Anchor b = a;
+    b.label = "totally-different-label";
+
+    // The label is cosmetic: echoed in the result but it resolves nothing, so it is not evidence.
+    EXPECT_EQ(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+}
+
+TEST(AnchorFingerprintTest, VtableMangledIsEvidence)
+{
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::VtableIdentity;
+    a.mangled = ".?AVFoo@@";
+
+    Anchors::Anchor b = a;
+    b.mangled = ".?AVBar@@";
+
+    EXPECT_NE(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+}
+
+TEST(AnchorFingerprintTest, KindIsEvidence)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"marker", "DE AD BE EF", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor global{};
+    global.kind = Anchors::AnchorKind::RipGlobal;
+    global.site = cands;
+
+    Anchors::Anchor code = global;
+    code.kind = Anchors::AnchorKind::CodeOperand;
+
+    // Same cascade bytes, different backend -> different evidence path.
+    EXPECT_NE(Anchors::anchor_fingerprint(global), Anchors::anchor_fingerprint(code));
+}
+
+TEST(AnchorFingerprintTest, IgnoresCandidateName)
+{
+    Scanner::AddrCandidate cands_a[] = {
+        {"name-A", "DE AD BE EF", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate cands_b[] = {
+        {"name-B", "DE AD BE EF", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::RipGlobal;
+    a.site = cands_a;
+
+    Anchors::Anchor b{};
+    b.kind = Anchors::AnchorKind::RipGlobal;
+    b.site = cands_b;
+
+    // The candidate name is a cosmetic log label; only the pattern + resolve params are evidence.
+    EXPECT_EQ(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+}
+
+TEST(AnchorFingerprintTest, CascadePatternIsEvidence)
+{
+    Scanner::AddrCandidate cands_a[] = {
+        {"m", "DE AD BE EF", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate cands_b[] = {
+        {"m", "DE AD BE 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::RipGlobal;
+    a.site = cands_a;
+    Anchors::Anchor b{};
+    b.kind = Anchors::AnchorKind::RipGlobal;
+    b.site = cands_b;
+
+    EXPECT_NE(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+}
+
+TEST(AnchorFingerprintTest, CodeOperandDecodeParamsAreEvidence)
+{
+    Scanner::AddrCandidate cands[] = {
+        {"m", "48 05 F0 00 00 00", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor base{};
+    base.kind = Anchors::AnchorKind::CodeOperand;
+    base.site = cands;
+    base.operand_kind = Scanner::OperandKind::Immediate;
+    base.operand_index = 1;
+    base.byte_width = 0;
+
+    Anchors::Anchor diff_index = base;
+    diff_index.operand_index = 2;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_index));
+
+    Anchors::Anchor diff_width = base;
+    diff_width.byte_width = 4;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_width));
+
+    Anchors::Anchor diff_kind = base;
+    diff_kind.operand_kind = Scanner::OperandKind::MemoryDisplacement;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_kind));
+}
+
+TEST(AnchorFingerprintTest, StringXrefShapeFlagsAreEvidence)
+{
+    Anchors::Anchor base{};
+    base.kind = Anchors::AnchorKind::StringXref;
+    base.xref_text = "Health";
+    base.xref_encoding = Scanner::StringEncoding::Utf8;
+    base.xref_return = Scanner::XrefReturn::ReferencingInstruction;
+    base.xref_require_terminator = true;
+    base.xref_broad_match = false;
+
+    Anchors::Anchor diff_text = base;
+    diff_text.xref_text = "Stamina";
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_text));
+
+    Anchors::Anchor diff_enc = base;
+    diff_enc.xref_encoding = Scanner::StringEncoding::Utf16le;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_enc));
+
+    Anchors::Anchor diff_term = base;
+    diff_term.xref_require_terminator = false;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_term));
+
+    Anchors::Anchor diff_broad = base;
+    diff_broad.xref_broad_match = true;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_broad));
+
+    Anchors::Anchor diff_return = base;
+    diff_return.xref_return = Scanner::XrefReturn::EnclosingFunction;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_return));
+}
+
+TEST(AnchorFingerprintTest, ManualLiteralIsEvidence)
+{
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::Manual;
+    a.manual_value = 0x10;
+    Anchors::Anchor b = a;
+    b.manual_value = 0x20;
+
+    EXPECT_NE(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+
+    Anchors::Anchor c = a;
+    EXPECT_EQ(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(c));
+}
+
+TEST(AnchorFingerprintTest, SameEvidenceDifferentAddressMatches)
+{
+    Region reg_a;
+    Region reg_b;
+    ASSERT_TRUE(reg_a.ok());
+    ASSERT_TRUE(reg_b.ok());
+    // Plant the identical marker at different offsets in two distinct allocations so it resolves to two different
+    // addresses while the declarative evidence (the AOB pattern) stays byte-for-byte identical.
+    reg_a.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF, 0x55, 0x66, 0x77, 0x88});
+    reg_b.put(0x300, {0xDE, 0xAD, 0xBE, 0xEF, 0x55, 0x66, 0x77, 0x88});
+
+    Scanner::AddrCandidate cands_a[] = {
+        {"a", "DE AD BE EF 55 66 77 88", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate cands_b[] = {
+        {"b", "DE AD BE EF 55 66 77 88", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor anchor_a{};
+    anchor_a.kind = Anchors::AnchorKind::RipGlobal;
+    anchor_a.site = cands_a;
+    Anchors::Anchor anchor_b{};
+    anchor_b.kind = Anchors::AnchorKind::RipGlobal;
+    anchor_b.site = cands_b;
+
+    const auto res_a = Anchors::resolve(anchor_a, reg_a.range());
+    const auto res_b = Anchors::resolve(anchor_b, reg_b.range());
+    ASSERT_EQ(res_a.status, Anchors::AnchorStatus::Resolved);
+    ASSERT_EQ(res_b.status, Anchors::AnchorStatus::Resolved);
+    // The whole point: the targets moved (new address) but the evidence path did not.
+    EXPECT_NE(res_a.value, res_b.value);
+    EXPECT_EQ(Anchors::anchor_fingerprint(anchor_a), Anchors::anchor_fingerprint(anchor_b));
+}
+
+TEST(AnchorFingerprintTest, QuorumIsOrderIndependent)
+{
+    Anchors::Anchor vt{};
+    vt.kind = Anchors::AnchorKind::VtableIdentity;
+    vt.mangled = ".?AVFoo@@";
+    Anchors::Anchor man{};
+    man.kind = Anchors::AnchorKind::Manual;
+    man.manual_value = 0x99;
+
+    Anchors::Anchor q_ab{};
+    q_ab.kind = Anchors::AnchorKind::Quorum;
+    q_ab.quorum_a = &vt;
+    q_ab.quorum_b = &man;
+
+    Anchors::Anchor q_ba{};
+    q_ba.kind = Anchors::AnchorKind::Quorum;
+    q_ba.quorum_a = &man;
+    q_ba.quorum_b = &vt;
+
+    EXPECT_EQ(Anchors::anchor_fingerprint(q_ab), Anchors::anchor_fingerprint(q_ba));
+}
+
+TEST(AnchorFingerprintTest, QuorumMatchModeAndToleranceAreEvidence)
+{
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::Manual;
+    a.manual_value = 1;
+    Anchors::Anchor b{};
+    b.kind = Anchors::AnchorKind::Manual;
+    b.manual_value = 2;
+
+    Anchors::Anchor base{};
+    base.kind = Anchors::AnchorKind::Quorum;
+    base.quorum_a = &a;
+    base.quorum_b = &b;
+    base.quorum_match = Anchors::QuorumMatch::ExactValue;
+    base.quorum_tolerance = 0;
+
+    Anchors::Anchor diff_match = base;
+    diff_match.quorum_match = Anchors::QuorumMatch::WithinTolerance;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_match));
+
+    Anchors::Anchor diff_tol = base;
+    diff_tol.quorum_tolerance = 8;
+    EXPECT_NE(Anchors::anchor_fingerprint(base), Anchors::anchor_fingerprint(diff_tol));
+}
+
+TEST(AnchorFingerprintTest, QuorumNullSubAnchorIsDefined)
+{
+    Anchors::Anchor q{};
+    q.kind = Anchors::AnchorKind::Quorum;
+    q.quorum_a = nullptr;
+    q.quorum_b = nullptr;
+
+    // Must not dereference null; the result is well-defined and deterministic.
+    EXPECT_EQ(Anchors::anchor_fingerprint(q), Anchors::anchor_fingerprint(q));
+}
+
+TEST(AnchorFingerprintTest, CallArgHomeReflectsKindOnly)
+{
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::CallArgHome;
+    a.label = "x";
+    Anchors::Anchor b{};
+    b.kind = Anchors::AnchorKind::CallArgHome;
+    b.label = "y";
+    b.manual_value = 0x1234; // unused by this kind
+
+    EXPECT_EQ(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+}
+
+TEST(AnchorFingerprintTest, CascadeFieldBoundariesDoNotAlias)
+{
+    // Each candidate's pattern bytes are length-prefixed, so two splits that concatenate to the same bytes still
+    // differ: the candidate list ["AB", ""] must not collide with ["A", "B"].
+    Scanner::AddrCandidate split_one[] = {
+        {"x", "AB", Scanner::ResolveMode::Direct, 0, 0},
+        {"y", "", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Scanner::AddrCandidate split_two[] = {
+        {"x", "A", Scanner::ResolveMode::Direct, 0, 0},
+        {"y", "B", Scanner::ResolveMode::Direct, 0, 0},
+    };
+    Anchors::Anchor a{};
+    a.kind = Anchors::AnchorKind::RipGlobal;
+    a.site = split_one;
+    Anchors::Anchor b{};
+    b.kind = Anchors::AnchorKind::RipGlobal;
+    b.site = split_two;
+
+    EXPECT_NE(Anchors::anchor_fingerprint(a), Anchors::anchor_fingerprint(b));
+}

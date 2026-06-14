@@ -11,6 +11,7 @@
 
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "scanner_internal.hpp"
 
 // windows.h included after project headers to avoid macro conflicts (e.g., 'small')
@@ -4159,6 +4160,24 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     ASSERT_EQ(found, reinterpret_cast<const std::byte *>(base + 0x123));
     std::memset(base + 0x123, 0xAB, sizeof(needle)); // remove it so the race loop expects nullptr
 
+    // A skipped-region fault surfaces on the diagnostic bus too. The race is non-deterministic, so a sweep
+    // that never overlapped the decommit window emits nothing -- a valid pass. But every event that does fire must
+    // carry a positive skipped-region count and the exact scanned window. The scan runs on this thread, so the handler
+    // never races the toggler.
+    const std::uintptr_t window_low = reinterpret_cast<std::uintptr_t>(base);
+    const std::uintptr_t window_high = window_low + size;
+    std::size_t fault_events = 0;
+    bool event_payload_ok = true;
+    auto fault_sub = Diagnostics::scanner_faults().subscribe(
+        [&](const Diagnostics::ScannerFaultEvent &e)
+        {
+            ++fault_events;
+            if (e.faulted_regions == 0 || e.window_low != window_low || e.window_high != window_high)
+            {
+                event_payload_ok = false;
+            }
+        });
+
     const std::uintptr_t middle = reinterpret_cast<std::uintptr_t>(base) + (pages / 2) * page;
     std::jthread toggler(
         [middle, page](std::stop_token stop_token)
@@ -4175,5 +4194,8 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
         const std::byte *hit = Scanner::detail::scan_module_readable(*pattern, range, 1);
         EXPECT_EQ(hit, nullptr);
     }
+
+    // Whether or not any fault landed, no emitted event may carry a zero count or a mismatched window.
+    EXPECT_TRUE(event_payload_ok);
 }
 #endif // _MSC_VER

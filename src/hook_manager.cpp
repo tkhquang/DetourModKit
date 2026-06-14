@@ -24,6 +24,38 @@ namespace DetourModKit
 
     namespace
     {
+        // Maps a HookManager hook type onto the diagnostic event bus's hook flavor.
+        [[nodiscard]] Diagnostics::HookKind to_diagnostics_hook_kind(HookType type) noexcept
+        {
+            switch (type)
+            {
+            case HookType::Inline:
+                return Diagnostics::HookKind::Inline;
+            case HookType::Mid:
+                return Diagnostics::HookKind::Mid;
+            case HookType::Vmt:
+                return Diagnostics::HookKind::Vmt;
+            }
+            return Diagnostics::HookKind::Inline;
+        }
+
+        // Publishes a hook lifecycle transition on the process-wide diagnostic bus. Called only from the post-lock tail
+        // of a HookManager mutator, after the registry locks are released, so a subscriber's handler never runs inside
+        // the registry critical section. The dispatcher is lazy and can allocate on first use, so the whole diagnostic
+        // side path is best-effort.
+        void emit_hook_lifecycle(std::string_view name, Diagnostics::HookKind kind,
+                                 Diagnostics::HookTransition transition) noexcept
+        {
+            try
+            {
+                Diagnostics::hook_lifecycle().emit_safe(
+                    Diagnostics::HookLifecycleEvent{.name = name, .kind = kind, .transition = transition});
+            }
+            catch (...)
+            {
+            }
+        }
+
         enum class PrehookState
         {
             NotHooked,
@@ -597,6 +629,10 @@ namespace DetourModKit
         {
             m_logger.log(entry.level, entry.msg);
         }
+        if (result)
+        {
+            emit_hook_lifecycle(*result, Diagnostics::HookKind::Inline, Diagnostics::HookTransition::Created);
+        }
         return result;
     }
 
@@ -856,6 +892,10 @@ namespace DetourModKit
         {
             m_logger.log(entry.level, entry.msg);
         }
+        if (result)
+        {
+            emit_hook_lifecycle(*result, Diagnostics::HookKind::Mid, Diagnostics::HookTransition::Created);
+        }
         return result;
     }
 
@@ -1084,6 +1124,12 @@ namespace DetourModKit
             return std::unexpected(HookError::ReentrantCallRejected);
         }
 
+        // Captured in the exclusive erase phase below so the post-lock lifecycle emit can report the real hook flavor
+        // and fire only when a hook was actually erased.
+        std::string lifecycle_name;
+        Diagnostics::HookKind lifecycle_kind = Diagnostics::HookKind::Inline;
+        bool lifecycle_found = false;
+
         auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
         {
             std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
@@ -1133,6 +1179,9 @@ namespace DetourModKit
             }
             std::string name_of_removed_hook = it->second->get_name();
             HookType type_of_removed_hook = it->second->get_type();
+            lifecycle_name = name_of_removed_hook;
+            lifecycle_kind = to_diagnostics_hook_kind(type_of_removed_hook);
+            lifecycle_found = true;
             m_hooks.erase(it);
             std::erase(m_hook_creation_order, name_of_removed_hook);
             logs.push_back(
@@ -1147,6 +1196,10 @@ namespace DetourModKit
         for (const auto &entry : deferred_logs)
         {
             m_logger.log(entry.level, entry.msg);
+        }
+        if (lifecycle_found && result)
+        {
+            emit_hook_lifecycle(lifecycle_name, lifecycle_kind, Diagnostics::HookTransition::Removed);
         }
         return result;
     }
@@ -1236,6 +1289,11 @@ namespace DetourModKit
             return std::unexpected(HookError::ReentrantCallRejected);
         }
 
+        // Captured in the locked lookup below so the post-lock lifecycle emit can report the real hook flavor and fire
+        // only when the operation actually changes the hook state.
+        Diagnostics::HookKind lifecycle_kind = Diagnostics::HookKind::Inline;
+        bool lifecycle_transitioned = false;
+
         auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
         {
             std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
@@ -1255,7 +1313,10 @@ namespace DetourModKit
             }
 
             Hook *hook = it->second.get();
+            lifecycle_kind = to_diagnostics_hook_kind(hook->get_type());
+            const HookStatus status_before = hook->get_status();
             auto enable_result = hook->enable();
+            lifecycle_transitioned = enable_result.has_value() && status_before == HookStatus::Disabled;
             if (enable_result)
             {
                 return {std::expected<void, HookError>{},
@@ -1280,6 +1341,10 @@ namespace DetourModKit
         {
             m_logger.log(entry.level, entry.msg);
         }
+        if (lifecycle_transitioned)
+        {
+            emit_hook_lifecycle(hook_id, lifecycle_kind, Diagnostics::HookTransition::Enabled);
+        }
         return result;
     }
 
@@ -1301,6 +1366,11 @@ namespace DetourModKit
             return std::unexpected(HookError::ReentrantCallRejected);
         }
 
+        // Captured in the locked lookup below so the post-lock lifecycle emit can report the real hook flavor and fire
+        // only when the operation actually changes the hook state.
+        Diagnostics::HookKind lifecycle_kind = Diagnostics::HookKind::Inline;
+        bool lifecycle_transitioned = false;
+
         auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
         {
             std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
@@ -1320,7 +1390,10 @@ namespace DetourModKit
             }
 
             Hook *hook = it->second.get();
+            lifecycle_kind = to_diagnostics_hook_kind(hook->get_type());
+            const HookStatus status_before = hook->get_status();
             auto disable_result = hook->disable();
+            lifecycle_transitioned = disable_result.has_value() && status_before == HookStatus::Active;
             if (disable_result)
             {
                 return {std::expected<void, HookError>{},
@@ -1345,6 +1418,10 @@ namespace DetourModKit
         for (const auto &entry : deferred_logs)
         {
             m_logger.log(entry.level, entry.msg);
+        }
+        if (lifecycle_transitioned)
+        {
+            emit_hook_lifecycle(hook_id, lifecycle_kind, Diagnostics::HookTransition::Disabled);
         }
         return result;
     }
@@ -1800,6 +1877,10 @@ namespace DetourModKit
         {
             m_logger.log(entry.level, entry.msg);
         }
+        if (result)
+        {
+            emit_hook_lifecycle(*result, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Created);
+        }
         return result;
     }
 
@@ -1820,6 +1901,7 @@ namespace DetourModKit
             return std::unexpected(HookError::ReentrantCallRejected);
         }
 
+        std::string lifecycle_name;
         auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
         {
             std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
@@ -1836,6 +1918,7 @@ namespace DetourModKit
             if (it != m_vmt_hooks.end())
             {
                 std::string removed_name = it->second.get_name();
+                lifecycle_name = removed_name;
                 m_vmt_hooks.erase(it);
                 std::erase(m_vmt_creation_order, removed_name);
                 return {std::expected<void, HookError>{},
@@ -1849,6 +1932,10 @@ namespace DetourModKit
         for (const auto &entry : deferred_logs)
         {
             m_logger.log(entry.level, entry.msg);
+        }
+        if (result)
+        {
+            emit_hook_lifecycle(lifecycle_name, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Removed);
         }
         return result;
     }
