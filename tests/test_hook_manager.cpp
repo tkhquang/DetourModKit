@@ -2448,10 +2448,13 @@ TEST_F(HookManagerTest, RemoveAllHooks_WithOnlyVmtHooks)
 {
     struct FakeVtable
     {
-        void *methods[4]{};
+        // SafetyHook's create copies the header slot at vptr[-1], so the synthetic vtable must carry an in-bounds
+        // leading member; vptr points past it at the first method slot, mirroring a real object's layout.
+        void *rtti;
+        void *methods[4];
     };
     FakeVtable vtable{};
-    void *vptr = &vtable;
+    void *vptr = &vtable.methods[0];
 
     auto vmt_result = m_hook_manager->create_vmt_hook("VmtOnlyHook", &vptr);
     ASSERT_TRUE(vmt_result.has_value());
