@@ -25,6 +25,11 @@
 namespace Memory = DetourModKit::Memory;
 namespace Rtti = DetourModKit::Rtti;
 
+static_assert(static_cast<std::uint8_t>(Rtti::Indirection::PointerToObject) == 0);
+static_assert(static_cast<std::uint8_t>(Rtti::Indirection::ObjectBase) == 1);
+static_assert(static_cast<std::uint8_t>(Rtti::Indirection::Any) == 2);
+static_assert(static_cast<std::uint8_t>(Rtti::Indirection::CompleteObject) == 3);
+
 namespace
 {
     // Per-fixture layout offsets shared by every SyntheticVtable instance. Picked so the COL, TypeDescriptor, and
@@ -890,9 +895,111 @@ TEST_F(RttiDissectTest, Heal_ShapeFilterPointerVsObjectVsAny)
     EXPECT_TRUE(Rtti::heal_landmark(lm_for(pointed.base(), Rtti::Indirection::PointerToObject)).has_value());
     EXPECT_FALSE(Rtti::heal_landmark(lm_for(direct.base(), Rtti::Indirection::PointerToObject)).has_value());
 
+    // CompleteObject matches the direct primary subobject only, not a pointer-shaped slot.
+    EXPECT_TRUE(Rtti::heal_landmark(lm_for(direct.base(), Rtti::Indirection::CompleteObject)).has_value());
+    EXPECT_FALSE(Rtti::heal_landmark(lm_for(pointed.base(), Rtti::Indirection::CompleteObject)).has_value());
+
     // Any matches either.
     EXPECT_TRUE(Rtti::heal_landmark(lm_for(direct.base(), Rtti::Indirection::Any)).has_value());
     EXPECT_TRUE(Rtti::heal_landmark(lm_for(pointed.base(), Rtti::Indirection::Any)).has_value());
+}
+
+TEST_F(RttiDissectTest, Heal_CompleteObjectRejectsSecondaryVtableObjectBaseAccepts)
+{
+    // A multiple-inheritance secondary base: a direct object base whose vtable carries a nonzero COL.offset but whose
+    // COL still names the complete type. ObjectBase accepts it (the silent off-by-a-subobject hazard) and surfaces the
+    // subobject delta via HealHit::col_offset; CompleteObject rejects it because a secondary base is never the complete
+    // object.
+    SyntheticVtable secondary(".?AVMISecondary@@");
+    secondary.set_col_offset(0x08);
+    SynStruct st;
+    const std::size_t nominal = 0x80;
+    st.put(nominal, secondary.vtable());
+
+    const auto lm_with = [&](Rtti::Indirection ind) noexcept
+    {
+        return Rtti::Landmark{
+            .base = st.base(),
+            .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+            .expected_mangled = ".?AVMISecondary@@",
+            .indirection = ind,
+        };
+    };
+
+    // ObjectBase latches the secondary slot and heals to it; col_offset reports the subobject delta.
+    const auto as_object = Rtti::heal_landmark(lm_with(Rtti::Indirection::ObjectBase));
+    ASSERT_TRUE(as_object.has_value());
+    EXPECT_EQ(as_object->healed_offset, static_cast<std::ptrdiff_t>(nominal));
+    EXPECT_FALSE(as_object->was_pointer);
+    EXPECT_EQ(as_object->col_offset, 0x08u);
+
+    // CompleteObject refuses the secondary subobject and, with nothing else in the window, fails closed.
+    const auto as_complete = Rtti::heal_landmark(lm_with(Rtti::Indirection::CompleteObject));
+    ASSERT_FALSE(as_complete.has_value());
+    EXPECT_EQ(as_complete.error(), Rtti::HealError::NoMatch);
+}
+
+TEST_F(RttiDissectTest, Heal_CompleteObjectMatchesPrimarySubobject)
+{
+    // The primary subobject of the complete object: a direct object base with COL.offset == 0. CompleteObject heals it
+    // exactly as ObjectBase would and reports col_offset == 0.
+    SyntheticVtable primary(".?AVMIPrimary@@");
+    SynStruct st;
+    const std::size_t nominal = 0x80;
+    st.put(nominal, primary.vtable());
+
+    const Rtti::Landmark lm{
+        .base = st.base(),
+        .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+        .expected_mangled = ".?AVMIPrimary@@",
+        .indirection = Rtti::Indirection::CompleteObject,
+    };
+
+    const auto hit = Rtti::heal_landmark(lm);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal));
+    EXPECT_FALSE(hit->was_pointer);
+    EXPECT_EQ(hit->col_offset, 0u);
+}
+
+TEST_F(RttiDissectTest, Heal_CompleteObjectAvoidsSilentSecondaryShortCircuit)
+{
+    // The real correctness trap. An upstream member removal shifts the embedded object down by 8 bytes, so its
+    // secondary vtable now sits exactly on the old nominal offset while the true primary base (the complete object)
+    // sits 8 bytes earlier. Both vtables' COLs name the same complete type.
+    //
+    // ObjectBase short-circuits on the nominal secondary slot and reports "no drift" (delta 0) while pointing 8 bytes
+    // into the object -- a silent, confidently-wrong heal. CompleteObject rejects the secondary at the nominal slot and
+    // scans on to recover the true primary base at nominal - 8.
+    SyntheticVtable secondary(".?AVMITrap@@");
+    secondary.set_col_offset(0x08);
+    SyntheticVtable primary(".?AVMITrap@@");
+    SynStruct st;
+    const std::size_t nominal = 0x80;
+    st.put(nominal, secondary.vtable());      // secondary landed on the old offset
+    st.put(nominal - 0x08, primary.vtable()); // the true complete-object base, one subobject earlier
+
+    const auto lm_with = [&](Rtti::Indirection ind) noexcept
+    {
+        return Rtti::Landmark{
+            .base = st.base(),
+            .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+            .expected_mangled = ".?AVMITrap@@",
+            .indirection = ind,
+        };
+    };
+
+    // The trap: ObjectBase heals to the nominal secondary, off by the subobject delta (col_offset flags it).
+    const auto as_object = Rtti::heal_landmark(lm_with(Rtti::Indirection::ObjectBase));
+    ASSERT_TRUE(as_object.has_value());
+    EXPECT_EQ(as_object->healed_offset, static_cast<std::ptrdiff_t>(nominal));
+    EXPECT_EQ(as_object->col_offset, 0x08u);
+
+    // The fix: CompleteObject recovers the true complete-object base.
+    const auto as_complete = Rtti::heal_landmark(lm_with(Rtti::Indirection::CompleteObject));
+    ASSERT_TRUE(as_complete.has_value());
+    EXPECT_EQ(as_complete->healed_offset, static_cast<std::ptrdiff_t>(nominal - 0x08));
+    EXPECT_EQ(as_complete->col_offset, 0u);
 }
 
 TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)

@@ -246,17 +246,34 @@ namespace DetourModKit
 
         /**
          * @enum Indirection
-         * @brief Slot shape a self-heal landmark requires of a matching slot.
+         * @brief Slot shape (and, for @ref CompleteObject, subobject position) a self-heal landmark requires of a
+         *        matching slot.
          * @details Applied as a soft policy filter on top of @ref identify_pointee_type's resolvability classification.
+         * @note Under multiple inheritance each base subobject carries its own vtable, and each vtable's COL names the
+         *       same most-derived type; COL.offset is what distinguishes them. A direct-object heal keyed on @ref
+         *       ObjectBase or @ref Any can therefore match a secondary base's vtable and report an offset shifted by
+         *       that subobject delta. Use @ref CompleteObject for an embedded object that may use multiple inheritance:
+         *       it matches only the primary subobject (COL.offset == 0), so the healed offset is always the true
+         *       complete-object base. @ref HealHit::was_pointer and @ref HealHit::col_offset let an @ref ObjectBase /
+         *       @ref Any consumer detect the direct-object case after the fact.
          */
         enum class Indirection : std::uint8_t
         {
             /// Match only slots that held a pointer-to-object.
-            PointerToObject,
-            /// Match only slots that were a direct object base.
-            ObjectBase,
+            PointerToObject = 0,
+            /// Match only a direct object base (any subobject, including a multiple-inheritance secondary).
+            ObjectBase = 1,
             /// Match either shape (use when capture and heal may straddle a DLL boundary).
-            Any
+            Any = 2,
+            /**
+             * @brief Match only a direct object base whose vtable is the most-derived (primary) subobject,
+             *        COL.offset == 0.
+             * @details Like @ref ObjectBase, but rejects a multiple-inheritance secondary base whose vtable sits
+             *          adjacent to the primary and whose COL still names the complete type. This keeps a heal from
+             *          latching that secondary slot and reporting an offset shifted by the subobject delta (a silent
+             *          off-by-a-subobject heal). Prefer it whenever the landmarked object may have more than one base.
+             */
+            CompleteObject = 3
         };
 
         /**
@@ -319,6 +336,15 @@ namespace DetourModKit
             std::uintptr_t object_addr = 0;
             /// Resolved vtable of the matched object.
             std::uintptr_t vtable = 0;
+            /**
+             * @brief COL.offset of the matched object: 0 for the primary (complete) subobject, nonzero for a
+             *        multiple-inheritance secondary base.
+             * @details On a direct-object match (@ref was_pointer is false), a nonzero value means the slot landed on
+             *          a secondary base, so @ref healed_offset is shifted that many bytes from the complete-object
+             *          base. An @ref Indirection::CompleteObject heal only matches col_offset == 0, so this is always
+             *          0 there.
+             */
+            std::uint32_t col_offset = 0;
             /// Shape of the matched slot.
             bool was_pointer = false;
         };
