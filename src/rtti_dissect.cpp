@@ -26,13 +26,19 @@ namespace DetourModKit
     namespace
     {
         /**
-         * @brief Soft policy filter: does a resolved slot's shape satisfy the landmark's required indirection?
-         * @details Indirection::Any accepts either shape; the other two pin the slot to the pointer-to-object or
-         *          direct-object form. This is a policy-layer decision deliberately kept out of L1 so a consumer can
-         *          record Any when capture and heal may straddle a
-         *          DLL boundary.
+         * @brief Soft policy filter: does a resolved slot's shape (and subobject position) satisfy the landmark's
+         *        required indirection?
+         * @details Indirection::Any accepts either shape; PointerToObject and ObjectBase pin the slot to the
+         *          pointer-to-object or direct-object form. This is a policy-layer decision deliberately kept out
+         *          of L1 so a consumer can record Any when capture and heal may straddle a DLL boundary.
+         *          CompleteObject adds a subobject constraint on top of the direct-object shape, which is why
+         *          @p col_offset is consulted here.
+         * @param was_pointer The resolved slot's shape (PointeeType::was_pointer).
+         * @param col_offset The resolved object's COL.offset (PointeeType::col_offset): 0 for the primary subobject,
+         *                   nonzero for a multiple-inheritance secondary base.
+         * @param ind The landmark's required indirection.
          */
-        [[nodiscard]] bool shape_ok(bool was_pointer, Rtti::Indirection ind) noexcept
+        [[nodiscard]] bool shape_ok(bool was_pointer, std::uint32_t col_offset, Rtti::Indirection ind) noexcept
         {
             switch (ind)
             {
@@ -42,6 +48,13 @@ namespace DetourModKit
                 return was_pointer;
             case Rtti::Indirection::ObjectBase:
                 return !was_pointer;
+            case Rtti::Indirection::CompleteObject:
+                // A direct object base pinned to the most-derived (primary) subobject. Under multiple inheritance every
+                // base subobject has its own vtable, and each vtable's COL names the same complete type. COL.offset
+                // distinguishes those subobjects; the primary subobject has col_offset == 0, so its base is the
+                // complete object. Rejecting col_offset != 0 keeps a heal from latching a secondary base's adjacent
+                // vtable and reporting an offset shifted by that subobject delta.
+                return !was_pointer && col_offset == 0;
             }
             return false;
         }
@@ -57,7 +70,7 @@ namespace DetourModKit
         {
             if (!Rtti::identify_pointee_type(addr, pt))
                 return false;
-            if (!shape_ok(pt.was_pointer, lm.indirection))
+            if (!shape_ok(pt.was_pointer, pt.col_offset, lm.indirection))
                 return false;
             return pt.name() == lm.expected_mangled;
         }
@@ -76,6 +89,7 @@ namespace DetourModKit
             h.slot_addr = slot_addr;
             h.object_addr = pt.object_base;
             h.vtable = pt.vtable;
+            h.col_offset = pt.col_offset;
             h.was_pointer = pt.was_pointer;
             return h;
         }
@@ -94,6 +108,7 @@ namespace DetourModKit
             {
             case Rtti::Indirection::PointerToObject:
             case Rtti::Indirection::ObjectBase:
+            case Rtti::Indirection::CompleteObject:
             case Rtti::Indirection::Any:
                 return true;
             }

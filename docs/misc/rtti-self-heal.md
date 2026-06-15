@@ -110,8 +110,15 @@ The algorithm:
 | Value | Matches |
 |-------|---------|
 | `PointerToObject` (default) | slots that held a pointer-to-object |
-| `ObjectBase` | slots that were a direct object base |
+| `ObjectBase` | a direct object base (any subobject, including a multiple-inheritance secondary) |
+| `CompleteObject` | a direct object base that is the primary subobject (`COL.offset == 0`) -- the multiple-inheritance-safe `ObjectBase` |
 | `Any` | either shape -- use when capture and heal may straddle a DLL boundary |
+
+### Multiple inheritance and the complete object
+
+Under multiple inheritance each base subobject has its own vtable, and every one of those vtables' COLs names the *same* most-derived type -- only `COL.offset` differs (it is the subobject's byte offset within the complete object, `0` for the primary). A direct-object heal keyed on `ObjectBase` (or `Any`) compares only the mangled name, so it can match a *secondary* base's vtable and report an offset shifted by that subobject delta. The most dangerous form is through the nominal-first short-circuit: an upstream member removal can land a secondary vtable exactly on the old offset, and the heal then reports `delta == 0` ("did not move") while pointing `COL.offset` bytes into the object -- silent and confidently wrong.
+
+`CompleteObject` closes this. It matches only the primary subobject (`COL.offset == 0`), so the healed offset is always the true complete-object base; prefer it for any embedded object that may use multiple inheritance. Consumers that stay on `ObjectBase` / `Any` can still detect the direct-object case after the fact: `HealHit::col_offset` reports the matched subobject delta, and when `was_pointer == false`, a nonzero value means the slot was a secondary base.
 
 ### The unique-match guard
 
