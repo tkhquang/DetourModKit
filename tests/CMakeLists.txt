@@ -1,17 +1,17 @@
-cmake_minimum_required(VERSION 3.25)
+cmake_minimum_required(VERSION 3.28)
 
 if(DMK_BUILD_TESTS)
-  # Prefer a system/pre-provisioned GoogleTest (>= 1.14) so an offline or CI machine with a system GTest skips the
+  # Prefer a system/pre-provisioned GoogleTest (>= 1.17) so an offline or CI machine with a system GTest skips the
   # network fetch; otherwise fall back to a pinned FetchContent clone. Both paths provide the GTest::gtest_main
   # target the tests link against, so no link-line change is needed for either.
-  find_package(GTest 1.14 QUIET)
+  find_package(GTest 1.17 QUIET)
 
   if(NOT GTest_FOUND OR NOT TARGET GTest::gtest_main)
     include(FetchContent)
     FetchContent_Declare(
       googletest
       GIT_REPOSITORY https://github.com/google/googletest.git
-      GIT_TAG f8d7d77c06936315286eb55f8de22cd23c188571 # v1.14.0 release commit
+      GIT_TAG 52eb8108c5bdec04579160ae17225d66034bd723 # v1.17.0 release commit
     )
 
     # For Windows: Prevent overriding the parent project's compiler/linker settings
