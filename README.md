@@ -646,7 +646,7 @@ This method is ideal for active development and ensures you always have the late
 2. **Configure your CMakeLists.txt:**
 
     ```cmake
-    cmake_minimum_required(VERSION 3.25)
+    cmake_minimum_required(VERSION 3.28)
     project(MyMod VERSION 1.0.0 LANGUAGES CXX)
 
     set(CMAKE_CXX_STANDARD 23)
