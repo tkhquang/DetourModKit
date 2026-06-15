@@ -14,7 +14,7 @@ namespace
         // automatically. The release workflow separately guards that CMakeLists.txt project(VERSION) matches the tag.
         EXPECT_EQ(DMK_VERSION_MAJOR, 3);
         EXPECT_EQ(DMK_VERSION_MINOR, 8);
-        EXPECT_EQ(DMK_VERSION_PATCH, 0);
+        EXPECT_EQ(DMK_VERSION_PATCH, 1);
     }
 
     TEST(VersionTest, VersionStringMatchesMacros)
