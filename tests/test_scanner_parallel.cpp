@@ -512,6 +512,9 @@ TEST(ScannerBatchTest, CascadeBatchWorkerCountYieldsIdenticalResults)
 // it.
 TEST(ScannerBatchTest, CascadeBatchResolvesStringXrefTierLikeSerial)
 {
+    // No Memory::init_cache() by design: find_string_xref installs its fault guard lazily (MinGW) or uses SEH (MSVC),
+    // so it needs no cache warm-up -- the dedicated find_string_xref suite (test_string_xref.cpp) and the byte-mode
+    // cascade-batch tests above run the same fork-join read path without it.
     // Zero-fill: a 0x00 byte both terminates the planted literal and never starts a RIP-relative load.
     CommittedPage image(4096, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(image.base, nullptr);

@@ -389,7 +389,12 @@ namespace DetourModKit
         struct PrologueFallbackResult
         {
             CascadeAttempt attempt{};
+            // True until some Direct candidate yields a usable rebuilt pattern (enough literal tail to scan).
             bool not_applicable{true};
+            // True once any Direct candidate parsed -- i.e. the fallback had a real target to rebuild. Lets finalize
+            // tell "Direct present but tail too short" (PrologueFallbackNotApplicable) from "no Direct candidate at
+            // all" (a plain NoMatch); a name/string/RipRelative-only cascade leaves this false.
+            bool had_fallback_candidate{false};
         };
 
         // Attempts one prologue shape for a single Direct candidate: rebuilds the patched prologue as shape.jump_prefix
@@ -494,6 +499,10 @@ namespace DetourModKit
                 {
                     continue;
                 }
+                // A Direct candidate that parses is a real fallback target, even if its literal tail later proves too
+                // short to rebuild. Recording that lets finalize distinguish "tail too short"
+                // (PrologueFallbackNotApplicable) from "no Direct candidate at all" (a plain NoMatch).
+                out.had_fallback_candidate = true;
                 // Try each recognised inline-hook prologue shape in turn. The first that uniquely recovers an
                 // executable target wins; E9 is tried before FF 25 because it is by far the common case.
                 bool any_applicable = false;
@@ -581,7 +590,10 @@ namespace DetourModKit
                 logger.error("{}: every byte candidate pattern failed to parse.", label);
                 return std::unexpected(ResolveError::AllPatternsInvalid);
             }
-            if (hooked.not_applicable)
+            // PrologueFallbackNotApplicable means a Direct candidate was present to rebuild but its literal tail was
+            // too short -- not "no fallback ran". A cascade of only name/string/RipRelative tiers has no Direct row to
+            // rebuild, so its full miss is a plain NoMatch, not this diagnostic.
+            if (hooked.not_applicable && hooked.had_fallback_candidate)
             {
                 logger.warning(
                     "{}: cascade resolve failed; prologue fallback not applicable (insufficient literal tail bytes).",

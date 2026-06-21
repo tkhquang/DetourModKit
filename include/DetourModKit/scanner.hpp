@@ -715,10 +715,11 @@ namespace DetourModKit
          *       wrong address. Two failure modes are distinct and worth handling separately: NoMatch means the
          *       direct scan and every rebuilt fallback shape both ran and matched nothing (the case for a
          *       prologue overwritten by an unhandled shape such as a push imm32 / ret thunk, an FF15 call thunk,
-         *       or a prefixed jump); PrologueFallbackNotApplicable means no fallback could be formed in the
-         *       first place (a Direct-mode candidate's literal tail was too short to rebuild a unique pattern
-         *       around the prologue), so nothing was retried. Do not assume every unsupported overwrite
-         *       collapses to NoMatch.
+         *       or a prefixed jump); PrologueFallbackNotApplicable means a Direct-mode candidate was present to
+         *       rebuild but its literal tail was too short to form a unique pattern around the prologue, so nothing
+         *       was retried. A cascade with no Direct-mode candidate at all (only RttiVtable / StringXref / RipRelative
+         *       tiers) has nothing to rebuild, so a full miss there is NoMatch, not PrologueFallbackNotApplicable. Do
+         *       not assume every unsupported overwrite collapses to NoMatch.
          * @param candidates Ordered candidates.
          * @param label Human-readable identifier used in log messages.
          * @return ResolveHit on success; ResolveError on failure.

@@ -4580,6 +4580,27 @@ TEST(ScannerModuleCascade, PrologueFallbackSkipsNameStringRowsAndRewritesDirect)
     EXPECT_EQ(hit->winning_name, std::string_view{"hooked"});
 }
 
+// A name/string-only cascade (no Direct row) that fully misses under the prologue-fallback resolver returns NoMatch,
+// not PrologueFallbackNotApplicable: the fallback has no Direct candidate to rebuild, so the "insufficient literal tail
+// bytes" classification (which only fits a present Direct row) does not apply.
+TEST(ScannerModuleCascade, PrologueFallbackNoDirectRowMissReturnsNoMatch)
+{
+    ASSERT_TRUE(Memory::init_cache());
+
+    CascadeStringImage img;
+    ASSERT_TRUE(img.ok());
+
+    // Neither tier can resolve in this empty scratch page (no COL, no literal), and neither is a Direct row the
+    // fallback could rebuild.
+    Scanner::AddrCandidate cands[] = {
+        {"name-tier", ".?AVNeverInThisScratchImage@@", Scanner::ResolveMode::RttiVtable},
+        {"string-tier", "NeverInThisScratchImageLiteral", Scanner::ResolveMode::StringXref},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "no-direct-row", img.range());
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+}
+
 // The four xref_* facet fields are appended to AddrCandidate and defaulted, so every pre-existing positional aggregate
 // initializer keeps compiling and the new fields take their StringRefQuery-mirroring defaults. Verified at compile
 // time.
