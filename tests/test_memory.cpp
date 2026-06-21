@@ -2229,12 +2229,12 @@ TEST_F(MemoryTest, ReadPtrUnsafeReadsMisalignedPointer)
     ASSERT_NE(region, nullptr);
 
     auto *base = static_cast<std::uint8_t *>(region);
-    constexpr std::uintptr_t kSentinel = 0xDEADBEEFCAFEF00Dull;
-    constexpr ptrdiff_t kMisalignedOffset = 1; // deliberately not a multiple of alignof(uintptr_t)
-    std::memcpy(base + kMisalignedOffset, &kSentinel, sizeof(kSentinel));
+    constexpr std::uintptr_t SENTINEL = 0xDEADBEEFCAFEF00Dull;
+    constexpr ptrdiff_t MISALIGNED_OFFSET = 1; // deliberately not a multiple of alignof(uintptr_t)
+    std::memcpy(base + MISALIGNED_OFFSET, &SENTINEL, sizeof(SENTINEL));
 
-    const std::uintptr_t value = Memory::read_ptr_unsafe(reinterpret_cast<std::uintptr_t>(base), kMisalignedOffset);
-    EXPECT_EQ(value, kSentinel);
+    const std::uintptr_t value = Memory::read_ptr_unsafe(reinterpret_cast<std::uintptr_t>(base), MISALIGNED_OFFSET);
+    EXPECT_EQ(value, SENTINEL);
 
     // An unmapped low address still fails closed to 0 (the fault is swallowed, not propagated).
     EXPECT_EQ(Memory::read_ptr_unsafe(0, 0), 0u);
@@ -2376,8 +2376,8 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
 {
     void *good = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(good, nullptr);
-    constexpr uintptr_t kSentinel = 0x5151515151515151ULL;
-    *reinterpret_cast<uintptr_t *>(good) = kSentinel;
+    constexpr uintptr_t SENTINEL = 0x5151515151515151ULL;
+    *reinterpret_cast<uintptr_t *>(good) = SENTINEL;
 
     // A deliberately non-readable page the test owns until teardown. This used to MEM_RELEASE a PAGE_READWRITE region
     // to get an unmapped address, but a released VA can be recycled and remapped by the allocations that spawning the
@@ -2399,7 +2399,7 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
                 {
                     if (t % 2 == 0)
                     {
-                        if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0) != kSentinel)
+                        if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0) != SENTINEL)
                             all_correct.store(false, std::memory_order_relaxed);
                     }
                     else if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(unreadable), 0) != 0u)
@@ -2425,8 +2425,8 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
 {
     void *good = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(good, nullptr);
-    constexpr uintptr_t kSentinel = 0xA5A5A5A5A5A5A5A5ULL;
-    *reinterpret_cast<uintptr_t *>(good) = kSentinel;
+    constexpr uintptr_t SENTINEL = 0xA5A5A5A5A5A5A5A5ULL;
+    *reinterpret_cast<uintptr_t *>(good) = SENTINEL;
 
     // A deliberately non-readable page the test owns until teardown: a committed PAGE_NOACCESS page faults on every
     // read and cannot be recycled, unlike a MEM_RELEASE'd VA, which the allocations from spawning the reader threads
@@ -2449,7 +2449,7 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
                     const uintptr_t v = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(target), 0);
                     if (target == good)
                     {
-                        if (v == kSentinel)
+                        if (v == SENTINEL)
                             seen_good.fetch_add(1, std::memory_order_relaxed);
                     }
                     else if (v == 0u)
@@ -2476,7 +2476,7 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
     for (auto &th : readers)
         th.join();
 
-    EXPECT_EQ(Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0), kSentinel);
+    EXPECT_EQ(Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0), SENTINEL);
     VirtualFree(unreadable, 0, MEM_RELEASE);
     VirtualFree(good, 0, MEM_RELEASE);
 }
@@ -2621,8 +2621,8 @@ TEST_F(MemoryTest, SehWriteBytes_ReadOnlyPageFaultsClosed)
     void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(page, nullptr);
 
-    constexpr uint32_t kSentinel = 0xA5A5A5A5u;
-    *reinterpret_cast<uint32_t *>(page) = kSentinel;
+    constexpr uint32_t SENTINEL = 0xA5A5A5A5u;
+    *reinterpret_cast<uint32_t *>(page) = SENTINEL;
 
     DWORD old_protect = 0;
     ASSERT_NE(VirtualProtect(page, 4096, PAGE_READONLY, &old_protect), 0);
@@ -2633,7 +2633,7 @@ TEST_F(MemoryTest, SehWriteBytes_ReadOnlyPageFaultsClosed)
 
     // Restore write access to read the page back and prove the bytes never changed.
     ASSERT_NE(VirtualProtect(page, 4096, old_protect, &old_protect), 0);
-    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), kSentinel);
+    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), SENTINEL);
 
     VirtualFree(page, 0, MEM_RELEASE);
 }

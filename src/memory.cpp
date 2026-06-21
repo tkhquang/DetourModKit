@@ -2124,6 +2124,10 @@ namespace DetourModKit
         // in one __try region, mirroring seh_read_chain_bytes: one uniform failure path for the whole operation.
         const ptrdiff_t *const offs = offsets.data();
         const size_t count = offsets.size();
+        // The copies below use plain std::memcpy, not the __movsb ASan shim seh_write_bytes uses. The single-shot
+        // primitive writes arbitrary scan/code memory that can abut an ASan-poisoned redzone; a chain write instead
+        // lands on a plausibility-screened, resolved address, so plain memcpy stays correct and still lets ASan flag a
+        // genuinely out-of-bounds chain target. This matches seh_read_chain_bytes, the design mirror of this function.
         __try
         {
             uintptr_t cur = base;

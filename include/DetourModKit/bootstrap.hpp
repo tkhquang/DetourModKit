@@ -82,6 +82,9 @@ namespace DetourModKit
          * @param shutdown_fn Called exactly once before DMK_Shutdown().
          * @return bool32_t TRUE if the worker was started, FALSE if the process gate, instance mutex, or event creation
          *         failed.
+         * @note Setup/control-plane only -- forwarded from DllMain's DLL_PROCESS_ATTACH under the loader lock; it
+         *       allocates, configures the logger, and starts a thread, so call it only from the DllMain attach path,
+         *       never from a hook or input callback.
          * @note noexcept by contract: this runs under the loader lock, so any internal throw (e.g. std::bad_alloc while
          *       Logger::configure builds its prefix / path strings) is caught, the partial attach is rolled back, and
          *       FALSE is returned rather than letting an exception cross the loader lock (undefined behavior).
