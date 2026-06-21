@@ -91,7 +91,10 @@ jobs:
       - name: Copy MinGW runtime DLLs
         run: |
           $testDir = "build\mingw-debug\tests"
-          Get-ChildItem "${{ env.MINGW_BIN }}\lib*.dll" | ForEach-Object {
+          # Resolve the runtime DLLs from the g++ that actually built the tests (off PATH) rather than a hard-coded
+          # Chocolatey subpath, whose bin layout varies by package version and may not exist on the runner image.
+          $mingwBin = Split-Path -Parent (Get-Command g++).Source
+          Get-ChildItem "$mingwBin\lib*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
             Copy-Item $_.FullName "$testDir\"
           }
         shell: powershell
