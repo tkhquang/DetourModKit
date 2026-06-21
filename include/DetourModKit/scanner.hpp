@@ -452,15 +452,66 @@ namespace DetourModKit
                                                                        std::size_t max_workers = 0);
 
         /**
+         * @enum StringEncoding
+         * @brief Byte encoding of an anchor string as it is stored in the image.
+         */
+        enum class StringEncoding : std::uint8_t
+        {
+            /// One byte per character (char / std::string literals).
+            Utf8,
+            /// Two bytes per character, little-endian (wchar_t / L"" on Windows).
+            Utf16le
+        };
+
+        /**
+         * @enum XrefReturn
+         * @brief What a resolved string cross-reference returns.
+         */
+        enum class XrefReturn : std::uint8_t
+        {
+            /// Exact address of the instruction that loads the string.
+            ReferencingInstruction,
+            /// Best-effort prologue back-scan from the instruction (heuristic).
+            EnclosingFunction,
+            /**
+             * @brief Address of the global data slot a `mov [rip+slot], reg` stores the loaded string pointer into.
+             * @details Applies when the unique reference is a `lea reg, [rip+string]` shortly followed by that store.
+             *          Resolves a cached global string pointer rather than the load site. Reports @ref
+             *          StringXrefError::StoreNotFound when no such store follows the reference.
+             */
+            StringPointerSlot
+        };
+
+        /**
          * @enum ResolveMode
          * @brief How a cascade candidate's pattern maps to a final address.
+         * @details Direct and RipRelative interpret @ref AddrCandidate::pattern as a byte AOB. RttiVtable and
+         *          StringXref interpret it as a textual key (an MSVC mangled type name and a literal string
+         *          respectively) and resolve through the name/string backends instead of a byte scan.
          */
         enum class ResolveMode : std::uint8_t
         {
             /// Returned address = match + disp_offset.
             Direct,
             /// Read int32 displacement at (match + disp_offset), compute match + instr_end_offset + disp.
-            RipRelative
+            RipRelative,
+            /**
+             * @brief @ref AddrCandidate::pattern is an MSVC mangled type name; resolve via Rtti::vtable_for_type.
+             * @details Returns the type's primary (COL.offset == 0) vtable. Scoped to the cascade's explicit module
+             *          range, or Memory::host_module_range() when the resolver carries none (the range-less
+             *          whole-process cascades), because a COL's RVAs are image-base-relative. Always unique-only: the
+             *          backend fails closed on an ambiguous name, so @ref AddrCandidate::require_unique does not apply.
+             */
+            RttiVtable,
+            /**
+             * @brief @ref AddrCandidate::pattern is a literal string; resolve via find_string_xref.
+             * @details Anchors on the immutable literal, then its unique RIP-relative reference. The @c xref_* facet
+             *          fields tune the query. Scoped to the cascade's explicit module range, or
+             *          Memory::host_module_range() when the resolver carries none, because an in-image string xref is
+             *          image-scoped. Always unique-only: the backend fails closed on a pooled string or an ambiguous
+             *          reference, so @ref AddrCandidate::require_unique does not apply.
+             */
+            StringXref
         };
 
         /**
@@ -469,7 +520,10 @@ namespace DetourModKit
          * @details The cascade scans candidates in array order and returns the first successful resolution. @p name is
          *          echoed back in the
          *          ResolveHit on success so callers can log which candidate won -- useful when multiple patterns cover
-         *          different game versions.
+         *          different game versions. @p pattern is a byte AOB for ResolveMode::Direct / RipRelative, an MSVC
+         *          mangled type name for ResolveMode::RttiVtable, and a literal string for ResolveMode::StringXref. The
+         *          four @c xref_* facet fields apply only to ResolveMode::StringXref and are ignored otherwise; they
+         *          mirror the StringRefQuery defaults so a plain StringXref row needs only @p pattern.
          */
         struct AddrCandidate
         {
@@ -496,8 +550,21 @@ namespace DetourModKit
              *          intended one (e.g. "first occurrence of a common instruction", or a last-resort broad net). The
              *          flag is per-candidate, so a strict primary anchor keeps the default while a broad fallback opts
              *          out. The uniqueness scan runs once per candidate that already matched; opt out to skip it.
+             *
+             *          Has no effect for ResolveMode::RttiVtable / StringXref: those backends are unique-only and
+             *          fail closed on ambiguity, so a non-unique name or pooled string falls through regardless of
+             *          this flag.
              */
             bool require_unique = true;
+
+            /// StringXref only: byte encoding of the literal as stored in the image. Ignored for other modes.
+            StringEncoding xref_encoding = StringEncoding::Utf8;
+            /// StringXref only: what a resolved reference returns (load site, enclosing function, or pointer slot).
+            XrefReturn xref_return = XrefReturn::ReferencingInstruction;
+            /// StringXref only: match a trailing NUL so a prefix of a longer literal is not matched.
+            bool xref_require_terminator = true;
+            /// StringXref only: also run the Zydis broad reference sweep for rarer RIP-relative shapes.
+            bool xref_broad_match = false;
         };
 
         /**
@@ -526,9 +593,9 @@ namespace DetourModKit
             case ResolveError::EmptyCandidates:
                 return "No candidates supplied";
             case ResolveError::NoMatch:
-                return "No candidate pattern matched the scanned regions";
+                return "No cascade candidate matched the scanned scope";
             case ResolveError::AllPatternsInvalid:
-                return "Every candidate pattern failed to parse";
+                return "Every byte candidate pattern failed to parse";
             case ResolveError::PrologueFallbackNotApplicable:
                 return "Prologue fallback pattern too short to be unique";
             case ResolveError::InvalidRange:
@@ -821,37 +888,6 @@ namespace DetourModKit
          */
         [[nodiscard]] std::expected<std::int64_t, ResolveError>
         read_code_constant(const CodeConstant &cc, Memory::ModuleRange range = Memory::host_module_range());
-
-        /**
-         * @enum StringEncoding
-         * @brief Byte encoding of an anchor string as it is stored in the image.
-         */
-        enum class StringEncoding : std::uint8_t
-        {
-            /// One byte per character (char / std::string literals).
-            Utf8,
-            /// Two bytes per character, little-endian (wchar_t / L"" on Windows).
-            Utf16le
-        };
-
-        /**
-         * @enum XrefReturn
-         * @brief What a resolved string cross-reference returns.
-         */
-        enum class XrefReturn : std::uint8_t
-        {
-            /// Exact address of the instruction that loads the string.
-            ReferencingInstruction,
-            /// Best-effort prologue back-scan from the instruction (heuristic).
-            EnclosingFunction,
-            /**
-             * @brief Address of the global data slot a `mov [rip+slot], reg` stores the loaded string pointer into.
-             * @details Applies when the unique reference is a `lea reg, [rip+string]` shortly followed by that store.
-             *          Resolves a cached global string pointer rather than the load site. Reports @ref
-             *          StringXrefError::StoreNotFound when no such store follows the reference.
-             */
-            StringPointerSlot
-        };
 
         /**
          * @enum StringXrefError

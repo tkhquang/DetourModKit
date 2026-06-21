@@ -1,11 +1,13 @@
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <span>
 #include <stop_token>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -4199,3 +4201,400 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     EXPECT_TRUE(event_payload_ok);
 }
 #endif // _MSC_VER
+
+// --- Tests for the name/string resilience tiers (ResolveMode::RttiVtable / StringXref) ---
+
+namespace
+{
+    // Synthetic MSVC x64 RTTI layout, mirroring the build_synth fixture in tests/test_rtti_reverse.cpp. The cascade's
+    // RttiVtable tier resolves through Rtti::vtable_for_type, whose COL prelude validates each candidate against the
+    // real owning module (its pSelf RVA must reconstruct the owning image base), so the synthetic COL / TypeDescriptor
+    // / vtable must live in the test executable's own data segment. s_cas_rtti_pool provides that storage;
+    // cas_rtti_range() is a tight scope over the bytes written so far, so a unit test sweeps only the fixture, not the
+    // whole exe.
+    constexpr std::size_t CAS_RTTI_BUF_SIZE = 4096;
+    constexpr std::size_t CAS_RTTI_COL_OFFSET = 256;
+    constexpr std::size_t CAS_RTTI_TD_OFFSET = CAS_RTTI_COL_OFFSET + 24; // COL is 24 bytes
+    constexpr std::size_t CAS_RTTI_TD_NAME_OFFSET = CAS_RTTI_TD_OFFSET + 16;
+    constexpr std::size_t CAS_RTTI_COL_PTR_OFFSET = 2048; // the vtable[-1] meta-slot
+    constexpr std::size_t CAS_RTTI_VTABLE_OFFSET = CAS_RTTI_COL_PTR_OFFSET + 8;
+
+    constexpr std::size_t CAS_RTTI_POOL_FIXTURES = 6;
+    alignas(8) std::array<std::byte, CAS_RTTI_BUF_SIZE * CAS_RTTI_POOL_FIXTURES> s_cas_rtti_pool{};
+    std::size_t s_cas_rtti_used = 0;
+
+    void cas_rtti_reset() noexcept
+    {
+        s_cas_rtti_used = 0;
+    }
+
+    template <typename T> void cas_rtti_write(std::byte *buf, std::size_t off, const T &value) noexcept
+    {
+        std::memcpy(buf + off, &value, sizeof(T));
+    }
+
+    // Builds one synthetic COL/TypeDescriptor/vtable carrying @p name at sub-object offset @p col_offset and returns
+    // the synthetic vtable address (0 on pool exhaustion or a sub-image-base data segment).
+    [[nodiscard]] std::uintptr_t cas_build_synth_vtable(std::string_view name, std::uint32_t col_offset) noexcept
+    {
+        if (s_cas_rtti_used + CAS_RTTI_BUF_SIZE > s_cas_rtti_pool.size())
+        {
+            return 0;
+        }
+        std::byte *buf = s_cas_rtti_pool.data() + s_cas_rtti_used;
+        s_cas_rtti_used += CAS_RTTI_BUF_SIZE;
+        std::memset(buf, 0, CAS_RTTI_BUF_SIZE);
+
+        const std::uintptr_t exe_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+        const std::uintptr_t buf_base = reinterpret_cast<std::uintptr_t>(buf);
+        if (buf_base < exe_base)
+        {
+            return 0;
+        }
+        const std::uintptr_t buf_rva = buf_base - exe_base;
+
+        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 0, 1);          // signature (x64)
+        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 4, col_offset); // offset in complete object
+        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 8, 0);          // cd_offset
+        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 12,
+                                      static_cast<std::uint32_t>(buf_rva + CAS_RTTI_TD_OFFSET)); // p_type_descriptor
+        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 16, 0);                         // p_class_descriptor
+        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 20,
+                                      static_cast<std::uint32_t>(buf_rva + CAS_RTTI_COL_OFFSET)); // p_self
+
+        const std::size_t max_name = CAS_RTTI_COL_PTR_OFFSET - CAS_RTTI_TD_NAME_OFFSET - 1;
+        const std::size_t name_len = name.size() < max_name ? name.size() : max_name;
+        std::memcpy(buf + CAS_RTTI_TD_NAME_OFFSET, name.data(), name_len);
+        buf[CAS_RTTI_TD_NAME_OFFSET + name_len] = std::byte{0};
+
+        const std::uintptr_t col_addr = buf_base + CAS_RTTI_COL_OFFSET;
+        cas_rtti_write<std::uintptr_t>(buf, CAS_RTTI_COL_PTR_OFFSET, col_addr);
+
+        return buf_base + CAS_RTTI_VTABLE_OFFSET;
+    }
+
+    // Plants a 16-byte signature into a fresh pool buffer (so it shares the module range with the synthetic vtables)
+    // and returns its address; the matching AOB is written to @p aob_out. Used as the byte fallback tier below an
+    // ambiguous name candidate. Returns 0 on pool exhaustion.
+    [[nodiscard]] std::uintptr_t cas_plant_pool_signature(std::uint8_t seed, std::string &aob_out) noexcept
+    {
+        if (s_cas_rtti_used + CAS_RTTI_BUF_SIZE > s_cas_rtti_pool.size())
+        {
+            return 0;
+        }
+        std::byte *buf = s_cas_rtti_pool.data() + s_cas_rtti_used;
+        s_cas_rtti_used += CAS_RTTI_BUF_SIZE;
+        std::memset(buf, 0, CAS_RTTI_BUF_SIZE);
+        constexpr std::size_t plant_off = 512;
+        aob_out = write_signature(buf + plant_off, 16, seed);
+        return reinterpret_cast<std::uintptr_t>(buf + plant_off);
+    }
+
+    [[nodiscard]] Memory::ModuleRange cas_rtti_range() noexcept
+    {
+        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_cas_rtti_pool.data());
+        return Memory::ModuleRange{base, base + s_cas_rtti_used};
+    }
+
+    // A committed RWX page used as a synthetic module image for the StringXref tier, mirroring the SyntheticImage
+    // fixture in tests/test_string_xref.cpp. find_string_xref scans readable pages for the literal (phase 1) and
+    // execute-readable pages for the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both, so one page hosts the
+    // literal, its RIP-relative reference, and any byte fallback signature, with the ModuleRange spanning exactly it.
+    class CascadeStringImage
+    {
+    public:
+        CascadeStringImage()
+        {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            m_size = si.dwPageSize;
+            m_base = static_cast<std::uint8_t *>(
+                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        }
+
+        ~CascadeStringImage() noexcept
+        {
+            if (m_base)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        CascadeStringImage(const CascadeStringImage &) = delete;
+        CascadeStringImage &operator=(const CascadeStringImage &) = delete;
+        CascadeStringImage(CascadeStringImage &&) = delete;
+        CascadeStringImage &operator=(CascadeStringImage &&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+
+        [[nodiscard]] std::byte *bytes(std::size_t off = 0) const noexcept
+        {
+            if (m_base == nullptr)
+            {
+                return nullptr;
+            }
+            return reinterpret_cast<std::byte *>(m_base + off);
+        }
+
+        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base) + off;
+        }
+
+        void write(std::size_t off, const void *data, std::size_t n) noexcept { std::memcpy(m_base + off, data, n); }
+
+        // Plants `48 <opcode> 05 <disp32>` (a REX.W RIP-relative lea/mov into rax) at instr_off whose computed target
+        // is target_off. opcode 0x8D is lea, the canonical string-load shape the narrow phase-2 scan recognizes.
+        void plant_rip_load(std::size_t instr_off, std::size_t target_off, std::uint8_t opcode) noexcept
+        {
+            std::uint8_t *p = m_base + instr_off;
+            p[0] = 0x48; // REX.W
+            p[1] = opcode;
+            p[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
+            const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
+            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
+            std::memcpy(p + 3, &disp, sizeof(disp));
+        }
+
+        [[nodiscard]] Memory::ModuleRange range() const noexcept
+        {
+            if (m_base == nullptr)
+            {
+                return {};
+            }
+            const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(m_base);
+            return Memory::ModuleRange{base, base + m_size};
+        }
+
+    private:
+        std::uint8_t *m_base = nullptr;
+        std::size_t m_size = 0;
+    };
+} // namespace
+
+// The RttiVtable tier resolves a candidate whose pattern is an MSVC mangled name through Rtti::vtable_for_type, scoped
+// to the cascade's module range. The branch lands ahead of parse_aob (the name is not an AOB), so the strongest tier
+// actually fires instead of degrading to a parse-warning skip.
+TEST(ScannerModuleCascade, RttiVtableResolvesInModuleRange)
+{
+    ASSERT_TRUE(Memory::init_cache());
+    cas_rtti_reset();
+
+    const std::uintptr_t vt = cas_build_synth_vtable(".?AVCasRttiHit@@", 0);
+    ASSERT_NE(vt, 0u);
+
+    Scanner::AddrCandidate cands[] = {
+        {"CasRttiHit", ".?AVCasRttiHit@@", Scanner::ResolveMode::RttiVtable},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "rtti-hit", cas_rtti_range());
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, vt);
+    EXPECT_EQ(hit->winning_name, std::string_view{"CasRttiHit"});
+}
+
+// vtable_for_type fails closed on an ambiguous name (two distinct primary vtables share it), so the RttiVtable tier
+// falls through to the byte AOB tier below it. The uniqueness is enforced by the backend, not by the byte-mode
+// require_unique rescan, which the new modes never run.
+TEST(ScannerModuleCascade, AmbiguousRttiNameFallsThroughToByteCandidate)
+{
+    ASSERT_TRUE(Memory::init_cache());
+    cas_rtti_reset();
+
+    ASSERT_NE(cas_build_synth_vtable(".?AVCasRttiDup@@", 0), 0u);
+    ASSERT_NE(cas_build_synth_vtable(".?AVCasRttiDup@@", 0), 0u);
+
+    std::string aob;
+    const std::uintptr_t sig_addr = cas_plant_pool_signature(0x4D, aob);
+    ASSERT_NE(sig_addr, 0u);
+
+    Scanner::AddrCandidate cands[] = {
+        {"CasRttiDup", ".?AVCasRttiDup@@", Scanner::ResolveMode::RttiVtable},
+        {"byte-fallback", aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "rtti-ambiguous", cas_rtti_range());
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, sig_addr);
+    EXPECT_EQ(hit->winning_name, std::string_view{"byte-fallback"});
+}
+
+// A cascade whose only candidate is a missing RttiVtable name returns NoMatch, not AllPatternsInvalid: the branch marks
+// the cascade as having seen a valid non-byte candidate, so the "every byte pattern failed to parse" diagnostic is
+// never reached for a name/string-only table.
+TEST(ScannerModuleCascade, SoleMissingRttiVtableReturnsNoMatchNotInvalid)
+{
+    ASSERT_TRUE(Memory::init_cache());
+    cas_rtti_reset();
+
+    // Plant an unrelated fixture so the pool range is non-empty, then resolve a name that does not exist.
+    ASSERT_NE(cas_build_synth_vtable(".?AVCasRttiPresent@@", 0), 0u);
+
+    Scanner::AddrCandidate cands[] = {
+        {"absent", ".?AVCasRttiAbsentNeverLinked@@", Scanner::ResolveMode::RttiVtable},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "rtti-absent", cas_rtti_range());
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+}
+
+// The StringXref tier anchors on an immutable literal and resolves its unique RIP-relative reference through
+// find_string_xref, scoped to the cascade's module range. The branch lands ahead of parse_aob (the literal is not an
+// AOB), and the default ReferencingInstruction return mode yields the load-site address.
+TEST(ScannerModuleCascade, StringXrefResolvesReferenceInModuleRange)
+{
+    ASSERT_TRUE(Memory::init_cache());
+
+    CascadeStringImage img;
+    ASSERT_TRUE(img.ok());
+
+    constexpr std::size_t STR_OFF = 0x100;
+    constexpr std::size_t LEA_OFF = 0x040;
+    const char literal[] = "CasStringXrefAnchorLiteral";
+    img.write(STR_OFF, literal, sizeof(literal)); // sizeof includes the NUL terminator
+    img.plant_rip_load(LEA_OFF, STR_OFF, 0x8D);   // lea rax, [rip+str]
+
+    Scanner::AddrCandidate cands[] = {
+        {"anchor", "CasStringXrefAnchorLiteral", Scanner::ResolveMode::StringXref},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-hit", img.range());
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, img.addr(LEA_OFF));
+    EXPECT_EQ(hit->winning_name, std::string_view{"anchor"});
+}
+
+// find_string_xref reports StringAmbiguous when the literal is pooled (planted twice), so the StringXref tier falls
+// through to the byte AOB tier below it. As with RttiVtable, the unique-only behaviour is the backend's, not the
+// byte-mode require_unique rescan.
+TEST(ScannerModuleCascade, AmbiguousStringXrefFallsThroughToByteCandidate)
+{
+    ASSERT_TRUE(Memory::init_cache());
+
+    CascadeStringImage img;
+    ASSERT_TRUE(img.ok());
+
+    const char literal[] = "CasDupStringLiteral";
+    img.write(0x100, literal, sizeof(literal));
+    img.write(0x180, literal, sizeof(literal));
+
+    constexpr std::size_t SIG_OFF = 0x300;
+    const std::string aob = write_signature(img.bytes(SIG_OFF), 16, 0x71);
+
+    Scanner::AddrCandidate cands[] = {
+        {"anchor-dup", "CasDupStringLiteral", Scanner::ResolveMode::StringXref},
+        {"byte-fallback", aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-ambiguous", img.range());
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, img.addr(SIG_OFF));
+    EXPECT_EQ(hit->winning_name, std::string_view{"byte-fallback"});
+}
+
+// A single literal with two valid code references reports AmbiguousReference, so the StringXref tier falls through just
+// like a pooled literal does.
+TEST(ScannerModuleCascade, AmbiguousStringReferenceFallsThroughToByteCandidate)
+{
+    ASSERT_TRUE(Memory::init_cache());
+
+    CascadeStringImage img;
+    ASSERT_TRUE(img.ok());
+
+    constexpr std::size_t STR_OFF = 0x100;
+    constexpr std::size_t LEA_A_OFF = 0x040;
+    constexpr std::size_t LEA_B_OFF = 0x080;
+    const char literal[] = "CasMultiRefStringLiteral";
+    img.write(STR_OFF, literal, sizeof(literal));
+    img.plant_rip_load(LEA_A_OFF, STR_OFF, 0x8D);
+    img.plant_rip_load(LEA_B_OFF, STR_OFF, 0x8D);
+
+    constexpr std::size_t SIG_OFF = 0x300;
+    const std::string aob = write_signature(img.bytes(SIG_OFF), 16, 0x89);
+
+    Scanner::AddrCandidate cands[] = {
+        {"anchor-multiref", "CasMultiRefStringLiteral", Scanner::ResolveMode::StringXref},
+        {"byte-fallback", aob, Scanner::ResolveMode::Direct, 0, 0},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-ambiguous-reference", img.range());
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, img.addr(SIG_OFF));
+    EXPECT_EQ(hit->winning_name, std::string_view{"byte-fallback"});
+}
+
+// A cascade whose only candidate is a missing StringXref literal returns NoMatch, not AllPatternsInvalid, for the same
+// reason as the RttiVtable case: a valid non-byte candidate was attempted.
+TEST(ScannerModuleCascade, SoleMissingStringXrefReturnsNoMatchNotInvalid)
+{
+    ASSERT_TRUE(Memory::init_cache());
+
+    CascadeStringImage img;
+    ASSERT_TRUE(img.ok());
+
+    // No literal planted: phase 1 reports StringNotFound.
+    Scanner::AddrCandidate cands[] = {
+        {"absent", "CasAbsentLiteralNeverPlanted", Scanner::ResolveMode::StringXref},
+    };
+    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-absent", img.range());
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
+}
+
+// The prologue-recovery fallback rewrites only ResolveMode::Direct rows. Name/string rows that miss on the happy path
+// are skipped unchanged by the fallback pass, so the Direct row's hooked E9 prologue is the only one rebuilt and
+// recovered. This pins that the new tiers compose with prologue recovery without special-casing.
+TEST(ScannerModuleCascade, PrologueFallbackSkipsNameStringRowsAndRewritesDirect)
+{
+    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
+
+    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
+    if (region.get() == nullptr)
+    {
+        GTEST_SKIP() << "no free executable region within rel32 of the test image";
+    }
+    std::memset(region.get(), 0xCC, 0x1000);
+
+    constexpr std::size_t PLANT_OFFSET = 0x200;
+    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
+    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
+    ASSERT_GE(rel, INT32_MIN);
+    ASSERT_LE(rel, INT32_MAX);
+
+    constexpr std::uint8_t TAIL_BYTES[] = {0x6C, 0xA3, 0xD2, 0xE8, 0xFA, 0x2C, 0x4E, 0x60, 0x82, 0x94};
+
+    region.get()[PLANT_OFFSET + 0] = 0xE9;
+    const std::int32_t disp = static_cast<std::int32_t>(rel);
+    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
+    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
+
+    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
+                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
+
+    // The name/string rows miss (no COL or literal lives in this scratch page) and the fallback skips them, so only the
+    // Direct row's hooked prologue is rebuilt as E9 ?? ?? ?? ?? + tail and recovered at the planted site.
+    Scanner::AddrCandidate cands[] = {
+        {"name-tier", ".?AVNeverInThisScratchPage@@", Scanner::ResolveMode::RttiVtable},
+        {"string-tier", "NeverInThisScratchPageLiteral", Scanner::ResolveMode::StringXref},
+        {"hooked", "48 89 5C 24 08 6C A3 D2 E8 FA 2C 4E 60 82 94", Scanner::ResolveMode::Direct, 0, 0},
+    };
+
+    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "skip-name-string", range);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address, match_site);
+    EXPECT_EQ(hit->winning_name, std::string_view{"hooked"});
+}
+
+// The four xref_* facet fields are appended to AddrCandidate and defaulted, so every pre-existing positional aggregate
+// initializer keeps compiling and the new fields take their StringRefQuery-mirroring defaults. Verified at compile
+// time.
+TEST(ScannerCascade, PositionalAggregateInitStillCompiles)
+{
+    constexpr Scanner::AddrCandidate five{"n", "48 8B", Scanner::ResolveMode::RipRelative, 3, 7};
+    static_assert(five.disp_offset == 3 && five.instr_end_offset == 7);
+    static_assert(five.require_unique);
+    static_assert(five.xref_encoding == Scanner::StringEncoding::Utf8);
+    static_assert(five.xref_return == Scanner::XrefReturn::ReferencingInstruction);
+    static_assert(five.xref_require_terminator);
+    static_assert(!five.xref_broad_match);
+
+    constexpr Scanner::AddrCandidate six{"n", "90", Scanner::ResolveMode::Direct, 0, 0, false};
+    static_assert(!six.require_unique);
+
+    SUCCEED();
+}
