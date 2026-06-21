@@ -81,7 +81,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
   - Comma-separated independent combos (e.g., `F3,Gamepad_LT+Gamepad_B`)
   - Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats
   - Opt-out sentinels: an empty value or the literal `NONE` (case-insensitive, whole-string only) leaves the binding unbound silently. A non-empty value whose every token fails to parse is logged at WARNING level naming the binding and the offending raw string.
-- Convenience helpers: `register_log_level` (parses an INI string into a `Logger::set_log_level` call) and `register_atomic<T>` for `int`/`bool`/`float` (writes the parsed value into a caller-supplied `std::atomic<T>` with `memory_order_relaxed`)
+- Convenience helpers: `register_log_level` (parses an INI string into a `Logger::set_log_level` call) and `register_atomic<T>` for `int`/`bool`/`float` (writes the parsed value into a caller-supplied `std::atomic<T>` with `memory_order_relaxed`; the 4-argument overload uses the atomic's current value as the registration default)
 - **Hot-reload** (see [Config Hot-Reload Guide](docs/config-hot-reload/README.md)):
   - `Config::reload()` re-runs every registered setter against the last-loaded INI without touching registrations; skips setters when the on-disk bytes are byte-identical to the last load (FNV-1a content hash)
   - `Config::enable_auto_reload()` starts a background `ConfigWatcher` (`config_watcher.hpp`) that debounces editor save-flurries and triggers `reload()` automatically; returns an `AutoReloadStatus` enum indicating outcome
@@ -301,6 +301,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - Named key resolution uses binary search for efficient lookup
 - `register_press` and `register_hold` accept `KeyComboList` directly for zero-boilerplate binding of config-parsed key combos
 - Live registration: `register_press` / `register_hold` append bindings to a running poller, and `clear_bindings()` / `remove_binding_by_name()` drop bindings without stopping the poll thread, so consumers can re-arm input on hot-reload without a full restart
+- `Config::register_press_combo` / `Config::register_hold_combo` fuse an INI combo item, the matching `InputManager::register_press` / `register_hold` binding, automatic rebind on `reload()`, and an `InputBindingGuard` cancellation token into one call. The hold variant's guard synthesizes a single balancing `on_state_change(false)` when cancelled mid-hold, so tearing a hold down cannot strand the consumer in the held state
+- Both combo registrars take an optional per-binding `consume` facet: pass `consume` to register a `"<ini_key>.Consume"` bool inline (wired to `set_consume`) instead of a separate `register_consume_flag` call. `std::nullopt` (the default) registers no extra key and preserves the prior behavior exactly; suppression honors the same gamepad-digital + mouse-wheel scope noted above, so a `.Consume` key on a keyboard-only binding is inert
 
 </details>
 

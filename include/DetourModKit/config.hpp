@@ -9,8 +9,10 @@
 #include <concepts>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace DetourModKit
@@ -78,14 +80,23 @@ namespace DetourModKit
 
         /**
          * @class InputBindingGuard
-         * @brief RAII cancellation token for bindings registered via register_press_combo().
+         * @brief RAII cancellation token for bindings registered via register_press_combo() / register_hold_combo().
          * @details The guard owns a shared atomic flag that gates the user callback. On destruction (or explicit
-         *          release()) the flag is cleared and subsequent key events become no-ops. The underlying InputManager
-         *          binding remains registered; it is only torn down by InputManager::shutdown() or
+         *          release()) the flag is cleared and subsequent input events become no-ops. The underlying
+         *          InputManager binding remains registered; it is only torn down by InputManager::shutdown() or
          *          DMK_Shutdown().
          *
-         *          Non-copyable, movable. Moving transfers ownership of the cancellation flag; the moved-from guard
-         *          becomes inert.
+         *          A hold-combo guard additionally carries an optional one-shot release action. A hold callback has
+         *          lingering state -- the consumer is told "held" (true) until told "released" (false) -- so simply
+         *          gating the callback off mid-hold would strand the consumer in the held state. The release action
+         *          synthesizes a single balancing on_state_change(false) when a true edge was the last one forwarded.
+         *          A press guard has no such state and carries no action.
+         *
+         *          Non-copyable, movable. Moving transfers ownership of the cancellation flag and the release action;
+         *          the moved-from guard becomes inert.
+         * @note Setup/control-plane only for hold guards: release() (and therefore the destructor) may invoke the hold
+         *       release callback, so destroy a hold guard from init/shutdown or a worker thread, never from inside an
+         *       input callback running on a game thread.
          */
         class InputBindingGuard
         {
@@ -96,14 +107,30 @@ namespace DetourModKit
             {
             }
 
+            /**
+             * @brief Constructs a guard that also runs @p on_release once when the binding is cancelled.
+             * @details Used by the hold-combo fusion to synthesize the balancing on_state_change(false). The action is
+             *          invoked under this guard's noexcept teardown; any exception it raises is caught and logged
+             *          best-effort, never propagated.
+             */
+            InputBindingGuard(std::string name, std::shared_ptr<std::atomic<bool>> enabled,
+                              std::function<void()> on_release) noexcept
+                : m_name(std::move(name)), m_enabled(std::move(enabled)), m_on_release(std::move(on_release))
+            {
+            }
+
             ~InputBindingGuard() noexcept { release(); }
 
             InputBindingGuard(const InputBindingGuard &) = delete;
             InputBindingGuard &operator=(const InputBindingGuard &) = delete;
 
             InputBindingGuard(InputBindingGuard &&other) noexcept
-                : m_name(std::move(other.m_name)), m_enabled(std::move(other.m_enabled))
+                : m_name(std::move(other.m_name)), m_enabled(std::move(other.m_enabled)),
+                  m_on_release(std::move(other.m_on_release))
             {
+                // A moved-from std::function is left in a valid-but-unspecified state; null it explicitly so the
+                // moved-from guard's release() cannot re-run the action this guard now owns.
+                other.m_on_release = nullptr;
             }
 
             InputBindingGuard &operator=(InputBindingGuard &&other) noexcept
@@ -113,12 +140,14 @@ namespace DetourModKit
                     release();
                     m_name = std::move(other.m_name);
                     m_enabled = std::move(other.m_enabled);
+                    m_on_release = std::move(other.m_on_release);
+                    other.m_on_release = nullptr;
                 }
                 return *this;
             }
 
             /**
-             * @brief Disables the binding's callback. Idempotent.
+             * @brief Disables the binding's callback, then runs the release action once if present. Idempotent.
              */
             void release() noexcept
             {
@@ -126,6 +155,23 @@ namespace DetourModKit
                 {
                     m_enabled->store(false, std::memory_order_release);
                     m_enabled.reset();
+                }
+                // Run the optional release action exactly once. std::exchange clears the member first so a repeated or
+                // re-entrant release() cannot double-fire it, and the catch keeps this noexcept teardown honest even
+                // though the action may invoke a user-supplied hold callback.
+                if (m_on_release)
+                {
+                    const std::function<void()> action = std::exchange(m_on_release, nullptr);
+                    try
+                    {
+                        action();
+                    }
+                    catch (...)
+                    {
+                        (void)Logger::get_instance().log_noexcept(
+                            LogLevel::Error,
+                            "InputBindingGuard: hold release action threw; suppressed in noexcept teardown");
+                    }
                 }
             }
 
@@ -145,6 +191,9 @@ namespace DetourModKit
         private:
             std::string m_name;
             std::shared_ptr<std::atomic<bool>> m_enabled;
+            // Optional one-shot action run on release(); empty for press bindings, set by the hold-combo fusion to
+            // synthesize the balancing on_state_change(false) so a cancelled hold cannot strand the consumer as held.
+            std::function<void()> m_on_release;
         };
 
         /**
@@ -227,6 +276,7 @@ namespace DetourModKit
          * @param log_key_name Human-readable name shown in log output.
          * @param out Atomic destination updated on every successful parse.
          * @param default_value Value applied when the INI key is missing.
+         * @note Setup/control-plane only: registration may allocate and updates the Config registry.
          */
         // A single constrained template rather than explicit specializations:
         // specializing a function template is discouraged (Core Guidelines
@@ -256,6 +306,28 @@ namespace DetourModKit
                     section, ini_key, log_key_name, [&out](float v) { out.store(v, std::memory_order_relaxed); },
                     default_value);
             }
+        }
+
+        /**
+         * @brief Registers an atomic-backed INI item using the atomic's current value as the default.
+         * @details Convenience overload for the supported atomic scalar set: int, bool, and float. The registration
+         *          default is sampled once from @p out with std::memory_order_relaxed at registration time, then the
+         *          matching typed registration stores parsed values back to @p out with relaxed ordering on every
+         *          load() / reload(). Initialize the atomic deliberately before calling this overload; an accidental
+         *          default-initialized value becomes the INI fallback.
+         * @tparam T One of int, bool, float.
+         * @param section INI section name.
+         * @param ini_key INI key name.
+         * @param log_key_name Human-readable name shown in log output.
+         * @param out Atomic destination updated on every successful parse and used as the registration default.
+         * @note Setup/control-plane only: registration may allocate and updates the Config registry.
+         */
+        template <typename T>
+            requires(std::same_as<T, int> || std::same_as<T, bool> || std::same_as<T, float>)
+        void register_atomic(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
+                             std::atomic<T> &out)
+        {
+            register_atomic<T>(section, ini_key, log_key_name, out, out.load(std::memory_order_relaxed));
         }
 
         /**
@@ -312,13 +384,56 @@ namespace DetourModKit
          * @param input_binding_name InputManager binding name (must be unique).
          * @param on_press User callback fired on key-down edge.
          * @param default_value Default combo string (same format as register_key_combo).
+         * @param consume Optional per-binding input-suppression facet. std::nullopt (default) registers no extra INI
+         *                key and preserves the historic behavior exactly. A value registers a bool item named
+         *                "<ini_key>.Consume" defaulting to that value and wired to InputManager::set_consume on this
+         *                binding, so the user can toggle suppression from the INI file.
          * @return InputBindingGuard RAII cancellation token for the callback.
+         * @note Suppression via @p consume is honored only for digital gamepad buttons and the mouse wheel, never for
+         *       keyboard keys, mouse buttons, or analog axes (see InputBinding::consume). A "<ini_key>.Consume" key on
+         *       a keyboard-only binding is therefore inert.
          */
-        [[nodiscard]] InputBindingGuard register_press_combo(std::string_view section, std::string_view ini_key,
-                                                             std::string_view log_name,
-                                                             std::string_view input_binding_name,
-                                                             std::function<void()> on_press,
-                                                             std::string_view default_value);
+        [[nodiscard]] InputBindingGuard
+        register_press_combo(std::string_view section, std::string_view ini_key, std::string_view log_name,
+                             std::string_view input_binding_name, std::function<void()> on_press,
+                             std::string_view default_value, std::optional<bool> consume = std::nullopt);
+
+        /**
+         * @brief Registers a key combo INI item and wires it to InputManager as a hold binding.
+         * @details The hold-mode mirror of register_press_combo(). Fuses register_key_combo() with
+         *          InputManager::register_hold(): the binding is created with the parsed default combo, and on each
+         *          subsequent load() the setter invokes InputManager::update_binding_combos() so the bound keys and
+         *          modifiers pick up the INI-sourced value without re-registering the binding. @p on_state_change fires
+         *          with true on the press edge (any listed input pressed, all modifiers held) and false on the release
+         *          edge.
+         *
+         *          The returned guard cancels the callback when released, and -- because a hold carries lingering
+         *          state -- synthesizes a single balancing on_state_change(false) if the binding was held at the moment
+         *          of cancellation, so a cancelled hold cannot strand the consumer in the held state. That synthesis is
+         *          serialized against any in-flight callback, fires at most once, and never re-enters the callback
+         *          while it is on the stack (see InputBindingGuard).
+         *
+         *          The "NONE"/empty opt-out sentinels, the typo WARNING, and the before/after-start() semantics all
+         *          match register_press_combo().
+         * @param section INI section name.
+         * @param ini_key INI key name.
+         * @param log_name Human-readable name echoed by the config logger and in the typo WARNING.
+         * @param input_binding_name InputManager binding name (must be unique).
+         * @param on_state_change User callback fired with the hold state (true = held, false = released).
+         * @param default_value Default combo string (same format as register_key_combo).
+         * @param consume Optional per-binding input-suppression facet. std::nullopt (default) registers no extra INI
+         *                key. A value registers a bool item named "<ini_key>.Consume" defaulting to that value and
+         *                wired to InputManager::set_consume on this binding.
+         * @return InputBindingGuard RAII cancellation token for the callback; destroying it may synthesize the final
+         *         on_state_change(false), so treat it as setup/control-plane only (see the class note).
+         * @note Suppression via @p consume is honored only for digital gamepad buttons and the mouse wheel, never for
+         *       keyboard keys, mouse buttons, or analog axes (see InputBinding::consume). A "<ini_key>.Consume" key on
+         *       a keyboard-only binding is therefore inert.
+         */
+        [[nodiscard]] InputBindingGuard
+        register_hold_combo(std::string_view section, std::string_view ini_key, std::string_view log_name,
+                            std::string_view input_binding_name, std::function<void(bool)> on_state_change,
+                            std::string_view default_value, std::optional<bool> consume = std::nullopt);
 
         /**
          * @brief Registers a boolean INI item that toggles input suppression for a binding.
