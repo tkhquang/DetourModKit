@@ -66,7 +66,7 @@ namespace
             : base(VirtualAlloc(nullptr, bytes, MEM_COMMIT | MEM_RESERVE, protect)), size(bytes)
         {
         }
-        ~CommittedPage()
+        ~CommittedPage() noexcept
         {
             if (base != nullptr)
             {
@@ -75,6 +75,8 @@ namespace
         }
         CommittedPage(const CommittedPage &) = delete;
         CommittedPage &operator=(const CommittedPage &) = delete;
+        CommittedPage(CommittedPage &&) = delete;
+        CommittedPage &operator=(CommittedPage &&) = delete;
 
         [[nodiscard]] std::byte *bytes() const noexcept { return reinterpret_cast<std::byte *>(base); }
     };
@@ -501,4 +503,57 @@ TEST(ScannerBatchTest, CascadeBatchWorkerCountYieldsIdenticalResults)
             EXPECT_EQ(results[i]->winning_name, labels[i]) << "workers=" << workers << " item=" << i;
         }
     }
+}
+
+// A CascadeRequest carrying a name/string resilience tier resolves identically through the fork-join batch path and the
+// serial resolver, confirming resolve_cascade_batch uses the same mode dispatch as the serial path. StringXref is the
+// representative tier: find_string_xref is the non-noexcept backend, so this also exercises that the throwing dispatch
+// runs safely on a worker thread. The fixture is an RWX page holding one literal and one RIP-relative lea reference to
+// it.
+TEST(ScannerBatchTest, CascadeBatchResolvesStringXrefTierLikeSerial)
+{
+    // No Memory::init_cache() by design: find_string_xref installs its fault guard lazily (MinGW) or uses SEH (MSVC),
+    // so it needs no cache warm-up -- the dedicated find_string_xref suite (test_string_xref.cpp) and the byte-mode
+    // cascade-batch tests above run the same fork-join read path without it.
+    // Zero-fill: a 0x00 byte both terminates the planted literal and never starts a RIP-relative load.
+    CommittedPage image(4096, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(image.base, nullptr);
+    std::memset(image.bytes(), 0x00, image.size);
+
+    constexpr std::size_t STR_OFF = 0x100;
+    constexpr std::size_t LEA_OFF = 0x040;
+    const char literal[] = "BatchStringXrefAnchorLiteral";
+    std::memcpy(image.bytes() + STR_OFF, literal, sizeof(literal)); // sizeof includes the NUL terminator
+
+    // lea rax, [rip+str]: 48 8D 05 <disp32>, the canonical narrow-scan string-load shape.
+    auto *insn = reinterpret_cast<std::uint8_t *>(image.bytes() + LEA_OFF);
+    insn[0] = 0x48;
+    insn[1] = 0x8D;
+    insn[2] = 0x05;
+    const auto base = reinterpret_cast<std::uintptr_t>(image.base);
+    const auto next = static_cast<std::int64_t>(base + LEA_OFF + 7);
+    const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(base + STR_OFF) - next);
+    std::memcpy(insn + 3, &disp, sizeof(disp));
+
+    const Memory::ModuleRange range{base, base + image.size};
+
+    Scanner::AddrCandidate cands[] = {
+        {"string-tier", "BatchStringXrefAnchorLiteral", Scanner::ResolveMode::StringXref},
+    };
+
+    Scanner::CascadeRequest request{};
+    request.candidates = cands;
+    request.label = "string-tier";
+    request.range = range;
+
+    const std::vector<Scanner::CascadeRequest> requests{request};
+    const auto results = Scanner::resolve_cascade_batch(requests, 2);
+    ASSERT_EQ(results.size(), 1u);
+
+    const auto serial = Scanner::resolve_cascade_in_module(cands, "string-tier", range);
+    ASSERT_TRUE(serial.has_value());
+    ASSERT_TRUE(results[0].has_value());
+    EXPECT_EQ(results[0]->address, serial->address);
+    EXPECT_EQ(results[0]->winning_name, serial->winning_name);
+    EXPECT_EQ(results[0]->address, base + LEA_OFF);
 }

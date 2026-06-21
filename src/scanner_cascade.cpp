@@ -12,6 +12,7 @@
 
 #include "DetourModKit/scanner.hpp"
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/rtti.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/format.hpp"
 #include "x86_decode.hpp"
@@ -73,6 +74,38 @@ namespace DetourModKit
                 return std::nullopt;
             }
             return resolved;
+        }
+
+        // Resolves a name/string tier through its backend and lets misses or backend ambiguity fall through to the next
+        // candidate. This helper is intentionally not noexcept: the string-xref path may allocate while building its
+        // scan windows, and throwing out of the byte-mode noexcept helper would terminate the host.
+        std::optional<std::uintptr_t> resolve_named_candidate(const DetourModKit::Scanner::AddrCandidate &candidate,
+                                                              DetourModKit::Memory::ModuleRange range)
+        {
+            using DetourModKit::Scanner::ResolveMode;
+            if (candidate.mode == ResolveMode::RttiVtable)
+            {
+                // candidate.pattern is the MSVC mangled type name; the primary (COL.offset == 0) vtable is returned.
+                return DetourModKit::Rtti::vtable_for_type(candidate.pattern, range);
+            }
+            // ResolveMode::StringXref: anchor on the immutable literal, then resolve its unique RIP-relative reference.
+            // Build the query with designated initializers, not positional brace-init, so a future StringRefQuery field
+            // reorder cannot silently misassign a facet.
+            const DetourModKit::Scanner::StringRefQuery query{
+                .text = candidate.pattern,
+                .encoding = candidate.xref_encoding,
+                .require_terminator = candidate.xref_require_terminator,
+                .return_mode = candidate.xref_return,
+                .broad_match = candidate.xref_broad_match,
+            };
+            const auto resolved = DetourModKit::Scanner::find_string_xref(query, range);
+            if (!resolved)
+            {
+                // Any StringXrefError is a fall-through, never a hit at address 0; the ambiguity variants are exactly
+                // the unique-only contract the name/string tiers promise.
+                return std::nullopt;
+            }
+            return *resolved;
         }
 
         // Minimum number of literal (non-wildcard) bytes the tail of the pattern must contain after dropping the first
@@ -254,11 +287,38 @@ namespace DetourModKit
                                        bool &all_parse_failed, DetourModKit::Scanner::ScannerKind kind,
                                        std::optional<DetourModKit::Memory::ModuleRange> range = std::nullopt)
         {
+            using DetourModKit::Scanner::ResolveMode;
             DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
             all_parse_failed = true;
             for (std::size_t i = 0; i < candidates.size(); ++i)
             {
                 const auto &candidate = candidates[i];
+
+                // Name/string tiers branch before parse_aob: their pattern field is a mangled type name or literal,
+                // not byte syntax. They are module-scoped signals, so a range-less cascade uses the host image and an
+                // explicit-range cascade passes that image through. Marking the candidate as valid keeps a
+                // name/string-only miss on the NoMatch path; AllPatternsInvalid is reserved for byte rows whose AOB
+                // text cannot parse.
+                if (candidate.mode == ResolveMode::RttiVtable || candidate.mode == ResolveMode::StringXref)
+                {
+                    all_parse_failed = false;
+                    const auto selected_range = range ? *range : DetourModKit::Memory::host_module_range();
+                    const auto resolved = resolve_named_candidate(candidate, selected_range);
+                    if (!resolved)
+                    {
+                        continue;
+                    }
+                    // A module-scoped cascade still bounds the result to its image. Both backends already confine
+                    // their search to selected_range, so for the host-module default (range unset) the result is
+                    // in-image by construction and this check is skipped; it guards only the explicit-range path,
+                    // mirroring the byte-mode contains() gate below.
+                    if (range && !DetourModKit::Memory::contains(*range, *resolved))
+                    {
+                        continue;
+                    }
+                    return CascadeAttempt{*resolved, i, true};
+                }
+
                 auto compiled = DetourModKit::Scanner::parse_aob(candidate.pattern);
                 if (!compiled)
                 {
@@ -329,7 +389,12 @@ namespace DetourModKit
         struct PrologueFallbackResult
         {
             CascadeAttempt attempt{};
+            // True until some Direct candidate yields a usable rebuilt pattern (enough literal tail to scan).
             bool not_applicable{true};
+            // True once any Direct candidate parsed -- i.e. the fallback had a real target to rebuild. Lets finalize
+            // tell "Direct present but tail too short" (PrologueFallbackNotApplicable) from "no Direct candidate at
+            // all" (a plain NoMatch); a name/string/RipRelative-only cascade leaves this false.
+            bool had_fallback_candidate{false};
         };
 
         // Attempts one prologue shape for a single Direct candidate: rebuilds the patched prologue as shape.jump_prefix
@@ -434,6 +499,10 @@ namespace DetourModKit
                 {
                     continue;
                 }
+                // A Direct candidate that parses is a real fallback target, even if its literal tail later proves too
+                // short to rebuild. Recording that lets finalize distinguish "tail too short"
+                // (PrologueFallbackNotApplicable) from "no Direct candidate at all" (a plain NoMatch).
+                out.had_fallback_candidate = true;
                 // Try each recognised inline-hook prologue shape in turn. The first that uniquely recovers an
                 // executable target wins; E9 is tried before FF 25 because it is by far the common case.
                 bool any_applicable = false;
@@ -481,10 +550,10 @@ namespace DetourModKit
             }
             if (all_parse_failed)
             {
-                logger.error("{}: every candidate pattern failed to parse.", label);
+                logger.error("{}: every byte candidate pattern failed to parse.", label);
                 return std::unexpected(ResolveError::AllPatternsInvalid);
             }
-            logger.warning("{}: cascade AOB scan failed (no candidate matched).", label);
+            logger.warning("{}: cascade resolve failed (no candidate matched).", label);
             return std::unexpected(ResolveError::NoMatch);
         }
 
@@ -518,17 +587,20 @@ namespace DetourModKit
             }
             if (all_parse_failed)
             {
-                logger.error("{}: every candidate pattern failed to parse.", label);
+                logger.error("{}: every byte candidate pattern failed to parse.", label);
                 return std::unexpected(ResolveError::AllPatternsInvalid);
             }
-            if (hooked.not_applicable)
+            // PrologueFallbackNotApplicable means a Direct candidate was present to rebuild but its literal tail was
+            // too short -- not "no fallback ran". A cascade of only name/string/RipRelative tiers has no Direct row to
+            // rebuild, so its full miss is a plain NoMatch, not this diagnostic.
+            if (hooked.not_applicable && hooked.had_fallback_candidate)
             {
                 logger.warning(
-                    "{}: cascade AOB scan failed; prologue fallback not applicable (insufficient literal tail bytes).",
+                    "{}: cascade resolve failed; prologue fallback not applicable (insufficient literal tail bytes).",
                     label);
                 return std::unexpected(ResolveError::PrologueFallbackNotApplicable);
             }
-            logger.warning("{}: cascade AOB scan failed (including prologue fallback).", label);
+            logger.warning("{}: cascade resolve failed (including prologue fallback).", label);
             return std::unexpected(ResolveError::NoMatch);
         }
     } // anonymous namespace

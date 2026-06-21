@@ -14,9 +14,10 @@ Practical reference for building, maintaining, and resolving array-of-bytes (AOB
     - 6.2 [API shape](#62-api-shape)
     - 6.3 [Basic usage](#63-basic-usage)
     - 6.4 [Prologue fallback variant](#64-prologue-fallback-variant)
-    - 6.5 [Ordering and logging](#65-ordering-and-logging)
-    - 6.6 [Host-module convenience overloads](#66-host-module-convenience-overloads)
-    - 6.7 [Reading a code constant (read_code_constant)](#67-reading-a-code-constant-read_code_constant)
+    - 6.5 [Name and string resilience tiers](#65-name-and-string-resilience-tiers)
+    - 6.6 [Ordering and logging](#66-ordering-and-logging)
+    - 6.7 [Host-module convenience overloads](#67-host-module-convenience-overloads)
+    - 6.8 [Reading a code constant (read_code_constant)](#68-reading-a-code-constant-read_code_constant)
 7. [Patch-proof patterns (cache, fallback, verify)](#7-patch-proof-patterns-cache-fallback-verify)
 8. [Worked examples](#8-worked-examples)
 9. [DOs and DON'Ts](#9-dos-and-donts)
@@ -481,8 +482,10 @@ Defined in [include/DetourModKit/scanner.hpp](../../include/DetourModKit/scanner
 ```cpp
 enum class ResolveMode : std::uint8_t
 {
-    Direct,     // Returned address = match + disp_offset
-    RipRelative // Read int32 disp at (match + disp_offset); target = match + instr_end_offset + disp
+    Direct,      // Returned address = match + disp_offset
+    RipRelative, // Read int32 disp at (match + disp_offset); target = match + instr_end_offset + disp
+    RttiVtable,  // pattern is an MSVC mangled type name; resolved via Rtti::vtable_for_type
+    StringXref   // pattern is a literal string; resolved via find_string_xref
 };
 
 enum class ScannerKind : std::uint8_t
@@ -494,18 +497,24 @@ enum class ScannerKind : std::uint8_t
 struct AddrCandidate
 {
     std::string_view name;
-    std::string_view pattern;
+    std::string_view pattern;       // AOB for Direct/RipRelative; mangled name for RttiVtable; literal for StringXref
     ResolveMode mode = ResolveMode::Direct;
     std::ptrdiff_t disp_offset = 0;
     std::ptrdiff_t instr_end_offset = 0;
-    bool require_unique = true;     // default: skip this candidate if it matches >1 time
+    bool require_unique = true;     // default: skip this candidate if it matches >1 time (byte modes only)
+
+    // StringXref only; ignored otherwise. Mirror the StringRefQuery defaults.
+    StringEncoding xref_encoding = StringEncoding::Utf8;
+    XrefReturn xref_return = XrefReturn::ReferencingInstruction;
+    bool xref_require_terminator = true;
+    bool xref_broad_match = false;
 };
 
 enum class ResolveError : std::uint8_t
 {
     EmptyCandidates,               // no candidates supplied
-    NoMatch,                       // no candidate matched the scanned regions
-    AllPatternsInvalid,            // every candidate pattern failed to parse
+    NoMatch,                       // no candidate matched the scanned scope
+    AllPatternsInvalid,            // every byte candidate pattern failed to parse
     PrologueFallbackNotApplicable, // prologue fallback pattern too short to be unique
     InvalidRange,                  // supplied module range is invalid
     DecodeFailed,                  // read_code_constant: resolved site did not decode
@@ -599,11 +608,36 @@ There is one guardrail callers must be aware of. The fallback refuses to scan an
 >
 > If your anchor family covers a function that may have been removed or reshaped by a future patch (rather than just inline-hooked by a sibling), prefer `resolve_cascade` (no fallback) as the strict variant; it ships in the same header and treats a full-cascade miss as a hard `ResolveError::NoMatch` without engaging the rewritten-prologue path at all. As a defense in depth, ensure at least one `AddrCandidate` in the cascade anchors **past** the SafetyHook 5-byte displacement window (a mid-body literal-byte landmark in the function), which lets the regular cascade match a sibling-patched site without the fallback ever being needed.
 
-### 6.5 Ordering and logging
+### 6.5 Name and string resilience tiers
+
+A byte AOB is the most brittle anchor on the ladder: it breaks the moment the compiler reorders an instruction or the linker shifts a constant. Two stronger signals survive a patch because the *name* or the *literal* does not move even when the surrounding bytes and addresses do, and both can live directly in an `AddrCandidate` cascade as `ResolveMode` values:
+
+- `ResolveMode::RttiVtable` -- `pattern` is an MSVC mangled type name (e.g. `".?AVMyEngineActor@ns@@"`). The candidate resolves through `Rtti::vtable_for_type`, returning the type's primary (`COL.offset == 0`) vtable.
+- `ResolveMode::StringXref` -- `pattern` is a literal string. The candidate resolves through `find_string_xref`: it anchors on the immutable literal in `.rdata`, then resolves the single RIP-relative reference to it. The four `xref_*` facet fields tune that query (encoding, return mode, terminator match, broad sweep) and mirror the `StringRefQuery` defaults, so a plain row needs only `pattern`.
+
+This lets one ordered table express the natural ladder "try the RTTI name, else the string xref, else the byte AOB" for a single target, resolved by the same machinery and used automatically by `resolve_cascade_batch` and the prologue-fallback resolvers.
+
+```cpp
+static constexpr sc::AddrCandidate k_actor_vtbl[] = {
+    {"MyEngineActor", ".?AVMyEngineActor@ns@@", sc::ResolveMode::RttiVtable},
+    {"MyEngineActor_byteAOB", "48 8D 05 ?? ?? ?? ??", sc::ResolveMode::RipRelative, 3, 7}, // unchanged fallback
+};
+const auto hit = sc::resolve_cascade_in_host_module(k_actor_vtbl, "MyEngineActorVtbl");
+```
+
+Three properties are load-bearing:
+
+- **Scope.** Both backends are module-scoped (an RTTI COL's RVAs are image-base-relative; an in-image string xref is image-scoped). A `*_in_module` / `*_in_host_module` cascade passes its explicit range straight through. The range-less whole-process `resolve_cascade` / `resolve_cascade_with_prologue_fallback` resolve a name/string tier against `Memory::host_module_range()` -- the only meaningful default and the same one both backends use.
+- **Uniqueness is the backend's job.** `require_unique` has no effect for these modes: `Rtti::vtable_for_type` returns nothing on an ambiguous name, and `find_string_xref` returns `StringAmbiguous` / `AmbiguousReference` on a pooled literal or a multiply-referenced one. Both map to "fall through to the next candidate", which is exactly the `require_unique == true` contract, honored by construction without the byte-mode uniqueness rescan.
+- **Prologue fallback ignores them.** The fallback pass only rewrites `ResolveMode::Direct` rows, so a name/string tier is inherently stomp-immune: it either resolved on the happy path or is skipped unchanged. A cascade whose only candidates are missing name/string tiers returns `ResolveError::NoMatch` (a valid candidate was attempted), never `AllPatternsInvalid` (which is reserved for "every byte pattern failed to parse").
+
+The two backends themselves (`Rtti::vtable_for_type` and `find_string_xref`) are documented in full in [rtti-walker.md](rtti-walker.md) and the string-xref tour above; this section only covers expressing them inside a cascade.
+
+### 6.6 Ordering and logging
 
 Put the most-specific candidate first. The cascade returns on the first successful resolution, so an overly-generic pattern placed near the head will shadow tighter patterns further down the list. The `winning_name` on `ResolveHit` tells you which candidate fired; log it or stash it in your mod's telemetry so you can correlate a running session with a specific build of the game after the fact. The cascade also emits a Debug-level log line of the form `"<label> resolved via '<name>' at 0x..."` the first time it succeeds; raise your log level to Debug to capture it for build identification even without explicit caller logging.
 
-### 6.6 Host-module convenience overloads
+### 6.7 Host-module convenience overloads
 
 The overwhelmingly common scope for an injected ASI is "the host EXE." `resolve_cascade_in_host_module` and `resolve_cascade_in_host_module_with_prologue_fallback` are one-line overloads that supply `Memory::host_module_range()` for you, so you stop threading the range through every call site:
 
@@ -613,7 +647,7 @@ const auto hit = sc::resolve_cascade_in_host_module(k_candidates, "weapon_fire")
 
 They return `ResolveError::InvalidRange` if the host module range cannot be determined. Use them **only** when the target code lives in the host EXE. For a game whose logic is in a separate module (an engine DLL loaded by a thin launcher EXE), the host EXE holds none of the target code: resolve that module's range explicitly (`Memory::module_range_for(...)`) and call `resolve_cascade_in_module` instead, or host-scoping will scan the wrong image.
 
-### 6.7 Reading a code constant (`read_code_constant`)
+### 6.8 Reading a code constant (`read_code_constant`)
 
 Sometimes the value a mod needs is not an address but a constant baked into an instruction: an array stride in an `add reg, imm`, a struct displacement in a `movzx [reg + disp]`, a bit position. Hand-reading those immediates every patch is the largest "re-RE every update" bucket. `read_code_constant` is the code-side twin of the RTTI self-heal: declare the instruction site (an AOB cascade that lands **on** the instruction) plus which operand to read, and it decodes the live instruction and returns the current value.
 
