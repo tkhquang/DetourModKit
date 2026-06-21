@@ -636,6 +636,18 @@ namespace DetourModKit::detail
         {
             s_prev_wndproc.store(prev, std::memory_order_release);
         }
+
+        // Drain any notches the wndproc detour latched while no binding owned the wheel. uninstall() drops the consume
+        // flag but leaves the detour live (it may stay layered under a foreign subclass), so it keeps incrementing
+        // s_wheel_count between an unbind and this re-arm. Without this reset the first take_wheel_counts() after a
+        // re-bind would replay that stale backlog as a burst of phantom notches. This is a fresh-install transition
+        // (the idempotent already-installed path returned above), so resetting here cannot discard counts a live
+        // binding is about to consume.
+        for (auto &count : s_wheel_count)
+        {
+            count.store(0, std::memory_order_relaxed);
+        }
+
         s_wndproc_installed.store(true, std::memory_order_release);
         return true;
     }

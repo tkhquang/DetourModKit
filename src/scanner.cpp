@@ -989,6 +989,19 @@ namespace DetourModKit
         return std::unexpected(RipResolveError::PrefixNotFound);
     }
 
+    // Per-thread "the most recently measured sweep window skipped a faulted region" flag. scan_regions_filtered ORs it
+    // true (never clears it) whenever it skips a region that faulted mid-scan, so a faulted sweep is observable to the
+    // cascade layer in its own TU without changing any scan return type. It is thread_local because two threads
+    // scanning concurrently must not see each other's fault state; the cascade clears it before a measurement window
+    // and reads it after, so a stale value from an unrelated earlier scan on the same thread cannot leak into a later
+    // verdict. The flag is advisory accounting for the fail-closed uniqueness check -- it never alters which address a
+    // scan returns.
+    bool &Scanner::detail::scan_incomplete_flag() noexcept
+    {
+        thread_local bool incomplete = false;
+        return incomplete;
+    }
+
     namespace
     {
         // Scan one protection-gated region for the next needed match, decrementing matches_remaining for each non-self
@@ -1035,6 +1048,12 @@ namespace DetourModKit
                                              const Scanner::CompiledPattern &pattern, uintptr_t needle_lo,
                                              uintptr_t needle_hi, size_t &matches_remaining, bool &out_faulted) noexcept
         {
+            // The 64-bit-only contract, asserted locally so the unguarded 32-bit MinGW arm of this function (the bare
+            // #else below, which runs scan_region_for_match with no vectored fault guard) is provably unreachable in
+            // any build that compiles: a 32-bit build fails here at compile time rather than silently shipping a sweep
+            // whose only TOCTOU protection is the per-region VirtualQuery gate.
+            static_assert(sizeof(void *) == 8, "scan_region_guarded requires a 64-bit target: the MinGW fault guard "
+                                               "(run_guarded_region) is x64-only and the 32-bit arm is unguarded.");
             out_faulted = false;
 #ifdef _MSC_VER
             const size_t original_matches_remaining = matches_remaining;
@@ -1138,6 +1157,42 @@ namespace DetourModKit
             bool prev_accepted = false;
             uintptr_t prev_accept_hi = 0;
             uintptr_t run_lo = 0;
+            auto report_faulted_regions = [&]() noexcept
+            {
+                if (faulted_regions == 0)
+                    return;
+
+                // Surface the incomplete-scan state to the cascade layer (its own TU) so a uniqueness / occurrence
+                // count run over a window that skipped a faulted region can fail closed: a hidden match could live in
+                // the skipped bytes, so a count taken here is a lower bound, not a proof. OR-set (never clear) so a
+                // fault in any one of several scans within a caller's measurement window stays observable until the
+                // caller reads and clears it.
+                Scanner::detail::scan_incomplete_flag() = true;
+
+                // Best-effort diagnosis only; the sweep already skipped each faulted region and continued.
+                try
+                {
+                    (void)Logger::get_instance().try_log(
+                        LogLevel::Debug,
+                        "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
+                        faulted_regions);
+                }
+                catch (...)
+                {
+                }
+
+                // Surface the same skipped-region count to subscribers as a typed event. The dispatcher is lazy and can
+                // allocate on first use, so diagnostics must never change the scan result.
+                try
+                {
+                    Diagnostics::scanner_faults().emit_safe(Diagnostics::ScannerFaultEvent{
+                        .faulted_regions = faulted_regions, .window_low = window_lo, .window_high = window_hi});
+                }
+                catch (...)
+                {
+                }
+                faulted_regions = 0;
+            };
 
             while (addr < window_hi && VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)))
             {
@@ -1188,7 +1243,10 @@ namespace DetourModKit
                         const std::byte *result = scan_region_guarded(region_start, scan_size, pattern, needle_lo,
                                                                       needle_hi, matches_remaining, region_faulted);
                         if (result != nullptr)
+                        {
+                            report_faulted_regions();
                             return result;
+                        }
                         if (region_faulted)
                             ++faulted_regions;
                     }
@@ -1207,27 +1265,7 @@ namespace DetourModKit
                 addr = region_end;
             }
 
-            if (faulted_regions > 0)
-            {
-                // Best-effort diagnosis only; the sweep already skipped each faulted region and continued. try_log
-                // keeps this noexcept path honest when the Debug level is enabled.
-                (void)Logger::get_instance().try_log(
-                    LogLevel::Debug,
-                    "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
-                    faulted_regions);
-
-                // Surface the same skipped-region count to subscribers as a typed event. The dispatcher is lazy and can
-                // allocate on first use, so diagnostics must never change the scan result.
-                try
-                {
-                    Diagnostics::scanner_faults().emit_safe(Diagnostics::ScannerFaultEvent{
-                        .faulted_regions = faulted_regions, .window_low = window_lo, .window_high = window_hi});
-                }
-                catch (...)
-                {
-                }
-            }
-
+            report_faulted_regions();
             return nullptr;
         }
 

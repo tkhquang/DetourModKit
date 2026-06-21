@@ -388,7 +388,46 @@ namespace DetourModKit
                 // below instead, because its parse path differs (nullptr INI value handling, combo-list parsing).
                 if constexpr (std::same_as<T, int>)
                 {
-                    current_value = static_cast<int>(ini.GetLongValue(section.c_str(), ini_key.c_str(), default_value));
+                    // SimpleIni's GetLongValue parses into a long, which is 32-bit on this LLP64 target, so a value
+                    // beyond int range is silently saturated by strtol (e.g. "5000000000" becomes INT_MAX) rather than
+                    // rejected. Read the raw string and parse it as a 64-bit integer instead, so an out-of-range or
+                    // non-numeric value falls back to the registered default with a Warning -- mirroring how
+                    // parse_input_code_list rejects a bad token rather than wrapping it. Preserve GetLongValue's base
+                    // rules: 0x-prefixed values are hexadecimal and everything else is decimal (including leading-zero
+                    // values such as "010").
+                    const char *raw = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
+                    if (raw == nullptr)
+                    {
+                        current_value = default_value;
+                    }
+                    else
+                    {
+                        const char *parse_begin = raw;
+                        int base = 10;
+                        if (raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X'))
+                        {
+                            parse_begin = raw + 2;
+                            base = 16;
+                        }
+
+                        errno = 0;
+                        char *end = nullptr;
+                        const long long parsed = std::strtoll(parse_begin, &end, base);
+                        const bool fully_consumed = (end != nullptr && end != parse_begin && *end == '\0');
+                        if (!fully_consumed || errno == ERANGE ||
+                            parsed < static_cast<long long>(std::numeric_limits<int>::min()) ||
+                            parsed > static_cast<long long>(std::numeric_limits<int>::max()))
+                        {
+                            logger.warning("Config: value '{}' for '{}' is not a valid int (non-numeric or out of "
+                                           "range); using default {}.",
+                                           raw, ini_key, default_value);
+                            current_value = default_value;
+                        }
+                        else
+                        {
+                            current_value = static_cast<int>(parsed);
+                        }
+                    }
                 }
                 else if constexpr (std::same_as<T, float>)
                 {
@@ -481,6 +520,17 @@ namespace DetourModKit
         {
             static std::string s_last_loaded_ini_path;
             return s_last_loaded_ini_path;
+        }
+
+        // Tear-free snapshot of the last-loaded INI path. Takes get_config_mutex() itself and returns a copy, so a
+        // caller that only needs to read the path cannot observe a reference torn by a concurrent reload()/load()
+        // mutating the underlying string. Use this instead of get_last_loaded_ini_path() at any read site that is not
+        // already inside a held get_config_mutex() critical section (the mutex is non-recursive). The string copy can
+        // allocate, so this is intentionally not noexcept.
+        [[nodiscard]] std::string snapshot_last_loaded_ini_path()
+        {
+            std::lock_guard<std::mutex> lock(get_config_mutex());
+            return get_last_loaded_ini_path();
         }
 
         // Content hash of the bytes last successfully loaded from the INI file. std::nullopt until the first successful
@@ -1119,9 +1169,25 @@ namespace DetourModKit
 
         // Invoke setter callbacks outside the config mutex -- same deferred
         // pattern as register_*().  Setters may safely call back into Config.
+        // Wrap each call so a single throwing setter cannot prevent the remaining setters from applying the freshly
+        // loaded values, mirroring reload_impl(): the initial load() and a reload() share the same per-setter isolation
+        // so one bad item degrades to a logged warning instead of aborting the whole load. The logger is acquired
+        // outside the config mutex -- a custom Logger sink that re-enters Config cannot AB/BA deadlock here.
+        Logger &setter_logger = Logger::get_instance();
         for (auto &cb : deferred_callbacks)
         {
-            cb();
+            try
+            {
+                cb();
+            }
+            catch (const std::exception &e)
+            {
+                setter_logger.error("Config: load setter threw: {}", e.what());
+            }
+            catch (...)
+            {
+                setter_logger.error("Config: load setter threw unknown exception.");
+            }
         }
     }
 
@@ -1266,11 +1332,7 @@ namespace DetourModKit
     DetourModKit::Config::enable_auto_reload(std::chrono::milliseconds debounce_window,
                                              std::function<void(bool)> on_reload)
     {
-        std::string ini_filename;
-        {
-            std::lock_guard<std::mutex> lock(get_config_mutex());
-            ini_filename = get_last_loaded_ini_path();
-        }
+        const std::string ini_filename = snapshot_last_loaded_ini_path();
 
         Logger &logger = Logger::get_instance();
 

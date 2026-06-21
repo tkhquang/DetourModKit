@@ -49,21 +49,19 @@ namespace DetourModKit
 #if !defined(_MSC_VER) && defined(_WIN64)
             /**
              * @brief Runs @p fn(@p ctx) with the process-wide vectored read guard armed over [@p lo, @p hi).
-             * @details MinGW x64 has no frame-based __try / __except, so a bulk in-place foreign read -- the
-             *          scanner's memchr / SIMD region sweep -- cannot wrap itself in SEH the way the MSVC path
-             *          does. This routes such a read through the same vectored exception handler, thread-local
-             *          guard slot, and drain epoch the seh_read_bytes path uses: the guard is armed for
-             *          [lo, hi), @p fn performs the read, and a guarded read fault (is_guarded_read_fault)
-             *          inside that range is turned into a clean failure (the handler longjmps back) instead of
-             *          terminating the host. @p fn must be a self-contained read with no resources that need
-             *          unwinding, because a guarded fault abandons its frame via __builtin_longjmp without
-             *          running destructors -- exactly the contract the copy-based guard relies on. When the
-             *          handler could not be installed @p fn is run unguarded, the same VirtualQuery-fallback
-             *          posture the byte-copy guard takes (the caller's own readability gate is then the only
-             *          guard).
+             * @details MinGW x64 has no frame-based __try / __except, so a bulk in-place foreign read -- the scanner's
+             *          memchr / SIMD region sweep -- cannot wrap itself in SEH the way the MSVC path does. This routes
+             *          such a read through the same vectored exception handler, thread-local guard slot, and drain
+             *          epoch the seh_read_bytes path uses: the guard is armed for [lo, hi), @p fn performs the read,
+             *          and a guarded read fault (is_guarded_read_fault) inside that range is turned into a clean
+             *          failure (the handler longjmps back) instead of terminating the host. @p fn must be a
+             *          self-contained read with no resources that need unwinding, because a guarded fault abandons its
+             *          frame via __builtin_longjmp without running destructors -- exactly the contract the copy-based
+             *          guard relies on. When the handler could not be installed @p fn is not run; callers treat false
+             *          as a skipped/faulted range and fail uniqueness-sensitive work closed.
              * @param lo First byte of the foreign range @p fn will read.
              * @param hi One past the last byte of that range. An empty or wrapping range (hi <= lo) runs @p fn
-             *           unguarded.
+             *           directly because there is no foreign byte span to guard.
              * @param fn The read to perform; must be noexcept and must not throw.
              * @param ctx Opaque pointer forwarded to @p fn.
              * @return true if @p fn completed without a guarded read fault; false if a fault inside [lo, hi) was

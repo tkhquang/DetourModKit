@@ -572,11 +572,20 @@ namespace DetourModKit
             return cached != 0 ? std::optional<std::uintptr_t>(cached) : std::nullopt;
         }
 
-        // First use: resolve and cache. Concurrent first-callers converge on the same vtable, so a benign
-        // double-resolve needs no lock.
+        // First use (or a retry after an earlier miss): resolve and cache. Concurrent first-callers converge on the
+        // same vtable, so a benign double-resolve needs no lock.
         const auto resolved = vtable_for_type(m_mangled, m_range);
-        m_cached.store(resolved.value_or(0), std::memory_order_relaxed);
-        m_resolved.store(true, std::memory_order_release);
+
+        // Latch only a SUCCESSFUL resolve as permanent. A failed resolve is not cached: the vtable may simply not be
+        // mapped yet (the owning module loads later, or a game patch is mid-relocation), so leaving m_resolved false
+        // lets a subsequent call retry once the type becomes resolvable rather than wedging on a stale miss forever.
+        // The store of m_cached is published with release before m_resolved, so the fast path's acquire-load that sees
+        // m_resolved == true also sees the cached value.
+        if (resolved)
+        {
+            m_cached.store(*resolved, std::memory_order_release);
+            m_resolved.store(true, std::memory_order_release);
+        }
         return resolved;
     }
 

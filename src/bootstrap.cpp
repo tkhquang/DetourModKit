@@ -198,63 +198,83 @@ namespace DetourModKit::Bootstrap
             {
             }
         }
+
+        // The throwing core of on_dll_attach, separated so the public entry point can be noexcept. on_dll_attach is
+        // called from DllMain under the Windows loader lock, where an escaping exception is undefined behavior. Any
+        // throwing step here -- most concretely Logger::configure, which builds std::string / std::wstring for the log
+        // prefix and path and can raise std::bad_alloc -- propagates to the noexcept wrapper, which fails closed.
+        [[nodiscard]] bool32_t attach_core(module_handle_t hMod, const ModInfo &info, std::function<bool()> init_fn,
+                                           std::function<void()> shutdown_fn)
+        {
+            if (s_shutdown_event || s_worker_thread)
+            {
+                return FALSE;
+            }
+
+            s_module = hMod;
+            if (hMod)
+            {
+                DisableThreadLibraryCalls(hMod);
+            }
+
+            if (!is_target_process(info.game_process_name))
+            {
+                s_module = nullptr;
+                return FALSE;
+            }
+
+            if (!acquire_instance_mutex(info.instance_mutex_prefix))
+            {
+                s_module = nullptr;
+                return FALSE;
+            }
+
+            Logger::configure(info.prefix, info.log_file);
+            Logger::get_instance().enable_async_mode(info.async_cfg);
+
+            s_init_fn = std::move(init_fn);
+            s_shutdown_fn = std::move(shutdown_fn);
+
+            s_shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            if (!s_shutdown_event)
+            {
+                unwind_early_attach_failure();
+                return FALSE;
+            }
+
+            s_worker_thread = CreateThread(nullptr, 0, lifecycle_thread, nullptr, 0, nullptr);
+            if (!s_worker_thread)
+            {
+                unwind_early_attach_failure();
+                return FALSE;
+            }
+
+            // Re-arm the detach gate now that a fresh attach has fully succeeded, so the matching on_dll_detach runs
+            // its teardown instead of no-opping. Without this reset s_detach_called stays true after the first detach
+            // and a second attach/detach cycle would leak the worker thread, shutdown event, and instance mutex (the
+            // header contract promises a subsequent attach starts from a clean slate). Reset only on the success path:
+            // early failures above never set the gate, so they must not clear it either. Release pairs with the acquire
+            // in on_dll_detach's compare_exchange. Both run serialized under the loader lock.
+            s_detach_called.store(false, std::memory_order_release);
+
+            return TRUE;
+        }
     } // anonymous namespace
 
     [[nodiscard]] bool32_t on_dll_attach(module_handle_t hMod, const ModInfo &info, std::function<bool()> init_fn,
-                                         std::function<void()> shutdown_fn)
+                                         std::function<void()> shutdown_fn) noexcept
     {
-        if (s_shutdown_event || s_worker_thread)
+        // Fail closed on any exception so nothing unwinds across the loader lock (see attach_core). On a throw the
+        // partially-built attach state is rolled back through the same path the explicit early-failure returns use.
+        try
         {
-            return FALSE;
+            return attach_core(hMod, info, std::move(init_fn), std::move(shutdown_fn));
         }
-
-        s_module = hMod;
-        if (hMod)
-        {
-            DisableThreadLibraryCalls(hMod);
-        }
-
-        if (!is_target_process(info.game_process_name))
-        {
-            s_module = nullptr;
-            return FALSE;
-        }
-
-        if (!acquire_instance_mutex(info.instance_mutex_prefix))
-        {
-            s_module = nullptr;
-            return FALSE;
-        }
-
-        Logger::configure(info.prefix, info.log_file);
-        Logger::get_instance().enable_async_mode(info.async_cfg);
-
-        s_init_fn = std::move(init_fn);
-        s_shutdown_fn = std::move(shutdown_fn);
-
-        s_shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (!s_shutdown_event)
+        catch (...)
         {
             unwind_early_attach_failure();
             return FALSE;
         }
-
-        s_worker_thread = CreateThread(nullptr, 0, lifecycle_thread, nullptr, 0, nullptr);
-        if (!s_worker_thread)
-        {
-            unwind_early_attach_failure();
-            return FALSE;
-        }
-
-        // Re-arm the detach gate now that a fresh attach has fully succeeded, so the matching on_dll_detach runs its
-        // teardown instead of no-opping. Without this reset s_detach_called stays true after the first detach and a
-        // second attach/detach cycle would leak the worker thread, shutdown event, and instance mutex (the header
-        // contract promises a subsequent attach starts from a clean slate). Reset only on the success path: early
-        // failures above never set the gate, so they must not clear it either. Release pairs with the acquire in
-        // on_dll_detach's compare_exchange. Both run serialized under the loader lock.
-        s_detach_called.store(false, std::memory_order_release);
-
-        return TRUE;
     }
 
     void request_shutdown() noexcept

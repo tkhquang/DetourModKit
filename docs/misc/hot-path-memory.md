@@ -100,6 +100,28 @@ if (value)
 }
 ```
 
+## Writing in hot paths
+
+Writes follow the same rule as reads. A pointer the hook was handed is live by definition, so write through it directly (the anti-patterns below show why gating that write is pointless). But a value written through a *resolved* address -- a scanned base plus a pointer chain that can go stale between frames -- needs the same fault guard a read does, because the terminal slot can be unmapped the instant the chain is wrong.
+
+Use the guarded write primitives for that. They write to memory the target already keeps writable (a camera transform, a player field) under one fault guard, changing no page protection:
+
+```cpp
+namespace Mem = DetourModKit::Memory;
+
+// Write a camera transform every frame through a resolved chain. Fault-guarded:
+// a stale chain fails closed (returns false) instead of faulting the host.
+const Matrix4x4 next = compute_camera(...);
+if (!Mem::seh_write_chain<Matrix4x4>(camera_base, CAMERA_TRANSFORM_CHAIN, next))
+{
+    // Chain went stale this frame -- skip the write, do not crash.
+}
+```
+
+`seh_write_bytes` / `seh_write<T>` are the single-address forms; `seh_write_chain_bytes` / `seh_write_chain<T>` resolve a chain and write its terminal slot through the guarded write path. None of them change page protection, flush the instruction cache, or invalidate the readability cache -- they are the write counterpart of `seh_read_*`.
+
+`write_bytes` is a different tool: it flips page protection to writable, writes, restores protection, flushes the instruction cache, and invalidates the cache range. That is exactly what a one-shot CODE patch on a read-only / executable page needs, and exactly the overhead you do not want per frame. Use `write_bytes` for setup-time patches; use `seh_write_*` for per-frame data writes.
+
 ## Primitive selection
 
 | You have | You want | Use |
@@ -110,13 +132,16 @@ if (value)
 | A multi-level pointer chain | The final address only | `seh_resolve_chain(base, {offsets...})` |
 | A multi-level pointer chain | A typed value at the end | `seh_read_chain<T>(base, {offsets...})` |
 | A pointer chain you can prove is structurally valid this frame | The fastest possible read, no syscall, no SEH | `read_ptr_unchecked(base, offset)` |
+| A resolved address that may be stale | One typed / range write that fails closed instead of faulting | `seh_write<T>(addr, value)` / `seh_write_bytes(addr, src, n)` |
+| A multi-level pointer chain | A guarded write at its terminal slot | `seh_write_chain<T>(base, {offsets...}, value)` / `seh_write_chain_bytes(...)` |
+| To patch CODE on a read-only / executable page once | A protection-flipping, i-cache-flushing write | `write_bytes(target, src, n)` -- setup/patch-only, never per frame |
 | To screen a candidate pointer before any read | A pure arithmetic plausibility test | `plausible_userspace_ptr(p)` |
 | To confirm a pointer lives in a known module | A branch-only range test | `contains(own_module_range(), p)` (capture the range once) |
 | To validate an address once at setup | A readability or writability check | `is_readable` / `is_writable` |
 
 ## Toolchain note
 
-The `seh_*` primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no frame-based SEH) a 64-bit build installs a process-wide vectored exception handler once and runs the read as a guarded copy with no `VirtualQuery` on the success path, recovering a fault as `std::nullopt` / `false` instead of crashing. This is best-effort: `veh_read_bytes` takes the VEH guarded-copy path only when handler installation succeeded (`s_veh_handle` is non-null); if `ensure_veh_installed()` failed, or on a 32-bit MinGW build (`!_WIN64`), it falls back to `virtualquery_validated_copy`, a `VirtualQuery`-validated copy that pays a syscall per region. So MinGW `seh_*` reads are fault-safe either way, using the VEH when available and the VirtualQuery fallback otherwise. `read_ptr_unchecked` is still the fastest choice when you can prove the pointer is live for the current frame; otherwise prefer `seh_read` / `seh_read_chain` for stale or unmapped pointers. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
+The `seh_*` primitives use real `__try` / `__except` on MSVC, where the success path is table-driven and costs nothing extra. On MinGW (which has no frame-based SEH) a 64-bit build installs a process-wide vectored exception handler once and runs reads or writes through a guarded access path with no `VirtualQuery` on the success path, recovering a fault as `std::nullopt` / `false` instead of crashing. This is best-effort: the VEH path is used only when handler installation succeeded (`s_veh_handle` is non-null); if `ensure_veh_installed()` failed, or on a 32-bit MinGW build (`!_WIN64`), byte reads fall back to `VirtualQuery` plus `ReadProcessMemory` and byte writes fall back to `VirtualQuery` plus `WriteProcessMemory` after confirming the destination is currently writable. Bulk in-place region scans do not have a kernel-mediated byte-copy fallback, so they fail closed if the MinGW x64 handler is unavailable. `read_ptr_unchecked` is still the fastest choice when you can prove the pointer is live for the current frame; otherwise prefer `seh_read` / `seh_read_chain` for stale or unmapped pointers. Shipping mod builds target MSVC, so the zero-cost path is the normal case.
 
 ## Anti-patterns to remove
 

@@ -479,6 +479,38 @@ TEST_F(RttiDissectTest, IdentifyOr_NoFallbacksDegradesToPrimary)
     EXPECT_EQ(pt.name(), ".?AVNoFallback@@");
 }
 
+TEST_F(RttiDissectTest, IdentifyOr_AllFailResetsOutToDefault)
+{
+    // A prior success leaves out fully populated; a later all-fail cascade must wipe out back to a default-constructed
+    // PointeeType, so a caller that ignores the error never reads a stale name/vtable from the earlier resolve.
+    SyntheticVtable prior(".?AVPriorResolve@@");
+    std::array<std::uintptr_t, 1> prior_slot{prior.vtable()};
+    const std::uintptr_t prior_addr = reinterpret_cast<std::uintptr_t>(prior_slot.data());
+
+    Rtti::PointeeType pt;
+    const auto first = Rtti::identify_pointee_type_or(prior_addr, pt);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_FALSE(pt.name().empty());
+    ASSERT_NE(pt.vtable, 0u);
+
+    std::array<std::uintptr_t, 1> garbage_a{0xDEADBEEFu};
+    std::array<std::uintptr_t, 1> garbage_b{0xDEADBEEFu};
+    const std::uintptr_t garbage_a_addr = reinterpret_cast<std::uintptr_t>(garbage_a.data());
+    const std::uintptr_t garbage_b_addr = reinterpret_cast<std::uintptr_t>(garbage_b.data());
+
+    const auto miss = Rtti::identify_pointee_type_or(garbage_a_addr, pt, garbage_b_addr);
+    ASSERT_FALSE(miss.has_value());
+
+    // out is the value-initialized default, not the prior success.
+    EXPECT_TRUE(pt.name().empty());
+    EXPECT_EQ(pt.name_len, 0u);
+    EXPECT_EQ(pt.vtable, 0u);
+    EXPECT_EQ(pt.col_addr, 0u);
+    EXPECT_EQ(pt.object_base, 0u);
+    EXPECT_EQ(pt.pointer_value, 0u);
+    EXPECT_FALSE(pt.was_pointer);
+}
+
 TEST_F(RttiDissectTest, Identify_ErrorStringsAreDistinct)
 {
     EXPECT_NE(Rtti::identify_error_to_string(Rtti::IdentifyError::BadSlotAddress),
@@ -1247,6 +1279,28 @@ TEST_F(RttiDissectTest, Fingerprint_SingleLandmarkMatchesHeal)
     // The fingerprint delta is the drift; the heal offset is the absolute field offset. They agree once the nominal
     // offset is removed.
     EXPECT_EQ(healed->healed_offset - static_cast<std::ptrdiff_t>(FP_OA), solved->delta);
+}
+
+TEST_F(RttiDissectTest, Fingerprint_DuplicateOffsetIsBadDescriptor)
+{
+    // Two required landmarks that share a nominal_offset probe the same shifted slot. Counting both would inflate the
+    // corroboration score and report stronger agreement than the template actually provides, so a duplicate offset is
+    // a malformed template and must fail before any memory is probed.
+    FpTypes ty;
+    SynStruct st;
+    st.put(FP_OA, syn_heap_object(ty.a.vtable()));
+    st.put(FP_OB, syn_heap_object(ty.b.vtable()));
+    st.put(FP_OC, syn_heap_object(ty.c.vtable()));
+
+    const std::array<Rtti::Landmark, 4> with_dup{
+        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
+        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OB, .expected_mangled = ".?AVFpB@@"},
+        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OC, .expected_mangled = ".?AVFpC@@"},
+        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
+    };
+    const auto hit = Rtti::solve_fingerprint(st.base(), with_dup, 0x20);
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error(), Rtti::HealError::BadDescriptor);
 }
 
 TEST_F(RttiDissectTest, Fingerprint_AllocatesNothing)

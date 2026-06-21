@@ -189,8 +189,11 @@ namespace DetourModKit
         // window with one VirtualQuery; a concurrent decommit / reprotect before these unguarded byte reads complete
         // would otherwise fault the host. On MSVC the body runs inside a __try / __except that swallows exactly the
         // foreign-read faults (Memory::detail::is_guarded_read_fault) and reports the window faulted so the sweep skips
-        // it; MinGW has no structured exception handling and runs the body directly (the VirtualQuery gate is the only
-        // guard available there). Mirrors scan_region_guarded in scanner.cpp. Returns true when a fault was swallowed.
+        // it. On MinGW x64 the body runs through the same process-wide vectored read guard the seh_read paths use
+        // (Memory::detail::run_guarded_region), so the fault is swallowed and the window skipped + counted there too;
+        // only on 32-bit MinGW, where that x64-only vectored guard is unavailable, does the body run directly behind
+        // just the VirtualQuery gate. Mirrors scan_region_guarded in scanner.cpp. Returns true when a fault was
+        // swallowed.
         bool scan_window_narrow_guarded(const Scanner::detail::ExecutableWindow &window, std::uintptr_t string_addr,
                                         std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
                                         LeaReferenceInfo *info) noexcept
@@ -217,6 +220,44 @@ namespace DetourModKit
                 }
                 return true;
             }
+#elif defined(_WIN64)
+            // MinGW x64: arm the process-wide vectored read guard over exactly the bytes the window gate proved
+            // readable, so a concurrent decommit / reprotect that faults the scan is swallowed and the window reported
+            // faulted -- the same skip-the-window contract the MSVC __except arm and scanner.cpp's scan_region_guarded
+            // follow.
+            const std::size_t original_found_count = found_count;
+            const std::uintptr_t original_first_site = first_site;
+            const LeaReferenceInfo original_info = (info != nullptr) ? *info : LeaReferenceInfo{};
+            struct NarrowScanContext
+            {
+                const Scanner::detail::ExecutableWindow *window;
+                std::uintptr_t string_addr;
+                std::size_t instr_len;
+                std::size_t *found_count;
+                std::uintptr_t *first_site;
+                LeaReferenceInfo *info;
+            } scan_ctx{&window, string_addr, instr_len, &found_count, &first_site, info};
+
+            const auto run_scan = [](void *opaque) noexcept -> void
+            {
+                auto *context = static_cast<NarrowScanContext *>(opaque);
+                scan_window_narrow_body(*context->window, context->string_addr, context->instr_len,
+                                        *context->found_count, *context->first_site, context->info);
+            };
+
+            if (Memory::detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
+            {
+                return false;
+            }
+            // Faulted: discard any partial count / site / lea info so a partially-scanned window cannot leak a stale
+            // site or register, exactly as the MSVC arm does.
+            found_count = original_found_count;
+            first_site = original_first_site;
+            if (info != nullptr)
+            {
+                *info = original_info;
+            }
+            return true;
 #else
             scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
             return false;
@@ -468,6 +509,35 @@ namespace DetourModKit
                 first_site = original_first_site;
                 return true;
             }
+#elif defined(_WIN64)
+            // MinGW x64: same vectored read guard as the narrow sibling, armed over the gated window bytes; a fault is
+            // swallowed and the window reported faulted. Only 32-bit MinGW falls back to the bare VirtualQuery gate.
+            const std::size_t original_found_count = found_count;
+            const std::uintptr_t original_first_site = first_site;
+            struct BroadScanContext
+            {
+                const ZydisDecoder *decoder;
+                const Scanner::detail::ExecutableWindow *window;
+                std::uintptr_t string_addr;
+                std::size_t *found_count;
+                std::uintptr_t *first_site;
+            } scan_ctx{&decoder, &window, string_addr, &found_count, &first_site};
+
+            const auto run_scan = [](void *opaque) noexcept -> void
+            {
+                auto *context = static_cast<BroadScanContext *>(opaque);
+                scan_window_broad_body(*context->decoder, *context->window, context->string_addr, *context->found_count,
+                                       *context->first_site);
+            };
+
+            if (Memory::detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
+            {
+                return false;
+            }
+            // Faulted: discard any partial count / site so a partially-scanned window cannot leak a stale site.
+            found_count = original_found_count;
+            first_site = original_first_site;
+            return true;
 #else
             scan_window_broad_body(decoder, window, string_addr, found_count, first_site);
             return false;

@@ -211,6 +211,27 @@ namespace DetourModKit
                                   Memory::ModuleRange range = Memory::host_module_range()) noexcept;
 
             /**
+             * @brief Constructs a cached identity from a null-terminated mangled type name.
+             * @details This exact-match overload keeps string-literal call sites unambiguous while the deleted
+             *          std::string rvalue overload rejects dangling temporaries. A null pointer is treated as an empty
+             *          name and resolves to no match.
+             * @param mangled Null-terminated MSVC RTTI name. The backing bytes must outlive this identity.
+             * @param range Module range searched for the primary vtable.
+             */
+            explicit TypeIdentity(const char *mangled, Memory::ModuleRange range = Memory::host_module_range()) noexcept
+                : TypeIdentity(mangled != nullptr ? std::string_view(mangled) : std::string_view{}, range)
+            {
+            }
+
+            /**
+             * @brief Rejects std::string temporaries because the identity stores a non-owning view.
+             * @details A string literal, std::string_view, or long-lived std::string lvalue can still bind safely. A
+             *          std::string rvalue would dangle as soon as the constructor returns, so it is a compile-time
+             *          error.
+             */
+            TypeIdentity(std::string &&mangled, Memory::ModuleRange range = Memory::host_module_range()) = delete;
+
+            /**
              * @brief Tests whether @p vtable is this type's primary vtable.
              * @details Resolves on first call, then compares. Returns false when the type cannot be resolved, so a
              *          missing type never matches.
@@ -229,9 +250,11 @@ namespace DetourModKit
             std::string_view m_mangled;
             Memory::ModuleRange m_range;
 
-            // m_cached holds the resolved primary vtable (0 once resolved-but-not-found). m_resolved latches a
-            // completed resolve and is published with release after m_cached is stored, so an acquire-load that
-            // observes it also observes the cached value.
+            // m_cached holds the resolved primary vtable and is written only on a SUCCESSFUL (nonzero) resolve.
+            // m_resolved latches that success and is published with release after m_cached is stored, so an
+            // acquire-load that observes m_resolved == true also observes the cached value. A failed resolve latches
+            // neither flag, so a later call retries once the type becomes resolvable instead of caching the miss as
+            // permanent.
             mutable std::atomic<std::uintptr_t> m_cached{0};
             mutable std::atomic<bool> m_resolved{false};
         };

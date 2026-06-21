@@ -760,6 +760,72 @@ TEST_F(ConfigTest, NegativeIntValue)
     EXPECT_EQ(val, -50);
 }
 
+TEST_F(ConfigTest, IntValueAboveIntMaxFallsBackToDefault)
+{
+    std::ofstream ini_file(m_test_ini_file);
+    ini_file << "[TestSection]\n";
+    // 5000000000 is larger than INT_MAX. The 64-bit parse can observe that instead of accepting the saturated 32-bit
+    // strtol value, so the range check must fall back to the registered default.
+    ini_file << "TestInt=5000000000\n";
+    ini_file.close();
+
+    int val = 0;
+
+    Config::register_int("TestSection", "TestInt", "val", [&val](int v) { val = v; }, 7);
+
+    EXPECT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_EQ(val, 7);
+}
+
+TEST_F(ConfigTest, IntValueBelowIntMinFallsBackToDefault)
+{
+    std::ofstream ini_file(m_test_ini_file);
+    ini_file << "[TestSection]\n";
+    // -5000000000 is below INT_MIN; the symmetric lower-bound branch must also fall back to the registered default.
+    ini_file << "TestInt=-5000000000\n";
+    ini_file.close();
+
+    int val = 0;
+
+    Config::register_int("TestSection", "TestInt", "val", [&val](int v) { val = v; }, -3);
+
+    EXPECT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_EQ(val, -3);
+}
+
+TEST_F(ConfigTest, IntValueLeadingZeroStaysDecimal)
+{
+    std::ofstream ini_file(m_test_ini_file);
+    ini_file << "[TestSection]\n";
+    // Match SimpleIni's historical GetLongValue behavior: only 0x switches to hex, so a leading zero is not octal.
+    ini_file << "TestInt=010\n";
+    ini_file.close();
+
+    int val = 0;
+
+    Config::register_int("TestSection", "TestInt", "val", [&val](int v) { val = v; }, 7);
+
+    EXPECT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_EQ(val, 10);
+}
+
+TEST_F(ConfigTest, IntValueNonNumericFallsBackToDefault)
+{
+    std::ofstream ini_file(m_test_ini_file);
+    ini_file << "[TestSection]\n";
+    // A non-numeric value never fully consumes under strtoll (the end pointer stays at the start), so the parse must
+    // reject it and fall back to the registered default rather than committing strtoll's zero result.
+    ini_file << "TestInt=abc\n";
+    ini_file.close();
+
+    int val = 0;
+
+    Config::register_int("TestSection", "TestInt", "val", [&val](int v) { val = v; }, 5);
+
+    EXPECT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_EQ(val, 5);
+}
+
 TEST_F(ConfigTest, MissingSectionInFile)
 {
     std::ofstream ini_file(m_test_ini_file);

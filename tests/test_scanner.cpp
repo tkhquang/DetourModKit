@@ -4122,19 +4122,17 @@ TEST(ScannerBoundaryTest, FindsPatternStraddlingAdjacentExecutableRegions)
     VirtualFree(base, 0, MEM_RELEASE);
 }
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) || defined(_WIN64)
 // The per-region VirtualQuery gate in scan_regions_filtered proves a region readable only at gate time.
 // scan_region_guarded backstops a concurrent decommit / reprotect that races the unguarded find_pattern_raw reads:
-// without the __try, the faulting read would terminate the process. This test sweeps a committed range repeatedly
-// (through the module-scoped readable entry point, which routes through scan_regions_filtered) while a second thread
-// decommits and recommits an interior page. A pre-race positive control proves the refactored scan body still finds a
-// planted needle; the loop then asserts the sweep survives every iteration (a crash is the regression) and never
-// reports a false match for an absent needle. A run where the decommit never lands inside the read window is a valid
-// pass for the fault path; the __except / skip-the-region mechanism is pinned deterministically by
-// MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. MSVC-only: MinGW has no
-// structured exception handling, and the vectored handler that guards the seh_read primitives does not extend to this
-// sweep's bulk find_pattern_raw reads, so the per-region VirtualQuery gate is the only guard there and the race can
-// still fault.
+// without the __try / VEH guard, the faulting read would terminate the process. This test sweeps a committed range
+// repeatedly (through the module-scoped readable entry point, which routes through scan_regions_filtered) while a
+// second thread decommits and recommits an interior page. A pre-race positive control proves the refactored scan body
+// still finds a planted needle; the loop then asserts the sweep survives every iteration (a crash is the regression)
+// and never reports a false match for an absent needle. A run where the decommit never lands inside the read window is
+// a valid pass for the fault path; the __except / VEH skip-the-region mechanism is pinned deterministically by
+// MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. 32-bit MinGW is excluded
+// because the process-wide vectored guard is x64-only there.
 TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
 {
     SYSTEM_INFO si{};
@@ -4200,7 +4198,7 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     // Whether or not any fault landed, no emitted event may carry a zero count or a mismatched window.
     EXPECT_TRUE(event_payload_ok);
 }
-#endif // _MSC_VER
+#endif // _MSC_VER || _WIN64
 
 // --- Tests for the name/string resilience tiers (ResolveMode::RttiVtable / StringXref) ---
 

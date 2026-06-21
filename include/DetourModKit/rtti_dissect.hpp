@@ -167,11 +167,11 @@ namespace DetourModKit
          *          per fallback beyond the single probe the bare primitive performs). The cascade selects the first
          *          RESOLVING slot, not the "best" one: with several valid-but-different objects, declaration order is
          *          the only disambiguator -- a consumer needing type discrimination uses @ref heal_landmark / @ref
-         *          solve_fingerprint instead. On any failure return @p out is left as the last probe wrote it and must
-         *          not be read.
+         *          solve_fingerprint instead. On a failure return @p out is reset to a default-constructed @ref
+         *          PointeeType, so a caller that ignores the error never reads a slot's partially written fields.
          * @tparam Fallbacks Pack of alternate slot addresses, each convertible to std::uintptr_t.
          * @param candidate The primary slot address to probe first.
-         * @param out Receives the identification of the first resolving slot. Unspecified on a failure return.
+         * @param out Receives the first resolving slot's identification; reset to a default PointeeType on failure.
          * @param fallbacks Alternate slot addresses, tried in order after @p candidate.
          * @return A value on the first resolve (@p out populated), or the @p candidate's @ref IdentifyError when all
          *         candidates fail.
@@ -194,6 +194,11 @@ namespace DetourModKit
             {
                 return {};
             }
+            // Every candidate failed. The last probe may have left @p out half-written (e.g. a partial name_buf on a
+            // NoRtti-after-name miss), so reset it to a clean default before returning. This keeps a caller that
+            // ignores the error code from reading partially-written fields, while the FIRST (primary) error is still
+            // the one surfaced.
+            out = PointeeType{};
             return std::unexpected(primary.error());
         }
 
@@ -312,7 +317,16 @@ namespace DetourModKit
             std::ptrdiff_t nominal_offset = 0;
             /// Search radius per side in bytes (capped at MAX_HEAL_WINDOW).
             std::size_t window = 0x40;
-            /// MSVC mangled name to match. Aliases caller storage.
+            /**
+             * @brief MSVC mangled name to match. Aliases caller storage.
+             * @note Non-owning view: the backing bytes must outlive every heal call that reads this landmark. A string
+             *       literal (the documented common case) and any longer-lived std::string / std::string_view are safe.
+             *       Initialising this field from a std::string temporary dangles the view as soon as the full
+             *       expression ends -- a latent use-after-free. Because Landmark is an aggregate (so a heal template
+             *       can be a @c static @c constexpr designated initializer and stay serializable), this cannot be
+             *       rejected with a deleted rvalue overload the way @ref Rtti::TypeIdentity does; the consumer owns the
+             *       lifetime.
+             */
             std::string_view expected_mangled;
             /// Required slot shape.
             Indirection indirection = Indirection::PointerToObject;
@@ -367,13 +381,22 @@ namespace DetourModKit
          *         - @ref HealError::NoMatch when no slot matched;
          *         - @ref HealError::Ambiguous when both the @c +d and @c -d slots
          *           at the nearest matching distance match (an irreducible tie).
-         * @note For a struct known to hold more than one field of @c expected_mangled's type, prefer @ref
-         *       solve_fingerprint. A single landmark resolves to the uniquely nearest same-typed slot, so a nearer
-         *       same-typed neighbour heals to the wrong field silently (both satisfy the slot shape); the @ref
-         *       HealError::Ambiguous result fires only for an exact +/- distance tie, not for a nearer decoy.
-         *       solve_fingerprint disambiguates structurally because one uniform delta must fit every field at once.
-         * @warning Init-time / re-heal-on-miss, not per-frame: each probe runs the syscall-heavy prelude up to twice.
-         *          The window cap bounds the worst case. Allocates nothing (one reused stack @ref PointeeType).
+         * @warning FAIL-WRONG HAZARD when the window is crowded with same-typed slots. A single landmark resolves to
+         * the
+         *          uniquely NEAREST slot that satisfies the type + shape, so any of these wins SILENTLY and returns a
+         *          confidently-wrong offset rather than failing closed:
+         *          - a strictly-nearer same-typed DECOY field at the wrong offset (both satisfy the slot shape, and the
+         *            nearer one is returned before the intended field is ever probed);
+         *          - under multiple inheritance, a secondary base subobject whose vtable sits nearer than the primary
+         *            and whose COL still names the complete type (use @ref Indirection::CompleteObject to reject it).
+         *          The @ref HealError::Ambiguous result fires ONLY for an exact +/- distance tie at the nearest
+         *          matching ring, never for a nearer decoy, so a wrong-but-nearer slot is not flagged. Whenever the
+         *          window may be crowded -- a struct that holds more than one field of @c expected_mangled's type, or
+         *          an object that may use multiple inheritance -- prefer @ref solve_fingerprint, which disambiguates
+         *          structurally because one uniform delta must fit every field at once, or narrow @c window / tighten
+         *          the type to a name that is unique in the neighbourhood.
+         * @note Init-time / re-heal-on-miss, not per-frame: each probe runs the syscall-heavy prelude up to twice. The
+         *       window cap bounds the worst case. Allocates nothing (one reused stack @ref PointeeType).
          */
         [[nodiscard]] std::expected<HealHit, HealError> heal_landmark(const Landmark &lm) noexcept;
 
@@ -382,6 +405,13 @@ namespace DetourModKit
          * @details Feeds straight into a @c std::span<const std::ptrdiff_t> pointer-chain API.
          * @param lm The landmark, with @c base filled in.
          * @return The healed offset, or std::nullopt on any failure.
+         * @warning Inherits @ref heal_landmark's crowding FAIL-WRONG HAZARD, and discards every signal that would let a
+         *          caller detect it: the std::nullopt return collapses all @ref HealError reasons, and the dropped @ref
+         *          HealHit::col_offset / @ref HealHit::was_pointer hide a secondary-base or direct-object match. A
+         *          strictly-nearer same-typed decoy (or an MI secondary base) still wins SILENTLY and yields a
+         *          confidently-wrong offset with no indication. Use this only when the window cannot be crowded; when
+         *          it can, call @ref heal_landmark (to inspect the full @ref HealHit) or @ref solve_fingerprint (to
+         *          disambiguate structurally across several co-moving fields).
          */
         [[nodiscard]] std::optional<std::ptrdiff_t> heal_offset(const Landmark &lm) noexcept;
 
@@ -430,9 +460,9 @@ namespace DetourModKit
          *         - @ref HealError::Ambiguous when two or more deltas tie for the
          *           most optional matches.
          * @note Each landmark in @p fp must have a distinct @c nominal_offset. Corroboration is scored by counting the
-         *       required landmarks satisfied at a delta, so two landmarks sharing a nominal_offset probe the same slot
-         *       and would double-count it, reporting stronger agreement than the template provides. Distinct offsets
-         *       are an author-side invariant of the constexpr template, not validated at runtime.
+         *       required landmarks satisfied at a delta, so two landmarks sharing a nominal_offset would probe the same
+         *       slot and double-count it. Duplicate offsets are rejected as @ref HealError::BadDescriptor before any
+         *       memory is touched.
          * @warning Init-time only: the probe count is (2 * window_bytes / 8 + 1) * fp.size() prelude walks. Allocates
          *          nothing.
          */

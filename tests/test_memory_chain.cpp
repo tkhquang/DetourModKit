@@ -182,3 +182,120 @@ TEST(MemorySehReadChain, ReadsNonDefaultConstructibleType)
     EXPECT_EQ(value->a, 0xAABBCCDDu);
     EXPECT_EQ(value->b, 0x11223344u);
 }
+
+// Coverage for the pointer-chain write primitives (seh_write_chain, seh_write_chain_bytes). These write to
+// already-writable in-process memory, so no game memory, cache state, or page-protection change is required.
+
+TEST(MemorySehWriteChain, TwoLevelWritesTypedValueRoundTrips)
+{
+    uint64_t target = 0;
+    uintptr_t mid = reinterpret_cast<uintptr_t>(&target);
+    uintptr_t root = reinterpret_cast<uintptr_t>(&mid);
+
+    // deref(&root) -> &mid, deref(&mid) -> &target; final offset 0 not dereferenced. The write lands in target.
+    const uint64_t expected = 0x1122334455667788ull;
+    EXPECT_TRUE(Memory::seh_write_chain<uint64_t>(reinterpret_cast<uintptr_t>(&root), {0, 0, 0}, expected));
+    EXPECT_EQ(target, expected);
+
+    // Read it back through the same chain to confirm the resolve agrees both directions.
+    const auto value = Memory::seh_read_chain<uint64_t>(reinterpret_cast<uintptr_t>(&root), {0, 0, 0});
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(*value, expected);
+}
+
+TEST(MemorySehWriteChain, WritesIntoNestedStructFieldViaRealOffsets)
+{
+    // A struct with a nested pointer and an array field, so the chain walks a real intra-object layout. The first link
+    // dereferences the embedded pointer; the final offset selects the array element address without dereferencing it.
+    struct Inner
+    {
+        uint32_t header;
+        uint32_t cells[4];
+    };
+    struct Outer
+    {
+        Inner *inner;
+        uint64_t pad;
+    };
+
+    Inner inner{0xDEADBEEFu, {0, 0, 0, 0}};
+    Outer outer{&inner, 0};
+
+    // Chain semantics: every offset but the last is dereferenced. From &outer, the first offset lands on the embedded
+    // Outer::inner pointer and is dereferenced to reach &inner; the final offset selects inner.cells[2]'s address
+    // without dereferencing it. deref(&outer + offsetof(inner)) -> &inner, then + offsetof(cells) + 2 *
+    // sizeof(uint32_t).
+    const ptrdiff_t to_inner = static_cast<ptrdiff_t>(offsetof(Outer, inner));
+    const ptrdiff_t to_cell2 = static_cast<ptrdiff_t>(offsetof(Inner, cells) + 2 * sizeof(uint32_t));
+    const uint32_t expected = 0xCAFEF00Du;
+    EXPECT_TRUE(Memory::seh_write_chain<uint32_t>(reinterpret_cast<uintptr_t>(&outer), {to_inner, to_cell2}, expected));
+
+    EXPECT_EQ(inner.cells[2], expected);
+    // Neighbouring fields are untouched.
+    EXPECT_EQ(inner.header, 0xDEADBEEFu);
+    EXPECT_EQ(inner.cells[1], 0u);
+    EXPECT_EQ(inner.cells[3], 0u);
+}
+
+TEST(MemorySehWriteChain, EmptyOffsetsWritesAtBase)
+{
+    uint32_t target = 0;
+    const uint32_t expected = 0xABCD1234u;
+
+    // An empty offset span writes at base unchanged.
+    EXPECT_TRUE(Memory::seh_write_chain_bytes(reinterpret_cast<uintptr_t>(&target), std::span<const ptrdiff_t>{},
+                                              &expected, sizeof(expected)));
+    EXPECT_EQ(target, expected);
+}
+
+TEST(MemorySehWriteChain, ZeroBytesIsNoOpSuccess)
+{
+    uint64_t target = 0xFEEDFACEull;
+    const uint64_t source = 0x0;
+
+    // Zero-byte write is a no-op success and must leave the target untouched.
+    EXPECT_TRUE(
+        Memory::seh_write_chain_bytes(reinterpret_cast<uintptr_t>(&target), std::span<const ptrdiff_t>{}, &source, 0));
+    EXPECT_EQ(target, 0xFEEDFACEull);
+}
+
+TEST(MemorySehWriteChain, NullSourceReturnsFalse)
+{
+    uint64_t target = 0xFEEDFACEull;
+
+    // nullptr source is rejected and the target is unchanged.
+    EXPECT_FALSE(Memory::seh_write_chain_bytes(reinterpret_cast<uintptr_t>(&target), std::span<const ptrdiff_t>{},
+                                               nullptr, sizeof(target)));
+    EXPECT_EQ(target, 0xFEEDFACEull);
+}
+
+TEST(MemorySehWriteChain, ImplausibleLinkFailsClosed)
+{
+    // The first dereference yields a null pointer, which fails the plausibility screen before any write is attempted,
+    // mirroring the seh_resolve_chain implausible-link test.
+    uintptr_t null_holder = 0;
+    const uint32_t source = 0x11223344u;
+    EXPECT_FALSE(
+        Memory::seh_write_chain_bytes(reinterpret_cast<uintptr_t>(&null_holder), {0, 0}, &source, sizeof(source)));
+}
+
+TEST(MemorySehWriteChain, InitializerListMatchesSpanOverload)
+{
+    uint32_t target_list = 0;
+    uint32_t target_span = 0;
+    uintptr_t holder_list = reinterpret_cast<uintptr_t>(&target_list);
+    uintptr_t holder_span = reinterpret_cast<uintptr_t>(&target_span);
+
+    const uint32_t expected = 0x99AABBCCu;
+
+    // The braced-list overload and the explicit span overload must behave identically.
+    EXPECT_TRUE(Memory::seh_write_chain<uint32_t>(reinterpret_cast<uintptr_t>(&holder_list), {0, 0}, expected));
+
+    const ptrdiff_t offs[] = {0, 0};
+    EXPECT_TRUE(Memory::seh_write_chain<uint32_t>(reinterpret_cast<uintptr_t>(&holder_span),
+                                                  std::span<const ptrdiff_t>(offs), expected));
+
+    EXPECT_EQ(target_list, expected);
+    EXPECT_EQ(target_span, expected);
+    EXPECT_EQ(target_list, target_span);
+}

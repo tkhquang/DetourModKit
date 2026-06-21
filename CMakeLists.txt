@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(DetourModKit VERSION 3.8.2 LANGUAGES CXX)
+project(DetourModKit VERSION 3.9.0 LANGUAGES CXX)
 
 # GNUInstallDirs defines CMAKE_INSTALL_LIBDIR / BINDIR / INCLUDEDIR / DOCDIR. It must be included before any
 # install() rule reads those variables; otherwise they expand to empty and components land at the install-prefix
@@ -350,7 +350,7 @@ if(WIN32)
   # stated explicitly, and /GUARD:CF activates the Control Flow Guard load config
   # so DetourModKit's /guard:cf-instrumented code is enforced in the consumer
   # binary. CMake's compiler-frontend generator expression is 3.30+, so keep the
-  # project compatible with its 3.25 minimum by detecting the active frontend at
+  # project compatible with its 3.28 minimum by detecting the active frontend at
   # configure time. Release packages are compiler-specific, and add_subdirectory
   # consumers share the same toolchain that configured this target.
   set(_dmk_uses_msvc_linker_frontend OFF)

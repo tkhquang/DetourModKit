@@ -353,11 +353,16 @@ namespace DetourModKit
             return std::unexpected(HealError::BadDescriptor);
 
         std::size_t required_count = 0;
-        for (const Landmark &lm : fp)
+        for (std::size_t i = 0; i < fp.size(); ++i)
         {
-            if (!descriptor_ok(lm))
+            if (!descriptor_ok(fp[i]))
                 return std::unexpected(HealError::BadDescriptor);
-            if (lm.required)
+            for (std::size_t j = 0; j < i; ++j)
+            {
+                if (fp[j].nominal_offset == fp[i].nominal_offset)
+                    return std::unexpected(HealError::BadDescriptor);
+            }
+            if (fp[i].required)
                 ++required_count;
         }
         // A template with no required landmark cannot fail closed against a dense region, so it is rejected rather than

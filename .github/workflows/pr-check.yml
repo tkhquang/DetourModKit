@@ -15,7 +15,9 @@ on:
   workflow_dispatch:
 
 env:
-  MINGW_BIN: C:\mingw64\bin
+  # Pin the exact GCC the release workflow ships with (Chocolatey MinGW 13.2.0) so the coverage/PR gate and the
+  # released artifact compile with one toolchain instead of the runner's unversioned C:\mingw64.
+  MINGW_BIN: C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
 
 jobs:
   build-test:
@@ -27,6 +29,18 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: "recursive"
+
+      - name: Cache MinGW
+        id: cache-mingw
+        uses: actions/cache@v4
+        with:
+          path: C:\ProgramData\chocolatey\lib\mingw
+          key: ${{ runner.os }}-mingw-13.2.0-v2
+
+      - name: Install MinGW (if not cached)
+        if: steps.cache-mingw.outputs.cache-hit != 'true'
+        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        shell: powershell
 
       - name: Add MinGW to PATH
         run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
@@ -53,10 +67,17 @@ jobs:
 
       - name: Verify Tools
         run: |
+          echo "--- gcc ---" && gcc --version
           echo "--- g++ ---" && g++ --version
           echo "--- ninja ---" && ninja --version
           echo "--- cmake ---" && cmake --version
           echo "--- gcovr ---" && gcovr --version
+          # Surface the resolved toolchain in the job summary so the gate's GCC is visible without opening the log.
+          echo "### Toolchain" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          gcc --version | head -1 >> "$GITHUB_STEP_SUMMARY"
+          g++ --version | head -1 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
         shell: bash
 
       - name: Configure (Debug + Tests + Coverage)

@@ -2550,3 +2550,103 @@ TEST_F(MemoryTest, UnarmedThreadFaultIsPassedThroughNotClaimed)
     EXPECT_EQ(observed.load(), 0u);
     VirtualFree(page, 0, MEM_RELEASE);
 }
+
+// Coverage for the per-frame guarded WRITE primitives (seh_write_bytes, seh_write). They write to already-writable
+// memory under a fault guard, changing no page protection and running no i-cache flush or cache invalidation, so they
+// need no cache state; the fixture's cache is left in its default state.
+
+TEST_F(MemoryTest, SehWrite_TypedRoundTripsToLocal)
+{
+    uint64_t target = 0;
+    const uint64_t expected = 0x1122334455667788ull;
+
+    EXPECT_TRUE(Memory::seh_write<uint64_t>(reinterpret_cast<uintptr_t>(&target), expected));
+    EXPECT_EQ(target, expected);
+
+    // Read it back through the guarded read primitive to confirm the byte image matches.
+    const auto value = Memory::seh_read<uint64_t>(reinterpret_cast<uintptr_t>(&target));
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(*value, expected);
+}
+
+TEST_F(MemoryTest, SehWriteBytes_RoundTripsToHeap)
+{
+    auto buffer = std::make_unique<std::byte[]>(16);
+    std::memset(buffer.get(), 0, 16);
+    const std::byte source[] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
+
+    EXPECT_TRUE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(buffer.get()), source, sizeof(source)));
+
+    for (size_t i = 0; i < sizeof(source); ++i)
+    {
+        EXPECT_EQ(buffer[i], source[i]);
+    }
+    // Bytes beyond the written span are untouched.
+    EXPECT_EQ(buffer[sizeof(source)], std::byte{0x00});
+}
+
+TEST_F(MemoryTest, SehWriteBytes_ZeroBytesIsNoOpSuccess)
+{
+    uint64_t target = 0xFEEDFACEull;
+    const uint64_t source = 0x0;
+
+    // Zero-byte write is a no-op success that leaves the target unchanged.
+    EXPECT_TRUE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(&target), &source, 0));
+    EXPECT_EQ(target, 0xFEEDFACEull);
+}
+
+TEST_F(MemoryTest, SehWriteBytes_NullSourceReturnsFalse)
+{
+    uint64_t target = 0xFEEDFACEull;
+
+    // nullptr source is rejected without a write.
+    EXPECT_FALSE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(&target), nullptr, sizeof(target)));
+    EXPECT_EQ(target, 0xFEEDFACEull);
+}
+
+TEST_F(MemoryTest, SehWriteBytes_LowAddressReturnsFalse)
+{
+    const uint32_t source = 0x11223344u;
+
+    // An address below 0x10000 (the Windows reserved low range) is rejected without a write and must not crash.
+    EXPECT_FALSE(Memory::seh_write_bytes(static_cast<uintptr_t>(0x100), &source, sizeof(source)));
+}
+
+// FAULT-GUARD proof: a write into a committed PAGE_READONLY page must be caught by the SEH/VEH guard and return false,
+// not fault the host, and must leave the page bytes unchanged. The page is held until TearDown via the local scope
+// (never MEM_RELEASE'd before the assertions) so a released VA cannot be remapped and the fault stays deterministic.
+TEST_F(MemoryTest, SehWriteBytes_ReadOnlyPageFaultsClosed)
+{
+    // A page seeded as PAGE_READWRITE so we can plant a known sentinel, then flipped to PAGE_READONLY before the write.
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(page, nullptr);
+
+    constexpr uint32_t kSentinel = 0xA5A5A5A5u;
+    *reinterpret_cast<uint32_t *>(page) = kSentinel;
+
+    DWORD old_protect = 0;
+    ASSERT_NE(VirtualProtect(page, 4096, PAGE_READONLY, &old_protect), 0);
+
+    const uint32_t source = 0xDEADBEEFu;
+    // The guarded write must fail closed: the access violation is swallowed and false is returned.
+    EXPECT_FALSE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(page), &source, sizeof(source)));
+
+    // Restore write access to read the page back and prove the bytes never changed.
+    ASSERT_NE(VirtualProtect(page, 4096, old_protect, &old_protect), 0);
+    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), kSentinel);
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+// FAULT-GUARD proof, no-access variant: a write into a committed PAGE_NOACCESS page must also be caught and return
+// false. The page is held until after the assertion (never released early) so the fault is deterministic.
+TEST_F(MemoryTest, SehWriteBytes_NoAccessPageFaultsClosed)
+{
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(page, nullptr);
+
+    const uint32_t source = 0xDEADBEEFu;
+    EXPECT_FALSE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(page), &source, sizeof(source)));
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
