@@ -559,6 +559,13 @@ namespace DetourModKit
          *          without attempting to log, preventing use-after-free. The shutdown flag is reset after hooks are
          *          cleared, allowing subsequent hook creation for hot-reload scenarios. The destructor becomes a no-op
          *          only while the flag is set during the shutdown operation itself.
+         * @note Two-phase teardown / quiesce contract: acquires the mutator gate exclusively to block new mutators,
+         *       disables all hooks first (shared registry lock), then clears the maps under the exclusive lock, both
+         *       phases newest-first so layered hooks unwind onto still-valid bytes. SafetyHook relocates a thread
+         *       caught in the patched prologue but cannot drain a thread already inside the detour or trampoline body,
+         *       so the caller must quiesce the hooked functions before shutdown to close that residual window. Do not
+         *       call this (or any mutator) from within a with_* / try_with_* callback; defer the teardown until the
+         *       callback returns (the reentrancy guard fails such calls closed).
          */
         void shutdown() noexcept;
 
@@ -783,6 +790,15 @@ namespace DetourModKit
          *          does not reorder for the caller: removing an inner layer while a clone created later on top of it
          *          is still installed frees the clone that the newer hook recorded as its "original", so remove
          *          layered hooks newest-first.
+         * @warning Restoring a VMT hook writes the saved original vptr back into the object. If the game reconstructed
+         *          the object in place or layered its own vptr on top after the clone was installed, this write
+         *          restores a vtable the game has since overwritten, silently clobbering the game's pointer (or
+         *          restoring a stale one). VMT removal is a bare vptr write with no thread protection, so the caller
+         *          must guarantee no thread is dispatching through the cloned slot across removal and that the object's
+         *          vptr was not re-layered since create.
+         * @note Two-phase teardown / quiesce contract: the registry entry is mutated under the exclusive lock; do not
+         *       call this from within a with_* / try_with_* callback (defer until the callback returns -- the
+         *       reentrancy guard fails such calls closed).
          * @param vmt_name The name of the VMT hook to remove.
          * @return Success if removed, or HookError::VmtHookNotFound.
          */
@@ -790,6 +806,13 @@ namespace DetourModKit
 
         /**
          * @brief Removes a single method hook from a VMT, restoring the original method.
+         * @warning Restoring a method hook rewrites the cloned vtable slot back to the original function pointer. If
+         *          the game overwrote that slot or relaid the object's vptr after the hook was installed, the restore
+         *          writes over a pointer the game has since changed. Removal carries no thread protection, so the
+         *          caller must guarantee no thread is dispatching through the slot across removal.
+         * @note Two-phase teardown / quiesce contract: mutates the registry entry under the exclusive lock; do not call
+         *       this from within a with_* / try_with_* callback (defer until the callback returns -- the reentrancy
+         *       guard fails such calls closed).
          * @param vmt_name The name of the VMT hook.
          * @param method_index The vtable index of the method to unhook.
          * @return Success if removed, or a HookError describing the failure.
@@ -823,6 +846,15 @@ namespace DetourModKit
 
         /**
          * @brief Removes the hooked vtable from a specific object, restoring its original vptr.
+         * @warning This writes the saved original vptr back into @p object. If the game reconstructed @p object in
+         * place
+         *          or layered its own vptr on top after the clone was installed, the restore overwrites the vptr the
+         *          game has since set, silently clobbering it (or installing a stale vtable). The write has no thread
+         *          protection, so the caller must guarantee no thread is dispatching through the cloned slot across the
+         *          restore and that the object's vptr was not re-layered since the clone went on.
+         * @note Two-phase teardown / quiesce contract: mutates the registry entry under the exclusive lock; do not call
+         *       this from within a with_* / try_with_* callback (defer until the callback returns -- the reentrancy
+         *       guard fails such calls closed).
          * @param vmt_name The name of the VMT hook.
          * @param object The object to restore.
          * @return true if the VMT hook was found and the object was restored, false otherwise.
@@ -831,6 +863,16 @@ namespace DetourModKit
 
         /**
          * @brief Removes all VMT hooks, restoring original vtables on all applied objects.
+         * @details Destroys VMT hooks newest-first so clones layered on the same object unwind safely.
+         * @warning Each restore writes a saved original vptr back into its applied objects. If the game reconstructed
+         * an
+         *          object in place or layered its own vptr on top after the clone was installed, the restore overwrites
+         *          the vptr the game has since set, silently clobbering it (or installing a stale vtable). VMT removal
+         *          is a bare vptr write with no thread protection, so the caller must quiesce all hooked objects -- no
+         *          thread dispatching through any cloned slot -- across this teardown.
+         * @note Two-phase teardown / quiesce contract: mutates the registry under the exclusive lock; do not call this
+         *       (or any mutator) from within a with_* / try_with_* callback (defer until the callback returns -- the
+         *       reentrancy guard fails such calls closed).
          */
         void remove_all_vmt_hooks();
 
@@ -936,6 +978,13 @@ namespace DetourModKit
          *          not reorder for the caller: removing an older hook while a newer hook layered on the same address is
          *          still installed restores the prologue to the original bytes underneath the newer hook, leaving its
          *          entry jump pointing into a trampoline that is about to be freed. Remove layered hooks newest-first.
+         * @note Two-phase teardown / quiesce contract: disables the hook under the shared registry lock, then erases
+         * its
+         *       entry under the exclusive lock. SafetyHook relocates a thread caught in the patched prologue but cannot
+         *       drain a thread already inside the detour or trampoline body, so the caller must quiesce the hooked
+         *       function before removal to close that residual window. Do not call this from within a with_* /
+         *       try_with_* callback; defer the removal until the callback returns (the reentrancy guard fails such
+         *       calls closed).
          * @param hook_id The name of the hook to remove.
          * @return Success if removed, or HookError::HookNotFound.
          */
@@ -949,7 +998,9 @@ namespace DetourModKit
          *          a freed trampoline. The shared phase lets DetourModKit's own with_* readers finish before Hook
          *          storage is destroyed. SafetyHook can relocate threads caught in the patched prologue, but it cannot
          *          drain threads already running the detour or trampoline body; callers must quiesce the hooked
-         *          function during planned teardown to close that residual window.
+         *          function during planned teardown to close that residual window. Do not call this (or any mutator)
+         *          from within a with_* / try_with_* callback; defer the teardown until the callback returns (the
+         *          reentrancy guard fails such calls closed).
          *
          *          After clearing, resets the internal shutdown flag to false, allowing subsequent create_*_hook()
          *          calls to succeed for hot-reload workflows.

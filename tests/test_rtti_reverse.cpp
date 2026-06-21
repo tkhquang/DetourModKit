@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstring>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <type_traits>
 
 #include <windows.h>
 
@@ -240,6 +242,28 @@ TEST_F(RttiReverseTest, TypeIdentityUnresolvedNeverMatches)
     EXPECT_FALSE(id.matches(0x1000));
 }
 
+TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
+{
+    // A failed resolve must NOT latch permanently: the owning module may map the type later (a DLL loads, or a patch
+    // finishes relocating the vtable). Scope the identity to the whole pool, miss while the type is absent, then build
+    // the synth and confirm the next call resolves rather than staying wedged on the earlier miss.
+    const std::uintptr_t pool_base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
+    const Memory::ModuleRange full_pool{pool_base, pool_base + s_rev_pool.size()};
+
+    Rtti::TypeIdentity id(".?AVRevLateBind@@", full_pool);
+    EXPECT_FALSE(id.vtable().has_value());
+
+    const std::uintptr_t vt = build_synth(".?AVRevLateBind@@", 0);
+    ASSERT_NE(vt, 0u);
+
+    const auto resolved = id.vtable();
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(*resolved, vt);
+
+    // The successful resolve now latches: the warm path returns the same value.
+    EXPECT_EQ(id.vtable(), resolved);
+}
+
 TEST_F(RttiReverseTest, FindsFixtureViaHostModuleSectionWalk)
 {
     // Resolve against the real host EXE range so collect_rtti_scan_ranges parses actual PE section headers and sweeps
@@ -270,6 +294,21 @@ TEST_F(RttiReverseTest, VtablesForTypeTruncatesButReportsFullCount)
     const std::size_t n = Rtti::vtables_for_type(".?AVRevTrunc@@", all, 1, pool_range());
     EXPECT_EQ(n, 2u);
     EXPECT_EQ(all[0], primary);
+}
+
+TEST_F(RttiReverseTest, TypeIdentityRejectsStringTemporaryAtCompileTime)
+{
+    // TypeIdentity stores the name as a non-owning view, so a std::string rvalue would dangle the moment the
+    // constructor returns. The deleted std::string&& overload rejects that temporary at compile time, while a literal
+    // (const char*), a std::string_view, and a long-lived std::string lvalue all bind the view safely.
+    static_assert(!std::is_constructible_v<Rtti::TypeIdentity, std::string &&>,
+                  "a std::string temporary must be rejected (the stored view would dangle)");
+    static_assert(std::is_constructible_v<Rtti::TypeIdentity, const char *>,
+                  "a string literal (const char*) must construct");
+    static_assert(std::is_constructible_v<Rtti::TypeIdentity, std::string_view>, "a std::string_view must construct");
+    static_assert(std::is_constructible_v<Rtti::TypeIdentity, std::string &>,
+                  "a long-lived std::string lvalue must construct");
+    SUCCEED();
 }
 
 TEST_F(RttiReverseTest, VtablesForTypeOrdersByColOffset)

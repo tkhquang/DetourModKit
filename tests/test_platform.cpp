@@ -39,9 +39,13 @@ TEST(VersionTest, VersionStringIsNonEmpty)
 
 TEST(VersionTest, MakeVersionEncoding)
 {
-    EXPECT_EQ(DMK_MAKE_VERSION(2, 3, 0), 20300);
-    EXPECT_EQ(DMK_MAKE_VERSION(1, 0, 0), 10000);
+    EXPECT_EQ(DMK_MAKE_VERSION(2, 3, 0), 2003000);
+    EXPECT_EQ(DMK_MAKE_VERSION(1, 0, 0), 1000000);
     EXPECT_EQ(DMK_MAKE_VERSION(0, 0, 1), 1);
+    // The minor and patch fields reserve three decimal digits each (0..999), so a multi-digit minor no longer collides
+    // and a higher minor can never overtake the next major.
+    EXPECT_EQ(DMK_MAKE_VERSION(0, 100, 0), 100000);
+    EXPECT_GT(DMK_MAKE_VERSION(1, 0, 0), DMK_MAKE_VERSION(0, 999, 999));
 }
 
 TEST(VersionTest, VersionAtLeast)

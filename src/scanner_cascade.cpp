@@ -249,15 +249,26 @@ namespace DetourModKit
         // evidence. When first_match_out is non-null it receives the first occurrence (the n == 1 scan result, or
         // nullptr when there were no hits) so a caller that needs both the count and the first match -- the same scan,
         // same scope -- does not have to sweep again to fetch it.
+        //
+        // When incomplete_out is non-null it receives whether any scan in this count skipped a region that faulted
+        // mid-scan. A faulted region means the returned count is a lower bound: a second occurrence could have lived in
+        // the skipped bytes, so a count of 1 over an incomplete sweep does NOT prove uniqueness. The flag is cleared
+        // here once before the count loop and read after, so the result reflects only the scans this call performed
+        // (not a stale fault from an earlier scan on the same thread). The count itself is unchanged; the caller
+        // decides how to treat the incomplete signal.
         std::size_t count_pattern_hits_bounded(const DetourModKit::Scanner::CompiledPattern &pattern,
                                                std::size_t max_hits,
                                                std::optional<DetourModKit::Memory::ModuleRange> range,
-                                               const std::byte **first_match_out = nullptr) noexcept
+                                               const std::byte **first_match_out = nullptr,
+                                               bool *incomplete_out = nullptr) noexcept
         {
             if (first_match_out != nullptr)
             {
                 *first_match_out = nullptr;
             }
+            // Clear once before the loop so the flag reflects only the scans below; the region walk OR-sets it on a
+            // faulted skip and never clears it, so a prior scan on this thread must not bleed into this verdict.
+            DetourModKit::Scanner::detail::scan_incomplete_flag() = false;
             std::size_t hits = 0;
             for (std::size_t n = 1; n <= max_hits + 1; ++n)
             {
@@ -272,6 +283,10 @@ namespace DetourModKit
                     *first_match_out = match;
                 }
                 ++hits;
+            }
+            if (incomplete_out != nullptr)
+            {
+                *incomplete_out = DetourModKit::Scanner::detail::scan_incomplete_flag();
             }
             return hits;
         }
@@ -423,10 +438,25 @@ namespace DetourModKit
             }
             applicable = true;
             const std::byte *first_match = nullptr;
-            const std::size_t hits =
-                count_pattern_hits_bounded(*compiled, PROLOGUE_FALLBACK_MAX_HITS, range, &first_match);
+            bool count_incomplete = false;
+            const std::size_t hits = count_pattern_hits_bounded(*compiled, PROLOGUE_FALLBACK_MAX_HITS, range,
+                                                                &first_match, &count_incomplete);
             if (hits == 0)
             {
+                return std::nullopt;
+            }
+            // Fail closed when the uniqueness count ran over an incomplete sweep. A region that faulted mid-scan
+            // (concurrent decommit / reprotect) was skipped, so a second occurrence of the rebuilt jump pattern could
+            // have lived in the unscanned bytes. The fallback's whole safety rests on the rebuilt pattern matching
+            // exactly once -- the single site a sibling mod inline-hooked -- so an unproven count must be treated as
+            // ambiguous, not as a unique hit. Rejecting here lets the cascade fall through to the next candidate /
+            // shape rather than commit a hook at a possibly-wrong address whose blast radius (an unrelated function)
+            // is severe.
+            if (count_incomplete)
+            {
+                logger.debug("Scanner: prologue fallback rejected for '{}': uniqueness count incomplete (a region "
+                             "faulted mid-scan); uniqueness unproven, failing closed",
+                             candidate.name.empty() ? std::string_view{"<unnamed>"} : candidate.name);
                 return std::nullopt;
             }
             if (hits > PROLOGUE_FALLBACK_MAX_HITS)

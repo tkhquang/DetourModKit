@@ -16,6 +16,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
 #include <future>
@@ -481,15 +482,42 @@ namespace DetourModKit
                         // DEBUG edge rather than staying silent forever.
                         overflow_logged = false;
 
-                        // Walk the FILE_NOTIFY_INFORMATION chain.
+                        // Walk the FILE_NOTIFY_INFORMATION chain. The kernel is trusted, but every kernel-supplied
+                        // length/offset is bounds-checked against the buffer before any read or advance: trusting
+                        // FileNameLength or NextEntryOffset blindly would turn a corrupt/malicious completion into an
+                        // out-of-bounds read of the worker's heap buffer. On any inconsistency the walk stops (fails
+                        // closed) rather than reading past the bytes the kernel actually returned.
                         const BYTE *cursor = buffer.data();
                         const BYTE *const end_ptr = cursor + bytes_transferred;
 
-                        while (cursor + sizeof(FILE_NOTIFY_INFORMATION) <= end_ptr)
+                        // Offset of the variable-length FileName[] member; the fixed header occupies the bytes before
+                        // it. Used to bound both the header and the filename extent against end_ptr.
+                        constexpr size_t name_field_offset = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+
+                        // (a) The entry header itself must fit before we dereference any of its fields. Compare on the
+                        // remaining span before forming cursor + name_field_offset, so malformed trailing bytes cannot
+                        // make the bounds check itself step outside the buffer.
+                        while (static_cast<size_t>(end_ptr - cursor) >= name_field_offset)
                         {
                             const auto *info = reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(cursor);
 
-                            const size_t name_len = info->FileNameLength / sizeof(WCHAR);
+                            const DWORD name_bytes = info->FileNameLength;
+
+                            // (c) FileNameLength must be a whole number of WCHARs; an odd byte count is malformed.
+                            if (name_bytes % sizeof(WCHAR) != 0)
+                            {
+                                break;
+                            }
+
+                            // (b) FileName + FileNameLength must not run past the buffer end. Compare on the available
+                            // span (end_ptr - FileName) so the addition cannot overflow a pointer.
+                            const BYTE *const name_start = cursor + name_field_offset;
+                            if (name_bytes > static_cast<size_t>(end_ptr - name_start))
+                            {
+                                break;
+                            }
+
+                            const size_t name_len = name_bytes / sizeof(WCHAR);
                             const std::wstring_view changed_name(info->FileName, name_len);
 
                             // Match against target filename (case-insensitive). Rename-swap-save (temp -> target)
@@ -499,11 +527,22 @@ namespace DetourModKit
                                 matched = true;
                             }
 
-                            if (info->NextEntryOffset == 0)
+                            // A zero NextEntryOffset terminates the walk (the spec's end-of-chain marker).
+                            const DWORD next = info->NextEntryOffset;
+                            if (next == 0)
                             {
                                 break;
                             }
-                            cursor += info->NextEntryOffset;
+
+                            // (d) NextEntryOffset must advance past at least this entry's header (forward progress, so
+                            // a bogus small value cannot loop or alias the current entry) and must keep the next
+                            // entry's start at or before the buffer end; the loop condition then re-validates that the
+                            // next entry's header fully fits. Compare on the available span to avoid pointer overflow.
+                            if (next < name_field_offset || next > static_cast<size_t>(end_ptr - cursor))
+                            {
+                                break;
+                            }
+                            cursor += next;
                         }
                     }
 

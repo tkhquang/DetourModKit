@@ -139,7 +139,10 @@ namespace DetourModKit
 
         static constexpr size_t MAX_INLINE_SIZE = LOG_INLINE_MESSAGE_SIZE;
         static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
-        std::array<char, MAX_INLINE_SIZE> buffer{};
+        // Left uninitialized (raw storage): only [0, length) is ever read, and every constructor/move writes exactly
+        // length bytes before any read. Zero-filling the whole inline buffer would memset MAX_INLINE_SIZE bytes on each
+        // construction/enqueue for no observable effect.
+        std::array<char, MAX_INLINE_SIZE> buffer;
         size_t length{0};
 
         // Owned: allocated by StringPool, freed by reset().

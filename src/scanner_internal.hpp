@@ -93,6 +93,19 @@ namespace DetourModKit
              *         address (VirtualQuery failure) or a guard / no-access page.
              */
             [[nodiscard]] bool is_executable_address(std::uintptr_t address) noexcept;
+
+            /**
+             * @brief Per-thread flag set when a region sweep skipped a region that faulted mid-scan.
+             * @details scan_regions_filtered ORs this true (never clears it) when it skips a region that faulted under
+             *          the TOCTOU guard, so an out-of-TU caller (the cascade resolver) can tell that an occurrence
+             *          count it just ran is only a lower bound: a hidden match could live in the skipped bytes.
+             *          thread_local so two threads scanning concurrently do not see each other's fault state. The
+             *          reader clears it before a measurement window and reads it after, so a stale fault from an
+             *          earlier scan on the same thread cannot bleed into a later verdict. Advisory accounting only --
+             *          it never changes which address a scan returns.
+             * @return Reference to the calling thread's incomplete-scan flag.
+             */
+            [[nodiscard]] bool &scan_incomplete_flag() noexcept;
         } // namespace detail
     } // namespace Scanner
 } // namespace DetourModKit

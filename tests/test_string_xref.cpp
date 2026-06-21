@@ -1170,7 +1170,7 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
     }
 }
 
-#ifdef _MSC_VER
+#if defined(_MSC_VER) || defined(_WIN64)
 // Mirror of the scanner region guard for the string-xref window scans. find_string_xref reads each
 // execute-readable window returned by collect_executable_windows with unguarded byte reads (narrow shape scan) and
 // Zydis decoding (broad scan); scan_window_narrow_guarded / scan_window_broad_guarded backstop a concurrent decommit /
@@ -1178,9 +1178,9 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 // executable window while a second thread decommits and recommits a separate trailing executable window. Every
 // iteration must still resolve to the stable site: a faulted trailing window is skipped, and any references collected
 // before a swallowed fault are discarded by the guarded wrappers. A run where the decommit never lands inside the read
-// window is a valid pass for the fault path; the __except / skip-the-window mechanism is pinned deterministically by
-// MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. MSVC-only for the same
-// reason as the scanner guard test.
+// window is a valid pass for the fault path; the __except / VEH skip-the-window mechanism is pinned deterministically
+// by MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. 32-bit MinGW is
+// excluded because the process-wide vectored guard is x64-only there.
 TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 {
     SYSTEM_INFO si{};
@@ -1243,4 +1243,4 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
         EXPECT_EQ(*result, reference_site);
     }
 }
-#endif // _MSC_VER
+#endif // _MSC_VER || _WIN64

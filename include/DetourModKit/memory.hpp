@@ -9,6 +9,7 @@
 #include <cstring>
 #include <expected>
 #include <initializer_list>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -215,8 +216,8 @@ namespace DetourModKit
          *          PAGE_NOACCESS/guard, or a page reprotected out from under a stale cache entry -- is swallowed and
          *          returned as 0. Suitable for hot paths that already manage their own error recovery.
          * @note The MinGW path consults no cache; the fault guard makes a cache probe unnecessary. If the vectored
-         *       handler cannot be installed it falls back to VirtualQuery-validated reads. Either way the function
-         *       exposes no caller-observable cache state.
+         *       handler cannot be installed it falls back to VirtualQuery plus ReadProcessMemory. Either way the
+         *       function exposes no caller-observable cache state.
          * @param base The base address to read from.
          * @param offset Byte offset added to base before dereferencing.
          * @return The pointer-sized value at the address, or 0 if the read faults.
@@ -329,7 +330,7 @@ namespace DetourModKit
         [[nodiscard]] bool is_writable(void *address, size_t size);
 
         /**
-         * @brief Writes a sequence of bytes to a target memory address.
+         * @brief Writes a sequence of bytes to a target memory address, changing page protection around the write.
          * @details Handles changing memory protection, performs the write operation, and restores original protection.
          *          Also flushes instruction cache. Automatically invalidates the affected cache range. If num_bytes
          *          exceeds MAX_WRITE_SIZE the function performs no write and returns MemoryError::SizeTooLarge.
@@ -337,6 +338,11 @@ namespace DetourModKit
          * @param source_bytes Pointer to the source buffer containing data to write.
          * @param num_bytes Number of bytes to write. Must not exceed MAX_WRITE_SIZE.
          * @return std::expected<void, MemoryError> on success, or the specific error on failure.
+         * @note Setup / control-plane only. The two VirtualProtect calls, FlushInstructionCache, and the all-shard
+         *       cache-range invalidation make this the right tool for one-shot CODE patches on read-only / executable
+         *       pages, not a per-frame primitive. To write DATA to memory the target already keeps writable (a camera
+         *       transform, a player field) every frame, use @ref seh_write_bytes or @ref seh_write_chain_bytes, which
+         *       change no protection and run no flush or invalidation.
          */
         [[nodiscard]] std::expected<void, MemoryError> write_bytes(std::byte *target_address,
                                                                    const std::byte *source_bytes, size_t num_bytes);
@@ -414,7 +420,7 @@ namespace DetourModKit
          *          and the function returns false. On MinGW the copy runs under a process-wide vectored exception
          *          handler that claims the same fault set (no per-call VirtualQuery on the success path); a fault
          *          anywhere in the span is swallowed and the function returns false. If the handler cannot be installed
-         *          it falls back to VirtualQuery-based validation of every region the read spans.
+         *          it falls back to VirtualQuery plus ReadProcessMemory for every region the read spans.
          *
          *          The function is the underlying primitive for the typed @ref seh_read template and is exposed
          *          directly for callers that need to read a contiguous buffer of bytes (for example NUL-terminated
@@ -537,6 +543,105 @@ namespace DetourModKit
         [[nodiscard]] std::optional<T> seh_read_chain(uintptr_t base, std::initializer_list<ptrdiff_t> offsets) noexcept
         {
             return seh_read_chain<T>(base, std::span<const ptrdiff_t>(offsets.begin(), offsets.size()));
+        }
+
+        /**
+         * @brief SEH-guarded raw memory copy from @p source into @p addr.
+         * @details The write sibling of @ref seh_read_bytes for memory the target already keeps writable (live game
+         *          data such as a camera transform or player field). On MSVC the copy runs inside a __try / __except
+         *          frame whose filter accepts the foreign-access fault set (EXCEPTION_ACCESS_VIOLATION,
+         *          STATUS_GUARD_PAGE_VIOLATION, EXCEPTION_IN_PAGE_ERROR), so a fault mid-copy unwinds cleanly and the
+         *          function returns false. On MinGW x64 the copy normally runs under the same process-wide vectored
+         *          guard the read primitives use, armed over the destination span; if the handler cannot be installed,
+         *          and on 32-bit MinGW, it falls back to VirtualQuery plus WriteProcessMemory and fails closed unless
+         *          the destination is currently writable.
+         * @param addr Destination address. Values below 0x10000 are rejected without a write.
+         * @param source Source buffer. nullptr returns false.
+         * @param bytes Number of bytes to copy. Zero returns true (no-op).
+         * @return true on full success; false on any fault or invalid argument. On a fault mid-copy the target may have
+         *         been partially written.
+         * @warning This does NOT change page protection, flush the instruction cache, or invalidate the readability
+         *          cache. It is for writing DATA to memory the target already keeps writable, which is the per-frame
+         *          hot-path case. To patch CODE on read-only / executable pages, use @ref write_bytes instead.
+         * @note Callback-safe on the established hot path: MSVC and the installed MinGW x64 VEH path allocate nothing,
+         *       take no lock, and issue no syscall for the copy itself. On MinGW, call @ref init_cache during setup if
+         *       you want the VEH installed before a hook callback can be the first guarded access.
+         */
+        [[nodiscard]] bool seh_write_bytes(uintptr_t addr, const void *source, size_t bytes) noexcept;
+
+        /**
+         * @brief SEH-guarded typed write of a trivially copyable T to @p addr.
+         * @details Forwards to @ref seh_write_bytes, so the underlying guard lives in the translation unit that defines
+         *          it. The value's object representation is copied byte-for-byte; no T object is constructed at @p
+         *          addr.
+         * @tparam T A trivially copyable type.
+         * @param addr Destination address (see @ref seh_write_bytes).
+         * @param value Value whose object representation is written.
+         * @return true on success, false on any write fault or invalid address.
+         */
+        template <typename T>
+            requires std::is_trivially_copyable_v<T>
+        [[nodiscard]] bool seh_write(uintptr_t addr, const T &value) noexcept
+        {
+            return seh_write_bytes(addr, std::addressof(value), sizeof(T));
+        }
+
+        /**
+         * @brief Resolves a pointer chain and writes a raw byte range at its end.
+         * @details Performs the same walk as @ref seh_resolve_chain and then copies @p bytes from @p source into the
+         *          resolved address through the guarded write path, so a fault in the resolve or the terminal write
+         *          fails closed. This is the per-frame WRITE counterpart of @ref seh_read_chain_bytes: it changes no
+         *          page protection and runs no i-cache flush or cache invalidation, so writing a camera transform every
+         *          frame through it is a guarded copy, not the heavy @ref write_bytes path.
+         * @param base Root address of the chain.
+         * @param offsets Byte offsets applied left to right (see @ref seh_resolve_chain). An empty span writes at @p
+         *                base.
+         * @param source Source buffer. nullptr returns false.
+         * @param bytes Number of bytes to copy. Zero returns true (no-op).
+         * @return true on a fully successful resolve and write; false if any intermediate link faults or is
+         * implausible,
+         *         or the terminal write faults. On a terminal fault the target may have been partially written.
+         */
+        [[nodiscard]] bool seh_write_chain_bytes(uintptr_t base, std::span<const ptrdiff_t> offsets, const void *source,
+                                                 size_t bytes) noexcept;
+
+        /**
+         * @brief Convenience overload accepting a braced offset list.
+         * @see seh_write_chain_bytes(uintptr_t, std::span<const ptrdiff_t>, const void *, size_t)
+         */
+        [[nodiscard]] inline bool seh_write_chain_bytes(uintptr_t base, std::initializer_list<ptrdiff_t> offsets,
+                                                        const void *source, size_t bytes) noexcept
+        {
+            return seh_write_chain_bytes(base, std::span<const ptrdiff_t>(offsets.begin(), offsets.size()), source,
+                                         bytes);
+        }
+
+        /**
+         * @brief Resolves a pointer chain and writes a typed value at its end.
+         * @details Forwards to @ref seh_write_chain_bytes. The value's object representation is copied byte-for-byte.
+         * @tparam T A trivially copyable type.
+         * @param base Root address of the chain.
+         * @param offsets Byte offsets applied left to right (see @ref seh_resolve_chain).
+         * @param value Value whose object representation is written.
+         * @return true on success, false if any link faults or is implausible or the terminal write faults.
+         */
+        template <typename T>
+            requires std::is_trivially_copyable_v<T>
+        [[nodiscard]] bool seh_write_chain(uintptr_t base, std::span<const ptrdiff_t> offsets, const T &value) noexcept
+        {
+            return seh_write_chain_bytes(base, offsets, std::addressof(value), sizeof(T));
+        }
+
+        /**
+         * @brief Convenience overload accepting a braced offset list.
+         * @see seh_write_chain(uintptr_t, std::span<const ptrdiff_t>, const T &)
+         */
+        template <typename T>
+            requires std::is_trivially_copyable_v<T>
+        [[nodiscard]] bool seh_write_chain(uintptr_t base, std::initializer_list<ptrdiff_t> offsets,
+                                           const T &value) noexcept
+        {
+            return seh_write_chain<T>(base, std::span<const ptrdiff_t>(offsets.begin(), offsets.size()), value);
         }
     } // namespace Memory
 } // namespace DetourModKit
