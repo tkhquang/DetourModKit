@@ -15,6 +15,9 @@
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/worker.hpp"
+
+#include "config_input_fusion.hpp"
+
 #include "SimpleIni.h"
 
 #include <atomic>
@@ -930,38 +933,110 @@ namespace DetourModKit
         }
     }
 
+    // Anonymous namespace: the shared combo-binding fusion behind register_press_combo() and register_hold_combo().
+    namespace
+    {
+        /// Trigger kind selected by the shared combo-binding fusion.
+        enum class TriggerMode
+        {
+            Press,
+            Hold
+        };
+
+        /**
+         * @brief Shared implementation behind register_press_combo() and register_hold_combo().
+         * @details Builds the combo INI item (register_key_combo, wired to update_binding_combos for reload rebind),
+         *          registers the InputManager binding for @p trigger (press wraps a flag-gated void() callback; hold
+         *          wraps a HoldGate that adds the balancing-release lifecycle), optionally registers the
+         *          "<ini_key>.Consume" facet, and returns the owning guard. Exactly one of @p on_press /
+         *          @p on_state_change is used, per @p trigger.
+         */
+        Config::InputBindingGuard register_combo_binding(TriggerMode trigger, std::string_view section,
+                                                         std::string_view ini_key, std::string_view log_name,
+                                                         std::string_view input_binding_name,
+                                                         std::function<void()> on_press,
+                                                         std::function<void(bool)> on_state_change,
+                                                         std::string_view default_value, std::optional<bool> consume)
+        {
+            auto enabled_flag = std::make_shared<std::atomic<bool>>(true);
+            // Seed empty: register_key_combo() below parses default_value once and synchronously invokes the setter,
+            // which writes the parsed default into current_combos before the InputManager binding reads it. Pre-parsing
+            // the same default here would be a redundant second parse -- and a duplicate WARNING when the C++ literal
+            // default carries a typo.
+            auto current_combos = std::make_shared<Config::KeyComboList>();
+            std::string binding_name_str(input_binding_name);
+
+            Config::register_key_combo(
+                section, ini_key, log_name,
+                [current_combos, binding_name_str](const Config::KeyComboList &combos)
+                {
+                    *current_combos = combos;
+                    InputManager::get_instance().update_binding_combos(binding_name_str, combos);
+                },
+                default_value);
+
+            // Empty for press; set for hold to synthesize the balancing false.
+            std::function<void()> release_action;
+            if (trigger == TriggerMode::Press)
+            {
+                InputManager::get_instance().register_press(binding_name_str, *current_combos,
+                                                            [enabled_flag, cb = std::move(on_press)]()
+                                                            {
+                                                                if (cb && enabled_flag->load(std::memory_order_acquire))
+                                                                {
+                                                                    cb();
+                                                                }
+                                                            });
+            }
+            else
+            {
+                auto gate = std::make_shared<detail::HoldGate>();
+                gate->enabled = enabled_flag;
+                gate->on_state_change = std::move(on_state_change);
+                InputManager::get_instance().register_hold(binding_name_str, *current_combos,
+                                                           [gate](bool active) { gate->deliver(active); });
+                release_action = [gate]() { gate->release(); };
+            }
+
+            // Build the guard before registering the optional consume facet. register_consume_flag() allocates a
+            // Config item and can throw; constructing the guard first means a throw there unwinds through the guard's
+            // destructor, which disables the just-registered binding instead of leaking its callback live without an
+            // owner. binding_name_str is copied (not moved) so it stays valid for the consume registration below; an
+            // empty release_action (the press case) makes the three-argument guard behave exactly like the two-argument
+            // one.
+            Config::InputBindingGuard guard{binding_name_str, std::move(enabled_flag), std::move(release_action)};
+
+            // Register the consume facet only after the binding exists: register_consume_flag()'s immediate setter
+            // calls set_consume(), a no-op for an unknown name, so registering the bool item before
+            // register_press/register_hold created the binding would drop the registration-time default.
+            if (consume.has_value())
+            {
+                Config::register_consume_flag(section, std::string(ini_key) + ".Consume",
+                                              std::string(log_name) + " Consume", binding_name_str, *consume);
+            }
+
+            return guard;
+        }
+    } // namespace
+
     DetourModKit::Config::InputBindingGuard
     DetourModKit::Config::register_press_combo(std::string_view section, std::string_view ini_key,
                                                std::string_view log_name, std::string_view input_binding_name,
-                                               std::function<void()> on_press, std::string_view default_value)
+                                               std::function<void()> on_press, std::string_view default_value,
+                                               std::optional<bool> consume)
     {
-        auto enabled_flag = std::make_shared<std::atomic<bool>>(true);
-        // Seed empty: register_key_combo() below parses default_value once and synchronously invokes the setter closure
-        // (the [current_combos, ...] lambda), which writes the parsed default into current_combos before register_press
-        // reads it. Pre-parsing the same default here would be a redundant second parse -- and a duplicate WARNING when
-        // the C++ literal default carries a typo.
-        auto current_combos = std::make_shared<KeyComboList>();
-        std::string binding_name_str(input_binding_name);
+        return register_combo_binding(TriggerMode::Press, section, ini_key, log_name, input_binding_name,
+                                      std::move(on_press), nullptr, default_value, consume);
+    }
 
-        register_key_combo(
-            section, ini_key, log_name,
-            [current_combos, binding_name_str](const KeyComboList &combos)
-            {
-                *current_combos = combos;
-                InputManager::get_instance().update_binding_combos(binding_name_str, combos);
-            },
-            default_value);
-
-        InputManager::get_instance().register_press(binding_name_str, *current_combos,
-                                                    [enabled_flag, cb = std::move(on_press)]()
-                                                    {
-                                                        if (cb && enabled_flag->load(std::memory_order_acquire))
-                                                        {
-                                                            cb();
-                                                        }
-                                                    });
-
-        return InputBindingGuard{std::move(binding_name_str), std::move(enabled_flag)};
+    DetourModKit::Config::InputBindingGuard
+    DetourModKit::Config::register_hold_combo(std::string_view section, std::string_view ini_key,
+                                              std::string_view log_name, std::string_view input_binding_name,
+                                              std::function<void(bool)> on_state_change, std::string_view default_value,
+                                              std::optional<bool> consume)
+    {
+        return register_combo_binding(TriggerMode::Hold, section, ini_key, log_name, input_binding_name, nullptr,
+                                      std::move(on_state_change), default_value, consume);
     }
 
     void DetourModKit::Config::register_consume_flag(std::string_view section, std::string_view ini_key,

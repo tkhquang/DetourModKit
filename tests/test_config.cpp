@@ -1,17 +1,22 @@
 #include <gtest/gtest.h>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <filesystem>
 #include <memory>
 #include <process.h>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/input.hpp"
+
+#include "config_input_fusion.hpp"
+#include "input_intercept.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::gamepad_button;
@@ -2204,6 +2209,88 @@ TEST_F(ConfigTest, RegisterAtomic_IntRoundTrip)
     EXPECT_EQ(n.load(std::memory_order_relaxed), 7);
 }
 
+TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_BoolIniWins)
+{
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nFlag=false\n";
+    }
+
+    std::atomic<bool> flag{true};
+    Config::register_atomic<bool>("Atom", "Flag", "atomic bool flag", flag);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_FALSE(flag.load(std::memory_order_relaxed));
+}
+
+TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_BoolMissingUsesMemberInitializer)
+{
+    // The INI exists but omits the target key, so the registration default (the atomic's member value) applies. The
+    // unrelated key keeps this distinct from the file-not-found fallback.
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nUnrelated=1\n";
+    }
+
+    std::atomic<bool> flag{true};
+    Config::register_atomic<bool>("Atom", "Flag", "atomic bool flag", flag);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_TRUE(flag.load(std::memory_order_relaxed));
+}
+
+TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_IntIniWins)
+{
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nCount=11\n";
+    }
+
+    std::atomic<int> count{-3};
+    Config::register_atomic<int>("Atom", "Count", "atomic int", count);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_EQ(count.load(std::memory_order_relaxed), 11);
+}
+
+TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_IntMissingUsesMemberInitializer)
+{
+    // File exists but omits the key, so the member default applies (not the file-not-found path).
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nUnrelated=1\n";
+    }
+
+    std::atomic<int> count{-3};
+    Config::register_atomic<int>("Atom", "Count", "atomic int", count);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_EQ(count.load(std::memory_order_relaxed), -3);
+}
+
+TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_FloatIniWins)
+{
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nScale=2.5\n";
+    }
+
+    std::atomic<float> scale{0.15f};
+    Config::register_atomic<float>("Atom", "Scale", "atomic float", scale);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_FLOAT_EQ(scale.load(std::memory_order_relaxed), 2.5f);
+}
+
+TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_FloatMissingUsesMemberInitializer)
+{
+    // File exists but omits the key, so the member default applies (not the file-not-found path).
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nUnrelated=1\n";
+    }
+
+    std::atomic<float> scale{0.15f};
+    Config::register_atomic<float>("Atom", "Scale", "atomic float", scale);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_FLOAT_EQ(scale.load(std::memory_order_relaxed), 0.15f);
+}
+
 namespace
 {
     // RAII helper that redirects the global Logger to a temporary file and exposes the captured contents for
@@ -2483,8 +2570,8 @@ TEST_F(ConfigTest, EndToEnd_NoneDefaultRegistersCleanly)
 
 namespace
 {
-    // SFINAE probe: detects whether register_atomic<T> can be invoked. The requires-clause constrains T to int, bool,
-    // and float, so only those instantiations yield a viable overload.
+    // SFINAE probes: detect whether each register_atomic<T> overload can be invoked. The requires-clause constrains T
+    // to int, bool, and float, so only those instantiations yield a viable overload.
     template <typename T, typename = void> struct RegisterAtomicCallable : std::false_type
     {
     };
@@ -2494,6 +2581,18 @@ namespace
         T, std::void_t<decltype(Config::register_atomic<T>(
                std::declval<std::string_view>(), std::declval<std::string_view>(), std::declval<std::string_view>(),
                std::declval<std::atomic<T> &>(), std::declval<T>()))>> : std::true_type
+    {
+    };
+
+    template <typename T, typename = void> struct RegisterAtomicDefaultCallable : std::false_type
+    {
+    };
+
+    template <typename T>
+    struct RegisterAtomicDefaultCallable<T, std::void_t<decltype(Config::register_atomic<T>(
+                                                std::declval<std::string_view>(), std::declval<std::string_view>(),
+                                                std::declval<std::string_view>(), std::declval<std::atomic<T> &>()))>>
+        : std::true_type
     {
     };
 } // anonymous namespace
@@ -2507,3 +2606,379 @@ static_assert(!RegisterAtomicCallable<double>::value,
               "register_atomic<double> must be unavailable; only int, bool, and float are supported.");
 static_assert(!RegisterAtomicCallable<long>::value,
               "register_atomic<long> must be unavailable; only int, bool, and float are supported.");
+static_assert(RegisterAtomicDefaultCallable<int>::value, "register_atomic<int> inferred-default overload must exist.");
+static_assert(RegisterAtomicDefaultCallable<bool>::value,
+              "register_atomic<bool> inferred-default overload must exist.");
+static_assert(RegisterAtomicDefaultCallable<float>::value,
+              "register_atomic<float> inferred-default overload must exist.");
+static_assert(!RegisterAtomicDefaultCallable<double>::value,
+              "register_atomic<double> inferred-default overload must stay unavailable.");
+static_assert(!RegisterAtomicDefaultCallable<long>::value,
+              "register_atomic<long> inferred-default overload must stay unavailable.");
+
+// --- Input-binding fusion: the InputBindingGuard release action, the HoldGate teardown gate, and the
+// --- register_hold_combo / consume facet (Config layer). The HoldGate synchronization is exercised directly through
+// --- its internal header because the poll loop reads real key state and cannot deliver hold edges deterministically
+// --- from a test.
+
+TEST(InputBindingGuard, ReleaseActionRunsOnceThenIdempotent)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    int runs = 0;
+    Config::InputBindingGuard guard("hold", flag, [&runs]() { ++runs; });
+    guard.release();
+    EXPECT_EQ(runs, 1);
+    // Idempotent: the action was exchanged out on the first release.
+    guard.release();
+    EXPECT_EQ(runs, 1);
+}
+
+TEST(InputBindingGuard, ReleaseActionRunsOnDestruct)
+{
+    int runs = 0;
+    {
+        auto flag = std::make_shared<std::atomic<bool>>(true);
+        Config::InputBindingGuard guard("hold", flag, [&runs]() { ++runs; });
+    }
+    EXPECT_EQ(runs, 1);
+}
+
+TEST(InputBindingGuard, ReleaseActionMoveCtorTransfersOwnership)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    int runs = 0;
+    Config::InputBindingGuard a("hold", flag, [&runs]() { ++runs; });
+    Config::InputBindingGuard b(std::move(a));
+    // The moved-from guard must not fire the action b now owns.
+    a.release();
+    EXPECT_EQ(runs, 0);
+    b.release();
+    EXPECT_EQ(runs, 1);
+}
+
+TEST(InputBindingGuard, ReleaseActionMoveAssignFiresOldThenTransfers)
+{
+    auto flag_a = std::make_shared<std::atomic<bool>>(true);
+    auto flag_b = std::make_shared<std::atomic<bool>>(true);
+    int runs_a = 0;
+    int runs_b = 0;
+    Config::InputBindingGuard a("a", flag_a, [&runs_a]() { ++runs_a; });
+    Config::InputBindingGuard b("b", flag_b, [&runs_b]() { ++runs_b; });
+    // Move assignment releases b, firing its old action, then adopts a's action.
+    b = std::move(a);
+    EXPECT_EQ(runs_b, 1);
+    EXPECT_EQ(runs_a, 0);
+    b.release();
+    EXPECT_EQ(runs_a, 1);
+}
+
+TEST(InputBindingGuard, ReleaseActionExceptionIsSwallowed)
+{
+    auto flag = std::make_shared<std::atomic<bool>>(true);
+    Config::InputBindingGuard guard("hold", flag, []() { throw std::runtime_error("boom"); });
+    // release() is noexcept; a throwing action must not escape teardown.
+    EXPECT_NO_THROW(guard.release());
+}
+
+namespace
+{
+    // Builds a HoldGate wired to a recording callback. enabled starts live so deliver() forwards edges.
+    std::shared_ptr<DetourModKit::detail::HoldGate> make_recording_gate(std::vector<bool> &events)
+    {
+        auto gate = std::make_shared<DetourModKit::detail::HoldGate>();
+        gate->enabled = std::make_shared<std::atomic<bool>>(true);
+        gate->on_state_change = [&events](bool active) { events.push_back(active); };
+        return gate;
+    }
+
+    class PublishedConsumeRuleReset
+    {
+    public:
+        PublishedConsumeRuleReset() noexcept { DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
+        ~PublishedConsumeRuleReset() noexcept { DetourModKit::detail::publish_gamepad_consume_rules(nullptr, 0); }
+
+        PublishedConsumeRuleReset(const PublishedConsumeRuleReset &) = delete;
+        PublishedConsumeRuleReset &operator=(const PublishedConsumeRuleReset &) = delete;
+    };
+
+    [[nodiscard]] std::uint16_t gamepad_mask(int code) noexcept
+    {
+        return static_cast<std::uint16_t>(code);
+    }
+} // anonymous namespace
+
+TEST(HoldGate, InactiveReleaseSynthesizesNothing)
+{
+    std::vector<bool> events;
+    auto gate = make_recording_gate(events);
+    // Never held, so there is nothing to balance.
+    gate->release();
+    EXPECT_TRUE(events.empty());
+}
+
+TEST(HoldGate, HeldReleaseSynthesizesOneFalse)
+{
+    std::vector<bool> events;
+    auto gate = make_recording_gate(events);
+    gate->deliver(true);
+    gate->release();
+    // Idempotent: the balancing false was already emitted.
+    gate->release();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_TRUE(events[0]);
+    EXPECT_FALSE(events[1]);
+}
+
+TEST(HoldGate, NaturalReleaseLeavesNothingToSynthesize)
+{
+    std::vector<bool> events;
+    auto gate = make_recording_gate(events);
+    gate->deliver(true);
+    // Natural key-up already balanced the hold.
+    gate->deliver(false);
+    gate->release();
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_TRUE(events[0]);
+    // Exactly one false, no extra synthetic one.
+    EXPECT_FALSE(events[1]);
+}
+
+TEST(HoldGate, ReleasedGateSwallowsLaterEdges)
+{
+    std::vector<bool> events;
+    auto gate = make_recording_gate(events);
+    gate->deliver(true);
+    gate->release();
+    // Released gates swallow later edges.
+    gate->deliver(true);
+    gate->deliver(false);
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_FALSE(events.back());
+}
+
+TEST(HoldGate, SelfReleaseDuringDeliveryDefersBalancingFalse)
+{
+    std::vector<bool> events;
+    auto gate = std::make_shared<DetourModKit::detail::HoldGate>();
+    gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    gate->on_state_change = [&events, &gate](bool active)
+    {
+        events.push_back(active);
+        if (active)
+        {
+            // Self-release from inside the callback while delivering true.
+            gate->release();
+        }
+    };
+    gate->deliver(true);
+    // The balancing false is deferred to deliver()'s unwind and fired exactly once, never re-entering the callback
+    // while it is still on the stack.
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_TRUE(events[0]);
+    EXPECT_FALSE(events[1]);
+    // Released gates swallow later edges.
+    gate->deliver(true);
+    EXPECT_EQ(events.size(), 2u);
+}
+
+TEST(HoldGate, SelfReleaseThenThrowDuringDeliveryStillBalances)
+{
+    std::vector<bool> events;
+    auto gate = std::make_shared<DetourModKit::detail::HoldGate>();
+    gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    bool first = true;
+    gate->on_state_change = [&events, &gate, &first](bool active)
+    {
+        events.push_back(active);
+        if (active && first)
+        {
+            first = false;
+            // Self-release and then throw inside the same true delivery: the deferred balancing false must still
+            // fire so the consumer is not stranded observing the stale true.
+            gate->release();
+            throw std::runtime_error("boom");
+        }
+    };
+    EXPECT_THROW(gate->deliver(true), std::runtime_error); // the original exception surfaces to the poller
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_TRUE(events[0]);
+    EXPECT_FALSE(events[1]);
+    gate->deliver(true); // released -> swallowed
+    EXPECT_EQ(events.size(), 2u);
+}
+
+TEST(HoldGate, CallbackExceptionKeepsGateConsistent)
+{
+    auto gate = std::make_shared<DetourModKit::detail::HoldGate>();
+    gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    gate->on_state_change = [](bool) { throw std::runtime_error("boom"); };
+    // deliver() propagates to the poller's callback handler.
+    EXPECT_THROW(gate->deliver(true), std::runtime_error);
+
+    // delivering was reset by deliver()'s catch, so a later release() can still synthesize the balancing false
+    // (a true edge was forwarded before the throw).
+    int falses = 0;
+    gate->on_state_change = [&falses](bool active)
+    {
+        if (!active)
+        {
+            ++falses;
+        }
+    };
+    gate->release();
+    EXPECT_EQ(falses, 1);
+}
+
+TEST(HoldGate, ConcurrentReleaseNeverStrandsHeld)
+{
+    // A poll-thread-like producer toggles the hold while a control-plane thread releases the guard. After release the
+    // consumer must never be left observing 'held' (true): a stale true cannot land after the synthetic false.
+    for (int iter = 0; iter < 200; ++iter)
+    {
+        auto gate = std::make_shared<DetourModKit::detail::HoldGate>();
+        gate->enabled = std::make_shared<std::atomic<bool>>(true);
+        // Last delivered state: 1 = held, 0 = released, -1 = nothing yet.
+        std::atomic<int> last{-1};
+        std::atomic<bool> stop{false};
+        gate->on_state_change = [&last](bool active) { last.store(active ? 1 : 0, std::memory_order_relaxed); };
+
+        std::thread producer(
+            [gate, &stop]()
+            {
+                bool state = false;
+                while (!stop.load(std::memory_order_relaxed))
+                {
+                    state = !state;
+                    gate->deliver(state);
+                }
+            });
+
+        // Race the release against a producer that has already delivered at least one edge.
+        while (last.load(std::memory_order_relaxed) == -1)
+        {
+            std::this_thread::yield();
+        }
+        gate->release();
+        stop.store(true, std::memory_order_relaxed);
+        producer.join();
+
+        EXPECT_NE(last.load(std::memory_order_relaxed), 1)
+            << "consumer left observing 'held' after release on iteration " << iter;
+    }
+}
+
+TEST_F(ConfigTest, HoldCombo_RegistersOneBinding)
+{
+    InputManager::get_instance().shutdown();
+    auto guard = Config::register_hold_combo("Camera", "ZoomKey", "zoom hold", "zoom-hold-reg", [](bool) {}, "F4");
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, HoldCombo_LoadAndReloadRebinds)
+{
+    InputManager::get_instance().shutdown();
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Camera]\nZoomKey=F4,F5\n";
+    }
+
+    auto guard = Config::register_hold_combo("Camera", "ZoomKey", "zoom hold", "zoom-hold-rebind", [](bool) {}, "F3");
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(2));
+
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Camera]\nZoomKey=F6\n";
+    }
+    ASSERT_TRUE(Config::reload());
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, HoldCombo_ConsumeNulloptRegistersNoConsumeItem)
+{
+    InputManager::get_instance().shutdown();
+    LoggerFileCapture cap;
+    auto guard = Config::register_hold_combo("Camera", "ZoomKey", "zoom hold", "zoom-hold-plain", [](bool) {}, "F4");
+    Config::log_all();
+    EXPECT_EQ(cap.read_all().find("Consume"), std::string::npos);
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, PressCombo_ConsumeNulloptPreservesCurrentRegistrationShape)
+{
+    InputManager::get_instance().shutdown();
+    LoggerFileCapture cap;
+    auto guard = Config::register_press_combo("Camera", "ToggleKey", "toggle", "toggle-plain", []() {}, "Gamepad_A");
+    Config::log_all();
+    EXPECT_EQ(cap.read_all().find("Consume"), std::string::npos);
+    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, PressCombo_ConsumeFalseRegistersFacetAndLeavesRulesEmpty)
+{
+    PublishedConsumeRuleReset rules;
+    InputManager::get_instance().shutdown();
+    LoggerFileCapture cap;
+    auto guard = Config::register_press_combo(
+        "Camera", "ToggleKey", "toggle", "toggle-suppress-false", []() {}, "Gamepad_A",
+        /*consume=*/false);
+    Config::log_all();
+    EXPECT_NE(cap.read_all().find("ToggleKey.Consume"), std::string::npos);
+
+    InputManager::get_instance().start(std::chrono::milliseconds{1000});
+    const std::uint16_t button = gamepad_mask(GamepadCode::A);
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), 0u);
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, HoldCombo_ConsumeTrueRegistersFacetAndPublishesRule)
+{
+    PublishedConsumeRuleReset rules;
+    InputManager::get_instance().shutdown();
+    LoggerFileCapture cap;
+    auto guard = Config::register_hold_combo(
+        "Camera", "ZoomKey", "zoom hold", "zoom-hold-suppress-true", [](bool) {}, "Gamepad_A",
+        /*consume=*/true);
+    Config::log_all();
+    EXPECT_NE(cap.read_all().find("ZoomKey.Consume"), std::string::npos);
+
+    InputManager::get_instance().start(std::chrono::milliseconds{1000});
+    const std::uint16_t button = gamepad_mask(GamepadCode::A);
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
+{
+    PublishedConsumeRuleReset rules;
+    InputManager::get_instance().shutdown();
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Camera]\nZoomKey=Gamepad_A\nZoomKey.Consume=true\n";
+    }
+
+    // Register with the consume facet defaulting to false; load() must then apply the INI-sourced
+    // "<ini_key>.Consume = true" through the combo helper's consume item so the published rule masks the button.
+    auto guard = Config::register_hold_combo(
+        "Camera", "ZoomKey", "zoom hold", "zoom-hold-consume-ini", [](bool) {}, "Gamepad_A",
+        /*consume=*/false);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
+
+    InputManager::get_instance().start(std::chrono::milliseconds{1000});
+    const std::uint16_t button = gamepad_mask(GamepadCode::A);
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
