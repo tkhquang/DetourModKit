@@ -81,6 +81,25 @@ namespace DetourModKit
                     // logs it). Leaving `delivering` true would make a later release() defer its balancing edge
                     // forever.
                     delivering = false;
+                    // A self-release that ran inside this now-throwing delivery set released = true and deferred its
+                    // balancing false to the drain below, which the throw would skip; a later release() then
+                    // short-circuits on `released` and the consumer is stranded observing the stale true. Drain it
+                    // here, swallowing any secondary throw so the original exception is the one that surfaces.
+                    if (deferred_final)
+                    {
+                        deferred_final = false;
+                        if (forwarded_active && on_state_change)
+                        {
+                            forwarded_active = false;
+                            try
+                            {
+                                on_state_change(false);
+                            }
+                            catch (...)
+                            {
+                            }
+                        }
+                    }
                     throw;
                 }
                 delivering = false;

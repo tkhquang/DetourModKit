@@ -998,21 +998,24 @@ namespace DetourModKit
                 release_action = [gate]() { gate->release(); };
             }
 
-            // Register the optional consume facet only after the binding exists: register_consume_flag()'s immediate
-            // setter calls set_consume(), which is a no-op for an unknown name, so the registration-time default would
-            // be dropped if the bool item were registered before register_press/register_hold created the binding.
+            // Build the guard before registering the optional consume facet. register_consume_flag() allocates a
+            // Config item and can throw; constructing the guard first means a throw there unwinds through the guard's
+            // destructor, which disables the just-registered binding instead of leaking its callback live without an
+            // owner. binding_name_str is copied (not moved) so it stays valid for the consume registration below; an
+            // empty release_action (the press case) makes the three-argument guard behave exactly like the two-argument
+            // one.
+            Config::InputBindingGuard guard{binding_name_str, std::move(enabled_flag), std::move(release_action)};
+
+            // Register the consume facet only after the binding exists: register_consume_flag()'s immediate setter
+            // calls set_consume(), a no-op for an unknown name, so registering the bool item before
+            // register_press/register_hold created the binding would drop the registration-time default.
             if (consume.has_value())
             {
                 Config::register_consume_flag(section, std::string(ini_key) + ".Consume",
                                               std::string(log_name) + " Consume", binding_name_str, *consume);
             }
 
-            if (release_action)
-            {
-                return Config::InputBindingGuard{std::move(binding_name_str), std::move(enabled_flag),
-                                                 std::move(release_action)};
-            }
-            return Config::InputBindingGuard{std::move(binding_name_str), std::move(enabled_flag)};
+            return guard;
         }
     } // namespace
 

@@ -2224,6 +2224,13 @@ TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_BoolIniWins)
 
 TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_BoolMissingUsesMemberInitializer)
 {
+    // The INI exists but omits the target key, so the registration default (the atomic's member value) applies. The
+    // unrelated key keeps this distinct from the file-not-found fallback.
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nUnrelated=1\n";
+    }
+
     std::atomic<bool> flag{true};
     Config::register_atomic<bool>("Atom", "Flag", "atomic bool flag", flag);
     ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
@@ -2245,6 +2252,12 @@ TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_IntIniWins)
 
 TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_IntMissingUsesMemberInitializer)
 {
+    // File exists but omits the key, so the member default applies (not the file-not-found path).
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nUnrelated=1\n";
+    }
+
     std::atomic<int> count{-3};
     Config::register_atomic<int>("Atom", "Count", "atomic int", count);
     ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
@@ -2266,6 +2279,12 @@ TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_FloatIniWins)
 
 TEST_F(ConfigTest, RegisterAtomic_DefaultFromMember_FloatMissingUsesMemberInitializer)
 {
+    // File exists but omits the key, so the member default applies (not the file-not-found path).
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Atom]\nUnrelated=1\n";
+    }
+
     std::atomic<float> scale{0.15f};
     Config::register_atomic<float>("Atom", "Scale", "atomic float", scale);
     ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
@@ -2762,6 +2781,32 @@ TEST(HoldGate, SelfReleaseDuringDeliveryDefersBalancingFalse)
     EXPECT_EQ(events.size(), 2u);
 }
 
+TEST(HoldGate, SelfReleaseThenThrowDuringDeliveryStillBalances)
+{
+    std::vector<bool> events;
+    auto gate = std::make_shared<DetourModKit::detail::HoldGate>();
+    gate->enabled = std::make_shared<std::atomic<bool>>(true);
+    bool first = true;
+    gate->on_state_change = [&events, &gate, &first](bool active)
+    {
+        events.push_back(active);
+        if (active && first)
+        {
+            first = false;
+            // Self-release and then throw inside the same true delivery: the deferred balancing false must still
+            // fire so the consumer is not stranded observing the stale true.
+            gate->release();
+            throw std::runtime_error("boom");
+        }
+    };
+    EXPECT_THROW(gate->deliver(true), std::runtime_error); // the original exception surfaces to the poller
+    ASSERT_EQ(events.size(), 2u);
+    EXPECT_TRUE(events[0]);
+    EXPECT_FALSE(events[1]);
+    gate->deliver(true); // released -> swallowed
+    EXPECT_EQ(events.size(), 2u);
+}
+
 TEST(HoldGate, CallbackExceptionKeepsGateConsistent)
 {
     auto gate = std::make_shared<DetourModKit::detail::HoldGate>();
@@ -2907,6 +2952,29 @@ TEST_F(ConfigTest, HoldCombo_ConsumeTrueRegistersFacetAndPublishesRule)
         /*consume=*/true);
     Config::log_all();
     EXPECT_NE(cap.read_all().find("ZoomKey.Consume"), std::string::npos);
+
+    InputManager::get_instance().start(std::chrono::milliseconds{1000});
+    const std::uint16_t button = gamepad_mask(GamepadCode::A);
+    EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
+    guard.release();
+    InputManager::get_instance().shutdown();
+}
+
+TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
+{
+    PublishedConsumeRuleReset rules;
+    InputManager::get_instance().shutdown();
+    {
+        std::ofstream ini_file(m_test_ini_file);
+        ini_file << "[Camera]\nZoomKey=Gamepad_A\nZoomKey.Consume=true\n";
+    }
+
+    // Register with the consume facet defaulting to false; load() must then apply the INI-sourced
+    // "<ini_key>.Consume = true" through the combo helper's consume item so the published rule masks the button.
+    auto guard = Config::register_hold_combo(
+        "Camera", "ZoomKey", "zoom hold", "zoom-hold-consume-ini", [](bool) {}, "Gamepad_A",
+        /*consume=*/false);
+    ASSERT_NO_THROW(Config::load(m_test_ini_file.string()));
 
     InputManager::get_instance().start(std::chrono::milliseconds{1000});
     const std::uint16_t button = gamepad_mask(GamepadCode::A);

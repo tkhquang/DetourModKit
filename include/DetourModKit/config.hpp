@@ -112,6 +112,12 @@ namespace DetourModKit
              * @details Used by the hold-combo fusion to synthesize the balancing on_state_change(false). The action is
              *          invoked under this guard's noexcept teardown; any exception it raises is caught and logged
              *          best-effort, never propagated.
+             * @param name InputManager binding name this guard reports via name().
+             * @param enabled Shared cancellation flag the binding's callback wrapper gates on; release() clears it so
+             *               subsequent events become no-ops.
+             * @param on_release One-shot action run once by release() (the hold's balancing on_state_change(false));
+             *                   pass an empty function for a press binding, which then behaves like the two-argument
+             *                   constructor.
              */
             InputBindingGuard(std::string name, std::shared_ptr<std::atomic<bool>> enabled,
                               std::function<void()> on_release) noexcept
