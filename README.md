@@ -10,6 +10,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 
 | Module | Description | Header |
 |--------|-------------|--------|
+| Core Vocabulary (v4) | Strongly-typed `Address` and `Region` value types (constexpr arithmetic, a single audited cast surface, named scope factories), the backend-neutral `Prot` protection flags, and one unified error idiom: the eight per-domain enums folded into one high-byte-tagged `ErrorCode` superset (`category()` recovers the subsystem), a trivially-copyable `Error`, `Result<T> = std::expected<T, Error>`, and the `DMK_TRY` / `DMK_TRY_VOID` propagation macros | `address.hpp`, `region.hpp`, `error.hpp`, `defines.hpp` |
 | AOB Scanner | SIMD-accelerated pattern scanning with full-byte and per-nibble wildcards, cross-region-boundary overlap, RIP resolution, raw pattern batch scanning, multi-candidate cascade resolver with prologue-recovery fallback (E9 near-jump, FF25 indirect-jump, and absolute far-jump shapes), parallel cascade batch resolution, host-EXE cascade overloads, in-code constant (immediate/displacement) extraction, and string-reference (xref) resolution (load site, enclosing function, or cached global pointer slot; fast lea/mov shape scan plus an opt-in Zydis sweep for cmp/push/no-REX shapes) | `scanner.hpp` |
 | Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
 | Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
@@ -471,10 +472,15 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     <install_prefix>/
     ├── include/
     │   ├── DetourModKit/             <-- DetourModKit public headers
+    │   │   ├── defines.hpp           <-- v4 portability macros + `dmk` alias
+    │   │   ├── address.hpp           <-- v4 Address value type
+    │   │   ├── region.hpp            <-- v4 Region + Prot flags
+    │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
+    │   │   ├── scan.hpp              <-- v4 scanning surface (scan::Pattern)
     │   │   ├── scanner.hpp           <-- AOB scanner
     │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
     │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (bootstrap.hpp stays light)
-    │   │   ├── detail/               <-- Installed-but-internal headers (async_logger_internal.hpp, hook_impl.hpp)
+    │   │   ├── detail/               <-- Installed-but-internal headers (async_logger_internal.hpp, hook_impl.hpp, pattern_core.hpp)
     │   │   ├── bootstrap.hpp         <-- DllMain lifecycle helpers
     │   │   ├── config.hpp
     │   │   ├── event_dispatcher.hpp  <-- Typed pub/sub with RAII subscriptions

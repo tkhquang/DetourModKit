@@ -18,7 +18,8 @@
         "${workspaceFolder}/build/mingw-debug/_deps/zydis-src/include",
         "${workspaceFolder}/build/mingw-debug/_deps/zydis-build",
         "${workspaceFolder}/build/mingw-debug/_deps/zydis-src/dependencies/zycore/include",
-        "${workspaceFolder}/build/mingw-debug/_deps/zydis-build/zycore"
+        "${workspaceFolder}/build/mingw-debug/_deps/zydis-build/zycore",
+        "${workspaceFolder}/build/mingw-debug/_deps/googletest-src/googletest/include"
       ],
       "defines": [
         "WIN32",
@@ -48,7 +49,8 @@
         "${workspaceFolder}/build/msvc-debug/_deps/zydis-src/include",
         "${workspaceFolder}/build/msvc-debug/_deps/zydis-build",
         "${workspaceFolder}/build/msvc-debug/_deps/zydis-src/dependencies/zycore/include",
-        "${workspaceFolder}/build/msvc-debug/_deps/zydis-build/zycore"
+        "${workspaceFolder}/build/msvc-debug/_deps/zydis-build/zycore",
+        "${workspaceFolder}/build/msvc-debug/_deps/googletest-src/googletest/include"
       ],
       "defines": [
         "_DEBUG",
