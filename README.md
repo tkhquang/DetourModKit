@@ -57,14 +57,13 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 <details>
 <summary><strong>Hook Manager</strong></summary>
 
-- C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing hooks
+- C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing hooks. The backend is confined to the library: no public header includes or names SafetyHook, and a mid-hook detour takes an opaque `hook::MidContext` read/written through `gpr()` / `stack_pointer()` / `instruction_pointer()` / `xmm()` accessors, so a consumer writes a detour without SafetyHook on its own include path
 - **Inline hooks** and **mid-function hooks** - target functions by direct address or AOB scan
   - **Same-address layering is teardown-safe**: when more than one managed hook stacks on one address, bulk teardown (`remove_all_hooks`, `shutdown`, the destructor) disables and destroys them newest-first so each prologue restore lands on still-valid bytes instead of a freed trampoline. `HookConfig::fail_if_already_hooked` refuses a second managed hook on an address this HookManager already hooks (a registry-exact check, in addition to the prologue-byte heuristic that catches foreign-module hooks); explicit single removals must still be ordered newest-first by the caller.
   - **Unsafe-prologue pre-flight**: inline and mid hook creation decodes the target's first byte under a fault guard and flags a leading `E8` (call rel32) or `0xCC`/`0xCD` (breakpoint) prologue -- a relative call whose displacement would be relocated wrongly, or an already-patched / padding entry. `HookConfig::prologue_policy` selects `InlineProloguePolicy::Warn` (the default: log and install anyway, preserving prior behaviour) or `Fail` (refuse with `HookError::TargetPrologueUnsafe`).
-- **VMT (virtual method table) hooks** - clone an object's vtable and replace individual method slots by index
-  - Per-object interception of virtual calls (e.g., D3D device methods, game AI interfaces)
-  - Apply a single hooked vtable to multiple objects
-  - Safe callback-based access to hooked methods via `with_vmt_method()`
+- **VMT (virtual method table) hooks** - clone an object's vtable and apply it to one or more objects
+  - **Per-method slot replacement (`hook_vmt_method`) and the `with_vmt_method()` accessor are deferred to a post-4.0.0 VMT release.** The object-level clone / apply / remove API and its `VmtHookConfig` pre-flight ship now; the method-redirection layer (and its SafetyHook-typed callback) lands in a later release that also resolves the apply-to race
+  - Apply a single cloned vtable to multiple objects
   - **`VmtHookConfig` symmetric with inline `HookConfig`**: opt-in `fail_if_already_hooked` refuses a second create/apply whose vptr is already on a clone owned by this HookManager (the silent double-clone bug class), and opt-in `fail_on_non_function_pointer` pre-flight-decodes the first byte of the original vtable slot to reject int3 padding/breakpoints and same-module jump stubs. Both default to off; the single-arg `create_vmt_hook(name, object)` and `apply_vmt_hook(name, object)` overloads are preserved for backward compatibility.
 - **Convenience helpers**: `try_install_inline` / `try_install_inline_aob` / `try_install_mid` / `try_install_mid_aob` fuse `create_*_hook` with single-line Error logging on failure, returning `optional<string>` of the registered name
 - **Duplicate-target query**: `HookManager::is_target_already_hooked(addr)` reports whether the local registry already patches a given address with an inline or mid hook (does not see hooks installed by other statically-linked DMK consumers in the same process)
@@ -473,7 +472,9 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     ├── include/
     │   ├── DetourModKit/             <-- DetourModKit public headers
     │   │   ├── scanner.hpp           <-- AOB scanner
-    │   │   ├── async_logger.hpp      <-- Async logging system
+    │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
+    │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (bootstrap.hpp stays light)
+    │   │   ├── detail/               <-- Installed-but-internal headers (async_logger_internal.hpp, hook_impl.hpp)
     │   │   ├── bootstrap.hpp         <-- DllMain lifecycle helpers
     │   │   ├── config.hpp
     │   │   ├── event_dispatcher.hpp  <-- Typed pub/sub with RAII subscriptions
@@ -767,10 +768,11 @@ This method uses a pre-built and installed version of DetourModKit.
 // Single include for all DetourModKit functionality
 #include <DetourModKit.hpp>
 
-// SafetyHook headers are installed alongside DetourModKit and are transitively available.
-// SimpleIni is an internal build-time dependency and is NOT installed; do not include <SimpleIni.h>
+// A mid-hook detour takes DetourModKit::hook::MidContext (from hook_manager.hpp, pulled in by the umbrella above),
+// so a detour body no longer needs SafetyHook on the include path. SafetyHook headers are still installed alongside
+// DetourModKit and remain available; add `#include <safetyhook.hpp>` only if you call SafetyHook directly for
+// something else. SimpleIni is an internal build-time dependency and is NOT installed; do not include <SimpleIni.h>
 // from a find_package consumer. Use the DetourModKit::Config API for INI access instead.
-#include <safetyhook.hpp>
 
 // Global variables for your mod's configuration
 struct ModConfiguration

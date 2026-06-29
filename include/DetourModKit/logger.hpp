@@ -11,6 +11,7 @@
 #include <atomic>
 
 #include "DetourModKit/win_file_stream.hpp"
+#include "DetourModKit/async_logger_config.hpp"
 
 namespace DetourModKit
 {
@@ -65,8 +66,9 @@ namespace DetourModKit
     // sides.
     inline constexpr std::size_t LOG_INLINE_MESSAGE_SIZE = 512;
 
-    // Forward declarations
-    struct AsyncLoggerConfig;
+    // Forward declarations. AsyncLoggerConfig is a complete type via async_logger_config.hpp (included above); only
+    // AsyncLogger stays forward-declared here, since Logger holds it behind an atomic<shared_ptr> whose full
+    // definition lives in async_logger.hpp.
     class AsyncLogger;
 
     /**

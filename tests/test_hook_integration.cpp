@@ -13,6 +13,8 @@
 #include <string>
 
 using namespace DetourModKit;
+// Mid-hook detours name only the DMK-owned hook::MidContext now that the SafetyHook backend is library-private.
+using namespace DetourModKit::hook;
 
 using ComputeDamageFn = int (*)(int, int);
 using ComputeArmorFn = int (*)(int, int);
@@ -254,10 +256,10 @@ TEST_F(HookIntegrationTest, MidHook_InspectAndModifyArgs)
 
     EXPECT_EQ(m_fn_compute_armor(5, 10), 50);
 
-    auto mid_detour = [](safetyhook::Context &ctx)
+    auto mid_detour = [](MidContext &ctx)
     {
-        ctx.rcx = 100;
-        ctx.rdx = 2;
+        gpr(ctx, Gpr::Rcx) = 100;
+        gpr(ctx, Gpr::Rdx) = 2;
     };
 
     auto result =
@@ -406,10 +408,10 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
     ASSERT_TRUE(r1.has_value());
     s_original_compute_damage = reinterpret_cast<ComputeDamageFn>(tramp);
 
-    auto mid_detour = [](safetyhook::Context &ctx)
+    auto mid_detour = [](MidContext &ctx)
     {
-        ctx.rcx = 100;
-        ctx.rdx = 1;
+        gpr(ctx, Gpr::Rcx) = 100;
+        gpr(ctx, Gpr::Rdx) = 1;
     };
 
     auto r2 = m_hook_manager->create_mid_hook("ReloadMid", reinterpret_cast<uintptr_t>(m_fn_compute_armor), mid_detour);
