@@ -29,6 +29,8 @@ namespace DetourModKit::scan
      *          compiled form exposes its bytes, mask, result offset, and the cached compile-time anchor so the scan
      *          engine can prefilter and verify without re-parsing, and matches_at() applies the same masked compare
      *          the engine uses for a single position. Copyable and trivially comparable in cost to its inline arrays.
+     * @note The compile() / literal() factories are setup/control-plane; size(), the byte/mask/anchor accessors, and
+     *       matches_at() are callback-safe (pure value reads with no allocation, I/O, or locking).
      */
     class Pattern
     {
@@ -62,6 +64,7 @@ namespace DetourModKit::scan
          *          non-constant expression and fails the build at the offending literal site. A valid literal never
          *          reaches the throw and compiles to a plain Pattern value, keeping hard-coded candidate ladders
          *          constexpr-friendly.
+         * @note Compile-time only: consteval, so it runs during compilation and has no runtime call site to classify.
          */
         [[nodiscard]] static consteval Pattern literal(std::string_view dsl)
         {
@@ -111,6 +114,7 @@ namespace DetourModKit::scan
          *          (memory ^ pattern) & mask is zero for every byte, so wildcard bytes (mask 0x00) always agree and a
          *          nibble mask (0xF0 / 0x0F) compares only the fixed nibble. A window shorter than the pattern cannot
          *          match.
+         * @note Callback-safe -- a pure masked byte compare with no allocation, I/O, or locking.
          */
         [[nodiscard]] constexpr bool matches_at(std::span<const std::byte> window) const noexcept
         {

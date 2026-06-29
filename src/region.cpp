@@ -104,6 +104,9 @@ namespace DetourModKit
             return Region{};
         }
 
-        return Region{Address{minimum_address}, static_cast<std::size_t>(maximum_address - minimum_address)};
+        // lpMaximumApplicationAddress is the highest address usable by the process and is INCLUSIVE, so the half-open
+        // Region must run one byte past it to actually contain that last address: size = (max - min) + 1. The guard
+        // above guarantees max > min, and an application maximum is never UINTPTR_MAX, so the + 1 cannot overflow.
+        return Region{Address{minimum_address}, static_cast<std::size_t>(maximum_address - minimum_address) + 1U};
     }
 } // namespace DetourModKit

@@ -18,6 +18,7 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <type_traits>
 
 namespace DetourModKit
@@ -111,8 +112,14 @@ namespace DetourModKit
          */
         [[nodiscard]] Address rip(std::ptrdiff_t displacement_at, std::size_t instruction_length) const noexcept
         {
-            const std::int32_t displacement =
-                *reinterpret_cast<const std::int32_t *>(m_value + static_cast<std::uintptr_t>(displacement_at));
+            // Load the disp32 with memcpy rather than a typed dereference. A displacement field sits at an arbitrary
+            // byte offset inside an instruction and is almost never 4-byte aligned, so forming an `int32_t *` to it
+            // and dereferencing would be undefined behaviour. memcpy of a fixed 4 bytes is the well-defined unaligned
+            // load and the compiler folds it to a single (unaligned) mov on x86-64.
+            std::int32_t displacement = 0;
+            std::memcpy(&displacement,
+                        reinterpret_cast<const void *>(m_value + static_cast<std::uintptr_t>(displacement_at)),
+                        sizeof(displacement));
             const std::uintptr_t next_instruction = m_value + static_cast<std::uintptr_t>(instruction_length);
             return Address{next_instruction + static_cast<std::uintptr_t>(static_cast<std::intptr_t>(displacement))};
         }

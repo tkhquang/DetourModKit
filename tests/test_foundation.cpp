@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <string>
 #include <type_traits>
 #include <utility>
+
+#include <windows.h>
 
 #include "DetourModKit/address.hpp"
 #include "DetourModKit/defines.hpp"
@@ -187,6 +191,23 @@ TEST(FoundationAddress, OrderingIsByRawValue)
     EXPECT_NE(Address{0x55}, Address{0x56});
 }
 
+TEST(FoundationAddress, RipResolvesUnalignedDisplacement)
+{
+    // A 7-byte "mov rax, [rip+disp32]" shape: three opcode/ModRM bytes then a disp32 deliberately placed at offset 3,
+    // which is unaligned relative to the 16-byte-aligned buffer. This exercises the memcpy unaligned load in rip().
+    alignas(16) std::array<std::byte, 7> code{};
+    code[0] = std::byte{0x48};
+    code[1] = std::byte{0x8B};
+    code[2] = std::byte{0x05};
+    const std::int32_t displacement = -0x20;
+    std::memcpy(&code[3], &displacement, sizeof(displacement));
+
+    const Address site{code.data()};
+    const std::uintptr_t expected = reinterpret_cast<std::uintptr_t>(code.data()) + 7U +
+                                    static_cast<std::uintptr_t>(static_cast<std::intptr_t>(displacement));
+    EXPECT_EQ(site.rip(3, 7).raw(), expected);
+}
+
 TEST(FoundationRegion, HalfOpenContainmentAndEnd)
 {
     constexpr Region region{Address{0x1000}, 0x100};
@@ -222,6 +243,18 @@ TEST(FoundationRegion, HostAndWholeProcessResolve)
     const Region whole = Region::whole_process();
     EXPECT_TRUE(static_cast<bool>(whole.base));
     EXPECT_GT(whole.size, 0U);
+}
+
+TEST(FoundationRegion, WholeProcessIncludesMaximumApplicationAddress)
+{
+    // lpMaximumApplicationAddress is inclusive, so the half-open Region must contain it and end one byte past it.
+    SYSTEM_INFO system_info{};
+    ::GetSystemInfo(&system_info);
+    const Address maximum{reinterpret_cast<std::uintptr_t>(system_info.lpMaximumApplicationAddress)};
+
+    const Region whole = Region::whole_process();
+    EXPECT_TRUE(whole.contains(maximum));
+    EXPECT_EQ(whole.end().raw(), maximum.raw() + 1U);
 }
 
 TEST(FoundationRegion, ModuleNamedResolvesLoadedAndFailsClosed)

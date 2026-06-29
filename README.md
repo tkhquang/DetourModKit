@@ -476,8 +476,8 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── address.hpp           <-- v4 Address value type
     │   │   ├── region.hpp            <-- v4 Region + Prot flags
     │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
-    │   │   ├── scanner.hpp           <-- AOB scanner
     │   │   ├── scan.hpp              <-- v4 scanning surface (scan::Pattern)
+    │   │   ├── scanner.hpp           <-- AOB scanner
     │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
     │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (bootstrap.hpp stays light)
     │   │   ├── detail/               <-- Installed-but-internal headers (async_logger_internal.hpp, hook_impl.hpp, pattern_core.hpp)

@@ -80,7 +80,7 @@ namespace DetourModKit
 
         /**
          * @brief Returns the Region spanning this process's entire user-mode address window.
-         * @return The span from the system minimum to maximum application address.
+         * @return The half-open span from the system minimum application address through the maximum (inclusive).
          * @details The widest scope, for a scan that cannot assume which module holds the target. It reflects the
          *          system's reported application-address window rather than a hardcoded ceiling, so it stays correct
          *          across address-layout differences.
@@ -103,6 +103,9 @@ namespace DetourModKit
         R = 1,
         W = 2,
         X = 4,
+        // Inside an enum with a fixed underlying type, the enumerators have that integral type (std::uint32_t), not
+        // Prot, until the closing brace, so these `R | W` initializers are a plain integer OR evaluated at this point.
+        // They do not depend on (and predate) the DMK_FLAG_ENUM(Prot) operators below, which only apply to Prot values.
         RW = R | W,
         RWX = R | W | X
     };
