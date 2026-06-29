@@ -2,6 +2,8 @@
 
 Reference for `DetourModKit::VmtHookConfig` and the configurable VMT hook creation and apply overloads in [`hook_manager.hpp`](../../include/DetourModKit/hook_manager.hpp). Covers the operational policy knobs that mirror `HookConfig` for the inline path.
 
+> **v4.0.0 note:** Per-method VMT hooking (`hook_vmt_method` / `with_vmt_method` / `remove_vmt_method`) is deferred to a later VMT release (it named the SafetyHook backend in a position incompatible with the v4 backend-free public header). The object-level clone / apply / remove API and the `VmtHookConfig` knobs documented here ship in 4.0.0; the `hook_vmt_method` examples below illustrate the method layer as it will return with that release.
+
 ## Contents
 
 1. [Why the VMT path needed a config struct](#1-why-the-vmt-path-needed-a-config-struct)
@@ -110,7 +112,9 @@ cfg.fail_on_non_function_pointer = true;
 auto r = HookManager::get_instance().create_vmt_hook("MyVmt", object, cfg);
 if (r)
 {
-    HookManager::get_instance().hook_vmt_method("MyVmt", method_index, &MyClass::detour);
+    // NOTE: hook_vmt_method is deferred and does NOT compile in 4.0.0 (see the note at the top of this file).
+    // It returns when the per-method VMT layer is reintroduced:
+    // HookManager::get_instance().hook_vmt_method("MyVmt", method_index, &MyClass::detour);
 }
 ```
 

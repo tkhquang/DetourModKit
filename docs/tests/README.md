@@ -177,11 +177,11 @@ EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(fn));
 - **Concurrent access**: Multi-threaded hook creation stress tests
 - **Cross-module hooking**: DLL exports hooked and verified via integration tests
 - **AOB scan pipeline**: Scanner finds patterns in loaded DLLs, hooks the result
-- **Mid hooks**: Argument inspection and modification via `safetyhook::Context`
+- **Mid hooks**: Argument inspection and modification via `hook::MidContext` (the DMK accessors `gpr()` / `stack_pointer()` / `instruction_pointer()` / `xmm()`)
 
 ### Platform-Specific Tests
 
-Mid hook tests that modify registers (`ctx.rcx`, `ctx.rdx`) are x86-64 specific. Guard with:
+Mid hook tests that modify registers (`gpr(ctx, Gpr::Rcx)`, `gpr(ctx, Gpr::Rdx)`) are x86-64 specific. Guard with:
 
 ```cpp
 #if !defined(__x86_64__) && !defined(_M_X64)

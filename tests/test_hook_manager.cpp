@@ -22,6 +22,8 @@
 #include "DetourModKit/logger.hpp"
 
 using namespace DetourModKit;
+// Mid-hook detours name only the DMK-owned hook::MidContext now that the SafetyHook backend is confined to the library.
+using namespace DetourModKit::hook;
 
 #if defined(_MSC_VER)
 #define DMK_TEST_NOINLINE __declspec(noinline)
@@ -230,7 +232,7 @@ TEST_F(HookManagerTest, CreateInlineHookAob_InvalidPattern)
 
 TEST_F(HookManagerTest, CreateMidHook_InvalidAddress)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result = m_hook_manager->create_mid_hook("TestMidInvalid", 0, detour_fn);
 
@@ -248,7 +250,7 @@ TEST_F(HookManagerTest, CreateMidHook_NullDetour)
 
 TEST_F(HookManagerTest, CreateMidHookAob_EmptyPattern)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result = m_hook_manager->create_mid_hook_aob("TestMidAobEmpty", 0, 0, "", 0, detour_fn);
 
@@ -603,12 +605,12 @@ TEST_F(HookManagerTest, Reentrancy_MutatorsFromCallbackFailClosed)
             EXPECT_EQ(tramp_d, nullptr);
 
             const auto mid = m_hook_manager->create_mid_hook(
-                "ReentryMid", reinterpret_cast<uintptr_t>(&real_hook_target_add), [](safetyhook::Context &) {});
+                "ReentryMid", reinterpret_cast<uintptr_t>(&real_hook_target_add), [](MidContext &) {});
             EXPECT_FALSE(mid.has_value());
             EXPECT_EQ(mid.error(), HookError::ReentrantCallRejected);
 
             const auto mid_aob =
-                m_hook_manager->create_mid_hook_aob("ReentryMidAob", 0, 0, "ZZ", 0, [](safetyhook::Context &) {});
+                m_hook_manager->create_mid_hook_aob("ReentryMidAob", 0, 0, "ZZ", 0, [](MidContext &) {});
             EXPECT_FALSE(mid_aob.has_value());
             EXPECT_EQ(mid_aob.error(), HookError::ReentrantCallRejected);
 
@@ -617,9 +619,11 @@ TEST_F(HookManagerTest, Reentrancy_MutatorsFromCallbackFailClosed)
             EXPECT_FALSE(vmt.has_value());
             EXPECT_EQ(vmt.error(), HookError::ReentrantCallRejected);
 
+#if 0 // hook_vmt_method reentrancy check deferred with the per-method VMT API
             const auto method = m_hook_manager->hook_vmt_method("ReentryVmt", 0, &real_hook_detour_add);
             EXPECT_FALSE(method.has_value());
             EXPECT_EQ(method.error(), HookError::ReentrantCallRejected);
+#endif
 
             // Removers acquire exclusive.
             const auto removed = m_hook_manager->remove_hook("ReentryHookB");
@@ -630,9 +634,11 @@ TEST_F(HookManagerTest, Reentrancy_MutatorsFromCallbackFailClosed)
             EXPECT_FALSE(removed_vmt.has_value());
             EXPECT_EQ(removed_vmt.error(), HookError::ReentrantCallRejected);
 
+#if 0 // remove_vmt_method reentrancy check deferred with the per-method VMT API
             const auto removed_method = m_hook_manager->remove_vmt_method("ReentryVmt", 0);
             EXPECT_FALSE(removed_method.has_value());
             EXPECT_EQ(removed_method.error(), HookError::ReentrantCallRejected);
+#endif
 
             EXPECT_FALSE(m_hook_manager->apply_vmt_hook("ReentryVmt", &dummy_object));
             EXPECT_FALSE(m_hook_manager->remove_vmt_from_object("ReentryVmt", &dummy_object));
@@ -688,7 +694,7 @@ TEST_F(HookManagerTest, RealMidHook_CreateSuccess)
 {
     s_mid_detour_calls.store(0);
 
-    auto detour_fn = [](safetyhook::Context &) { s_mid_detour_calls.fetch_add(1, std::memory_order_relaxed); };
+    auto detour_fn = [](MidContext &) { s_mid_detour_calls.fetch_add(1, std::memory_order_relaxed); };
 
     auto result =
         m_hook_manager->create_mid_hook("RealMidHook", reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
@@ -706,7 +712,7 @@ TEST_F(HookManagerTest, RealMidHook_CreateSuccess)
 
 TEST_F(HookManagerTest, RealMidHook_WithCallback)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result = m_hook_manager->create_mid_hook("RealMidCallbackHook",
                                                   reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
@@ -729,7 +735,7 @@ TEST_F(HookManagerTest, RealMidHook_WithCallback)
 
 TEST_F(HookManagerTest, RealMidHook_EnableDisable)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result =
         m_hook_manager->create_mid_hook("RealMidEnDis", reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
@@ -760,7 +766,7 @@ TEST_F(HookManagerTest, InlineHook_WindowsApiAddress)
 TEST_F(HookManagerTest, MidHook_WindowsApiAddress)
 {
     void *api_func = reinterpret_cast<void *>(&GetTickCount);
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result =
         m_hook_manager->create_mid_hook("MidWindowsApiHook", reinterpret_cast<uintptr_t>(api_func), detour_fn);
@@ -773,7 +779,7 @@ TEST_F(HookManagerTest, MidHook_WindowsApiAddress)
 
 TEST_F(HookManagerTest, CreateMidHook_NullAddress)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result = m_hook_manager->create_mid_hook("MidNullAddr", 0, detour_fn);
     ASSERT_FALSE(result.has_value());
@@ -782,7 +788,7 @@ TEST_F(HookManagerTest, CreateMidHook_NullAddress)
 
 TEST_F(HookManagerTest, CreateMidHook_DuplicateName)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     void *tramp = nullptr;
 
     auto result1 = m_hook_manager->create_inline_hook("DupMidName", reinterpret_cast<uintptr_t>(&real_hook_target_add),
@@ -823,7 +829,7 @@ TEST_F(HookManagerTest, CreateInlineHookAOB_PatternNotFound)
 
 TEST_F(HookManagerTest, CreateMidHookAOB_InvalidPattern)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result = m_hook_manager->create_mid_hook_aob(
         "MidAOBInvalid", reinterpret_cast<uintptr_t>(&real_hook_target_add), 256, "ZZ XX INVALID", 0, detour_fn);
@@ -833,7 +839,7 @@ TEST_F(HookManagerTest, CreateMidHookAOB_InvalidPattern)
 
 TEST_F(HookManagerTest, CreateMidHookAOB_PatternNotFound)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result =
         m_hook_manager->create_mid_hook_aob("MidAOBNotFound", reinterpret_cast<uintptr_t>(&real_hook_target_add), 16,
@@ -844,7 +850,7 @@ TEST_F(HookManagerTest, CreateMidHookAOB_PatternNotFound)
 
 TEST_F(HookManagerTest, RealMidHook_CreateDisabled)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     HookConfig config;
     config.auto_enable = false;
 
@@ -889,7 +895,7 @@ TEST_F(HookManagerTest, HotReload_InlineHookAfterShutdown)
 
 TEST_F(HookManagerTest, HotReload_MidHookAfterShutdown)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto r1 = m_hook_manager->create_mid_hook("PreShutdownMid", reinterpret_cast<uintptr_t>(&real_hook_target_add),
                                               detour_fn);
@@ -921,7 +927,7 @@ TEST_F(HookManagerTest, ShutdownThenRemoveAll_Succeeds)
 
 TEST_F(HookManagerTest, WithInlineHook_WrongType)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     auto result = m_hook_manager->create_mid_hook("MidForWrongType", reinterpret_cast<uintptr_t>(&real_hook_target_add),
                                                   detour_fn);
     ASSERT_TRUE(result.has_value());
@@ -1004,7 +1010,7 @@ TEST_F(HookManagerTest, ShutdownWithHooks)
 
 TEST_F(HookManagerTest, RealMidHook_Remove)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result =
         m_hook_manager->create_mid_hook("MidRemoveHook", reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
@@ -1041,7 +1047,7 @@ TEST_F(HookManagerTest, CreateInlineHookAOB_Success)
 
 TEST_F(HookManagerTest, CreateMidHookAOB_Success)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto *target_bytes = reinterpret_cast<unsigned char *>(&real_hook_target_mul);
 
@@ -1079,7 +1085,7 @@ TEST_F(HookManagerTest, WithInlineHook_SuccessCallback)
 
 TEST_F(HookManagerTest, WithMidHook_SuccessCallback)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result =
         m_hook_manager->create_mid_hook("WithMidCB", reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
@@ -1116,7 +1122,7 @@ TEST_F(HookManagerTest, TryWithInlineHook_NotFound)
 
 TEST_F(HookManagerTest, TryWithMidHook_Success)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result =
         m_hook_manager->create_mid_hook("TryMidCB", reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
@@ -1138,7 +1144,7 @@ TEST_F(HookManagerTest, TryWithMidHook_NotFound)
 
 TEST_F(HookManagerTest, RealMidHook_CreateDisabledAutoEnable)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     HookConfig config;
     config.auto_enable = false;
 
@@ -1277,7 +1283,7 @@ TEST_F(HookManagerTest, WithInlineHook_DirectEnableDisable)
 
 TEST_F(HookManagerTest, WithMidHook_DirectEnableDisable)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
 
     auto result = m_hook_manager->create_mid_hook("DirectMidEnDisHook",
                                                   reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
@@ -1310,7 +1316,7 @@ TEST_F(HookManagerTest, RemoveAllHooks_WithRealHooks)
                                                  reinterpret_cast<void *>(&real_hook_detour_add), &tramp1);
     ASSERT_TRUE(r1.has_value());
 
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     auto r2 =
         m_hook_manager->create_mid_hook("BulkRemove2", reinterpret_cast<uintptr_t>(&real_hook_target_mul), detour_fn);
     ASSERT_TRUE(r2.has_value());
@@ -1369,7 +1375,7 @@ TEST_F(HookManagerTest, WithInlineHook_CallbackExecutesSuccessfully)
 
 TEST_F(HookManagerTest, WithMidHook_CallbackExecutesSuccessfully)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     auto result = m_hook_manager->create_mid_hook("MidCallbackExecHook",
                                                   reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
     ASSERT_TRUE(result.has_value());
@@ -1411,7 +1417,7 @@ TEST_F(HookManagerTest, TryWithInlineHook_CallbackExecutesSuccessfully)
 
 TEST_F(HookManagerTest, TryWithMidHook_CallbackExecutesSuccessfully)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     auto result = m_hook_manager->create_mid_hook("TryMidCallbackExecHook",
                                                   reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
     ASSERT_TRUE(result.has_value());
@@ -1465,7 +1471,7 @@ TEST_F(HookManagerTest, InlineHook_GetOriginal_Noexcept)
 
 TEST_F(HookManagerTest, MidHook_GetDestination_Noexcept)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     auto result = m_hook_manager->create_mid_hook("NoexceptMidHook", reinterpret_cast<uintptr_t>(&real_hook_target_add),
                                                   detour_fn);
     ASSERT_TRUE(result.has_value());
@@ -1538,7 +1544,7 @@ TEST_F(HookManagerTest, WithInlineHook_VoidCallback_NotFound)
 
 TEST_F(HookManagerTest, WithMidHook_VoidCallback)
 {
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     auto result =
         m_hook_manager->create_mid_hook("VoidMidCB", reinterpret_cast<uintptr_t>(&real_hook_target_add), detour_fn);
     ASSERT_TRUE(result.has_value());
@@ -1580,6 +1586,11 @@ public:
     int transform(int x) override { return x * 2; }
 };
 
+// VMT METHOD-HOOK TEST FIXTURES are deferred along with the per-method API they exercise (hook_vmt_method /
+// with_vmt_method). The vtable-index constants, the captured VmHook pointer, and the method-detour subclass all name
+// the SafetyHook backend (safetyhook::VmHook) or feed only the deferred per-method API, so they are guarded out until
+// that API is reintroduced. The object-level VMT tests below stay live.
+#if 0
 // Vtable layout differs between MSVC (single destructor slot) and
 // Itanium ABI (two destructor slots used by GCC/MinGW).
 #if defined(_MSC_VER)
@@ -1597,6 +1608,7 @@ class VmtTestHook : public VmtTestTarget
 public:
     int hooked_compute(int a, int b) { return s_compute_vm_hook->thiscall<int>(this, a, b) + 1000; }
 };
+#endif // VMT method-hook fixtures deferred until the per-method VMT API is reintroduced
 
 TEST_F(HookManagerTest, VmtHook_CreateSuccess)
 {
@@ -1634,6 +1646,7 @@ TEST_F(HookManagerTest, VmtHook_CreateDuplicate)
     m_hook_manager->remove_all_vmt_hooks();
 }
 
+#if 0 // VMT method-hook tests deferred until the per-method VMT API is reintroduced
 TEST_F(HookManagerTest, VmtHook_HookMethod)
 {
     auto target = std::make_unique<VmtTestTarget>();
@@ -1731,6 +1744,8 @@ TEST_F(HookManagerTest, VmtHook_RemoveEntireHook)
     EXPECT_TRUE(m_hook_manager->get_vmt_hook_names().empty());
 }
 
+#endif // VMT method-hook tests deferred until the per-method VMT API is reintroduced
+
 TEST_F(HookManagerTest, VmtHook_RemoveNotFound)
 {
     auto result = m_hook_manager->remove_vmt_hook("NonExistent");
@@ -1738,6 +1753,7 @@ TEST_F(HookManagerTest, VmtHook_RemoveNotFound)
     EXPECT_EQ(result.error(), HookError::VmtHookNotFound);
 }
 
+#if 0 // VMT method-hook tests deferred until the per-method VMT API is reintroduced
 TEST_F(HookManagerTest, VmtHook_ApplyToMultipleObjects)
 {
     auto target1 = std::make_unique<VmtTestTarget>();
@@ -1765,6 +1781,8 @@ TEST_F(HookManagerTest, VmtHook_ApplyToMultipleObjects)
     s_compute_vm_hook = nullptr;
     m_hook_manager->remove_all_vmt_hooks();
 }
+
+#endif // VMT method-hook tests deferred until the per-method VMT API is reintroduced
 
 TEST_F(HookManagerTest, VmtHook_RemoveAllVmt)
 {
@@ -2051,6 +2069,7 @@ TEST_F(HookManagerTest, VmtHook_ShutdownClearsVmt)
     m_hook_manager->remove_all_vmt_hooks();
 }
 
+#if 0 // VMT method-hook tests deferred until the per-method VMT API is reintroduced
 TEST_F(HookManagerTest, VmtHook_WithVmtMethod_ValueCallback)
 {
     auto target = std::make_unique<VmtTestTarget>();
@@ -2107,6 +2126,8 @@ TEST_F(HookManagerTest, VmtHook_WithVmtMethod_VoidCallback)
     s_compute_vm_hook = nullptr;
     m_hook_manager->remove_all_vmt_hooks();
 }
+
+#endif // VMT method-hook tests deferred until the per-method VMT API is reintroduced
 
 TEST_F(HookManagerTest, VmtHook_ErrorStrings)
 {
@@ -2206,8 +2227,7 @@ TEST_F(HookManagerTest, CreateInlineHookAob_NullStartAddress)
 
 TEST_F(HookManagerTest, CreateMidHookAob_NullStartAddress)
 {
-    auto result =
-        m_hook_manager->create_mid_hook_aob("MidAobNullBase", 0, 0x1000, "48 8B 05", 0, [](safetyhook::Context &) {});
+    auto result = m_hook_manager->create_mid_hook_aob("MidAobNullBase", 0, 0x1000, "48 8B 05", 0, [](MidContext &) {});
 
     ASSERT_FALSE(result.has_value());
 }
@@ -2239,6 +2259,7 @@ TEST_F(HookManagerTest, VmtHook_CreateAfterShutdownSucceeds)
     m_hook_manager->remove_all_vmt_hooks();
 }
 
+#if 0 // VMT method-hook tests deferred until the per-method VMT API is reintroduced
 TEST_F(HookManagerTest, VmtHook_MethodHookAfterShutdownNotFound)
 {
     // shutdown() clears all VMT hooks, so hook_vmt_method returns VmtHookNotFound.
@@ -2254,6 +2275,8 @@ TEST_F(HookManagerTest, VmtHook_MethodHookAfterShutdownNotFound)
     ASSERT_FALSE(method_result.has_value());
     EXPECT_EQ(method_result.error(), HookError::VmtHookNotFound);
 }
+
+#endif // VMT method-hook tests deferred until the per-method VMT API is reintroduced
 
 TEST_F(HookManagerTest, VmtHook_ConcurrentCreateAndShutdown)
 {
@@ -2642,7 +2665,7 @@ TEST_F(HookManagerTest, MidHook_StrictModeRefusesLayeringByRegistry)
 {
     auto &hm = *m_hook_manager;
     const auto target = reinterpret_cast<std::uintptr_t>(&layered_teardown_target);
-    auto mid_detour = [](safetyhook::Context &) {};
+    auto mid_detour = [](MidContext &) {};
 
     ASSERT_TRUE(hm.create_mid_hook("StrictMidBase", target, mid_detour).has_value());
 
@@ -2662,7 +2685,7 @@ TEST_F(HookManagerTest, InlineMidHook_StrictModeRefusesCrossTypeLayering)
 {
     auto &hm = *m_hook_manager;
     const auto target = reinterpret_cast<std::uintptr_t>(&layered_teardown_target);
-    auto mid_detour = [](safetyhook::Context &) {};
+    auto mid_detour = [](MidContext &) {};
 
     void *trampoline = nullptr;
     ASSERT_TRUE(hm.create_inline_hook("StrictInlineBase", target, reinterpret_cast<void *>(&layered_teardown_detour_1),
@@ -2780,7 +2803,7 @@ TEST_F(HookManagerTest, MidHook_FailPolicyRefusesLeadingCallPrologue)
 {
     auto &hm = *m_hook_manager;
     const auto target = reinterpret_cast<std::uintptr_t>(CALL_PROLOGUE_BYTES);
-    auto mid_detour = [](safetyhook::Context &) {};
+    auto mid_detour = [](MidContext &) {};
 
     HookConfig cfg;
     cfg.prologue_policy = InlineProloguePolicy::Fail;
@@ -3025,7 +3048,7 @@ TEST_F(HookManagerTest, TryInstallInline_LogsOnceOnFailure)
 TEST_F(HookManagerTest, TryInstallMid_LogsOnceOnFailure)
 {
     ScopedTestLogFile logfile;
-    auto name = try_install_mid("TryInstallMid_LogOnce", 0, +[](safetyhook::Context &) {});
+    auto name = try_install_mid("TryInstallMid_LogOnce", 0, +[](MidContext &) {});
     EXPECT_FALSE(name.has_value());
     EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
 }
@@ -3050,7 +3073,7 @@ TEST_F(HookManagerTest, TryInstallMidAob_LogsOnceOnPatternFailure)
     ScopedTestLogFile logfile;
     auto name = try_install_mid_aob(
         "TryInstallMidAob_LogOnce", reinterpret_cast<uintptr_t>(&real_hook_target_add), 16,
-        "FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF", 0, +[](safetyhook::Context &) {});
+        "FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF", 0, +[](MidContext &) {});
     EXPECT_FALSE(name.has_value());
     EXPECT_EQ(logfile.count_error_lines(), static_cast<size_t>(1));
 }
@@ -3105,7 +3128,7 @@ TEST_F(HookManagerTest, LifecycleEventReportsMidKind)
         Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
-    auto detour_fn = [](safetyhook::Context &) {};
+    auto detour_fn = [](MidContext &) {};
     ASSERT_TRUE(m_hook_manager
                     ->create_mid_hook("MidLifecycleHook", reinterpret_cast<uintptr_t>(&real_hook_target_mul), detour_fn)
                     .has_value());
