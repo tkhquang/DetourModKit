@@ -9,7 +9,7 @@
  *       <windows.h> for its own DllMain must include it directly.
  */
 
-#include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/async_logger_config.hpp"
 
 #include <functional>
 #include <span>

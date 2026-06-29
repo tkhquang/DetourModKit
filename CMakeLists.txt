@@ -439,6 +439,23 @@ else()
   message(WARNING "No module headers found in 'include/DetourModKit/*.hpp' to install.")
 endif()
 
+# Install detail/ headers from include/DetourModKit/detail/. These carry implementation-only types (namespace
+# DetourModKit::detail) that public headers depend on by value, so they must ship alongside the public surface even
+# though consumers never include them directly. async_logger.hpp pulls detail/async_logger_internal.hpp, so an
+# installed package that omitted this directory would fail to compile.
+file(GLOB _dmk_detail_headers_for_install
+  LIST_DIRECTORIES false
+  CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit/detail/*.hpp"
+)
+
+if(_dmk_detail_headers_for_install)
+  install(FILES ${_dmk_detail_headers_for_install}
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit/detail"
+    COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+  )
+endif()
+
 # Install generated version header
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit"

@@ -16,6 +16,10 @@
 #include "DetourModKit/async_logger.hpp"
 
 using namespace DetourModKit;
+// White-box access: StringPool, LogMessage, and DynamicMPMCQueue (plus their sizing constants) were relocated into
+// DetourModKit::detail in the 4.0.0 encapsulation pass. These tests exercise that plumbing directly, so they reach
+// into the detail namespace deliberately; production consumers never do.
+using namespace DetourModKit::detail;
 
 class AsyncLoggerTest : public ::testing::Test
 {
@@ -902,9 +906,9 @@ TEST(LogMessageTest, IsValid_OverflowMessage)
 
 TEST(LogMessageTest, MaxMessageSizeTruncation)
 {
-    std::string huge_msg(DetourModKit::MAX_MESSAGE_SIZE + 1000, 'Y');
+    std::string huge_msg(MAX_MESSAGE_SIZE + 1000, 'Y');
     LogMessage msg(LogLevel::Info, huge_msg);
-    EXPECT_EQ(msg.message().size(), DetourModKit::MAX_MESSAGE_SIZE);
+    EXPECT_EQ(msg.message().size(), MAX_MESSAGE_SIZE);
     EXPECT_TRUE(msg.is_valid());
 }
 

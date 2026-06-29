@@ -177,7 +177,7 @@ EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(fn));
 - **Concurrent access**: Multi-threaded hook creation stress tests
 - **Cross-module hooking**: DLL exports hooked and verified via integration tests
 - **AOB scan pipeline**: Scanner finds patterns in loaded DLLs, hooks the result
-- **Mid hooks**: Argument inspection and modification via `safetyhook::Context`
+- **Mid hooks**: Argument inspection and modification via `hook::MidContext` (the DMK accessors `gpr()` / `stack_pointer()` / `instruction_pointer()` / `xmm()`)
 
 ### Platform-Specific Tests
 

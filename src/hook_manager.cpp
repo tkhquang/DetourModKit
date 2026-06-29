@@ -1,4 +1,9 @@
 #include "DetourModKit/hook_manager.hpp"
+// detail/hook_impl.hpp is the only place the SafetyHook backend becomes visible: it completes the pimpl Impl bodies
+// that hook_manager.hpp only forward-declares, and transitively provides safetyhook.hpp for the create/apply calls and
+// the MidContext accessor bridge below. Keeping this include here (and nowhere in a public header) is what confines the
+// backend to this translation unit.
+#include "DetourModKit/detail/hook_impl.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/memory.hpp"
@@ -12,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <format>
 #include <memory>
 #include <new>
@@ -193,7 +199,201 @@ namespace DetourModKit
             }
             return "an unremarkable byte";
         }
+
+        // Mid-hook detour type bridges. hook::MidHookFn (void(*)(MidContext&)) and the backend callback
+        // (void(*)(Context64&)) are ABI-identical because MidContext is never more than a pass-through alias for
+        // Context64: identical calling convention, identical single pointer-sized argument. The
+        // reinterpret_cast is therefore sound, but it crosses a nominal parameter-type boundary that GCC's
+        // -Wcast-function-type (and MSVC's C4191) flag. Confining the cast to these two converters localizes and
+        // documents the one place the bridge happens, and keeps the create / get_destination paths warning-clean.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-function-type"
+#endif
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4191)
+#endif
+        [[nodiscard]] safetyhook::MidHookFn to_backend_detour(hook::MidHookFn fn) noexcept
+        {
+            return reinterpret_cast<safetyhook::MidHookFn>(fn);
+        }
+        [[nodiscard]] hook::MidHookFn from_backend_detour(safetyhook::MidHookFn fn) noexcept
+        {
+            return reinterpret_cast<hook::MidHookFn>(fn);
+        }
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
     } // anonymous namespace
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // hook::MidContext accessor bridge.
+    //
+    // At every mid-hook call the backend hands the detour a safetyhook::Context64& (the captured register file). DMK
+    // exposes that as an OPAQUE hook::MidContext& so a consumer never names the backend. MidContext is never defined,
+    // so these accessors are the single place that recovers the real type by reinterpret_cast. The cast is well-defined
+    // precisely because MidContext is forever incomplete and is only ever the very Context64 the backend passed in.
+    // All four are the library-side definitions of the declarations in hook_manager.hpp.
+    // -----------------------------------------------------------------------------------------------------------------
+    namespace hook
+    {
+        std::uintptr_t &gpr(MidContext &ctx, Gpr reg) noexcept
+        {
+            auto &c = reinterpret_cast<safetyhook::Context64 &>(ctx);
+            switch (reg)
+            {
+            case Gpr::Rax:
+                return c.rax;
+            case Gpr::Rbx:
+                return c.rbx;
+            case Gpr::Rcx:
+                return c.rcx;
+            case Gpr::Rdx:
+                return c.rdx;
+            case Gpr::Rsi:
+                return c.rsi;
+            case Gpr::Rdi:
+                return c.rdi;
+            case Gpr::Rbp:
+                return c.rbp;
+            case Gpr::R8:
+                return c.r8;
+            case Gpr::R9:
+                return c.r9;
+            case Gpr::R10:
+                return c.r10;
+            case Gpr::R11:
+                return c.r11;
+            case Gpr::R12:
+                return c.r12;
+            case Gpr::R13:
+                return c.r13;
+            case Gpr::R14:
+                return c.r14;
+            case Gpr::R15:
+                return c.r15;
+            }
+            // Unreachable: Gpr is a fixed enum and every enumerator is handled above. Returning rax keeps the
+            // reference-returning function well-formed on compilers that cannot prove the switch is exhaustive.
+            return c.rax;
+        }
+
+        std::uintptr_t stack_pointer(const MidContext &ctx) noexcept
+        {
+            return reinterpret_cast<const safetyhook::Context64 &>(ctx).rsp;
+        }
+
+        std::uintptr_t &instruction_pointer(MidContext &ctx) noexcept
+        {
+            return reinterpret_cast<safetyhook::Context64 &>(ctx).rip;
+        }
+
+        XmmView xmm(const MidContext &ctx, std::size_t index) noexcept
+        {
+            // Context64 lays out xmm0..xmm15 as 16 contiguous Xmm unions, so indexing from &xmm0 selects register
+            // number @p index. The 16 bytes are copied out by value; v4 surfaces XMM read-only.
+            const auto &c = reinterpret_cast<const safetyhook::Context64 &>(ctx);
+            const safetyhook::Xmm &reg = (&c.xmm0)[index];
+            XmmView view{};
+            std::memcpy(view.bytes.data(), reg.u8, view.bytes.size());
+            return view;
+        }
+    } // namespace hook
+
+    // -----------------------------------------------------------------------------------------------------------------
+    // Out-of-line pimpl bodies for the managed-hook wrappers. These live in the .cpp (not the header) because every
+    // line reaches the SafetyHook backend through the Impl definitions in detail/hook_impl.hpp.
+    // -----------------------------------------------------------------------------------------------------------------
+
+    InlineHook::InlineHook(std::string name, uintptr_t target_address, std::unique_ptr<Impl> impl,
+                           HookStatus initial_status)
+        : Hook(std::move(name), HookType::Inline, target_address, initial_status), m_impl(std::move(impl))
+    {
+    }
+
+    InlineHook::~InlineHook() noexcept = default;
+
+    void *InlineHook::original_address() const noexcept
+    {
+        return (m_impl && m_impl->hook) ? m_impl->hook.original<void *>() : nullptr;
+    }
+
+    bool InlineHook::is_impl_valid() const noexcept
+    {
+        return m_impl && static_cast<bool>(m_impl->hook);
+    }
+
+    bool InlineHook::do_enable()
+    {
+        auto result = m_impl->hook.enable();
+        return result.has_value();
+    }
+
+    bool InlineHook::do_disable()
+    {
+        auto result = m_impl->hook.disable();
+        return result.has_value();
+    }
+
+    MidHook::MidHook(std::string name, uintptr_t target_address, std::unique_ptr<Impl> impl, HookStatus initial_status)
+        : Hook(std::move(name), HookType::Mid, target_address, initial_status), m_impl(std::move(impl))
+    {
+    }
+
+    MidHook::~MidHook() noexcept = default;
+
+    hook::MidHookFn MidHook::get_destination() const noexcept
+    {
+        if (!m_impl || !m_impl->hook)
+        {
+            return nullptr;
+        }
+        // destination() yields the backend callback (void(*)(Context64&)), which is the same pointer the caller passed
+        // to create_mid_hook; reinterpret_cast restores its DMK-typed face (void(*)(MidContext&)).
+        return from_backend_detour(m_impl->hook.destination());
+    }
+
+    bool MidHook::is_impl_valid() const noexcept
+    {
+        return m_impl && static_cast<bool>(m_impl->hook);
+    }
+
+    bool MidHook::do_enable()
+    {
+        auto result = m_impl->hook.enable();
+        return result.has_value();
+    }
+
+    bool MidHook::do_disable()
+    {
+        auto result = m_impl->hook.disable();
+        return result.has_value();
+    }
+
+    namespace detail
+    {
+        VmtHookEntry::VmtHookEntry(std::string name, std::unique_ptr<Impl> impl, std::uintptr_t new_vptr_base)
+            : m_name(std::move(name)), m_impl(std::move(impl)), m_cloned_vptr_base(new_vptr_base)
+        {
+        }
+
+        VmtHookEntry::~VmtHookEntry() = default;
+        VmtHookEntry::VmtHookEntry(VmtHookEntry &&) noexcept = default;
+        VmtHookEntry &VmtHookEntry::operator=(VmtHookEntry &&) noexcept = default;
+
+        VmtHookEntry::Impl &VmtHookEntry::impl() noexcept
+        {
+            return *m_impl;
+        }
+        const VmtHookEntry::Impl &VmtHookEntry::impl() const noexcept
+        {
+            return *m_impl;
+        }
+    } // namespace detail
 
     HookManager &HookManager::get_instance()
     {
@@ -201,10 +401,10 @@ namespace DetourModKit
         return instance;
     }
 
-    HookManager::HookManager(Logger &logger) : m_logger(logger)
+    HookManager::HookManager(Logger &logger) : m_logger(logger), m_impl(std::make_unique<Impl>())
     {
-        m_allocator = safetyhook::Allocator::global();
-        if (!m_allocator)
+        m_impl->allocator = safetyhook::Allocator::global();
+        if (!m_impl->allocator)
         {
             m_logger.error("HookManager: Failed to get SafetyHook global allocator! Hook creation will fail.");
         }
@@ -256,7 +456,7 @@ namespace DetourModKit
             // Heap-allocate each map directly rather than nesting them inside an outer container. A container of
             // containers would force the standard library to instantiate a copy-construction fallback for the element
             // type whenever the element's move constructor is not unconditionally noexcept, and that copy path would
-            // try to copy a move-only member (VmtHookEntry owns a safetyhook::VmtHook).
+            // try to copy a move-only member (VmtHookEntry owns a std::unique_ptr<Impl>).
             //
             // Default-construct each map on the heap, then swap content in. std::unordered_map's move constructor is
             // not guaranteed noexcept on every standard library implementation (some mark it noexcept(false) so
@@ -343,7 +543,11 @@ namespace DetourModKit
         }
     }
 
-    std::string HookManager::error_to_string(const safetyhook::InlineHook::Error &err) const
+    // File-local backend error formatters. v3 declared these as private HookManager members, which forced the public
+    // header to name safetyhook::InlineHook::Error / safetyhook::MidHook::Error. They are only ever called from the
+    // create paths in this translation unit, so v4 makes them internal-linkage free functions and keeps the backend
+    // out of the header entirely.
+    static std::string error_to_string(const safetyhook::InlineHook::Error &err)
     {
         const int type_int = static_cast<int>(err.type);
         const auto ip_str = DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(err.ip));
@@ -380,7 +584,7 @@ namespace DetourModKit
         }
     }
 
-    std::string HookManager::error_to_string(const safetyhook::MidHook::Error &err) const
+    static std::string error_to_string(const safetyhook::MidHook::Error &err)
     {
         const int type_int = static_cast<int>(err.type);
 
@@ -434,7 +638,7 @@ namespace DetourModKit
                         {{std::format("HookManager: Shutdown in progress. Cannot create inline hook '{}'.", name),
                           LogLevel::Error}}};
             }
-            if (!m_allocator)
+            if (!m_impl->allocator)
             {
                 return {std::unexpected(HookError::AllocatorNotAvailable),
                         {{std::format("HookManager: Allocator not available. Cannot create inline hook '{}'.", name),
@@ -532,7 +736,7 @@ namespace DetourModKit
                     config.auto_enable ? safetyhook::InlineHook::Default : safetyhook::InlineHook::StartDisabled;
 
                 auto hook_creation_result = safetyhook::InlineHook::create(
-                    m_allocator, reinterpret_cast<void *>(target_address), detour_function, sh_flags);
+                    m_impl->allocator, reinterpret_cast<void *>(target_address), detour_function, sh_flags);
 
                 if (!hook_creation_result)
                 {
@@ -598,8 +802,9 @@ namespace DetourModKit
                 }
 
                 std::string name_str{name};
-                auto managed_hook =
-                    std::make_unique<InlineHook>(name_str, target_address, std::move(sh_inline_hook), initial_status);
+                auto managed_hook = std::make_unique<InlineHook>(
+                    name_str, target_address, std::make_unique<InlineHook::Impl>(std::move(sh_inline_hook)),
+                    initial_status);
                 // Record creation order before emplace: if emplace throws, the stale order entry is a harmless skip at
                 // teardown, whereas a registered hook missing from the order vector would dodge the ordered unwind.
                 m_hook_creation_order.push_back(name_str);
@@ -692,7 +897,7 @@ namespace DetourModKit
     }
 
     std::expected<std::string, HookError> HookManager::create_mid_hook(std::string_view name, uintptr_t target_address,
-                                                                       safetyhook::MidHookFn detour_function,
+                                                                       hook::MidHookFn detour_function,
                                                                        const HookConfig &config)
     {
         if (m_shutdown_called.load(std::memory_order_acquire))
@@ -722,7 +927,7 @@ namespace DetourModKit
                         {{std::format("HookManager: Shutdown in progress. Cannot create mid hook '{}'.", name),
                           LogLevel::Error}}};
             }
-            if (!m_allocator)
+            if (!m_impl->allocator)
             {
                 return {std::unexpected(HookError::AllocatorNotAvailable),
                         {{std::format("HookManager: Allocator not available. Cannot create mid hook '{}'.", name),
@@ -798,8 +1003,13 @@ namespace DetourModKit
             {
                 auto sh_flags = config.auto_enable ? safetyhook::MidHook::Default : safetyhook::MidHook::StartDisabled;
 
-                auto hook_creation_result = safetyhook::MidHook::create(
-                    m_allocator, reinterpret_cast<void *>(target_address), detour_function, sh_flags);
+                // detour_function is the DMK-typed hook::MidHookFn (void(*)(MidContext&)); the backend callback is
+                // void(*)(Context64&). MidContext is a pass-through alias for Context64, so the two
+                // pointer types are layout- and ABI-identical and reinterpret_cast bridges DMK's type to the backend's
+                // at registration time.
+                auto hook_creation_result =
+                    safetyhook::MidHook::create(m_impl->allocator, reinterpret_cast<void *>(target_address),
+                                                to_backend_detour(detour_function), sh_flags);
 
                 if (!hook_creation_result)
                 {
@@ -862,8 +1072,8 @@ namespace DetourModKit
                 }
 
                 std::string name_str{name};
-                auto managed_hook =
-                    std::make_unique<MidHook>(name_str, target_address, std::move(sh_mid_hook), initial_status);
+                auto managed_hook = std::make_unique<MidHook>(
+                    name_str, target_address, std::make_unique<MidHook::Impl>(std::move(sh_mid_hook)), initial_status);
                 // Record creation order before emplace so layered hooks unwind newest-first at teardown; a stale entry
                 // from a throwing emplace is a harmless skip there. Mid hooks share m_hooks and the same
                 // prologue-overlap hazard as inline hooks, so they participate in the same ordered teardown.
@@ -902,7 +1112,7 @@ namespace DetourModKit
     std::expected<std::string, HookError>
     HookManager::create_mid_hook_aob(std::string_view name, uintptr_t module_base, size_t module_size,
                                      std::string_view aob_pattern_str, ptrdiff_t aob_offset,
-                                     safetyhook::MidHookFn detour_function, const HookConfig &config)
+                                     hook::MidHookFn detour_function, const HookConfig &config)
     {
         if (get_reentrancy_guard() > 0)
         {
@@ -1854,8 +2064,11 @@ namespace DetourModKit
                 // erase at teardown, whereas a registered hook missing from the order vector would dodge the ordered
                 // teardown.
                 m_vmt_creation_order.push_back(name_str);
-                m_vmt_hooks.emplace(std::piecewise_construct, std::forward_as_tuple(name_str),
-                                    std::forward_as_tuple(name_str, std::move(vmt_result.value()), new_vptr_base));
+                m_vmt_hooks.emplace(
+                    std::piecewise_construct, std::forward_as_tuple(name_str),
+                    std::forward_as_tuple(name_str,
+                                          std::make_unique<detail::VmtHookEntry::Impl>(std::move(vmt_result.value())),
+                                          new_vptr_base));
 
                 return {std::move(name_str), std::move(logs)};
             }
@@ -1940,59 +2153,9 @@ namespace DetourModKit
         return result;
     }
 
-    std::expected<void, HookError> HookManager::remove_vmt_method(std::string_view vmt_name, size_t method_index)
-    {
-        if (m_shutdown_called.load(std::memory_order_acquire))
-        {
-            m_logger.warning("HookManager: Shutdown in progress. Cannot remove VMT method on '{}'.", vmt_name);
-            return std::unexpected(HookError::ShutdownInProgress);
-        }
-        // Fail closed on a reentrant call from inside a with_*/try_with_* callback: it holds m_hooks_mutex shared, so
-        // re-acquiring this non-recursive lock here is UB / deadlock. Defer the mutation past the callback.
-        if (get_reentrancy_guard() > 0)
-        {
-            m_logger.warning("HookManager: Reentrant remove_vmt_method('{}') from within a with_*/try_with_* callback "
-                             "rejected; defer hook mutation until the callback returns.",
-                             vmt_name);
-            return std::unexpected(HookError::ReentrantCallRejected);
-        }
-
-        auto [result, deferred_logs] = [&]() -> std::pair<std::expected<void, HookError>, std::vector<DeferredLogEntry>>
-        {
-            std::shared_lock<detail::SrwSharedMutex> mutator_gate(m_mutator_gate);
-            std::unique_lock<detail::SrwSharedMutex> lock(m_hooks_mutex);
-            if (m_shutdown_called.load(std::memory_order_acquire))
-            {
-                return {std::unexpected(HookError::ShutdownInProgress),
-                        {{std::format("HookManager: Shutdown in progress. Cannot remove VMT method on '{}'.", vmt_name),
-                          LogLevel::Warning}}};
-            }
-            auto it = m_vmt_hooks.find(vmt_name);
-            if (it == m_vmt_hooks.end())
-            {
-                return {std::unexpected(HookError::VmtHookNotFound),
-                        {{std::format("HookManager: VMT hook '{}' not found for method removal.", vmt_name),
-                          LogLevel::Warning}}};
-            }
-
-            if (it->second.remove_method_hook(method_index))
-            {
-                return {
-                    std::expected<void, HookError>{},
-                    {{std::format("HookManager: VMT '{}' method index {} has been unhooked.", vmt_name, method_index),
-                      LogLevel::Debug}}};
-            }
-            return {std::unexpected(HookError::MethodNotFound),
-                    {{std::format("HookManager: VMT '{}' has no hooked method at index {}.", vmt_name, method_index),
-                      LogLevel::Warning}}};
-        }();
-
-        for (const auto &entry : deferred_logs)
-        {
-            m_logger.log(entry.level, entry.msg);
-        }
-        return result;
-    }
+    // HookManager::remove_vmt_method() is deferred with the rest of the per-method VMT layer (hook_vmt_method /
+    // with_vmt_method). With no way to install a method hook here there is nothing to remove; it returns when that
+    // layer is reintroduced.
 
     bool HookManager::apply_vmt_hook(std::string_view vmt_name, void *object)
     {
@@ -2116,7 +2279,7 @@ namespace DetourModKit
             // the held locks.
             try
             {
-                it->second.vmt_hook().apply(object);
+                it->second.impl().hook.apply(object);
             }
             catch (const std::exception &e)
             {
@@ -2188,7 +2351,7 @@ namespace DetourModKit
                           LogLevel::Warning}}};
             }
 
-            it->second.vmt_hook().remove(object);
+            it->second.impl().hook.remove(object);
             return {true,
                     {{std::format("HookManager: VMT hook '{}' removed from object {}.", vmt_name,
                                   DetourModKit::Format::format_address(reinterpret_cast<uintptr_t>(object))),

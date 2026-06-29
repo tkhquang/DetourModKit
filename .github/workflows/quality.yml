@@ -42,6 +42,14 @@ jobs:
         run: python scripts/check_comment_style.py
         shell: bash
 
+      - name: Check header-encapsulation hygiene
+        # Enforces the v4.0.0 boundary invariants: the SafetyHook backend is confined to
+        # detail/hook_impl.hpp, hook::MidContext is never defined, and the async-logger internals
+        # live only in detail/async_logger_internal.hpp. Runs regardless of earlier step status.
+        if: ${{ !cancelled() }}
+        run: python scripts/check_header_hygiene.py
+        shell: bash
+
   clang-tidy:
     name: clang-tidy (advisory)
     runs-on: windows-latest
