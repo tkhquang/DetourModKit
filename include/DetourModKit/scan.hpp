@@ -190,6 +190,7 @@ namespace DetourModKit::scan
      * @brief Returns the enumerator name for a CandidateOrder.
      * @param order The ordering policy.
      * @return A static string view; "Unknown" for an out-of-range value.
+     * @note Callback-safe: a pure constexpr value map with no allocation, I/O, or locking.
      */
     [[nodiscard]] constexpr std::string_view candidate_order_to_string(CandidateOrder order) noexcept
     {
@@ -223,6 +224,7 @@ namespace DetourModKit::scan
          * @param pattern The compiled signature to scan for.
          * @param walk_back Signed byte delta added to the match (negative walks backward); 0 returns the match itself.
          * @return The constructed Candidate.
+         * @note Setup/control-plane only: builds an owned Candidate (string + Pattern copy); assemble ladders at init.
          */
         [[nodiscard]] static Candidate direct(std::string name, Pattern pattern, std::ptrdiff_t walk_back = 0);
 
@@ -235,6 +237,7 @@ namespace DetourModKit::scan
          * @return The constructed Candidate.
          * @details The target is `(match + instruction_length) + sign_extend(disp32 @ (match + displacement_at))`, read
          *          under a fault guard, so a corrupt displacement is a miss rather than a host fault.
+         * @note Setup/control-plane only: builds an owned Candidate (string + Pattern copy); assemble ladders at init.
          */
         [[nodiscard]] static Candidate rip_relative(std::string name, Pattern pattern, std::ptrdiff_t displacement_at,
                                                     std::size_t instruction_length);
@@ -245,6 +248,7 @@ namespace DetourModKit::scan
          * @param mangled The MSVC decorated type name, e.g. ".?AVCameraManager@@". Owned.
          * @return The constructed Candidate.
          * @details Unique-only: an ambiguous name (two primaries) fails closed and the ladder falls through.
+         * @note Setup/control-plane only: builds an owned Candidate (copies the name and mangled query strings).
          */
         [[nodiscard]] static Candidate rtti_vtable(std::string name, std::string mangled);
 
@@ -255,6 +259,7 @@ namespace DetourModKit::scan
          * @return The constructed Candidate.
          * @details Strings outlive the code around them across game updates, so a string xref is the most
          *          update-resilient anchor. Unique-only: a pooled literal or a second reference fails closed.
+         * @note Setup/control-plane only: builds an owned Candidate (copies the name and literal query strings).
          */
         [[nodiscard]] static Candidate string_xref(std::string name, std::string literal);
 
@@ -342,6 +347,7 @@ namespace DetourModKit::scan
      *          passed (the attribute is a parameter/return annotation and cannot sit on the ScanRequest members). MinGW
      *          GCC has no such attribute, so the build there relies on the owning/borrowed split plus
      *          `-Wdangling-reference` instead. For a stored or deferred request, prefer OwnedScanRequest.
+     * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation.
      */
     [[nodiscard]] ScanRequest borrow(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                      std::string_view label DMK_LIFETIMEBOUND = {}, Region scope = Region::host(),
@@ -399,6 +405,7 @@ namespace DetourModKit::scan
      *          identity permutation. UniqueFirst is a stable three-pass partition (unique-only text tiers, then
      *          anchored byte patterns, then the rest), declared order preserved within each group. The resolver uses
      *          this to lay out its try order; it is exposed so a caller can inspect or reuse the same ordering.
+     * @note Callback-safe: pure index math, noexcept, no allocation.
      */
     [[nodiscard]] std::size_t order_candidates(CandidateOrder order, std::span<const Candidate> ladder,
                                                std::span<std::size_t> out) noexcept;
@@ -433,6 +440,7 @@ namespace DetourModKit::scan
      *          report into), so a caller that indexes the result must treat a size mismatch as a whole-batch
      *          allocation failure. This deletes the try/catch + serial-fallback compensation consumers hand-rolled
      *          around the legacy batch.
+     * @note Setup/control-plane only: spawns a worker pool and allocates; a startup-time batch, not a per-frame call.
      */
     [[nodiscard]] std::vector<Result<Hit>> resolve_batch(std::span<const ScanRequest> requests,
                                                          std::size_t max_workers = 0) noexcept;
@@ -447,6 +455,8 @@ namespace DetourModKit::scan
      *          faulting the host. noexcept; an allocation failure while preparing the scan surfaces as
      *          Error{OutOfMemory} rather than an exception. For the raw, caller-guarantees-readability primitive use
      *          unchecked::find_pattern.
+     * @note Setup/control-plane only: walks the scope through the OS page map; a startup-time scan, not a per-frame
+     * call.
      */
     [[nodiscard]] Result<Address> scan(const Pattern &pattern, Region scope) noexcept;
 
@@ -458,6 +468,7 @@ namespace DetourModKit::scan
      *          flatten consumers wrote at every call site). It is a LEGACY/compat adapter, not the primary contract:
      *          new code resolves through Result and handles the Error. or_null appearing on a happy path is a smell.
      *          Header-inline because Hit and Result<Hit> are complete here, so it costs no scan.cpp dependency.
+     * @note Callback-safe: a pure noexcept Result read with no allocation, I/O, or locking.
      */
     [[nodiscard]] inline Address or_null(const Result<Hit> &result) noexcept
     {
@@ -472,6 +483,7 @@ namespace DetourModKit::scan
      * @details The general, non-default form of or_null (`or_null(r)` is `address_or(r, Address{})`). Same
      * LEGACY/compat
      *          status: prefer handling the Error in new code.
+     * @note Callback-safe: a pure noexcept Result read with no allocation, I/O, or locking.
      */
     [[nodiscard]] inline Address address_or(const Result<Hit> &result, Address fallback = Address{}) noexcept
     {
@@ -489,6 +501,7 @@ namespace DetourModKit::scan
          *          unreadable byte in @p region faults the host. It is quarantined in `unchecked` precisely because its
          *          contract is "caller proved readability"; the return is a raw pointer, not a Result, because there is
          *          no recoverable error to report. noexcept; an allocation failure preparing the scan returns nullptr.
+         * @note Setup/control-plane only: allocates the compiled form and performs a raw, page-unfiltered scan.
          */
         [[nodiscard]] const std::byte *find_pattern(Region region, const Pattern &pattern) noexcept;
     } // namespace unchecked

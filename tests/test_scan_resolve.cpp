@@ -259,6 +259,18 @@ TEST(ScanResolve, CandidateFactoriesExposeCoherentPayloads)
     EXPECT_EQ(xref.mode(), scan::Mode::StringXref);
     EXPECT_EQ(xref.pattern(), nullptr);
     EXPECT_EQ(xref.query(), "literal");
+
+    // Owned-string contract: build a Candidate from runtime strings that are destroyed before the assertions. A
+    // borrowed-view member (instead of an owned std::string) would dangle here; an owning std::string survives.
+    const Candidate owned = []
+    {
+        std::string name = "runtime-name";
+        name += "-built";
+        std::string mangled = std::string(".?AV") + "RuntimeType@@";
+        return Candidate::rtti_vtable(name, mangled);
+    }();
+    EXPECT_EQ(owned.name(), "runtime-name-built");
+    EXPECT_EQ(owned.query(), ".?AVRuntimeType@@");
 }
 
 TEST(ScanResolve, RttiVtableMissFallsThroughToByteCandidate)
@@ -327,23 +339,34 @@ TEST(ScanResolve, OrderCandidatesUniqueFirstPartitionsByTier)
     EXPECT_EQ(out[3], 2U); // unanchored byte pattern
 }
 
-TEST(ScanResolve, UniqueFirstOrderingReachesTheTextTierFirst)
+TEST(ScanResolve, CandidateOrderChangesTheWinner)
 {
     ReadableBuffer buffer(0x400);
-    buffer.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF});
+    // Two byte patterns, each planted uniquely: an anchored one (fully-known rare bytes) and an unanchored one
+    // (high-nibble-only, so it carries no fully-known byte to anchor on). The unanchored candidate is declared first,
+    // so AsDeclared and UniqueFirst try a different candidate first and produce a different winner.
+    buffer.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF}); // anchored target
+    buffer.put(0x200,
+               {0x10, 0x20, 0x30, 0x40}); // unanchored target (high nibbles 1,2,3,4; the 0xCC fill never collides)
 
-    // With AsDeclared the byte candidate (declared first) wins; with UniqueFirst the text tier is tried first, misses
-    // against a heap buffer, and the cascade still falls through to the byte candidate. Either way the byte candidate
-    // resolves, proving the order field is threaded into resolve() without changing the valid outcome.
     const std::array<Candidate, 2> ladder = {
-        Candidate::direct("marker", scan::Pattern::literal("DE AD BE EF")),
-        Candidate::rtti_vtable("bogus", ".?AVNope@@"),
+        Candidate::direct("unanchored", scan::Pattern::literal("1? 2? 3? 4?")),
+        Candidate::direct("anchored", scan::Pattern::literal("DE AD BE EF")),
     };
-    const auto hit = scan::resolve(
-        scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .order = scan::CandidateOrder::UniqueFirst});
 
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->winning_name, "marker");
+    // AsDeclared tries the unanchored candidate (declared first), so it wins.
+    const auto as_declared = scan::resolve(
+        scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .order = scan::CandidateOrder::AsDeclared});
+    ASSERT_TRUE(as_declared.has_value());
+    EXPECT_EQ(as_declared->winning_name, "unanchored");
+    EXPECT_EQ(as_declared->address.raw(), buffer.address_of(0x200));
+
+    // UniqueFirst promotes the anchored byte pattern ahead of the unanchored one, flipping the winner.
+    const auto unique_first = scan::resolve(
+        scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .order = scan::CandidateOrder::UniqueFirst});
+    ASSERT_TRUE(unique_first.has_value());
+    EXPECT_EQ(unique_first->winning_name, "anchored");
+    EXPECT_EQ(unique_first->address.raw(), buffer.address_of(0x100));
 }
 
 TEST(ScanResolve, OrNullAndAddressOrFlatten)
