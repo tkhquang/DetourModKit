@@ -246,3 +246,17 @@ TEST_F(MidHookContextTest, DetourReadsXmm0FloatArg)
     std::memcpy(&got, &bits, sizeof(got));
     EXPECT_EQ(got, 3.5f) << "detour did not observe the live xmm0 float argument";
 }
+
+// XmmView::lane fails closed on an out-of-range lane instead of reading past the 16-byte register. This needs no
+// live hook: XmmView is a plain value type, so it pins the bounds contract directly.
+TEST(MidContextXmmViewTest, LaneFailsClosedOutOfRange)
+{
+    XmmView view{};
+    const float stored = 12.5f;
+    std::memcpy(view.bytes.data(), &stored, sizeof(stored));
+
+    EXPECT_EQ(view.lane<float>(0), 12.5f);      // in-range lane reads the stored value
+    EXPECT_EQ(view.lane<float>(4), 0.0f);       // lane 4 starts at byte 16 (out of range) -> zero
+    EXPECT_EQ(view.lane<float>(99), 0.0f);      // far out of range -> zero, no out-of-bounds read
+    EXPECT_EQ(view.lane<std::uint64_t>(2), 0u); // lane 2 starts at byte 16 (out of range) -> zero
+}

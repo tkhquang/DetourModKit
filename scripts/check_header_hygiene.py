@@ -39,9 +39,11 @@ SAFETYHOOK_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*safetyhook')
 SAFETYHOOK_NS = re.compile(r'\bsafetyhook::')
 PSAPI_INCLUDE = re.compile(r'#\s*include\s*<\s*psapi\.h\s*>')
 ZYDIS_REF = re.compile(r'\bZy(?:dis|core)\b')
-# Matches a MidContext DEFINITION (struct/class ... { ...), Allman braces included because DOTALL-free
-# whitespace class \s already spans the newline. A forward declaration ends in ';' and is not matched.
-MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+MidContext\s*\{')
+# Matches a MidContext DEFINITION: struct/class, an optional alignas, the name, then any final / base-class
+# text up to the opening brace (so `struct MidContext final {`, `class MidContext : Base {`, and
+# `struct alignas(16) MidContext {` are all caught). Allman braces are covered because the character classes
+# already span newlines, and a forward declaration (which reaches ';' before any '{') is not matched.
+MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?MidContext\b[^;{]*\{')
 # Matches a class/struct DECLARATION token for an async-logger internal type (decl or def alike).
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
 
@@ -143,8 +145,10 @@ def main():
             violations.append(
                 f"{rel}:{line_of(text, m.start())}: MidContext is defined; it must remain an opaque forward declaration")
 
-        # Rule 3: async-logger internals are defined only in detail/async_logger_internal.hpp.
-        if is_public_header and rel != ASYNC_INTERNAL_HEADER:
+        # Rule 3: async-logger internals are defined ONLY in detail/async_logger_internal.hpp. The contract is
+        # location-exclusive, so this scans every source (headers and .cpp), excluding only the one allowed header,
+        # rather than the public headers alone.
+        if rel != ASYNC_INTERNAL_HEADER:
             for n, line in enumerate(lines, 1):
                 am = ASYNC_INTERNAL_DECL.search(line)
                 if am:

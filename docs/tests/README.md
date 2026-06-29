@@ -181,7 +181,7 @@ EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(fn));
 
 ### Platform-Specific Tests
 
-Mid hook tests that modify registers (`ctx.rcx`, `ctx.rdx`) are x86-64 specific. Guard with:
+Mid hook tests that modify registers (`gpr(ctx, Gpr::Rcx)`, `gpr(ctx, Gpr::Rdx)`) are x86-64 specific. Guard with:
 
 ```cpp
 #if !defined(__x86_64__) && !defined(_M_X64)

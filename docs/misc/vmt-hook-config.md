@@ -112,7 +112,9 @@ cfg.fail_on_non_function_pointer = true;
 auto r = HookManager::get_instance().create_vmt_hook("MyVmt", object, cfg);
 if (r)
 {
-    HookManager::get_instance().hook_vmt_method("MyVmt", method_index, &MyClass::detour);
+    // NOTE: hook_vmt_method is deferred and does NOT compile in 4.0.0 (see the note at the top of this file).
+    // It returns when the per-method VMT layer is reintroduced:
+    // HookManager::get_instance().hook_vmt_method("MyVmt", method_index, &MyClass::detour);
 }
 ```
 

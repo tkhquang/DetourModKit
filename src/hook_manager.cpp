@@ -294,11 +294,16 @@ namespace DetourModKit
 
         XmmView xmm(const MidContext &ctx, std::size_t index) noexcept
         {
-            // Context64 lays out xmm0..xmm15 as 16 contiguous Xmm unions, so indexing from &xmm0 selects register
-            // number @p index. The 16 bytes are copied out by value; v4 surfaces XMM read-only.
+            XmmView view{};
+            // Fail closed on an out-of-range index: only xmm0..xmm15 exist, so indexing past 15 would read past the
+            // captured context. Context64 lays out the 16 Xmm unions contiguously, so indexing from &xmm0 selects
+            // register number @p index. The 16 bytes are copied out by value; v4 surfaces XMM read-only.
+            if (index >= 16)
+            {
+                return view;
+            }
             const auto &c = reinterpret_cast<const safetyhook::Context64 &>(ctx);
             const safetyhook::Xmm &reg = (&c.xmm0)[index];
-            XmmView view{};
             std::memcpy(view.bytes.data(), reg.u8, view.bytes.size());
             return view;
         }

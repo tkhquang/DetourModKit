@@ -9,10 +9,11 @@ on:
 permissions:
   contents: read
 
-# Advisory, non-blocking. Verifies the tracked project sources stay formatted against the root .clang-format
-# (clang-format 20, pinned below) and follow the comment-marker conventions. Runs on pull requests so style is caught
-# before merge, and on manual dispatch. The blocking gate (build, tests, coverage) lives in pr-check.yml; the slower
-# AddressSanitizer probe runs post-merge in sanitizers.yml.
+# Mostly advisory. The format-check and clang-tidy jobs verify the tracked project sources stay formatted against the
+# root .clang-format (clang-format 20, pinned below) and follow the comment-marker conventions; they never gate a PR.
+# The header-encapsulation-hygiene job is the exception: it is a correctness gate and DOES block merge. Runs on pull
+# requests so issues are caught before merge, and on manual dispatch. The build/test/coverage gate lives in
+# pr-check.yml; the slower AddressSanitizer probe runs post-merge in sanitizers.yml.
 
 jobs:
   format-check:
@@ -42,11 +43,19 @@ jobs:
         run: python scripts/check_comment_style.py
         shell: bash
 
+  header-hygiene:
+    name: header-encapsulation hygiene (blocking)
+    runs-on: windows-latest
+    # NOT advisory: unlike the formatting probes above, the encapsulation invariants are a correctness contract. A
+    # public header that re-includes the SafetyHook backend, a hook::MidContext definition, or an async-logger internal
+    # leaking onto the documented surface must FAIL the PR, so this job carries no continue-on-error.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
       - name: Check header-encapsulation hygiene
-        # Enforces the v4.0.0 boundary invariants: the SafetyHook backend is confined to
-        # detail/hook_impl.hpp, hook::MidContext is never defined, and the async-logger internals
-        # live only in detail/async_logger_internal.hpp. Runs regardless of earlier step status.
-        if: ${{ !cancelled() }}
         run: python scripts/check_header_hygiene.py
         shell: bash
 

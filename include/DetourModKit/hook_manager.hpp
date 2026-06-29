@@ -253,10 +253,15 @@ namespace DetourModKit
         {
             std::array<std::byte, 16> bytes;
 
-            /// Reinterprets the captured bytes as the index-th T-sized lane. The caller must keep index*sizeof(T) < 16.
+            /// Reinterprets the captured bytes as the index-th T-sized lane; an out-of-range lane returns zero.
             template <typename T> [[nodiscard]] T lane(std::size_t index) const noexcept
             {
                 T value{};
+                // Fail closed on an out-of-range lane: a bad index must not read past the 16-byte register.
+                if (index >= bytes.size() / sizeof(T))
+                {
+                    return value;
+                }
                 std::memcpy(&value, bytes.data() + index * sizeof(T), sizeof(T));
                 return value;
             }
@@ -282,7 +287,7 @@ namespace DetourModKit
          */
         [[nodiscard]] std::uintptr_t &instruction_pointer(MidContext &ctx) noexcept;
 
-        /// Returns a read-only by-value snapshot of XMM register @p index (0..15) captured at the hook point.
+        /// Read-only by-value snapshot of XMM register @p index (0..15); an out-of-range index returns a zeroed view.
         [[nodiscard]] XmmView xmm(const MidContext &ctx, std::size_t index) noexcept;
     } // namespace hook
 
