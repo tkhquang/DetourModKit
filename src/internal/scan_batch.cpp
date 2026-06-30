@@ -40,7 +40,7 @@ namespace DetourModKit
     }
 
     std::vector<const std::byte *> detail::scan_module_batch(std::span<const detail::BatchScanItem> items,
-                                                             Memory::ModuleRange range, detail::ScannerKind kind,
+                                                             detail::ModuleSpan range, detail::ScannerKind kind,
                                                              std::size_t max_workers)
     {
         return detail::run_fork_join<detail::BatchScanItem, const std::byte *>(

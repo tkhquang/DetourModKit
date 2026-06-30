@@ -7,6 +7,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/memory.hpp"
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_pages.hpp"
 #include "platform.hpp"
@@ -81,7 +82,7 @@ namespace DetourModKit
             // Read the opcode bytes under a fault guard and dispatch on the copy;
             // an unguarded dereference of target_address could fault if the page is unmapped or guarded.
             std::array<std::uint8_t, 2> opcode{};
-            if (!Memory::seh_read_bytes(target_address, opcode.data(), opcode.size()))
+            if (!detail::guarded_read_bytes(target_address, opcode.data(), opcode.size()))
             {
                 return std::nullopt;
             }
@@ -168,7 +169,7 @@ namespace DetourModKit
                 return PrologueRisk::None;
             }
             std::uint8_t first_byte = 0;
-            if (!Memory::seh_read_bytes(target_address, &first_byte, sizeof(first_byte)))
+            if (!detail::guarded_read_bytes(target_address, &first_byte, sizeof(first_byte)))
             {
                 // Unreadable target: leave the existing create-path validation and SafetyHook create to fail; do not
                 // invent a prologue warning from a read that did not happen.
@@ -882,8 +883,7 @@ namespace DetourModKit
         // protection split inside the image is still found (the sweep carries the cross-region overlap), and
         // pattern.offset is applied exactly once, matching the raw find_pattern contract.
         const std::byte *found_address_start =
-            detail::scan_module_readable(pattern.value(), Memory::ModuleRange{module_base, module_base + module_size},
-                                         1)
+            detail::scan_module_readable(pattern.value(), detail::ModuleSpan{module_base, module_base + module_size}, 1)
                 .match;
         if (!found_address_start)
         {
@@ -1147,8 +1147,7 @@ namespace DetourModKit
         // protection split inside the image is still found (the sweep carries the cross-region overlap), and
         // pattern.offset is applied exactly once, matching the raw find_pattern contract.
         const std::byte *found_address_start =
-            detail::scan_module_readable(pattern.value(), Memory::ModuleRange{module_base, module_base + module_size},
-                                         1)
+            detail::scan_module_readable(pattern.value(), detail::ModuleSpan{module_base, module_base + module_size}, 1)
                 .match;
         if (!found_address_start)
         {
@@ -1261,7 +1260,7 @@ namespace DetourModKit
 
         // Reject 0xCC/0xCD padding or breakpoints and bare RETs. A 0x00 first byte is the uninitialised-page sentinel.
         std::uint8_t first_byte = 0;
-        if (!Memory::seh_read_bytes(slot_value, &first_byte, sizeof(first_byte)))
+        if (!detail::guarded_read_bytes(slot_value, &first_byte, sizeof(first_byte)))
         {
             // Unreadable: cannot prove it is a function, refuse.
             return false;
@@ -1978,7 +1977,8 @@ namespace DetourModKit
             // false no read is performed and the legacy path is unchanged.
             if (cfg.fail_if_already_hooked || cfg.fail_on_non_function_pointer)
             {
-                const auto current_vptr = Memory::seh_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+                const auto current_vptr =
+                    detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
                 if (!current_vptr)
                 {
                     return {std::unexpected(HookError::InvalidObject),
@@ -2006,7 +2006,7 @@ namespace DetourModKit
                 // jmp` to a foreign function) are real functions and pass through.
                 if (cfg.fail_on_non_function_pointer)
                 {
-                    const auto slot0 = Memory::seh_read<std::uintptr_t>(*current_vptr);
+                    const auto slot0 = detail::guarded_read<std::uintptr_t>(*current_vptr);
                     if (!slot0)
                     {
                         return {
@@ -2051,7 +2051,7 @@ namespace DetourModKit
                 // vmt_result's destructor restore the original vptr, rather than taking down the host on a raw
                 // dereference.
                 const auto new_vptr_base_read =
-                    Memory::seh_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+                    detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
                 if (!new_vptr_base_read)
                 {
                     return {
@@ -2217,7 +2217,8 @@ namespace DetourModKit
             // performed and the legacy path is unchanged.
             if (cfg.fail_if_already_hooked || cfg.fail_on_non_function_pointer)
             {
-                const auto current_vptr = Memory::seh_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+                const auto current_vptr =
+                    detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
                 if (!current_vptr)
                 {
                     return {false,
@@ -2260,7 +2261,7 @@ namespace DetourModKit
                 // destination.
                 if (cfg.fail_on_non_function_pointer)
                 {
-                    const auto slot0 = Memory::seh_read<std::uintptr_t>(*current_vptr);
+                    const auto slot0 = detail::guarded_read<std::uintptr_t>(*current_vptr);
                     if (!slot0)
                     {
                         return {

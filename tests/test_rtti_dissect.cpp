@@ -22,7 +22,7 @@
 
 #include "test_alloc_probe.hpp"
 
-namespace Memory = DetourModKit::Memory;
+namespace memory = DetourModKit::memory;
 namespace Rtti = DetourModKit::Rtti;
 
 static_assert(static_cast<std::uint8_t>(Rtti::Indirection::PointerToObject) == 0);
@@ -43,7 +43,7 @@ namespace
     constexpr std::size_t SYN_VTABLE_OFFSET = SYN_COL_PTR_OFFSET + 8;
 
     // Static buffer pool for SyntheticVtable storage. Living in the test executable's data segment ensures
-    // Memory::module_range_for resolves every synthetic vtable back to the test exe's PE range, which the prelude's
+    // memory::module_of resolves every synthetic vtable back to the test exe's PE range, which the prelude's
     // bound-check guard requires. The pool is reset between tests.
     constexpr std::size_t SYN_POOL_FIXTURES = 32;
     constexpr std::size_t SYN_POOL_SIZE = SYN_BUF_SIZE * SYN_POOL_FIXTURES;
@@ -177,13 +177,13 @@ class RttiDissectTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        (void)Memory::init_cache();
+        (void)memory::init_cache();
         syn_reset();
     }
 
     void TearDown() override
     {
-        Memory::shutdown_cache();
+        memory::shutdown_cache();
         for (void *p : m_heap_pages)
         {
             VirtualFree(p, 0, MEM_RELEASE);

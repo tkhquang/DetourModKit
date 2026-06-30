@@ -14,8 +14,10 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
-namespace Memory = DetourModKit::Memory;
+namespace memory = DetourModKit::memory;
 namespace Rtti = DetourModKit::Rtti;
+using DetourModKit::Address;
+using DetourModKit::Region;
 
 namespace
 {
@@ -28,7 +30,7 @@ namespace
     constexpr std::size_t REV_COL_PTR_OFFSET = 2048; // the vtable[-1] meta-slot
     constexpr std::size_t REV_VTABLE_OFFSET = REV_COL_PTR_OFFSET + 8;
 
-    // Static pool in the test executable's data segment so Memory::module_range_for resolves every synthetic vtable
+    // Static pool in the test executable's data segment so memory::module_of resolves every synthetic vtable
     // back to the test exe's PE range, which the shared prelude's bound check requires. Reset between tests. Sized to
     // hold one full MAX_REVERSE_MATCHES (64) saturation set plus the small fixtures every other case builds.
     constexpr std::size_t REV_POOL_FIXTURES = 64;
@@ -92,10 +94,10 @@ namespace
     // PE image, so collect_rtti_scan_ranges' header parse fails and the resolver sweeps exactly this range;
     // resolve_col_site still validates every hit against the real owning module. This keeps the unit tests fast and
     // deterministic instead of sweeping the whole multi-megabyte test executable.
-    [[nodiscard]] Memory::ModuleRange pool_range() noexcept
+    [[nodiscard]] Region pool_range() noexcept
     {
         const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
-        return Memory::ModuleRange{base, base + s_rev_used};
+        return Region{Address{base}, s_rev_used};
     }
 } // anonymous namespace
 
@@ -104,11 +106,11 @@ class RttiReverseTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        (void)Memory::init_cache();
+        (void)memory::init_cache();
         rev_reset();
     }
 
-    void TearDown() override { Memory::shutdown_cache(); }
+    void TearDown() override { memory::shutdown_cache(); }
 };
 
 TEST_F(RttiReverseTest, SingleInheritanceResolvesPrimaryVtable)
@@ -203,7 +205,7 @@ TEST_F(RttiReverseTest, InvalidRangeReturnsNullopt)
 {
     ASSERT_NE(build_synth(".?AVRevInvalid@@", 0), 0u);
 
-    const Memory::ModuleRange invalid{}; // base == end == 0 => valid() is false
+    const Region invalid{}; // base == size == 0 => empty range
     EXPECT_FALSE(Rtti::vtable_for_type(".?AVRevInvalid@@", invalid).has_value());
     std::uintptr_t all[4] = {};
     EXPECT_EQ(Rtti::vtables_for_type(".?AVRevInvalid@@", all, 4, invalid), 0u);
@@ -248,7 +250,7 @@ TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
     // finishes relocating the vtable). Scope the identity to the whole pool, miss while the type is absent, then build
     // the synth and confirm the next call resolves rather than staying wedged on the earlier miss.
     const std::uintptr_t pool_base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
-    const Memory::ModuleRange full_pool{pool_base, pool_base + s_rev_pool.size()};
+    const Region full_pool{Address{pool_base}, s_rev_pool.size()};
 
     Rtti::TypeIdentity id(".?AVRevLateBind@@", full_pool);
     EXPECT_FALSE(id.vtable().has_value());
@@ -272,9 +274,9 @@ TEST_F(RttiReverseTest, FindsFixtureViaHostModuleSectionWalk)
     const std::uintptr_t vt = build_synth(".?AVRevHostWalk@@", 0);
     ASSERT_NE(vt, 0u);
 
-    const auto host = Memory::host_module_range();
-    ASSERT_TRUE(host.valid());
-    ASSERT_TRUE(Memory::contains(host, vt));
+    const auto host = Region::host();
+    ASSERT_TRUE(host.size != 0);
+    ASSERT_TRUE(host.contains(Address{vt}));
 
     const auto found = Rtti::vtable_for_type(".?AVRevHostWalk@@", host);
     ASSERT_TRUE(found.has_value());

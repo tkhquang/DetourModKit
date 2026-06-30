@@ -11,14 +11,14 @@
 
 #include "DetourModKit/scan.hpp"
 
+#include "internal/memory_fault.hpp"
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/memory.hpp"
-
-#include "memory_internal.hpp"
 
 #include <windows.h>
 
@@ -191,9 +191,9 @@ namespace DetourModKit
             // Window-granular TOCTOU fault guard around scan_window_narrow_body. collect_executable_windows gated each
             // window with one VirtualQuery; a concurrent decommit / reprotect before these unguarded byte reads
             // complete would otherwise fault the host. On MSVC the body runs inside a __try / __except that swallows
-            // exactly the foreign-read faults (Memory::detail::is_guarded_read_fault) and reports the window faulted so
+            // exactly the foreign-read faults (detail::is_guarded_read_fault) and reports the window faulted so
             // the sweep skips it. On MinGW x64 the body runs through the same process-wide vectored read guard the
-            // seh_read paths use (Memory::detail::run_guarded_region), so the fault is swallowed and the window skipped
+            // guarded_read paths use (detail::run_guarded_region), so the fault is swallowed and the window skipped
             // + counted there too; only on 32-bit MinGW, where that x64-only vectored guard is unavailable, does the
             // body run directly behind just the VirtualQuery gate. Returns true when a fault was swallowed.
             bool scan_window_narrow_guarded(const detail::ExecutableWindow &window, std::uintptr_t string_addr,
@@ -209,8 +209,8 @@ namespace DetourModKit
                     scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
                     return false;
                 }
-                __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
-                                                                                    : EXCEPTION_CONTINUE_SEARCH)
+                __except (detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                            : EXCEPTION_CONTINUE_SEARCH)
                 {
                     // The caller skips faulted windows, so discard any reference count (and recovered lea info)
                     // collected before the fault, or a partially-scanned window could leak a stale site/register.
@@ -246,7 +246,7 @@ namespace DetourModKit
                                             *context->found_count, *context->first_site, context->info);
                 };
 
-                if (Memory::detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
+                if (detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
                 {
                     return false;
                 }
@@ -277,10 +277,10 @@ namespace DetourModKit
             // The resolved target is next-instruction-address + sign-extended disp32, done in unsigned modular
             // arithmetic so it is well-defined for every input. Only a target that exactly equals string_addr is
             // accepted, which is an extremely strong filter: string_addr is the already-located, plausible .rdata
-            // address, so this equality subsumes the plausible_userspace_ptr floor and a coincidental byte sequence
+            // address, so this equality subsumes the is_plausible_ptr floor and a coincidental byte sequence
             // resolving to precisely string_addr is not a realistic false positive. Counting stops at the second hit so
             // the caller can fail closed on ambiguity.
-            std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr, Memory::ModuleRange range,
+            std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr, detail::ModuleSpan range,
                                                   std::size_t &found_count, LeaReferenceInfo &info)
             {
                 found_count = 0;
@@ -327,10 +327,10 @@ namespace DetourModKit
             // overwritten. The store shape is REX.W MOV [rip+disp32], reg64. The match is first-within-window, not
             // uniqueness-checked, so the window is kept tight. Returns 0 (the caller maps it to StoreNotFound) on no
             // store, a write to the loaded register, a CALL, a decode failure, an unreadable byte, or the bound being
-            // hit. Reads go through Memory::seh_read_bytes so a truncated or unmapped tail cannot fault the host.
+            // hit. Reads go through detail::guarded_read_bytes so a truncated or unmapped tail cannot fault the host.
             std::uintptr_t scan_store_slot_after_lea(std::uintptr_t lea_site, std::size_t lea_len,
                                                      std::uintptr_t window_end, std::uint8_t lea_reg,
-                                                     Memory::ModuleRange range) noexcept
+                                                     detail::ModuleSpan range) noexcept
             {
                 // A cached pointer is stored very close to its load; bound the forward scan so a pathological region
                 // cannot scan unboundedly and the store cannot be attributed to a distant, unrelated reuse of the same
@@ -369,7 +369,7 @@ namespace DetourModKit
                     std::array<std::uint8_t, ZYDIS_MAX_INSTRUCTION_LENGTH> code{};
                     const std::size_t avail =
                         (scan_hi - p < code.size()) ? static_cast<std::size_t>(scan_hi - p) : code.size();
-                    if (!Memory::seh_read_bytes(p, code.data(), avail))
+                    if (!detail::guarded_read_bytes(p, code.data(), avail))
                     {
                         // Unreadable byte: the store sits in the same execute-readable window as the lea, so a fault
                         // here means it is not present in mapped code.
@@ -502,8 +502,8 @@ namespace DetourModKit
                     scan_window_broad_body(decoder, window, string_addr, found_count, first_site);
                     return false;
                 }
-                __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
-                                                                                    : EXCEPTION_CONTINUE_SEARCH)
+                __except (detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                            : EXCEPTION_CONTINUE_SEARCH)
                 {
                     // The caller skips faulted windows, so discard any reference count collected before the fault.
                     found_count = original_found_count;
@@ -532,7 +532,7 @@ namespace DetourModKit
                                            *context->found_count, *context->first_site);
                 };
 
-                if (Memory::detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
+                if (detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
                 {
                     return false;
                 }
@@ -557,7 +557,7 @@ namespace DetourModKit
             // RIP-relative operand whose absolute target exactly equals string_addr counts. That exact-target filter
             // subsumes the plausibility floor and neutralizes a mid-.text desync. Counting stops at the second
             // referencing instruction so the caller fails closed on ambiguity.
-            std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr, Memory::ModuleRange range,
+            std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr, detail::ModuleSpan range,
                                                  std::size_t &found_count)
             {
                 found_count = 0;
@@ -612,16 +612,16 @@ namespace DetourModKit
                 // holds the byte at floor + k; valid_lo is the lowest address actually buffered.
                 std::array<std::uint8_t, static_cast<std::size_t>(back_scan_window)> window{};
                 std::uintptr_t valid_lo = instr_addr;
-                // Windows x86/x64 base page size; seh_read_bytes faults at this granularity. Chunks are page-aligned,
-                // not instr-aligned, so a single guarded read covers at most one page and never straddles a
-                // readable/unreadable page boundary.
+                // Windows x86/x64 base page size; guarded_read_bytes faults at this granularity. Chunks are
+                // page-aligned, not instr-aligned, so a single guarded read covers at most one page and never straddles
+                // a readable/unreadable page boundary.
                 constexpr std::uintptr_t page_size = 0x1000;
                 for (std::uintptr_t hi = instr_addr; hi > floor;)
                 {
                     const std::uintptr_t page_lo = (hi - 1) & ~(page_size - 1);
                     const std::uintptr_t lo = (page_lo > floor) ? page_lo : floor;
                     const std::size_t len = static_cast<std::size_t>(hi - lo);
-                    if (!Memory::seh_read_bytes(lo, window.data() + (lo - floor), len))
+                    if (!detail::guarded_read_bytes(lo, window.data() + (lo - floor), len))
                     {
                         // This page is unreadable; stop. The byte-at-a-time walk would fault on the first byte here
                         // too, after exhausting the readable bytes buffered above it.
@@ -662,7 +662,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::EmptyQuery, "scan::find_string_xref"});
             }
-            const Memory::ModuleRange range = detail::to_module_range(scope);
+            const detail::ModuleSpan range = detail::module_span(scope);
             if (!range.valid())
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::find_string_xref"});

@@ -9,7 +9,7 @@
 
 #include "DetourModKit/scan.hpp"
 
-#include "DetourModKit/memory.hpp"
+#include "internal/memory_guarded.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -33,7 +33,7 @@ namespace DetourModKit
             // Read the displacement under a single SEH fault guard instead of is_readable + raw memcpy. is_readable is
             // a time-of-check/time-of-use illusion -- the page can change protection or unmap between the check and the
             // copy -- so an unguarded memcpy could fault the host.
-            const auto displacement = Memory::seh_read<std::int32_t>(disp_addr);
+            const auto displacement = detail::guarded_read<std::int32_t>(disp_addr);
             if (!displacement)
             {
                 return std::unexpected(Error{ErrorCode::UnreadableDisplacement, "scan::resolve_rip_relative"});
@@ -47,9 +47,9 @@ namespace DetourModKit
 
             // Fail closed on a target that cannot be a real in-process address. A corrupt or hostile displacement can
             // resolve to 0, a low guard-page address, or a kernel-range value; returning that as "success" would hand
-            // the caller a pointer that faults on first use. plausible_userspace_ptr is pure arithmetic, so this guard
+            // the caller a pointer that faults on first use. is_plausible_ptr is pure arithmetic, so this guard
             // adds no syscall and no memory access.
-            if (!Memory::plausible_userspace_ptr(target))
+            if (!detail::is_plausible_ptr(target))
             {
                 return std::unexpected(Error{ErrorCode::ImplausibleTarget, "scan::resolve_rip_relative"});
             }

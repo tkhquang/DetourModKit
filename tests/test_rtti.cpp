@@ -13,7 +13,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
-namespace Memory = DetourModKit::Memory;
+namespace memory = DetourModKit::memory;
 namespace Rtti = DetourModKit::Rtti;
 
 namespace
@@ -28,7 +28,7 @@ namespace
     constexpr std::size_t SYN_VTABLE_OFFSET = SYN_COL_PTR_OFFSET + 8;
 
     // Static buffer pool for SyntheticVtable storage. Living in the test executable's data segment ensures
-    // Memory::module_range_for resolves every synthetic address back to the test exe's PE range, which is required by
+    // memory::module_of resolves every synthetic address back to the test exe's PE range, which is required by
     // the RTTI walker's bound-check guard. The pool is sized for up to 16 fixtures per test; RttiTest::SetUp resets the
     // offset between tests so the pool never grows unbounded.
     constexpr std::size_t SYN_POOL_FIXTURES = 16;
@@ -159,10 +159,10 @@ class RttiTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        (void)Memory::init_cache();
+        (void)memory::init_cache();
         syn_reset();
     }
-    void TearDown() override { Memory::shutdown_cache(); }
+    void TearDown() override { memory::shutdown_cache(); }
 };
 
 // --- type_name_of ---

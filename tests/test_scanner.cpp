@@ -1165,9 +1165,9 @@ TEST(ScannerTest, find_pattern_sse2_path_not_found)
 class ScannerRipTest : public ::testing::Test
 {
 protected:
-    void SetUp() override { ASSERT_TRUE(Memory::init_cache()); }
+    void SetUp() override { ASSERT_TRUE(memory::init_cache()); }
 
-    void TearDown() override { Memory::shutdown_cache(); }
+    void TearDown() override { memory::shutdown_cache(); }
 };
 
 TEST_F(ScannerRipTest, resolve_rip_relative_positive_displacement)
@@ -2491,13 +2491,13 @@ TEST(ScannerTest, ResolveRipRelative_NegativeDisplacement_ComputesCorrectTarget)
     alignas(4)
         std::byte buffer[5] = {std::byte{0xE8}, std::byte{0xE0}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
 
-    ASSERT_TRUE(Memory::init_cache());
+    ASSERT_TRUE(memory::init_cache());
     const auto result = resolve_rip(buffer, 1, 5);
     ASSERT_TRUE(result.has_value());
 
     const auto *expected_ptr = buffer + 5 - 0x20;
     EXPECT_EQ(result->raw(), reinterpret_cast<uintptr_t>(expected_ptr));
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 }
 
 // Exercise the full VirtualQuery walk. The test cannot portably set up a pure-execute page, but it can verify the walk
@@ -2833,8 +2833,8 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     auto pattern = detail::parse_aob("DE AD BE EF CA FE");
     ASSERT_TRUE(pattern.has_value());
 
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
-                                    reinterpret_cast<std::uintptr_t>(base) + size};
+    const detail::ModuleSpan range{reinterpret_cast<std::uintptr_t>(base),
+                                   reinterpret_cast<std::uintptr_t>(base) + size};
 
     // Positive control: the refactored scan body still finds a planted needle at the right address.
     const std::uint8_t needle[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE};

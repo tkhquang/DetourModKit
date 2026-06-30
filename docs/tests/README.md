@@ -422,8 +422,8 @@ tests/
 ├── test_input_intercept.cpp    # Active-input layer state machines (internal)
 ├── test_logger.cpp             # Logger tests
 ├── test_math.cpp               # Math utilities tests
-├── test_memory.cpp             # Memory utilities tests (cache, read/write, SEH reads, module range)
-├── test_memory_chain.cpp       # Pointer-chain / plausibility primitives (seh_resolve_chain, seh_read_chain)
+├── test_memory.cpp             # Memory utilities tests (cache, read/write, guarded reads, module range)
+├── test_memory_chain.cpp       # Pointer-chain / plausibility primitives (memory::walk, is_plausible_ptr)
 ├── test_platform.cpp           # Platform detection and version macro tests
 ├── test_profiler.cpp           # Profiler tests
 ├── test_scan_resolve.cpp       # AOB scanner and resolver tests (scan::Pattern, scan::resolve)

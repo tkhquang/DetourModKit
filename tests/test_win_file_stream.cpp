@@ -16,10 +16,14 @@ protected:
     void SetUp() override
     {
         static int s_counter = 0;
-        m_test_dir = std::filesystem::temp_directory_path() / "dmk_wfs_test";
+        // Key the test DIRECTORY on the process id, not just the files inside it. ctest runs each test in its own
+        // process and may run several concurrently (-j); with a shared directory, TearDown's remove_all() raced --
+        // one process could delete the directory out from under another process's in-flight file, which surfaced as a
+        // flaky failure on the longer multi-flush write. A per-process directory isolates each process so a teardown
+        // only ever removes its own files.
+        m_test_dir = std::filesystem::temp_directory_path() / ("dmk_wfs_test_" + std::to_string(GetCurrentProcessId()));
         std::filesystem::create_directories(m_test_dir);
-        m_test_path =
-            m_test_dir / ("wfs_" + std::to_string(GetCurrentProcessId()) + "_" + std::to_string(s_counter++) + ".txt");
+        m_test_path = m_test_dir / ("wfs_" + std::to_string(s_counter++) + ".txt");
     }
 
     void TearDown() override

@@ -3,6 +3,8 @@
 
 #include "DetourModKit/memory.hpp"
 
+#include "internal/memory_guarded.hpp"
+
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -13,7 +15,7 @@ namespace DetourModKit::detail
     /**
      * @brief Decodes an E9 rel32 near JMP at @p address and returns its absolute destination.
      * @details Copies the candidate instruction bytes into a local buffer under a single SEH fault guard
-     *          (seh_read_bytes), then inspects the copy. Read-then-test on a local buffer closes the time-of-check to
+     *          (guarded_read_bytes), then inspects the copy. Read-then-test on a local buffer closes the time-of-check to
      *          time-of-use gap that is_readable + a raw dereference leaves open: the target page can change protection
      *          or unmap between the probe and the access, and these decoders run on the nested-hook detection and
      *          prologue-recovery paths where the page state is most likely to be in flux. A faulting read returns
@@ -24,7 +26,7 @@ namespace DetourModKit::detail
     [[nodiscard]] inline std::optional<std::uintptr_t> decode_e9_rel32(std::uintptr_t address) noexcept
     {
         std::array<std::uint8_t, 5> code{};
-        if (!Memory::seh_read_bytes(address, code.data(), code.size()))
+        if (!guarded_read_bytes(address, code.data(), code.size()))
         {
             return std::nullopt;
         }
@@ -40,7 +42,7 @@ namespace DetourModKit::detail
     /**
      * @brief Decodes an EB rel8 short JMP at @p address and returns its absolute destination.
      * @details Copies the candidate instruction bytes into a local buffer under a single SEH fault guard
-     *          (seh_read_bytes), then inspects the copy. Read-then-test on a local buffer closes the time-of-check to
+     *          (guarded_read_bytes), then inspects the copy. Read-then-test on a local buffer closes the time-of-check to
      *          time-of-use gap that is_readable + a raw dereference leaves open: the target page can change protection
      *          or unmap between the probe and the access, and this decoder runs on hook-detection pre-flight paths
      *          (the VMT slot pre-flight) where the page state is most likely to be in flux. A faulting read returns
@@ -52,7 +54,7 @@ namespace DetourModKit::detail
     [[nodiscard]] inline std::optional<std::uintptr_t> decode_eb_rel8(std::uintptr_t address) noexcept
     {
         std::array<std::uint8_t, 2> code{};
-        if (!Memory::seh_read_bytes(address, code.data(), code.size()))
+        if (!guarded_read_bytes(address, code.data(), code.size()))
         {
             return std::nullopt;
         }
@@ -69,7 +71,7 @@ namespace DetourModKit::detail
      * @details FF 25 disp32 on x86-64 is RIP-relative: the 32-bit signed displacement is added to the address of the
      *          next instruction. On x86 (32-bit) the same encoding is absolute, which this decoder does not handle.
      *          Copies the candidate instruction bytes into a local buffer under a single SEH fault guard
-     *          (seh_read_bytes), then inspects the copy. Read-then-test on a local buffer closes the time-of-check to
+     *          (guarded_read_bytes), then inspects the copy. Read-then-test on a local buffer closes the time-of-check to
      *          time-of-use gap that is_readable + a raw dereference leaves open: the target page can change protection
      *          or unmap between the probe and the access, and these decoders run on the nested-hook detection and
      *          prologue-recovery paths where the page state is most likely to be in flux. A faulting read returns
@@ -82,7 +84,7 @@ namespace DetourModKit::detail
     {
         static_assert(sizeof(void *) == 8, "decode_ff25_indirect assumes x86-64 RIP-relative semantics");
         std::array<std::uint8_t, 6> code{};
-        if (!Memory::seh_read_bytes(address, code.data(), code.size()))
+        if (!guarded_read_bytes(address, code.data(), code.size()))
         {
             return std::nullopt;
         }
@@ -95,7 +97,7 @@ namespace DetourModKit::detail
         const auto slot_addr = static_cast<std::uintptr_t>(static_cast<std::int64_t>(address) + 6 + disp);
         // The slot stores the final indirect target; read it under the same fault guard rather than is_readable + a raw
         // dereference.
-        const auto indirect_destination = Memory::seh_read<std::uintptr_t>(slot_addr);
+        const auto indirect_destination = guarded_read<std::uintptr_t>(slot_addr);
         if (!indirect_destination)
         {
             return std::nullopt;
@@ -109,7 +111,7 @@ namespace DetourModKit::detail
      *          followed by `FF E0` (jmp rax) -- when the detour trampoline is beyond rel32 reach and the hooking
      *          library does not use the FF 25 RIP-relative form. Unlike FF 25 the absolute target is the imm64 baked
      *          directly into the instruction, so no pointer-slot dereference is needed. Copies the candidate bytes
-     *          into a local buffer under a single SEH fault guard (seh_read_bytes), then inspects the copy.
+     *          into a local buffer under a single SEH fault guard (guarded_read_bytes), then inspects the copy.
      *          Read-then-test on a local buffer closes the time-of-check to time-of-use gap that is_readable + a raw
      *          dereference leaves open: the target page can change protection or unmap between the probe and the
      *          access, and this decoder
@@ -123,7 +125,7 @@ namespace DetourModKit::detail
     {
         static_assert(sizeof(void *) == 8, "decode_mov_rax_imm64_jmp_rax assumes a 64-bit absolute target");
         std::array<std::uint8_t, 12> code{};
-        if (!Memory::seh_read_bytes(address, code.data(), code.size()))
+        if (!guarded_read_bytes(address, code.data(), code.size()))
         {
             return std::nullopt;
         }
