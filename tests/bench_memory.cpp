@@ -62,9 +62,9 @@ namespace
     using DetourModKit::Address;
     using DetourModKit::Region;
 
-    // The v4 readability predicates take a Region; the bench works in (pointer, size). Wrap once here so the call sites
+    // The readability predicates take a Region; the bench works in (pointer, size). Wrap once here so the call sites
     // below stay readable.
-    // ANTI-PATTERN: these wrappers resurrect the removed v3 (pointer, size) shape so the bench bodies did not have to
+    // ANTI-PATTERN: these wrappers resurrect the removed (pointer, size) call shape so the bench bodies did not have to
     // change. Treat them as a temporary scaffold: rewrite the call sites to build a Region directly and remove these.
     // (The same scaffold exists in test_memory.cpp.)
     inline bool is_readable(const void *p, std::size_t n) noexcept

@@ -111,46 +111,50 @@ if (const auto slot = mem::walk(Address{base}, std::array<std::ptrdiff_t, 3>{0x1
 
 Writes follow the same rule as reads. A pointer the hook was handed is live by definition, so write through it directly (the anti-patterns below show why gating that write is pointless). But a value written through a *resolved* address -- a scanned base plus a pointer chain that can go stale between frames -- needs the same fault guard a read does, because the terminal slot can be unmapped the instant the chain is wrong.
 
-`memory::write<T>` / `memory::write_bytes` are guarded and fail closed on a fault. They are also a single tool that serves both the per-frame data write and the one-shot code patch: each first attempts a guarded write that changes **no** page protection, and only falls back to flipping protection (then flushing the instruction cache and restoring) if that fast write faults because the page is read-only or executable. So a write to memory the target already keeps writable (a camera transform, a player field) stays on the cheap path with no `VirtualProtect`:
+There are two guarded write families, split by what should happen when the target is not already writable.
+
+`memory::write_in_place<T>` / `memory::write_in_place(Address, std::span<const std::byte>)` is the per-frame data write. It is a guarded copy that changes **no** page protection and fails closed with `ErrorCode::WriteFaulted` if the target is not already writable. Use it for the common case, a value written every frame to memory the target keeps writable (a camera transform, a player field): it stays on the cheap no-`VirtualProtect` path, and if a stale or mistargeted chain drifts onto a read-only page it reports the fault instead of silently unprotecting and corrupting that page.
 
 ```cpp
 namespace mem = DetourModKit::memory;
 using DetourModKit::Address;
 
-// Write a camera transform every frame through a resolved chain. Fault-guarded:
-// a stale chain fails closed instead of faulting the host. The target keeps the
-// slot writable, so this stays on the cheap no-reprotect path.
+// Write a camera transform every frame through a resolved chain. Fault-guarded: a stale chain fails closed
+// instead of faulting the host, and a slot that is not writable (the chain drifted onto a protected page) is
+// rejected rather than reprotected.
 const Matrix4x4 next = compute_camera(...);
 if (const auto slot = mem::walk(Address{camera_base}, CAMERA_TRANSFORM_CHAIN))
 {
-    if (!mem::write<Matrix4x4>(*slot, next))
+    if (!mem::write_in_place<Matrix4x4>(*slot, next))
     {
-        // Write faulted this frame -- skip it, do not crash.
+        // Faulted or not writable this frame -- skip it, do not crash.
     }
 }
 // else: chain went stale this frame -- skip the write.
 ```
 
-When you write the same read-only or executable page every frame (a code or data page the target keeps protected), do not let each write take the slow protection-flip path. Hold a `memory::ProtectGuard` over the region for the lifetime of the write loop: it changes the page to writable once, and every `write_bytes` inside the guarded window then sees an already-writable page and stays on the cheap fast path. The guard restores the original protection on scope exit.
+`memory::write<T>` / `memory::write_bytes` are the escalating write: they first try the same no-reprotect copy, then fall back to flipping protection (write, flush the instruction cache, restore) when that fast write faults because the page is read-only or executable. Reach for them when escalation is the intent, a one-shot CODE patch on a protected page, not for a per-frame data write where a non-writable target signals a bug you want surfaced rather than papered over.
+
+When you repeatedly write to a page the target keeps protected, do not pay a protection flip per write. Hold a `memory::ProtectGuard` over the region for the lifetime of the loop: it makes the page writable once, so each `write_in_place` inside the guarded window sees a writable page and stays on the cheap path. The guard restores the original protection on scope exit. Note this is a DATA pattern: `write_in_place` does not flush the instruction cache, so to patch executable CODE use `write_bytes` (which flushes when it changes protection) rather than a guarded `write_in_place` loop.
 
 ```cpp
 namespace mem = DetourModKit::memory;
 using DetourModKit::Region;
 using DetourModKit::Prot;
 
-// Keep a protected region writable across the whole write loop so each per-frame
-// write stays on the cheap path instead of flipping protection every time.
+// Make a protected region writable once across the whole loop, so each per-frame write stays cheap instead of
+// flipping protection every time.
 auto guard = mem::ProtectGuard::make(Region{slot, sizeof(Matrix4x4)}, Prot::RW);
 if (guard)
 {
     while (running)
     {
-        mem::write<Matrix4x4>(slot, compute_camera(...)); // no VirtualProtect here
+        (void)mem::write_in_place<Matrix4x4>(slot, compute_camera(...)); // page already writable under the guard
     }
 } // guard restores the original protection on scope exit
 ```
 
-Without a held guard, a one-shot `write_bytes` to a read-only / executable page takes the full slow path on its own: change protection to writable, write, flush the instruction cache, restore protection, and invalidate the affected cache range. That is exactly what a one-shot CODE patch needs, and exactly the overhead you do not want once per frame -- which is why a per-frame writer to a protected page should hold a `ProtectGuard` rather than pay that cost each call.
+A one-shot CODE patch on a read-only / executable page is `memory::write_bytes`, which auto-unprotects on its own: change protection to writable, write, flush the instruction cache, restore protection, and invalidate the affected cache range. That is exactly what a code patch needs and exactly the overhead you do not want once per frame, which is why a per-frame writer uses `write_in_place` and a repeated writer to a protected page holds a `ProtectGuard`.
 
 ## Primitive selection
 
@@ -162,10 +166,10 @@ Without a held guard, a one-shot `write_bytes` to a read-only / executable page 
 | A multi-level pointer chain | The final address only | `memory::walk(Address{base}, {offsets...})` |
 | A multi-level pointer chain | A typed value at the end | `memory::walk(...)` then `memory::read<T>(*slot)` |
 | A pointer you can prove is alive this frame | The fastest possible read, no syscall, no SEH | `memory::unchecked::read<T>(Address{...})` |
-| A resolved address that may be stale | One typed / range write that fails closed instead of faulting | `memory::write<T>(Address{addr}, value)` / `memory::write_bytes(Address{addr}, span)` |
-| A multi-level pointer chain | A guarded write at its terminal slot | `memory::walk(...)` then `memory::write<T>(*slot, value)` |
-| To patch CODE on a read-only / executable page once | A protection-flipping, i-cache-flushing write | `memory::write_bytes(Address{target}, span)` -- auto-unprotects on fault; this is the setup/patch case |
-| To keep per-frame writes to a protected page on the cheap path | A held page-protection guard | `memory::ProtectGuard::make(Region{...}, Prot::RW)` (hold it across the loop) |
+| A resolved address on a page the target keeps writable | A per-frame write that fails closed if the page is not writable (no reprotect) | `memory::write_in_place<T>(Address{addr}, value)` / `write_in_place(Address{addr}, span)` |
+| A multi-level pointer chain | A guarded per-frame write at its terminal slot | `memory::walk(...)` then `memory::write_in_place<T>(*slot, value)` |
+| To patch CODE on a read-only / executable page, or write and have protection changed for you | An auto-unprotecting write | `memory::write_bytes(Address{target}, span)` / `memory::write<T>(...)` -- changes protection on fault; the setup/patch case |
+| To write a protected page repeatedly without flipping protection each time | A held page-protection guard | `memory::ProtectGuard::make(Region{...}, Prot::RW)` (hold it across the loop) |
 | To screen a candidate pointer before any read | A pure arithmetic plausibility test | `memory::is_plausible_ptr(Address{p})` |
 | To confirm a pointer lives in a known module | A branch-only range test | `Region::own().contains(Address{p})` (capture the range once) |
 | To validate an address once at setup | A readability or writability check | `memory::is_readable(Region{...})` / `memory::is_writable(Region{...})` |

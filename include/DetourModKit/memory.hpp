@@ -171,6 +171,43 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Strict guarded write of a byte span that NEVER changes page protection.
+         * @param address Destination address.
+         * @param source Source byte span. An empty span is a successful no-op.
+         * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` for a rejected
+         *         argument, or `ErrorCode::WriteFaulted` when the target was not already writable.
+         * @details The counterpart to @ref write_bytes for memory the target already keeps writable -- a live game
+         *          field a hook updates every frame. Unlike @ref write_bytes it does NOT escalate: a read-only,
+         *          executable, or no-access target FAILS CLOSED (`WriteFaulted`) rather than being unprotected and
+         *          written. Use it when "write only if this page is already writable" is the intended contract: to
+         *          keep a per-frame store off the VirtualProtect path, or to let a stale or mistargeted pointer that
+         *          lands in read-only memory surface as an error instead of silently mutating it. For a one-shot code
+         *          patch on a read-only / executable page use @ref write_bytes, which unprotects internally.
+         * @note Callback-safe: allocates nothing, takes no lock, changes no protection, and issues no syscall on the
+         *       fast path.
+         */
+        [[nodiscard]] Result<void> write_in_place(Address address, std::span<const std::byte> source) noexcept;
+
+        /**
+         * @brief Strict guarded write of a trivially copyable @p T that NEVER changes page protection.
+         * @tparam T A trivially copyable type; its object representation is copied byte-for-byte.
+         * @param address Destination address.
+         * @param value Value whose object representation is written.
+         * @return The propagated @ref write_in_place result.
+         * @details Forwards to @ref write_in_place, so the same no-reprotect, fail-closed-if-not-writable contract
+         *          applies. This is the typed per-frame store; see @ref write_in_place for when to prefer it over
+         *          @ref write.
+         * @note Callback-safe (see @ref write_in_place).
+         */
+        template <class T>
+            requires std::is_trivially_copyable_v<T>
+        [[nodiscard]] Result<void> write_in_place(Address address, const T &value) noexcept
+        {
+            const auto storage = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
+            return write_in_place(address, std::span<const std::byte>{storage});
+        }
+
+        /**
          * @struct ChainStep
          * @brief One hop of a pointer-chain @ref walk: a byte offset plus the per-hop plausibility floor.
          * @details A walk applies each step's @ref offset to the running address; every step except the last is then

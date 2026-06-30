@@ -21,14 +21,13 @@ using namespace DetourModKit;
 
 namespace
 {
-    // --- Migration shims to the v4 surface ---------------------------------------------------------------------------
-    // These keep the v3 call shapes the test bodies were written against (raw void*/uintptr_t + size) while routing to
-    // the v4 memory:: surface (Address/Region/Result). They add NO behavior; they only wrap arguments.
+    // These shims re-create the removed raw (void*/uintptr_t + size) call shapes so the existing test bodies did not
+    // have to be rewritten against the memory:: surface (Address/Region/Result). They add no behavior; they only wrap
+    // arguments.
     //
-    // ANTI-PATTERN: these shims re-create the removed v3 call shapes (raw void*/uintptr_t + size) so the existing test
-    // bodies did not have to be rewritten. A test should exercise the v4 surface directly (Address/Region/Result), not
-    // a local adapter that resurrects the old shapes; treat this namespace as a temporary scaffold and remove it by
-    // rewriting the affected bodies to call memory:: directly. (The same scaffold exists in bench_memory.cpp.)
+    // ANTI-PATTERN: a test should exercise the memory:: surface directly, not a local adapter that resurrects the old
+    // shapes. Treat this namespace as a temporary scaffold and remove it by rewriting the affected bodies to call
+    // memory:: directly. (The same scaffold exists in bench_memory.cpp.)
 
     inline Region region_of(const void *p, std::size_t n) noexcept
     {
@@ -57,7 +56,7 @@ namespace
         memory::invalidate_range(region_of(p, n));
     }
 
-    // Guarded byte read: returns true on full success, mirroring v3 seh_read_bytes(bool).
+    // Guarded byte read returning a plain bool (true on full success) rather than a Result, as the test bodies expect.
     inline bool read_bytes(std::uintptr_t addr, void *out, std::size_t n) noexcept
     {
         if (out == nullptr && n != 0)
@@ -1527,7 +1526,7 @@ TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
     (void)memory::init_cache();
 }
 
-// --- read<T> / read.value_or(0) (formerly read_ptr_unsafe) -------------------------------------------------------
+// read<T> and the read<T>(addr).value_or(0) guarded-pointer idiom
 
 TEST_F(MemoryTest, ReadPtrUnsafe_ValidPointer)
 {
@@ -1698,7 +1697,7 @@ TEST_F(MemoryTest, ReadPtrUnsafe_NegativeOffset)
     EXPECT_EQ(result, 0xBBBBBBBB);
 }
 
-// --- read_ptr_unchecked: window screen via is_plausible_ptr + unchecked::read raw read ---------------------------
+// Window screen (is_plausible_ptr) plus the raw unchecked::read
 
 TEST_F(MemoryTest, ReadPtrUnchecked_ValidHighPointer)
 {
@@ -2017,7 +2016,7 @@ TEST(MemoryErrorTest, MemoryErrorToString_IsNoexcept)
     static_assert(noexcept(to_string(ErrorCode::NullTargetAddress)));
 }
 
-// --- Tests for read_into (formerly seh_read_bytes) ----------------------------------------------------------------
+// read_into
 
 TEST_F(MemoryTest, SehReadBytes_ValidStackBuffer)
 {
@@ -2104,7 +2103,7 @@ TEST_F(MemoryTest, SehReadBytes_LargeRangePartialUnmapped)
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
-// --- Tests for read<T> (formerly seh_read<T>) ---------------------------------------------------------------------
+// read<T>
 
 TEST_F(MemoryTest, SehRead_Uintptr)
 {
@@ -2163,7 +2162,7 @@ TEST_F(MemoryTest, SehRead_FreedMemoryReturnsNullopt)
     EXPECT_FALSE(value.has_value());
 }
 
-// --- Tests for Region / module_of / Region::own / Region::host (formerly ModuleRange family) ---------------------
+// Region / module_of / Region::own / Region::host
 
 TEST_F(MemoryTest, ModuleRange_DefaultIsInvalid)
 {
@@ -2775,7 +2774,99 @@ TEST_F(MemoryTest, WriteBytes_NoAccessPageUnprotectsAndSucceeds)
     VirtualFree(page, 0, MEM_RELEASE);
 }
 
-// === NEW v4 cases (no legacy equivalent) ==========================================================================
+// memory::write_in_place is the strict, no-reprotect write: it writes only when the target is already writable and
+// FAILS CLOSED otherwise, never escalating to VirtualProtect the way write_bytes does. These cases pin both halves of
+// that contract.
+TEST_F(MemoryTest, WriteInPlace_WritableTargetSucceeds)
+{
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(page, nullptr);
+
+    const uint32_t source = 0xDEADBEEFu;
+    auto result = memory::write_in_place(
+        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), source);
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, WriteInPlace_ReadOnlyPageFailsClosedWithoutUnprotecting)
+{
+    // The capability that distinguishes write_in_place from write_bytes: a read-only target is REJECTED and the bytes
+    // are left untouched (no silent unprotect-and-write).
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(page, nullptr);
+
+    constexpr uint32_t SENTINEL = 0xA5A5A5A5u;
+    *reinterpret_cast<uint32_t *>(page) = SENTINEL;
+
+    DWORD old_protect = 0;
+    ASSERT_NE(VirtualProtect(page, 4096, PAGE_READONLY, &old_protect), 0);
+
+    const uint32_t source = 0xDEADBEEFu;
+    auto result = memory::write_in_place(
+        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::WriteFaulted);
+
+    // Reprotect to readable and confirm the sentinel is intact: the write never landed.
+    ASSERT_NE(VirtualProtect(page, 4096, PAGE_READWRITE, &old_protect), 0);
+    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), SENTINEL);
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, WriteInPlace_NoAccessPageFailsClosed)
+{
+    // Contrast with WriteBytes_NoAccessPageUnprotectsAndSucceeds: write_in_place changes no protection, so a committed
+    // no-access page is rejected rather than reprotected and written.
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
+    ASSERT_NE(page, nullptr);
+
+    const uint32_t source = 0xDEADBEEFu;
+    auto result = memory::write_in_place(
+        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::WriteFaulted);
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, WriteInPlace_TypedRoundTripsToWritableLocal)
+{
+    uint64_t target = 0;
+    const uint64_t value = 0x0123456789ABCDEFull;
+    auto result = memory::write_in_place(Address{&target}, value);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(target, value);
+}
+
+TEST_F(MemoryTest, WriteInPlace_NullTargetReturnsError)
+{
+    const uint32_t source = 0;
+    auto result = memory::write_in_place(
+        Address{}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::NullTargetAddress);
+}
+
+TEST_F(MemoryTest, WriteInPlace_NullSourceReturnsError)
+{
+    uint32_t target = 0;
+    auto result = memory::write_in_place(Address{&target},
+                                         std::span<const std::byte>{static_cast<const std::byte *>(nullptr), 4});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::NullSourceBytes);
+}
+
+TEST_F(MemoryTest, WriteInPlace_ZeroBytesIsNoOpSuccess)
+{
+    uint32_t target = 0x11111111u;
+    auto result = memory::write_in_place(Address{&target}, std::span<const std::byte>{});
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(target, 0x11111111u);
+}
 
 // (a) ProtectGuard lifecycle.
 TEST_F(MemoryTest, ProtectGuard_MakeOnReadOnlyPageSucceedsAndRestores)

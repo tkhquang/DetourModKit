@@ -86,6 +86,34 @@ namespace DetourModKit
             }
         }
 
+        Result<void> write_in_place(Address address, std::span<const std::byte> source) noexcept
+        {
+            // Same validation order as write_bytes: a null target outranks a null source, and a zero-length write is a
+            // success no-op that inspects neither the source pointer nor the target's protection.
+            if (!address)
+            {
+                return std::unexpected(Error{ErrorCode::NullTargetAddress, "memory::write_in_place", address.raw(), 0});
+            }
+            if (source.data() == nullptr && !source.empty())
+            {
+                return std::unexpected(Error{ErrorCode::NullSourceBytes, "memory::write_in_place", address.raw(), 0});
+            }
+            if (source.empty())
+            {
+                return {};
+            }
+
+            // The strict path: a guarded write that changes NO protection. A read-only, executable, or no-access target
+            // faults the guarded copy and fails closed -- this entry point exists precisely to reject a write the
+            // caller did not intend to escalate, so it never reaches the VirtualProtect dance write_bytes takes on a
+            // fault. No cache invalidation either: changing nothing leaves the cached protection state valid.
+            if (!detail::guarded_write_bytes(address.raw(), source.data(), source.size()))
+            {
+                return std::unexpected(Error{ErrorCode::WriteFaulted, "memory::write_in_place", address.raw(), 0});
+            }
+            return {};
+        }
+
         Result<Address> walk(Address base, std::span<const ChainStep> steps, std::span<Address> trace) noexcept
         {
             // A null root cannot be dereferenced. An empty chain is the identity walk (engine returns base), so the
