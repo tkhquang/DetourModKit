@@ -37,8 +37,8 @@ namespace DetourModKit
 
         Result<void> write_bytes(Address address, std::span<const std::byte> source) noexcept
         {
-            // Validation order mirrors the v3 contract: a null target outranks a null source, and a zero-length write
-            // is a success no-op that never inspects the source pointer or the size cap.
+            // Validation order: a null target outranks a null source, and a zero-length write is a success no-op that
+            // never inspects the source pointer or the size cap.
             if (!address)
             {
                 return std::unexpected(Error{ErrorCode::NullTargetAddress, "memory::write_bytes", address.raw(), 0});
@@ -127,8 +127,8 @@ namespace DetourModKit
                 detail::guarded_resolve_chain(base, steps.data(), steps.size(), trace.data(), trace.size());
             if (!outcome.ok)
             {
-                // ReadFaulted carries the failing hop index in Error::detail (the named ctest invariant for walk): the
-                // hop whose dereference faulted, or whose dereferenced link fell below that hop's plausibility floor.
+                // ReadFaulted carries the failing hop index in Error::detail: the hop whose dereference faulted, or
+                // whose dereferenced link fell below that hop's plausibility floor.
                 return std::unexpected(Error{ErrorCode::ReadFaulted, "memory::walk", outcome.fail_index, 0});
             }
             return outcome.address;

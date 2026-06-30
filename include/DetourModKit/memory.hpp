@@ -78,13 +78,12 @@ namespace DetourModKit
          * @brief Structural plausibility test for an x64 user-mode pointer.
          * @param address The address to test.
          * @return True only when @p address lies in [@ref USERSPACE_PTR_MIN, @ref USERSPACE_PTR_MAX).
-         * @details A pure arithmetic guard with no memory access and no syscall, the first-class pointer-sanity gate
-         * the
-         *          consumer base used ~90 times in v3 (then spelled `plausible_userspace_ptr`). It is meant to terminate
-         *          pointer-chain traversals early on obviously bad values (null, small enum-shaped integers,
-         *          non-canonical addresses) before paying for a guarded read. It does NOT prove the pointer is mapped or
-         *          that the target object is the expected type; pair it with a module range check (@ref module_of) and a
-         *          guarded @ref read for full validation. It is `constexpr`, so it can gate compile-time checks.
+         * @details A pure arithmetic guard with no memory access and no syscall: the first-class pointer-sanity gate
+         *          meant to terminate pointer-chain traversals early on obviously bad values (null, small enum-shaped
+         *          integers, non-canonical addresses) before paying for a guarded read. It does NOT prove the pointer
+         *          is mapped or that the target object is the expected type; pair it with a module range check
+         *          (@ref module_of) and a guarded @ref read for full validation. It is `constexpr`, so it can gate
+         *          compile-time checks.
          */
         [[nodiscard]] inline constexpr bool is_plausible_ptr(Address address) noexcept
         {
@@ -237,7 +236,7 @@ namespace DetourModKit
          * @return The resolved leaf address on success; on failure, `ErrorCode::NullChain` for a null @p base with a
          *         non-empty chain, or `ErrorCode::ReadFaulted` with the FAILING HOP INDEX in `Error::detail` when an
          *         intermediate dereference faults or yields a link below that hop's @ref ChainStep::min_valid.
-         * @details This is the precise primitive consumers previously hand-rolled raw guarded blocks to get: per-hop
+         * @details This is the precise primitive a consumer otherwise hand-rolls raw guarded blocks to get: per-hop
          *          gating, intermediate-link capture, and early-out at the first bad hop, none of which an all-or-nothing
          *          read can express. The returned address is not itself dereferenced or range-checked; the caller reads
          *          it (typically via @ref read).
@@ -311,11 +310,11 @@ namespace DetourModKit
          * @param address Any address inside the target module.
          * @return The owning module's @ref Region, or an empty Region when @p address is null, falls inside no loaded
          *         module, or the module's PE headers do not validate.
-         * @details The address-keyed module lookup (v3's `module_range_for`): given a resolved pointer, answer "which
-         *          module is this in, and what is its full image span?" so a caller can range-check the pointer against
-         *          its own image (@ref Region::own), the host image (@ref Region::host), or a third module. The result
-         *          is cached per module handle for the process lifetime, so repeated probes degenerate to a loader
-         *          lookup plus a hash hit.
+         * @details The address-keyed module lookup: given a resolved pointer, answer "which module is this in, and what
+         *          is its full image span?" so a caller can range-check the pointer against its own image
+         *          (@ref Region::own), the host image (@ref Region::host), or a third module. The result is cached per
+         *          module handle for the process lifetime, so repeated probes degenerate to a loader lookup plus a hash
+         *          hit.
          * @note Setup/control-plane only -- issues a loader lookup; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] Region module_of(Address address) noexcept;
@@ -326,8 +325,8 @@ namespace DetourModKit
          * @param case_insensitive When true (the default, matching Windows module-name semantics) the comparison
          *                         ignores case.
          * @return True when a loaded module's base name matches @p basename.
-         * @details Reuses the loader's own module table rather than a from-scratch enumeration, so a consumer no longer
-         *          reimplements a PSAPI walk just to ask "is this DLL present?".
+         * @details Reuses the loader's own module table rather than a from-scratch enumeration, so a consumer need not
+         *          reimplement a PSAPI walk just to ask "is this DLL present?".
          * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
          */
         [[nodiscard]] bool is_module_loaded(std::string_view basename, bool case_insensitive = true) noexcept;
