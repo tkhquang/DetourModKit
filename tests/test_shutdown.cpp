@@ -5,15 +5,43 @@
 #include <filesystem>
 #include <process.h>
 
+#include "DetourModKit/address.hpp"
 #include "DetourModKit/config.hpp"
-#include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/hook.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit.hpp"
 
 using namespace DetourModKit;
+using namespace DetourModKit::hook;
 using DetourModKit::keyboard_key;
+
+// Portable "do not inline" attribute: MSVC silently ignores [[gnu::noinline]], which would let the target below inline
+// and defeat the patch, so route through the same per-file macro the other hook tests use.
+#if defined(_MSC_VER)
+#define DMK_TEST_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define DMK_TEST_NOINLINE [[gnu::noinline]]
+#else
+#define DMK_TEST_NOINLINE
+#endif
+
+namespace
+{
+    // A trivial in-process target/detour pair so the RAII shutdown test can install a real inline hook without a
+    // fixture DLL. DMK_TEST_NOINLINE keeps the target a distinct, patchable function body across compilers.
+    DMK_TEST_NOINLINE int shutdown_raii_target(int x)
+    {
+        volatile int r = x + 1;
+        return r;
+    }
+
+    int shutdown_raii_detour(int x)
+    {
+        return x + 2;
+    }
+} // namespace
 
 // DMK_Shutdown() is the documented teardown entry point and runs from loader-lock / DLL_PROCESS_DETACH paths where an
 // escaping exception would terminate the host. Every subsystem teardown it invokes is noexcept, so the wrapper is too;
@@ -146,13 +174,34 @@ TEST_F(DMKShutdownTest, ShutdownWithInputManagerRegistered)
     EXPECT_EQ(mgr.binding_count(), 0u);
 }
 
-TEST_F(DMKShutdownTest, ShutdownWithHookManager)
+// DMK_Shutdown() does not manage hooks: each hook is owned by the caller's Hook handle and
+// is unhooked when that handle is dropped. Prove the lifetimes are now orthogonal -- a Hook dropped before
+// DMK_Shutdown() is already unhooked (so shutdown has nothing to tear down), and DMK_Shutdown() still runs its
+// non-hook teardown cleanly afterwards.
+TEST_F(DMKShutdownTest, HookLifetimeIsCallerOwnedNotShutdownManaged)
 {
-    DMK_Shutdown();
+    const Address target{reinterpret_cast<std::uintptr_t>(&shutdown_raii_target)};
 
-    auto counts = HookManager::get_instance().get_hook_counts();
-    for (const auto &[status, count] : counts)
     {
-        EXPECT_EQ(count, 0u);
+        Result<Hook> r =
+            inline_at(InlineRequest{.name = "shutdown_raii_hook", .target = target}, &shutdown_raii_detour);
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        Hook h = std::move(*r);
+
+        EXPECT_TRUE(static_cast<bool>(h));
+        EXPECT_TRUE(h.is_enabled());
+        EXPECT_TRUE(is_target_hooked(target)) << "ledger must record the live hook";
+        // Calling the hooked target directly runs the detour (x + 2); call<>() reaches the ORIGINAL (x + 1) through
+        // the guarded trampoline, so the two return values differ -- both prove the hook is live.
+        EXPECT_EQ(shutdown_raii_target(10), 12) << "the installed detour is active when the target is called";
+        EXPECT_EQ(h.call<int>(10), 11) << "call<>() reaches the original through the guarded trampoline";
     }
+
+    // The handle dropped at the end of the block: RAII already unhooked it, with no help from DMK_Shutdown().
+    EXPECT_FALSE(is_target_hooked(target)) << "dropping the Hook handle must unhook before any DMK_Shutdown()";
+
+    // DMK_Shutdown() owns the input poller, memory cache, config registry, and logger -- never hooks. With the hook
+    // already gone, shutdown must still complete its non-hook teardown without throwing.
+    EXPECT_NO_THROW(DMK_Shutdown());
+    EXPECT_FALSE(is_target_hooked(target)) << "shutdown must not resurrect or re-touch a caller-owned hook";
 }

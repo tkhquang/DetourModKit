@@ -62,7 +62,7 @@ python -m gcovr --root . --filter "src/" --filter "include/" \
 ### 2. Check Specific File Coverage
 
 ```bash
-python -m gcovr --root . --filter "src/hook_manager.cpp" --txt
+python -m gcovr --root . --filter "src/hook.cpp" --txt
 ```
 
 ### 3. Analyze Uncovered Lines
@@ -96,13 +96,20 @@ Unit tests use `DMK_TEST_NOINLINE` static functions as hook targets within the t
 
 1. `LoadLibrary` the fixture DLL
 2. `GetProcAddress` to resolve exports
-3. Hook exported functions via `HookManager` (by address and AOB scan)
+3. Hook exported functions via `hook::inline_at` (by address and AOB scan)
 4. Verify behavioral changes (altered return values)
-5. Remove hooks and verify original behavior is restored
+5. Drop the `Hook` handles and verify original behavior is restored
 
 The fixture DLL exports `extern "C"` functions with volatile magic constants for stable AOB patterns across builds.
 
-## Hook Manager Testing
+## Hook Testing
+
+The hook surface is exercised by four test files:
+
+- `tests/test_hook.cpp` -- the free-function / RAII surface (`hook::inline_at`, `hook::mid_at`, `hook::vmt_for`, `hook::install_all`): inline / mid / vmt installs, `Hook` lifecycle (enable / disable / release / destructor unhook), duplicate detection, prologue policy, `Hook::call`, and `install_all` batch outcomes. This file replaces the former `tests/test_hook_manager.cpp`.
+- `tests/test_mid_hook_context.cpp` -- `hook::MidContext` accessors (`gpr` / `stack_pointer` / `resume_stack_pointer` / `instruction_pointer` / `flags` / `xmm`).
+- `tests/test_hook_integration.cpp` -- real-DLL cross-module hooking against the `hook_target_lib.dll` fixture.
+- `tests/test_diagnostics.cpp` -- covers hook-lifecycle diagnostic events (install / enable / disable / teardown) emitted through the diagnostics surface.
 
 ### Using Real Function Addresses
 
@@ -127,14 +134,14 @@ DMK_TEST_NOINLINE static int real_hook_detour_add(int a, int b)
     return a + b + 100;
 }
 
-// Create a hook on a real, callable function
-void *trampoline = nullptr;
-auto result = m_hook_manager->create_inline_hook(
-    "TestHook",
-    reinterpret_cast<uintptr_t>(&real_hook_target_add),
-    reinterpret_cast<void *>(&real_hook_detour_add),
-    &trampoline);
+// Create a hook on a real, callable function. The returned Hook is a
+// move-only RAII handle; its destructor unhooks.
+auto result = DetourModKit::hook::inline_at(
+    {.name = "TestHook",
+     .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&real_hook_target_add)}},
+    &real_hook_detour_add);
 ASSERT_TRUE(result.has_value());
+DetourModKit::hook::Hook hook = std::move(*result);
 ```
 
 ### Cross-Module Hooking (Integration Tests)
@@ -144,12 +151,10 @@ ASSERT_TRUE(result.has_value());
 HMODULE dll = LoadLibraryA("hook_target_lib.dll");
 auto fn = reinterpret_cast<ComputeDamageFn>(GetProcAddress(dll, "compute_damage"));
 
-void *trampoline = nullptr;
-auto result = m_hook_manager->create_inline_hook(
-    "DamageHook",
-    reinterpret_cast<uintptr_t>(fn),
-    reinterpret_cast<void *>(&detour_compute_damage),
-    &trampoline);
+auto result = DetourModKit::hook::inline_at(
+    {.name = "DamageHook",
+     .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(fn)}},
+    &detour_compute_damage);
 ```
 
 ### AOB Scan + Hook Pipeline
@@ -172,12 +177,13 @@ EXPECT_EQ(found->value(), reinterpret_cast<uintptr_t>(fn));
 
 ### What Can Be Tested
 
-- **Pre-flight validation**: Invalid addresses, null pointers, duplicate names, shutdown state
-- **Hook lifecycle**: Create, enable, disable, remove, re-enable
-- **Callback execution**: `with_inline_hook`, `with_mid_hook`, `try_with_*` variants
+- **Pre-flight validation**: Invalid addresses, null pointers, duplicate names, unsafe prologues
+- **Hook lifecycle**: Install, enable, disable, release, RAII destructor unhook, re-enable
+- **Original invocation**: `Hook::original<Fn>()` (typed trampoline) and `Hook::call<Ret>(Args...)` (guarded by the per-hook mutex)
+- **Batch install**: `hook::install_all` Mandatory / BestEffort severities and per-row `InstallOutcome`
 - **Concurrent access**: Multi-threaded hook creation stress tests
 - **Cross-module hooking**: DLL exports hooked and verified via integration tests
-- **AOB scan pipeline**: `scan::scan` / `scan::resolve` finds patterns in loaded DLLs, hooks the result
+- **AOB scan pipeline**: `scan::scan` / `scan::resolve` finds patterns in loaded DLLs, hooks the result via `hook::inline_at(InlineRequest{.target = scan::OwnedScanRequest{...}})`
 - **Mid hooks**: Argument inspection and modification via `hook::MidContext` (the DMK accessors `gpr()` / `stack_pointer()` / `instruction_pointer()` / `xmm()`)
 
 ### Platform-Specific Tests
@@ -195,8 +201,8 @@ Mid hook tests that modify registers (`gpr(ctx, Gpr::Rcx)`, `gpr(ctx, Gpr::Rdx)`
 ```cpp
 // Pattern: Subject_ConditionOrScenario
 TEST_F(ClassName, Method_ExpectedBehavior)
-TEST_F(HookManagerTest, CreateInlineHook_InvalidAddress)
-TEST_F(HookIntegrationTest, AOBScan_HookManager_EndToEnd)
+TEST_F(HookTest, InlineAt_InvalidAddress)
+TEST_F(HookIntegrationTest, AOBScan_InlineAt_EndToEnd)
 ```
 
 ## Adding New Tests
@@ -215,14 +221,19 @@ TEST_F(SomeTest, Method_ErrorCondition)
 ### For Template Methods
 
 ```cpp
-// Template methods only get coverage when instantiated with specific types
-auto hook_result = m_hook_manager->with_inline_hook(
-    "HookName",
-    [](InlineHook &hook) -> bool
-    {
-        auto orig = hook.get_original<int (*)(int, int)>();
-        return orig != nullptr;
-    });
+// Template methods only get coverage when instantiated with specific types.
+// Hook::original<Fn>() and Hook::call<Ret>(Args...) are templates, so a test
+// that instantiates them with the target signature drives that coverage.
+auto result = DetourModKit::hook::inline_at(
+    {.name = "HookName",
+     .target = DetourModKit::Address{reinterpret_cast<uintptr_t>(&target)}},
+    &detour);
+ASSERT_TRUE(result.has_value());
+DetourModKit::hook::Hook hook = std::move(*result);
+
+auto orig = hook.original<int (*)(int, int)>();
+EXPECT_NE(orig, nullptr);
+EXPECT_EQ(hook.call<int>(2, 3), /* original result */ 5);
 ```
 
 ### For Config Parsing
@@ -382,7 +393,7 @@ cmake --build build/mingw-release --parallel
 
 ## Installed Package Smoke Test
 
-`tests/package_smoke` is a minimal consumer project for validating installed release packages. It uses `find_package(DetourModKit REQUIRED)`, links `DetourModKit::DetourModKit`, and touches `HookManager` so the static dependency archives are required by the final link.
+`tests/package_smoke` is a minimal consumer project for validating installed release packages. It uses `find_package(DetourModKit REQUIRED)`, links `DetourModKit::DetourModKit`, and touches `hook::is_target_hooked` so the static dependency archives are required by the final link.
 
 ```bash
 cmake -S tests/package_smoke -B build/package-smoke-mingw -G Ninja \
@@ -416,8 +427,9 @@ tests/
 ├── test_event_dispatcher.cpp   # Event dispatcher tests (incl. fast-path and snapshot stability)
 ├── test_filesystem.cpp         # Filesystem tests
 ├── test_format.cpp             # Format utilities tests
+├── test_hook.cpp               # Hook free-function / RAII surface unit tests (inline/mid/vmt/lifecycle/call/install_all)
 ├── test_hook_integration.cpp   # Cross-module hook integration tests
-├── test_hook_manager.cpp       # Hook manager unit tests
+├── test_mid_hook_context.cpp   # hook::MidContext accessor tests
 ├── test_input.cpp              # Input system and input code tests
 ├── test_input_intercept.cpp    # Active-input layer state machines (internal)
 ├── test_logger.cpp             # Logger tests

@@ -98,7 +98,7 @@ Exceptions that escape a setter propagate to the caller of `reload()`. When the 
 
 `Config::register_reload_hotkey` does not run `Config::reload()` directly on the `InputManager` poll thread. The press callback sets an atomic flag and notifies a condition variable, returning in microseconds; a dedicated reload servicer thread drains the flag and calls `Config::reload()` off the poll path. This keeps a 30-item INI parse from jittering other hotkeys. Bursts of presses coalesce: five quick presses while a reload is in flight result in at most one follow-up reload when the servicer wakes.
 
-The servicer is spun up lazily on the first `register_reload_hotkey` call and torn down inside `clear_registered_items()`. Under the Windows loader lock the servicer thread is detached (the `StoppableWorker` discipline used by `Logger` and `HookManager`).
+The servicer is spun up lazily on the first `register_reload_hotkey` call and torn down inside `clear_registered_items()`. Under the Windows loader lock the servicer thread is detached (the `StoppableWorker` discipline used by `Logger` and by `Hook` teardown).
 
 ### Content-hash skip
 
@@ -117,7 +117,7 @@ The `on_reload` callback passed to `enable_auto_reload` receives a `bool content
 
 **Restart required** (reloading silently has no effect, or is actively unsafe):
 
-- SafetyHook trampolines: once a hook is installed its target address is baked in. Removing a hook requires `HookManager::remove_*_hook`, which may deadlock with in-flight callers if triggered from the watcher thread. Change the "hook installed" bit only through a proper shutdown cycle.
+- Hook trampolines: once a hook is installed its target address is baked in. A config-driven "hook installed" toggle cannot flip a live hook on or off, because a `Hook` is a caller-owned RAII handle whose lifetime is not reachable from a Config setter. Removing a hook means dropping its `Hook` handle (its destructor unhooks under the loader-lock leaf discipline), which must not be driven from the watcher thread while callers may still be in flight. Change the "hook installed" bit only through a proper shutdown cycle.
 - Thread pool sizes and `poll_interval` for `InputManager::start()`: these are fixed at start time.
 - Log file handle and log prefix: `Logger::configure` rotates the file, which requires coordinating with in-flight async writes. Prefer reconfiguring via a full shutdown/start cycle.
 - The reload hotkey combo itself can be changed at runtime; the cardinality of the new combo list does not need to match the default and the binding's combo set is rebuilt on the fly. To opt the hotkey out at runtime, set the INI value to either an empty string or the literal `NONE` (case-insensitive, whole-string only); both forms produce an unbound binding silently. A non-empty value whose every comma-separated token fails to parse is logged at WARNING level naming the binding and the offending raw string. See the [combo string syntax sub-section](../hot-reload/README.md#combo-string-syntax-opt-out-and-parse-failures) in the hot-reload guide for the complete contract (mixed-list behavior, `NONE`-in-list, and so on).
@@ -146,7 +146,7 @@ The watcher also treats a zero-byte notification buffer as a match (buffer overf
 
 On stop the worker cancels its in-flight `ReadDirectoryChangesW` and waits for the kernel to release the `OVERLAPPED` and notification buffer before they are freed; per MSDN both must stay valid until the cancelled I/O has actually completed. Cancellation normally drives the read to completion in microseconds, but if the watched directory was deleted the notify IRP can be orphaned (`CancelIoEx` reports success yet no completion is ever delivered), which a blind unbounded wait would turn into a teardown hang. The drain is therefore bounded and escalates: a timed wait for the cancelled read, then closing the directory handle to force the I/O Manager to cancel and complete the outstanding IRP (which signals the worker's event), and finally -- if completion still cannot be confirmed -- leaking the I/O buffer so a late kernel write can never land in freed memory. Worst-case teardown is bounded at roughly two seconds instead of an unbounded hang, and the leak path mirrors the leak-on-teardown discipline used elsewhere under the loader lock.
 
-If the current thread holds the Windows loader lock (e.g. `stop()` is called from `DllMain`), the watcher thread is detached rather than joined, mirroring the discipline used by `Logger::shutdown_internal` and `HookManager::~HookManager`.
+If the current thread holds the Windows loader lock (e.g. `stop()` is called from `DllMain`), the watcher thread is detached rather than joined, mirroring the discipline used by `Logger::shutdown_internal` and by `~Hook` (which pins the module and leaks the restore under the loader lock).
 
 ## Design: single-INI assumption
 

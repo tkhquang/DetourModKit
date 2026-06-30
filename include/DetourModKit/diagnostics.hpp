@@ -107,7 +107,7 @@ namespace DetourModKit
          */
         enum class HookTransition : std::uint8_t
         {
-            /// A hook was created (installed) by a create_*_hook call.
+            /// A hook was created (installed) by an install verb (inline_at / mid_at / vmt_for).
             Created,
             /// An existing hook was enabled.
             Enabled,
@@ -119,13 +119,13 @@ namespace DetourModKit
 
         /**
          * @struct HookLifecycleEvent
-         * @brief A HookManager hook crossed an install / enable / disable / remove transition.
-         * @details Emitted by @ref DetourModKit::HookManager after the operation completes and its registry locks are
-         *          released. Failed operations and idempotent no-ops emit nothing: every event represents a completed
-         *          state transition. A handler therefore runs outside the hook registry's critical section. If a
-         *          handler performs another hook mutation, that mutation is a new operation and may emit nested
-         *          lifecycle events; avoid unbounded event recursion. @ref name aliases the hook id only for the
-         *          duration of the emit call; copy it if the handler retains it past the call.
+         * @brief A hook crossed an install / enable / disable / remove transition.
+         * @details Emitted by the hook surface after the operation completes; the emit holds no hook lock, so a handler
+         *          runs outside any hook critical section. Failed operations and idempotent no-ops emit nothing: every
+         *          event represents a completed state transition. If a handler performs another hook mutation, that
+         *          mutation is a new operation and may emit nested lifecycle events; avoid unbounded event recursion.
+         *          @ref name aliases the hook id only for the duration of the emit call; copy it if the handler retains
+         *          it past the call.
          */
         struct HookLifecycleEvent
         {
@@ -149,7 +149,7 @@ namespace DetourModKit
 
         /**
          * @brief Returns the process-wide dispatcher for @ref HookLifecycleEvent.
-         * @details A single shared dispatcher every HookManager emits hook lifecycle transitions to. The returned
+         * @details A single shared dispatcher the hook surface emits hook lifecycle transitions to. The returned
          *          reference is stable for the process lifetime.
          * @return The shared @ref HookLifecycleEvent dispatcher.
          * @note Setup/control-plane only on first call: lazily constructs the dispatcher (one heap allocation). Every

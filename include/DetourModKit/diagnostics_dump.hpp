@@ -3,16 +3,14 @@
 
 /**
  * @file diagnostics_dump.hpp
- * @brief One-call aggregator that snapshots DMK's runtime diagnostics -- intentional-leak counters, hook population,
- *        and self-heal drift -- into a single struct.
+ * @brief One-call aggregator that snapshots DMK's runtime diagnostics -- intentional-leak counters and self-heal
+ *        drift -- into a single struct.
  * @details Each piece is already queryable on its own (@ref DetourModKit::Diagnostics::intentional_leak_count, @ref
- *          DetourModKit::HookManager::get_hook_counts, @ref DetourModKit::Rtti::heal_report). This header only bundles
- *          them so a consumer can capture a one-shot health view in a single call instead of stitching the sources
- *          together by hand.
+ *          DetourModKit::Rtti::heal_report). This header only bundles them so a consumer can capture a one-shot health
+ *          view in a single call instead of stitching the sources together by hand.
  */
 
 #include "DetourModKit/diagnostics.hpp"
-#include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
 #include <array>
@@ -37,13 +35,6 @@ namespace DetourModKit
             /// Total intentional leak / detach events across all subsystems.
             std::size_t total_intentional_leaks = 0;
 
-            /// Inline + mid hooks currently active (@ref HookStatus::Active).
-            std::size_t hooks_active = 0;
-            /// Inline + mid hooks currently disabled (@ref HookStatus::Disabled).
-            std::size_t hooks_disabled = 0;
-            /// Inline + mid hooks the HookManager owns, in any status (VMT hooks are tracked separately).
-            std::size_t hooks_total = 0;
-
             /// Landmarks in the supplied drift report.
             std::size_t drift_total = 0;
             /// Landmarks that healed (@ref Rtti::DriftEntry::ok).
@@ -54,17 +45,14 @@ namespace DetourModKit
 
         /**
          * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
-         * @details Reads the process-wide intentional-leak counters, folds @p hooks.get_hook_counts() into active /
-         *          disabled / total tallies, and counts healed vs failed entries in @p drift_report. The drift report
-         *          is caller-owned (typically the output of @ref Rtti::heal_report); pass an empty span to skip the
-         *          drift summary.
-         * @param hooks The HookManager whose population to snapshot (typically @ref HookManager::get_instance()).
+         * @details Reads the process-wide intentional-leak counters and counts healed vs failed entries in
+         *          @p drift_report. The drift report is caller-owned (typically the output of @ref Rtti::heal_report);
+         *          pass an empty span to skip the drift summary.
          * @param drift_report A self-heal drift report, or an empty span to skip the drift summary.
          * @return The aggregated snapshot.
-         * @note Setup/control-plane only: @ref HookManager::get_hook_counts allocates and takes a shared lock, so this
-         *       is not callback-safe. Call it from init / a worker / a diagnostics command, never from a hook callback.
+         * @note Setup/control-plane only: not callback-safe. Call it from init / a worker / a diagnostics command.
          */
-        [[nodiscard]] Snapshot collect(const HookManager &hooks, std::span<const Rtti::DriftEntry> drift_report = {});
+        [[nodiscard]] Snapshot collect(std::span<const Rtti::DriftEntry> drift_report = {});
     } // namespace Diagnostics
 } // namespace DetourModKit
 

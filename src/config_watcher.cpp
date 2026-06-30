@@ -200,8 +200,8 @@ namespace DetourModKit
             // Under loader lock (FreeLibrary path): joining the watcher would deadlock against ReadDirectoryChangesW's
             // I/O completion, and tearing down Impl would invalidate the worker_thread_id pointer the detached lambda
             // still references. Pin the module so trampoline and worker code pages remain mapped, request stop, then
-            // leak the entire Impl onto the heap so it outlives the destructor. The same discipline as
-            // HookManager::~HookManager and Logger::shutdown_internal.
+            // leak the entire Impl onto the heap so it outlives the destructor. The same loader-lock leaf discipline
+            // used by the hook handle teardown and Logger::shutdown_internal.
             detail::pin_current_module();
 
             if (m_impl->worker)
