@@ -61,9 +61,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/mingw-debug
-          key: cmake-build-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**') }}
-          restore-keys: |
-            cmake-build-${{ runner.os }}-
+          # Exact-key only -- deliberately NO restore-keys. The key hashes every source file, so a cache hit means the
+          # build dir was instrumented from byte-identical sources. A prefix restore-key would instead reuse a build
+          # dir built from a DIFFERENT source set, and ninja never purges the orphaned .gcno/.gcda of since-deleted
+          # sources; gcovr then reads stale coverage notes for removed files (e.g. src/scan.cpp, src/memory.cpp) and
+          # aborts on a function-line merge conflict (the same inline scan::Pattern member reported at two different
+          # line numbers across builds). A changed source set therefore starts from a clean build dir, while an
+          # identical-commit re-run still hits the exact key. The `v2` epoch invalidates every pre-existing cache
+          # entry (the failing run saved a poisoned build dir under the old key, since cache save runs in the post-step
+          # even on failure); bump it again if a future change ever needs to discard all cached build dirs wholesale.
+          key: cmake-build-v2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**') }}
 
       - name: Verify Tools
         run: |

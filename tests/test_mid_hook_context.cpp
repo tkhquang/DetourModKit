@@ -5,12 +5,12 @@
 #include <cstdint>
 #include <cstring>
 
-#include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/hook.hpp"
 
 using namespace DetourModKit;
 // The mid-hook detours below exercise the DMK-owned MidContext accessor surface (gpr / stack_pointer /
-// instruction_pointer / xmm). v4 confines the SafetyHook backend to the library, so a detour names only these DMK
-// types, exactly as a shipping consumer would.
+// resume_stack_pointer / instruction_pointer / flags / xmm). The SafetyHook backend is confined to the library, so a
+// detour names only these DMK types, exactly as a shipping consumer would.
 using namespace DetourModKit::hook;
 
 #if defined(_MSC_VER)
@@ -83,7 +83,20 @@ namespace
     std::atomic<std::uint64_t> s_rdx{0};
     std::atomic<std::uint64_t> s_r8{0};
     std::atomic<std::uint64_t> s_rsp{0};
+    std::atomic<std::uint64_t> s_resume_rsp{0};
+    std::atomic<std::uint64_t> s_rflags{0};
     std::atomic<std::uint32_t> s_xmm0_bits{0};
+
+    /**
+     * @brief Builds a mid hook at @p target via the free-function surface; returns the RAII handle the caller holds.
+     * @details Templated on the target's function type so a plain `&fn` argument reinterpret_casts cleanly to an
+     *          Address (a function pointer does not implicitly convert to void*).
+     */
+    template <class Fn> [[nodiscard]] Result<Hook> install_mid(std::string name, Fn *target, MidHookFn detour)
+    {
+        return mid_at(MidRequest{.name = std::move(name), .target = Address{reinterpret_cast<std::uintptr_t>(target)}},
+                      detour);
+    }
 } // namespace
 
 class MidHookContextTest : public ::testing::Test
@@ -91,25 +104,15 @@ class MidHookContextTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        m_hook_manager = &HookManager::get_instance();
-        m_hook_manager->remove_all_hooks();
         s_calls.store(0);
         s_rcx.store(0);
         s_rdx.store(0);
         s_r8.store(0);
         s_rsp.store(0);
+        s_resume_rsp.store(0);
+        s_rflags.store(0);
         s_xmm0_bits.store(0);
     }
-
-    void TearDown() override
-    {
-        if (m_hook_manager)
-        {
-            m_hook_manager->remove_all_hooks();
-        }
-    }
-
-    HookManager *m_hook_manager = nullptr;
 };
 
 // 1. GPR READ INTEGRITY -- the detour observes the live argument registers.
@@ -126,12 +129,10 @@ TEST_F(MidHookContextTest, DetourReadsLiveArgumentRegisters)
         s_r8.store(gpr(ctx, Gpr::R8), std::memory_order_relaxed);
     };
 
-    auto result = m_hook_manager->create_mid_hook("MidRead", reinterpret_cast<uintptr_t>(&read_probe), detour);
-    ASSERT_TRUE(result.has_value()) << "create_mid_hook failed: " << Hook::error_to_string(result.error());
-
-    auto status = m_hook_manager->get_hook_status("MidRead");
-    ASSERT_TRUE(status.has_value());
-    EXPECT_EQ(*status, HookStatus::Active);
+    Result<Hook> result = install_mid("MidRead", &read_probe, detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
+    EXPECT_TRUE(hook.is_enabled());
 
     volatile int observed = read_probe(0x11, 0x22, 0x33);
     EXPECT_EQ(observed, 0x11 + 0x22 + 0x33); // unmodified path still computes correctly
@@ -149,8 +150,9 @@ TEST_F(MidHookContextTest, RspIsRealStackPointer)
 #endif
     auto detour = [](MidContext &ctx) { s_rsp.store(stack_pointer(ctx), std::memory_order_relaxed); };
 
-    auto result = m_hook_manager->create_mid_hook("MidRsp", reinterpret_cast<uintptr_t>(&read_probe), detour);
-    ASSERT_TRUE(result.has_value()) << "create_mid_hook failed: " << Hook::error_to_string(result.error());
+    Result<Hook> result = install_mid("MidRsp", &read_probe, detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
 
     int local = 0;
     volatile int observed = read_probe(1, 2, 3);
@@ -174,9 +176,9 @@ TEST_F(MidHookContextTest, GprWriteRcxSurvivesResume)
 #endif
     auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::Rcx) = 1000; }; // overwrite first arg (a)
 
-    auto result =
-        m_hook_manager->create_mid_hook("MidWriteRcx", reinterpret_cast<uintptr_t>(&sum_first_second), detour);
-    ASSERT_TRUE(result.has_value()) << "create_mid_hook failed: " << Hook::error_to_string(result.error());
+    Result<Hook> result = install_mid("MidWriteRcx", &sum_first_second, detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
 
     // unhooked: 1+2=3 ; with ctx.rcx:=1000 the resumed body computes 1000+2.
     volatile int observed = sum_first_second(1, 2);
@@ -193,8 +195,9 @@ TEST_F(MidHookContextTest, GprWriteR8SurvivesResume)
 #endif
     auto detour = [](MidContext &ctx) { gpr(ctx, Gpr::R8) = 777; }; // overwrite third arg (c)
 
-    auto result = m_hook_manager->create_mid_hook("MidWriteR8", reinterpret_cast<uintptr_t>(&return_third), detour);
-    ASSERT_TRUE(result.has_value()) << "create_mid_hook failed: " << Hook::error_to_string(result.error());
+    Result<Hook> result = install_mid("MidWriteR8", &return_third, detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
 
     // unhooked: returns c=3 ; with ctx.r8:=777 the resumed body returns 777.
     volatile int observed = return_third(1, 2, 3);
@@ -213,8 +216,9 @@ TEST_F(MidHookContextTest, RipWriteRedirectsExecution)
 
     auto detour = [](MidContext &ctx) { instruction_pointer(ctx) = reinterpret_cast<uintptr_t>(&rip_replacement); };
 
-    auto result = m_hook_manager->create_mid_hook("MidWriteRip", reinterpret_cast<uintptr_t>(&rip_original), detour);
-    ASSERT_TRUE(result.has_value()) << "create_mid_hook failed: " << Hook::error_to_string(result.error());
+    Result<Hook> result = install_mid("MidWriteRip", &rip_original, detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
 
     volatile int observed = rip_original();
     EXPECT_EQ(observed, 22) << "context-modified rip not honored on resume";
@@ -235,8 +239,9 @@ TEST_F(MidHookContextTest, DetourReadsXmm0FloatArg)
         s_xmm0_bits.store(bits, std::memory_order_relaxed);
     };
 
-    auto result = m_hook_manager->create_mid_hook("MidXmmRead", reinterpret_cast<uintptr_t>(&pass_float), detour);
-    ASSERT_TRUE(result.has_value()) << "create_mid_hook failed: " << Hook::error_to_string(result.error());
+    Result<Hook> result = install_mid("MidXmmRead", &pass_float, detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
 
     volatile float observed = pass_float(3.5f);
     EXPECT_EQ(observed, 3.5f); // unmodified path still correct
@@ -245,6 +250,35 @@ TEST_F(MidHookContextTest, DetourReadsXmm0FloatArg)
     std::uint32_t bits = s_xmm0_bits.load();
     std::memcpy(&got, &bits, sizeof(got));
     EXPECT_EQ(got, 3.5f) << "detour did not observe the live xmm0 float argument";
+}
+
+// 7. The resume stack pointer (trampoline_rsp) and the flags register (rflags) are readable at the hook point.
+// These two accessors expose the resume stack pointer (trampoline_rsp) and flags (rflags) the trampoline restores on
+// resume, which a detour may need to read or rewrite. The captured resume rsp is a real stack pointer, and rflags
+// always has the reserved bit 1 set on x86-64, so a zeroed view would mean the accessor missed the live register.
+TEST_F(MidHookContextTest, ResumeStackPointerAndFlagsAreReadable)
+{
+#if !defined(__x86_64__) && !defined(_M_X64)
+    GTEST_SKIP() << "requires x86-64 (Win64) calling convention";
+#endif
+    auto detour = [](MidContext &ctx)
+    {
+        s_resume_rsp.store(resume_stack_pointer(ctx), std::memory_order_relaxed);
+        s_rflags.store(flags(ctx), std::memory_order_relaxed);
+    };
+
+    Result<Hook> result = install_mid("MidResumeFlags", &read_probe, detour);
+    ASSERT_TRUE(result.has_value()) << "mid_at failed: " << result.error().message();
+    Hook hook = std::move(*result);
+
+    volatile int observed = read_probe(1, 2, 3);
+    (void)observed;
+
+    std::uint64_t resume_rsp = s_resume_rsp.load();
+    EXPECT_NE(resume_rsp, 0u) << "resume stack pointer (trampoline_rsp) must be a live stack pointer";
+    EXPECT_EQ(resume_rsp & 0x7u, 0u) << "resume stack pointer must be at least 8-byte aligned";
+    // rflags bit 1 is the always-set reserved bit on x86-64; its presence proves a live flags capture.
+    EXPECT_NE(s_rflags.load() & 0x2u, 0u) << "flags() did not capture the live rflags register";
 }
 
 // XmmView::lane fails closed on an out-of-range lane instead of reading past the 16-byte register. This needs no

@@ -10,8 +10,7 @@ int main()
 {
     static_assert(DMK_VERSION_AT_LEAST(0, 0, 0));
 
-    const auto &hook_manager = DetourModKit::HookManager::get_instance();
-    if (hook_manager.is_target_already_hooked(0))
+    if (DetourModKit::hook::is_target_hooked(DetourModKit::Address{0}))
     {
         return 1;
     }

@@ -54,8 +54,8 @@ graph TD
 ```mermaid
 flowchart TD
     A["User presses Numpad 0"] --> B["1. Disable hotkey<br/>Prevent double-reload"]
-    B --> C["2. Call Shutdown()<br/>mod_logic.dll exported function<br/>DMK_Shutdown(): InputManager -> HookManager -> Memory -> Config -> Logger"]
-    C --> D["3. FreeLibrary()<br/>Unloads mod_logic.dll from process"]
+    B --> C["2. Call Shutdown()<br/>mod_logic.dll exported function<br/>drop Hook handles, then DMK_Shutdown(): InputManager -> Memory -> Config -> Logger"]
+    C --> D["3. FreeLibrary()<br/>Unloads mod_logic.dll from process<br/>(caller-owned Hook handles dropped first)"]
     D --> E["4. LoadLibrary()<br/>Loads fresh mod_logic.dll from disk"]
     E --> F["5. GetProcAddress()<br/>Resolve Init / Shutdown exports"]
     F --> G["6. Call Init()<br/>Re-create hooks, reload config, rebind inputs"]
@@ -158,8 +158,10 @@ extern "C" __declspec(dllexport) void Shutdown()
     auto& logger = DMKLogger::get_instance();
     logger.info("mod_logic: Shutdown() called");
 
-    // DMK_Shutdown handles the correct teardown order:
-    // InputManager -> HookManager -> Memory cache -> Config -> Logger
+    // Drop any caller-owned Hook handles first (their destructors unhook),
+    // then let DMK_Shutdown tear down the remaining subsystems in order:
+    // InputManager -> Memory cache -> Config -> Logger
+    s_hooks.clear(); // e.g. std::vector<DetourModKit::hook::Hook>
     DMK_Shutdown();
 }
 
@@ -176,20 +178,23 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 
 // --- Setup functions ---
 
+// Caller-owned Hook handles. Stored so Shutdown() can drop them before
+// FreeLibrary (each destructor unhooks under the loader-lock leaf discipline).
+static std::vector<DetourModKit::hook::Hook> s_hooks;
+
 static bool setup_hooks()
 {
-    auto& hm = DMKHookManager::get_instance();
-
-    // Example: hook a game function by AOB pattern
-    // auto result = hm.create_inline_hook_aob(
-    //     "camera_update",
-    //     game_base, game_size,
-    //     "48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? F3 0F",
-    //     0,
-    //     &detour_camera_update,
-    //     reinterpret_cast<void**>(&original_camera_update)
-    // );
-    // return result.has_value();
+    // Example: hook a game function by AOB pattern. inline_at returns a
+    // move-only RAII Hook; keep it alive for as long as the hook should apply.
+    // auto result = DetourModKit::hook::inline_at(
+    //     {.name = "camera_update",
+    //      .target = DetourModKit::scan::OwnedScanRequest{
+    //          DetourModKit::scan::Pattern::compile(
+    //              "48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? F3 0F").value(),
+    //          DetourModKit::Region::module_named(game_module)}},
+    //     &detour_camera_update);
+    // if (!result) return false;
+    // s_hooks.push_back(std::move(*result));
 
     return true;
 }
@@ -343,9 +348,9 @@ static void unload_logic_dll()
     }
 
     // Brief sleep to allow any in-flight hook callbacks to complete.
-    // SafetyHook does not freeze threads during removal: it relocates only a
-    // thread that faults on the patched page during the brief rewrite window,
-    // so a callback already past the hook entry must return on its own.
+    // The hook backend does not freeze threads during removal: it relocates
+    // only a thread that faults on the patched page during the brief rewrite
+    // window, so a callback already past the hook entry must return on its own.
     Sleep(CALLBACK_DRAIN_MS);
 
     FreeLibrary(s_logic_module);
@@ -654,7 +659,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **Problem:** A hook callback may be executing on the game's thread when you trigger a reload. If the logic DLL is unloaded while a callback is mid-execution, the game crashes (code page unmapped leads to access violation).
 
-**How DMK handles this:** SafetyHook's `remove_all_hooks()` patches the original bytes back without freezing threads. While it rewrites the prologue it strips execute on the patched page, and a vectored exception handler relocates the instruction pointer of any thread that *faults* on that page during the rewrite window; a thread already running inside the trampoline or detour body is **not** relocated. So removal is safe only if the hooked function is quiescent at that moment, which is why you must drain or quiesce callers before unloading. As long as that holds:
+**How DMK handles this:** dropping a `Hook` handle patches the original bytes back without freezing threads. While it rewrites the prologue the backend strips execute on the patched page, and a vectored exception handler relocates the instruction pointer of any thread that *faults* on that page during the rewrite window; a thread already running inside the trampoline or detour body is **not** relocated. So removal is safe only if the hooked function is quiescent at that moment, which is why you must drain or quiesce callers before unloading. As long as that holds:
 
 - The hook callback does not store persistent pointers into the logic DLL's code/data segments.
 - The hook callback does not spawn threads that outlive the DLL.
@@ -669,9 +674,11 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **Global variables in logic DLL:** Reset to initial values on reload. This is expected - design for it.
 
-**DMK singletons (Logger, HookManager, etc.):** **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
+**DMK singletons (Logger, etc.):** **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
 
-**Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
+**Hooks:** There is no hook singleton in v4. Each `hook::inline_at` / `mid_at` / `vmt_for` returns a caller-owned RAII `Hook` (or `VmtHook`) handle that lives in the logic DLL's memory. Drop those handles in `Shutdown()` *before* `FreeLibrary` so each destructor restores the original bytes while the code pages are still mapped. A handle that is leaked across `FreeLibrary` leaves the game running a detour into unmapped memory.
+
+**Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Dropping a `Hook` handle restores the original prologue bytes; direct `memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
 
 **Config file on disk:** **Persists** across reloads. Edit the INI, press reload, and new values take effect.
 
@@ -1169,26 +1176,30 @@ extern "C" __declspec(dllexport) void Shutdown()
 {
     using namespace std::string_view_literals;
 
-    static constexpr std::string_view hook_names[] = {
-        "camera_update"sv,
-        "visual_equip_change"sv,
-    };
+    // Drop this Logic DLL's caller-owned Hook handles first. Each destructor
+    // unhooks under the loader-lock leaf discipline before FreeLibrary runs.
+    s_hooks.clear(); // e.g. std::vector<DetourModKit::hook::Hook>
+
     static constexpr std::string_view binding_names[] = {
         "ToggleEquip_Chest"sv,
         "ShowEquip_Chest"sv,
     };
 
-    DMKBootstrap::on_logic_dll_unload(hook_names, binding_names);
+    // hook_names is retained for source compatibility but ignored in v4
+    // (hooks are caller-owned, dropped above). Pass {} or the legacy list.
+    DMKBootstrap::on_logic_dll_unload({}, binding_names);
 }
 ```
 
-`Bootstrap::on_logic_dll_unload(hook_names, binding_names)` removes the named hooks via `HookManager::remove_hook` (which restores the original prologue bytes through SafetyHook) and clears the named input bindings via `InputManager::remove_binding_by_name`. It is `noexcept`, idempotent, and safe to call multiple times: a second call with the same names is a no-op. Logger, Config, and the ConfigWatcher are intentionally left running.
+`Bootstrap::on_logic_dll_unload(hook_names, binding_names)` clears the named input bindings via `InputManager::remove_binding_by_name`. It is `noexcept`, idempotent, and safe to call multiple times: a second call with the same names is a no-op. Logger, Config, and the ConfigWatcher are intentionally left running.
 
-`Bootstrap::on_logic_dll_unload_all()` is the catch-all variant for callers that do not maintain an explicit registry of hook or binding names. It composes `HookManager::remove_all_hooks` with `InputManager::clear_bindings` under the same `noexcept`, idempotent, exception-swallowing contract; Logger, Config, and the ConfigWatcher are again left running. The HookManager teardown call is `remove_all_hooks()` rather than `shutdown()` so the manager stays re-usable for the next attach, and the binding teardown call is `clear_bindings()` rather than `InputManager::shutdown()` so the poll thread keeps running idle. Use this overload when one Logic DLL owns the entire DMK instance and a single Logic DLL teardown should drain everything.
+> **v4.0.0 note:** Hooks are no longer manager-owned. There is no central name-keyed registry for this helper to remove from, so the `hook_names` span is retained for source compatibility but **ignored** -- the helper tears down bindings and config only. A Logic DLL drops its own caller-owned `Hook` handles in `Shutdown()` (their destructors unhook) *before* it calls this helper.
 
-Prefer the named-list overload when the host loads several Logic DLLs that share one DMK instance: calling `on_logic_dll_unload_all()` from one Logic DLL's `Shutdown()` rips out every other Logic DLL's hooks and bindings as well, because the singletons are process-scoped. The named-list overload keeps each Logic DLL's teardown scoped to the names it registered.
+`Bootstrap::on_logic_dll_unload_all()` is the catch-all variant for callers that do not maintain an explicit registry of binding names. It composes `InputManager::clear_bindings` under the same `noexcept`, idempotent, exception-swallowing contract; Logger, Config, and the ConfigWatcher are again left running. The binding teardown call is `clear_bindings()` rather than `InputManager::shutdown()` so the poll thread keeps running idle. It does not touch hooks (caller-owned). Use this overload when one Logic DLL owns the entire DMK binding/config surface and a single Logic DLL teardown should drain everything.
 
-`Init()` re-registers hooks and bindings as it normally would. `HookManager::create_*_hook` uses replace-on-duplicate semantics, and `InputManager::register_press` / `register_hold` insert into a live poller without restarting it (see `clear_bindings()` if a wholesale reset is preferred).
+Prefer the named-list overload when the host loads several Logic DLLs that share one DMK instance: calling `on_logic_dll_unload_all()` from one Logic DLL's `Shutdown()` clears every other Logic DLL's bindings as well, because the binding registry is process-scoped. The named-list overload keeps each Logic DLL's binding teardown scoped to the names it registered. (Hooks are already scoped per Logic DLL because each owns its own `Hook` handles.)
+
+`Init()` re-installs hooks and re-registers bindings as it normally would. Each `hook::inline_at` / `mid_at` returns a fresh `Hook` handle, and `InputManager::register_press` / `register_hold` insert into a live poller without restarting it (see `clear_bindings()` if a wholesale reset is preferred).
 
 When choosing between the two topologies:
 
@@ -1204,7 +1215,7 @@ Mixing the two in one process is not supported: pick one per host module and sta
 
 ### When to use `on_logic_dll_unload` vs `DMK_Shutdown`
 
-Both APIs leave the unloading Logic DLL in a state where its hooks, bindings, and Config-registered setters are gone before `FreeLibrary` reclaims the code pages. The difference is what survives on the loader side: `DMK_Shutdown` tears down Logger, ConfigWatcher, and the Memory cache; `on_logic_dll_unload(_all)` keeps them running.
+Both APIs leave the unloading Logic DLL in a state where its bindings and Config-registered setters are gone before `FreeLibrary` reclaims the code pages (hooks are dropped separately by releasing their caller-owned `Hook` handles in `Shutdown()`). The difference is what survives on the loader side: `DMK_Shutdown` tears down Logger, ConfigWatcher, and the Memory cache; `on_logic_dll_unload(_all)` keeps them running.
 
 | Consumer shape                                         | Use                   | Why                                                                                                                                                    |
 |--------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -1218,9 +1229,9 @@ If DMK could only ship one of the two, `DMK_Shutdown` would cover ~90% of consum
 
 ### Pre-unload contract: worker-thread quiescence
 
-`Bootstrap::on_logic_dll_unload(_all)` removes hooks and bindings, but it cannot prove that every consumer-owned worker thread has stopped firing those hooks. A worker thread that calls into a detoured function between `remove_hook` returning and `FreeLibrary` reclaiming the Logic DLL's `.text` pages will execute freed code; the resulting access violation often points at an address that no longer maps to anything, which is hard to triage from a crash dump. SafetyHook does not freeze threads while it patches the original prologue back; it only relocates a thread that faults on the patched page during the rewrite window, and has no visibility into worker threads spawned by the consumer, so a worker already inside a detour body is never rescued.
+Dropping a `Hook` handle restores its target and `Bootstrap::on_logic_dll_unload(_all)` clears bindings, but neither can prove that every consumer-owned worker thread has stopped firing those hooks. A worker thread that calls into a detoured function between the `Hook` destructor returning and `FreeLibrary` reclaiming the Logic DLL's `.text` pages will execute freed code; the resulting access violation often points at an address that no longer maps to anything, which is hard to triage from a crash dump. The backend does not freeze threads while it patches the original prologue back; it only relocates a thread that faults on the patched page during the rewrite window, and has no visibility into worker threads spawned by the consumer, so a worker already inside a detour body is never rescued.
 
-Stop and join every consumer-owned worker BEFORE you call the unload helper. The canonical Logic-DLL `Shutdown()` ordering for the persistent-host topology is:
+Stop and join every consumer-owned worker BEFORE you drop the hooks. The canonical Logic-DLL `Shutdown()` ordering for the persistent-host topology is:
 
 ```cpp
 extern "C" __declspec(dllexport) void Shutdown()
@@ -1232,16 +1243,20 @@ extern "C" __declspec(dllexport) void Shutdown()
     s_telemetry_worker.reset();
 
     // 2. Now the only remaining callers into the hooks are game threads.
-    //    SafetyHook does not freeze them inside remove_hook; it relocates
-    //    only a thread that faults on the patched page during the rewrite,
-    //    so they must be quiescent here. Drop the DLL-local registrations.
-    DMKBootstrap::on_logic_dll_unload(hook_names, binding_names);
+    //    The backend does not freeze them inside the Hook destructor; it
+    //    relocates only a thread that faults on the patched page during the
+    //    rewrite, so they must be quiescent here. Drop the Hook handles
+    //    (each destructor unhooks), then clear bindings and config.
+    s_hooks.clear(); // std::vector<DetourModKit::hook::Hook>
+    DMKBootstrap::on_logic_dll_unload({}, binding_names); // hook_names ignored
 
     // 3. Return from Shutdown(). The loader's FreeLibrary call follows.
 }
 ```
 
-A common worker case to watch for: a hook callback runs on a game thread, but a separate consumer-owned thread pool *also* calls into the same detour body (e.g. an off-thread snapshot capture, a deferred re-scan, a periodic poller that touches game state through a hooked accessor). Both paths must be quiet before the unload helper runs. If a worker calls into game-side code that the host module also hooks, joining the worker before unload handles the worker side; the game-thread side still depends on the hooked function being quiescent during removal, since SafetyHook only relocates threads that fault on the patched page and does not drain a thread already inside a detour.
+A common worker case to watch for: a hook callback runs on a game thread, but a separate consumer-owned thread pool *also* calls into the same detour body (e.g. an off-thread snapshot capture, a deferred re-scan, a periodic poller that touches game state through a hooked accessor). Both paths must be quiet before the hooks are dropped. If a worker calls into game-side code that the host module also hooks, joining the worker before teardown handles the worker side; the game-thread side still depends on the hooked function being quiescent during removal, since the backend only relocates threads that fault on the patched page and does not drain a thread already inside a detour.
+
+A further v4 hazard: when several handles target the **same** address (layered hooks), destroy them newest-first. This is now an RAII contract backed by the ledger's out-of-order-teardown detection, not a manager reverse-walk -- store layered same-target handles in an order (e.g. a stack) that lets you release the newest first.
 
 ---
 
@@ -1252,7 +1267,7 @@ The persistent-host topology calls `Init()` once per Logic-DLL load. Every call 
 | API                                                    | Second-call behavior                                  | Consumer action before second call               |
 |--------------------------------------------------------|-------------------------------------------------------|--------------------------------------------------|
 | `Logger::configure`                                    | Replaces existing config                              | None; safe on every `Init()`                     |
-| `HookManager::create_inline_hook` (and variants)       | Fails with `HookAlreadyExists`                        | Call `remove_hook(name)` first                   |
+| `hook::inline_at` / `mid_at` (per `name`)              | Fails with `HookAlreadyExists` if still hooked        | Drop the prior `Hook` handle first               |
 | `Config::register_string` / `register_int` / etc.      | Replace-on-duplicate                                  | None; new setter overwrites stale closure        |
 | `Config::register_press_combo` / `register_hold_combo` | Replace-on-duplicate (Config); APPENDS (InputManager) | Drop prior binding via `remove_binding_by_name`  |
 | `InputManager::register_press` / `register_hold`       | APPENDS a new binding entry                           | Call `remove_binding_by_name(name)` first        |
@@ -1262,14 +1277,14 @@ The persistent-host topology calls `Init()` once per Logic-DLL load. Every call 
 Notes on individual rows:
 
 - **`Logger::configure`**: If the file path differs from the previous call, the open log handle is rotated under lock; the writer thread is preserved. The internal `shutdown_called_` flag is reset on every call so the logger is usable again after a reload.
-- **`HookManager::create_inline_hook` (and `create_mid_hook`, `*_aob` variants)**: NOT replace-on-duplicate. The hook map is keyed by `name`, and a second `create_*_hook` with the same `name` fails fast with `HookAlreadyExists` so a stale detour is never silently swapped (which would leave the old detour code mapped into the trampoline). Always remove before re-installing.
+- **`hook::inline_at` / `mid_at`**: NOT replace-on-duplicate. The same-kit ledger is keyed by `name` (and target), and a second `inline_at` / `mid_at` with the same `name` while a live `Hook` still targets it fails fast with `HookAlreadyExists` so a stale detour is never silently swapped (which would leave the old detour code mapped into the trampoline). Drop the prior `Hook` handle before re-installing.
 - **`Config::register_*` (string, int, float, bool, key_combo)**: If a registration with the same `(section, ini_key)` already exists, the prior `ConfigItemBase` and its setter closure are overwritten in place. Re-registering with a fresh setter from the new Logic DLL replaces the stale closure cleanly.
 - **`Config::register_press_combo` / `register_hold_combo`**: The Config item itself follows replace-on-duplicate semantics. The InputManager binding it creates does not, because `InputManager::register_press` / `register_hold` are append-only (see next row). Drop the prior binding via `InputManager::remove_binding_by_name(name)` to avoid duplicates.
 - **`InputManager::register_press` / `register_hold`**: Append-only. The InputPoller treats `name` as a label, not a key. Two registrations with the same `name` produce two `InputBinding` entries that both fire on a matching key sequence. This is the most common surprise across reloads.
 - **`InputManager::start(poll_interval)`**: No-op when the poller is already running. The new `poll_interval` is ignored; the running poller keeps its original interval. Use `shutdown()` then `start(new_interval)` if you actually need to change it (the lighter unload helpers do not stop the poller).
 - **`Bootstrap::on_dll_attach`**: Guards against double-attach by checking `s_shutdown_event || s_worker_thread` and returning `FALSE` without invoking `init_fn`. Typically not relevant in the persistent-host topology where the host module attaches exactly once for the process lifetime.
 
-`Bootstrap::on_logic_dll_unload(_all)` exists precisely to bundle the required teardown for hooks, bindings, and Config-registered setters so consumers do not have to remember the per-API rules individually. A correct persistent-host `Shutdown()` invokes one of those helpers (after draining its own workers; see the previous sub-section) and the next `Init()` lands on a clean slate for every entry above.
+`Bootstrap::on_logic_dll_unload(_all)` exists precisely to bundle the required teardown for bindings and Config-registered setters so consumers do not have to remember the per-API rules individually. Hooks sit outside this bundle in v4: a correct persistent-host `Shutdown()` first drops its own `Hook` handles, then invokes one of those helpers (after draining its own workers; see the previous sub-section), and the next `Init()` lands on a clean slate for every entry above.
 
 ---
 
@@ -1277,9 +1292,9 @@ Notes on individual rows:
 
 DetourModKit's core systems are designed to be safe across DLL reload cycles:
 
-**HookManager:** `shutdown()` and `remove_all_hooks()` both use a two-phase removal pattern: hooks are disabled under a shared lock first (allowing in-flight trampoline callers to drain), then the hook maps are cleared under an exclusive lock. This prevents deadlock when a hooked thread is blocked on `m_hooks_mutex` via `with_inline_hook()`. Both methods reset internal state afterward, allowing subsequent `create_*_hook()` calls to succeed. There is no need to call both - either one prepares the HookManager for reuse.
+**Hooks:** v4 has no hook manager. Each hook is a caller-owned RAII `Hook` (`inline_at` / `mid_at`) or `VmtHook` (`vmt_for`) handle, and teardown is dropping the handle: the destructor restores the original bytes under the loader-lock leaf discipline (under the loader lock it pins the module and records an intentional leak instead of restoring, exactly the leak-on-purpose discipline used by `Logger` and the `ConfigWatcher`). Each `Hook::call<Ret>(Args...)` into the original is guarded by a DMK-owned per-hook `std::recursive_mutex`, so an in-flight caller and a teardown serialise rather than race. When several handles target the same address, destroy them newest-first; the ledger detects out-of-order teardown.
 
-`HookManager::is_target_already_hooked(addr)` reports whether the local `HookManager` instance already has an inline or mid hook installed at `addr`. It is the programmatic counterpart to the install-time WARNING that fires when SafetyHook layers on top of a pre-existing JMP from another module, and it covers the common case of two cooperating modules wanting to coordinate hook ownership without grepping log output.
+`hook::is_target_hooked(Address)` reports whether this statically-linked DMK kit already has an inline or mid hook installed at the address. It is the programmatic counterpart to the install-time refusal that fires under `Prologue::Fail` when the prologue is already redirected, and it covers the common case of two cooperating modules wanting to coordinate hook ownership without grepping log output. Installs default to `Prologue::Fail` in v4 (safe-by-default), so a leading `call`/breakpoint prologue is refused with `ErrorCode::TargetPrologueUnsafe`.
 
 **InputManager:** `register_press` and `register_hold` accept new bindings whether the poller is stopped, starting, or running. Live registration takes the poller's exclusive lock, appends to the binding list, and rebuilds the parallel `m_active_states` array in one step, so there is no per-tick allocation in the hot loop. Surviving entries' atomic states are carried forward across every reshape (`add_binding`, `remove_bindings_by_name`, `update_binding_combos`), so a held binding never flickers through one inactive tick when an unrelated binding is added or dropped. `clear_bindings()` empties the registry without stopping the poller, and `remove_binding_by_name(name)` drops a single binding by name (used internally by `Bootstrap::on_logic_dll_unload`). `update_binding_combos(name, combos)` accepts cardinality changes (1 to N or N to 1) and replaces the registered combo list wholesale; an empty replacement is the explicit-unbound state and collapses the entry set to a single inert sentinel so the binding name remains addressable for a later non-empty update. When a cardinality change drops a held `register_hold` entry, that entry's `on_state_change(false)` release callback fires before the rebuild completes so the consumer never latches in the held state.
 

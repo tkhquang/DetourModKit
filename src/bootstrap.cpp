@@ -2,7 +2,6 @@
 #include "DetourModKit/diagnostics.hpp"
 
 #include "DetourModKit/config.hpp"
-#include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
@@ -361,33 +360,13 @@ namespace DetourModKit::Bootstrap
                              std::span<const std::string_view> binding_names) noexcept
     {
         Logger &logger = Logger::get_instance();
-        size_t hooks_removed = 0;
         size_t bindings_removed = 0;
 
-        for (const auto name : hook_names)
-        {
-            try
-            {
-                auto result = HookManager::get_instance().remove_hook(name);
-                if (result)
-                {
-                    ++hooks_removed;
-                }
-                else
-                {
-                    logger.debug("Bootstrap: on_logic_dll_unload: hook '{}' not removed ({}).", name,
-                                 Hook::error_to_string(result.error()));
-                }
-            }
-            catch (const std::exception &e)
-            {
-                logger.error("Bootstrap: on_logic_dll_unload caught exception removing hook '{}': {}", name, e.what());
-            }
-            catch (...)
-            {
-                logger.error("Bootstrap: on_logic_dll_unload caught unknown exception removing hook '{}'.", name);
-            }
-        }
+        // Hook teardown is caller-owned: each hook lives in a Hook handle the Logic DLL holds, and dropping that
+        // handle unhooks it (the destructor honours the loader-lock leaf discipline). This helper therefore tears
+        // down only the bindings and the config registry; the hook names are accepted for call-shape compatibility
+        // but are not acted on here.
+        (void)hook_names;
 
         for (const auto name : binding_names)
         {
@@ -411,8 +390,7 @@ namespace DetourModKit::Bootstrap
             }
         }
 
-        logger.info("Bootstrap: on_logic_dll_unload drained {} hook(s) and {} binding(s).", hooks_removed,
-                    bindings_removed);
+        logger.info("Bootstrap: on_logic_dll_unload drained {} binding(s).", bindings_removed);
 
         // Wipe the Config registry last because the prior hook and binding teardown may invoke a registered setter one
         // final time (a setter that observes a binding-driven flag, for instance). Clearing first would orphan that
@@ -435,33 +413,9 @@ namespace DetourModKit::Bootstrap
     {
         Logger &logger = Logger::get_instance();
 
-        // Hooks first so the original prologue bytes are restored before the binding teardown can disturb any callback
-        // that still trampolines through SafetyHook. remove_all_hooks() resets m_shutdown_called at the end, leaving
-        // HookManager re-usable for the next attach.
-        try
-        {
-            HookManager::get_instance().remove_all_hooks();
-        }
-        catch (const std::exception &e)
-        {
-            try
-            {
-                logger.error("Bootstrap: on_logic_dll_unload_all caught exception in remove_all_hooks: {}", e.what());
-            }
-            catch (...)
-            {
-            }
-        }
-        catch (...)
-        {
-            try
-            {
-                logger.error("Bootstrap: on_logic_dll_unload_all caught unknown exception in remove_all_hooks.");
-            }
-            catch (...)
-            {
-            }
-        }
+        // Hook teardown is caller-owned: there is no central registry to clear here, so the Logic DLL drops its Hook
+        // handles to unhook (each destructor honours the loader-lock leaf discipline).
+        // Bindings and the config registry below are still process-wide singletons and are torn down as before.
 
         // clear_bindings() leaves the poll thread running and ready to accept fresh bindings, matching the "tear down
         // per-Logic-DLL state but keep the manager re-usable" contract that the named-list overload honours. Pass
@@ -494,7 +448,7 @@ namespace DetourModKit::Bootstrap
 
         try
         {
-            logger.info("Bootstrap: on_logic_dll_unload_all drained all hooks and bindings.");
+            logger.info("Bootstrap: on_logic_dll_unload_all drained all bindings.");
         }
         catch (...)
         {

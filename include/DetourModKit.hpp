@@ -13,7 +13,7 @@
 
 // Core functionality headers
 #include "DetourModKit/config.hpp"
-#include "DetourModKit/hook_manager.hpp"
+#include "DetourModKit/hook.hpp"
 #include "DetourModKit/input_codes.hpp"
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger.hpp"
@@ -43,6 +43,7 @@
 namespace DMK = DetourModKit;
 namespace DMKConfig = DetourModKit::Config;
 namespace DMKScan = DetourModKit::scan;
+namespace DMKHook = DetourModKit::hook;
 namespace DMKString = DetourModKit::String;
 namespace DMKFormat = DetourModKit::Format;
 namespace DMKFilesystem = DetourModKit::Filesystem;
@@ -60,11 +61,7 @@ namespace DMKRtti = DetourModKit::Rtti;
 using DMKLogger = DetourModKit::Logger;
 using DMKStoppableWorker = DetourModKit::StoppableWorker;
 using DMKInputBindingGuard = DetourModKit::Config::InputBindingGuard;
-using DMKHookManager = DetourModKit::HookManager;
 using DMKLogLevel = DetourModKit::LogLevel;
-using DMKHookStatus = DetourModKit::HookStatus;
-using DMKHookType = DetourModKit::HookType;
-using DMKHookConfig = DetourModKit::HookConfig;
 using DMKAsyncLogger = DetourModKit::AsyncLogger;
 using DMKAsyncLoggerConfig = DetourModKit::AsyncLoggerConfig;
 using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
@@ -85,8 +82,9 @@ using DMKProfileSample = DetourModKit::ProfileSample;
  * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
  * @details This function should be called before process exit or DLL unload to ensure proper cleanup without
  *          use-after-free errors. It shuts down singletons in reverse dependency order: the Config auto-reload watcher
- *          first, then InputManager, HookManager, Memory cache, the Config registry, then Logger last. After calling
- *          this function, the singletons are in a safe state for destruction.
+ *          first, then InputManager, Memory cache, the Config registry, then Logger last. After calling this function,
+ *          the singletons are in a safe state for destruction. Hooks are not torn down here: each hook is owned by the
+ *          caller's Hook handle and is unhooked when that handle is dropped.
  *
  * @note This function is idempotent - calling it multiple times is safe.
  * @note noexcept: every teardown step it invokes is itself noexcept, so the wrapper carries the no-throw guarantee.
@@ -107,16 +105,15 @@ inline void DMK_Shutdown() noexcept
     // 2. InputManager (polling thread may invoke callbacks that log)
     DetourModKit::InputManager::get_instance().shutdown();
 
-    // 3. HookManager (may have been logging via Logger)
-    DetourModKit::HookManager::get_instance().shutdown();
-
-    // 4. Memory cache (background cleanup thread must stop before Logger shuts down)
+    // 3. Memory cache (background cleanup thread must stop before Logger shuts down). Hooks are intentionally not torn
+    //    down here: the caller owns each Hook handle, and dropping it unhooks (the destructor also honours the
+    //    loader-lock leaf discipline). There is no central hook registry to sequence.
     DetourModKit::memory::shutdown_cache();
 
-    // 5. Clear registered config items (static vector cleanup)
+    // 4. Clear registered config items (static vector cleanup)
     DetourModKit::Config::clear_registered_items();
 
-    // 6. Logger last (no more logging after this)
+    // 5. Logger last (no more logging after this)
     DetourModKit::Logger::get_instance().shutdown();
 }
 
