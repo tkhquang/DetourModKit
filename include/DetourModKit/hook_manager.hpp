@@ -3,7 +3,7 @@
 
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/scanner.hpp"
+#include "DetourModKit/memory.hpp"
 #include "DetourModKit/srw_shared_mutex.hpp"
 
 #include <array>
@@ -685,8 +685,8 @@ namespace DetourModKit
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          * @note The AOB scan over [module_base, module_base + module_size) is page-filtered: it walks VirtualQuery
          *       and skips guard, no-access, and non-readable pages, so passing a full SizeOfImage span is safe even
-         *       when the image contains a guard or no-access section -- unlike the raw Scanner::find_pattern
-         *       overloads, which read the span unconditionally and fault the host on an unreadable byte. A signature
+         *       when the image contains a guard or no-access section -- unlike the raw scan::unchecked::find_pattern
+         *       primitive, which reads the span unconditionally and faults the host on an unreadable byte. A signature
          *       straddling a protection split inside the image is still found, and @p aob_offset is applied to the
          *       located address. For code that lives outside any mapped module (packed payloads unpacked into
          *       anonymous pages), resolve the address with the whole-process Scanner sweeps and call
@@ -722,8 +722,8 @@ namespace DetourModKit
          * @return std::expected<std::string, HookError> The hook name if successful, error code otherwise.
          * @note The AOB scan over [module_base, module_base + module_size) is page-filtered: it walks VirtualQuery
          *       and skips guard, no-access, and non-readable pages, so passing a full SizeOfImage span is safe even
-         *       when the image contains a guard or no-access section -- unlike the raw Scanner::find_pattern
-         *       overloads, which read the span unconditionally and fault the host on an unreadable byte. A signature
+         *       when the image contains a guard or no-access section -- unlike the raw scan::unchecked::find_pattern
+         *       primitive, which reads the span unconditionally and faults the host on an unreadable byte. A signature
          *       straddling a protection split inside the image is still found, and @p aob_offset is applied to the
          *       located address. For code that lives outside any mapped module (packed payloads unpacked into
          *       anonymous pages), resolve the address with the whole-process Scanner sweeps and call

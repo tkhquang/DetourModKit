@@ -7,8 +7,9 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/memory.hpp"
+#include "internal/scan_engine.hpp"
+#include "internal/scan_pages.hpp"
 #include "platform.hpp"
-#include "scanner_internal.hpp"
 #include "x86_decode.hpp"
 
 #include <windows.h>
@@ -26,7 +27,7 @@
 
 namespace DetourModKit
 {
-    using DetourModKit::Scanner::parse_aob;
+    using DetourModKit::detail::parse_aob;
 
     namespace
     {
@@ -880,8 +881,10 @@ namespace DetourModKit
         // span cannot fault the host the way a raw find_pattern over the whole span would. A signature straddling a
         // protection split inside the image is still found (the sweep carries the cross-region overlap), and
         // pattern.offset is applied exactly once, matching the raw find_pattern contract.
-        const std::byte *found_address_start = Scanner::detail::scan_module_readable(
-            pattern.value(), Memory::ModuleRange{module_base, module_base + module_size}, 1);
+        const std::byte *found_address_start =
+            detail::scan_module_readable(pattern.value(), Memory::ModuleRange{module_base, module_base + module_size},
+                                         1)
+                .match;
         if (!found_address_start)
         {
             m_logger.error("HookManager: AOB pattern not found for inline hook '{}'. Pattern: \"{}\".", name,
@@ -1143,8 +1146,10 @@ namespace DetourModKit
         // span cannot fault the host the way a raw find_pattern over the whole span would. A signature straddling a
         // protection split inside the image is still found (the sweep carries the cross-region overlap), and
         // pattern.offset is applied exactly once, matching the raw find_pattern contract.
-        const std::byte *found_address_start = Scanner::detail::scan_module_readable(
-            pattern.value(), Memory::ModuleRange{module_base, module_base + module_size}, 1);
+        const std::byte *found_address_start =
+            detail::scan_module_readable(pattern.value(), Memory::ModuleRange{module_base, module_base + module_size},
+                                         1)
+                .match;
         if (!found_address_start)
         {
             m_logger.error("HookManager: AOB pattern not found for mid hook '{}'. Pattern: \"{}\".", name,

@@ -238,27 +238,31 @@ TEST(ScanResolve, CandidateFactoriesExposeCoherentPayloads)
     const Candidate direct = Candidate::direct("direct", scan::Pattern::literal("DE AD"), -4);
     EXPECT_EQ(direct.name(), "direct");
     EXPECT_EQ(direct.mode(), scan::Mode::Direct);
-    ASSERT_NE(direct.pattern(), nullptr);
-    EXPECT_EQ(direct.pattern()->size(), 2U);
-    EXPECT_EQ(direct.displacement(), -4);
-    EXPECT_EQ(direct.instruction_length(), 0U);
-    EXPECT_TRUE(direct.query().empty());
+    ASSERT_NE(direct.as_direct(), nullptr);
+    EXPECT_EQ(direct.as_direct()->pattern.size(), 2U);
+    EXPECT_EQ(direct.as_direct()->walk_back, -4);
+    // The variant keeps the (mode, payload) pairing coherent: a Direct candidate carries no other tier's payload.
+    EXPECT_EQ(direct.as_rip_relative(), nullptr);
+    EXPECT_EQ(direct.as_rtti_vtable(), nullptr);
+    EXPECT_EQ(direct.as_string_xref(), nullptr);
 
     const Candidate rip = Candidate::rip_relative("rip", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7);
     EXPECT_EQ(rip.mode(), scan::Mode::RipRelative);
-    ASSERT_NE(rip.pattern(), nullptr);
-    EXPECT_EQ(rip.displacement(), 3);
-    EXPECT_EQ(rip.instruction_length(), 7U);
+    ASSERT_NE(rip.as_rip_relative(), nullptr);
+    EXPECT_EQ(rip.as_rip_relative()->displacement_at, 3);
+    EXPECT_EQ(rip.as_rip_relative()->instruction_length, 7U);
 
     const Candidate rtti = Candidate::rtti_vtable("rtti", ".?AVType@@");
     EXPECT_EQ(rtti.mode(), scan::Mode::RttiVtable);
-    EXPECT_EQ(rtti.pattern(), nullptr);
-    EXPECT_EQ(rtti.query(), ".?AVType@@");
+    EXPECT_EQ(rtti.as_direct(), nullptr);
+    ASSERT_NE(rtti.as_rtti_vtable(), nullptr);
+    EXPECT_EQ(rtti.as_rtti_vtable()->mangled, ".?AVType@@");
 
     const Candidate xref = Candidate::string_xref("xref", "literal");
     EXPECT_EQ(xref.mode(), scan::Mode::StringXref);
-    EXPECT_EQ(xref.pattern(), nullptr);
-    EXPECT_EQ(xref.query(), "literal");
+    EXPECT_EQ(xref.as_direct(), nullptr);
+    ASSERT_NE(xref.as_string_xref(), nullptr);
+    EXPECT_EQ(xref.as_string_xref()->text, "literal");
 
     // Owned-string contract: build a Candidate from runtime strings that are destroyed before the assertions. A
     // borrowed-view member (instead of an owned std::string) would dangle here; an owning std::string survives.
@@ -270,7 +274,8 @@ TEST(ScanResolve, CandidateFactoriesExposeCoherentPayloads)
         return Candidate::rtti_vtable(name, mangled);
     }();
     EXPECT_EQ(owned.name(), "runtime-name-built");
-    EXPECT_EQ(owned.query(), ".?AVRuntimeType@@");
+    ASSERT_NE(owned.as_rtti_vtable(), nullptr);
+    EXPECT_EQ(owned.as_rtti_vtable()->mangled, ".?AVRuntimeType@@");
 }
 
 TEST(ScanResolve, RttiVtableMissFallsThroughToByteCandidate)

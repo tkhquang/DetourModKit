@@ -12,8 +12,7 @@ namespace DetourModKit
 {
     namespace Diagnostics
     {
-        Snapshot collect(const HookManager &hooks, std::span<const Anchors::ResolvedAnchor> anchor_report,
-                         std::span<const Rtti::DriftEntry> drift_report)
+        Snapshot collect(const HookManager &hooks, std::span<const Rtti::DriftEntry> drift_report)
         {
             Snapshot snapshot;
 
@@ -39,8 +38,6 @@ namespace DetourModKit
                     snapshot.hooks_disabled = count;
                 }
             }
-
-            snapshot.anchor_quality = Anchors::assess_quality(anchor_report);
 
             snapshot.drift_total = drift_report.size();
             for (const Rtti::DriftEntry &entry : drift_report)

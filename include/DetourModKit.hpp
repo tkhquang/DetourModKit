@@ -20,7 +20,6 @@
 #include "DetourModKit/input.hpp"
 
 // Module headers
-#include "DetourModKit/anchors.hpp"
 #include "DetourModKit/bootstrap.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/diagnostics_dump.hpp"
@@ -30,11 +29,10 @@
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/math.hpp"
 #include "DetourModKit/memory.hpp"
-#include "DetourModKit/profile.hpp"
 #include "DetourModKit/profiler.hpp"
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
-#include "DetourModKit/scanner.hpp"
+#include "DetourModKit/scan.hpp"
 #include "DetourModKit/worker.hpp"
 
 /**
@@ -44,7 +42,7 @@
  */
 namespace DMK = DetourModKit;
 namespace DMKConfig = DetourModKit::Config;
-namespace DMKScanner = DetourModKit::Scanner;
+namespace DMKScan = DetourModKit::scan;
 namespace DMKString = DetourModKit::String;
 namespace DMKFormat = DetourModKit::Format;
 namespace DMKFilesystem = DetourModKit::Filesystem;
@@ -52,7 +50,6 @@ namespace DMKMemory = DetourModKit::Memory;
 namespace DMKMath = DetourModKit::Math;
 namespace DMKBootstrap = DetourModKit::Bootstrap;
 namespace DMKRtti = DetourModKit::Rtti;
-namespace DMKAnchors = DetourModKit::Anchors;
 
 #ifndef DMK_NO_SHORT_NAMES
 /**

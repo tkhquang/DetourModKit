@@ -13,7 +13,7 @@ Everything here fails **closed**. Zero matches, an irreducible ambiguity, a forg
 
 ## Why a mod wants this
 
-A mod resolves a struct base once (typically via a `Scanner` cascade or an AOB anchor), then walks fixed field offsets inside it. A game patch that inserts or removes a member shifts every field after it by a few bytes, and the mod's hard-coded offset now reads garbage. Re-deriving the offset by hand and shipping a new build is the usual fix.
+A mod resolves a struct base once (typically via a `scan::resolve` cascade or an AOB anchor), then walks fixed field offsets inside it. A game patch that inserts or removes a member shifts every field after it by a few bytes, and the mod's hard-coded offset now reads garbage. Re-deriving the offset by hand and shipping a new build is the usual fix.
 
 Self-heal automates that recovery. Record a landmark once:
 
@@ -122,13 +122,13 @@ Under multiple inheritance each base subobject has its own vtable, and every one
 
 ### The unique-match guard
 
-This mirrors the module-scoped cascade's `require_unique` philosophy (`AddrCandidate::require_unique`, which fails closed when a second match exists), transplanted from an AOB pattern scan to a slot scan. Three refinements adapt it from code-address resolution (where patterns are intentionally specific) to data-layout healing (where same-typed neighbours are common):
+This mirrors the scan resolver's `require_unique` philosophy (`ScanRequest::require_unique`, which fails closed when a second match exists), transplanted from an AOB pattern scan to a slot scan. Three refinements adapt it from code-address resolution (where patterns are intentionally specific) to data-layout healing (where same-typed neighbours are common):
 
 1. The exact nominal slot is checked first and short-circuits, so an unchanged offset never reaches the ambiguity test.
 2. On a widened scan, matches are probed nearest-to-nominal first; a uniquely nearest match heals, so a single far-away same-typed neighbour does not produce a dead mod.
 3. Only an equidistant `+d` / `-d` pair latches `Ambiguous`.
 
-Consumers see one consistent failure story: `Scanner::ResolveError::NoMatch` and `Rtti::HealError::NoMatch` / `Ambiguous` all mean "the binary changed too much, re-author the landmark," never a silent wrong heal.
+Consumers see one consistent failure story: `ErrorCode::NoMatch` (from a `scan::resolve` cascade) and `Rtti::HealError::NoMatch` / `Ambiguous` all mean "the binary changed too much, re-author the landmark," never a silent wrong heal.
 
 ## L4 -- `solve_fingerprint`
 
@@ -198,7 +198,7 @@ A drift report is the signal that a patch moved a layout. When it shows a field 
 
 ## Relation to the walker
 
-The walker runs vtable -> name; this module runs slot -> object -> name and adds the offset-recovery policy on top. Both share the same `resolve_col_site` prelude internally, so the two compose into one fail-closed resilience story: resolve the struct base via a module-scoped `Scanner::resolve_cascade`, then heal field offsets inside it via `heal_landmark` -- one contract across both code-address and data-layout drift.
+The walker runs vtable -> name; this module runs slot -> object -> name and adds the offset-recovery policy on top. Both share the same `resolve_col_site` prelude internally, so the two compose into one fail-closed resilience story: resolve the struct base via a module-scoped `scan::resolve` call, then heal field offsets inside it via `heal_landmark` -- one contract across both code-address and data-layout drift.
 
 ## Prior art and acknowledgements
 

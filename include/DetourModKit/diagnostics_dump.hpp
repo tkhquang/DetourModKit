@@ -4,14 +4,13 @@
 /**
  * @file diagnostics_dump.hpp
  * @brief One-call aggregator that snapshots DMK's runtime diagnostics -- intentional-leak counters, hook population,
- *        anchor-manifest robustness, and self-heal drift -- into a single struct.
+ *        and self-heal drift -- into a single struct.
  * @details Each piece is already queryable on its own (@ref DetourModKit::Diagnostics::intentional_leak_count, @ref
- *          DetourModKit::HookManager::get_hook_counts, @ref DetourModKit::Anchors::assess_quality, @ref
- *          DetourModKit::Rtti::heal_report). This header only bundles them so a consumer can capture a one-shot health
- *          view in a single call instead of stitching four sources together by hand.
+ *          DetourModKit::HookManager::get_hook_counts, @ref DetourModKit::Rtti::heal_report). This header only bundles
+ *          them so a consumer can capture a one-shot health view in a single call instead of stitching the sources
+ *          together by hand.
  */
 
-#include "DetourModKit/anchors.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/hook_manager.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
@@ -45,9 +44,6 @@ namespace DetourModKit
             /// Inline + mid hooks the HookManager owns, in any status (VMT hooks are tracked separately).
             std::size_t hooks_total = 0;
 
-            /// Anchor-manifest robustness summary over the supplied report.
-            Anchors::AnchorQuality anchor_quality{};
-
             /// Landmarks in the supplied drift report.
             std::size_t drift_total = 0;
             /// Landmarks that healed (@ref Rtti::DriftEntry::ok).
@@ -59,20 +55,16 @@ namespace DetourModKit
         /**
          * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
          * @details Reads the process-wide intentional-leak counters, folds @p hooks.get_hook_counts() into active /
-         *          disabled / total tallies, summarizes @p anchor_report through @ref Anchors::assess_quality, and
-         *          counts healed vs failed entries in @p drift_report. The anchor and drift reports are caller-owned
-         *          (typically the output of @ref Anchors::resolve_all and @ref Rtti::heal_report); pass empty spans to
-         *          omit either.
+         *          disabled / total tallies, and counts healed vs failed entries in @p drift_report. The drift report
+         *          is caller-owned (typically the output of @ref Rtti::heal_report); pass an empty span to skip the
+         *          drift summary.
          * @param hooks The HookManager whose population to snapshot (typically @ref HookManager::get_instance()).
-         * @param anchor_report A resolved anchor report, or an empty span to skip the anchor summary.
          * @param drift_report A self-heal drift report, or an empty span to skip the drift summary.
          * @return The aggregated snapshot.
          * @note Setup/control-plane only: @ref HookManager::get_hook_counts allocates and takes a shared lock, so this
          *       is not callback-safe. Call it from init / a worker / a diagnostics command, never from a hook callback.
          */
-        [[nodiscard]] Snapshot collect(const HookManager &hooks,
-                                       std::span<const Anchors::ResolvedAnchor> anchor_report = {},
-                                       std::span<const Rtti::DriftEntry> drift_report = {});
+        [[nodiscard]] Snapshot collect(const HookManager &hooks, std::span<const Rtti::DriftEntry> drift_report = {});
     } // namespace Diagnostics
 } // namespace DetourModKit
 

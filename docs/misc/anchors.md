@@ -1,5 +1,14 @@
 # Anchor Registry (`anchors.hpp`)
 
+> Status (v4.0.0): the declarative Anchor Registry (`anchors.hpp` / `profile.hpp`) is REMOVED from the v4 scan
+> clean-break (item 8b) and is scheduled to be rebuilt as a separate drift module at item 17, alongside the
+> `drift_manifest` / `diagnostics_dump` reshape. Its four resolution backends survive as v4 API and are what a
+> rebuilt registry will compose: `scan::resolve` (was the `RipGlobal` cascade), `scan::read_code_constant` (the
+> `CodeOperand` backend), `scan::find_string_xref` (the `StringXref` backend), and `rtti::vtable_for_type` (the
+> `VtableIdentity` backend). This document describes the v3 registry surface and is retained as the design
+> reference for that rebuild; the `Scanner::` / `Anchors::` names below are pre-v4. See
+> `docs/proposals/v4.0.0-master-plan.md` (item 8b amendment) for the deferral record.
+
 A mod against a fast-patching game accumulates a wall of patch-fragile constants: a vtable matched by literal, a global resolved by AOB, a struct stride read out of a dispatch loop, the occasional pinned offset. The Anchor Registry collapses that wall into one declarative table. Each constant is declared once with the kind of anchor it is and the inputs its backend needs; the whole table is resolved at init and reported uniformly, so "this mod is broken on the new patch" becomes a precise, machine-readable diff instead of a debugging session.
 
 The registry unifies the self-healing backends that resolve from a module range alone. It is the consolidation layer over the primitives documented in [aob-signatures.md](aob-signatures.md), [rtti-walker.md](rtti-walker.md), and [rtti-self-heal.md](rtti-self-heal.md).

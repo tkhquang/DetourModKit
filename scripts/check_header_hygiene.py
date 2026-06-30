@@ -47,6 +47,31 @@ MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?Mi
 # Matches a class/struct DECLARATION token for an async-logger internal type (decl or def alike).
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
 
+# --- v4 scan clean-break gates ---
+# The legacy scan public surface is deleted; these files must not reappear.
+LEGACY_HEADERS = (
+    "include/DetourModKit/scanner.hpp",
+    "include/DetourModKit/anchors.hpp",
+    "include/DetourModKit/profile.hpp",
+)
+# Legacy scan symbols the v4 surface replaced. None may appear in this repo's own sources: the engine is
+# DetourModKit::detail::EnginePattern / find_pattern, the resolver is scan::resolve / scan::Candidate, and
+# the three per-domain scan error enums folded into the unified ErrorCode. Matched after comment stripping,
+# so doc prose that merely mentions the old names does not trip the gate.
+LEGACY_SCAN_TOKEN = re.compile(
+    r'(\bScanner::|\bresolve_cascade|\bRipResolveError\b|\bResolveError\b|\bStringXrefError\b'
+    r'|\bAddrCandidate\b|\bResolveMode\b|\bResolveHit\b|\bCascadeRequest\b|\bCompiledPattern\b)')
+# A public header must never reach into the non-installed private engine under src/internal/.
+INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
+# include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
+# there (templates / constexpr / public object layout, backend-/Win32-/logger-/heap-free). A new detail
+# header must be justified and added here, not slipped in silently.
+ALLOWED_DETAIL_HEADERS = {
+    "pattern_core.hpp",  # by-value inline storage + constexpr parser of public scan::Pattern
+    "hook_impl.hpp",  # SafetyHook backend bridge (slated to relocate to src/internal as hook_backend)
+    "async_logger_internal.hpp",  # async-logger queue/pool (slated to relocate under the AsyncLogger pimpl)
+}
+
 
 def strip_comments(text):
     """Blank out // and /* */ comments while preserving newlines (so line numbers stay accurate) and
@@ -121,6 +146,21 @@ def line_of(text, index):
 
 def main():
     violations = []
+
+    # v4 scan gate A: the deleted legacy scan headers must not reappear.
+    for legacy in LEGACY_HEADERS:
+        if (REPO / legacy).is_file():
+            violations.append(f"{legacy}: legacy scan header still present; the v4 public surface is scan.hpp")
+
+    # v4 scan gate B: include/DetourModKit/detail/ holds only allowlisted compile-visible support headers.
+    detail_dir = REPO / "include" / "DetourModKit" / "detail"
+    if detail_dir.is_dir():
+        for header in sorted(detail_dir.glob("*.hpp")):
+            if header.name not in ALLOWED_DETAIL_HEADERS:
+                rel = header.relative_to(REPO).as_posix()
+                violations.append(
+                    f"{rel}: detail/ header not on the allowlist; true-private implementation belongs in src/internal/")
+
     for rel, path in iter_sources():
         raw = path.read_text(encoding="utf-8", errors="replace")
         text = strip_comments(raw)
@@ -154,6 +194,19 @@ def main():
                 if am:
                     violations.append(
                         f"{rel}:{n}: {am.group(1)} declared outside detail/async_logger_internal.hpp")
+
+        # v4 scan gate C: no public header reaches into the non-installed private engine under src/internal/.
+        if is_public_header:
+            for n, line in enumerate(lines, 1):
+                if INTERNAL_INCLUDE.search(line):
+                    violations.append(f"{rel}:{n}: public header includes the private engine (src/internal/)")
+
+        # v4 scan gate D: no legacy scan symbol survives in this repo's own sources (headers, sources, or tests).
+        for n, line in enumerate(lines, 1):
+            lm = LEGACY_SCAN_TOKEN.search(line)
+            if lm:
+                violations.append(
+                    f"{rel}:{n}: legacy scan symbol '{lm.group(1).strip()}' (replaced by the v4 scan surface)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")
