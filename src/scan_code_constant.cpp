@@ -12,8 +12,6 @@
 
 #include "internal/scan_shared.hpp"
 
-#include "DetourModKit/memory.hpp"
-
 #include <Zydis/Zydis.h>
 
 #include <cstddef>
@@ -62,7 +60,7 @@ namespace DetourModKit
             }
             const std::uintptr_t site = hit->address.raw();
 
-            const Memory::ModuleRange range = detail::to_module_range(scope);
+            const detail::ModuleSpan range = detail::module_span(scope);
 
             // Read a full maximum-length instruction window, clamped to the module so the read never runs past the end
             // of the image, behind a fault guard. A truncated window that fails to decode is reported as DecodeFailed
@@ -77,7 +75,7 @@ namespace DetourModKit
                     avail = static_cast<std::size_t>(to_end);
                 }
             }
-            if (avail == 0 || !Memory::seh_read_bytes(site, buf, avail))
+            if (avail == 0 || !detail::guarded_read_bytes(site, buf, avail))
             {
                 return std::unexpected(Error{ErrorCode::DecodeFailed, "scan::read_code_constant"});
             }

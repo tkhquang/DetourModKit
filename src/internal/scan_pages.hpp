@@ -14,9 +14,9 @@
  *          thread-local side channel.
  */
 
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 
-#include "DetourModKit/memory.hpp"
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
@@ -50,7 +50,7 @@ namespace DetourModKit
          * @details Searches only [range.base, range.end) and only execute-readable pages, so a match can only land on
          *          code. Returns the Nth match (1-based, adjusted by pattern.offset) and the incomplete flag.
          */
-        [[nodiscard]] MatchResult scan_module_executable(const EnginePattern &pattern, Memory::ModuleRange range,
+        [[nodiscard]] MatchResult scan_module_executable(const EnginePattern &pattern, ModuleSpan range,
                                                          std::size_t occurrence = 1) noexcept;
 
         /**
@@ -59,7 +59,7 @@ namespace DetourModKit
          *          (.rdata / .data), so one pass covers both code and data candidates. Returns the Nth match and the
          *          incomplete flag.
          */
-        [[nodiscard]] MatchResult scan_module_readable(const EnginePattern &pattern, Memory::ModuleRange range,
+        [[nodiscard]] MatchResult scan_module_readable(const EnginePattern &pattern, ModuleSpan range,
                                                        std::size_t occurrence = 1) noexcept;
 
         /**
@@ -84,8 +84,8 @@ namespace DetourModKit
          * @details Pages::Readable selects @ref scan_module_readable (the data-capable superset), Pages::Executable
          *          selects @ref scan_module_executable (code-only).
          */
-        [[nodiscard]] MatchResult scan_module_pages(const EnginePattern &pattern, Memory::ModuleRange range,
-                                                    scan::Pages pages, std::size_t occurrence) noexcept;
+        [[nodiscard]] MatchResult scan_module_pages(const EnginePattern &pattern, ModuleSpan range, scan::Pages pages,
+                                                    std::size_t occurrence) noexcept;
 
         /**
          * @struct ExecutableWindow
@@ -110,7 +110,7 @@ namespace DetourModKit
          *          backend) scans the image's code without re-deriving the Windows page masks.
          * @return The execute-readable windows; empty when @p range is invalid or it exposes no readable code pages.
          */
-        [[nodiscard]] std::vector<ExecutableWindow> collect_executable_windows(Memory::ModuleRange range);
+        [[nodiscard]] std::vector<ExecutableWindow> collect_executable_windows(ModuleSpan range);
 
         /**
          * @brief True when @p address lies on a committed, execute-readable page.

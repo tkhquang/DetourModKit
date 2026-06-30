@@ -12,8 +12,9 @@
  *          confirm a real redirect, and resolves the anchored match.
  */
 
-#include "DetourModKit/memory.hpp"
 #include "DetourModKit/scan.hpp"
+
+#include "internal/memory_guarded.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -42,13 +43,12 @@ namespace DetourModKit
          * @brief Runs hooked-prologue recovery across the ordered ladder.
          * @param request The resolution request (its ladder is indexed through @p order).
          * @param order The try order (indices into request.ladder), as produced by order_candidates.
-         * @param range The module image to scan, in engine ModuleRange form.
+         * @param range The module image to scan, in engine ModuleSpan form.
          * @return The recovery outcome: a Hit when a shape uniquely recovered an executable target, plus the
          *         applicability diagnostics. May allocate while rebuilding patterns, so it is not noexcept.
          */
         [[nodiscard]] FallbackOutcome resolve_prologue_fallback(const scan::ScanRequest &request,
-                                                                std::span<const std::size_t> order,
-                                                                Memory::ModuleRange range);
+                                                                std::span<const std::size_t> order, ModuleSpan range);
     } // namespace detail
 } // namespace DetourModKit
 

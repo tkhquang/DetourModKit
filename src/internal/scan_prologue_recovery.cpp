@@ -10,12 +10,12 @@
 
 #include "internal/scan_prologue_recovery.hpp"
 
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
 
 #include "DetourModKit/detail/pattern_core.hpp"
-#include "DetourModKit/memory.hpp"
 
 #include "x86_decode.hpp"
 
@@ -118,7 +118,7 @@ namespace DetourModKit
         // resolve the anchored match. applicable becomes true once the rebuilt pattern is usable (enough literal tail),
         // independent of whether it then matches, so the caller can tell "no shape applied" from "applied but missed".
         std::optional<std::uintptr_t> try_prologue_shape(const scan::DirectPattern &direct, const PrologueShape &shape,
-                                                         Memory::ModuleRange range, bool &applicable)
+                                                         detail::ModuleSpan range, bool &applicable)
         {
             const scan::Pattern &pattern = direct.pattern;
             const std::optional<detail::EnginePattern> rebuilt = build_rebuilt_prologue(pattern, shape);
@@ -146,8 +146,7 @@ namespace DetourModKit
 
             const std::uintptr_t match = reinterpret_cast<std::uintptr_t>(first.match);
             const std::optional<std::uintptr_t> jump_target = shape.decode(match);
-            if (!jump_target || !Memory::plausible_userspace_ptr(*jump_target) ||
-                !detail::is_executable_address(*jump_target))
+            if (!jump_target || !detail::is_plausible_ptr(*jump_target) || !detail::is_executable_address(*jump_target))
             {
                 // The matched bytes do not redirect to executable code, so this is a coincidental opcode collision, not
                 // a hooked prologue. The jump destination itself is intentionally NOT range-constrained: a sibling
@@ -157,7 +156,7 @@ namespace DetourModKit
 
             const std::uintptr_t anchored = match + static_cast<std::uintptr_t>(pattern.offset());
             const std::optional<std::uintptr_t> resolved = detail::resolve_direct(anchored, direct);
-            if (!resolved || !Memory::contains(range, *resolved))
+            if (!resolved || !range.contains(*resolved))
             {
                 // Bound the recovered address to the requested scope, matching the normal byte path: a Direct walk-back
                 // must not resolve outside the range even when it is reached through prologue recovery.
@@ -168,8 +167,7 @@ namespace DetourModKit
     } // anonymous namespace
 
     detail::FallbackOutcome detail::resolve_prologue_fallback(const scan::ScanRequest &request,
-                                                              std::span<const std::size_t> order,
-                                                              Memory::ModuleRange range)
+                                                              std::span<const std::size_t> order, ModuleSpan range)
     {
         FallbackOutcome outcome;
         for (const std::size_t index : order)

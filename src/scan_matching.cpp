@@ -11,11 +11,10 @@
 
 #include "DetourModKit/scan.hpp"
 
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_shared.hpp"
-
-#include "DetourModKit/memory.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -36,7 +35,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::NoMatch, "scan::scan"});
             }
-            const Memory::ModuleRange range = detail::to_module_range(scope);
+            const detail::ModuleSpan range = detail::module_span(scope);
             if (!range.valid())
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::scan"});
@@ -73,8 +72,8 @@ namespace DetourModKit
 
             // Read the first opcode byte under a fault guard rather than is_readable + a raw dereference. is_readable
             // is a TOCTOU illusion (the page can change or unmap between the check and the read), and the bare
-            // dereference would then fault the host. seh_read returns nullopt on any fault.
-            const auto b0 = Memory::seh_read<std::uint8_t>(addr.raw());
+            // dereference would then fault the host. guarded_read returns nullopt on any fault.
+            const auto b0 = detail::guarded_read<std::uint8_t>(addr.raw());
             if (!b0)
             {
                 return false;

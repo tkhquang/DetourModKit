@@ -71,6 +71,20 @@ namespace DetourModKit
         [[nodiscard]] static Region host() noexcept;
 
         /**
+         * @brief Returns the Region spanning the module DetourModKit is linked into (the calling DLL, or the EXE when
+         *        DMK is statically linked into the host process).
+         * @return The owning module's mapped image span, or an empty Region if the lookup or PE-header read failed.
+         * @details DetourModKit is a static library, so "own" resolves to whichever DLL/EXE consumed it -- distinct
+         * from
+         *          host(), which is always the process EXE. A mod DLL uses this to sanity-check that a resolved pointer
+         *          lives inside the mod's own image rather than the game's, the inverse of the host() check. The image
+         *          is found by resolving the module that contains this function's own code, so it is correct regardless
+         *          of how the consumer packaged the library.
+         * @note Setup/control-plane only -- queries the loader; call from init or a worker, not a hot callback.
+         */
+        [[nodiscard]] static Region own() noexcept;
+
+        /**
          * @brief Returns the Region spanning a named, already-loaded module.
          * @param name UTF-8 module name as the loader knows it (e.g. "kernel32.dll").
          * @return The module's mapped image span, or an empty Region if @p name is empty or the module is not loaded.

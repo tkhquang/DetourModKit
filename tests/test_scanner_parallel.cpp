@@ -353,7 +353,7 @@ TEST(ScannerBatchTest, ModuleBatchConfinesToRangeAndResolvesEachItem)
     }
 
     const auto base = reinterpret_cast<std::uintptr_t>(page.base);
-    const Memory::ModuleRange range{base, base + page.size};
+    const detail::ModuleSpan range{base, base + page.size};
 
     // Range-scoped: the only copy of each sig inside [base, base + size) is the planted one, so the match is exact.
     const auto results = detail::scan_module_batch(items, range, detail::ScannerKind::Readable);
@@ -371,7 +371,7 @@ TEST(ScannerBatchTest, ModuleBatchInvalidRangeFailsClosed)
 
     const std::vector<detail::BatchScanItem> items{detail::BatchScanItem{&*pattern, 1},
                                                    detail::BatchScanItem{&*pattern, 1}};
-    const Memory::ModuleRange invalid{}; // base == end == 0 => valid() is false
+    const detail::ModuleSpan invalid{}; // base == end == 0 => valid() is false
     const auto results = detail::scan_module_batch(items, invalid);
     ASSERT_EQ(results.size(), 2u);
     EXPECT_EQ(results[0], nullptr);
@@ -507,7 +507,7 @@ TEST(ScannerBatchTest, ResolveBatchWorkerCountYieldsIdenticalResults)
 // worker thread. The fixture is an RWX page holding one literal and one RIP-relative lea reference to it.
 TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
 {
-    // No Memory::init_cache() by design: find_string_xref installs its fault guard lazily (MinGW) or uses SEH (MSVC),
+    // No memory::init_cache() by design: find_string_xref installs its fault guard lazily (MinGW) or uses SEH (MSVC),
     // so it needs no cache warm-up. Zero-fill: a 0x00 byte both terminates the planted literal and never starts a
     // RIP-relative load.
     CommittedPage image(4096, PAGE_EXECUTE_READWRITE);

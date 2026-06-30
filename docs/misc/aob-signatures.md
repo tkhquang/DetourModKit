@@ -664,7 +664,7 @@ if (hit) logger.info("resolved via {}", hit->winning_name);
 A lone signature hit is necessary but not sufficient. Two lightweight checks catch the overwhelming majority of mis-hits:
 
 - **First-byte sanity check.** A function prologue does not start with `0x00`, `0xC2`, `0xC3`, or (usually) `0xCC`. Use `scan::is_likely_function_prologue(addr)` to reject scan poison before handing the address to SafetyHook. The helper accepts `0xE9` / `0xEB` / `0xFF 0x25` so a target already inline-hooked by another mod still passes.
-- **`Memory::is_readable()` guard.** Before reading more than a single byte (for example, disassembling a 5-byte trampoline or copying out an RTTI string), confirm the entire span is inside a committed page with an expected protection flag.
+- **`memory::is_readable()` guard.** Before reading more than a single byte (for example, disassembling a 5-byte trampoline or copying out an RTTI string), confirm the entire span is inside a committed page with an expected protection flag. It takes a `Region` now: `memory::is_readable(dmk::Region{addr, n})`.
 
 ```cpp
 if (!DetourModKit::scan::is_likely_function_prologue(resolved_addr))
@@ -726,8 +726,7 @@ if (!ptr_addr)
 }
 
 // ptr_addr is the absolute address of the pointer slot, not the pointee.
-auto global_ptr = dmk::Memory::read_ptr_unsafe(
-    reinterpret_cast<const uintptr_t*>(ptr_addr->value()));
+auto global_ptr = dmk::memory::read<std::uintptr_t>(*ptr_addr).value_or(0);
 ```
 
 If `hit` came from a pattern with a `|` offset marker, `scan::scan` has already applied the offset: pass `*hit` directly. Adding the offset would double-apply and start the search window past the intended opcode.
@@ -773,7 +772,7 @@ Reminder: `scan::scan` returns the offset-adjusted address when a `|` marker is 
 - **Do** keep signatures as short as will return a unique hit: 7 to 16 bytes is the common sweet spot.
 - **Do** cache compiled `Pattern` values if you scan more than once; prefer `Pattern::literal()` for compile-time-known signatures.
 - **Do** ship at least one fallback candidate per hook for long-lived projects.
-- **Do** verify the match with `Memory::is_readable()` and a first-byte sanity check before hooking.
+- **Do** verify the match with `memory::is_readable()` and a first-byte sanity check before hooking.
 - **Do** log which named candidate matched; anonymous signatures are unmaintainable at scale.
 - **Do** treat the address returned by `scan::scan` as already offset-adjusted; it applies `Pattern::offset()` for you.
 
@@ -782,7 +781,7 @@ Reminder: `scan::scan` returns the offset-adjusted address when a `|` marker is 
 - **Don't** include a static address or RVA in the signature body: it will change next build.
 - **Don't** extend a signature into the `CC`/`90` padding between functions: linkers rebalance padding freely.
 - **Don't** anchor on a short `Jcc rel8` conditional jump. Compilers flip freely between the `rel8` and `rel32` encodings (from a 2-byte `74 xx` to a 6-byte `0F 84 xx xx xx xx`, or vice versa) whenever the branch distance crosses a threshold, and even trivial edits to unrelated code can push the branch into a different encoding. The opcode byte changes, so the signature stops matching.
-- **Don't** assume `scan::resolve_rip_relative` hands back the call target for `FF 15 disp32` / `FF 25 disp32`. The disp32 addresses a pointer slot, and DMK returns that slot's absolute address; you must dereference it (for example with `Memory::read_ptr_unsafe`) to obtain the final destination.
+- **Don't** assume `scan::resolve_rip_relative` hands back the call target for `FF 15 disp32` / `FF 25 disp32`. The disp32 addresses a pointer slot, and DMK returns that slot's absolute address; you must dereference it (for example with `memory::read<std::uintptr_t>`) to obtain the final destination.
 - **Don't** ship a pattern with zero literal bytes (every token `??`). The scan engine will match at the region start every time, which is almost never what the caller wants.
 - **Don't** call `Pattern::compile` in a hot loop on user-supplied strings; compile once at startup.
 - **Don't** add `Pattern::offset()` to the address returned by `scan::scan`; it already applies the offset. Double-applying walks past the intended byte and is a common source of mysteriously-wrong resolved addresses.

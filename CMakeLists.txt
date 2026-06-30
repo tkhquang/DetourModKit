@@ -59,9 +59,9 @@ else()
   # Security hardening: ASLR and DEP (NX) for MinGW targets
   add_link_options(-Wl,--dynamicbase -Wl,--nxcompat)
 
-  # The scanner's SSE2/AVX2 intrinsics are already hand-optimized and do
+  # The scan engine's SSE2/AVX2 intrinsics are already hand-optimized and do
   # not benefit from -O3's aggressive loop unrolling and auto-vectorization;
-  # the scanner.cpp downgrade to -O2 is applied per-source below so the
+  # the scan engine downgrade to -O2 is applied per-source below so the
   # rest of the tree keeps -O3 (hot paths in logger/memory integer math
   # measurably benefit).
 
@@ -156,7 +156,7 @@ configure_file(
 # header diagnostics to include/DetourModKit via HeaderFilterRegex. This option wires it into the build so clang-tidy
 # runs alongside compilation of DetourModKit's own sources (and the tests). Off by default so normal consumer and CI
 # builds are unaffected; CI runs it in a continue-on-error lane. Set here -- after the external submodules are added
-# above (line 108) and before the library and test targets below -- so only this project's targets inherit the launcher
+# above and before the library and test targets below -- so only this project's targets inherit the launcher
 # and SafetyHook / Zydis / Zycore are never analysed.
 option(DMK_ENABLE_CLANG_TIDY "Run clang-tidy on DetourModKit sources during the build (advisory)" OFF)
 
@@ -298,7 +298,7 @@ target_include_directories(DetourModKit
 
   # For DetourModKit's own sources to find its private engine headers without `../` paths: src/ TUs
   # include "internal/scan_engine.hpp" etc., and src/internal/ TUs include the shared src/ headers
-  # ("x86_decode.hpp", "fork_join.hpp", "memory_internal.hpp"). These headers are never installed.
+  # ("x86_decode.hpp", "fork_join.hpp"). These headers are never installed.
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 

@@ -157,4 +157,4 @@ if (!still_valid(cached.value))
 
 ## Scope
 
-Like the underlying resolvers, the registry defaults to the host EXE and accepts an explicit `Memory::ModuleRange`. Scoping is load-bearing for correctness, not just ergonomics: the same vtable name or instruction shape can exist in several loaded modules. Pass the game module's range when the target lives in a separate DLL.
+Like the underlying resolvers, the registry defaults to the host EXE and accepts an explicit `Region`. Scoping is load-bearing for correctness, not just ergonomics: the same vtable name or instruction shape can exist in several loaded modules. Pass the game module's range when the target lives in a separate DLL.

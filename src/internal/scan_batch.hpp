@@ -10,9 +10,8 @@
  *          the serial scans use, via the generic fork-join driver.
  */
 
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
-
-#include "DetourModKit/memory.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -72,7 +71,7 @@ namespace DetourModKit
          * @note Setup/control-plane only, same constraints as scan_regions_batch.
          */
         [[nodiscard]] std::vector<const std::byte *> scan_module_batch(std::span<const BatchScanItem> items,
-                                                                       Memory::ModuleRange range,
+                                                                       ModuleSpan range,
                                                                        ScannerKind kind = ScannerKind::Readable,
                                                                        std::size_t max_workers = 0);
     } // namespace detail

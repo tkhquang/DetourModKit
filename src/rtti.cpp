@@ -18,6 +18,7 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/memory.hpp"
 
+#include "internal/memory_guarded.hpp"
 #include "rtti_internal.hpp"
 
 #include <windows.h>
@@ -33,21 +34,21 @@ namespace DetourModKit
 
         // Anchor every subsequent bound check against the vtable's owning module. Heap pointers and addresses inside
         // unmapped ranges fail here without ever touching memory.
-        const auto mod_range_opt = Memory::module_range_for(reinterpret_cast<const void *>(vtable));
-        if (!mod_range_opt)
+        const DetourModKit::detail::ModuleSpan mod_range =
+            DetourModKit::detail::module_span(memory::module_of(Address{vtable}));
+        if (!mod_range.valid())
             return false;
-        const auto mod_range = *mod_range_opt;
 
         // vtable[-1] holds a pointer to the RTTICompleteObjectLocator. The COL must live in the same module as the
         // vtable; a COL pointer escaping the module range is the signature of a forged or relocated structure and
         // aborts the walk.
-        const auto col_ptr_opt =
-            Memory::seh_read<std::uintptr_t>(static_cast<std::uintptr_t>(vtable + COL_OFFSET_FROM_VTABLE));
-        if (!col_ptr_opt || !Memory::contains(mod_range, *col_ptr_opt))
+        const auto col_ptr_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(
+            static_cast<std::uintptr_t>(vtable + COL_OFFSET_FROM_VTABLE));
+        if (!col_ptr_opt || !mod_range.contains(*col_ptr_opt))
             return false;
         const std::uintptr_t col_addr = *col_ptr_opt;
 
-        // contains() above proved col_addr is in [base, end), but the seh_read<ColHead> below pulls sizeof(ColHead)
+        // contains() above proved col_addr is in [base, end), but the guarded_read<ColHead> below pulls sizeof(ColHead)
         // bytes, which a COL sitting within that many bytes of the module end would straddle past. The SEH guard
         // faults cleanly on an unmapped straddle, but reject the whole-span overrun up front so the walk never reads
         // COL fields out of an adjacent mapped image. (mod_range.end - col_addr cannot underflow: col_addr < end.)
@@ -56,7 +57,7 @@ namespace DetourModKit
 
         // Batched read: pulling all six COL fields in one SEH frame matters on
         // MinGW where every guarded read translates into a VirtualQuery.
-        const auto head_opt = Memory::seh_read<ColHead>(col_addr);
+        const auto head_opt = DetourModKit::detail::guarded_read<ColHead>(col_addr);
         if (!head_opt || head_opt->p_type_descriptor == 0)
             return false;
 
@@ -75,11 +76,11 @@ namespace DetourModKit
 
         // Compute the TypeDescriptor and name-buffer addresses from the module base plus the type-descriptor RVA. A
         // bogus RVA that places the name buffer outside the module range (or wraps the address space) is rejected by
-        // Memory::contains, which also requires the range to be valid. The name address is the strictly-higher of the
-        // two (td + 0x10), so bound-checking it implies td_addr is in range as well.
+        // the in-module bound check, which also requires the range to be valid. The name address is the strictly-higher
+        // of the two (td + 0x10), so bound-checking it implies td_addr is in range as well.
         const std::uintptr_t td_addr = mod_range.base + head_opt->p_type_descriptor;
         const std::uintptr_t name_addr = td_addr + TD_NAME_OFFSET;
-        if (!Memory::contains(mod_range, name_addr))
+        if (!mod_range.contains(name_addr))
             return false;
 
         out.col_addr = col_addr;
@@ -118,7 +119,7 @@ namespace DetourModKit
 
             char buf[256];
             const std::size_t this_read = (chunk > sizeof(buf)) ? sizeof(buf) : chunk;
-            if (!Memory::seh_read_bytes(cur, buf, this_read))
+            if (!DetourModKit::detail::guarded_read_bytes(cur, buf, this_read))
             {
                 read_failed = true;
                 break;
@@ -215,7 +216,7 @@ namespace DetourModKit
         // is either longer (a superstring) or unreadable past that point; both are rejected.
         char buf[MAX_TYPE_NAME_LEN + 1];
         const std::size_t need = expected.size() + 1;
-        if (!Memory::seh_read_bytes(name_addr, buf, need))
+        if (!DetourModKit::detail::guarded_read_bytes(name_addr, buf, need))
             return false;
         if (buf[expected.size()] != '\0')
             return false;
@@ -252,12 +253,12 @@ namespace DetourModKit
         {
             const std::uintptr_t slot_addr = table + i * stride;
 
-            const auto obj_opt = Memory::seh_read<std::uintptr_t>(slot_addr);
+            const auto obj_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(slot_addr);
             if (!obj_opt || *obj_opt < detail::MIN_VALID_PTR)
                 continue;
             const std::uintptr_t obj = *obj_opt;
 
-            const auto vt_opt = Memory::seh_read<std::uintptr_t>(obj);
+            const auto vt_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(obj);
             if (!vt_opt || *vt_opt < detail::MIN_VALID_PTR)
                 continue;
             const std::uintptr_t vt = *vt_opt;
@@ -312,9 +313,10 @@ namespace DetourModKit
          * @return The number of ranges written into @p out; 0 means the PE headers could not be parsed and the caller
          *         falls back to the whole module image.
          */
-        std::size_t collect_rtti_scan_ranges(Memory::ModuleRange mod, ScanRange *out, std::size_t cap) noexcept
+        std::size_t collect_rtti_scan_ranges(DetourModKit::detail::ModuleSpan mod, ScanRange *out,
+                                             std::size_t cap) noexcept
         {
-            const auto dos = Memory::seh_read<IMAGE_DOS_HEADER>(mod.base);
+            const auto dos = DetourModKit::detail::guarded_read<IMAGE_DOS_HEADER>(mod.base);
             if (!dos || dos->e_magic != IMAGE_DOS_SIGNATURE)
                 return 0;
 
@@ -322,10 +324,10 @@ namespace DetourModKit
                 mod.base + static_cast<std::uintptr_t>(static_cast<std::uint32_t>(dos->e_lfanew));
             // The NT headers must lie inside the image; a wild e_lfanew is the signature of a forged or truncated
             // header.
-            if (!Memory::contains(mod, nt_addr) || !Memory::contains(mod, nt_addr + sizeof(IMAGE_NT_HEADERS64)))
+            if (!mod.contains(nt_addr) || !mod.contains(nt_addr + sizeof(IMAGE_NT_HEADERS64)))
                 return 0;
 
-            const auto nt = Memory::seh_read<IMAGE_NT_HEADERS64>(nt_addr);
+            const auto nt = DetourModKit::detail::guarded_read<IMAGE_NT_HEADERS64>(nt_addr);
             if (!nt || nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
                 return 0;
 
@@ -346,10 +348,10 @@ namespace DetourModKit
             {
                 const std::uintptr_t hdr_addr =
                     sec_table + static_cast<std::uintptr_t>(i) * sizeof(IMAGE_SECTION_HEADER);
-                if (!Memory::contains(mod, hdr_addr + sizeof(IMAGE_SECTION_HEADER)))
+                if (!mod.contains(hdr_addr + sizeof(IMAGE_SECTION_HEADER)))
                     break;
 
-                const auto sec = Memory::seh_read<IMAGE_SECTION_HEADER>(hdr_addr);
+                const auto sec = DetourModKit::detail::guarded_read<IMAGE_SECTION_HEADER>(hdr_addr);
                 if (!sec)
                     break;
 
@@ -365,7 +367,7 @@ namespace DetourModKit
                 // mapped.
                 const std::uintptr_t begin = mod.base + sec->VirtualAddress;
                 const std::uintptr_t end = begin + sec->Misc.VirtualSize;
-                if (end <= begin || !Memory::contains(mod, begin) || end > mod.end)
+                if (end <= begin || !mod.contains(begin) || end > mod.end)
                     continue;
 
                 out[count].begin = begin;
@@ -384,7 +386,7 @@ namespace DetourModKit
         {
             char buf[Rtti::MAX_TYPE_NAME_LEN + 1];
             const std::size_t need = mangled.size() + 1;
-            if (!Memory::seh_read_bytes(name_addr, buf, need))
+            if (!DetourModKit::detail::guarded_read_bytes(name_addr, buf, need))
                 return false;
             if (buf[mangled.size()] != '\0')
                 return false;
@@ -401,7 +403,7 @@ namespace DetourModKit
          *          the forward walker uses, so the in-range pre-filter only spares a deeper read and never decides
          *          correctness.
          */
-        void sweep_range_for_name(Memory::ModuleRange mod, std::uintptr_t begin, std::uintptr_t end,
+        void sweep_range_for_name(DetourModKit::detail::ModuleSpan mod, std::uintptr_t begin, std::uintptr_t end,
                                   std::string_view mangled, VtMatch *out, std::size_t cap, std::size_t &count) noexcept
         {
             // Image-resident pointer storage is 8-byte aligned, so only qword-aligned slots can hold a vtable
@@ -424,13 +426,13 @@ namespace DetourModKit
                 // a 4 KiB page holds at most 512 qwords
                 std::uintptr_t buf[512];
                 const std::size_t want = (qwords < 512) ? qwords : 512;
-                if (Memory::seh_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
+                if (DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
                 {
                     for (std::size_t j = 0; j < want && count < cap; ++j)
                     {
                         // Pre-filter: a meta-slot holds a pointer to a COL inside
                         // this module. Most qwords fail here without a second read.
-                        if (!Memory::contains(mod, buf[j]))
+                        if (!mod.contains(buf[j]))
                             continue;
 
                         const std::uintptr_t slot_addr = addr + j * sizeof(std::uintptr_t);
@@ -471,7 +473,7 @@ namespace DetourModKit
          *          whole module image rather than reporting a confident-but-wrong "not found" for a packed or merged
          *          binary.
          */
-        std::size_t scan_vtables_for_name(Memory::ModuleRange mod, std::string_view mangled, VtMatch *out,
+        std::size_t scan_vtables_for_name(DetourModKit::detail::ModuleSpan mod, std::string_view mangled, VtMatch *out,
                                           std::size_t cap) noexcept
         {
             if (!mod.valid() || mangled.empty() || mangled.size() >= Rtti::MAX_TYPE_NAME_LEN)
@@ -499,10 +501,11 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    std::optional<std::uintptr_t> Rtti::vtable_for_type(std::string_view mangled, Memory::ModuleRange range) noexcept
+    std::optional<std::uintptr_t> Rtti::vtable_for_type(std::string_view mangled, Region range) noexcept
     {
         VtMatch matches[MAX_REVERSE_MATCHES];
-        const std::size_t match_count = scan_vtables_for_name(range, mangled, matches, MAX_REVERSE_MATCHES);
+        const std::size_t match_count =
+            scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled, matches, MAX_REVERSE_MATCHES);
 
         // The primary vtable is the COL.offset == 0 sub-object: the value an object pointer's first qword holds for a
         // most-derived instance, i.e. the faithful inverse of vtable_is_type. More than one distinct primary for the
@@ -529,13 +532,14 @@ namespace DetourModKit
     }
 
     std::size_t Rtti::vtables_for_type(std::string_view mangled, std::uintptr_t *out, std::size_t out_cap,
-                                       Memory::ModuleRange range) noexcept
+                                       Region range) noexcept
     {
         if (!out)
             out_cap = 0;
 
         VtMatch matches[MAX_REVERSE_MATCHES];
-        const std::size_t match_count = scan_vtables_for_name(range, mangled, matches, MAX_REVERSE_MATCHES);
+        const std::size_t match_count =
+            scan_vtables_for_name(DetourModKit::detail::module_span(range), mangled, matches, MAX_REVERSE_MATCHES);
 
         // Ascending COL.offset so the primary (offset 0) sorts first. The match count is tiny (one per base
         // sub-object), so an in-place insertion sort is both adequate and allocation-free.
@@ -557,7 +561,7 @@ namespace DetourModKit
         return match_count;
     }
 
-    Rtti::TypeIdentity::TypeIdentity(std::string_view mangled, Memory::ModuleRange range) noexcept
+    Rtti::TypeIdentity::TypeIdentity(std::string_view mangled, Region range) noexcept
         : m_mangled(mangled), m_range(range)
     {
     }

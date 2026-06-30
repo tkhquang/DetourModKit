@@ -12,6 +12,7 @@
 
 #include "DetourModKit/scan.hpp"
 
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_pages.hpp"
 #include "internal/scan_prologue_recovery.hpp"
@@ -74,7 +75,7 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::EmptyCandidates, "scan::resolve"});
             }
-            const Memory::ModuleRange range = detail::to_module_range(request.scope);
+            const detail::ModuleSpan range = detail::module_span(request.scope);
             if (!range.valid())
             {
                 return std::unexpected(Error{ErrorCode::InvalidRange, "scan::resolve"});
@@ -92,8 +93,8 @@ namespace DetourModKit
 
                 if (const RttiVtable *rtti = candidate.as_rtti_vtable())
                 {
-                    const std::optional<std::uintptr_t> vtable = Rtti::vtable_for_type(rtti->mangled, range);
-                    if (vtable && Memory::contains(range, *vtable))
+                    const std::optional<std::uintptr_t> vtable = Rtti::vtable_for_type(rtti->mangled, request.scope);
+                    if (vtable && range.contains(*vtable))
                     {
                         return Hit{Address{*vtable}, candidate.name()};
                     }
@@ -111,7 +112,7 @@ namespace DetourModKit
                         .broad_match = xref->broad_match,
                     };
                     const Result<Address> site = find_string_xref(query, request.scope);
-                    if (site && Memory::contains(range, site->raw()))
+                    if (site && range.contains(site->raw()))
                     {
                         return Hit{*site, candidate.name()};
                     }
@@ -158,7 +159,7 @@ namespace DetourModKit
                 }
                 const std::optional<std::uintptr_t> resolved =
                     resolve_byte_candidate(reinterpret_cast<std::uintptr_t>(first.match), candidate);
-                if (!resolved || !Memory::contains(range, *resolved))
+                if (!resolved || !range.contains(*resolved))
                 {
                     // A RipRelative displacement can resolve outside the scanned scope (e.g. an import thunk in another
                     // module); reject it here so the ladder falls through instead of committing out of scope.

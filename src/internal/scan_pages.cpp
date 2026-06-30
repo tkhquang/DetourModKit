@@ -14,7 +14,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
-#include "memory_internal.hpp"
+#include "internal/memory_fault.hpp"
 
 #include <windows.h>
 
@@ -60,10 +60,10 @@ namespace DetourModKit
         // Region-granular TOCTOU fault guard around scan_region_for_match. The caller's per-region VirtualQuery only
         // proves the region was committed and readable at gate time; a concurrent decommit / reprotect before these
         // unguarded reads complete would otherwise fault the host. On MSVC the body runs inside a __try / __except that
-        // swallows exactly the foreign-read faults (Memory::detail::is_guarded_read_fault) and reports the region as
-        // faulted, so the sweep skips it and continues -- the same skip-the-region contract seh_read_bytes follows. On
-        // MinGW x64 the same scan runs through the process-wide vectored read guard
-        // (Memory::detail::run_guarded_region) that the seh_read paths use, so a fault inside the scanned span is
+        // swallows exactly the foreign-read faults (detail::is_guarded_read_fault) and reports the region as
+        // faulted, so the sweep skips it and continues -- the same skip-the-region contract guarded_read_bytes follows.
+        // On MinGW x64 the same scan runs through the process-wide vectored read guard
+        // (detail::run_guarded_region) that the guarded_read paths use, so a fault inside the scanned span is
         // swallowed and the region is skipped + counted there too. On 32-bit MinGW that x64-only vectored guard is
         // unavailable, so the body runs directly and the per-region VirtualQuery gate is the only guard. *out_faulted
         // is set true only when a fault was swallowed.
@@ -85,8 +85,8 @@ namespace DetourModKit
             {
                 return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, matches_remaining);
             }
-            __except (Memory::detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
-                                                                                : EXCEPTION_CONTINUE_SEARCH)
+            __except (detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
+                                                                        : EXCEPTION_CONTINUE_SEARCH)
             {
                 // Treat a faulted region as skipped, not partially scanned. Matches observed before the fault cannot be
                 // trusted for Nth-occurrence accounting because unreadable tail bytes may hide additional matches.
@@ -120,7 +120,7 @@ namespace DetourModKit
             };
 
             const auto span_lo = reinterpret_cast<std::uintptr_t>(region_start);
-            if (Memory::detail::run_guarded_region(span_lo, span_lo + scan_size, run_scan, &scan_ctx))
+            if (detail::run_guarded_region(span_lo, span_lo + scan_size, run_scan, &scan_ctx))
             {
                 return scan_ctx.result;
             }
@@ -309,7 +309,7 @@ namespace DetourModKit
         constexpr DWORD READABLE_PAGE_FLAGS = EXECUTABLE_PAGE_FLAGS | PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
     } // anonymous namespace
 
-    detail::MatchResult detail::scan_module_executable(const detail::EnginePattern &pattern, Memory::ModuleRange range,
+    detail::MatchResult detail::scan_module_executable(const detail::EnginePattern &pattern, detail::ModuleSpan range,
                                                        std::size_t occurrence) noexcept
     {
         // EXECUTABLE_PAGE_FLAGS confines the match to code: the prologue-recovery fallback's rebuilt near-JMP can only
@@ -324,7 +324,7 @@ namespace DetourModKit
         return MatchResult{match, incomplete};
     }
 
-    detail::MatchResult detail::scan_module_readable(const detail::EnginePattern &pattern, Memory::ModuleRange range,
+    detail::MatchResult detail::scan_module_readable(const detail::EnginePattern &pattern, detail::ModuleSpan range,
                                                      std::size_t occurrence) noexcept
     {
         // READABLE_PAGE_FLAGS lets one pass cover both .text and .rdata / .data candidates, which is why the in-module
@@ -372,7 +372,7 @@ namespace DetourModKit
         return MatchResult{match, incomplete};
     }
 
-    detail::MatchResult detail::scan_module_pages(const detail::EnginePattern &pattern, Memory::ModuleRange range,
+    detail::MatchResult detail::scan_module_pages(const detail::EnginePattern &pattern, detail::ModuleSpan range,
                                                   scan::Pages pages, std::size_t occurrence) noexcept
     {
         // Pages::Executable narrows to code pages; Pages::Readable is the data-capable superset (the default).
@@ -385,7 +385,7 @@ namespace DetourModKit
     // using the identical mask scan_module_executable applies. The per-region gate (MEM_COMMIT, EXECUTABLE_PAGE_FLAGS,
     // not PAGE_GUARD / PAGE_NOACCESS) guarantees the window is readable at gate time; the caller still wraps its reads
     // of the window in a fault guard so a concurrent decommit / reprotect between gate and read cannot fault the host.
-    std::vector<detail::ExecutableWindow> detail::collect_executable_windows(Memory::ModuleRange range)
+    std::vector<detail::ExecutableWindow> detail::collect_executable_windows(detail::ModuleSpan range)
     {
         std::vector<ExecutableWindow> windows;
         if (!range.valid())

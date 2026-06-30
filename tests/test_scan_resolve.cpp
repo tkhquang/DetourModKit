@@ -938,10 +938,10 @@ class ScanResolveRttiVtable : public ::testing::Test
 protected:
     void SetUp() override
     {
-        (void)Memory::init_cache();
+        (void)memory::init_cache();
         sr_reset();
     }
-    void TearDown() override { Memory::shutdown_cache(); }
+    void TearDown() override { memory::shutdown_cache(); }
 };
 
 TEST_F(ScanResolveRttiVtable, ResolvesPrimaryVtableInScope)

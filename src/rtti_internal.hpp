@@ -42,7 +42,7 @@ namespace DetourModKit
              * @brief First 24 bytes of an MSVC x64 RTTICompleteObjectLocator.
              * @details Field order is fixed by the MSVC ABI; declaring it as a packed POD lets resolve_col_site() pull
              *          every field in a single SEH read rather than six separate ones. The struct is trivially copyable
-             *          so seh_read<ColHead> instantiates cleanly.
+             *          so guarded_read<ColHead> instantiates cleanly.
              */
             struct ColHead
             {
