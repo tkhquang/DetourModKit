@@ -298,8 +298,9 @@ auto r = hook::inline_at({.name = "camera_update", .target = Address{addr}}, &de
 if (r)
 {
     Hook h = std::move(*r);
-    // Typed trampoline (UNGUARDED, inline-only); the RAII handle unhooks on drop.
-    auto *original = h.original<CameraUpdateFn>();
+    // Typed trampoline (UNGUARDED, inline-only); original<Fn>() already returns the Fn function-pointer type, so
+    // plain auto reads clearer than auto*. The RAII handle unhooks on drop.
+    auto original = h.original<CameraUpdateFn>();
     original(camera_ptr);
 }
 ```

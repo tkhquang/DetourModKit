@@ -17,11 +17,21 @@ using namespace DetourModKit;
 using namespace DetourModKit::hook;
 using DetourModKit::keyboard_key;
 
+// Portable "do not inline" attribute: MSVC silently ignores [[gnu::noinline]], which would let the target below inline
+// and defeat the patch, so route through the same per-file macro the other hook tests use.
+#if defined(_MSC_VER)
+#define DMK_TEST_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define DMK_TEST_NOINLINE [[gnu::noinline]]
+#else
+#define DMK_TEST_NOINLINE
+#endif
+
 namespace
 {
     // A trivial in-process target/detour pair so the RAII shutdown test can install a real inline hook without a
-    // fixture DLL. [[gnu::noinline]] keeps the target a distinct, patchable function body.
-    [[gnu::noinline]] int shutdown_raii_target(int x)
+    // fixture DLL. DMK_TEST_NOINLINE keeps the target a distinct, patchable function body across compilers.
+    DMK_TEST_NOINLINE int shutdown_raii_target(int x)
     {
         volatile int r = x + 1;
         return r;

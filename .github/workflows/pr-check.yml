@@ -70,7 +70,12 @@ jobs:
           # identical-commit re-run still hits the exact key. The `v2` epoch invalidates every pre-existing cache
           # entry (the failing run saved a poisoned build dir under the old key, since cache save runs in the post-step
           # even on failure); bump it again if a future change ever needs to discard all cached build dirs wholesale.
-          key: cmake-build-v2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**') }}
+          # The workflow file itself is hashed so a change to the build inputs that live HERE rather than in the
+          # sources -- the pinned MinGW version (the `mingw-13.2.0` literal) and the configure flags passed on the
+          # command line (-DDMK_ENABLE_COVERAGE / -DDMK_WARNINGS_AS_ERRORS, neither of which is in CMakePresets.json) --
+          # also invalidates the key, so a toolchain bump or a flag flip never restores a build dir whose
+          # CMakeCache.txt embeds the old toolchain/flags.
+          key: cmake-build-v2-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'CMakePresets.json', 'external/**', 'src/**', 'include/**', 'tests/**', '.github/workflows/pr-check.yml') }}
 
       - name: Verify Tools
         run: |

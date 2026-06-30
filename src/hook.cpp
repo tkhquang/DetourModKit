@@ -568,17 +568,37 @@ namespace DetourModKit
             const std::uint64_t ledger_id = m_impl->ledger_id;
             const Diagnostics::HookKind kind =
                 m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
-            // Alias the name rather than copy it: a std::string copy allocates for a non-SSO name and can throw under
-            // OOM, which a noexcept destructor must not do. The view stays valid until m_impl is reset at the end.
-            const std::string_view name = m_impl->name;
+            // Copy the name out before the backend is restored below: the post-restore warning and lifecycle event read
+            // it, but m_impl (which owns the name storage) is gone once reset() runs, so a view would dangle. A
+            // std::string copy allocates for a non-SSO name and can throw under OOM, which a noexcept destructor must
+            // not do, so contain the copy in a try/catch and degrade to an empty name on failure rather than letting
+            // the throw escape.
+            std::string name;
+            try
+            {
+                name = m_impl->name;
+            }
+            catch (...)
+            {
+            }
 
             // Serialize with any in-flight call(): it holds call_mutex for its whole invocation, so acquiring it here
             // waits the call out, and marking the hook Disabled makes a subsequently-arriving call() return its default
-            // instead of dispatching through the trampoline (which the final reset frees).
+            // instead of dispatching through the trampoline (which the reset below frees).
             {
                 std::unique_lock<std::recursive_mutex> guard(m_impl->call_mutex);
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
             }
+
+            // Restore the prologue and free the trampoline FIRST, while the ledger still records this hook on the
+            // target, THEN release the ledger entry. Releasing before the backend is restored would open a window in
+            // which the ledger reads the target as un-hooked while the patch is still physically installed: a
+            // concurrent inline_at/mid_at on the same address could slip into that window, install over the live patch,
+            // and then be clobbered by this restore (a trampoline use-after-free). Restoring first means a racing
+            // create still sees the target as hooked (the safe direction) right up until the ledger entry is dropped.
+            // No call() can be dispatching through it here: status is Disabled and the guard above drained any
+            // in-flight call.
+            m_impl.reset();
 
             const std::size_t newer = DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
             if (newer > 0)
@@ -592,10 +612,6 @@ namespace DetourModKit
                     name, Format::format_address(target), newer);
             }
             emit_lifecycle(name, kind, Diagnostics::HookTransition::Removed);
-            // Destroy the Impl LAST, after the diagnostics that read its name: this restores the prologue and frees the
-            // trampoline. No call() can be dispatching through it (status is Disabled and the guard above drained any
-            // in-flight call).
-            m_impl.reset();
         }
 
         Hook::operator bool() const noexcept
@@ -671,9 +687,14 @@ namespace DetourModKit
             if (std::visit([](auto &backend) { return backend.enable().has_value(); }, m_impl->backend))
             {
                 m_impl->status.store(HookState::Active, std::memory_order_release);
-                emit_lifecycle(m_impl->name,
-                               m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid,
-                               Diagnostics::HookTransition::Enabled);
+                const Diagnostics::HookKind kind =
+                    m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
+                const std::string_view name = m_impl->name;
+                // Release the call guard before dispatching the lifecycle event: emit_lifecycle runs arbitrary
+                // subscriber code, which must not execute while DMK's per-hook mutex is held (CP.22 -- never call
+                // unknown code under a lock). enable() does not reset m_impl, so the captured name view stays valid.
+                guard.unlock();
+                emit_lifecycle(name, kind, Diagnostics::HookTransition::Enabled);
                 return {};
             }
             m_impl->status.store(HookState::Disabled, std::memory_order_release);
@@ -704,9 +725,13 @@ namespace DetourModKit
             if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend))
             {
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
-                emit_lifecycle(m_impl->name,
-                               m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid,
-                               Diagnostics::HookTransition::Disabled);
+                const Diagnostics::HookKind kind =
+                    m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
+                const std::string_view name = m_impl->name;
+                // Release the call guard before dispatching the lifecycle event (CP.22, see enable()); disable() does
+                // not reset m_impl, so the captured name view stays valid past the unlock.
+                guard.unlock();
+                emit_lifecycle(name, kind, Diagnostics::HookTransition::Disabled);
                 return {};
             }
             m_impl->status.store(HookState::Active, std::memory_order_release);
@@ -922,14 +947,23 @@ namespace DetourModKit
                 return;
             }
             const std::uint64_t ledger_id = m_impl->ledger_id;
-            // Alias the name rather than copy it (a std::string copy can throw under OOM; this is a noexcept
-            // destructor). The view stays valid until m_impl is reset below.
-            const std::string_view name = m_impl->name;
+            // Copy the name out before reset (which restores the vptrs and destroys the name storage); the lifecycle
+            // event below reads it. A std::string copy can throw under OOM and this is a noexcept destructor, so
+            // contain the copy and degrade to an empty name rather than letting the throw escape.
+            std::string name;
+            try
+            {
+                name = m_impl->name;
+            }
+            catch (...)
+            {
+            }
+            // Restore the original vptr on every applied object FIRST, while the ledger still records this clone, THEN
+            // release the ledger entry -- the same ordering as Hook::~Hook, so a concurrent vmt_for/apply_to keeps
+            // seeing the clone base as live until its restore completes instead of racing a half-removed clone.
+            m_impl.reset();
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
             emit_lifecycle(name, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Removed);
-            // Destroy the backend VmtHook LAST, after the diagnostics that read its name: this restores the original
-            // vptr on every applied object.
-            m_impl.reset();
         }
 
         VmtHook::operator bool() const noexcept

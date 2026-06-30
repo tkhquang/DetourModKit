@@ -186,11 +186,15 @@ static bool setup_hooks()
 {
     // Example: hook a game function by AOB pattern. inline_at returns a
     // move-only RAII Hook; keep it alive for as long as the hook should apply.
+    // Compile the pattern first and check the Result rather than calling
+    // .value() (which throws on a malformed pattern).
+    // auto pattern = DetourModKit::scan::Pattern::compile(
+    //     "48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? F3 0F");
+    // if (!pattern) return false;
     // auto result = DetourModKit::hook::inline_at(
     //     {.name = "camera_update",
     //      .target = DetourModKit::scan::OwnedScanRequest{
-    //          DetourModKit::scan::Pattern::compile(
-    //              "48 8B ?? ?? ?? ?? ?? 48 85 C0 74 ?? F3 0F").value(),
+    //          std::move(*pattern),
     //          DetourModKit::Region::module_named(game_module)}},
     //     &detour_camera_update);
     // if (!result) return false;

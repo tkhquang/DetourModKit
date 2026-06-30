@@ -81,8 +81,11 @@ LEGACY_MEMORY_TOKEN = re.compile(
 # InlineProloguePolicy, HookStatus / HookType, and the create_*_hook / hook_vmt_method / with_vmt_method entry points)
 # was reshaped into the free-function hook:: surface (inline_at / mid_at / install_all / Hook / VmtHook) over the
 # unified ErrorCode. None of these spellings may reappear. Matched after comment stripping. HookManager:: is gated
-# with the scope operator, not a bare \bHookManager\b, so the surviving Diagnostics::LeakSubsystem::HookManager
-# enumerator (a distinct name that FOLLOWS '::') is not a false positive.
+# with the scope operator, not a bare \bHookManager\b, on purpose -- broadening to the bare token is both unnecessary
+# and wrong: the HookManager class is deleted, so any standalone-type spelling (HookManager x;, HookManager *, or
+# using X = HookManager) is already a hard compile error that needs no gate; and a bare token would false-positive on
+# the surviving Diagnostics::LeakSubsystem::HookManager enumerator (a distinct, legitimate name that FOLLOWS '::').
+# The scope-only form targets exactly the legacy static-call spelling, the one that could otherwise read as plausible.
 LEGACY_HOOK_TOKEN = re.compile(
     r'(\bHookManager::|\bHookError\b|\bHookConfig\b|\bVmtHookConfig\b|\bInlineProloguePolicy\b'
     r'|\bHookStatus\b|\bHookType\b|\bcreate_inline_hook\b|\bcreate_mid_hook\b'

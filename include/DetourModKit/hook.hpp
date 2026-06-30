@@ -106,9 +106,16 @@ namespace DetourModKit
         {
             std::array<std::byte, 16> bytes;
 
-            /// Reinterprets the captured bytes as the index-th T-sized lane; an out-of-range lane returns zero.
+            /**
+             * @brief Reinterprets the captured bytes as the index-th T-sized lane; an out-of-range lane returns zero.
+             * @tparam T A trivially-copyable scalar lane type (float, double, an integer). memcpy-ing the raw register
+             *         bytes into a non-trivially-copyable T would be undefined behaviour, so the type is constrained.
+             * @note Callback-safe: a pure read over the captured context, no allocation, locking, or I/O.
+             */
             template <typename T> [[nodiscard]] T lane(std::size_t index) const noexcept
             {
+                static_assert(std::is_trivially_copyable_v<T>,
+                              "XmmView::lane<T> requires a trivially-copyable lane type");
                 T value{};
                 // Fail closed on an out-of-range lane: a bad index must not read past the 16-byte register.
                 if (index >= bytes.size() / sizeof(T))
@@ -129,10 +136,14 @@ namespace DetourModKit
          * @details Reading observes the live argument/scratch register at the hook point; writing overwrites it and
          *          the new value survives the trampoline resume. Defined in src/hook.cpp, the only TU that sees the
          *          backend; it reinterpret_casts the opaque MidContext& back to the real captured-context reference.
+         * @note Callback-safe: a pure register read/write over the captured context, no allocation, locking, or I/O.
          */
         [[nodiscard]] std::uintptr_t &gpr(MidContext &ctx, Gpr reg) noexcept;
 
-        /// Returns the captured stack pointer (rsp). Read-only by backend contract; modifying it would have no effect.
+        /**
+         * @brief Returns the captured stack pointer (rsp); read-only by backend contract, modifying it has no effect.
+         * @note Callback-safe: a pure register read over the captured context, no allocation, locking, or I/O.
+         */
         [[nodiscard]] std::uintptr_t stack_pointer(const MidContext &ctx) noexcept;
 
         /**
@@ -140,6 +151,7 @@ namespace DetourModKit
          * @details Unlike rsp (read-only, see stack_pointer), this is the stack pointer the trampoline restores when
          *          it resumes the original code, so writing it relocates the stack the resumed body runs on -- the
          *          accessor a detour reaches for when it needs to adjust where execution resumes.
+         * @note Callback-safe: a pure register read/write over the captured context, no allocation, locking, or I/O.
          */
         [[nodiscard]] std::uintptr_t &resume_stack_pointer(MidContext &ctx) noexcept;
 
@@ -148,6 +160,7 @@ namespace DetourModKit
          * @details Writing it redirects execution on resume: the trampoline's terminal return pops this (possibly
          *          rewritten) slot, so storing another same-signature function's address makes the resume land there
          *          instead of the original body.
+         * @note Callback-safe: a pure register read/write over the captured context, no allocation, locking, or I/O.
          */
         [[nodiscard]] std::uintptr_t &instruction_pointer(MidContext &ctx) noexcept;
 
@@ -155,10 +168,14 @@ namespace DetourModKit
          * @brief Returns a mutable reference to the captured flags register (rflags).
          * @details Writing it alters the condition flags the trampoline restores on resume, so a detour can flip a
          *          comparison result the original code is about to branch on.
+         * @note Callback-safe: a pure register read/write over the captured context, no allocation, locking, or I/O.
          */
         [[nodiscard]] std::uintptr_t &flags(MidContext &ctx) noexcept;
 
-        /// Read-only by-value snapshot of XMM register @p index (0..15); an out-of-range index returns a zeroed view.
+        /**
+         * @brief Read-only by-value snapshot of XMM register @p index (0..15); out-of-range returns a zeroed view.
+         * @note Callback-safe: a pure register read over the captured context, no allocation, locking, or I/O.
+         */
         [[nodiscard]] XmmView xmm(const MidContext &ctx, std::size_t index) noexcept;
 
         /**
@@ -272,8 +289,14 @@ namespace DetourModKit
             Hook(const Hook &) = delete;
             Hook &operator=(const Hook &) = delete;
 
-            /// Restores the patched prologue and frees the trampoline, unless the handle was released or moved-from.
-            ~Hook();
+            /**
+             * @brief Restores the patched prologue and frees the trampoline, unless the handle was released or
+             *        moved-from.
+             * @note Explicitly noexcept (a destructor is implicitly noexcept already): this runs from
+             *       DLL_PROCESS_DETACH / loader-lock teardown where an escaping exception terminates the host, so the
+             *       no-throw contract is pinned at the declaration and every path inside fails closed.
+             */
+            ~Hook() noexcept;
 
             /// True while this handle owns a live hook (false after a move-out or @ref release).
             [[nodiscard]] explicit operator bool() const noexcept;
@@ -324,6 +347,20 @@ namespace DetourModKit
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {
+                // A disengaged handle (moved-from or released) has no Impl and therefore no call_mutex to lock; return
+                // the inactive default here so call() matches the null-tolerance of original()/active_trampoline()
+                // instead of dereferencing a null Impl inside acquire_call_lock().
+                if (!m_impl)
+                {
+                    if constexpr (!std::is_void_v<Ret>)
+                    {
+                        return Ret{};
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
                 // Hold DMK's own per-hook guard for the whole invocation so a concurrent disable()/~Hook on another
                 // thread blocks until the call returns, instead of freeing the trampoline under our feet.
                 std::unique_lock<std::recursive_mutex> guard = acquire_call_lock();
@@ -561,8 +598,12 @@ namespace DetourModKit
             VmtHook(const VmtHook &) = delete;
             VmtHook &operator=(const VmtHook &) = delete;
 
-            /// Restores the original vptr on every applied object (newest-first), unless released or moved-from.
-            ~VmtHook();
+            /**
+             * @brief Restores the original vptr on every applied object (newest-first), unless released or moved-from.
+             * @note Explicitly noexcept (a destructor is implicitly noexcept already): like @ref Hook::~Hook it runs
+             *       from loader-lock teardown, so the no-throw contract is pinned at the declaration.
+             */
+            ~VmtHook() noexcept;
 
             /// True while this handle owns a live cloned vtable (false after a move-out or @ref release).
             [[nodiscard]] explicit operator bool() const noexcept;

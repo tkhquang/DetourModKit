@@ -365,8 +365,15 @@ namespace DetourModKit::Bootstrap
         // Hook teardown is caller-owned: each hook lives in a Hook handle the Logic DLL holds, and dropping that
         // handle unhooks it (the destructor honours the loader-lock leaf discipline). This helper therefore tears
         // down only the bindings and the config registry; the hook names are accepted for call-shape compatibility
-        // but are not acted on here.
-        (void)hook_names;
+        // but are not acted on here. Warn rather than silently ignore a non-empty list: a caller still passing hook
+        // names is on the pre-RAII contract and would otherwise believe these hooks were torn down here when they were
+        // not.
+        if (!hook_names.empty())
+        {
+            logger.warning("Bootstrap: on_logic_dll_unload received {} hook name(s), but hooks are now caller-owned "
+                           "RAII; drop the Hook handle to unhook. The names are ignored.",
+                           hook_names.size());
+        }
 
         for (const auto name : binding_names)
         {
@@ -421,9 +428,11 @@ namespace DetourModKit::Bootstrap
         // per-Logic-DLL state but keep the manager re-usable" contract that the named-list overload honours. Pass
         // invoke_callbacks=false because this helper is documented as safe from DllMain detach paths: user release
         // callbacks live in the unloading Logic DLL and must not be invoked under loader lock.
+        bool bindings_cleared = false;
         try
         {
             InputManager::get_instance().clear_bindings(false);
+            bindings_cleared = true;
         }
         catch (const std::exception &e)
         {
@@ -446,12 +455,17 @@ namespace DetourModKit::Bootstrap
             }
         }
 
-        try
+        // Only claim success when clear_bindings actually completed: on a caught throw the error above already recorded
+        // the partial teardown, and logging "drained all bindings" unconditionally would misreport it as a clean drain.
+        if (bindings_cleared)
         {
-            logger.info("Bootstrap: on_logic_dll_unload_all drained all bindings.");
-        }
-        catch (...)
-        {
+            try
+            {
+                logger.info("Bootstrap: on_logic_dll_unload_all drained all bindings.");
+            }
+            catch (...)
+            {
+            }
         }
 
         // Wipe the Config registry last for the same reason as the named-list overload: the prior remove_all_hooks /

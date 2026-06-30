@@ -429,6 +429,9 @@ TEST(HookTeardown, MovedFromHandleIsInert)
         // Only b owns the live hook now; a is inert and must not double-unhook or crash.
         EXPECT_FALSE(static_cast<bool>(a));
         EXPECT_TRUE(static_cast<bool>(b));
+        // call() through a disengaged handle must be a defined no-op returning the inactive default, not a null
+        // dereference of the moved-out Impl (the guarded twin of original<Fn>(), which is already inert here).
+        EXPECT_EQ(a.call<int>(7), int{});
         EXPECT_EQ(echo(7), 107);
     } // only b unhooks; a's destructor is a no-op
     EXPECT_EQ(echo(7), 7);
