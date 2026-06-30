@@ -484,7 +484,7 @@ namespace
 // clears the binding -- the caller still owns the hook lifetime.
 TEST(BootstrapOnLogicDllUnload, BindingsTornDownButHooksAreCallerOwned)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     const Address target{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
     Result<Hook> r = inline_at(InlineRequest{.name = "logic_unload_hook", .target = target}, &logic_unload_detour_add);
@@ -492,15 +492,19 @@ TEST(BootstrapOnLogicDllUnload, BindingsTornDownButHooksAreCallerOwned)
     Hook h = std::move(*r);
     ASSERT_TRUE(is_target_hooked(target));
 
-    InputManager::get_instance().register_press("logic_unload_binding", {keyboard_key(0x41)}, []() {});
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_binding"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x41)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     const std::string_view hooks[] = {"logic_unload_hook"};
     const std::string_view bindings[] = {"logic_unload_binding"};
     Bootstrap::on_logic_dll_unload(hooks, bindings);
 
     // Binding gone; hook untouched (still live and enabled) because the helper ignores hook_names.
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
     EXPECT_TRUE(static_cast<bool>(h)) << "passing a hook name must be a no-op; the caller still owns the hook";
     EXPECT_TRUE(h.is_enabled());
     EXPECT_TRUE(is_target_hooked(target));
@@ -510,13 +514,17 @@ TEST(BootstrapOnLogicDllUnload, BindingsTornDownButHooksAreCallerOwned)
 
 TEST(BootstrapOnLogicDllUnload, IsIdempotent)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     const Address target{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
     Result<Hook> r = inline_at(InlineRequest{.name = "logic_unload_idem", .target = target}, &logic_unload_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
-    InputManager::get_instance().register_press("logic_unload_idem_bind", {keyboard_key(0x42)}, []() {});
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_idem_bind"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x42)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
 
     const std::string_view hooks[] = {"logic_unload_idem"};
     const std::string_view bindings[] = {"logic_unload_idem_bind"};
@@ -524,7 +532,7 @@ TEST(BootstrapOnLogicDllUnload, IsIdempotent)
     Bootstrap::on_logic_dll_unload(hooks, bindings);
 
     // A repeated sweep is a no-op for the (already gone) binding and leaves the caller-owned hook live both times.
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
     EXPECT_TRUE(static_cast<bool>(h));
     EXPECT_TRUE(is_target_hooked(target));
 }
@@ -533,7 +541,7 @@ TEST(BootstrapOnLogicDllUnload, IsIdempotent)
 // Hold two caller-owned hooks across the catch-all sweep and prove both survive while every binding is cleared.
 TEST(BootstrapOnLogicDllUnloadAll, ClearsAllBindingsButHooksAreCallerOwned)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     const Address target_add{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
     const Address target_sub{reinterpret_cast<std::uintptr_t>(&logic_unload_target_sub)};
@@ -548,9 +556,17 @@ TEST(BootstrapOnLogicDllUnloadAll, ClearsAllBindingsButHooksAreCallerOwned)
     ASSERT_TRUE(r_sub.has_value()) << r_sub.error().message();
     Hook h_sub = std::move(*r_sub);
 
-    InputManager::get_instance().register_press("logic_unload_all_bind_a", {keyboard_key(0x43)}, []() {});
-    InputManager::get_instance().register_press("logic_unload_all_bind_b", {keyboard_key(0x44)}, []() {});
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(2));
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_all_bind_a"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x43)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_all_bind_b"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x44)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(2));
     ASSERT_TRUE(is_target_hooked(target_add));
     ASSERT_TRUE(is_target_hooked(target_sub));
 
@@ -561,37 +577,41 @@ TEST(BootstrapOnLogicDllUnloadAll, ClearsAllBindingsButHooksAreCallerOwned)
     EXPECT_TRUE(static_cast<bool>(h_sub));
     EXPECT_TRUE(is_target_hooked(target_add));
     EXPECT_TRUE(is_target_hooked(target_sub));
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 }
 
 TEST(BootstrapOnLogicDllUnloadAll, IsIdempotent)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     const Address target{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
     Result<Hook> r =
         inline_at(InlineRequest{.name = "logic_unload_all_idem", .target = target}, &logic_unload_detour_add);
     ASSERT_TRUE(r.has_value()) << r.error().message();
     Hook h = std::move(*r);
-    InputManager::get_instance().register_press("logic_unload_all_idem_bind", {keyboard_key(0x45)}, []() {});
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_all_idem_bind"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x45)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
 
     Bootstrap::on_logic_dll_unload_all();
     Bootstrap::on_logic_dll_unload_all();
 
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
     EXPECT_TRUE(static_cast<bool>(h));
     EXPECT_TRUE(is_target_hooked(target));
 }
 
 TEST(BootstrapOnLogicDllUnloadAll, EmptyRegistriesIsNoOp)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 
     Bootstrap::on_logic_dll_unload_all();
 
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 }
 
 // The named overload and the catch-all coexist on the binding/Config side: the named overload peels off its explicit
@@ -599,7 +619,7 @@ TEST(BootstrapOnLogicDllUnloadAll, EmptyRegistriesIsNoOp)
 // across both calls.
 TEST(BootstrapOnLogicDllUnloadAll, CoexistsWithNamedOverload)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     const Address target_named{reinterpret_cast<std::uintptr_t>(&logic_unload_target_add)};
     const Address target_residual{reinterpret_cast<std::uintptr_t>(&logic_unload_target_sub)};
@@ -614,8 +634,16 @@ TEST(BootstrapOnLogicDllUnloadAll, CoexistsWithNamedOverload)
     ASSERT_TRUE(r_residual.has_value()) << r_residual.error().message();
     Hook h_residual = std::move(*r_residual);
 
-    InputManager::get_instance().register_press("logic_unload_mixed_named_bind", {keyboard_key(0x46)}, []() {});
-    InputManager::get_instance().register_press("logic_unload_mixed_residual_bind", {keyboard_key(0x47)}, []() {});
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_mixed_named_bind"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x46)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"logic_unload_mixed_residual_bind"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x47)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
 
     // Named overload first peels off the explicit binding subset (hook_names is accepted but ignored).
     const std::string_view hooks[] = {"logic_unload_mixed_named"};
@@ -625,7 +653,7 @@ TEST(BootstrapOnLogicDllUnloadAll, CoexistsWithNamedOverload)
     EXPECT_TRUE(static_cast<bool>(h_named)) << "named hook must survive; hook_names is a no-op";
     EXPECT_TRUE(is_target_hooked(target_named));
     EXPECT_TRUE(is_target_hooked(target_residual));
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     // Catch-all sweeps the residual binding; both hooks stay caller-owned.
     Bootstrap::on_logic_dll_unload_all();
@@ -634,34 +662,38 @@ TEST(BootstrapOnLogicDllUnloadAll, CoexistsWithNamedOverload)
     EXPECT_TRUE(static_cast<bool>(h_residual));
     EXPECT_TRUE(is_target_hooked(target_named));
     EXPECT_TRUE(is_target_hooked(target_residual));
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 }
 
 TEST(BootstrapOnLogicDllUnload, SuppressesHoldReleaseCallbacks)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     auto release_count = std::make_shared<std::atomic<int>>(0);
     auto press_count = std::make_shared<std::atomic<int>>(0);
 
-    InputManager::get_instance().register_hold("loader_lock_hold", {keyboard_key(0x48)},
-                                               [release_count, press_count](bool pressed) noexcept
-                                               {
-                                                   if (pressed)
-                                                   {
-                                                       press_count->fetch_add(1, std::memory_order_relaxed);
-                                                   }
-                                                   else
-                                                   {
-                                                       release_count->fetch_add(1, std::memory_order_relaxed);
-                                                   }
-                                               });
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(1));
+    (void)input::register_combo(
+        input::ComboBinding{.name = std::string{"loader_lock_hold"},
+                            .trigger = input::Trigger::Hold,
+                            .combos = {{{keyboard_key(0x48)}, {}}},
+                            .on_press = {},
+                            .on_state_change = [release_count, press_count](bool pressed) noexcept
+                            {
+                                if (pressed)
+                                {
+                                    press_count->fetch_add(1, std::memory_order_relaxed);
+                                }
+                                else
+                                {
+                                    release_count->fetch_add(1, std::memory_order_relaxed);
+                                }
+                            }});
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(1));
 
     const std::string_view bindings[] = {"loader_lock_hold"};
     Bootstrap::on_logic_dll_unload({}, bindings);
 
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
     EXPECT_EQ(release_count->load(), 0)
         << "Bootstrap unload helpers must not invoke user release callbacks under loader lock";
     EXPECT_EQ(press_count->load(), 0);
@@ -669,22 +701,25 @@ TEST(BootstrapOnLogicDllUnload, SuppressesHoldReleaseCallbacks)
 
 TEST(BootstrapOnLogicDllUnloadAll, SuppressesHoldReleaseCallbacks)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     auto release_count = std::make_shared<std::atomic<int>>(0);
 
-    InputManager::get_instance().register_hold("loader_lock_hold_all", {keyboard_key(0x49)},
-                                               [release_count](bool pressed) noexcept
-                                               {
-                                                   if (!pressed)
-                                                   {
-                                                       release_count->fetch_add(1, std::memory_order_relaxed);
-                                                   }
-                                               });
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"loader_lock_hold_all"},
+                                                    .trigger = input::Trigger::Hold,
+                                                    .combos = {{{keyboard_key(0x49)}, {}}},
+                                                    .on_press = {},
+                                                    .on_state_change = [release_count](bool pressed) noexcept
+                                                    {
+                                                        if (!pressed)
+                                                        {
+                                                            release_count->fetch_add(1, std::memory_order_relaxed);
+                                                        }
+                                                    }});
 
     Bootstrap::on_logic_dll_unload_all();
 
-    EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+    EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
     EXPECT_EQ(release_count->load(), 0);
 }
 
@@ -744,7 +779,7 @@ namespace
 // reloaded fixture succeeds.
 TEST(BootstrapOnLogicDllUnload, FixtureDllRoundTrip)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     LoadedFixtureModule mod;
     ASSERT_TRUE(mod.load()) << "hook_target_lib.dll must be loadable";
@@ -763,9 +798,17 @@ TEST(BootstrapOnLogicDllUnload, FixtureDllRoundTrip)
         ASSERT_TRUE(r_armor.has_value()) << r_armor.error().message();
         Hook h_armor = std::move(*r_armor);
 
-        InputManager::get_instance().register_press("fixture_dll_bind_a", {keyboard_key(0x4A)}, []() {});
-        InputManager::get_instance().register_press("fixture_dll_bind_b", {keyboard_key(0x4B)}, []() {});
-        EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(2));
+        (void)input::register_combo(input::ComboBinding{.name = std::string{"fixture_dll_bind_a"},
+                                                        .trigger = input::Trigger::Press,
+                                                        .combos = {{{keyboard_key(0x4A)}, {}}},
+                                                        .on_press = []() {},
+                                                        .on_state_change = {}});
+        (void)input::register_combo(input::ComboBinding{.name = std::string{"fixture_dll_bind_b"},
+                                                        .trigger = input::Trigger::Press,
+                                                        .combos = {{{keyboard_key(0x4B)}, {}}},
+                                                        .on_press = []() {},
+                                                        .on_state_change = {}});
+        EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(2));
         ASSERT_TRUE(is_target_hooked(target_damage));
         ASSERT_TRUE(is_target_hooked(target_armor));
 
@@ -774,7 +817,7 @@ TEST(BootstrapOnLogicDllUnload, FixtureDllRoundTrip)
         Bootstrap::on_logic_dll_unload(hooks, bindings);
 
         // Bindings cleared; the caller's hooks are untouched (hook_names ignored).
-        EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+        EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
         EXPECT_TRUE(static_cast<bool>(h_damage));
         EXPECT_TRUE(static_cast<bool>(h_armor));
         EXPECT_TRUE(is_target_hooked(target_damage));
@@ -782,7 +825,7 @@ TEST(BootstrapOnLogicDllUnload, FixtureDllRoundTrip)
 
         // Idempotent on the binding side: a second sweep of the same names is a no-op and still spares the hooks.
         Bootstrap::on_logic_dll_unload(hooks, bindings);
-        EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+        EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
         EXPECT_TRUE(is_target_hooked(target_damage));
 
         // The Hook handles drop here: RAII restores the fixture's prologues.
@@ -806,7 +849,7 @@ TEST(BootstrapOnLogicDllUnload, FixtureDllRoundTrip)
 
 TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
 {
-    InputManager::get_instance().shutdown();
+    input::Input::instance().shutdown();
 
     LoadedFixtureModule mod;
     ASSERT_TRUE(mod.load());
@@ -825,12 +868,16 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
         ASSERT_TRUE(r_armor.has_value()) << r_armor.error().message();
         Hook h_armor = std::move(*r_armor);
 
-        InputManager::get_instance().register_press("fixture_all_bind", {keyboard_key(0x4C)}, []() {});
+        (void)input::register_combo(input::ComboBinding{.name = std::string{"fixture_all_bind"},
+                                                        .trigger = input::Trigger::Press,
+                                                        .combos = {{{keyboard_key(0x4C)}, {}}},
+                                                        .on_press = []() {},
+                                                        .on_state_change = {}});
 
         Bootstrap::on_logic_dll_unload_all();
 
         // The catch-all cleared the binding but left both caller-owned hooks live.
-        EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+        EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
         EXPECT_TRUE(static_cast<bool>(h_damage));
         EXPECT_TRUE(static_cast<bool>(h_armor));
         EXPECT_TRUE(is_target_hooked(target_damage));
@@ -838,7 +885,7 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
 
         // Idempotency on the binding side.
         Bootstrap::on_logic_dll_unload_all();
-        EXPECT_EQ(InputManager::get_instance().binding_count(), static_cast<size_t>(0));
+        EXPECT_EQ(input::Input::instance().binding_count(), static_cast<size_t>(0));
 
         // Hook handles drop here: RAII restores the fixture prologues.
     }
@@ -856,7 +903,7 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
     EXPECT_TRUE(reload.has_value()) << reload.error().message();
 }
 
-// Verifies that on_logic_dll_unload chains Config::clear_registered_items after the hook and binding teardown so
+// Verifies that on_logic_dll_unload chains config::clear after the binding teardown so
 // registered std::function setters (whose call operator and destructor live in the unloading
 // Logic DLL) cannot survive into a second attach as use-after-unload hazards.
 //
@@ -866,15 +913,15 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
 // local sentinel is the sole owner.
 TEST(BootstrapOnLogicDllUnload, ClearsConfigRegisteredItems)
 {
-    InputManager::get_instance().shutdown();
-    Config::clear_registered_items();
+    input::Input::instance().shutdown();
+    config::clear();
 
     auto sentinel = std::make_shared<int>(0);
     EXPECT_EQ(sentinel.use_count(), 1L);
 
-    Config::register_string(
+    config::bind_string(
         "BootstrapUnloadCfgClear", "Key", "Bootstrap unload key",
-        [sentinel](const std::string &) { /* keeps sentinel alive */ }, "default");
+        [sentinel](std::string_view) { /* keeps sentinel alive */ }, "default");
 
     // After registration the captured-by-value shared_ptr lives inside the setter closure stored in the Config
     // registry, so use_count includes both the local sentinel and the closure copy.
@@ -889,15 +936,15 @@ TEST(BootstrapOnLogicDllUnload, ClearsConfigRegisteredItems)
 
 TEST(BootstrapOnLogicDllUnloadAll, ClearsConfigRegisteredItems)
 {
-    InputManager::get_instance().shutdown();
-    Config::clear_registered_items();
+    input::Input::instance().shutdown();
+    config::clear();
 
     auto sentinel = std::make_shared<int>(0);
     EXPECT_EQ(sentinel.use_count(), 1L);
 
-    Config::register_string(
+    config::bind_string(
         "BootstrapUnloadAllCfgClear", "Key", "Bootstrap unload-all key",
-        [sentinel](const std::string &) { /* keeps sentinel alive */ }, "default");
+        [sentinel](std::string_view) { /* keeps sentinel alive */ }, "default");
     EXPECT_GE(sentinel.use_count(), 2L);
 
     Bootstrap::on_logic_dll_unload_all();
@@ -917,9 +964,9 @@ namespace
             std::ofstream ofs(ini_path);
             ofs << "[Section]\nKey=1\n";
         }
-        Config::register_int("Section", "Key", std::string(item_name), [](int) {}, 1);
-        EXPECT_NO_THROW(Config::load(ini_path.string()));
-        EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started);
+        config::bind_int("Section", "Key", std::string(item_name), [](int) {}, 1);
+        EXPECT_NO_THROW(config::load(ini_path.string()));
+        EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started);
         return ini_path;
     }
 } // namespace
@@ -930,21 +977,21 @@ namespace
 // Started after re-loading proves the watcher was stopped.
 TEST(BootstrapOnLogicDllUnload, StopsAutoReloadWatcher)
 {
-    InputManager::get_instance().shutdown();
-    Config::clear_registered_items();
-    Config::disable_auto_reload();
+    input::Input::instance().shutdown();
+    config::clear();
+    config::disable_auto_reload();
 
     const auto ini_path = arm_auto_reload_watcher("bootstrap_unload_watcher");
 
     Bootstrap::on_logic_dll_unload({}, {});
 
-    Config::register_int("Section", "Key", "bootstrap_unload_watcher_2", [](int) {}, 1);
-    EXPECT_NO_THROW(Config::load(ini_path.string()));
-    EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started)
+    config::bind_int("Section", "Key", "bootstrap_unload_watcher_2", [](int) {}, 1);
+    EXPECT_NO_THROW(config::load(ini_path.string()));
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started)
         << "on_logic_dll_unload must stop the auto-reload watcher; a survivor would report AlreadyRunning";
 
-    Config::disable_auto_reload();
-    Config::clear_registered_items();
+    config::disable_auto_reload();
+    config::clear();
     if (std::filesystem::exists(ini_path))
     {
         std::filesystem::remove(ini_path);
@@ -953,21 +1000,21 @@ TEST(BootstrapOnLogicDllUnload, StopsAutoReloadWatcher)
 
 TEST(BootstrapOnLogicDllUnloadAll, StopsAutoReloadWatcher)
 {
-    InputManager::get_instance().shutdown();
-    Config::clear_registered_items();
-    Config::disable_auto_reload();
+    input::Input::instance().shutdown();
+    config::clear();
+    config::disable_auto_reload();
 
     const auto ini_path = arm_auto_reload_watcher("bootstrap_unload_all_watcher");
 
     Bootstrap::on_logic_dll_unload_all();
 
-    Config::register_int("Section", "Key", "bootstrap_unload_all_watcher_2", [](int) {}, 1);
-    EXPECT_NO_THROW(Config::load(ini_path.string()));
-    EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started)
+    config::bind_int("Section", "Key", "bootstrap_unload_all_watcher_2", [](int) {}, 1);
+    EXPECT_NO_THROW(config::load(ini_path.string()));
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started)
         << "on_logic_dll_unload_all must stop the auto-reload watcher; a survivor would report AlreadyRunning";
 
-    Config::disable_auto_reload();
-    Config::clear_registered_items();
+    config::disable_auto_reload();
+    config::clear();
     if (std::filesystem::exists(ini_path))
     {
         std::filesystem::remove(ini_path);

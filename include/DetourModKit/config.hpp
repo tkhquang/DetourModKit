@@ -1,600 +1,516 @@
 #ifndef DETOURMODKIT_CONFIG_HPP
 #define DETOURMODKIT_CONFIG_HPP
 
-#include "DetourModKit/input_codes.hpp"
-#include "DetourModKit/logger.hpp"
+/**
+ * @file config.hpp
+ * @brief INI-backed configuration binding, hot-reload, and the INI-to-input combo fusion.
+ * @details Binds INI keys to atomics, callbacks, and the logger, loads and hot-reloads an INI file, and fuses an INI
+ *          key to a live input combo binding (config depends on input, never the reverse). The filesystem watcher that
+ *          drives auto-reload is folded in: there is no separate watcher header, only enable_auto_reload /
+ *          disable_auto_reload over an engine living under src/internal/.
+ *
+ *          Config is deliberately fail-soft: a missing or malformed INI key falls back to the registered default and
+ *          is logged, never reported as an error, so the bind / load / reload surface speaks void / bool /
+ *          AutoReloadStatus rather than Result. Only the input combo fusion returns an input::BindingGuard.
+ *
+ *          The free functions operate on the process configuration registry. SectionBinder is a section-scoped view
+ *          that drops the repeated section argument, and Ini is a thin handle exposing the same operations plus
+ *          section(); both forward to the same process registry.
+ *
+ * @note Thread safety: every bind / load / reload uses a deferred-callback pattern -- registry state is read and
+ *       written under the config mutex, but setter callbacks run after the mutex is released. A setter may therefore
+ *       call back into the config API without deadlocking, so no reentrancy guard is needed.
+ */
+
+#include "DetourModKit/input.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <concepts>
+#include <cstdint>
 #include <functional>
-#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <utility>
-#include <vector>
 
 namespace DetourModKit
 {
-    // Forward-declared to keep the filesystem watcher out of this header. Full definition lives in config_watcher.hpp.
-    class ConfigWatcher;
-
-    /**
-     * @namespace Config
-     * @brief Provides functions for registering, loading, and logging configuration settings.
-     * @details This system allows mods to register their configuration variables with DetourModKit. The kit handles
-     *          loading values from an INI file and provides logging functionality. Uses std::function callbacks for
-     *          type-safe value setting.
-     *
-     * All `register_*` functions share these common parameters:
-     *   - @p section     INI section name.
-     *   - @p ini_key     INI key name.
-     *   - @p log_key_name  Human-readable name shown in log output.
-     *   - @p setter      Callback invoked with the loaded (or default) value.
-     *
-     * @note Setter callbacks are invoked at two points: immediately during registration (with the default value) and
-     *       again during load() (with the INI or default value). Consumers that accumulate state (e.g. building a
-     *       lookup map) must be idempotent -- clear accumulated state before applying the new value to avoid stale
-     *       entries.
-     *
-     * **Thread safety:** All `register_*` and `load()` functions use a deferred callback
-     * pattern: state is read/written under the config mutex, but setter callbacks are
-     * invoked *after* the mutex is released.  This means setter callbacks may safely call
-     * back into the Config API (e.g. `register_*`, `load`, `log_all`) without deadlocking.
-     * A reentrancy guard is therefore unnecessary.  `log_all()` and `clear_registered_items()`
-     * hold the mutex for the entire call but only invoke Logger methods, which use an independent lock hierarchy.
-     */
-    namespace Config
+    namespace config
     {
-
-        /**
-         * @struct KeyCombo
-         * @brief Represents a single key combination with trigger keys and modifiers.
-         * @details Contains trigger keys (OR logic) and modifier keys (AND logic). Designed for direct use with
-         *          InputManager::register_press/register_hold. Each key is an InputCode identifying both the device
-         *          source and button.
-         *
-         *          Within a single combo, modifiers are separated by '+' and the last '+'-delimited token is the
-         *          trigger key. Tokens can be human-readable names or hex VK codes:
-         *            - "F3"                   -> keys=[F3], modifiers=[]
-         *            - "Ctrl+F3"              -> keys=[F3], modifiers=[Ctrl]
-         *            - "Ctrl+Shift+F3"        -> keys=[F3], modifiers=[Ctrl, Shift]
-         *            - "Mouse4"               -> keys=[Mouse4], modifiers=[]
-         *            - "Gamepad_LB+Gamepad_A" -> keys=[Gamepad_A], modifiers=[Gamepad_LB]
-         *            - "0x11+0x72"            -> keys=[0x72], modifiers=[0x11] (hex fallback)
-         *
-         *          Multiple combos are separated by commas in INI values, parsed into a KeyComboList. Each combo is
-         *          independent (OR logic between combos):
-         *            - "F3,Gamepad_LT+Gamepad_B" -> [{keys=[F3]}, {keys=[Gamepad_B], mods=[Gamepad_LT]}]
-         *            - "Ctrl+F3,Ctrl+F4"          -> [{keys=[F3], mods=[Ctrl]}, {keys=[F4], mods=[Ctrl]}]
-         */
-        struct KeyCombo
-        {
-            std::vector<InputCode> keys;
-            std::vector<InputCode> modifiers;
-        };
-
-        /// A list of alternative key combinations (OR logic between combos).
-        using KeyComboList = std::vector<KeyCombo>;
-
-        /**
-         * @class InputBindingGuard
-         * @brief RAII cancellation token for bindings registered via register_press_combo() / register_hold_combo().
-         * @details The guard owns a shared atomic flag that gates the user callback. On destruction (or explicit
-         *          release()) the flag is cleared and subsequent input events become no-ops. The underlying
-         *          InputManager binding remains registered; it is only torn down by InputManager::shutdown() or
-         *          DMK_Shutdown().
-         *
-         *          A hold-combo guard additionally carries an optional one-shot release action. A hold callback has
-         *          lingering state -- the consumer is told "held" (true) until told "released" (false) -- so simply
-         *          gating the callback off mid-hold would strand the consumer in the held state. The release action
-         *          synthesizes a single balancing on_state_change(false) when a true edge was the last one forwarded.
-         *          A press guard has no such state and carries no action.
-         *
-         *          Non-copyable, movable. Moving transfers ownership of the cancellation flag and the release action;
-         *          the moved-from guard becomes inert.
-         * @note Setup/control-plane only for hold guards: release() (and therefore the destructor) may invoke the hold
-         *       release callback, so destroy a hold guard from init/shutdown or a worker thread, never from inside an
-         *       input callback running on a game thread.
-         */
-        class InputBindingGuard
-        {
-        public:
-            InputBindingGuard() = default;
-            InputBindingGuard(std::string name, std::shared_ptr<std::atomic<bool>> enabled) noexcept
-                : m_name(std::move(name)), m_enabled(std::move(enabled))
-            {
-            }
-
-            /**
-             * @brief Constructs a guard that also runs @p on_release once when the binding is cancelled.
-             * @details Used by the hold-combo fusion to synthesize the balancing on_state_change(false). The action is
-             *          invoked under this guard's noexcept teardown; any exception it raises is caught and logged
-             *          best-effort, never propagated.
-             * @param name InputManager binding name this guard reports via name().
-             * @param enabled Shared cancellation flag the binding's callback wrapper gates on; release() clears it so
-             *               subsequent events become no-ops.
-             * @param on_release One-shot action run once by release() (the hold's balancing on_state_change(false));
-             *                   pass an empty function for a press binding, which then behaves like the two-argument
-             *                   constructor.
-             */
-            InputBindingGuard(std::string name, std::shared_ptr<std::atomic<bool>> enabled,
-                              std::function<void()> on_release) noexcept
-                : m_name(std::move(name)), m_enabled(std::move(enabled)), m_on_release(std::move(on_release))
-            {
-            }
-
-            ~InputBindingGuard() noexcept { release(); }
-
-            InputBindingGuard(const InputBindingGuard &) = delete;
-            InputBindingGuard &operator=(const InputBindingGuard &) = delete;
-
-            InputBindingGuard(InputBindingGuard &&other) noexcept
-                : m_name(std::move(other.m_name)), m_enabled(std::move(other.m_enabled)),
-                  m_on_release(std::move(other.m_on_release))
-            {
-                // A moved-from std::function is left in a valid-but-unspecified state; null it explicitly so the
-                // moved-from guard's release() cannot re-run the action this guard now owns.
-                other.m_on_release = nullptr;
-            }
-
-            InputBindingGuard &operator=(InputBindingGuard &&other) noexcept
-            {
-                if (this != &other)
-                {
-                    release();
-                    m_name = std::move(other.m_name);
-                    m_enabled = std::move(other.m_enabled);
-                    m_on_release = std::move(other.m_on_release);
-                    other.m_on_release = nullptr;
-                }
-                return *this;
-            }
-
-            /**
-             * @brief Disables the binding's callback, then runs the release action once if present. Idempotent.
-             */
-            void release() noexcept
-            {
-                if (m_enabled)
-                {
-                    m_enabled->store(false, std::memory_order_release);
-                    m_enabled.reset();
-                }
-                // Run the optional release action exactly once. std::exchange clears the member first so a repeated or
-                // re-entrant release() cannot double-fire it, and the catch keeps this noexcept teardown honest even
-                // though the action may invoke a user-supplied hold callback.
-                if (m_on_release)
-                {
-                    const std::function<void()> action = std::exchange(m_on_release, nullptr);
-                    try
-                    {
-                        action();
-                    }
-                    catch (...)
-                    {
-                        (void)Logger::get_instance().log_noexcept(
-                            LogLevel::Error,
-                            "InputBindingGuard: hold release action threw; suppressed in noexcept teardown");
-                    }
-                }
-            }
-
-            /**
-             * @brief Returns the binding's InputManager name.
-             */
-            [[nodiscard]] const std::string &name() const noexcept { return m_name; }
-
-            /**
-             * @brief Returns true while the binding's callback is still live.
-             */
-            [[nodiscard]] bool is_active() const noexcept
-            {
-                return m_enabled && m_enabled->load(std::memory_order_acquire);
-            }
-
-        private:
-            std::string m_name;
-            std::shared_ptr<std::atomic<bool>> m_enabled;
-            // Optional one-shot action run on release(); empty for press bindings, set by the hold-combo fusion to
-            // synthesize the balancing on_state_change(false) so a cancelled hold cannot strand the consumer as held.
-            std::function<void()> m_on_release;
-        };
-
-        /**
-         * @brief Registers an integer configuration item.
-         * @details The setter is invoked immediately with @p default_value and again on every load() / reload() with
-         *          the parsed INI value.
-         * @param section INI section name.
-         * @param ini_key Key within the section.
-         * @param log_key_name Human-readable name used in log output.
-         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
-         * @param default_value Value used when the key is absent or unparsable.
-         */
-        void register_int(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                          std::function<void(int)> setter, int default_value);
-
-        /**
-         * @brief Registers a floating-point configuration item.
-         * @details The setter is invoked immediately with @p default_value and again on every load() / reload() with
-         *          the parsed INI value.
-         * @param section INI section name.
-         * @param ini_key Key within the section.
-         * @param log_key_name Human-readable name used in log output.
-         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
-         * @param default_value Value used when the key is absent or unparsable.
-         */
-        void register_float(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                            std::function<void(float)> setter, float default_value);
-
-        /**
-         * @brief Registers a boolean configuration item.
-         * @details The setter is invoked immediately with @p default_value and again on every load() / reload() with
-         *          the parsed INI value.
-         * @param section INI section name.
-         * @param ini_key Key within the section.
-         * @param log_key_name Human-readable name used in log output.
-         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
-         * @param default_value Value used when the key is absent or unparsable.
-         */
-        void register_bool(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                           std::function<void(bool)> setter, bool default_value);
-
-        /**
-         * @brief Registers a string configuration item.
-         * @details The setter is invoked immediately with @p default_value and again on every load() / reload() with
-         *          the parsed INI value.
-         * @param section INI section name.
-         * @param ini_key Key within the section.
-         * @param log_key_name Human-readable name used in log output.
-         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
-         * @param default_value Value used when the key is absent or unparsable.
-         * @note The INI is parsed as narrow bytes (the underlying SimpleIni uses SetUnicode(false)), so a value is
-         *       delivered to @p setter verbatim as the bytes on disk -- not transcoded. ASCII values (the common case)
-         *       pass through unchanged; a value with non-ASCII characters arrives as raw bytes (e.g. UTF-8 from a
-         *       UTF-8-saved INI), and any encoding interpretation is the consumer's responsibility.
-         */
-        void register_string(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                             std::function<void(const std::string &)> setter, std::string default_value);
-
-        /**
-         * @brief Registers a log-level INI item that applies directly to Logger.
-         * @details Parses @p default_value via Logger::string_to_log_level and calls Logger::set_log_level both at
-         *          registration and on each load() / reload(). Unrecognized values fall back to
-         *          LogLevel::Info per Logger::string_to_log_level.
-         * @param section INI section name.
-         * @param ini_key INI key name.
-         * @param default_value Default level string (e.g. "INFO", "DEBUG").
-         */
-        void register_log_level(std::string_view section, std::string_view ini_key,
-                                std::string_view default_value = "INFO");
-
-        /**
-         * @brief Registers an INI item whose value is stored into a caller-supplied atomic.
-         * @details Convenience wrapper over the matching register_<T> overload that stores the parsed value with
-         *          std::memory_order_relaxed. Supported
-         *          T: int, bool, float. The reference must outlive every load() and
-         *          reload() call: the setter captures @p out by reference.
-         * @tparam T One of int, bool, float.
-         * @param section INI section name.
-         * @param ini_key INI key name.
-         * @param log_key_name Human-readable name shown in log output.
-         * @param out Atomic destination updated on every successful parse.
-         * @param default_value Value applied when the INI key is missing.
-         * @note Setup/control-plane only: registration may allocate and updates the Config registry.
-         */
-        // A single constrained template rather than explicit specializations:
-        // specializing a function template is discouraged (Core Guidelines
-        // T.144) and an in-class explicit specialization is non-standard. The requires-clause caps the supported set to
-        // int, bool, and float, so an unsupported T (e.g. double, uint64_t) is a crisp constraint error at the call
-        // site rather than a mangled unresolved-symbol link error.
-        template <typename T>
-            requires(std::same_as<T, int> || std::same_as<T, bool> || std::same_as<T, float>)
-        void register_atomic(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                             std::atomic<T> &out, T default_value)
-        {
-            if constexpr (std::same_as<T, int>)
-            {
-                register_int(
-                    section, ini_key, log_key_name, [&out](int v) { out.store(v, std::memory_order_relaxed); },
-                    default_value);
-            }
-            else if constexpr (std::same_as<T, bool>)
-            {
-                register_bool(
-                    section, ini_key, log_key_name, [&out](bool v) { out.store(v, std::memory_order_relaxed); },
-                    default_value);
-            }
-            else
-            {
-                register_float(
-                    section, ini_key, log_key_name, [&out](float v) { out.store(v, std::memory_order_relaxed); },
-                    default_value);
-            }
-        }
-
-        /**
-         * @brief Registers an atomic-backed INI item using the atomic's current value as the default.
-         * @details Convenience overload for the supported atomic scalar set: int, bool, and float. The registration
-         *          default is sampled once from @p out with std::memory_order_relaxed at registration time, then the
-         *          matching typed registration stores parsed values back to @p out with relaxed ordering on every
-         *          load() / reload(). Initialize the atomic deliberately before calling this overload; an accidental
-         *          default-initialized value becomes the INI fallback.
-         * @tparam T One of int, bool, float.
-         * @param section INI section name.
-         * @param ini_key INI key name.
-         * @param log_key_name Human-readable name shown in log output.
-         * @param out Atomic destination updated on every successful parse and used as the registration default.
-         * @note Setup/control-plane only: registration may allocate and updates the Config registry.
-         */
-        template <typename T>
-            requires(std::same_as<T, int> || std::same_as<T, bool> || std::same_as<T, float>)
-        void register_atomic(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                             std::atomic<T> &out)
-        {
-            register_atomic<T>(section, ini_key, log_key_name, out, out.load(std::memory_order_relaxed));
-        }
-
-        /**
-         * @brief Registers a key combo configuration item.
-         * @details Parses an INI value as one or more key combinations. Commas at the top level separate independent
-         *          combos (OR logic). Within each combo, '+' separates modifier keys from the trigger key (last token).
-         *          Tokens can be human-readable names (e.g., "Ctrl", "F3", "Gamepad_A") or hex
-         *          VK codes (e.g., "0x72"). See KeyCombo for full parsing semantics.
-         *
-         *          Two opt-out sentinels yield an empty KeyComboList silently:
-         *          an empty string and the literal "NONE" (case-insensitive, surrounding whitespace OK, whole-string
-         *          only). A non-empty, non-sentinel value whose every token fails to parse is logged at WARNING level
-         *          naming @p log_key_name and the offending raw string.
-         * @param section INI section name.
-         * @param ini_key INI key name.
-         * @param log_key_name Human-readable name shown in log output and in the typo WARNING described above.
-         * @param setter Callback invoked with the parsed KeyComboList.
-         * @param default_value_str Default value string in the same format.
-         * @note The setter is called immediately with the parsed default and again on load().
-         */
-        void register_key_combo(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                                std::function<void(const KeyComboList &)> setter, std::string_view default_value_str);
-
-        /**
-         * @brief Registers a key combo INI item and wires it to InputManager.
-         * @details Fuses register_key_combo() with InputManager::register_press(). On registration the InputManager
-         *          binding is created with the parsed default combo. On each subsequent load() the setter invokes
-         *          InputManager::update_binding_combos() so the bound keys and modifiers pick up the INI-sourced value
-         *          without re-registering the binding. Live updates accept any
-         *          cardinality: the binding's combo set is rebuilt on the fly
-         *          and any held-state release callbacks fire before the swap completes.
-         *
-         *          To opt a binding out at runtime (no keys bound), set the
-         *          INI value to either an empty string or the literal "NONE" (case-insensitive, surrounding whitespace
-         *          OK). Both forms produce an unbound binding silently and the binding name remains addressable for a
-         *          future non-empty update. The "NONE" sentinel is only recognized as the entire trimmed value; "NONE"
-         *          appearing as one token in a comma-separated list is treated as an unparseable token and contributes
-         *          nothing.
-         *
-         *          A non-empty INI value whose every comma-separated token fails to parse is treated as a user typo and
-         *          logged at
-         *          WARNING level naming the binding and the offending raw string; the binding becomes unbound.
-         *
-         *          The returned guard holds a cancellation flag that short-circuits the user callback when released,
-         *          because
-         *          InputManager does not support per-binding removal post-start().
-         *
-         *          Safe to call before or after InputManager::start(). A binding registered while the poller is running
-         *          is appended to the live binding set and starts firing on the next poll cycle.
-         *
-         * @param section INI section name.
-         * @param ini_key INI key name.
-         * @param log_name Human-readable name echoed by the config logger and in the typo WARNING described above.
-         * @param input_binding_name InputManager binding name (must be unique).
-         * @param on_press User callback fired on key-down edge.
-         * @param default_value Default combo string (same format as register_key_combo).
-         * @param consume Optional per-binding input-suppression facet. std::nullopt (default) registers no extra INI
-         *                key and preserves the historic behavior exactly. A value registers a bool item named
-         *                "<ini_key>.Consume" defaulting to that value and wired to InputManager::set_consume on this
-         *                binding, so the user can toggle suppression from the INI file.
-         * @return InputBindingGuard RAII cancellation token for the callback.
-         * @note Suppression via @p consume is honored only for digital gamepad buttons and the mouse wheel, never for
-         *       keyboard keys, mouse buttons, or analog axes (see InputBinding::consume). A "<ini_key>.Consume" key on
-         *       a keyboard-only binding is therefore inert.
-         */
-        [[nodiscard]] InputBindingGuard
-        register_press_combo(std::string_view section, std::string_view ini_key, std::string_view log_name,
-                             std::string_view input_binding_name, std::function<void()> on_press,
-                             std::string_view default_value, std::optional<bool> consume = std::nullopt);
-
-        /**
-         * @brief Registers a key combo INI item and wires it to InputManager as a hold binding.
-         * @details The hold-mode mirror of register_press_combo(). Fuses register_key_combo() with
-         *          InputManager::register_hold(): the binding is created with the parsed default combo, and on each
-         *          subsequent load() the setter invokes InputManager::update_binding_combos() so the bound keys and
-         *          modifiers pick up the INI-sourced value without re-registering the binding. @p on_state_change fires
-         *          with true on the press edge (any listed input pressed, all modifiers held) and false on the release
-         *          edge.
-         *
-         *          The returned guard cancels the callback when released, and -- because a hold carries lingering
-         *          state -- synthesizes a single balancing on_state_change(false) if the binding was held at the moment
-         *          of cancellation, so a cancelled hold cannot strand the consumer in the held state. That synthesis is
-         *          serialized against any in-flight callback, fires at most once, and never re-enters the callback
-         *          while it is on the stack (see InputBindingGuard).
-         *
-         *          The "NONE"/empty opt-out sentinels, the typo WARNING, and the before/after-start() semantics all
-         *          match register_press_combo().
-         * @param section INI section name.
-         * @param ini_key INI key name.
-         * @param log_name Human-readable name echoed by the config logger and in the typo WARNING.
-         * @param input_binding_name InputManager binding name (must be unique).
-         * @param on_state_change User callback fired with the hold state (true = held, false = released).
-         * @param default_value Default combo string (same format as register_key_combo).
-         * @param consume Optional per-binding input-suppression facet. std::nullopt (default) registers no extra INI
-         *                key. A value registers a bool item named "<ini_key>.Consume" defaulting to that value and
-         *                wired to InputManager::set_consume on this binding.
-         * @return InputBindingGuard RAII cancellation token for the callback; destroying it may synthesize the final
-         *         on_state_change(false), so treat it as setup/control-plane only (see the class note).
-         * @note Suppression via @p consume is honored only for digital gamepad buttons and the mouse wheel, never for
-         *       keyboard keys, mouse buttons, or analog axes (see InputBinding::consume). A "<ini_key>.Consume" key on
-         *       a keyboard-only binding is therefore inert.
-         */
-        [[nodiscard]] InputBindingGuard
-        register_hold_combo(std::string_view section, std::string_view ini_key, std::string_view log_name,
-                            std::string_view input_binding_name, std::function<void(bool)> on_state_change,
-                            std::string_view default_value, std::optional<bool> consume = std::nullopt);
-
-        /**
-         * @brief Registers a boolean INI item that toggles input suppression for a binding.
-         * @details Fuses register_bool() with InputManager::set_consume(): the INI value (parsed as a bool) decides
-         *          whether @p input_binding_name hides its trigger from the game, applied both at registration (with
-         *          the default) and on every load() / reload(). This is the INI-driven counterpart to calling
-         *          InputManager::set_consume() directly, letting users opt individual bindings into passthrough
-         *          blocking from the config file (for example a `SetYToggle.Consume = true` key beside the combo).
-         *
-         *          Register the binding first (via register_press_combo or
-         *          InputManager::register_press); set_consume() is a no-op for an unknown name. Suppression is honored
-         *          for digital gamepad buttons and the mouse wheel only (analog triggers and stick directions cannot be
-         *          masked; see
-         *          InputBinding::consume).
-         * @param section INI section name.
-         * @param ini_key INI key name (e.g. "SetYToggle.Consume").
-         * @param log_key_name Human-readable name shown in log output.
-         * @param input_binding_name InputManager binding name to toggle.
-         * @param default_value Suppression state applied when the INI key is missing.
-         */
-        void register_consume_flag(std::string_view section, std::string_view ini_key, std::string_view log_key_name,
-                                   std::string_view input_binding_name, bool default_value = false);
-
-        /**
-         * @brief Loads all registered configuration settings from the specified INI file.
-         * @details Parses the INI file and attempts to read values for each registered item. If a key is missing or
-         *          invalid, the default value provided during registration is used. The INI path is remembered
-         *          internally so that subsequent reload() calls operate on the same file without needing the caller to
-         *          pass it again.
-         * @param ini_filename The base filename of the INI file. Path will be resolved relative to the mod's runtime
-         *                     directory.
-         */
-        void load(std::string_view ini_filename);
-
-        /**
-         * @brief Re-runs all registered setters against the last-loaded INI file.
-         * @details Reads the INI file previously passed to load() and re-invokes every registered setter with the fresh
-         *          value (or its default if the key is missing). Registrations themselves are not touched: user lambdas
-         *          persist across reloads. The deferred-setter invocation pattern used by load() applies here as well,
-         *          so setters may freely call back into the Config API without deadlocking.
-         * @return true if a previous load() path was available and the reload proceeded, false if reload() was called
-         *         before any load().
-         * @note Safe to call from any thread. Commonly wired to a filesystem watcher (see enable_auto_reload) or a
-         *       hotkey (see register_reload_hotkey).
-         * @note Only C++ exceptions are caught. Structured-exception (SEH) faults such as access violations bypass the
-         *       handler. A `noexcept`-marked user setter that throws still invokes std::terminate.
-         */
-        [[nodiscard]] bool reload();
-
         /**
          * @enum AutoReloadStatus
          * @brief Outcome of a call to enable_auto_reload().
          */
         enum class AutoReloadStatus
         {
-            /// Watcher is now running.
+            /// The watcher is now running.
             Started,
-            /// Called twice; the existing watcher was kept.
+            /// Called while a watcher was already installed; the existing one was kept.
             AlreadyRunning,
-            /// Config::load() was never called; no path to watch.
+            /// load() was never called, so there is no path to watch.
             NoPriorLoad,
-            /// Directory could not be opened or start handshake failed.
+            /// The parent directory could not be opened or the start handshake failed.
             StartFailed
         };
 
+        /// Constrains the atomic-backed bind to the scalar types the INI pipeline parses directly.
+        template <typename T>
+        concept BindableScalar = std::same_as<T, int> || std::same_as<T, bool> || std::same_as<T, float>;
+
+        /**
+         * @brief Binds an integer INI key to a callback.
+         * @details The setter is invoked immediately with @p default_value and again on every load() / reload() with
+         *          the parsed INI value. Integers are parsed with a hardened decimal/hex parser (range-checked) rather
+         *          than the underlying INI library's saturating conversion.
+         * @param section INI section name.
+         * @param key INI key name.
+         * @param display_name Human-readable name shown in log output.
+         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
+         * @param default_value Value used when the key is absent or unparsable.
+         */
+        void bind_int(std::string_view section, std::string_view key, std::string_view display_name,
+                      std::function<void(int)> setter, int default_value);
+
+        /// Binds a floating-point INI key to a callback. See bind_int for the invocation contract.
+        void bind_float(std::string_view section, std::string_view key, std::string_view display_name,
+                        std::function<void(float)> setter, float default_value);
+
+        /// Binds a boolean INI key to a callback. See bind_int for the invocation contract.
+        void bind_bool(std::string_view section, std::string_view key, std::string_view display_name,
+                       std::function<void(bool)> setter, bool default_value);
+
+        /**
+         * @brief Binds a string INI key to a callback (the general parse-into-anything form).
+         * @details The setter receives the raw INI value verbatim (narrow bytes; ASCII passes through unchanged, a
+         *          non-ASCII value arrives as raw bytes for the consumer to interpret). Use it to parse a value into a
+         *          mask, an enum, or a non-atomic field. The value is delivered as a string_view that is valid only for
+         *          the duration of the call and is not guaranteed to be NUL-terminated.
+         * @param section INI section name.
+         * @param key INI key name.
+         * @param display_name Human-readable name shown in log output.
+         * @param setter Callback applied with the resolved value. Must be reentrant and thread-safe.
+         * @param default_value Value used when the key is absent.
+         */
+        void bind_string(std::string_view section, std::string_view key, std::string_view display_name,
+                         std::function<void(std::string_view)> setter, std::string_view default_value);
+
+        /**
+         * @brief Binds an INI combo string to a callback receiving the parsed combo list (no input binding).
+         * @details Parses the INI value into an input::KeyComboList (see press_combo for the combo grammar and the
+         *          "NONE"/empty opt-out) and delivers it to @p setter at registration and on each load() / reload().
+         *          Unlike press_combo this registers no input binding; the consumer owns the parsed combos and uses
+         *          them however it likes.
+         * @param section INI section name.
+         * @param key INI key name.
+         * @param display_name Human-readable name shown in log output and in the typo Warning.
+         * @param setter Callback applied with the parsed combo list.
+         * @param default_value Default combo string when the key is absent.
+         */
+        void bind_combos(std::string_view section, std::string_view key, std::string_view display_name,
+                         std::function<void(const input::KeyComboList &)> setter, std::string_view default_value);
+
+        /**
+         * @brief Binds an INI key to a caller-supplied atomic (the most common form).
+         * @details Convenience over the matching bind_<T> callback that stores the parsed value with
+         *          std::memory_order_relaxed. The atomic must outlive every load() / reload(): the setter captures
+         *          @p out by reference.
+         * @tparam T One of int, bool, float.
+         * @param section INI section name.
+         * @param key INI key name.
+         * @param display_name Human-readable name shown in log output.
+         * @param out Atomic destination updated on every successful parse.
+         * @param default_value Value applied when the INI key is missing.
+         * @note Setup/control-plane only: registration may allocate and updates the config registry.
+         */
+        template <BindableScalar T>
+        void bind(std::string_view section, std::string_view key, std::string_view display_name, std::atomic<T> &out,
+                  T default_value)
+        {
+            if constexpr (std::same_as<T, int>)
+            {
+                bind_int(
+                    section, key, display_name, [&out](int v) { out.store(v, std::memory_order_relaxed); },
+                    default_value);
+            }
+            else if constexpr (std::same_as<T, bool>)
+            {
+                bind_bool(
+                    section, key, display_name, [&out](bool v) { out.store(v, std::memory_order_relaxed); },
+                    default_value);
+            }
+            else
+            {
+                bind_float(
+                    section, key, display_name, [&out](float v) { out.store(v, std::memory_order_relaxed); },
+                    default_value);
+            }
+        }
+
+        /**
+         * @brief Binds an INI key to an atomic, using the atomic's current value as the default.
+         * @details Samples @p out once with std::memory_order_relaxed at registration time to use as the INI fallback,
+         *          then stores parsed values back to @p out on every load() / reload(). Initialize the atomic
+         *          deliberately before calling this overload.
+         * @tparam T One of int, bool, float.
+         */
+        template <BindableScalar T>
+        void bind(std::string_view section, std::string_view key, std::string_view display_name, std::atomic<T> &out)
+        {
+            bind<T>(section, key, display_name, out, out.load(std::memory_order_relaxed));
+        }
+
+        /**
+         * @brief Binds an INI key to an atomic uint32 through a user parse function.
+         * @details The parse function turns the raw INI string into a uint32 (for example a bitmask) that is stored
+         *          with std::memory_order_relaxed. Applied at registration with @p default_value and again on each
+         *          load() / reload().
+         * @param section INI section name.
+         * @param key INI key name.
+         * @param display_name Human-readable name shown in log output.
+         * @param out Atomic destination for the parsed value.
+         * @param parse Pure function turning the raw INI string into the stored value.
+         * @param default_value Default INI string parsed when the key is absent.
+         */
+        void bind_parsed(std::string_view section, std::string_view key, std::string_view display_name,
+                         std::atomic<std::uint32_t> &out, std::function<std::uint32_t(std::string_view)> parse,
+                         std::string_view default_value);
+
+        /**
+         * @brief Binds a log-level INI key that applies directly to the logger.
+         * @details Parses @p default_value via the logger's string-to-level mapping and applies it both at registration
+         *          and on each load() / reload(). Unrecognized values fall back to the Info level.
+         * @param section INI section name.
+         * @param key INI key name.
+         * @param default_value Default level string (e.g. "INFO", "DEBUG").
+         */
+        void bind_log_level(std::string_view section, std::string_view key, std::string_view default_value = "INFO");
+
+        /**
+         * @brief Binds an INI combo string to a press-mode input binding and returns its guard.
+         * @details Parses the INI value as one or more key combinations (commas separate independent combos under OR
+         *          logic; '+' separates modifiers from the trailing trigger; tokens are key names or hex VK codes),
+         *          registers a press binding under @p binding_name via input::register_combo, and rebinds it on every
+         *          load() / reload() so the bound keys track the INI without re-registering.
+         *
+         *          Two opt-out sentinels yield an unbound but addressable binding silently: an empty value and the
+         *          literal "NONE" (case-insensitive, whole trimmed value only). A non-empty value whose every token
+         *          fails to parse is logged once at Warning level naming @p log_name and the offending string.
+         * @param section INI section name.
+         * @param ini_key INI key holding the combo string.
+         * @param log_name Human-readable name echoed by the config logger and in the typo Warning.
+         * @param binding_name input binding name (must be unique).
+         * @param on_press Callback fired on the key-down edge.
+         * @param default_combo Default combo string when the key is absent.
+         * @param consume Optional per-binding suppression facet. std::nullopt registers no extra key; a value registers
+         *                a bool item named "<ini_key>.Consume" wired to input suppression for this binding (honored for
+         *                digital gamepad buttons and the mouse wheel only).
+         * @return An input::BindingGuard owning the callback's lifetime. Store it (e.g. in an input::Scope); letting it
+         *         drop immediately disables the binding. Fail-soft: if the underlying input::register_combo cannot
+         *         allocate, an inert guard whose name() is empty is returned and the failure is logged (the binding is
+         *         simply not installed).
+         */
+        [[nodiscard]] input::BindingGuard press_combo(std::string_view section, std::string_view ini_key,
+                                                      std::string_view log_name, std::string_view binding_name,
+                                                      std::function<void()> on_press, std::string_view default_combo,
+                                                      std::optional<bool> consume = std::nullopt);
+
+        /**
+         * @brief Binds an INI combo string to a hold-mode input binding and returns its guard.
+         * @details The hold-mode mirror of press_combo. @p on_state_change fires true on the press edge and false on
+         *          the release edge; the returned guard synthesizes a single balancing false if it cancels a still-held
+         *          binding. The "NONE"/empty opt-out, the typo Warning, and the live-rebind on reload all match
+         *          press_combo.
+         * @param section INI section name.
+         * @param ini_key INI key holding the combo string.
+         * @param log_name Human-readable name echoed by the config logger and in the typo Warning.
+         * @param binding_name input binding name (must be unique).
+         * @param on_state_change Callback fired with the hold state (true = held, false = released).
+         * @param default_combo Default combo string when the key is absent.
+         * @param consume Optional per-binding suppression facet (see press_combo).
+         * @return An input::BindingGuard. Destroying it may synthesize the final on_state_change(false), so treat it as
+         *         setup/control-plane only. Fail-soft: a registration that cannot allocate yields an inert guard whose
+         *         name() is empty and is logged (the binding is simply not installed).
+         */
+        [[nodiscard]] input::BindingGuard hold_combo(std::string_view section, std::string_view ini_key,
+                                                     std::string_view log_name, std::string_view binding_name,
+                                                     std::function<void(bool)> on_state_change,
+                                                     std::string_view default_combo,
+                                                     std::optional<bool> consume = std::nullopt);
+
+        /**
+         * @brief Binds a boolean INI key that toggles input suppression for an already-registered binding.
+         * @details Fuses bind_bool with input suppression: the INI value decides whether @p binding_name hides its
+         *          trigger from the game, applied at registration and on each load() / reload(). Register the binding
+         *          first; this is a no-op for an unknown name. Suppression is honored for digital gamepad buttons and
+         *          the mouse wheel only.
+         * @param section INI section name.
+         * @param ini_key INI key name (e.g. "SetYToggle.Consume").
+         * @param display_name Human-readable name shown in log output.
+         * @param binding_name input binding name to toggle.
+         * @param default_value Suppression state when the INI key is missing.
+         */
+        void consume_flag(std::string_view section, std::string_view ini_key, std::string_view display_name,
+                          std::string_view binding_name, bool default_value = false);
+
+        /**
+         * @brief Registers a hotkey combo that triggers reload() on press.
+         * @details A press_combo whose callback requests a reload off a dedicated background servicer thread (the press
+         *          callback only flips a flag and notifies, so per-press latency stays low). The INI-configured combo
+         *          overrides @p default_combo on each load() / reload().
+         * @param ini_key INI key that stores the combo string.
+         * @param default_combo Combo applied when the key is absent (e.g. "Ctrl+F5").
+         * @return true if the binding was registered; false if @p default_combo is empty or the NONE sentinel (a reload
+         *         hotkey with no keys is never useful, so it is rejected at the call site).
+         */
+        [[nodiscard]] bool reload_hotkey(std::string_view ini_key, std::string_view default_combo);
+
+        /**
+         * @brief Loads all bound settings from the named INI file.
+         * @details Resolves @p ini_filename against the mod's runtime directory, parses it, and applies each bound
+         *          setter with the INI value (or its default if the key is missing or invalid). The path is remembered
+         *          so reload() operates on the same file.
+         * @param ini_filename The INI filename, resolved relative to the runtime directory.
+         */
+        void load(std::string_view ini_filename);
+
+        /**
+         * @brief Re-applies all bound setters against the last-loaded INI file.
+         * @details Re-reads the file passed to the most recent load() and re-invokes every setter with the fresh value.
+         *          If the file's bytes are unchanged since the last successful load (content-hash short-circuit), the
+         *          setters are skipped. Bindings persist across reloads.
+         * @return true if a previous load() path was available and the reload proceeded; false if reload() was called
+         *         before any load().
+         * @note Safe from any thread. Only C++ exceptions from setters are caught; a structured-exception fault or a
+         *       throwing noexcept setter is not recoverable.
+         */
+        [[nodiscard]] bool reload();
+
         /**
          * @brief Starts a background watcher that calls reload() when the INI changes.
-         * @details Creates a ConfigWatcher on the INI path last passed to load() and starts its worker thread. The
-         *          watcher collapses bursty editor save events (e.g. Notepad++ atomic save) into a single reload via
-         *          the @p debounce quiet window. After the reload completes, @p on_reload is invoked if provided,
-         *          allowing the caller to refresh derived state (e.g. rebuild caches, reformat log output).
-         *
-         *          If load() has not been called yet, or if auto-reload is already enabled, this is a no-op and a
-         *          Warning-level log message is emitted.
-         *
-         *          The watcher and any @p on_reload callback run on the watcher's background thread. User setters
-         *          invoked by reload() also run on that thread; they must handle their own synchronization.
-         *
-         *          The @p on_reload callback receives a `bool content_changed` argument. When the file's byte contents
-         *          are identical to the last successfully loaded version (e.g. after a `touch` or a no-op save),
-         *          setters are skipped and the flag is false; the callback still fires so derived state can observe the
-         *          event.
-         *
-         * @param debounce Quiet-window length between change detection and reload (default 250 ms).
-         * @param on_reload Optional callback invoked after each successful reload. The bool argument is true when
-         *                  setters ran, false when the content-hash skip short-circuited the reload.
-         * @return AutoReloadStatus::Started if the watcher is now running;
-         *         AutoReloadStatus::AlreadyRunning if a watcher was already installed
-         *         (no-op, existing watcher kept);
-         *         AutoReloadStatus::NoPriorLoad if load() has not been called yet
-         *         (no-op, no watcher installed);
-         *         AutoReloadStatus::StartFailed if the parent directory could not be opened or the start handshake
-         *         failed (watcher reset, error logged).
+         * @details Watches the directory of the path last passed to load(), collapsing bursty editor saves into a
+         *          single reload via the @p debounce quiet window. After each reload @p on_reload is invoked with a flag
+         *          that is true when setters ran and false when the content-hash skip short-circuited the reload. The
+         *          watcher and the callback run on the watcher's background thread.
+         * @param debounce Quiet window between change detection and reload (default 250 ms).
+         * @param on_reload Optional callback invoked after each reload attempt.
+         * @return Started if the watcher is now running; AlreadyRunning if one was already installed; NoPriorLoad if
+         *         load() has not been called; StartFailed if the directory could not be opened or the handshake failed.
          */
         [[nodiscard]] AutoReloadStatus
         enable_auto_reload(std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
                            std::function<void(bool)> on_reload = {});
 
         /**
-         * @brief Stops the filesystem watcher started by enable_auto_reload().
-         * @details Idempotent. Returns only once the watcher thread has exited (or been detached under the Windows
-         *          loader lock).
-         * @note When invoked from inside an on_reload callback (i.e. on the watcher thread itself) this is a no-op:
-         *       joining the worker from its own thread would raise std::system_error(resource_deadlock_would_occur).
-         *       The error is logged and the watcher remains running. Tear the watcher down from a different thread,
-         *       e.g. by posting the disable request to a deferred shutdown hook.
-         * @note A config change still inside the debounce window when this is called fires one final reload (running
-         *       the registered setters) during the stop, so disabling auto-reload does not guarantee no further setter
-         *       invocation. Callers that require a hard stop should latch their own guard around setter side effects.
+         * @brief Stops the auto-reload watcher.
+         * @details Idempotent. Returns once the watcher thread has exited (or been detached under the Windows loader
+         *          lock). Calling this from inside an on_reload callback (the watcher thread) is a no-op that logs and
+         *          leaves the watcher running, since joining the worker from itself would deadlock.
          */
         void disable_auto_reload() noexcept;
 
-        /**
-         * @brief Registers a hotkey binding that triggers reload() on press.
-         * @details Thin wrapper around register_press_combo() whose on-press callback calls Config::reload(). Like the
-         *          underlying helper, this must be called before InputManager::start() so the binding is picked up by
-         *          the poller.
-         *
-         *          The INI-configured combo overrides @p default_combo on each load() / reload() cycle via the standard
-         *          register_press_combo machinery.
-         *
-         * @param ini_key INI key that stores the combo string (e.g. "ReloadConfig").
-         * @param default_combo Combo string applied when the INI key is absent (e.g. "Ctrl+F5").
-         * @return true if the binding was registered, false if @p default_combo is empty or the NONE sentinel. @ref
-         *         register_press_combo accepts both as silent opt-out and registers the binding name with no keys
-         *         (addressable later by @ref update_binding_combos), but a reload hotkey with no default keys is never
-         *         useful, so this helper rejects that case at the call site rather than ship an inert reload binding.
-         * @note The on-press callback runs on the InputManager poll thread, but the actual reload() work is deferred to
-         *       a dedicated background servicer thread. The press callback only flips an atomic flag and notifies a
-         *       condition variable, so per-press latency on the poll thread stays in the microsecond range regardless
-         *       of INI size. Multiple presses during a running reload coalesce into at most one follow-up. Any
-         *       exception thrown by reload() on the servicer thread is caught and logged so the servicer stays alive.
-         * @note Only C++ exceptions are caught. Structured-exception (SEH) faults such as access violations bypass the
-         *       handler. A `noexcept`-marked user setter that throws still invokes std::terminate.
-         */
-        [[nodiscard]] bool register_reload_hotkey(std::string_view ini_key, std::string_view default_combo);
-
-        /**
-         * @brief Logs the current values of all registered configuration settings.
-         * @details Iterates through all items registered with the config system and outputs their current values to the
-         *          Logger.
-         */
+        /// Logs the current value of every bound setting, grouped by section.
         void log_all();
 
         /**
-         * @brief Clears all currently registered configuration items.
-         * @details Useful if the configuration system needs to be reset without restarting the application. This does
-         *          NOT stop the auto-reload watcher; call disable_auto_reload() first (DMK_Shutdown() already does so
-         *          in the correct order) so a watcher callback cannot fire against state torn down afterwards.
-         * @note noexcept: clearing the registry and dropping the cached path/hash and reload-servicer refs are all
-         *       no-throw, and any diagnostic logging routes through the best-effort no-throw log path.
+         * @brief Clears every bound item and the cached load path.
+         * @details Does not stop the auto-reload watcher; call disable_auto_reload() first so a watcher callback cannot
+         *          fire against a torn-down registry.
          */
-        void clear_registered_items() noexcept;
+        void clear() noexcept;
 
-    } // namespace Config
+        class Ini;
+
+        /**
+         * @class SectionBinder
+         * @brief A section-scoped view that drops the repeated section argument from the bind family.
+         * @details Obtained from Ini::section() or config::section(). Each method forwards to the matching free
+         *          function with the bound section name. Lightweight and copyable; it holds only the section name.
+         */
+        class SectionBinder
+        {
+        public:
+            /// Constructs a binder scoped to @p section. Prefer Ini::section() / config::section().
+            explicit SectionBinder(std::string_view section) : m_section(section) {}
+
+            /// Section-scoped atomic bind. See config::bind.
+            template <BindableScalar T> void bind(std::string_view key, std::atomic<T> &out, T default_value) const
+            {
+                config::bind<T>(m_section, key, key, out, default_value);
+            }
+
+            /// Section-scoped atomic bind with the atomic's current value as the default.
+            template <BindableScalar T> void bind(std::string_view key, std::atomic<T> &out) const
+            {
+                config::bind<T>(m_section, key, key, out);
+            }
+
+            /// Section-scoped atomic bind with an explicit display name.
+            template <BindableScalar T>
+            void bind(std::string_view key, std::string_view display_name, std::atomic<T> &out, T default_value) const
+            {
+                config::bind<T>(m_section, key, display_name, out, default_value);
+            }
+
+            /// Section-scoped integer callback bind. See config::bind_int.
+            void bind_int(std::string_view key, std::string_view display_name, std::function<void(int)> setter,
+                          int default_value) const
+            {
+                config::bind_int(m_section, key, display_name, std::move(setter), default_value);
+            }
+
+            /// Section-scoped float callback bind. See config::bind_float.
+            void bind_float(std::string_view key, std::string_view display_name, std::function<void(float)> setter,
+                            float default_value) const
+            {
+                config::bind_float(m_section, key, display_name, std::move(setter), default_value);
+            }
+
+            /// Section-scoped bool callback bind. See config::bind_bool.
+            void bind_bool(std::string_view key, std::string_view display_name, std::function<void(bool)> setter,
+                           bool default_value) const
+            {
+                config::bind_bool(m_section, key, display_name, std::move(setter), default_value);
+            }
+
+            /// Section-scoped string callback bind. See config::bind_string.
+            void bind_string(std::string_view key, std::string_view display_name,
+                             std::function<void(std::string_view)> setter, std::string_view default_value) const
+            {
+                config::bind_string(m_section, key, display_name, std::move(setter), default_value);
+            }
+
+            /// Section-scoped combo-list bind (no input binding). See config::bind_combos.
+            void bind_combos(std::string_view key, std::string_view display_name,
+                             std::function<void(const input::KeyComboList &)> setter,
+                             std::string_view default_value) const
+            {
+                config::bind_combos(m_section, key, display_name, std::move(setter), default_value);
+            }
+
+            /// Section-scoped parsed atomic-uint32 bind. See config::bind_parsed.
+            void bind_parsed(std::string_view key, std::string_view display_name, std::atomic<std::uint32_t> &out,
+                             std::function<std::uint32_t(std::string_view)> parse, std::string_view default_value) const
+            {
+                config::bind_parsed(m_section, key, display_name, out, std::move(parse), default_value);
+            }
+
+            /// Section-scoped log-level bind. See config::bind_log_level.
+            void bind_log_level(std::string_view key, std::string_view default_value = "INFO") const
+            {
+                config::bind_log_level(m_section, key, default_value);
+            }
+
+            /// Section-scoped press-combo fusion. See config::press_combo.
+            [[nodiscard]] input::BindingGuard press_combo(std::string_view ini_key, std::string_view log_name,
+                                                          std::string_view binding_name, std::function<void()> on_press,
+                                                          std::string_view default_combo,
+                                                          std::optional<bool> consume = std::nullopt) const
+            {
+                return config::press_combo(m_section, ini_key, log_name, binding_name, std::move(on_press),
+                                           default_combo, consume);
+            }
+
+            /// Section-scoped hold-combo fusion. See config::hold_combo.
+            [[nodiscard]] input::BindingGuard hold_combo(std::string_view ini_key, std::string_view log_name,
+                                                         std::string_view binding_name,
+                                                         std::function<void(bool)> on_state_change,
+                                                         std::string_view default_combo,
+                                                         std::optional<bool> consume = std::nullopt) const
+            {
+                return config::hold_combo(m_section, ini_key, log_name, binding_name, std::move(on_state_change),
+                                          default_combo, consume);
+            }
+
+            /// Section-scoped consume-flag fusion. See config::consume_flag.
+            void consume_flag(std::string_view ini_key, std::string_view display_name, std::string_view binding_name,
+                              bool default_value = false) const
+            {
+                config::consume_flag(m_section, ini_key, display_name, binding_name, default_value);
+            }
+
+        private:
+            std::string m_section;
+        };
+
+        /// Returns a section-scoped binder for @p name. Equivalent to Ini{}.section(name).
+        [[nodiscard]] inline SectionBinder section(std::string_view name)
+        {
+            return SectionBinder{name};
+        }
+
+        /**
+         * @class Ini
+         * @brief A handle to the process configuration registry.
+         * @details Exposes section() plus the common operations (bind / bind_parsed / bind_log_level / load / reload /
+         *          log_all / clear / enable_auto_reload / disable_auto_reload). The rest of the bind family
+         *          (bind_int/float/bool/string/combos, press_combo, hold_combo, consume_flag, reload_hotkey) is reached
+         *          through the free functions or through section(). Every Ini and every free function act on one shared
+         *          process registry, so an Ini is a thin, copyable handle rather than an independent configuration; it
+         *          exists so a consumer can write Ini{}.section("X").bind(...) and pass the surface around as an object.
+         */
+        class Ini
+        {
+        public:
+            Ini() = default;
+
+            /// Returns a section-scoped binder. See config::section.
+            [[nodiscard]] SectionBinder section(std::string_view name) const { return SectionBinder{name}; }
+
+            /// Atomic bind. See config::bind.
+            template <BindableScalar T>
+            void bind(std::string_view sec, std::string_view key, std::string_view display_name, std::atomic<T> &out,
+                      T default_value) const
+            {
+                config::bind<T>(sec, key, display_name, out, default_value);
+            }
+
+            /// Atomic bind with the atomic's current value as the default. See config::bind.
+            template <BindableScalar T>
+            void bind(std::string_view sec, std::string_view key, std::string_view display_name,
+                      std::atomic<T> &out) const
+            {
+                config::bind<T>(sec, key, display_name, out);
+            }
+
+            /// Parsed atomic-uint32 bind. See config::bind_parsed.
+            void bind_parsed(std::string_view sec, std::string_view key, std::string_view display_name,
+                             std::atomic<std::uint32_t> &out, std::function<std::uint32_t(std::string_view)> parse,
+                             std::string_view default_value) const
+            {
+                config::bind_parsed(sec, key, display_name, out, std::move(parse), default_value);
+            }
+
+            /// Log-level bind. See config::bind_log_level.
+            void bind_log_level(std::string_view sec, std::string_view key,
+                                std::string_view default_value = "INFO") const
+            {
+                config::bind_log_level(sec, key, default_value);
+            }
+
+            /// Loads the named INI file. See config::load.
+            void load(std::string_view ini_filename) const { config::load(ini_filename); }
+
+            /// Re-applies bound setters. See config::reload.
+            [[nodiscard]] bool reload() const { return config::reload(); }
+
+            /// Starts the auto-reload watcher. See config::enable_auto_reload.
+            [[nodiscard]] AutoReloadStatus
+            enable_auto_reload(std::chrono::milliseconds debounce = std::chrono::milliseconds{250},
+                               std::function<void(bool)> on_reload = {}) const
+            {
+                return config::enable_auto_reload(debounce, std::move(on_reload));
+            }
+
+            /// Stops the auto-reload watcher. See config::disable_auto_reload.
+            void disable_auto_reload() const noexcept { config::disable_auto_reload(); }
+
+            /// Logs every bound setting. See config::log_all.
+            void log_all() const { config::log_all(); }
+
+            /// Clears every bound item. See config::clear.
+            void clear() const noexcept { config::clear(); }
+        };
+    } // namespace config
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_CONFIG_HPP

@@ -56,6 +56,7 @@ LEGACY_HEADERS = (
     "include/DetourModKit/anchors.hpp",
     "include/DetourModKit/profile.hpp",
     "include/DetourModKit/hook_manager.hpp",
+    "include/DetourModKit/config_watcher.hpp",
 )
 # Legacy scan symbols the v4 surface replaced. None may appear in this repo's own sources: the engine is
 # DetourModKit::detail::EnginePattern / find_pattern, the resolver is scan::resolve / scan::Candidate, and
@@ -90,6 +91,27 @@ LEGACY_HOOK_TOKEN = re.compile(
     r'(\bHookManager::|\bHookError\b|\bHookConfig\b|\bVmtHookConfig\b|\bInlineProloguePolicy\b'
     r'|\bHookStatus\b|\bHookType\b|\bcreate_inline_hook\b|\bcreate_mid_hook\b'
     r'|\bhook_vmt_method\b|\bwith_vmt_method\b)')
+# --- v4 config clean-break gate ---
+# The legacy config surface (namespace Config, the register_* free functions, clear_registered_items) was reshaped into
+# namespace config (bind / bind_int / bind_parsed / press_combo / load / clear) and the watcher was folded into a
+# src/internal/ engine. None of these spellings may reappear in this repo's own sources. Config:: is gated with the
+# scope operator (PascalCase) so it targets exactly the deleted legacy namespace; the v4 surface is lowercase config::.
+# Matched after comment stripping, so v3-migration prose does not trip it.
+LEGACY_CONFIG_TOKEN = re.compile(
+    r'(\bConfig::|\bclear_registered_items\b'
+    r'|\bregister_int\b|\bregister_float\b|\bregister_bool\b|\bregister_string\b|\bregister_log_level\b'
+    r'|\bregister_atomic\b|\bregister_key_combo\b|\bregister_press_combo\b|\bregister_hold_combo\b'
+    r'|\bregister_consume_flag\b|\bregister_reload_hotkey\b)')
+# --- v4 input clean-break gate ---
+# The legacy input surface (the InputManager singleton + InputPoller as a PUBLIC class, InputMode, the InputBindingGuard
+# guard, update_binding_combos, input_mode_to_string) was reshaped into the namespace input facade (Input /
+# register_combo / BindingGuard / Scope / Trigger / rebind) over the private engine. None of these spellings may
+# reappear. InputPoller / InputBinding are intentionally NOT gated: they survive as the internal engine types
+# DetourModKit::detail::InputPoller / InputBinding, so a bare token would false-positive on legitimate v4 code; the
+# deletion of the PUBLIC classes is enforced by the namespace move, not this gate. Matched after comment stripping.
+LEGACY_INPUT_TOKEN = re.compile(
+    r'(\bInputManager\b|\bInputMode\b|\bInputBindingGuard\b|\bupdate_binding_combos\b|\binput_mode_to_string\b'
+    r'|\bregister_press\b|\bregister_hold\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
@@ -253,6 +275,20 @@ def main():
             if hm:
                 violations.append(
                     f"{rel}:{n}: legacy hook symbol '{hm.group(1).strip()}' (replaced by the v4 hook surface)")
+
+        # v4 config gate D: no legacy config symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            cm = LEGACY_CONFIG_TOKEN.search(line)
+            if cm:
+                violations.append(
+                    f"{rel}:{n}: legacy config symbol '{cm.group(1).strip()}' (replaced by the v4 config surface)")
+
+        # v4 input gate D: no legacy input symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            im = LEGACY_INPUT_TOKEN.search(line)
+            if im:
+                violations.append(
+                    f"{rel}:{n}: legacy input symbol '{im.group(1).strip()}' (replaced by the v4 input surface)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")

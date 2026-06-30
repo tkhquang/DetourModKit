@@ -41,7 +41,8 @@
  *          Example: DMK::Logger instead of DetourModKit::Logger.
  */
 namespace DMK = DetourModKit;
-namespace DMKConfig = DetourModKit::Config;
+namespace DMKConfig = DetourModKit::config;
+namespace DMKInput = DetourModKit::input;
 namespace DMKScan = DetourModKit::scan;
 namespace DMKHook = DetourModKit::hook;
 namespace DMKString = DetourModKit::String;
@@ -60,19 +61,18 @@ namespace DMKRtti = DetourModKit::Rtti;
  */
 using DMKLogger = DetourModKit::Logger;
 using DMKStoppableWorker = DetourModKit::StoppableWorker;
-using DMKInputBindingGuard = DetourModKit::Config::InputBindingGuard;
+using DMKBindingGuard = DetourModKit::input::BindingGuard;
+using DMKScope = DetourModKit::input::Scope;
 using DMKLogLevel = DetourModKit::LogLevel;
 using DMKAsyncLogger = DetourModKit::AsyncLogger;
 using DMKAsyncLoggerConfig = DetourModKit::AsyncLoggerConfig;
 using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
-using DMKInputManager = DetourModKit::InputManager;
-using DMKInputPoller = DetourModKit::InputPoller;
-using DMKInputMode = DetourModKit::InputMode;
+using DMKComboBinding = DetourModKit::input::ComboBinding;
+using DMKTrigger = DetourModKit::input::Trigger;
 using DMKInputSource = DetourModKit::InputSource;
 using DMKInputCode = DetourModKit::InputCode;
-using DMKKeyCombo = DetourModKit::Config::KeyCombo;
-using DMKKeyComboList = DetourModKit::Config::KeyComboList;
-using DMKInputBinding = DetourModKit::InputBinding;
+using DMKKeyCombo = DetourModKit::input::KeyCombo;
+using DMKKeyComboList = DetourModKit::input::KeyComboList;
 using DMKProfiler = DetourModKit::Profiler;
 using DMKScopedProfile = DetourModKit::ScopedProfile;
 using DMKProfileSample = DetourModKit::ProfileSample;
@@ -81,8 +81,9 @@ using DMKProfileSample = DetourModKit::ProfileSample;
 /**
  * @brief Explicitly shuts down all DetourModKit singletons in the correct order.
  * @details This function should be called before process exit or DLL unload to ensure proper cleanup without
- *          use-after-free errors. It shuts down singletons in reverse dependency order: the Config auto-reload watcher
- *          first, then InputManager, Memory cache, the Config registry, then Logger last. After calling this function,
+ *          use-after-free errors. It shuts down singletons in reverse dependency order: the config auto-reload watcher
+ *          first, then the input system, Memory cache, the config registry, then Logger last. After calling this
+ *          function,
  *          the singletons are in a safe state for destruction. Hooks are not torn down here: each hook is owned by the
  *          caller's Hook handle and is unhooked when that handle is dropped.
  *
@@ -100,18 +101,18 @@ inline void DMK_Shutdown() noexcept
     // Shutdown in reverse dependency order:
     // 1. Config auto-reload watcher first: its background thread can fire the user on_reload callback at any moment, so
     //    it must stop before any consumer state that callback may touch is torn down. Idempotent and noexcept.
-    DetourModKit::Config::disable_auto_reload();
+    DetourModKit::config::disable_auto_reload();
 
-    // 2. InputManager (polling thread may invoke callbacks that log)
-    DetourModKit::InputManager::get_instance().shutdown();
+    // 2. Input system (polling thread may invoke callbacks that log)
+    DetourModKit::input::Input::instance().shutdown();
 
     // 3. Memory cache (background cleanup thread must stop before Logger shuts down). Hooks are intentionally not torn
     //    down here: the caller owns each Hook handle, and dropping it unhooks (the destructor also honours the
     //    loader-lock leaf discipline). There is no central hook registry to sequence.
     DetourModKit::memory::shutdown_cache();
 
-    // 4. Clear registered config items (static vector cleanup)
-    DetourModKit::Config::clear_registered_items();
+    // 4. Clear bound config items (static vector cleanup)
+    DetourModKit::config::clear();
 
     // 5. Logger last (no more logging after this)
     DetourModKit::Logger::get_instance().shutdown();

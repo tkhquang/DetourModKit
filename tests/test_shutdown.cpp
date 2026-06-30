@@ -71,14 +71,14 @@ TEST_F(DMKShutdownTest, ShutdownWithNoSubsystemsInitialized)
 TEST_F(DMKShutdownTest, HotReloadScenario)
 {
     int call_count_a = 0;
-    Config::register_int("Section", "Key", "hot_reload_a", [&call_count_a](int) { ++call_count_a; }, 10);
+    config::bind_int("Section", "Key", "hot_reload_a", [&call_count_a](int) { ++call_count_a; }, 10);
     EXPECT_EQ(call_count_a, 1); // Default applied once
 
     DMK_Shutdown();
 
     // After shutdown, old registrations are cleared. Re-register with new items for the "second load".
     int call_count_b = 0;
-    Config::register_int("Section", "Key", "hot_reload_b", [&call_count_b](int) { ++call_count_b; }, 20);
+    config::bind_int("Section", "Key", "hot_reload_b", [&call_count_b](int) { ++call_count_b; }, 20);
     EXPECT_EQ(call_count_b, 1); // Default applied once
 
     // Reset counters before load
@@ -87,7 +87,7 @@ TEST_F(DMKShutdownTest, HotReloadScenario)
 
     auto ini_path =
         std::filesystem::temp_directory_path() / ("test_shutdown_hotreload_" + std::to_string(_getpid()) + ".ini");
-    EXPECT_NO_THROW(Config::load(ini_path.string()));
+    EXPECT_NO_THROW(config::load(ini_path.string()));
 
     // Old callback must not fire; new callback fires with default
     EXPECT_EQ(call_count_a, 0);
@@ -111,22 +111,22 @@ TEST_F(DMKShutdownTest, DisablesAutoReloadWatcher)
         ofs << "[Section]\nKey=1\n";
     }
 
-    Config::register_int("Section", "Key", "autoreload_watcher", [](int) {}, 1);
-    ASSERT_NO_THROW(Config::load(ini_path.string()));
+    config::bind_int("Section", "Key", "autoreload_watcher", [](int) {}, 1);
+    ASSERT_NO_THROW(config::load(ini_path.string()));
 
-    ASSERT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started);
-    ASSERT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::AlreadyRunning);
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started);
+    ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::AlreadyRunning);
 
     DMK_Shutdown();
 
     // Re-establish a load path (shutdown cleared the registry) and re-enable. A fresh Started proves DMK_Shutdown
     // disabled the watcher; AlreadyRunning would mean the watcher leaked past shutdown.
-    Config::register_int("Section", "Key", "autoreload_watcher_2", [](int) {}, 1);
-    ASSERT_NO_THROW(Config::load(ini_path.string()));
-    EXPECT_EQ(Config::enable_auto_reload(std::chrono::milliseconds{50}), Config::AutoReloadStatus::Started)
+    config::bind_int("Section", "Key", "autoreload_watcher_2", [](int) {}, 1);
+    ASSERT_NO_THROW(config::load(ini_path.string()));
+    EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started)
         << "DMK_Shutdown() must stop the auto-reload watcher; a surviving watcher would report AlreadyRunning";
 
-    Config::disable_auto_reload();
+    config::disable_auto_reload();
     if (std::filesystem::exists(ini_path))
     {
         std::filesystem::remove(ini_path);
@@ -163,10 +163,14 @@ TEST_F(DMKShutdownTest, ShutdownWithMemoryCacheInitialized)
     EXPECT_NE(stats.find("Misses: 0"), std::string::npos);
 }
 
-TEST_F(DMKShutdownTest, ShutdownWithInputManagerRegistered)
+TEST_F(DMKShutdownTest, ShutdownWithInputRegistered)
 {
-    auto &mgr = InputManager::get_instance();
-    mgr.register_press("shutdown_test_key", {keyboard_key(0x41)}, []() {});
+    auto &mgr = input::Input::instance();
+    (void)input::register_combo(input::ComboBinding{.name = std::string{"shutdown_test_key"},
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x41)}, {}}},
+                                                    .on_press = []() {},
+                                                    .on_state_change = {}});
     EXPECT_EQ(mgr.binding_count(), 1u);
 
     DMK_Shutdown();
