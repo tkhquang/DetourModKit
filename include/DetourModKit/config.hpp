@@ -57,8 +57,6 @@ namespace DetourModKit
         template <typename T>
         concept BindableScalar = std::same_as<T, int> || std::same_as<T, bool> || std::same_as<T, float>;
 
-        // --- Typed callback binds (the general callback-store forms) ---
-
         /**
          * @brief Binds an integer INI key to a callback.
          * @details The setter is invoked immediately with @p default_value and again on every load() / reload() with
@@ -110,8 +108,6 @@ namespace DetourModKit
          */
         void bind_combos(std::string_view section, std::string_view key, std::string_view display_name,
                          std::function<void(const input::KeyComboList &)> setter, std::string_view default_value);
-
-        // --- Atomic-backed bind (the hot path) ---
 
         /**
          * @brief Binds an INI key to a caller-supplied atomic (the most common form).
@@ -188,8 +184,6 @@ namespace DetourModKit
          * @param default_value Default level string (e.g. "INFO", "DEBUG").
          */
         void bind_log_level(std::string_view section, std::string_view key, std::string_view default_value = "INFO");
-
-        // --- INI-to-input combo fusion (config depends on input) ---
 
         /**
          * @brief Binds an INI combo string to a press-mode input binding and returns its guard.
@@ -270,8 +264,6 @@ namespace DetourModKit
          */
         [[nodiscard]] bool reload_hotkey(std::string_view ini_key, std::string_view default_combo);
 
-        // --- Load / reload / logging / lifecycle ---
-
         /**
          * @brief Loads all bound settings from the named INI file.
          * @details Resolves @p ini_filename against the mod's runtime directory, parses it, and applies each bound
@@ -326,8 +318,6 @@ namespace DetourModKit
          */
         void clear() noexcept;
 
-        // --- SectionBinder: section-scoped binding ---
-
         class Ini;
 
         /**
@@ -343,68 +333,69 @@ namespace DetourModKit
             explicit SectionBinder(std::string_view section) : m_section(section) {}
 
             /// Section-scoped atomic bind. See config::bind.
-            template <BindableScalar T> void bind(std::string_view key, std::atomic<T> &out, T default_value)
+            template <BindableScalar T> void bind(std::string_view key, std::atomic<T> &out, T default_value) const
             {
                 config::bind<T>(m_section, key, key, out, default_value);
             }
 
             /// Section-scoped atomic bind with the atomic's current value as the default.
-            template <BindableScalar T> void bind(std::string_view key, std::atomic<T> &out)
+            template <BindableScalar T> void bind(std::string_view key, std::atomic<T> &out) const
             {
                 config::bind<T>(m_section, key, key, out);
             }
 
             /// Section-scoped atomic bind with an explicit display name.
             template <BindableScalar T>
-            void bind(std::string_view key, std::string_view display_name, std::atomic<T> &out, T default_value)
+            void bind(std::string_view key, std::string_view display_name, std::atomic<T> &out, T default_value) const
             {
                 config::bind<T>(m_section, key, display_name, out, default_value);
             }
 
             /// Section-scoped integer callback bind. See config::bind_int.
             void bind_int(std::string_view key, std::string_view display_name, std::function<void(int)> setter,
-                          int default_value)
+                          int default_value) const
             {
                 config::bind_int(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped float callback bind. See config::bind_float.
             void bind_float(std::string_view key, std::string_view display_name, std::function<void(float)> setter,
-                            float default_value)
+                            float default_value) const
             {
                 config::bind_float(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped bool callback bind. See config::bind_bool.
             void bind_bool(std::string_view key, std::string_view display_name, std::function<void(bool)> setter,
-                           bool default_value)
+                           bool default_value) const
             {
                 config::bind_bool(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped string callback bind. See config::bind_string.
             void bind_string(std::string_view key, std::string_view display_name,
-                             std::function<void(std::string_view)> setter, std::string_view default_value)
+                             std::function<void(std::string_view)> setter, std::string_view default_value) const
             {
                 config::bind_string(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped combo-list bind (no input binding). See config::bind_combos.
             void bind_combos(std::string_view key, std::string_view display_name,
-                             std::function<void(const input::KeyComboList &)> setter, std::string_view default_value)
+                             std::function<void(const input::KeyComboList &)> setter,
+                             std::string_view default_value) const
             {
                 config::bind_combos(m_section, key, display_name, std::move(setter), default_value);
             }
 
             /// Section-scoped parsed atomic-uint32 bind. See config::bind_parsed.
             void bind_parsed(std::string_view key, std::string_view display_name, std::atomic<std::uint32_t> &out,
-                             std::function<std::uint32_t(std::string_view)> parse, std::string_view default_value)
+                             std::function<std::uint32_t(std::string_view)> parse, std::string_view default_value) const
             {
                 config::bind_parsed(m_section, key, display_name, out, std::move(parse), default_value);
             }
 
             /// Section-scoped log-level bind. See config::bind_log_level.
-            void bind_log_level(std::string_view key, std::string_view default_value = "INFO")
+            void bind_log_level(std::string_view key, std::string_view default_value = "INFO") const
             {
                 config::bind_log_level(m_section, key, default_value);
             }
@@ -413,7 +404,7 @@ namespace DetourModKit
             [[nodiscard]] input::BindingGuard press_combo(std::string_view ini_key, std::string_view log_name,
                                                           std::string_view binding_name, std::function<void()> on_press,
                                                           std::string_view default_combo,
-                                                          std::optional<bool> consume = std::nullopt)
+                                                          std::optional<bool> consume = std::nullopt) const
             {
                 return config::press_combo(m_section, ini_key, log_name, binding_name, std::move(on_press),
                                            default_combo, consume);
@@ -424,7 +415,7 @@ namespace DetourModKit
                                                          std::string_view binding_name,
                                                          std::function<void(bool)> on_state_change,
                                                          std::string_view default_combo,
-                                                         std::optional<bool> consume = std::nullopt)
+                                                         std::optional<bool> consume = std::nullopt) const
             {
                 return config::hold_combo(m_section, ini_key, log_name, binding_name, std::move(on_state_change),
                                           default_combo, consume);
@@ -432,7 +423,7 @@ namespace DetourModKit
 
             /// Section-scoped consume-flag fusion. See config::consume_flag.
             void consume_flag(std::string_view ini_key, std::string_view display_name, std::string_view binding_name,
-                              bool default_value = false)
+                              bool default_value = false) const
             {
                 config::consume_flag(m_section, ini_key, display_name, binding_name, default_value);
             }
@@ -450,10 +441,12 @@ namespace DetourModKit
         /**
          * @class Ini
          * @brief A handle to the process configuration registry.
-         * @details Exposes the same operations as the free functions plus section(); every Ini and every free function
-         *          act on one shared process registry, so an Ini is a thin, copyable handle rather than an independent
-         *          configuration. It exists so a consumer can write Ini{}.section("X").bind(...) and pass the surface
-         *          around as an object.
+         * @details Exposes section() plus the common operations (bind / bind_parsed / bind_log_level / load / reload /
+         *          log_all / clear / enable_auto_reload / disable_auto_reload). The rest of the bind family
+         *          (bind_int/float/bool/string/combos, press_combo, hold_combo, consume_flag, reload_hotkey) is reached
+         *          through the free functions or through section(). Every Ini and every free function act on one shared
+         *          process registry, so an Ini is a thin, copyable handle rather than an independent configuration; it
+         *          exists so a consumer can write Ini{}.section("X").bind(...) and pass the surface around as an object.
          */
         class Ini
         {

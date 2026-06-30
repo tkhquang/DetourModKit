@@ -78,7 +78,7 @@ input::Input::instance().start();
 
 All setters bound via `bind` / `bind_int` / `bind_float` / `bind_bool` / `bind_string` / `bind_combos` must therefore be reentrant and thread-safe if the caller uses any mechanism other than direct `reload()` invocation. The config mutex is released before setter callbacks fire (the deferred-setter pattern), so setters may freely call back into the config API.
 
-Exceptions that escape a setter propagate to the caller of `reload()`. When the watcher or the reload servicer fires `reload()` the surrounding firewall catches the escape, logs it, and keeps the thread alive.
+A C++ exception that escapes a setter is caught at the `reload()` boundary, logged, and the remaining setters still run; it does not propagate to the caller, whichever thread invoked `reload()`. Structured-exception (SEH) faults and a throwing `noexcept` setter bypass this handler and are not recoverable.
 
 ### Reload hotkey: deferred servicing
 

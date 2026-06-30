@@ -139,9 +139,11 @@ namespace DetourModKit
 
         /**
          * @brief Drops the per-Logic-DLL state owned by the caller.
-         * @details Composes input::Input::remove_bindings_by_name for every entry in @p binding_names, then calls
-         *          config::clear() to drop the bound setters because their call operators live in the unloading DLL's
-         *          .text; Logger and the config watcher are loader-side and outlive the unload. Names
+         * @details Composes input::Input::remove_bindings_by_name for every entry in @p binding_names, then stops the
+         *          auto-reload watcher (config::disable_auto_reload()) and drops the bound setters (config::clear())
+         *          because their call operators live in the unloading DLL's .text. The Logger and the watcher engine
+         *          are loader-side code, so a subsequent config::enable_auto_reload() starts a fresh watcher and
+         *          returns Started. Names
          *          that do not exist are skipped (logged at Debug). Idempotent: a second call with the same names is a
          *          no-op. Use DMK_Shutdown() for whole-process teardown.
          *
@@ -165,16 +167,18 @@ namespace DetourModKit
          *
          * @param hook_names Accepted for call-shape compatibility; not acted on (hooks unhook when their handle drops).
          * @param binding_names Names of input bindings registered via
-         *        input::register_combo (or via config::press_combo).
+         *        input::register_combo (or via config::press_combo / config::hold_combo).
          */
         void on_logic_dll_unload(std::span<const std::string_view> hook_names,
                                  std::span<const std::string_view> binding_names) noexcept;
 
         /**
          * @brief Drops every binding registered through the process-wide singletons.
-         * @details Composes input::Input::clear_bindings, then chains config::clear() to drop the bound setters
-         *          because their call operators live in the unloading DLL's .text; Logger and the config watcher are
-         *          loader-side and outlive the unload. The binding call is clear_bindings() (not
+         * @details Composes input::Input::clear_bindings, then stops the auto-reload watcher
+         *          (config::disable_auto_reload()) and chains config::clear() to drop the bound setters because their
+         *          call operators live in the unloading DLL's .text. The Logger and the watcher engine are loader-side
+         *          code, so a subsequent config::enable_auto_reload() starts a fresh watcher and returns Started. The
+         *          binding call is clear_bindings() (not
          *          shutdown()) so the subsystem stays re-usable for the next attach. Use DMK_Shutdown() for
          *          whole-process teardown.
          *

@@ -903,7 +903,7 @@ TEST(BootstrapOnLogicDllUnloadAll, FixtureDllRoundTrip)
     EXPECT_TRUE(reload.has_value()) << reload.error().message();
 }
 
-// Verifies that on_logic_dll_unload chains config::clear after the hook and binding teardown so
+// Verifies that on_logic_dll_unload chains config::clear after the binding teardown so
 // registered std::function setters (whose call operator and destructor live in the unloading
 // Logic DLL) cannot survive into a second attach as use-after-unload hazards.
 //

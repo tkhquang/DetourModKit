@@ -110,7 +110,8 @@ LEGACY_CONFIG_TOKEN = re.compile(
 # DetourModKit::detail::InputPoller / InputBinding, so a bare token would false-positive on legitimate v4 code; the
 # deletion of the PUBLIC classes is enforced by the namespace move, not this gate. Matched after comment stripping.
 LEGACY_INPUT_TOKEN = re.compile(
-    r'(\bInputManager\b|\bInputMode\b|\bInputBindingGuard\b|\bupdate_binding_combos\b|\binput_mode_to_string\b)')
+    r'(\bInputManager\b|\bInputMode\b|\bInputBindingGuard\b|\bupdate_binding_combos\b|\binput_mode_to_string\b'
+    r'|\bregister_press\b|\bregister_hold\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
