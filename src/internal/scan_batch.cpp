@@ -1,8 +1,7 @@
 /**
  * @file internal/scan_batch.cpp
  * @brief Raw parallel batch scanners over the whole process or one module image.
- * @details The relocated raw scan batch (the former scanner_parallel.cpp, minus the dropped cascade batch). Each item
- *          is dispatched to an existing serial page-gated scan on a worker thread, and results are gathered in input
+ * @details Each item is dispatched to a serial page-gated scan on a worker thread, and results are gathered in input
  *          order by the shared fork-join driver. Correctness rests on read-only sharing: a fully compiled EnginePattern
  *          is immutable during scanning, so workers share the caller's patterns without cloning.
  */

@@ -2,9 +2,9 @@
  * @file scan_resolution.cpp
  * @brief The candidate-ladder resolver: resolve() and resolve_batch().
  * @details Dispatches each Candidate on its active variant payload (Direct / RipRelative byte tiers, RttiVtable /
- *          StringXref text tiers) and returns the first that resolves uniquely to an in-scope, plausible address. The
- *          six v3 resolve_cascade_* overloads collapse into one resolve(ScanRequest) where scope, ordering, uniqueness,
- *          and prologue fallback are request fields. The byte tiers reuse the page-gated SIMD engine with the bounded
+ *          StringXref text tiers) and returns the first that resolves uniquely to an in-scope, plausible address. One
+ *          resolve(ScanRequest) carries scope, ordering, uniqueness, prologue fallback, and the ladder as fields. The
+ *          byte tiers reuse the page-gated SIMD engine with the bounded
  *          haystack-frequency anchor override (sampled lazily on the first byte candidate, shared across the ladder);
  *          the text tiers resolve through their unique-only backends. On a full direct miss with prologue_fallback,
  *          hooked-prologue recovery is attempted.

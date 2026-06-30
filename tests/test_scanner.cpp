@@ -29,9 +29,9 @@ using namespace DetourModKit;
 
 namespace
 {
-    // Adapters that keep the legacy engine-test call shapes working against the relocated v4 engine: the page-gated
-    // whole-process scans now return a MatchResult (the .match pointer plus an incomplete-scan flag), and the
-    // post-resolve prologue gate takes an Address. These are pure shape adapters, not new behaviour.
+    // Thin shape adapters so the engine white-box tests below drive one fixed call shape: the page-gated whole-process
+    // scans return a MatchResult (the .match pointer plus an incomplete-scan flag), and the prologue gate takes an
+    // Address. Pure shape adapters with no behaviour of their own.
     [[nodiscard]] inline const std::byte *scan_exec(const detail::EnginePattern &pattern,
                                                     std::size_t occurrence = 1) noexcept
     {
@@ -46,8 +46,8 @@ namespace
     {
         return scan::is_likely_function_prologue(Address{address});
     }
-    // resolve_rip_relative / find_and_resolve_rip_relative took a raw pointer (+ length) in v3; v4 takes an Address /
-    // Region. These adapters keep the engine-test call shapes while building the v4 scope types.
+    // resolve_rip_relative / find_and_resolve_rip_relative take an Address / Region; these adapters let the tests drive
+    // them from a raw pointer (+ length) by building the Address / Region scope types in one place.
     [[nodiscard]] inline Result<Address> resolve_rip(const std::byte *instruction, std::size_t displacement_offset,
                                                      std::size_t instruction_length) noexcept
     {
@@ -1424,8 +1424,6 @@ TEST_F(ScannerRipTest, rip_resolve_error_to_string_coverage)
     EXPECT_FALSE(to_string(ErrorCode::UnreadableDisplacement).empty());
 }
 
-// Mirror of the RIP mapper coverage above for the cascade ResolveError mapper. Every enumerator must map to a non-empty
-// string, including InvalidRange, which the module-scoped resolvers return for a range whose valid() check fails.
 TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
 {
     // Prefix starts at the last valid position
@@ -2639,51 +2637,6 @@ namespace
     };
 } // namespace
 
-// The whole-process Direct cascade path gates its resolved address with plausible_userspace_ptr. A Direct candidate
-// whose disp_offset underflows the match below the user-mode floor (0x10000) must not resolve: the cascade falls
-// through to the next candidate instead of committing to a near-null address the caller cannot dereference. Here P1
-// carries a pathological negative disp_offset computed to push the resolved address to 0x8000 (below the floor); P2 is
-// the same unique signature with disp_offset 0, so it resolves cleanly and wins.
-// When the only candidate's Direct resolution is implausible (underflows below the user-mode floor), the whole-process
-// cascade returns NoMatch rather than a near-null address.
-// The prologue fallback rebuilds a pattern as `E9 ?? ?? ?? ??` followed by the original pattern's tail bytes. The
-// uniqueness guard in scan_candidates_hooked_prologue rejects any rebuilt pattern that matches more than
-// PROLOGUE_FALLBACK_MAX_HITS locations across the process's executable regions, because a legitimate sibling-mod hook
-// rewrites exactly one prologue and so a unique scan target must resolve to exactly one site. This test seeds two
-// trampoline-shaped sequences with the same literal tail to force a multi-match outcome.
-// Boundary regression: a literal tail of exactly nine bytes must be rejected as PrologueFallbackNotApplicable. A lower
-// literal floor would let the fallback engage with this candidate and produce an unstable resolution; the ten-literal
-// floor surfaces the refusal at the API boundary instead.
-// Boundary regression: exactly two matches of the rebuilt pattern must trip the uniqueness guard. A ceiling above one
-// would accept two hits and hook the first arbitrary site; the ceiling of one demands exact uniqueness, so any
-// duplicate must surface as NoMatch.
-// --- Tests for resolve_cascade_in_module / _with_prologue_fallback ---
-
-// A module-scoped scan must reach the read-only data section of a real mapped
-// PE with a single range scan: there is no separate Readable kind to opt into. The fixture DLL exports dmk_scan_marker,
-// a fixed signature that lands in
-// .rdata; resolving it proves both the .rdata reach and the in-range result.
-// The same byte sequence planted in two independent "module" images: a module-scoped scan must return only the copy
-// inside the range it was given, never the identical copy in the sibling region. This is the cross-module collision a
-// first-match-wins whole-process scan cannot disambiguate.
-// A signature that exists only outside the supplied range must not be found. A whole-process readable scan does find
-// it; the module-scoped scan must not, which is the entire point of scoping.
-// Bounds-aware fall-through: a RipRelative P1 that matches in-module but whose disp32 resolves outside the range must
-// be skipped so the in-range Direct P2 wins. This is the fix a post-resolution caller check cannot express.
-// Bounds-aware fall-through for Direct mode: P1 matches in the scanned half of the image, but its disp_offset pushes
-// the resolved address into the second half, outside the supplied range. The cascade must fall through to P2.
-// Positive RipRelative case: a mov reg,[rip+disp32] candidate whose displacement targets data inside the same module
-// must resolve to that in-module address and win. This is the success path for a RipRelative global (e.g. a
-// context-pointer storage slot in .data): under a whole-process scan the instruction could match in a sibling module
-// and resolve out of bounds, but the module-scoped scan finds the in-module instruction and resolves it in range. A
-// decoy with the same instruction shape in a sibling region is never consulted.
-// Cascade fall-through when the first candidate is absent from the image: a generic prologue P1 that does not appear in
-// this module simply does not match, so the cascade falls through to the mid-body anchor P2 that does. Under a
-// whole-process scan the same P1 false-matches inside a sibling module and wins (first-match-wins), shadowing the
-// correct target -- the exact cross-module shadowing this overload prevents. The test asserts both halves: the
-// whole-process cascade returns P1, the module-scoped cascade returns P2.
-// An invalid range must surface a distinct error and never silently fall back to a whole-process scan, which would
-// re-introduce the cross-module shadowing the overload exists to prevent.
 namespace
 {
     struct VirtualFreeDeleter
@@ -2699,101 +2652,8 @@ namespace
 
     using VirtualPagePtr = std::unique_ptr<std::uint8_t, VirtualFreeDeleter>;
 
-    // Allocates an executable page within an int32 rel32 displacement of `anchor`, mirroring how inline-hook trampoline
-    // allocators place a detour close to its target so a 5-byte E9 can reach it. Returns nullptr if no free region
-    // within range is found; the caller owns a non-null result and must VirtualFree it.
-    std::uint8_t *alloc_exec_near(std::uintptr_t anchor, std::size_t size)
-    {
-        SYSTEM_INFO si{};
-        GetSystemInfo(&si);
-        const auto gran = static_cast<std::uintptr_t>(si.dwAllocationGranularity);
-        // Stay comfortably inside the +-2GB rel32 reach on either side of anchor.
-        constexpr std::uintptr_t search_radius = 0x6000'0000;
-
-        const std::uintptr_t lo = anchor > search_radius ? anchor - search_radius : gran;
-        const std::uintptr_t hi = anchor + search_radius;
-
-        std::uintptr_t probe = (lo + gran - 1) & ~(gran - 1);
-        while (probe < hi)
-        {
-            MEMORY_BASIC_INFORMATION mbi{};
-            if (VirtualQuery(reinterpret_cast<LPCVOID>(probe), &mbi, sizeof(mbi)) == 0)
-            {
-                break;
-            }
-            const auto region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
-            if (mbi.State == MEM_FREE)
-            {
-                const std::uintptr_t aligned = (region_base + gran - 1) & ~(gran - 1);
-                if (aligned + size <= region_base + mbi.RegionSize)
-                {
-                    void *p = VirtualAlloc(reinterpret_cast<LPVOID>(aligned), size, MEM_COMMIT | MEM_RESERVE,
-                                           PAGE_EXECUTE_READWRITE);
-                    if (p != nullptr)
-                    {
-                        return static_cast<std::uint8_t *>(p);
-                    }
-                }
-            }
-            probe = region_base + mbi.RegionSize;
-        }
-        return nullptr;
-    }
 } // namespace
 
-// Regression guard for the module-scoped prologue fallback: the rewritten near-JMP must be FOUND inside the module, but
-// its destination (a sibling mod's trampoline) lives OUTSIDE it. Constraining the destination to the module range would
-// reject this recovery, so the destination is validated only as a committed, execute-readable page. Here the jump
-// target is an executable address in the test image -- a different module than the scanned scratch buffer, which is
-// allocated within rel32 reach so the E9 can encode the jump.
-// A sibling mod's inline-hook trampoline is VirtualAlloc'd outside every loaded module -- the exact SafetyHook case the
-// fallback exists to recover. The destination gate must accept an E9 that lands on a committed, execute-readable page
-// even though it belongs to no module; an in-module requirement defeated recovery for every SafetyHook-hooked target.
-// Here the scanned scratch buffer and the jump destination are two independent VirtualAlloc'd executable pages, so
-// neither is a module and the destination must still be accepted.
-// The 14-byte FF 25 00000000 <abs64> absolute indirect jump (a disp32 of zero so the 8-byte target is inlined right
-// after the instruction, the far-jump shape some Detours-style detours emit) is a recognised prologue-recovery
-// shape. The fallback rebuilds `FF 25 00 00 00 00 ?? x8` + the original literal tail; decode_ff25_indirect reads the
-// inlined target at match+6, gated as a committed, execute-readable address. It is disjoint from the 6-byte FF 25 shape
-// because a 14-byte overwrite leaves a different surviving tail, so the two never alias.
-// The 12-byte `mov rax, imm64; jmp rax` (48 B8 <imm64> FF E0) absolute jump is a recognised prologue-recovery
-// shape some libraries emit instead of FF 25 when the trampoline is beyond rel32 reach. The fallback rebuilds
-// `48 B8 ?? x8 FF E0` + the original literal tail; decode_mov_rax_imm64_jmp_rax returns the inlined imm64 directly (no
-// slot read), gated as a committed, execute-readable address.
-// A hooked prologue inside executable code is still rejected when its E9 lands on committed data. This pins the
-// destination half of the gate separately from the page-scope test below, whose purpose is to prove the match scan
-// stays executable-only.
-// The fallback rebuilds the signature as `E9 ?? ?? ?? ??` + tail, which compiles with anchor offset 0 even when the
-// original carried a `|` marker. The recovered address must still honor that marker: the direct pass returns
-// (match + anchor offset), so the fallback must agree or a `|`-anchored Direct candidate resolves short by the anchor
-// offset -- a silently wrong address. This plants a hooked prologue with a `|` seven bytes in and asserts the fallback
-// lands on match_site + 7, not the bare match_site.
-// The prologue fallback recovers an FF 25 disp32 (RIP-relative indirect JMP) prologue in addition to E9. A trampoline
-// allocator beyond rel32 reach overwrites the prologue with FF 25 disp32 whose disp32 points at an 8-byte slot holding
-// the absolute target. decode_ff25_indirect dereferences the slot, so the destination gate sees the final executable
-// target. This mirrors the E9 trampoline test: plant FF 25 + a disp32 pointing to an in-region slot that holds an
-// executable address, append a 10-literal tail, and assert the fallback resolves to the planted match site.
-// An FF25 prologue whose slot holds a non-executable data address must be rejected exactly as the E9 path rejects a
-// data destination. decode_ff25_indirect returns the slot's target, and is_executable_address fails it, so the fallback
-// reports NoMatch.
-// An FF25-recovered prologue carrying a `|` marker must honor the original anchor offset, exactly as the E9 path does.
-// The FF25 instruction is six bytes, but the rebuilt pattern still compiles with anchor offset 0; the original offset
-// is reapplied at resolve time, so the recovered address must be match_site + 7.
-// Two FF25-shaped copies with the same literal tail exceed the uniqueness ceiling (1), so the FF25 fallback shape must
-// reject the ambiguity and report NoMatch, mirroring the E9 ambiguous-tail guard.
-// Page-scope regression guard for the module-scoped prologue fallback: a hooked near-JMP only ever overwrites a code
-// prologue, so the fallback must search the image's executable pages only -- matching the whole-process fallback, which
-// counts and scans through scan_executable_regions. Here the E9 + literal tail is planted in a READ-ONLY data page (the
-// execute bit is stripped after seeding) inside the range, with a rel32 that resolves to executable code. The
-// fallback must NOT resolve it: a hit would mean it scanned a non-code page. (A readable-page mask would resolve it to
-// the data-page address; this pins the executable-only mask.)
-// require_unique: an ambiguous primary (matches more than once in the module) is
-// skipped so the cascade falls through to the next candidate, instead of silently committing to the lowest-address
-// match. Here P2 is provably unique and wins.
-// require_unique is per-candidate, not a blanket per-call policy: a strict primary that is ambiguous is skipped, while
-// a deliberately broad fallback (require_unique left false) accepts its first match even though it too is non-unique.
-// require_unique with no unique candidate yields a clean NoMatch -- the "binary changed, update signatures" signal --
-// rather than a confident wrong hit.
 TEST(ScannerPrologueTest, NullAddrReturnsFalse)
 {
     EXPECT_FALSE(is_likely_prologue(0));
@@ -2858,7 +2718,7 @@ TEST(ScannerPrologueTest, PatchedJmpE9ReturnsTrue)
 
 // Short JMP (0xEB rel8) is the second prologue-overwrite shape the helper is documented to accept. Some mid-function
 // hookers prefer 0xEB when the target lives within +/-127 bytes; the resolver must still treat it as a real prologue so
-// cascade recovery keeps working under nested hooks.
+// ladder recovery keeps working under nested hooks.
 TEST(ScannerPrologueTest, PatchedJmpEBReturnsTrue)
 {
     ExecBuffer buf(0x1000);
@@ -2890,9 +2750,9 @@ TEST(ScannerPrologueTest, UnreadableAddrReturnsFalse)
     VirtualFree(na, 0, MEM_RELEASE);
 }
 
-// --- Tests for resolve_cascade_in_host_module / _with_prologue_fallback ---
+// --- Tests for host-module-scoped resolve() and prologue_fallback ---
 
-// A unique 16-byte signature compiled into the test executable's own image so a host-module-scoped cascade has a real
+// A unique 16-byte signature compiled into the test executable's own image so a host-module-scoped ladder has a real
 // in-host target to resolve. volatile const keeps the linker from folding the bytes or discarding them as unused (the
 // fixture DLL uses the same idiom for its stable AOB markers).
 static volatile const unsigned char s_host_marker[16] = {0x5A, 0xC3, 0x91, 0x44, 0xE2, 0x7B, 0x10, 0x8F,
@@ -3022,202 +2882,3 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     EXPECT_TRUE(event_payload_ok);
 }
 #endif // _MSC_VER || _WIN64
-
-// --- Tests for the name/string resilience tiers (ResolveMode::RttiVtable / StringXref) ---
-
-namespace
-{
-    // Synthetic MSVC x64 RTTI layout, mirroring the build_synth fixture in tests/test_rtti_reverse.cpp. The cascade's
-    // RttiVtable tier resolves through Rtti::vtable_for_type, whose COL prelude validates each candidate against the
-    // real owning module (its pSelf RVA must reconstruct the owning image base), so the synthetic COL / TypeDescriptor
-    // / vtable must live in the test executable's own data segment. s_cas_rtti_pool provides that storage;
-    // cas_rtti_range() is a tight scope over the bytes written so far, so a unit test sweeps only the fixture, not the
-    // whole exe.
-    constexpr std::size_t CAS_RTTI_BUF_SIZE = 4096;
-    constexpr std::size_t CAS_RTTI_COL_OFFSET = 256;
-    constexpr std::size_t CAS_RTTI_TD_OFFSET = CAS_RTTI_COL_OFFSET + 24; // COL is 24 bytes
-    constexpr std::size_t CAS_RTTI_TD_NAME_OFFSET = CAS_RTTI_TD_OFFSET + 16;
-    constexpr std::size_t CAS_RTTI_COL_PTR_OFFSET = 2048; // the vtable[-1] meta-slot
-    constexpr std::size_t CAS_RTTI_VTABLE_OFFSET = CAS_RTTI_COL_PTR_OFFSET + 8;
-
-    constexpr std::size_t CAS_RTTI_POOL_FIXTURES = 6;
-    alignas(8) std::array<std::byte, CAS_RTTI_BUF_SIZE * CAS_RTTI_POOL_FIXTURES> s_cas_rtti_pool{};
-    std::size_t s_cas_rtti_used = 0;
-
-    void cas_rtti_reset() noexcept
-    {
-        s_cas_rtti_used = 0;
-    }
-
-    template <typename T> void cas_rtti_write(std::byte *buf, std::size_t off, const T &value) noexcept
-    {
-        std::memcpy(buf + off, &value, sizeof(T));
-    }
-
-    // Builds one synthetic COL/TypeDescriptor/vtable carrying @p name at sub-object offset @p col_offset and returns
-    // the synthetic vtable address (0 on pool exhaustion or a sub-image-base data segment).
-    [[nodiscard]] std::uintptr_t cas_build_synth_vtable(std::string_view name, std::uint32_t col_offset) noexcept
-    {
-        if (s_cas_rtti_used + CAS_RTTI_BUF_SIZE > s_cas_rtti_pool.size())
-        {
-            return 0;
-        }
-        std::byte *buf = s_cas_rtti_pool.data() + s_cas_rtti_used;
-        s_cas_rtti_used += CAS_RTTI_BUF_SIZE;
-        std::memset(buf, 0, CAS_RTTI_BUF_SIZE);
-
-        const std::uintptr_t exe_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-        const std::uintptr_t buf_base = reinterpret_cast<std::uintptr_t>(buf);
-        if (buf_base < exe_base)
-        {
-            return 0;
-        }
-        const std::uintptr_t buf_rva = buf_base - exe_base;
-
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 0, 1);          // signature (x64)
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 4, col_offset); // offset in complete object
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 8, 0);          // cd_offset
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 12,
-                                      static_cast<std::uint32_t>(buf_rva + CAS_RTTI_TD_OFFSET)); // p_type_descriptor
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 16, 0);                         // p_class_descriptor
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 20,
-                                      static_cast<std::uint32_t>(buf_rva + CAS_RTTI_COL_OFFSET)); // p_self
-
-        const std::size_t max_name = CAS_RTTI_COL_PTR_OFFSET - CAS_RTTI_TD_NAME_OFFSET - 1;
-        const std::size_t name_len = name.size() < max_name ? name.size() : max_name;
-        std::memcpy(buf + CAS_RTTI_TD_NAME_OFFSET, name.data(), name_len);
-        buf[CAS_RTTI_TD_NAME_OFFSET + name_len] = std::byte{0};
-
-        const std::uintptr_t col_addr = buf_base + CAS_RTTI_COL_OFFSET;
-        cas_rtti_write<std::uintptr_t>(buf, CAS_RTTI_COL_PTR_OFFSET, col_addr);
-
-        return buf_base + CAS_RTTI_VTABLE_OFFSET;
-    }
-
-    // Plants a 16-byte signature into a fresh pool buffer (so it shares the module range with the synthetic vtables)
-    // and returns its address; the matching AOB is written to @p aob_out. Used as the byte fallback tier below an
-    // ambiguous name candidate. Returns 0 on pool exhaustion.
-    [[nodiscard]] std::uintptr_t cas_plant_pool_signature(std::uint8_t seed, std::string &aob_out) noexcept
-    {
-        if (s_cas_rtti_used + CAS_RTTI_BUF_SIZE > s_cas_rtti_pool.size())
-        {
-            return 0;
-        }
-        std::byte *buf = s_cas_rtti_pool.data() + s_cas_rtti_used;
-        s_cas_rtti_used += CAS_RTTI_BUF_SIZE;
-        std::memset(buf, 0, CAS_RTTI_BUF_SIZE);
-        constexpr std::size_t plant_off = 512;
-        aob_out = write_signature(buf + plant_off, 16, seed);
-        return reinterpret_cast<std::uintptr_t>(buf + plant_off);
-    }
-
-    [[nodiscard]] Memory::ModuleRange cas_rtti_range() noexcept
-    {
-        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_cas_rtti_pool.data());
-        return Memory::ModuleRange{base, base + s_cas_rtti_used};
-    }
-
-    // A committed RWX page used as a synthetic module image for the StringXref tier, mirroring the SyntheticImage
-    // fixture in tests/test_string_xref.cpp. find_string_xref scans readable pages for the literal (phase 1) and
-    // execute-readable pages for the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both, so one page hosts the
-    // literal, its RIP-relative reference, and any byte fallback signature, with the ModuleRange spanning exactly it.
-    class CascadeStringImage
-    {
-    public:
-        CascadeStringImage()
-        {
-            SYSTEM_INFO si{};
-            GetSystemInfo(&si);
-            m_size = si.dwPageSize;
-            m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-        }
-
-        ~CascadeStringImage() noexcept
-        {
-            if (m_base)
-            {
-                VirtualFree(m_base, 0, MEM_RELEASE);
-            }
-        }
-
-        CascadeStringImage(const CascadeStringImage &) = delete;
-        CascadeStringImage &operator=(const CascadeStringImage &) = delete;
-        CascadeStringImage(CascadeStringImage &&) = delete;
-        CascadeStringImage &operator=(CascadeStringImage &&) = delete;
-
-        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
-
-        [[nodiscard]] std::byte *bytes(std::size_t off = 0) const noexcept
-        {
-            if (m_base == nullptr)
-            {
-                return nullptr;
-            }
-            return reinterpret_cast<std::byte *>(m_base + off);
-        }
-
-        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept
-        {
-            return reinterpret_cast<std::uintptr_t>(m_base) + off;
-        }
-
-        void write(std::size_t off, const void *data, std::size_t n) noexcept { std::memcpy(m_base + off, data, n); }
-
-        // Plants `48 <opcode> 05 <disp32>` (a REX.W RIP-relative lea/mov into rax) at instr_off whose computed target
-        // is target_off. opcode 0x8D is lea, the canonical string-load shape the narrow phase-2 scan recognizes.
-        void plant_rip_load(std::size_t instr_off, std::size_t target_off, std::uint8_t opcode) noexcept
-        {
-            std::uint8_t *p = m_base + instr_off;
-            p[0] = 0x48; // REX.W
-            p[1] = opcode;
-            p[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
-            const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
-            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
-            std::memcpy(p + 3, &disp, sizeof(disp));
-        }
-
-        [[nodiscard]] Memory::ModuleRange range() const noexcept
-        {
-            if (m_base == nullptr)
-            {
-                return {};
-            }
-            const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(m_base);
-            return Memory::ModuleRange{base, base + m_size};
-        }
-
-    private:
-        std::uint8_t *m_base = nullptr;
-        std::size_t m_size = 0;
-    };
-} // namespace
-
-// The RttiVtable tier resolves a candidate whose pattern is an MSVC mangled name through Rtti::vtable_for_type, scoped
-// to the cascade's module range. The branch lands ahead of parse_aob (the name is not an AOB), so the strongest tier
-// actually fires instead of degrading to a parse-warning skip.
-// vtable_for_type fails closed on an ambiguous name (two distinct primary vtables share it), so the RttiVtable tier
-// falls through to the byte AOB tier below it. The uniqueness is enforced by the backend, not by the byte-mode
-// require_unique rescan, which the new modes never run.
-// A cascade whose only candidate is a missing RttiVtable name returns NoMatch, not AllPatternsInvalid: the branch marks
-// the cascade as having seen a valid non-byte candidate, so the "every byte pattern failed to parse" diagnostic is
-// never reached for a name/string-only table.
-// The StringXref tier anchors on an immutable literal and resolves its unique RIP-relative reference through
-// find_string_xref, scoped to the cascade's module range. The branch lands ahead of parse_aob (the literal is not an
-// AOB), and the default ReferencingInstruction return mode yields the load-site address.
-// find_string_xref reports StringAmbiguous when the literal is pooled (planted twice), so the StringXref tier falls
-// through to the byte AOB tier below it. As with RttiVtable, the unique-only behaviour is the backend's, not the
-// byte-mode require_unique rescan.
-// A single literal with two valid code references reports AmbiguousReference, so the StringXref tier falls through just
-// like a pooled literal does.
-// A cascade whose only candidate is a missing StringXref literal returns NoMatch, not AllPatternsInvalid, for the same
-// reason as the RttiVtable case: a valid non-byte candidate was attempted.
-// The prologue-recovery fallback rewrites only ResolveMode::Direct rows. Name/string rows that miss on the happy path
-// are skipped unchanged by the fallback pass, so the Direct row's hooked E9 prologue is the only one rebuilt and
-// recovered. This pins that the new tiers compose with prologue recovery without special-casing.
-// A name/string-only cascade (no Direct row) that fully misses under the prologue-fallback resolver returns NoMatch,
-// not PrologueFallbackNotApplicable: the fallback has no Direct candidate to rebuild, so the "insufficient literal tail
-// bytes" classification (which only fits a present Direct row) does not apply.
-// The four xref_* facet fields are appended to AddrCandidate and defaulted, so every pre-existing positional aggregate
-// initializer keeps compiling and the new fields take their StringRefQuery-mirroring defaults. Verified at compile
-// time.

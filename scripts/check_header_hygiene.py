@@ -5,7 +5,7 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
 
   1. The SafetyHook backend is confined. No public API header may include or name the backend
      (safetyhook), pull <psapi.h>, or reference Zydis/Zycore. The single sanctioned coupling
-     point is include/DetourModKit/detail/hook_impl.hpp, which only src/hook_manager.cpp
+     point is the non-installed src/internal/hook_backend.hpp, which only src/hook_manager.cpp
      includes. A consumer that includes hook_manager.hpp must therefore compile with SafetyHook
      off its own include path.
 
@@ -15,8 +15,8 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
      brace or same-line) is forbidden; the bare forward declaration `struct MidContext;` is fine.
 
   3. The async-logger plumbing (StringPool / LogMessage / DynamicMPMCQueue) is defined only in
-     detail/async_logger_internal.hpp, never on the documented public surface (one-definition
-     check).
+     the non-installed src/internal/async_logger_queue.hpp, never on the documented public surface
+     (one-definition check).
 
 The check enumerates this repository's own C++ sources from the filesystem (so newly added but
 not-yet-committed headers are covered too) and excludes vendored trees under external/ and any
@@ -28,9 +28,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The one public, installed header allowed to see the backend; only src/hook_manager.cpp includes it.
-BACKEND_BRIDGE_HEADER = "include/DetourModKit/detail/hook_impl.hpp"
-ASYNC_INTERNAL_HEADER = "include/DetourModKit/detail/async_logger_internal.hpp"
+# The one non-installed private header allowed to see the backend; only src/hook_manager.cpp includes it. It lives
+# under src/internal/ (not a public header), so the public-surface backend check below already skips it; the constant
+# is kept for documentation and to localize the sanctioned coupling point.
+BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
+ASYNC_INTERNAL_HEADER = "src/internal/async_logger_queue.hpp"
 
 CPP_SUFFIXES = (".hpp", ".cpp", ".h", ".cc", ".inl")
 SOURCE_DIRS = ("include", "src", "tests")
@@ -68,8 +70,6 @@ INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # header must be justified and added here, not slipped in silently.
 ALLOWED_DETAIL_HEADERS = {
     "pattern_core.hpp",  # by-value inline storage + constexpr parser of public scan::Pattern
-    "hook_impl.hpp",  # SafetyHook backend bridge (slated to relocate to src/internal as hook_backend)
-    "async_logger_internal.hpp",  # async-logger queue/pool (slated to relocate under the AsyncLogger pimpl)
 }
 
 
@@ -185,7 +185,7 @@ def main():
             violations.append(
                 f"{rel}:{line_of(text, m.start())}: MidContext is defined; it must remain an opaque forward declaration")
 
-        # Rule 3: async-logger internals are defined ONLY in detail/async_logger_internal.hpp. The contract is
+        # Rule 3: async-logger internals are defined ONLY in src/internal/async_logger_queue.hpp. The contract is
         # location-exclusive, so this scans every source (headers and .cpp), excluding only the one allowed header,
         # rather than the public headers alone.
         if rel != ASYNC_INTERNAL_HEADER:
@@ -214,7 +214,7 @@ def main():
             print("  " + v)
         print(f"\n{len(violations)} violation(s). See AGENTS.md (the encapsulation boundary rule).")
         return 1
-    print("Header-hygiene gate passed: backend confined, MidContext opaque, async internals in detail/.")
+    print("Header-hygiene gate passed: backend confined, MidContext opaque, async internals private.")
     return 0
 
 

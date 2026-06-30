@@ -3,9 +3,8 @@
  * @brief Standalone x86-64 RIP-relative resolvers: resolve_rip_relative() and find_and_resolve_rip_relative().
  * @details Resolves an absolute address from a RIP-relative instruction whose displacement is read under an SEH fault
  *          guard, then screened against the plausible-userspace floor. find_and_resolve_rip_relative scans a Region for
- *          an opcode prefix (first-prefix-wins) and resolves the disp32 assumed to follow it. Both express the legacy
- *          scanner logic verbatim in the Address / Region / Result vocabulary, mapping the former RipResolveError set to
- *          the unified ErrorCode Scan block.
+ *          an opcode prefix (first-prefix-wins) and resolves the disp32 assumed to follow it. A failure on either path
+ *          surfaces as a typed ErrorCode in the Scan block rather than undefined behaviour.
  */
 
 #include "DetourModKit/scan.hpp"

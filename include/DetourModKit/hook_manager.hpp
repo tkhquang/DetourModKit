@@ -186,7 +186,7 @@ namespace DetourModKit
      * @brief DMK-owned mid-hook detour surface, kept free of the SafetyHook backend.
      * @details v3 leaked SafetyHook's MidHookFn / Context types straight through the public header, which forced
      *          every consumer translation unit that wrote a mid-hook detour onto SafetyHook's (and Zydis's) include
-     *          path. v4 confines the backend to src/hook_manager.cpp + detail/hook_impl.hpp and exposes only these
+     *          path. v4 confines the backend to src/hook_manager.cpp + internal/hook_backend.hpp and exposes only these
      *          DMK-owned types. The captured register file is reached through free accessor functions instead of raw
      *          field access, so the backend's Context64 layout never has to be mirrored in a public header.
      */
@@ -475,7 +475,7 @@ namespace DetourModKit
     public:
         /**
          * @brief Opaque owner of the backend inline-hook object.
-         * @details Defined in detail/hook_impl.hpp and constructed in hook_manager.cpp, so the public header never
+         * @details Defined in internal/hook_backend.hpp and constructed in hook_manager.cpp, so the public header never
          *          names the backend type.
          */
         struct Impl;
@@ -519,7 +519,7 @@ namespace DetourModKit
     public:
         /**
          * @brief Opaque owner of the backend mid-hook object.
-         * @details Defined in detail/hook_impl.hpp and constructed in hook_manager.cpp.
+         * @details Defined in internal/hook_backend.hpp and constructed in hook_manager.cpp.
          */
         struct Impl;
 
@@ -567,7 +567,8 @@ namespace DetourModKit
              */
             /**
              * @brief Opaque owner of the backend VMT hook (the cloned vtable).
-             * @details Defined in detail/hook_impl.hpp and constructed in hook_manager.cpp, so the public header never
+             * @details Defined in internal/hook_backend.hpp and constructed in hook_manager.cpp, so the public header
+             * never
              *          names the backend type. Only the object-level clone lives here; the per-method hook layer is
              *          deferred until that surface is reintroduced.
              */
@@ -1248,7 +1249,8 @@ namespace DetourModKit
 
         /**
          * @brief Opaque owner of the HookManager's backend-coupled state (currently the shared SafetyHook allocator).
-         * @details Defined in detail/hook_impl.hpp and constructed in the HookManager constructor, so the public header
+         * @details Defined in internal/hook_backend.hpp and constructed in the HookManager constructor, so the public
+         * header
          *          neither includes nor names the backend. The unique_ptr's destruction runs in ~HookManager (defined
          *          in the .cpp, where Impl is complete).
          */

@@ -15,10 +15,13 @@
 
 #include "DetourModKit/async_logger.hpp"
 
+#include "internal/async_logger_queue.hpp"
+
 using namespace DetourModKit;
-// White-box access: StringPool, LogMessage, and DynamicMPMCQueue (plus their sizing constants) were relocated into
-// DetourModKit::detail in the 4.0.0 encapsulation pass. These tests exercise that plumbing directly, so they reach
-// into the detail namespace deliberately; production consumers never do.
+// White-box access: StringPool, LogMessage, and DynamicMPMCQueue (plus their sizing constants) are the AsyncLogger
+// pimpl's transport types, defined in the non-installed internal/async_logger_queue.hpp. These tests exercise that
+// plumbing directly, so they include the private header and reach into the detail namespace deliberately; production
+// consumers never do.
 using namespace DetourModKit::detail;
 
 class AsyncLoggerTest : public ::testing::Test

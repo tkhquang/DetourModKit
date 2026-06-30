@@ -2,10 +2,11 @@
  * @file internal/scan_pages.cpp
  * @brief Page-gated AOB scanning: the VirtualQuery region walk, the per-region TOCTOU fault guard, the committed-window
  *        collector, and the single-address executable-page predicate.
- * @details The relocated page machinery of the former scanner.cpp, carried over verbatim except that the incomplete-
- *          scan state now rides on a MatchResult return value (and an internal out-parameter) instead of a thread_local
- *          flag. The Windows page-protection masks stay private to this TU; callers reach them only through the named
- *          module / whole-process scans and the Pages mapping.
+ * @details Wraps the raw matcher in the OS page map so a scan over arbitrary process memory reads only committed pages
+ *          of the requested protection class. The incomplete-scan state rides on a MatchResult return value (and an
+ *          internal out-parameter) rather than a thread-local side channel, so concurrent scans cannot clobber each
+ *          other's fault state. The Windows page-protection masks stay private to this TU; callers reach them only
+ *          through the named module / whole-process scans and the Pages mapping.
  */
 
 #include "internal/scan_pages.hpp"

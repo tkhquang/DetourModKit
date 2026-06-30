@@ -10,7 +10,7 @@ The fix excludes only the deliberate foreign-memory readers from ASan. The AOB b
 
 Building the suite under `msvc-debug-asan` without the fix produces reports like:
 
-- `stack-buffer-underflow` / `global-buffer-overflow` in `find_pattern_raw` (`src/scanner.cpp`), reached via `scan_readable_regions` -> `scan_regions_filtered`. ASan attributes the address to `find_pattern_raw`'s own stack frame, or to an instrumented global.
+- `stack-buffer-underflow` / `global-buffer-overflow` in `find_pattern_raw` (`src/internal/scan_engine.cpp`), reached via `scan_readable_regions` -> `scan_regions_filtered`. ASan attributes the address to `find_pattern_raw`'s own stack frame, or to an instrumented global.
 - `global-buffer-overflow` in `seh_read_bytes` (`src/memory.cpp`), reached via the RTTI host-module section walk.
 
 ## Root cause
@@ -32,7 +32,7 @@ A function that reads foreign memory trips ASan two different ways, and each nee
 
 The byte-search prefilter is unconditional: every build routes it through a self-provided `dmk_memchr` that performs its own byte comparisons and never calls into libc, so the interceptor has nothing to hot-patch. Only the `DMK_NO_SANITIZE_ADDRESS` attribute and the `__movsb` copy in `seh_read_bytes` are guarded by `#if defined(__SANITIZE_ADDRESS__)`.
 
-`src/scanner.cpp`:
+`src/internal/scan_engine.cpp`:
 
 - A translation-unit-local `DMK_NO_SANITIZE_ADDRESS` macro (empty off ASan).
 - `no_sanitize_address` on `find_pattern_raw`, `verify_pattern_avx2`, and the `scan_for_byte` helper -- the functions whose instrumented SIMD/scalar loads read the scanned region.

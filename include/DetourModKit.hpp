@@ -95,7 +95,7 @@ using DMKProfileSample = DetourModKit::ProfileSample;
  *       DMK_Shutdown() before DLL_PROCESS_DETACH is still the recommended practice for a clean orderly shutdown.
  * @note The async-logger StringPool singleton is intentionally leaked and is
  *       NOT reclaimed by this function; the OS releases the memory at process exit. See
- *       DetourModKit::detail::StringPool (detail/async_logger_internal.hpp) for the rationale.
+ *       DetourModKit::detail::StringPool for the rationale.
  */
 inline void DMK_Shutdown() noexcept
 {

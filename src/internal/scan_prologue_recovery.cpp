@@ -2,10 +2,9 @@
  * @file internal/scan_prologue_recovery.cpp
  * @brief Hooked-prologue recovery: rebuild a Direct candidate's prologue as a recognised inline-hook jump shape and
  *        recover the single redirected site.
- * @details The relocated prologue-recovery control flow of the former scan.cpp anonymous namespace, adapted to the
- *          variant Candidate (it acts only on Direct candidates, dispatched through Candidate::as_direct()). Rebuilds
- *          run through the shared constexpr DSL core so the jump-prefix encoding has one source of truth, scan over the
- *          image's executable pages, and gate the decoded jump destination as a plausible, executable address before
+ * @details Acts only on Direct candidates, dispatched through Candidate::as_direct(). Each rebuilt prologue runs
+ *          through the shared constexpr DSL core so the jump-prefix encoding has one source of truth, scans over the
+ *          image's executable pages, and gates the decoded jump destination as a plausible, executable address before
  *          acceptance.
  */
 

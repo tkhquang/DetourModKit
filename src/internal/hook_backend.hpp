@@ -1,15 +1,15 @@
-#ifndef DETOURMODKIT_DETAIL_HOOK_IMPL_HPP
-#define DETOURMODKIT_DETAIL_HOOK_IMPL_HPP
+#ifndef DETOURMODKIT_INTERNAL_HOOK_BACKEND_HPP
+#define DETOURMODKIT_INTERNAL_HOOK_BACKEND_HPP
 
 /**
- * @file detail/hook_impl.hpp
+ * @file internal/hook_backend.hpp
  * @brief Backend-coupled pimpl bodies for the hook subsystem.
- * @details This is the ONLY DetourModKit header that names the SafetyHook backend. hook_manager.hpp forward-declares
+ * @details This is the only DetourModKit header that names the SafetyHook backend. hook_manager.hpp forward-declares
  *          the nested Impl of every backend-owning class (InlineHook, MidHook, detail::VmtHookEntry, HookManager) and
  *          holds it behind a std::unique_ptr; those Impl bodies are completed here, where safetyhook.hpp is visible.
- *          Only src/hook_manager.cpp includes this header, so the backend (and the Zydis headers it drags in) stays
- *          confined to that single translation unit. A public consumer that includes hook_manager.hpp pulls in none of
- *          it.
+ *          It is never installed and only src/hook_manager.cpp includes it, so the backend (and the Zydis headers it
+ *          drags in) stays confined to that single translation unit. A public consumer that includes hook_manager.hpp
+ *          pulls in none of it.
  *
  *          The opaque hook::MidContext bridge is deliberately NOT defined here. MidContext must stay
  *          an incomplete type in every translation unit so that the Context64 <-> MidContext reinterpret_cast remains a
@@ -64,4 +64,4 @@ namespace DetourModKit
     } // namespace detail
 } // namespace DetourModKit
 
-#endif // DETOURMODKIT_DETAIL_HOOK_IMPL_HPP
+#endif // DETOURMODKIT_INTERNAL_HOOK_BACKEND_HPP

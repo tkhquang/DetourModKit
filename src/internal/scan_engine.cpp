@@ -2,10 +2,10 @@
  * @file internal/scan_engine.cpp
  * @brief Raw AOB matching engine: anchor selection, the memchr-prefiltered SIMD match loop, parse_aob, and runtime
  *        SIMD-tier detection.
- * @details The relocated core of the former scanner.cpp, carried over verbatim. The matcher is logger-free and
- *          backend-free: the public scan module screens inputs and reports diagnostics; this engine only finds bytes.
- *          The SIMD verify tiers (SSE2 baseline, runtime-gated AVX2, opt-in runtime-gated AVX-512) and the
- *          ASan-safe self-provided memchr prefilter are preserved exactly as in the battle-tested original.
+ * @details The matcher is logger-free and backend-free: the public scan module screens inputs and reports diagnostics;
+ *          this engine only finds bytes. The SIMD verify tiers (SSE2 baseline, runtime-gated AVX2, opt-in runtime-gated
+ *          AVX-512) sit behind an ASan-safe self-provided memchr prefilter, so the hot path never calls into a libc
+ *          interceptor that would inspect the scanner's deliberate cross-region reads.
  */
 
 #include "internal/scan_engine.hpp"

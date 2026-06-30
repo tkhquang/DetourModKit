@@ -3,11 +3,11 @@
 
 /**
  * @file scan.hpp
- * @brief The single public surface of the v4 scan module: pattern matching, candidate-ladder
+ * @brief The single public surface of the scan module: pattern matching, candidate-ladder
  *        resolution, and the standalone RIP-relative / string-xref / code-constant resolvers.
- * @details This header is the entire public scan API. It is intentionally complete: every distinct
- *          v3 scanner capability is exposed here in v4 idiom (Address / Region / Pattern / Result),
- *          so v4 is not a capability regression. The engine that implements these (the SIMD matcher,
+ * @details This header is the entire public scan API. It is intentionally complete: every scanner
+ *          capability is exposed here in the library's value-type idiom (Address / Region / Pattern /
+ *          Result). The engine that implements these (the SIMD matcher,
  *          the VirtualQuery page walk, hooked-prologue recovery, the x86 decoder) lives under
  *          `src/internal/` and is never installed: an installed header is a public compile contract
  *          regardless of namespace, so the engine stays physically out of the include tree. The only
@@ -777,11 +777,15 @@ namespace DetourModKit::scan
      * @param opcode_prefix The opcode byte sequence to search for.
      * @param instruction_length Total length of the instruction in bytes.
      * @return The resolved absolute address, or an Error.
-     * @details Matching is first-prefix-wins. For indirect-call / indirect-jump forms (`FF 15`/`FF 25`) the returned
-     *          address is the pointer slot, not the final target. The resolved target is gated by the same
-     *          ImplausibleTarget check as resolve_rip_relative. When a signature may be ambiguous, anchor it through
-     *          resolve() (which enforces per-candidate uniqueness) instead.
-     * @note Callback-safe: a bounded scan plus a guarded read, no allocation.
+     * @details Matching is first-prefix-wins. The prefix search reads @p search directly with no page filtering, so the
+     *          caller must guarantee the region is committed and readable (use it over a region already known readable,
+     *          such as a located function body); to resolve a single instruction whose address is uncertain, prefer
+     *          resolve_rip_relative, whose displacement read is fault-guarded. For indirect-call / indirect-jump forms
+     *          (`FF 15`/`FF 25`) the returned address is the pointer slot, not the final target. The resolved target is
+     *          gated by the same ImplausibleTarget check as resolve_rip_relative. When a signature may be ambiguous,
+     *          anchor it through resolve() (which enforces per-candidate uniqueness) instead.
+     * @note The prefix scan reads @p search unguarded (caller-guaranteed readable); the displacement read is guarded.
+     *       No allocation.
      */
     [[nodiscard]] Result<Address> find_and_resolve_rip_relative(Region search, std::span<const std::byte> opcode_prefix,
                                                                 std::size_t instruction_length) noexcept;
@@ -802,7 +806,7 @@ namespace DetourModKit::scan
 
     /**
      * @brief Flattens a resolve Result to its address, or a null Address on failure.
-     * @details The single blessed convenience for the address-or-nothing shape. It is a LEGACY/compat adapter, not the
+     * @details The single blessed convenience for the address-or-nothing shape. It is a convenience adapter, not the
      *          primary contract: new code resolves through Result and handles the Error. or_null on a happy path is a
      *          smell. Header-inline because Hit and Result<Hit> are complete here.
      * @note Callback-safe: a pure noexcept Result read with no allocation, I/O, or locking.
@@ -815,8 +819,7 @@ namespace DetourModKit::scan
     /**
      * @brief Flattens a resolve Result to its address, or a caller-chosen fallback on failure.
      * @details The general, non-default form of or_null (`or_null(r)` is `address_or(r, Address{})`). Same
-     * LEGACY/compat
-     *          status: prefer handling the Error in new code.
+     *          convenience-adapter status: prefer handling the Error in new code.
      * @note Callback-safe: a pure noexcept Result read with no allocation, I/O, or locking.
      */
     [[nodiscard]] inline Address address_or(const Result<Hit> &result, Address fallback = Address{}) noexcept

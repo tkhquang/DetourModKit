@@ -630,7 +630,7 @@ int main(int argc, char **argv)
     constexpr std::size_t VERIFY_ITERS = 10;
     run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE, VERIFY_ITERS, SAMPLES);
 
-    // Startup-resolution layer benchmark. This times the consumer-facing cascade resolver instead of the raw
+    // Startup-resolution layer benchmark. This times the consumer-facing ladder resolver instead of the raw
     // EnginePattern batch, preserving per-target candidate order and uniqueness checks.
     constexpr std::size_t RESOLVER_MODULE = 8u * 1024u * 1024u;
     constexpr std::size_t RESOLVER_TARGETS = 16;

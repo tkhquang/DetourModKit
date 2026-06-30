@@ -5,9 +5,8 @@
  * @details Two fail-closed phases. Phase 1 locates the single occurrence of the query string in the image's readable
  *          pages (the page-gated readable scan). Phase 2 finds the single RIP-relative reference to that string: a fast,
  *          desync-immune shape scan for the dominant lea/mov forms by default, plus an optional Zydis-verified linear
- *          sweep (broad_match) for the rarer shapes. Carried over verbatim from the former string_xref.cpp, rewired to
- *          the v4 Region / Result vocabulary and the private engine page primitives. Zydis is confined to this TU: no
- *          public header exposes a Zydis type.
+ *          sweep (broad_match) for the rarer shapes. Both phases resolve through the private engine page primitives.
+ *          Zydis is confined to this TU: no public header exposes a Zydis type.
  */
 
 #include "DetourModKit/scan.hpp"

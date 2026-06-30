@@ -22,7 +22,7 @@ using namespace DetourModKit;
 // The raw parallel batch scanner (internal scan_batch) is a fork-join wrapper over the serial page-gated scans: each
 // item is one independent serial scan distributed across worker threads. These tests cover input-order preservation,
 // the per-item fail-closed behaviour (null / empty / zero-occurrence / no-match), ScannerKind selection, module-range
-// confinement, and the worker-count knob. The cascade-batch tests exercise the PUBLIC scan::resolve_batch over the same
+// confinement, and the worker-count knob. The batch tests exercise the PUBLIC scan::resolve_batch over the same
 // fork-join driver, confirming the variant-Candidate resolver dispatch and the string-xref tier run safely on a worker
 // thread. The raw batch is a true-private engine primitive (detail::), so those tests white-box-include the internal
 // headers; the resolve_batch tests use only the public scan:: surface.
@@ -63,7 +63,7 @@ namespace
         return out;
     }
 
-    /// Compiles a known-good AOB literal into a public scan::Pattern (the cascade-batch candidate signatures).
+    /// Compiles a known-good AOB literal into a public scan::Pattern (the batch candidate signatures).
     [[nodiscard]] scan::Pattern aob(std::string_view dsl)
     {
         return scan::Pattern::compile(dsl).value();
@@ -407,10 +407,10 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
     const scan::ScanRequest module_request{.ladder = cands_a, .label = "module-a", .scope = range};
     const scan::ScanRequest fallback_request{
         .ladder = cands_b, .label = "module-b-fallback", .scope = range, .prologue_fallback = true};
-    // Whole-process scope is the v4 successor to the legacy range-less cascade.
+    // Whole-process scope exercises the range-less resolution path (no module bound on the sweep).
     const scan::ScanRequest whole_process_request{
         .ladder = cands_b, .label = "whole-process-b", .scope = Region::whole_process()};
-    const scan::ScanRequest empty_request{.label = "empty"};
+    const scan::ScanRequest empty_request{.ladder = {}, .label = "empty"};
     const scan::ScanRequest invalid_range_request{.ladder = cands_a, .label = "invalid-range", .scope = Region{}};
 
     const std::vector<scan::ScanRequest> requests{module_request, fallback_request, whole_process_request,

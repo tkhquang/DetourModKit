@@ -1,15 +1,15 @@
-#ifndef DETOURMODKIT_DETAIL_ASYNC_LOGGER_INTERNAL_HPP
-#define DETOURMODKIT_DETAIL_ASYNC_LOGGER_INTERNAL_HPP
+#ifndef DETOURMODKIT_INTERNAL_ASYNC_LOGGER_QUEUE_HPP
+#define DETOURMODKIT_INTERNAL_ASYNC_LOGGER_QUEUE_HPP
 
 /**
- * @file detail/async_logger_internal.hpp
- * @brief Implementation-only async-logger plumbing.
+ * @file internal/async_logger_queue.hpp
+ * @brief True-private async-logger transport: the overflow string pool, the per-message record, and the MPMC queue.
  * @details Houses the overflow string pool (StringPool), the per-message transport record (LogMessage), and the
- *          bounded Vyukov MPMC ring buffer (DynamicMPMCQueue), all in namespace DetourModKit::detail. These are not
- *          part of the documented public API: the project boundary rule (see AGENTS.md) keeps implementation-only
- *          container and entry types out of namespace DetourModKit so a consumer cannot accidentally depend on them.
- *          AsyncLogger (async_logger.hpp) owns a DynamicMPMCQueue by value, so this header must stay visible to that
- *          public header; only async_logger.hpp and src/async_logger.cpp legitimately reach in here.
+ *          bounded Vyukov MPMC ring buffer (DynamicMPMCQueue), all in namespace DetourModKit::detail. It is never
+ *          installed: AsyncLogger holds these behind its pimpl (see src/async_logger.cpp), so the public
+ *          async_logger.hpp names none of them and a consumer compiles without the queue/pool/threading internals on
+ *          its include path. Only the AsyncLogger pimpl translation unit and the async-logger white-box tests reach in
+ *          here.
  */
 
 #include "DetourModKit/logger.hpp"
@@ -248,4 +248,4 @@ namespace DetourModKit::detail
 
 } // namespace DetourModKit::detail
 
-#endif // DETOURMODKIT_DETAIL_ASYNC_LOGGER_INTERNAL_HPP
+#endif // DETOURMODKIT_INTERNAL_ASYNC_LOGGER_QUEUE_HPP

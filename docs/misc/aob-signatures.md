@@ -378,7 +378,7 @@ const auto resolved = sc::find_and_resolve_rip_relative(
     /*instruction_length=*/5);        // E8 + disp32
 ```
 
-`find_and_resolve_rip_relative` is **first-prefix-wins**: it resolves the first location whose bytes match `opcode_prefix` and does not check whether the prefix occurs again within the window. When a signature may be ambiguous, anchor it through the cascade resolver (which enforces per-candidate uniqueness) instead of widening the search window. The resolved target is gated by the same `ImplausibleTarget` check as `resolve_rip_relative`.
+`find_and_resolve_rip_relative` is **first-prefix-wins**: it resolves the first location whose bytes match `opcode_prefix` and does not check whether the prefix occurs again within the window. Its prefix search reads `search` directly with no page filtering, so the caller must guarantee that region is committed and readable (use it over a region already known readable, such as a located function body); to resolve a single instruction whose address is uncertain, prefer `resolve_rip_relative`, whose displacement read is fault-guarded. When a signature may be ambiguous, anchor it through `resolve()` (the candidate ladder, which enforces per-candidate uniqueness) instead of widening the search window. The resolved target is gated by the same `ImplausibleTarget` check as `resolve_rip_relative`.
 
 ### 5.3 What these helpers will not resolve
 

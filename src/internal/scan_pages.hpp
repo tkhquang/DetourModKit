@@ -10,7 +10,8 @@
  *          no-access pages instead of faulting the host. The Windows page-protection masks (PAGE_EXECUTE_READ, ...)
  *          stay private to scan_pages.cpp; callers select a class through the Pages mapping or the named module/process
  *          scans. A page-gated scan returns a MatchResult so the caller learns whether a region faulted mid-scan (the
- *          occurrence count is then only a lower bound), which replaces the former thread_local incomplete flag.
+ *          occurrence count is then only a lower bound), so the fault state rides on the return value rather than a
+ *          thread-local side channel.
  */
 
 #include "internal/scan_engine.hpp"
@@ -33,8 +34,8 @@ namespace DetourModKit
          * @details @ref match is the Nth match (adjusted by pattern.offset) or nullptr when not found. @ref incomplete
          *          is true when the sweep skipped a region that faulted mid-scan under the TOCTOU guard: the occurrence
          *          count is then only a lower bound (a hidden match could live in the skipped bytes), so a caller doing
-         *          a uniqueness check must fail closed. This replaces the former thread_local scan_incomplete_flag: the
-         *          fault state rides on the return value rather than a side channel.
+         *          a uniqueness check must fail closed. The fault state rides on the return value rather than a
+         *          thread-local side channel, so concurrent scans cannot clobber each other's incomplete state.
          */
         struct MatchResult
         {

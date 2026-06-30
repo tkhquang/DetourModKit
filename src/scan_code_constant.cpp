@@ -4,8 +4,8 @@
  * @details The code-side twin of the RTTI self-heal: the CodeConstant's candidate ladder resolves to an instruction
  *          site (via scan::resolve), the live instruction is decoded, and the requested operand's immediate or memory
  *          displacement is returned as the CURRENT value. The caller's nominal is never a short-circuit, so a same-shape
- *          / different-value drift is reported as the new value. Carried over verbatim from the former code_constant.cpp,
- *          rewired to resolve a Candidate ladder instead of an AddrCandidate cascade. Zydis is confined to this TU.
+ *          / different-value drift is reported as the new value. The CodeConstant's Candidate ladder resolves the site;
+ *          Zydis is confined to this TU.
  */
 
 #include "DetourModKit/scan.hpp"

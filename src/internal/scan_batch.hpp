@@ -5,11 +5,9 @@
  * @file internal/scan_batch.hpp
  * @brief True-private raw parallel batch scanner: resolve many compiled EnginePatterns concurrently over the whole
  *        process or one module image.
- * @details Never installed. The raw scan batch, kept as an internal engine primitive: the public parallel surface is
- *          scan::resolve_batch.
- *          Each item is scanned independently by one worker through the same per-region page walk the serial scans use,
- *          via the generic fork-join driver. The cascade batch (resolve_cascade_batch) is dropped; resolve_batch
- *          supersedes it.
+ * @details Never installed. The raw scan batch, an internal engine primitive: the public parallel surface is
+ *          scan::resolve_batch. Each item is scanned independently by one worker through the same per-region page walk
+ *          the serial scans use, via the generic fork-join driver.
  */
 
 #include "internal/scan_engine.hpp"

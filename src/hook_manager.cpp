@@ -1,9 +1,9 @@
 #include "DetourModKit/hook_manager.hpp"
-// detail/hook_impl.hpp is the only place the SafetyHook backend becomes visible: it completes the pimpl Impl bodies
-// that hook_manager.hpp only forward-declares, and transitively provides safetyhook.hpp for the create/apply calls and
-// the MidContext accessor bridge below. Keeping this include here (and nowhere in a public header) is what confines the
-// backend to this translation unit.
-#include "DetourModKit/detail/hook_impl.hpp"
+// internal/hook_backend.hpp is the only place the SafetyHook backend becomes visible: it completes the pimpl Impl
+// bodies that hook_manager.hpp only forward-declares, and transitively provides safetyhook.hpp for the create/apply
+// calls and the MidContext accessor bridge below. Keeping this include here (and nowhere in a public header) is what
+// confines the backend to this translation unit.
+#include "internal/hook_backend.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/memory.hpp"
@@ -312,7 +312,7 @@ namespace DetourModKit
 
     // -----------------------------------------------------------------------------------------------------------------
     // Out-of-line pimpl bodies for the managed-hook wrappers. These live in the .cpp (not the header) because every
-    // line reaches the SafetyHook backend through the Impl definitions in detail/hook_impl.hpp.
+    // line reaches the SafetyHook backend through the Impl definitions in internal/hook_backend.hpp.
     // -----------------------------------------------------------------------------------------------------------------
 
     InlineHook::InlineHook(std::string name, uintptr_t target_address, std::unique_ptr<Impl> impl,

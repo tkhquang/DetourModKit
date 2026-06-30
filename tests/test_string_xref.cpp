@@ -1150,8 +1150,7 @@ TEST(StringXrefTest, StringPointerSlotBroadOnlyReferenceFails)
 
 TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 {
-    // In v4 the error carrier is ErrorCode, not a separate StringXrefError enum.
-    // Verify that error_code_to_string covers all string-xref ErrorCode values and is noexcept.
+    // Verify that to_string covers all string-xref ErrorCode values and is noexcept.
     static_assert(noexcept(to_string(ErrorCode::EmptyQuery)));
     const ErrorCode all[] = {
         ErrorCode::EmptyQuery,  ErrorCode::InvalidRange,       ErrorCode::StringNotFound,   ErrorCode::StringAmbiguous,

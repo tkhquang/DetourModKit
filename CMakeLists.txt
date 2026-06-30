@@ -445,10 +445,10 @@ else()
   message(WARNING "No module headers found in 'include/DetourModKit/*.hpp' to install.")
 endif()
 
-# Install detail/ headers from include/DetourModKit/detail/. These carry implementation-only types (namespace
+# Install detail/ headers from include/DetourModKit/detail/. These carry compile-visible support (namespace
 # DetourModKit::detail) that public headers depend on by value, so they must ship alongside the public surface even
-# though consumers never include them directly. async_logger.hpp pulls detail/async_logger_internal.hpp, so an
-# installed package that omitted this directory would fail to compile.
+# though consumers never include them directly. scan.hpp holds scan::Pattern by value, whose inline storage and
+# constexpr parser are detail/pattern_core.hpp, so that header must ship for an installed package to compile.
 file(GLOB _dmk_detail_headers_for_install
   LIST_DIRECTORIES false
   CONFIGURE_DEPENDS

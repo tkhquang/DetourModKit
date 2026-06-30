@@ -27,7 +27,7 @@ namespace DetourModKit
 {
     namespace detail
     {
-        // Convert a v4 Region into the engine's half-open ModuleRange [base, end). An empty Region (the fail-closed
+        // Convert a Region into the engine's half-open ModuleRange [base, end). An empty Region (the fail-closed
         // result every Region factory returns when its scope cannot be resolved) yields an invalid ModuleRange, which
         // both the page-gated scanners and the contains() screen treat as "resolve nothing".
         [[nodiscard]] inline Memory::ModuleRange to_module_range(Region scope) noexcept
