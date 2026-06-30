@@ -1,9 +1,9 @@
 /**
  * @file config_watcher.cpp
- * @brief Implementation of ConfigWatcher (ReadDirectoryChangesW-based).
+ * @brief Implementation of the internal ConfigWatcher engine (ReadDirectoryChangesW-based), not installed.
  */
 
-#include "DetourModKit/config_watcher.hpp"
+#include "config_watcher.hpp"
 #include "DetourModKit/diagnostics.hpp"
 
 #include "DetourModKit/logger.hpp"
@@ -13,7 +13,6 @@
 #include <windows.h>
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -30,16 +29,13 @@
 #include <utility>
 #include <vector>
 
-namespace DetourModKit
+namespace DetourModKit::detail
 {
-    namespace detail
-    {
-        // Test-only override for is_loader_lock_held(). When non-null the
-        // ConfigWatcher destructor consults this hook instead of the real
-        // PEB-based detection, letting the test suite exercise the detach-and-leak branch from user code. Defined as a
-        // plain function pointer because the override is set/cleared on a single thread inside a test fixture.
-        bool (*g_config_watcher_loader_lock_override)() noexcept = nullptr;
-    } // namespace detail
+    // Test-only override for is_loader_lock_held(). When non-null the ConfigWatcher destructor consults this hook
+    // instead of the real PEB-based detection, letting the test suite exercise the detach-and-leak branch from user
+    // code. Defined as a plain function pointer because the override is set/cleared on a single thread inside a test
+    // fixture.
+    bool (*g_config_watcher_loader_lock_override)() noexcept = nullptr;
 
     namespace
     {
@@ -48,11 +44,11 @@ namespace DetourModKit
 
         bool loader_lock_held_for_watcher() noexcept
         {
-            if (auto *override_fn = detail::g_config_watcher_loader_lock_override)
+            if (auto *override_fn = g_config_watcher_loader_lock_override)
             {
                 return override_fn();
             }
-            return detail::is_loader_lock_held();
+            return is_loader_lock_held();
         }
 
         // Sized so bursty editor saves do not overflow a single call while still fitting comfortably on the worker's
@@ -202,7 +198,7 @@ namespace DetourModKit
             // still references. Pin the module so trampoline and worker code pages remain mapped, request stop, then
             // leak the entire Impl onto the heap so it outlives the destructor. The same loader-lock leaf discipline
             // used by the hook handle teardown and Logger::shutdown_internal.
-            detail::pin_current_module();
+            pin_current_module();
 
             if (m_impl->worker)
             {
@@ -681,4 +677,4 @@ namespace DetourModKit
             to_drop->shutdown();
         }
     }
-} // namespace DetourModKit
+} // namespace DetourModKit::detail

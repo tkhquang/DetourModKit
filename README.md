@@ -13,7 +13,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Core Vocabulary (v4) | Strongly-typed `Address` and `Region` value types (constexpr arithmetic, a single audited cast surface, named scope factories), the backend-neutral `Prot` protection flags, and one unified error idiom: the eight per-domain enums folded into one high-byte-tagged `ErrorCode` superset (`category()` recovers the subsystem), a trivially-copyable `Error`, `Result<T> = std::expected<T, Error>`, and the `DMK_TRY` / `DMK_TRY_VOID` propagation macros | `address.hpp`, `region.hpp`, `error.hpp`, `defines.hpp` |
 | AOB Scanner | v4 `scan.hpp` surface with value-semantic `Pattern`, factory-only `Candidate` tiers, borrowed and owned `ScanRequest`, `resolve` / `resolve_batch`, page-gated `scan`, and `unchecked::find_pattern`, backed by the existing SIMD scanner with full-byte and per-nibble wildcards, cross-region-boundary overlap, RIP resolution, prologue-recovery fallback, raw and resolve-ladder batch scanning, in-code constants, and string-reference xrefs | `scan.hpp` |
 | Hook (v4) | Free verbs (`hook::inline_at` / `mid_at` / `install_all` / `vmt_for`) returning move-only RAII `Hook` / `VmtHook` handles whose destructors restore the prologue, with the SafetyHook backend fully hidden behind an opaque `hook::MidContext` | `hook.hpp` |
-| Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
+| Configuration | INI-based settings with key combo support and hot-reload (folded-in file watcher + hotkey) | `config.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed fault-guarded reads/writes (`Result<T>`), fault-guarded pointer-chain walks, page-protection guards, PE module range queries | `memory.hpp` |
@@ -71,33 +71,34 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 <summary><strong>Configuration System</strong></summary>
 
 - Load settings from INI files (powered by [SimpleIni](https://github.com/brofield/simpleini))
-- Mods register configuration variables; the kit handles parsing and value assignment
-- Key combo support via `register_key_combo`:
+- Free functions over the process config registry (namespace `DetourModKit::config`); the kit handles parsing and value assignment
+- Key combo support via `config::bind_combos` (delivers the parsed `input::KeyComboList` to a callback) and the `config::press_combo` / `config::hold_combo` fusions that also register a live input binding:
   - Format: `modifier+trigger` (e.g., `Ctrl+Shift+F3`)
   - Comma-separated independent combos (e.g., `F3,Gamepad_LT+Gamepad_B`)
   - Named keys (`Ctrl`, `F3`, `Mouse1`, `Gamepad_A`), hex VK codes (`0x72`), and mixed formats
   - Opt-out sentinels: an empty value or the literal `NONE` (case-insensitive, whole-string only) leaves the binding unbound silently. A non-empty value whose every token fails to parse is logged at WARNING level naming the binding and the offending raw string.
-- Convenience helpers: `register_log_level` (parses an INI string into a `Logger::set_log_level` call) and `register_atomic<T>` for `int`/`bool`/`float` (writes the parsed value into a caller-supplied `std::atomic<T>` with `memory_order_relaxed`; the 4-argument overload uses the atomic's current value as the registration default)
+- Binding helpers: `config::bind<T>` for `int`/`bool`/`float` (the hot path -- writes the parsed value into a caller-supplied `std::atomic<T>` with `memory_order_relaxed`; the overload without a default uses the atomic's current value as the registration default), the callback-store forms `config::bind_int` / `bind_float` / `bind_bool` / `bind_string`, `config::bind_parsed` (an `std::atomic<uint32_t>` written through a user parse function, e.g. a bitmask), and `config::bind_log_level` (parses an INI string into a logger level). `config::section("X")` returns a `SectionBinder` that drops the repeated section argument, and an `Ini` handle exposes the same operations plus `section()`
+- Config is fail-soft: `bind` / `load` return void, `reload` returns `bool`, and `enable_auto_reload` returns an `AutoReloadStatus` enum -- there is no `Result` and no per-domain error enum (a missing or malformed key falls back to the registered default and is logged, never reported as an error)
 - **Hot-reload** (see [Config Hot-Reload Guide](docs/config-hot-reload/README.md)):
-  - `Config::reload()` re-runs every registered setter against the last-loaded INI without touching registrations; skips setters when the on-disk bytes are byte-identical to the last load (FNV-1a content hash)
-  - `Config::enable_auto_reload()` starts a background `ConfigWatcher` (`config_watcher.hpp`) that debounces editor save-flurries and triggers `reload()` automatically; returns an `AutoReloadStatus` enum indicating outcome
-  - `Config::register_reload_hotkey()` wires a user-configurable key combo to `reload()` via the kit `InputManager`; the press callback hands off to a dedicated reload-servicer thread so the input poll thread never blocks on INI parsing
+  - `config::reload()` re-runs every bound setter against the last-loaded INI without touching registrations; skips setters when the on-disk bytes are byte-identical to the last load (FNV-1a content hash)
+  - `config::enable_auto_reload()` starts the folded-in background filesystem watcher that debounces editor save-flurries and triggers `reload()` automatically; returns an `AutoReloadStatus` enum indicating outcome. `config::disable_auto_reload()` stops it. There is no separate watcher header -- the watcher engine lives in the non-installed `src/internal/`
+  - `config::reload_hotkey()` wires a user-configurable key combo to `reload()` via a `config::press_combo`; the press callback hands off to a dedicated reload-servicer thread so the input poll thread never blocks on INI parsing
 
 </details>
 
 <details>
 <summary><strong>Config Hot-Reload</strong></summary>
 
-Two mechanisms share the same `Config::reload()` primitive - use either or both:
+Two mechanisms share the same `config::reload()` primitive - use either or both:
 
 ```cpp
 // 1. Initial load stashes the INI path.
-Config::load("mymod.ini");
+config::load("mymod.ini");
 
 // 2. Filesystem watcher: auto-reload on file change (250 ms debounce).
 //    on_reload receives true when setters actually ran, false when the
 //    content-hash short-circuit skipped the work.
-(void)Config::enable_auto_reload(std::chrono::milliseconds{250},
+(void)config::enable_auto_reload(std::chrono::milliseconds{250},
                                  [](bool content_changed)
                                  {
                                      if (content_changed)
@@ -107,8 +108,8 @@ Config::load("mymod.ini");
                                  });
 
 // 3. Hotkey: user presses Ctrl+F5 (or whatever the INI says) to force reload.
-Config::register_reload_hotkey("ReloadConfig", "Ctrl+F5");
-InputManager::get_instance().start();
+(void)config::reload_hotkey("ReloadConfig", "Ctrl+F5");
+input::Input::instance().start();
 ```
 
 See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thread-safety contract, debounce rationale, rename-swap-save handling, and the list of settings that are safe to hot-reload vs restart-required.
@@ -254,8 +255,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 
 **Threading and lifecycle:**
 
-- Available as an RAII `InputPoller` building block or via the thread-safe `InputManager` singleton
-- Two-phase initialization (construct then start) for safe thread launching
+- Driven through the thread-safe `input::Input` process singleton (`input::Input::instance()`), which owns the poll thread, the binding set, and the process-global interception layer; the poll/edge engine itself lives in the non-installed `src/internal/`
+- Two-phase initialization (register bindings, then `start()`) for safe thread launching
 - `condition_variable_any` with `stop_token` for responsive cooperative shutdown
 - Exception-safe callback invocation
 - Automatic hold release on shutdown
@@ -263,8 +264,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 
 **Performance:**
 
-- Hash-map-backed `is_binding_active()` query for low-overhead cross-thread state reads (e.g., from render hooks at 60+ fps)
-- Generation-checked `BindingToken`s for the highest-frequency consumers: `acquire_binding_token(name)` resolves a name once, then the `is_binding_active(token)` overload queries it every frame without the per-call name hash. The token carries the binding generation it was minted at; any reshape (register / remove / clear / combo update / consume change) advances the generation, so a stale token fails closed (returns false) instead of reading a different binding, and `binding_token_current(token)` lets a consumer detect the reshape and re-acquire. The generation is process-wide unique, so a token can never alias a different poller after a shutdown / start cycle
+- Hash-map-backed `Input::is_active(name)` query for low-overhead cross-thread state reads (e.g., from render hooks at 60+ fps)
+- Generation-checked `BindingToken`s for the highest-frequency consumers: `Input::acquire_token(name)` resolves a name once, then the `Input::is_active(token)` overload queries it every frame without the per-call name hash. The token carries the binding generation it was minted at; any reshape (register / remove / clear / rebind / consume change) advances the generation, so a stale token fails closed (returns false) instead of reading a different binding, and `Input::token_current(token)` lets a consumer detect the reshape and re-acquire. The generation is process-wide unique, so a token can never alias a different engine after a shutdown / start cycle
 - SRWLOCK-backed reader/writer synchronization for live binding reshapes, using the same native Windows lock primitive as hook registries and memory caches
 - Multiple bindings per name for multi-combo hotkeys
 - Keyboard and mouse virtual-key reads are memoized once per distinct VK per poll cycle, giving every binding in that cycle one coherent sample while avoiding duplicate `GetAsyncKeyState` calls
@@ -279,8 +280,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 **Mouse wheel and input suppression (opt-in):**
 
 - Bind the mouse wheel with `WheelUp` / `WheelDown` / `WheelLeft` / `WheelRight`. The wheel has no virtual-key code, so it is captured by a window-procedure hook the poll loop installs lazily only when a wheel binding exists; each notch fires once as a Press edge.
-- `InputManager::set_consume(name, true)` hides a binding's trigger from the game so the mod and the game do not both act on it -- applied per binding, so one binding can pass through while another is blocked. Honored for digital gamepad buttons (D-pad, face buttons, bumpers, stick clicks) via an `XInputGetState` hook, and for the mouse wheel; analog triggers, stick directions, keyboard, and mouse-button suppression are not provided (the gamepad detour clears only the digital `wButtons` bitmask). The fix targets the classic chord case (e.g. "LB + D-pad" zoom) where releasing the modifier a frame before the trigger would otherwise leak a bare trigger: suppression is latched to the trigger button's own release, plus a short grace window. Only the trigger is hidden, not the modifier.
-- `Config::register_consume_flag(section, ini_key, log_name, binding_name, default)` drives the same flag from the INI, so the choice lives next to the combo (register the binding first, then the flag):
+- `Input::set_consume(name, true)` hides a binding's trigger from the game so the mod and the game do not both act on it -- applied per binding, so one binding can pass through while another is blocked. Honored for digital gamepad buttons (D-pad, face buttons, bumpers, stick clicks) via an `XInputGetState` hook, and for the mouse wheel; analog triggers, stick directions, keyboard, and mouse-button suppression are not provided (the gamepad detour clears only the digital `wButtons` bitmask). The fix targets the classic chord case (e.g. "LB + D-pad" zoom) where releasing the modifier a frame before the trigger would otherwise leak a bare trigger: suppression is latched to the trigger button's own release, plus a short grace window. Only the trigger is hidden, not the modifier.
+- `config::consume_flag(section, ini_key, display_name, binding_name, default)` drives the same flag from the INI, so the choice lives next to the combo (register the binding first, then the flag):
 
   ```ini
   [Hotkeys]
@@ -290,9 +291,9 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
   ```
 
   ```cpp
-  im.register_press("set_x", cfg.set_x, []{ /* ... */ });
-  im.register_press("set_y", cfg.set_y, []{ /* ... */ });
-  DMKConfig::register_consume_flag("Hotkeys", "SetYToggle.Consume", "Set Y Consume", "set_y", false);
+  (void)input::register_combo({.name = "set_x", .combos = cfg.set_x, .on_press = []{ /* ... */ }});
+  (void)input::register_combo({.name = "set_y", .combos = cfg.set_y, .on_press = []{ /* ... */ }});
+  config::consume_flag("Hotkeys", "SetYToggle.Consume", "Set Y Consume", "set_y", false);
   ```
 - Both hooks are opt-in: a mod that registers neither a wheel binding nor a `consume` binding installs nothing and the input system stays purely observational.
 
@@ -300,10 +301,10 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 
 - Load input codes from INI files (named keys, hex VK codes, or mixed)
 - Named key resolution uses binary search for efficient lookup
-- `register_press` and `register_hold` accept `KeyComboList` directly for zero-boilerplate binding of config-parsed key combos
-- Live registration: `register_press` / `register_hold` append bindings to a running poller, and `clear_bindings()` / `remove_binding_by_name()` drop bindings without stopping the poll thread, so consumers can re-arm input on hot-reload without a full restart
-- `Config::register_press_combo` / `Config::register_hold_combo` fuse an INI combo item, the matching `InputManager::register_press` / `register_hold` binding, automatic rebind on `reload()`, and an `InputBindingGuard` cancellation token into one call. The hold variant's guard synthesizes a single balancing `on_state_change(false)` when cancelled mid-hold, so tearing a hold down cannot strand the consumer in the held state
-- Both combo registrars take an optional per-binding `consume` facet: pass `consume` to register a `"<ini_key>.Consume"` bool inline (wired to `set_consume`) instead of a separate `register_consume_flag` call. `std::nullopt` (the default) registers no extra key and preserves the prior behavior exactly; suppression honors the same gamepad-digital + mouse-wheel scope noted above, so a `.Consume` key on a keyboard-only binding is inert
+- `input::register_combo(ComboBinding{...})` takes a designated-init aggregate carrying a `KeyComboList` directly, for zero-boilerplate binding of config-parsed key combos; it returns a move-only `input::BindingGuard` (wrapped in a `Result`) that owns the callback's lifetime
+- Live registration: `register_combo` appends bindings to a running engine, and `Input::clear_bindings()` / `Input::remove_bindings_by_name()` drop bindings without stopping the poll thread, so consumers can re-arm input on hot-reload without a full restart
+- `config::press_combo` / `config::hold_combo` fuse an INI combo item, the matching press/hold input binding, automatic rebind on `reload()`, and an `input::BindingGuard` cancellation token into one call. The hold variant's guard synthesizes a single balancing `on_state_change(false)` when cancelled mid-hold, so tearing a hold down cannot strand the consumer in the held state. An `input::Scope` (or the process-default `input::scope()`) owns a batch of guards and releases them in reverse insertion order
+- Both combo fusions take an optional per-binding `consume` facet: pass `consume` to register a `"<ini_key>.Consume"` bool inline (wired to `set_consume`) instead of a separate `config::consume_flag` call. `std::nullopt` (the default) registers no extra key and preserves the prior behavior exactly; suppression honors the same gamepad-digital + mouse-wheel scope noted above, so a `.Consume` key on a keyboard-only binding is inert
 
 </details>
 
@@ -360,7 +361,7 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 * [Anchor Registry Guide](docs/misc/anchors.md) - Declare every patch-fragile constant once and resolve the whole table in a single self-healing pass
 * [Hot-Path Memory Guide](docs/misc/hot-path-memory.md) - Reading and writing game memory in per-frame hot paths with the `memory::read` / `write` / `walk` and `unchecked::read` primitives
 * [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
-* [Config Hot-Reload Guide](docs/config-hot-reload/README.md) - INI filesystem watcher and hotkey-triggered `Config::reload()`
+* [Config Hot-Reload Guide](docs/config-hot-reload/README.md) - INI filesystem watcher and hotkey-triggered `config::reload()`
 * [Test Coverage Guide](docs/tests/README.md) - Coverage analysis, test architecture, and module-level breakdown
 
 ## Prerequisites
@@ -778,7 +779,7 @@ This method uses a pre-built and installed version of DetourModKit.
 // takes an opaque DetourModKit::hook::MidContext, so a detour body no longer needs SafetyHook on the include path.
 // SafetyHook headers are still installed alongside DetourModKit and remain available; add `#include <safetyhook.hpp>`
 // only if you call SafetyHook directly for something else. SimpleIni is an internal build-time dependency and is NOT
-// installed; do not include <SimpleIni.h> from a find_package consumer. Use the DetourModKit::Config API for INI
+// installed; do not include <SimpleIni.h> from a find_package consumer. Use the DetourModKit::config API for INI
 // access instead.
 
 // Global variables for your mod's configuration
@@ -830,21 +831,21 @@ bool InitializeMyMod()
     // using the ModInfo passed into the attach call below.
     auto &logger = DMKLogger::get_instance();
 
-    // Register your configuration variables (using callback-based API)
-    DMKConfig::register_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
+    // Bind your configuration variables (callback-store API; config::bind<T> is the atomic hot path)
+    DMKConfig::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
         [](bool v) { g_mod_config.enable_greeting_hook = v; }, true);
-    DMKConfig::register_string("Debug", "LogLevel", "Log Level",
-        [](const std::string &v) { g_mod_config.log_level_setting = v; }, "INFO");
+    DMKConfig::bind_string("Debug", "LogLevel", "Log Level",
+        [](std::string_view v) { g_mod_config.log_level_setting = std::string{v}; }, "INFO");
 
-    // Register hotkey bindings from INI (modifier+trigger format)
+    // Bind hotkey combos from INI (modifier+trigger format)
     // Comma separates independent combos: "F3,Gamepad_LT+Gamepad_B" (F3 OR LT+B)
     // Plus separates modifiers from trigger: "Ctrl+Shift+F3" (AND for modifiers, last = trigger)
     // Hex VK codes still work: "0x72", "0x11+0x72"
     // Mouse: "Mouse4", "Ctrl+Mouse1"
     // Gamepad: "Gamepad_A", "Gamepad_LB+Gamepad_A"
-    DMKConfig::register_key_combo("Hotkeys", "ToggleKey", "Toggle Keys",
+    DMKConfig::bind_combos("Hotkeys", "ToggleKey", "Toggle Keys",
         [](const DMKKeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
-    DMKConfig::register_key_combo("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
+    DMKConfig::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
         [](const DMKKeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file
@@ -893,23 +894,36 @@ bool InitializeMyMod()
         return false;
     }
 
-    // Register hotkey bindings with the InputManager (after hooks are ready).
-    // register_press/register_hold accept a KeyComboList directly. One binding
-    // is created per combo, all sharing the same name for OR-logic queries.
-    auto &input_mgr = DMKInputManager::get_instance();
-
-    input_mgr.register_press("toggle_view", g_mod_config.toggle_combo, []()
+    // Register hotkey bindings with the input system (after hooks are ready).
+    // register_combo takes a ComboBinding aggregate carrying the KeyComboList
+    // directly. One engine entry is created per combo, all sharing the binding
+    // name for OR-logic queries. It returns a Result<BindingGuard>; on success,
+    // park the move-only guard in the process-default scope so it lives for the
+    // process. (config::press_combo / hold_combo wrap this with INI parsing and
+    // hand back the guard directly, no Result to unwrap.)
+    if (auto toggle = DMKInput::register_combo({
+            .name = "toggle_view",
+            .trigger = DMKInput::Trigger::Press,
+            .combos = g_mod_config.toggle_combo,
+            .on_press = []() { DMKLogger::get_instance().info("Toggle key pressed!"); },
+        }))
     {
-        DMKLogger::get_instance().info("Toggle key pressed!");
-    });
+        DMKInput::scope().add(std::move(*toggle));
+    }
 
-    input_mgr.register_hold("hold_scroll", g_mod_config.hold_scroll_combo, [](bool held)
+    if (auto scroll = DMKInput::register_combo({
+            .name = "hold_scroll",
+            .trigger = DMKInput::Trigger::Hold,
+            .combos = g_mod_config.hold_scroll_combo,
+            .on_state_change = [](bool held)
+            { DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released"); },
+        }))
     {
-        DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released");
-    });
+        DMKInput::scope().add(std::move(*scroll));
+    }
 
     // Start the input polling thread (focus-aware by default)
-    input_mgr.start();
+    (void)DMKInput::Input::instance().start();
 
     logger.info("MyMod Initialized using DetourModKit!");
     return true;
@@ -924,7 +938,7 @@ void ShutdownMyMod()
     g_print_hook.reset();
     // DMK_Shutdown() is invoked automatically by on_dll_detach() after this
     // function returns, in the correct order:
-    //   Config auto-reload watcher -> InputManager -> Memory cache -> Config registry -> Logger
+    //   config auto-reload watcher -> input system -> Memory cache -> config registry -> Logger
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)

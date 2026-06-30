@@ -10,7 +10,8 @@
 #include <utility>
 #include <vector>
 
-#include "input_intercept.hpp"
+#include "internal/input_intercept.hpp"
+#include "internal/input_poller.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
 
@@ -47,14 +48,14 @@ namespace
     constexpr uint64_t GRACE_MS = 80;
 
     // Builds a consume chord binding for the rule-publishing tests.
-    InputBinding make_consume_chord(std::vector<InputCode> modifiers, std::vector<InputCode> keys)
+    detail::InputBinding make_consume_chord(std::vector<InputCode> modifiers, std::vector<InputCode> keys)
     {
-        InputBinding binding;
+        detail::InputBinding binding;
         binding.name = "chord";
         binding.modifiers = std::move(modifiers);
         binding.keys = std::move(keys);
         binding.consume = true;
-        binding.mode = InputMode::Hold;
+        binding.trigger = input::Trigger::Hold;
         return binding;
     }
 
@@ -477,7 +478,7 @@ TEST_F(ConsumeRuleBuildTest, GamepadChordPublishesMaskableRule)
     const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     // Constructing the poller runs the same build+publish path the poll thread uses.
-    InputPoller poller(
+    detail::InputPoller poller(
         {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)})});
     EXPECT_EQ(evaluate_published_consume_rules(static_cast<uint16_t>(lb | up)), up);
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u); // modifier not held
@@ -489,7 +490,7 @@ TEST_F(ConsumeRuleBuildTest, OverlappingChordsGetCrossForbiddenMasks)
     const uint16_t rb = static_cast<uint16_t>(GamepadCode::RightBumper);
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     const uint16_t down = static_cast<uint16_t>(GamepadCode::DpadDown);
-    InputPoller poller({
+    detail::InputPoller poller({
         make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::DpadUp)}),
         make_consume_chord({gamepad_button(GamepadCode::RightBumper)}, {gamepad_button(GamepadCode::DpadDown)}),
     });
@@ -505,7 +506,7 @@ TEST_F(ConsumeRuleBuildTest, KeyboardModifierDisablesAllRules)
     const uint16_t up = static_cast<uint16_t>(GamepadCode::DpadUp);
     // A keyboard modifier is invisible to the detour, so the eligibility gate drops the whole rule list and the
     // reactive pre-arm path covers the chord instead.
-    InputPoller poller({make_consume_chord({keyboard_key(VK_CONTROL)}, {gamepad_button(GamepadCode::DpadUp)})});
+    detail::InputPoller poller({make_consume_chord({keyboard_key(VK_CONTROL)}, {gamepad_button(GamepadCode::DpadUp)})});
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
 }
 
@@ -514,7 +515,7 @@ TEST_F(ConsumeRuleBuildTest, AnalogTriggerProducesNoRule)
     const uint16_t lb = static_cast<uint16_t>(GamepadCode::LeftBumper);
     // LeftTrigger is analog (not an XINPUT_GAMEPAD.wButtons bit), so there is no digital trigger to mask and no rule is
     // emitted.
-    InputPoller poller(
+    detail::InputPoller poller(
         {make_consume_chord({gamepad_button(GamepadCode::LeftBumper)}, {gamepad_button(GamepadCode::LeftTrigger)})});
     EXPECT_EQ(evaluate_published_consume_rules(lb), 0u);
 }
@@ -764,15 +765,15 @@ TEST_F(InterceptWndProcTest, PollerDropsCallbackStagingCopyFailureAndContinues)
     auto failed_copies = std::make_shared<std::atomic<int>>(0);
     auto invocations = std::make_shared<std::atomic<int>>(0);
 
-    InputBinding binding;
+    detail::InputBinding binding;
     binding.name = "wheel_throwing_copy";
     binding.keys = {mouse_wheel(WheelCode::Up)};
-    binding.mode = InputMode::Press;
+    binding.trigger = input::Trigger::Press;
     binding.on_press = ThrowingCopyCallback{throw_on_copy, failed_copies, invocations};
 
-    std::vector<InputBinding> bindings;
+    std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
     poller.start();
 
     const bool hooked_ours =
@@ -869,15 +870,15 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
     // A consume mouse-wheel binding arms both the wheel-capture subclass and the wheel-swallow flag.
     // require_focus=false keeps process_focused true so the disarm is deterministic regardless of which window owns the
     // foreground.
-    InputBinding binding;
+    detail::InputBinding binding;
     binding.name = "wheel_zoom";
     binding.keys = {mouse_wheel(WheelCode::Up)};
     binding.consume = true;
-    binding.mode = InputMode::Press;
+    binding.trigger = input::Trigger::Press;
 
-    std::vector<InputBinding> bindings;
+    std::vector<detail::InputBinding> bindings;
     bindings.push_back(std::move(binding));
-    InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
     poller.start();
 
     const auto cleanup = [&]() noexcept

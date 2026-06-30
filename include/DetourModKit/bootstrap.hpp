@@ -139,9 +139,9 @@ namespace DetourModKit
 
         /**
          * @brief Drops the per-Logic-DLL state owned by the caller.
-         * @details Composes InputManager::remove_binding_by_name for every entry in @p binding_names, then calls
-         *          Config::clear_registered_items() to drop the registered setters because their call operators live in
-         *          the unloading DLL's .text; Logger and ConfigWatcher are loader-side and outlive the unload. Names
+         * @details Composes input::Input::remove_bindings_by_name for every entry in @p binding_names, then calls
+         *          config::clear() to drop the bound setters because their call operators live in the unloading DLL's
+         *          .text; Logger and the config watcher are loader-side and outlive the unload. Names
          *          that do not exist are skipped (logged at Debug). Idempotent: a second call with the same names is a
          *          no-op. Use DMK_Shutdown() for whole-process teardown.
          *
@@ -152,7 +152,7 @@ namespace DetourModKit
          *
          *          For guidance on choosing between this and DMK_Shutdown(), see docs/hot-reload/README.md.
          *
-         *          Safe to call from any thread except the InputPoller thread (would self-join).
+         *          Safe to call from any thread except the input poll thread (would self-join).
          *
          *          Marked noexcept because consumers may invoke it from a
          *          DllMain detach path. Internal allocations performed while iterating the name spans (vector growth,
@@ -165,16 +165,16 @@ namespace DetourModKit
          *
          * @param hook_names Accepted for call-shape compatibility; not acted on (hooks unhook when their handle drops).
          * @param binding_names Names of input bindings registered via
-         *        InputManager (or via Config::register_press_combo).
+         *        input::register_combo (or via config::press_combo).
          */
         void on_logic_dll_unload(std::span<const std::string_view> hook_names,
                                  std::span<const std::string_view> binding_names) noexcept;
 
         /**
          * @brief Drops every binding registered through the process-wide singletons.
-         * @details Composes InputManager::clear_bindings, then chains Config::clear_registered_items() to drop the
-         *          registered setters because their call operators live in the unloading DLL's .text; Logger and
-         *          ConfigWatcher are loader-side and outlive the unload. The binding call is clear_bindings() (not
+         * @details Composes input::Input::clear_bindings, then chains config::clear() to drop the bound setters
+         *          because their call operators live in the unloading DLL's .text; Logger and the config watcher are
+         *          loader-side and outlive the unload. The binding call is clear_bindings() (not
          *          shutdown()) so the subsystem stays re-usable for the next attach. Use DMK_Shutdown() for
          *          whole-process teardown.
          *
@@ -184,7 +184,7 @@ namespace DetourModKit
          *          For guidance on choosing between this and
          *          DMK_Shutdown(), see docs/hot-reload/README.md.
          *
-         *          Safe to call from any thread except the InputPoller thread (would self-join).
+         *          Safe to call from any thread except the input poll thread (would self-join).
          *
          *          Marked noexcept because consumers may invoke it from a DllMain detach path. Internal allocations
          *          performed

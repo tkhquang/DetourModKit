@@ -1,9 +1,12 @@
-#ifndef DETOURMODKIT_CONFIG_WATCHER_HPP
-#define DETOURMODKIT_CONFIG_WATCHER_HPP
+#ifndef DETOURMODKIT_INTERNAL_CONFIG_WATCHER_HPP
+#define DETOURMODKIT_INTERNAL_CONFIG_WATCHER_HPP
 
 /**
  * @file config_watcher.hpp
- * @brief Filesystem watcher that triggers a callback when an INI file changes.
+ * @brief Internal filesystem watcher engine that triggers a callback when an INI file changes.
+ * @details This is the private engine that backs config::enable_auto_reload / disable_auto_reload. It is reached only
+ *          through the config module's pimpl orchestration, carries the Win32 ReadDirectoryChangesW pump, and is never
+ *          installed. The config surface owns the watcher's lifetime; consumers do not see this type.
  */
 
 #include <chrono>
@@ -13,7 +16,7 @@
 #include <string_view>
 #include <thread>
 
-namespace DetourModKit
+namespace DetourModKit::detail
 {
     /**
      * @class ConfigWatcher
@@ -102,8 +105,9 @@ namespace DetourModKit
 
         /**
          * @brief Returns true if @p id names the background worker thread.
-         * @details Lets callers (in particular Config::disable_auto_reload) detect setter-induced self-calls and avoid
-         *          joining the worker from the worker itself, which would otherwise raise
+         * @details Lets a stop request detect a setter-induced self-call (a reload callback that, running on the worker
+         *          thread, tries to tear the watcher down) and avoid joining the worker from the worker itself, which
+         *          would otherwise raise
          *          std::system_error(resource_deadlock_would_occur). The worker publishes its id when its thread
          *          starts (before the first overlapped read is issued) and clears it on exit, so this returns false
          *          before the worker thread has started and after the worker has exited (including after stop() has
@@ -119,6 +123,6 @@ namespace DetourModKit
         struct Impl;
         std::unique_ptr<Impl> m_impl;
     };
-} // namespace DetourModKit
+} // namespace DetourModKit::detail
 
-#endif // DETOURMODKIT_CONFIG_WATCHER_HPP
+#endif // DETOURMODKIT_INTERNAL_CONFIG_WATCHER_HPP

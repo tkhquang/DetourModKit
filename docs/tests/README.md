@@ -319,7 +319,7 @@ The decoder header lives under `src/` (not the public include tree), so the test
 
 ## Input Tests
 
-`tests/test_input.cpp` covers public input-code parsing/formatting plus `InputPoller` / `InputManager` lifecycle and live binding reshapes. The poll-loop hot-path helpers are covered with focused tests because the real loop reads process input state:
+`tests/test_input.cpp` covers public input-code parsing/formatting plus `InputPoller` / `Input` lifecycle and live binding reshapes. The poll-loop hot-path helpers are covered with focused tests because the real loop reads process input state:
 
 | Test | What it proves |
 | ---- | -------------- |
@@ -328,7 +328,7 @@ The decoder header lives under `src/` (not the public include tree), so the test
 | `KeyStateCacheTest.CachesUpStateWithoutReProbing` | A released key is cached as a real sampled state, not confused with "not yet probed". |
 | `KeyStateCacheTest.OutOfRangeVkReadsAsNotPressedWithoutProbing` | Invalid VK codes fail closed and never call the probe. |
 | `InputPollerPollLoopSafety.BindingGrowthPastStartupReserveKeepsPollThreadAlive` | Live binding growth past the startup callback-staging reserve does not stop the poll thread. |
-| `InputManagerTest.BindingTokenStaleAfterConsumeToggle` | Toggling `consume` on a running binding routes through the reshape generation, so an old `BindingToken` fails closed and a freshly acquired token is current. |
+| `InputTest.BindingTokenStaleAfterConsumeToggle` | Toggling `consume` on a running binding routes through the reshape generation, so an old `BindingToken` fails closed and a freshly acquired token is current. |
 
 ## Input Interception Tests
 

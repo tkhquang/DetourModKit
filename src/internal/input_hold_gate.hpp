@@ -1,15 +1,13 @@
-#ifndef DETOURMODKIT_CONFIG_INPUT_FUSION_HPP
-#define DETOURMODKIT_CONFIG_INPUT_FUSION_HPP
+#ifndef DETOURMODKIT_INTERNAL_INPUT_HOLD_GATE_HPP
+#define DETOURMODKIT_INTERNAL_INPUT_HOLD_GATE_HPP
 
 /**
- * @file config_input_fusion.hpp
- * @brief Internal teardown gate shared by the Config combo-binding fusions (register_press_combo /
- *        register_hold_combo).
+ * @file input_hold_gate.hpp
+ * @brief Internal teardown gate that backs a hold binding's BindingGuard cancellation lifecycle.
  * @details Holds the per-binding HoldGate that gives a hold binding's RAII guard a correct cancellation lifecycle: a
  *          cancelled hold must deliver exactly one balancing on_state_change(false) and never let a stale true land
- *          after it. The logic lives in src/ (not in an anonymous namespace inside config.cpp) so the synchronization
- *          can be unit-tested directly, mirroring src/input_intercept.hpp and src/x86_decode.hpp. Not installed and not
- *          part of the public API.
+ *          after it. The logic lives in its own engine header (not an anonymous namespace inside a TU) so the
+ *          synchronization can be unit-tested directly. Not installed and not part of the public API.
  */
 
 #include <atomic>
@@ -27,8 +25,8 @@ namespace DetourModKit
          * @details A hold callback carries lingering state: the consumer is told true (held) until told false
          *          (released). Cancelling the binding mid-hold must therefore deliver exactly one balancing false and
          *          never let a stale true land after it. The poller invokes the wrapper on edges from the poll thread,
-         *          update_binding_combos / shutdown can invoke it from another thread, and the guard's release() runs
-         *          on a control-plane thread -- all of them route through this gate.
+         *          update_combos / shutdown can invoke it from another thread, and the guard's release() runs on a
+         *          control-plane thread -- all of them route through this gate.
          *
          *          The recursive_mutex serializes every delivery against teardown: a cross-thread release() waits
          *          behind any in-flight callback (so it observes the true last-delivered state and cannot interleave),
@@ -52,7 +50,7 @@ namespace DetourModKit
             bool deferred_final = false;
 
             /**
-             * @brief Wrapper invoked by InputManager on each hold edge; gates the edge and forwards to the user
+             * @brief Wrapper invoked by InputPoller on each hold edge; gates the edge and forwards to the user
              *        callback.
              */
             void deliver(bool active)
@@ -151,4 +149,4 @@ namespace DetourModKit
     } // namespace detail
 } // namespace DetourModKit
 
-#endif // DETOURMODKIT_CONFIG_INPUT_FUSION_HPP
+#endif // DETOURMODKIT_INTERNAL_INPUT_HOLD_GATE_HPP
