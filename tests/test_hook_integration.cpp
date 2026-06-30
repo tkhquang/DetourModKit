@@ -1,6 +1,9 @@
 #include "DetourModKit/hook_manager.hpp"
-#include "DetourModKit/scanner.hpp"
 #include "DetourModKit/logger.hpp"
+#include "DetourModKit/scan.hpp"
+
+// White-box: the AOB-find-then-hook tests drive the raw matcher directly (a consumer normally uses scan::resolve).
+#include "internal/scan_engine.hpp"
 
 #include <gtest/gtest.h>
 #include <windows.h>
@@ -276,11 +279,11 @@ TEST_F(HookIntegrationTest, AOBScan_FindAndHook)
     auto *target_bytes = reinterpret_cast<const unsigned char *>(m_fn_compute_damage);
     std::string aob_str = build_aob_from_bytes(target_bytes, AOB_SIGNATURE_LENGTH);
 
-    auto pattern = Scanner::parse_aob(aob_str);
+    auto pattern = detail::parse_aob(aob_str);
     ASSERT_TRUE(pattern.has_value()) << "Failed to parse AOB pattern: " << aob_str;
 
     const auto *found =
-        Scanner::find_pattern(reinterpret_cast<const std::byte *>(m_module_base), m_module_size, pattern.value());
+        detail::find_pattern(reinterpret_cast<const std::byte *>(m_module_base), m_module_size, pattern.value());
     ASSERT_NE(found, nullptr) << "AOB pattern not found in module";
 
     auto fn_addr = reinterpret_cast<uintptr_t>(m_fn_compute_damage);
@@ -303,11 +306,11 @@ TEST_F(HookIntegrationTest, AOBScan_HookManager_EndToEnd)
     auto *target_bytes = reinterpret_cast<const unsigned char *>(m_fn_compute_damage);
     std::string aob_str = build_aob_from_bytes(target_bytes, AOB_SIGNATURE_LENGTH);
 
-    auto pattern = Scanner::parse_aob(aob_str);
+    auto pattern = detail::parse_aob(aob_str);
     ASSERT_TRUE(pattern.has_value()) << "Failed to parse AOB pattern: " << aob_str;
 
     const auto *found =
-        Scanner::find_pattern(reinterpret_cast<const std::byte *>(m_module_base), m_module_size, pattern.value());
+        detail::find_pattern(reinterpret_cast<const std::byte *>(m_module_base), m_module_size, pattern.value());
     ASSERT_NE(found, nullptr) << "AOB pattern not found in module";
     EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(m_fn_compute_damage));
 

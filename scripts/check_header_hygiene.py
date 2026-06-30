@@ -5,7 +5,7 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
 
   1. The SafetyHook backend is confined. No public API header may include or name the backend
      (safetyhook), pull <psapi.h>, or reference Zydis/Zycore. The single sanctioned coupling
-     point is include/DetourModKit/detail/hook_impl.hpp, which only src/hook_manager.cpp
+     point is the non-installed src/internal/hook_backend.hpp, which only src/hook_manager.cpp
      includes. A consumer that includes hook_manager.hpp must therefore compile with SafetyHook
      off its own include path.
 
@@ -15,8 +15,8 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
      brace or same-line) is forbidden; the bare forward declaration `struct MidContext;` is fine.
 
   3. The async-logger plumbing (StringPool / LogMessage / DynamicMPMCQueue) is defined only in
-     detail/async_logger_internal.hpp, never on the documented public surface (one-definition
-     check).
+     the non-installed src/internal/async_logger_queue.hpp, never on the documented public surface
+     (one-definition check).
 
 The check enumerates this repository's own C++ sources from the filesystem (so newly added but
 not-yet-committed headers are covered too) and excludes vendored trees under external/ and any
@@ -28,9 +28,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The one public, installed header allowed to see the backend; only src/hook_manager.cpp includes it.
-BACKEND_BRIDGE_HEADER = "include/DetourModKit/detail/hook_impl.hpp"
-ASYNC_INTERNAL_HEADER = "include/DetourModKit/detail/async_logger_internal.hpp"
+# The one non-installed private header allowed to see the backend; only src/hook_manager.cpp includes it. It lives
+# under src/internal/ (not a public header), so the public-surface backend check below already skips it; the constant
+# is kept for documentation and to localize the sanctioned coupling point.
+BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
+ASYNC_INTERNAL_HEADER = "src/internal/async_logger_queue.hpp"
 
 CPP_SUFFIXES = (".hpp", ".cpp", ".h", ".cc", ".inl")
 SOURCE_DIRS = ("include", "src", "tests")
@@ -46,6 +48,29 @@ ZYDIS_REF = re.compile(r'\bZy(?:dis|core)\b')
 MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?MidContext\b[^;{]*\{')
 # Matches a class/struct DECLARATION token for an async-logger internal type (decl or def alike).
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
+
+# --- v4 scan clean-break gates ---
+# The legacy scan public surface is deleted; these files must not reappear.
+LEGACY_HEADERS = (
+    "include/DetourModKit/scanner.hpp",
+    "include/DetourModKit/anchors.hpp",
+    "include/DetourModKit/profile.hpp",
+)
+# Legacy scan symbols the v4 surface replaced. None may appear in this repo's own sources: the engine is
+# DetourModKit::detail::EnginePattern / find_pattern, the resolver is scan::resolve / scan::Candidate, and
+# the three per-domain scan error enums folded into the unified ErrorCode. Matched after comment stripping,
+# so doc prose that merely mentions the old names does not trip the gate.
+LEGACY_SCAN_TOKEN = re.compile(
+    r'(\bScanner::|\bresolve_cascade|\bRipResolveError\b|\bResolveError\b|\bStringXrefError\b'
+    r'|\bAddrCandidate\b|\bResolveMode\b|\bResolveHit\b|\bCascadeRequest\b|\bCompiledPattern\b)')
+# A public header must never reach into the non-installed private engine under src/internal/.
+INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
+# include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
+# there (templates / constexpr / public object layout, backend-/Win32-/logger-/heap-free). A new detail
+# header must be justified and added here, not slipped in silently.
+ALLOWED_DETAIL_HEADERS = {
+    "pattern_core.hpp",  # by-value inline storage + constexpr parser of public scan::Pattern
+}
 
 
 def strip_comments(text):
@@ -121,6 +146,21 @@ def line_of(text, index):
 
 def main():
     violations = []
+
+    # v4 scan gate A: the deleted legacy scan headers must not reappear.
+    for legacy in LEGACY_HEADERS:
+        if (REPO / legacy).is_file():
+            violations.append(f"{legacy}: legacy scan header still present; the v4 public surface is scan.hpp")
+
+    # v4 scan gate B: include/DetourModKit/detail/ holds only allowlisted compile-visible support headers.
+    detail_dir = REPO / "include" / "DetourModKit" / "detail"
+    if detail_dir.is_dir():
+        for header in sorted(detail_dir.glob("*.hpp")):
+            if header.name not in ALLOWED_DETAIL_HEADERS:
+                rel = header.relative_to(REPO).as_posix()
+                violations.append(
+                    f"{rel}: detail/ header not on the allowlist; true-private implementation belongs in src/internal/")
+
     for rel, path in iter_sources():
         raw = path.read_text(encoding="utf-8", errors="replace")
         text = strip_comments(raw)
@@ -145,7 +185,7 @@ def main():
             violations.append(
                 f"{rel}:{line_of(text, m.start())}: MidContext is defined; it must remain an opaque forward declaration")
 
-        # Rule 3: async-logger internals are defined ONLY in detail/async_logger_internal.hpp. The contract is
+        # Rule 3: async-logger internals are defined ONLY in src/internal/async_logger_queue.hpp. The contract is
         # location-exclusive, so this scans every source (headers and .cpp), excluding only the one allowed header,
         # rather than the public headers alone.
         if rel != ASYNC_INTERNAL_HEADER:
@@ -155,13 +195,26 @@ def main():
                     violations.append(
                         f"{rel}:{n}: {am.group(1)} declared outside detail/async_logger_internal.hpp")
 
+        # v4 scan gate C: no public header reaches into the non-installed private engine under src/internal/.
+        if is_public_header:
+            for n, line in enumerate(lines, 1):
+                if INTERNAL_INCLUDE.search(line):
+                    violations.append(f"{rel}:{n}: public header includes the private engine (src/internal/)")
+
+        # v4 scan gate D: no legacy scan symbol survives in this repo's own sources (headers, sources, or tests).
+        for n, line in enumerate(lines, 1):
+            lm = LEGACY_SCAN_TOKEN.search(line)
+            if lm:
+                violations.append(
+                    f"{rel}:{n}: legacy scan symbol '{lm.group(1).strip()}' (replaced by the v4 scan surface)")
+
     if violations:
         print("Header-hygiene gate FAILED:\n")
         for v in sorted(violations):
             print("  " + v)
         print(f"\n{len(violations)} violation(s). See AGENTS.md (the encapsulation boundary rule).")
         return 1
-    print("Header-hygiene gate passed: backend confined, MidContext opaque, async internals in detail/.")
+    print("Header-hygiene gate passed: backend confined, MidContext opaque, async internals private.")
     return 0
 
 

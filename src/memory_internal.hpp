@@ -3,16 +3,14 @@
 
 /**
  * @file memory_internal.hpp
- * @brief Shared fault-handling primitives for the SEH-guarded foreign-read paths in memory.cpp, scanner.cpp, and
- *        string_xref.cpp.
+ * @brief Shared fault-handling primitives for the SEH-guarded foreign-read paths in memory.cpp and the scan engine.
  *
  * The probe paths that read foreign (host-owned) memory -- the pointer-chain walks in memory.cpp and the protection-
- * gated region/window sweeps in scanner.cpp and string_xref.cpp -- all run their reads inside a Structured Exception
- * Handling frame on MSVC. They must agree on exactly which exception codes belong to such a read so the __except
- * filters stay identical: a single predicate keeps that set in one place and makes it unit-testable in isolation. The
- * codes are spelled as numeric literals (matching <winnt.h>) so this header stays free of <windows.h> and can be
- * included by any TU -- mirroring the way scanner_internal.hpp keeps the Windows page-protection masks private to
- * scanner.cpp. The declarations are internal to the build and are NOT part of the installed public surface.
+ * gated region/window sweeps in the scan engine -- all run their reads inside a Structured Exception Handling frame on
+ * MSVC. They must agree on exactly which exception codes belong to such a read so the __except filters stay identical:
+ * a single predicate keeps that set in one place and makes it unit-testable in isolation. The codes are spelled as
+ * numeric literals (matching <winnt.h>) so this header stays free of <windows.h> and can be included by any TU. The
+ * declarations are internal to the build and are NOT part of the installed public surface.
  */
 
 #include <cstdint>

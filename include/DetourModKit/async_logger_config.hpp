@@ -52,9 +52,8 @@ namespace DetourModKit
      * @details The default queue holds DEFAULT_QUEUE_CAPACITY (8192) slots; each slot embeds a LogMessage with a
      *          LOG_INLINE_MESSAGE_SIZE (512) byte inline buffer, so the ring buffer's resident footprint is on the
      *          order of a few MiB at the default capacity (queue_capacity must stay a power of two). The overflow
-     *          string pool (for messages larger than the inline buffer) is a separate, lazily grown allocation; see
-     *          detail::StringPool in detail/async_logger_internal.hpp. Shrink queue_capacity for memory-constrained
-     *          hosts.
+     *          string pool (for messages larger than the inline buffer) is a separate, lazily grown allocation behind
+     *          the AsyncLogger pimpl (detail::StringPool). Shrink queue_capacity for memory-constrained hosts.
      */
     struct AsyncLoggerConfig
     {

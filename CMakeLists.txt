@@ -190,6 +190,7 @@ endif()
 file(GLOB DETOURMODKIT_SOURCE_FILES
   CONFIGURE_DEPENDS
   "src/*.cpp"
+  "src/internal/*.cpp"
 )
 
 if(NOT DETOURMODKIT_SOURCE_FILES)
@@ -238,13 +239,13 @@ else()
     $<$<CONFIG:Release>:-Wl,--gc-sections>
   )
 
-  # Per-source optimization override: downgrade scanner.cpp from -O3 to -O2
+  # Per-source optimization override: downgrade the scan engine from -O3 to -O2
   # because its SSE2/AVX2 verifier is hand-tuned and -O3 loop unrolling has
   # been observed to pessimize the inner loop. The rest of the library keeps
   # the Release default (-O3 via CMAKE_CXX_FLAGS_RELEASE). Appending -O2
-  # after -O3 on the scanner's compile line is the effective flag because
+  # after -O3 on the engine's compile line is the effective flag because
   # GCC and Clang resolve repeated -O levels by taking the last one.
-  set(_dmk_scanner_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scanner.cpp")
+  set(_dmk_scanner_src "${CMAKE_CURRENT_SOURCE_DIR}/src/internal/scan_engine.cpp")
 
   if(EXISTS "${_dmk_scanner_src}")
     set_source_files_properties("${_dmk_scanner_src}"
@@ -294,6 +295,11 @@ target_include_directories(DetourModKit
 
   # For DetourModKit's *own sources* (in src/) to find its *public headers*
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
+
+  # For DetourModKit's own sources to find its private engine headers without `../` paths: src/ TUs
+  # include "internal/scan_engine.hpp" etc., and src/internal/ TUs include the shared src/ headers
+  # ("x86_decode.hpp", "fork_join.hpp", "memory_internal.hpp"). These headers are never installed.
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
 # External dependency headers marked as SYSTEM to suppress their warnings
@@ -439,10 +445,10 @@ else()
   message(WARNING "No module headers found in 'include/DetourModKit/*.hpp' to install.")
 endif()
 
-# Install detail/ headers from include/DetourModKit/detail/. These carry implementation-only types (namespace
+# Install detail/ headers from include/DetourModKit/detail/. These carry compile-visible support (namespace
 # DetourModKit::detail) that public headers depend on by value, so they must ship alongside the public surface even
-# though consumers never include them directly. async_logger.hpp pulls detail/async_logger_internal.hpp, so an
-# installed package that omitted this directory would fail to compile.
+# though consumers never include them directly. scan.hpp holds scan::Pattern by value, whose inline storage and
+# constexpr parser are detail/pattern_core.hpp, so that header must ship for an installed package to compile.
 file(GLOB _dmk_detail_headers_for_install
   LIST_DIRECTORIES false
   CONFIGURE_DEPENDS

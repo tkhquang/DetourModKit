@@ -16,6 +16,7 @@ git ls-files lists only this repo's files) it flags:
 
 Exit status is 1 with the offenders printed when any rule is violated, else 0.
 """
+import os
 import re
 import subprocess
 import sys
@@ -33,6 +34,10 @@ def main() -> int:
     files = subprocess.check_output(["git", "ls-files", "*.cpp", "*.hpp"], text=True).split()
     problems = []
     for path in files:
+        # git ls-files still lists a file that has been deleted but not yet staged; skip it rather than crash on the
+        # missing path (a removed file has no comments to lint).
+        if not os.path.isfile(path):
+            continue
         with open(path, encoding="utf-8", errors="replace") as handle:
             lines = handle.read().split("\n")
         prev_is_doc = False

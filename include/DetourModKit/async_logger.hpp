@@ -1,19 +1,14 @@
 #ifndef DETOURMODKIT_ASYNC_LOGGER_HPP
 #define DETOURMODKIT_ASYNC_LOGGER_HPP
 
-#include "DetourModKit/logger.hpp"
 #include "DetourModKit/async_logger_config.hpp"
-#include "DetourModKit/detail/async_logger_internal.hpp"
+#include "DetourModKit/logger.hpp"
 
-#include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <memory>
 #include <mutex>
-#include <span>
 #include <string_view>
-#include <thread>
 
 namespace DetourModKit
 {
@@ -25,8 +20,11 @@ namespace DetourModKit
      * @brief Asynchronous logger that decouples log production from file I/O.
      * @details Uses a lock-free queue to accept log messages from multiple threads and a dedicated writer thread to
      *          perform batched file writes. This significantly reduces latency on the producer side. The configuration
-     *          type (AsyncLoggerConfig) lives in async_logger_config.hpp; the queue, string pool, and per-message
-     *          record (DynamicMPMCQueue / StringPool / LogMessage) live in detail/async_logger_internal.hpp.
+     *          type (AsyncLoggerConfig) lives in async_logger_config.hpp. All implementation state -- the MPMC queue,
+     *          the overflow string pool, the per-message record, the writer thread, and the flush synchronization --
+     *          lives behind a pimpl (Impl, defined in src/async_logger.cpp over the non-installed
+     *          src/internal/async_logger_queue.hpp), so this public header names none of it and a consumer compiles
+     *          with the queue / pool / threading internals off its include path.
      * @note Uses shared_ptr<WinFileStream> to safely handle Logger reconfiguration during runtime.
      */
     class AsyncLogger
@@ -78,11 +76,11 @@ namespace DetourModKit
 
         /**
          * @brief Stops the writer thread and drains remaining queued messages.
-         * @details Sets m_shutdown_requested, joins the writer thread, then drains any messages that arrived between
-         *          the stop signal and thread exit.
-         * @note A producer that already passed the m_shutdown_requested check but has not yet completed try_push() can
-         *       enqueue at most one message after the final drain. This is an accepted trade-off to avoid adding atomic
-         *       overhead (producers_in_flight counter) to every enqueue() call.
+         * @details Signals shutdown, joins the writer thread, then drains any messages that arrived between the stop
+         *          signal and thread exit.
+         * @note A producer that already passed the shutdown check but has not yet completed try_push() can enqueue at
+         *       most one message after the final drain. This is an accepted trade-off to avoid adding atomic overhead
+         *       (producers_in_flight counter) to every enqueue() call.
          */
         void shutdown() noexcept;
 
@@ -111,55 +109,11 @@ namespace DetourModKit
         void reset_dropped_count() noexcept;
 
     private:
-        void writer_thread_func() noexcept;
-
-        /**
-         * @brief Drains any messages remaining in the queue after the writer thread exits.
-         * @details Called during shutdown to flush late-enqueued messages that arrived between m_running=false and the
-         *          writer thread observing an empty queue. No external lock is required; the writer thread has already
-         *          been joined.
-         */
-        void drain_remaining() noexcept;
-
-        void write_batch(std::span<detail::LogMessage> messages) noexcept;
-
-        bool handle_overflow(detail::LogMessage &&message) noexcept;
-
-        /**
-         * @brief Wakes the writer thread if it is parked on m_flush_cv after a successful push.
-         * @details A successful producer has already made m_pending_messages non-zero before publishing
-         *          a new queue slot, or preserved it while replacing an old slot. The writer publishes
-         *          m_writer_waiting before checking that same pending count and blocking. Those seq_cst
-         *          operations form a store/load handshake: if the writer misses the pending state, the
-         *          producer observes m_writer_waiting and notifies under m_flush_mutex; if the producer
-         *          observes false, the writer's pending-count predicate sees the work and does not block.
-         *          notify_all (not notify_one) is used so a flusher waiting on the same condition variable
-         *          cannot absorb the notification and leave the writer asleep. When the writer is
-         *          draining, this is a seq_cst flag load with no mutex or syscall.
-         */
-        void notify_writer() noexcept;
-
-        detail::DynamicMPMCQueue m_queue;
-        AsyncLoggerConfig m_config;
-
-        std::shared_ptr<WinFileStream> m_file_stream;
-        std::shared_ptr<std::mutex> m_log_mutex;
-
-        std::jthread m_writer_thread;
-        std::atomic<bool> m_running{false};
-        std::atomic<bool> m_shutdown_requested{false};
-
-        std::mutex m_flush_mutex;
-        std::condition_variable m_flush_cv;
-
-        // Set true by the writer immediately before it parks on m_flush_cv and cleared when it wakes.
-        // Producers read it outside m_flush_mutex after a successful queue push; the seq_cst order shared
-        // with m_pending_messages makes a racing push either visible to the writer's wait predicate or
-        // visible here as a parked-writer wake.
-        std::atomic<bool> m_writer_waiting{false};
-
-        std::atomic<size_t> m_pending_messages{0};
-        std::atomic<size_t> m_dropped_messages{0};
+        // All implementation state and behaviour live behind this pimpl so the queue, string pool, per-message record,
+        // writer thread, and flush synchronization stay off the public include path (their definitions live in the
+        // non-installed src/internal/async_logger_queue.hpp, reached only by src/async_logger.cpp).
+        struct Impl;
+        std::unique_ptr<Impl> m_impl;
     };
 
 } // namespace DetourModKit
