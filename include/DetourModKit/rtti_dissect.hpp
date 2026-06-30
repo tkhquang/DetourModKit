@@ -302,9 +302,9 @@ namespace DetourModKit
          * @details Recorded once and persisted (config). The persisted form carries @ref nominal_offset, @ref window,
          *          an owned copy of @ref expected_mangled, @ref indirection, @ref stride, and (for fingerprints) @ref
          *          required. @ref base is never persisted: it is an ASLR'd runtime address resolved fresh each session
-         *          (typically from a Scanner cascade/AOB anchor or a live object pointer) and filled in at call time.
-         *          The in-code common case is a @c static @c constexpr Landmark with a mangled string literal,
-         *          mirroring the existing AddrCandidate cascade tables.
+         *          (typically from a scan::resolve ladder/AOB anchor or a live object pointer) and filled in at call
+         *          time. The in-code common case is a @c static @c constexpr Landmark with a mangled string literal,
+         *          mirroring a scan::Candidate ladder.
          * @note @ref expected_mangled must name a type that is stable across patches (a base/engine type, not a
          *       game-specific most-derived subtype), because matching is byte-exact on the most-derived name. A subtype
          *       rename defeats healing and fails closed via @ref HealError::NoMatch.

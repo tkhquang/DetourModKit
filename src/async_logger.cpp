@@ -1,12 +1,16 @@
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/diagnostics.hpp"
+
+#include "internal/async_logger_queue.hpp"
 #include "platform.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <new>
+#include <span>
 #include <type_traits>
 
 namespace DetourModKit
@@ -16,8 +20,9 @@ namespace DetourModKit
     using detail::pin_current_module;
 
     // The string pool, per-message record, and MPMC queue are implementation-only types that live in
-    // DetourModKit::detail (see detail/async_logger_internal.hpp). Their out-of-line definitions are grouped in the
-    // namespace block below; the AsyncLogger definitions that follow reach them through the using-declarations above.
+    // DetourModKit::detail (see internal/async_logger_queue.hpp). Their out-of-line definitions are grouped in the
+    // namespace block below; the AsyncLogger pimpl definitions that follow reach them through the using-declarations
+    // above.
     namespace detail
     {
         StringPool::StringPool() noexcept
@@ -435,8 +440,68 @@ namespace DetourModKit
         }
     } // namespace detail
 
-    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
-                             std::shared_ptr<std::mutex> log_mutex)
+    // The AsyncLogger pimpl: every member and method that touches the queue, string pool, writer thread, or flush
+    // synchronization lives here, so the public header (async_logger.hpp) names none of it. AsyncLogger forwards each
+    // public call to the matching Impl method.
+    struct AsyncLogger::Impl
+    {
+        Impl(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+             std::shared_ptr<std::mutex> log_mutex);
+        ~Impl() noexcept;
+
+        Impl(const Impl &) = delete;
+        Impl &operator=(const Impl &) = delete;
+        Impl(Impl &&) = delete;
+        Impl &operator=(Impl &&) = delete;
+
+        [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
+        [[nodiscard]] bool flush_with_timeout(std::chrono::milliseconds timeout) noexcept;
+        void flush() noexcept;
+        void shutdown() noexcept;
+        [[nodiscard]] bool is_running() const noexcept;
+        [[nodiscard]] bool is_writer_waiting() const noexcept;
+        [[nodiscard]] size_t queue_size() const noexcept;
+        [[nodiscard]] size_t dropped_count() const noexcept;
+        void reset_dropped_count() noexcept;
+
+        void writer_thread_func() noexcept;
+        // Drains any messages remaining in the queue after the writer thread exits (called during shutdown to flush
+        // late-enqueued messages that arrived between m_running=false and the writer observing an empty queue).
+        void drain_remaining() noexcept;
+        void write_batch(std::span<detail::LogMessage> messages) noexcept;
+        bool handle_overflow(detail::LogMessage &&message) noexcept;
+        // Wakes the writer thread if it is parked on m_flush_cv after a successful push. The producer increments
+        // m_pending_messages and publishes the slot before this load; the writer publishes m_writer_waiting before
+        // checking the same count and parking. Those seq_cst operations form a store/load handshake that closes the
+        // lost-wakeup window without taking m_flush_mutex while the writer is actively draining. notify_all (not
+        // notify_one) keeps a flusher waiting on the same condition variable from absorbing the wake and leaving the
+        // writer asleep.
+        void notify_writer() noexcept;
+
+        detail::DynamicMPMCQueue m_queue;
+        AsyncLoggerConfig m_config;
+
+        std::shared_ptr<WinFileStream> m_file_stream;
+        std::shared_ptr<std::mutex> m_log_mutex;
+
+        std::jthread m_writer_thread;
+        std::atomic<bool> m_running{false};
+        std::atomic<bool> m_shutdown_requested{false};
+
+        std::mutex m_flush_mutex;
+        std::condition_variable m_flush_cv;
+
+        // Set true by the writer immediately before it parks on m_flush_cv and cleared when it wakes. Producers read it
+        // outside m_flush_mutex after a successful queue push; the seq_cst order shared with m_pending_messages makes a
+        // racing push either visible to the writer's wait predicate or visible here as a parked-writer wake.
+        std::atomic<bool> m_writer_waiting{false};
+
+        std::atomic<size_t> m_pending_messages{0};
+        std::atomic<size_t> m_dropped_messages{0};
+    };
+
+    AsyncLogger::Impl::Impl(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+                            std::shared_ptr<std::mutex> log_mutex)
         : m_queue(config.queue_capacity), m_config(config), m_file_stream(std::move(file_stream)),
           m_log_mutex(std::move(log_mutex))
     {
@@ -456,15 +521,15 @@ namespace DetourModKit
         }
 
         m_running.store(true, std::memory_order_release);
-        m_writer_thread = std::jthread(&AsyncLogger::writer_thread_func, this);
+        m_writer_thread = std::jthread(&AsyncLogger::Impl::writer_thread_func, this);
     }
 
-    AsyncLogger::~AsyncLogger() noexcept
+    AsyncLogger::Impl::~Impl() noexcept
     {
         shutdown();
     }
 
-    bool AsyncLogger::enqueue(LogLevel level, std::string_view message) noexcept
+    bool AsyncLogger::Impl::enqueue(LogLevel level, std::string_view message) noexcept
     {
         if (m_shutdown_requested.load(std::memory_order_acquire))
         {
@@ -512,7 +577,7 @@ namespace DetourModKit
         return handle_overflow(std::move(msg));
     }
 
-    bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
+    bool AsyncLogger::Impl::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
     {
         if (!m_running.load(std::memory_order_acquire))
         {
@@ -527,12 +592,12 @@ namespace DetourModKit
         return flushed;
     }
 
-    void AsyncLogger::flush() noexcept
+    void AsyncLogger::Impl::flush() noexcept
     {
         (void)flush_with_timeout(DEFAULT_FLUSH_TIMEOUT);
     }
 
-    void AsyncLogger::shutdown() noexcept
+    void AsyncLogger::Impl::shutdown() noexcept
     {
         bool expected = false;
         if (!m_shutdown_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -582,32 +647,32 @@ namespace DetourModKit
         }
     }
 
-    bool AsyncLogger::is_running() const noexcept
+    bool AsyncLogger::Impl::is_running() const noexcept
     {
         return m_running.load(std::memory_order_acquire);
     }
 
-    bool AsyncLogger::is_writer_waiting() const noexcept
+    bool AsyncLogger::Impl::is_writer_waiting() const noexcept
     {
         return m_writer_waiting.load(std::memory_order_acquire);
     }
 
-    size_t AsyncLogger::queue_size() const noexcept
+    size_t AsyncLogger::Impl::queue_size() const noexcept
     {
         return m_queue.size();
     }
 
-    size_t AsyncLogger::dropped_count() const noexcept
+    size_t AsyncLogger::Impl::dropped_count() const noexcept
     {
         return m_dropped_messages.load(std::memory_order_relaxed);
     }
 
-    void AsyncLogger::reset_dropped_count() noexcept
+    void AsyncLogger::Impl::reset_dropped_count() noexcept
     {
         m_dropped_messages.store(0, std::memory_order_release);
     }
 
-    void AsyncLogger::notify_writer() noexcept
+    void AsyncLogger::Impl::notify_writer() noexcept
     {
         // The caller has already incremented m_pending_messages and published the queue slot. In the
         // seq_cst order, either the writer's pending-count predicate sees that increment before it parks,
@@ -623,7 +688,7 @@ namespace DetourModKit
         }
     }
 
-    void AsyncLogger::writer_thread_func() noexcept
+    void AsyncLogger::Impl::writer_thread_func() noexcept
     {
         // Per-idle-cycle cap on the cooperative yields the writer spins through when the pending count
         // shows an in-flight push whose queue slot has not landed yet. Small and fixed so a producer
@@ -714,7 +779,7 @@ namespace DetourModKit
         }
     }
 
-    void AsyncLogger::drain_remaining() noexcept
+    void AsyncLogger::Impl::drain_remaining() noexcept
     {
         std::vector<LogMessage> remaining;
         remaining.reserve(m_config.batch_size);
@@ -725,7 +790,7 @@ namespace DetourModKit
         }
     }
 
-    void AsyncLogger::write_batch(std::span<LogMessage> messages) noexcept
+    void AsyncLogger::Impl::write_batch(std::span<LogMessage> messages) noexcept
     {
         std::lock_guard<std::mutex> lock(*m_log_mutex);
 
@@ -765,7 +830,7 @@ namespace DetourModKit
         m_file_stream->flush();
     }
 
-    bool AsyncLogger::handle_overflow(LogMessage &&message) noexcept
+    bool AsyncLogger::Impl::handle_overflow(LogMessage &&message) noexcept
     {
         switch (m_config.overflow_policy)
         {
@@ -867,6 +932,62 @@ namespace DetourModKit
             m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
+    }
+
+    // AsyncLogger is a thin facade: construction builds the Impl (which validates the config and starts the writer
+    // thread), and every public method forwards to it. The out-of-line destructor sees the complete Impl so the
+    // unique_ptr can delete it (Impl::~Impl drains and joins the writer).
+    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+                             std::shared_ptr<std::mutex> log_mutex)
+        : m_impl(std::make_unique<Impl>(config, std::move(file_stream), std::move(log_mutex)))
+    {
+    }
+
+    AsyncLogger::~AsyncLogger() noexcept = default;
+
+    bool AsyncLogger::enqueue(LogLevel level, std::string_view message) noexcept
+    {
+        return m_impl->enqueue(level, message);
+    }
+
+    bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
+    {
+        return m_impl->flush_with_timeout(timeout);
+    }
+
+    void AsyncLogger::flush() noexcept
+    {
+        m_impl->flush();
+    }
+
+    void AsyncLogger::shutdown() noexcept
+    {
+        m_impl->shutdown();
+    }
+
+    bool AsyncLogger::is_running() const noexcept
+    {
+        return m_impl->is_running();
+    }
+
+    bool AsyncLogger::is_writer_waiting() const noexcept
+    {
+        return m_impl->is_writer_waiting();
+    }
+
+    size_t AsyncLogger::queue_size() const noexcept
+    {
+        return m_impl->queue_size();
+    }
+
+    size_t AsyncLogger::dropped_count() const noexcept
+    {
+        return m_impl->dropped_count();
+    }
+
+    void AsyncLogger::reset_dropped_count() noexcept
+    {
+        m_impl->reset_dropped_count();
     }
 
 } // namespace DetourModKit

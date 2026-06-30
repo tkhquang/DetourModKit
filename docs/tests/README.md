@@ -160,13 +160,14 @@ auto *bytes = reinterpret_cast<const unsigned char *>(fn);
 std::string aob = build_aob_from_bytes(bytes, 16);
 
 // Scan the DLL's memory region for the pattern
-auto pattern = Scanner::parse_aob(aob);
-const auto *found = Scanner::find_pattern(
-    reinterpret_cast<const std::byte *>(module_base),
-    module_size, pattern.value());
+auto pattern_result = DetourModKit::scan::Pattern::compile(aob);
+const auto found = DetourModKit::scan::scan(
+    *pattern_result,
+    DetourModKit::Region::module_named(module_name),
+    1, DetourModKit::scan::Pages::Executable);
 
 // Verify it found the exact export address, then hook it
-EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(fn));
+EXPECT_EQ(found->value(), reinterpret_cast<uintptr_t>(fn));
 ```
 
 ### What Can Be Tested
@@ -176,7 +177,7 @@ EXPECT_EQ(reinterpret_cast<uintptr_t>(found), reinterpret_cast<uintptr_t>(fn));
 - **Callback execution**: `with_inline_hook`, `with_mid_hook`, `try_with_*` variants
 - **Concurrent access**: Multi-threaded hook creation stress tests
 - **Cross-module hooking**: DLL exports hooked and verified via integration tests
-- **AOB scan pipeline**: Scanner finds patterns in loaded DLLs, hooks the result
+- **AOB scan pipeline**: `scan::scan` / `scan::resolve` finds patterns in loaded DLLs, hooks the result
 - **Mid hooks**: Argument inspection and modification via `hook::MidContext` (the DMK accessors `gpr()` / `stack_pointer()` / `instruction_pointer()` / `xmm()`)
 
 ### Platform-Specific Tests
@@ -292,7 +293,7 @@ These tests enable the test-only `debug_snapshot_use_count()` accessor via `#def
 
 ## x86 Control-Flow Decoder Tests
 
-`tests/test_x86_decode.cpp` exercises the internal header `src/x86_decode.hpp`, which is consumed by `Scanner` for RIP-relative jump/call resolution. The decoders are small and pure, so each branch is driven by crafting a byte buffer and calling the decoder directly:
+`tests/test_x86_decode.cpp` exercises the internal header `src/x86_decode.hpp`, which is consumed by the scan engine for RIP-relative jump/call resolution. The decoders are small and pure, so each branch is driven by crafting a byte buffer and calling the decoder directly:
 
 | Test | What it proves |
 | ---- | -------------- |
@@ -358,7 +359,7 @@ The one path still validated manually is the gamepad button masking itself: clea
 `DMK_BUILD_BENCHMARKS=ON` builds three standalone microbenchmark executables. Each is deliberately not a gtest binary, so it runs under any build configuration (release, release+PGO, ASan, etc.) without dragging in the gtest runtime, and each prints a tab-separated table on stdout:
 
 - `DetourModKit_bench` (`bench_event_dispatcher.cpp`) -- EventDispatcher emit / subscribe throughput.
-- `DetourModKit_bench_scanner` (`bench_scanner.cpp`) -- `Scanner::find_pattern`, rare-byte anchor vs a naive first-byte anchor, prefilter and verify isolation rows, and serial cascade resolution vs `resolve_cascade_batch`.
+- `DetourModKit_bench_scanner` (`bench_scanner.cpp`) -- `scan::scan` / `scan::unchecked::find_pattern`, rare-byte anchor vs a naive first-byte anchor, prefilter and verify isolation rows, and serial cascade resolution vs `scan::resolve_batch`.
 - `DetourModKit_bench_memory` (`bench_memory.cpp`) -- the cost of each way to read game memory from a hot path: validation predicate (warm hit / cold miss) vs direct SEH-guarded read vs the pointer-chain primitives, plus per-probe tail-latency and per-frame budget studies.
 
 The option is independent of `DMK_BUILD_TESTS`, so the benches build alone:
@@ -425,8 +426,7 @@ tests/
 ├── test_memory_chain.cpp       # Pointer-chain / plausibility primitives (seh_resolve_chain, seh_read_chain)
 ├── test_platform.cpp           # Platform detection and version macro tests
 ├── test_profiler.cpp           # Profiler tests
-├── test_scanner.cpp            # AOB scanner tests
-├── test_scanner_parallel.cpp   # Parallel scanner and cascade-batch tests
+├── test_scan_resolve.cpp       # AOB scanner and resolver tests (scan::Pattern, scan::resolve)
 ├── test_shutdown.cpp           # DMK_Shutdown orchestration tests
 ├── test_string.cpp             # String::trim cases (shares format.hpp with test_format.cpp -- surface split)
 ├── test_win_file_stream.cpp    # Win32 file stream tests

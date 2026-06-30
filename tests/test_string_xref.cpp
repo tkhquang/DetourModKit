@@ -10,8 +10,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
-#include "DetourModKit/scanner.hpp"
-#include "DetourModKit/memory.hpp"
+#include "DetourModKit/scan.hpp"
 
 using namespace DetourModKit;
 
@@ -32,7 +31,7 @@ namespace
 
     // A committed RWX page used as a synthetic module image. find_string_xref scans readable pages for the string
     // (phase 1) and execute-readable pages for the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both masks, so
-    // a single page hosts the whole fixture and the ModuleRange spans exactly it. The page is zero-filled by
+    // a single page hosts the whole fixture and the Region spans exactly it. The page is zero-filled by
     // VirtualAlloc, so an unwritten byte is 0x00, which both terminates a planted string and never starts a
     // RIP-relative load.
     class SyntheticImage
@@ -94,10 +93,9 @@ namespace
             std::memcpy(p + 3, &disp, sizeof(disp));
         }
 
-        [[nodiscard]] Memory::ModuleRange range() const noexcept
+        [[nodiscard]] Region range() const noexcept
         {
-            return Memory::ModuleRange{reinterpret_cast<std::uintptr_t>(m_base),
-                                       reinterpret_cast<std::uintptr_t>(m_base) + m_size};
+            return Region{Address{reinterpret_cast<std::uintptr_t>(m_base)}, m_size};
         }
 
     private:
@@ -108,7 +106,7 @@ namespace
     // A two-page synthetic image mirroring a real PE's split protections: page 0 is execute-readable (the .text
     // analogue swept in phase 2) and page 1 is readable data (the .rdata analogue located in phase 1). Reserving both
     // pages in one
-    // VirtualAlloc keeps them contiguous so a single ModuleRange spans them, and the distinct protections keep the
+    // VirtualAlloc keeps them contiguous so a single Region spans them, and the distinct protections keep the
     // planted string out of the executable sweep -- exactly as production strings in .rdata are never decoded as code.
     // This is the fixture the broad (Zydis) phase-2 tests use so the decoder only ever walks the code page, never the
     // string bytes.
@@ -199,10 +197,9 @@ namespace
             }
         }
 
-        [[nodiscard]] Memory::ModuleRange range() const noexcept
+        [[nodiscard]] Region range() const noexcept
         {
-            const auto base = reinterpret_cast<std::uintptr_t>(m_base);
-            return Memory::ModuleRange{base, base + m_page * 2};
+            return Region{Address{reinterpret_cast<std::uintptr_t>(m_base)}, m_page * 2};
         }
 
     private:
@@ -278,10 +275,9 @@ namespace
             plant_lea(instr, reinterpret_cast<std::uintptr_t>(instr), target_off);
         }
 
-        [[nodiscard]] Memory::ModuleRange range() const noexcept
+        [[nodiscard]] Region range() const noexcept
         {
-            const auto base = reinterpret_cast<std::uintptr_t>(m_base);
-            return Memory::ModuleRange{base, base + m_page * 4};
+            return Region{Address{reinterpret_cast<std::uintptr_t>(m_base)}, m_page * 4};
         }
 
     private:
@@ -304,27 +300,27 @@ namespace
     constexpr std::uint8_t LEA = 0x8D;
     constexpr std::uint8_t MOV = 0x8B;
 
-    Scanner::StringRefQuery utf8_query(std::string_view text)
+    scan::StringRefQuery utf8_query(std::string_view text)
     {
-        Scanner::StringRefQuery q{};
+        scan::StringRefQuery q{};
         q.text = text;
-        q.encoding = Scanner::StringEncoding::Utf8;
+        q.encoding = scan::StringEncoding::Utf8;
         q.require_terminator = true;
-        q.return_mode = Scanner::XrefReturn::ReferencingInstruction;
+        q.return_mode = scan::XrefReturn::ReferencingInstruction;
         return q;
     }
 
-    Scanner::StringRefQuery broad_query(std::string_view text)
+    scan::StringRefQuery broad_query(std::string_view text)
     {
-        Scanner::StringRefQuery q = utf8_query(text);
+        scan::StringRefQuery q = utf8_query(text);
         q.broad_match = true;
         return q;
     }
 
-    Scanner::StringRefQuery slot_query(std::string_view text)
+    scan::StringRefQuery slot_query(std::string_view text)
     {
-        Scanner::StringRefQuery q = utf8_query(text);
-        q.return_mode = Scanner::XrefReturn::StringPointerSlot;
+        scan::StringRefQuery q = utf8_query(text);
+        q.return_mode = scan::XrefReturn::StringPointerSlot;
         return q;
     }
 } // namespace
@@ -340,9 +336,9 @@ TEST(StringXrefTest, ResolvesUniqueLeaReference)
     img.write(0x100, str, sizeof(str));
     img.plant_rip_load(0x10, 0x100, LEA);
 
-    const auto result = Scanner::find_string_xref(utf8_query("AnchorStringAlpha"), img.range());
+    const auto result = scan::find_string_xref(utf8_query("AnchorStringAlpha"), img.range());
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, img.addr(0x10));
+    EXPECT_EQ(result->raw(), img.addr(0x10));
 }
 
 TEST(StringXrefTest, ResolvesUniqueMovReference)
@@ -356,9 +352,9 @@ TEST(StringXrefTest, ResolvesUniqueMovReference)
     img.write(0x140, str, sizeof(str));
     img.plant_rip_load(0x20, 0x140, MOV);
 
-    const auto result = Scanner::find_string_xref(utf8_query("AnchorStringBeta"), img.range());
+    const auto result = scan::find_string_xref(utf8_query("AnchorStringBeta"), img.range());
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, img.addr(0x20));
+    EXPECT_EQ(result->raw(), img.addr(0x20));
 }
 
 TEST(StringXrefTest, StringNotFound)
@@ -371,9 +367,9 @@ TEST(StringXrefTest, StringNotFound)
     const char str[] = "PresentString";
     img.write(0x100, str, sizeof(str));
 
-    const auto result = Scanner::find_string_xref(utf8_query("AbsentString"), img.range());
+    const auto result = scan::find_string_xref(utf8_query("AbsentString"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StringNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StringNotFound);
 }
 
 TEST(StringXrefTest, StringAmbiguous)
@@ -387,9 +383,9 @@ TEST(StringXrefTest, StringAmbiguous)
     img.write(0x100, str, sizeof(str));
     img.write(0x140, str, sizeof(str)); // second occurrence makes it ambiguous
 
-    const auto result = Scanner::find_string_xref(utf8_query("DuplicatedAnchor"), img.range());
+    const auto result = scan::find_string_xref(utf8_query("DuplicatedAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StringAmbiguous);
+    EXPECT_EQ(result.error().code, ErrorCode::StringAmbiguous);
 }
 
 TEST(StringXrefTest, NoReference)
@@ -402,9 +398,9 @@ TEST(StringXrefTest, NoReference)
     const char str[] = "UnreferencedAnchor";
     img.write(0x100, str, sizeof(str)); // string present, no instruction loads it
 
-    const auto result = Scanner::find_string_xref(utf8_query("UnreferencedAnchor"), img.range());
+    const auto result = scan::find_string_xref(utf8_query("UnreferencedAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::NoReference);
+    EXPECT_EQ(result.error().code, ErrorCode::NoReference);
 }
 
 TEST(StringXrefTest, AmbiguousReference)
@@ -419,9 +415,9 @@ TEST(StringXrefTest, AmbiguousReference)
     img.plant_rip_load(0x10, 0x180, LEA);
     img.plant_rip_load(0x30, 0x180, LEA); // second reference to the same string
 
-    const auto result = Scanner::find_string_xref(utf8_query("TwiceReferenced"), img.range());
+    const auto result = scan::find_string_xref(utf8_query("TwiceReferenced"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::AmbiguousReference);
+    EXPECT_EQ(result.error().code, ErrorCode::AmbiguousReference);
 }
 
 TEST(StringXrefTest, TerminatorPreventsPrefixMatch)
@@ -436,16 +432,16 @@ TEST(StringXrefTest, TerminatorPreventsPrefixMatch)
     img.plant_rip_load(0x10, 0x100, LEA);
 
     // "Player" with a required terminator must not match inside "PlayerController".
-    const auto result = Scanner::find_string_xref(utf8_query("Player"), img.range());
+    const auto result = scan::find_string_xref(utf8_query("Player"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StringNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StringNotFound);
 
     // Without the terminator it matches the prefix and resolves the reference.
-    Scanner::StringRefQuery loose = utf8_query("Player");
+    scan::StringRefQuery loose = utf8_query("Player");
     loose.require_terminator = false;
-    const auto loose_result = Scanner::find_string_xref(loose, img.range());
+    const auto loose_result = scan::find_string_xref(loose, img.range());
     ASSERT_TRUE(loose_result.has_value());
-    EXPECT_EQ(*loose_result, img.addr(0x10));
+    EXPECT_EQ(loose_result->raw(), img.addr(0x10));
 }
 
 TEST(StringXrefTest, Utf16Reference)
@@ -459,13 +455,13 @@ TEST(StringXrefTest, Utf16Reference)
     img.write(0x100, wstr, sizeof(wstr)); // UTF-16LE bytes incl the wide NUL
     img.plant_rip_load(0x10, 0x100, LEA);
 
-    Scanner::StringRefQuery q{};
+    scan::StringRefQuery q{};
     q.text = "QuitGame";
-    q.encoding = Scanner::StringEncoding::Utf16le;
+    q.encoding = scan::StringEncoding::Utf16le;
     q.require_terminator = true;
-    const auto result = Scanner::find_string_xref(q, img.range());
+    const auto result = scan::find_string_xref(q, img.range());
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, img.addr(0x10));
+    EXPECT_EQ(result->raw(), img.addr(0x10));
 }
 
 TEST(StringXrefTest, EnclosingFunctionReturnsPrologue)
@@ -485,11 +481,11 @@ TEST(StringXrefTest, EnclosingFunctionReturnsPrologue)
     img.write(0x100, str, sizeof(str));
     img.plant_rip_load(0x60, 0x100, LEA); // lea sits inside the function body
 
-    Scanner::StringRefQuery q = utf8_query("FunctionAnchor");
-    q.return_mode = Scanner::XrefReturn::EnclosingFunction;
-    const auto result = Scanner::find_string_xref(q, img.range());
+    scan::StringRefQuery q = utf8_query("FunctionAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, img.addr(0x44));
+    EXPECT_EQ(result->raw(), img.addr(0x44));
 }
 
 TEST(StringXrefTest, EnclosingFunctionNotFound)
@@ -505,11 +501,11 @@ TEST(StringXrefTest, EnclosingFunctionNotFound)
     img.write(0x100, str, sizeof(str));
     img.plant_rip_load(0x10, 0x100, LEA);
 
-    Scanner::StringRefQuery q = utf8_query("NoBoundaryAnchor");
-    q.return_mode = Scanner::XrefReturn::EnclosingFunction;
-    const auto result = Scanner::find_string_xref(q, img.range());
+    scan::StringRefQuery q = utf8_query("NoBoundaryAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::FunctionNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::FunctionNotFound);
 }
 
 TEST(StringXrefTest, EnclosingFunctionBackScanCrossesPageBoundary)
@@ -548,13 +544,12 @@ TEST(StringXrefTest, EnclosingFunctionBackScanCrossesPageBoundary)
     std::memcpy(base + 0x800, str, sizeof(str));
     plant_lea(page + 0x100, 0x800); // lea in page 1 references the page-0 string
 
-    Scanner::StringRefQuery q = utf8_query("CrossPageAnchor");
-    q.return_mode = Scanner::XrefReturn::EnclosingFunction;
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
-                                    reinterpret_cast<std::uintptr_t>(base) + page * 2};
-    const auto result = Scanner::find_string_xref(q, range);
+    scan::StringRefQuery q = utf8_query("CrossPageAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const Region range{Address{reinterpret_cast<std::uintptr_t>(base)}, page * 2};
+    const auto result = scan::find_string_xref(q, range);
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, reinterpret_cast<std::uintptr_t>(base) + 0x44);
+    EXPECT_EQ(result->raw(), reinterpret_cast<std::uintptr_t>(base) + 0x44);
 
     VirtualFree(base, 0, MEM_RELEASE);
 }
@@ -603,13 +598,12 @@ TEST(StringXrefTest, EnclosingFunctionBackScanSkipsUnmappedLowerPage)
     std::memcpy(base + page + 0x800, str, sizeof(str));
     plant_lea(page * 2 + 0x100, page + 0x800); // lea in page 2 references the page-1 string
 
-    Scanner::StringRefQuery q = utf8_query("SkipGapAnchor");
-    q.return_mode = Scanner::XrefReturn::EnclosingFunction;
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
-                                    reinterpret_cast<std::uintptr_t>(base) + page * 3};
-    const auto result = Scanner::find_string_xref(q, range);
+    scan::StringRefQuery q = utf8_query("SkipGapAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const Region range{Address{reinterpret_cast<std::uintptr_t>(base)}, page * 3};
+    const auto result = scan::find_string_xref(q, range);
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, reinterpret_cast<std::uintptr_t>(base) + page + 0x44);
+    EXPECT_EQ(result->raw(), reinterpret_cast<std::uintptr_t>(base) + page + 0x44);
 
     VirtualFree(base, 0, MEM_RELEASE);
 }
@@ -621,13 +615,13 @@ TEST(StringXrefTest, EmptyQueryAndInvalidRange)
     {
         GTEST_SKIP() << "could not allocate a synthetic image page";
     }
-    const auto empty = Scanner::find_string_xref(utf8_query(""), img.range());
+    const auto empty = scan::find_string_xref(utf8_query(""), img.range());
     ASSERT_FALSE(empty.has_value());
-    EXPECT_EQ(empty.error(), Scanner::StringXrefError::EmptyQuery);
+    EXPECT_EQ(empty.error().code, ErrorCode::EmptyQuery);
 
-    const auto bad_range = Scanner::find_string_xref(utf8_query("Anything"), Memory::ModuleRange{});
+    const auto bad_range = scan::find_string_xref(utf8_query("Anything"), Region{});
     ASSERT_FALSE(bad_range.has_value());
-    EXPECT_EQ(bad_range.error(), Scanner::StringXrefError::InvalidRange);
+    EXPECT_EQ(bad_range.error().code, ErrorCode::InvalidRange);
 }
 
 TEST(StringXrefTest, BroadMatchResolvesCmpReference)
@@ -643,14 +637,14 @@ TEST(StringXrefTest, BroadMatchResolvesCmpReference)
     img.plant_code_rip_insn(0x10, 0x40, {0x83, 0x3D}, 7, {0x01});
 
     // The narrow scan models only lea/mov, so the cmp is invisible to it.
-    const auto narrow = Scanner::find_string_xref(utf8_query("BroadCmpAnchorString"), img.range());
+    const auto narrow = scan::find_string_xref(utf8_query("BroadCmpAnchorString"), img.range());
     ASSERT_FALSE(narrow.has_value());
-    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::NoReference);
+    EXPECT_EQ(narrow.error().code, ErrorCode::NoReference);
 
     // The broad sweep decodes the cmp and resolves its RIP operand to the string.
-    const auto broad = Scanner::find_string_xref(broad_query("BroadCmpAnchorString"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadCmpAnchorString"), img.range());
     ASSERT_TRUE(broad.has_value());
-    EXPECT_EQ(*broad, img.code_addr(0x10));
+    EXPECT_EQ(broad->raw(), img.code_addr(0x10));
 }
 
 TEST(StringXrefTest, BroadMatchResolvesPushReference)
@@ -665,9 +659,9 @@ TEST(StringXrefTest, BroadMatchResolvesPushReference)
     // push qword ptr [rip+disp]  ->  FF 35 <disp32>  (6 bytes)
     img.plant_code_rip_insn(0x10, 0x40, {0xFF, 0x35}, 6);
 
-    const auto broad = Scanner::find_string_xref(broad_query("BroadPushAnchorString"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadPushAnchorString"), img.range());
     ASSERT_TRUE(broad.has_value());
-    EXPECT_EQ(*broad, img.code_addr(0x10));
+    EXPECT_EQ(broad->raw(), img.code_addr(0x10));
 }
 
 TEST(StringXrefTest, BroadMatchResolvesNoRexLea)
@@ -683,13 +677,13 @@ TEST(StringXrefTest, BroadMatchResolvesNoRexLea)
     img.plant_code_rip_insn(0x10, 0x40, {0x8D, 0x05}, 6);
 
     // The narrow scan requires a REX prefix (0x48..0x4F), so a 32-bit lea misses.
-    const auto narrow = Scanner::find_string_xref(utf8_query("BroadNoRexLeaAnchor"), img.range());
+    const auto narrow = scan::find_string_xref(utf8_query("BroadNoRexLeaAnchor"), img.range());
     ASSERT_FALSE(narrow.has_value());
-    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::NoReference);
+    EXPECT_EQ(narrow.error().code, ErrorCode::NoReference);
 
-    const auto broad = Scanner::find_string_xref(broad_query("BroadNoRexLeaAnchor"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadNoRexLeaAnchor"), img.range());
     ASSERT_TRUE(broad.has_value());
-    EXPECT_EQ(*broad, img.code_addr(0x10));
+    EXPECT_EQ(broad->raw(), img.code_addr(0x10));
 }
 
 TEST(StringXrefTest, BroadMatchResolvesRexLeaForm)
@@ -705,9 +699,9 @@ TEST(StringXrefTest, BroadMatchResolvesRexLeaForm)
     // narrow scan, so this proves the broad sweep is a strict superset.
     img.plant_code_rip_insn(0x10, 0x40, {0x48, 0x8D, 0x05}, 7);
 
-    const auto broad = Scanner::find_string_xref(broad_query("BroadRexLeaAnchor"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadRexLeaAnchor"), img.range());
     ASSERT_TRUE(broad.has_value());
-    EXPECT_EQ(*broad, img.code_addr(0x10));
+    EXPECT_EQ(broad->raw(), img.code_addr(0x10));
 }
 
 TEST(StringXrefTest, BroadMatchKeepsNarrowShapeScanCoverage)
@@ -725,9 +719,9 @@ TEST(StringXrefTest, BroadMatchKeepsNarrowShapeScanCoverage)
     // replacing it.
     img.plant_code_rip_insn(0x11, 0x40, {0x48, 0x8D, 0x05}, 7);
 
-    const auto broad = Scanner::find_string_xref(broad_query("BroadKeepsNarrowAnchor"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadKeepsNarrowAnchor"), img.range());
     ASSERT_TRUE(broad.has_value());
-    EXPECT_EQ(*broad, img.code_addr(0x11));
+    EXPECT_EQ(broad->raw(), img.code_addr(0x11));
 }
 
 TEST(StringXrefTest, BroadMatchAmbiguousReference)
@@ -748,9 +742,9 @@ TEST(StringXrefTest, BroadMatchAmbiguousReference)
     img.plant_code_rip_insn(cmp_off, 0x40, {0x83, 0x3D}, cmp_len, {0x01});
     img.plant_code_rip_insn(cmp_off + cmp_len, 0x40, {0xFF, 0x35}, 6);
 
-    const auto broad = Scanner::find_string_xref(broad_query("BroadTwiceAnchorString"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadTwiceAnchorString"), img.range());
     ASSERT_FALSE(broad.has_value());
-    EXPECT_EQ(broad.error(), Scanner::StringXrefError::AmbiguousReference);
+    EXPECT_EQ(broad.error().code, ErrorCode::AmbiguousReference);
 }
 
 TEST(StringXrefTest, BroadMatchNoReference)
@@ -764,9 +758,9 @@ TEST(StringXrefTest, BroadMatchNoReference)
     const char str[] = "BroadUnreferencedAnchor";
     img.write_data(0x40, str, sizeof(str));
 
-    const auto broad = Scanner::find_string_xref(broad_query("BroadUnreferencedAnchor"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadUnreferencedAnchor"), img.range());
     ASSERT_FALSE(broad.has_value());
-    EXPECT_EQ(broad.error(), Scanner::StringXrefError::NoReference);
+    EXPECT_EQ(broad.error().code, ErrorCode::NoReference);
 }
 
 TEST(StringXrefTest, BroadMatchRecoversFromDecodeFailure)
@@ -793,9 +787,9 @@ TEST(StringXrefTest, BroadMatchRecoversFromDecodeFailure)
     // If the failure branch broke or stalled instead of byte-restarting, the
     // misaligned reference would be invisible and this would report NoReference;
     // resolving it proves the sweep realigns past undecodable bytes.
-    const auto broad = Scanner::find_string_xref(broad_query("BroadRecoveryAnchorString"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("BroadRecoveryAnchorString"), img.range());
     ASSERT_TRUE(broad.has_value());
-    EXPECT_EQ(*broad, img.code_addr(0x11));
+    EXPECT_EQ(broad->raw(), img.code_addr(0x11));
 }
 
 TEST(StringXrefTest, DataPageIsNeverDecodedAsCode)
@@ -819,13 +813,13 @@ TEST(StringXrefTest, DataPageIsNeverDecodedAsCode)
     // windows -- fail closed with
     // NoReference. A regression that widened the gate to readable pages would count the data-page pseudo-instruction
     // and flip this to a wrong success.
-    const auto narrow = Scanner::find_string_xref(utf8_query("DataPageNeverCodeAnchor"), img.range());
+    const auto narrow = scan::find_string_xref(utf8_query("DataPageNeverCodeAnchor"), img.range());
     ASSERT_FALSE(narrow.has_value());
-    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::NoReference);
+    EXPECT_EQ(narrow.error().code, ErrorCode::NoReference);
 
-    const auto broad = Scanner::find_string_xref(broad_query("DataPageNeverCodeAnchor"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("DataPageNeverCodeAnchor"), img.range());
     ASSERT_FALSE(broad.has_value());
-    EXPECT_EQ(broad.error(), Scanner::StringXrefError::NoReference);
+    EXPECT_EQ(broad.error().code, ErrorCode::NoReference);
 }
 
 TEST(StringXrefTest, MultiWindowResolvesReferenceInSecondWindow)
@@ -842,13 +836,13 @@ TEST(StringXrefTest, MultiWindowResolvesReferenceInSecondWindow)
     // both scans iterate every window collect_executable_windows returns, not just the first.
     img.plant_lea_window1(0x10, 0x40);
 
-    const auto narrow = Scanner::find_string_xref(utf8_query("SecondWindowAnchorString"), img.range());
+    const auto narrow = scan::find_string_xref(utf8_query("SecondWindowAnchorString"), img.range());
     ASSERT_TRUE(narrow.has_value());
-    EXPECT_EQ(*narrow, img.window1_addr(0x10));
+    EXPECT_EQ(narrow->raw(), img.window1_addr(0x10));
 
-    const auto broad = Scanner::find_string_xref(broad_query("SecondWindowAnchorString"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("SecondWindowAnchorString"), img.range());
     ASSERT_TRUE(broad.has_value());
-    EXPECT_EQ(*broad, img.window1_addr(0x10));
+    EXPECT_EQ(broad->raw(), img.window1_addr(0x10));
 }
 
 TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
@@ -867,13 +861,13 @@ TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
     img.plant_lea_window0(0x10, 0x40);
     img.plant_lea_window1(0x10, 0x40);
 
-    const auto narrow = Scanner::find_string_xref(utf8_query("CrossWindowAnchorString"), img.range());
+    const auto narrow = scan::find_string_xref(utf8_query("CrossWindowAnchorString"), img.range());
     ASSERT_FALSE(narrow.has_value());
-    EXPECT_EQ(narrow.error(), Scanner::StringXrefError::AmbiguousReference);
+    EXPECT_EQ(narrow.error().code, ErrorCode::AmbiguousReference);
 
-    const auto broad = Scanner::find_string_xref(broad_query("CrossWindowAnchorString"), img.range());
+    const auto broad = scan::find_string_xref(broad_query("CrossWindowAnchorString"), img.range());
     ASSERT_FALSE(broad.has_value());
-    EXPECT_EQ(broad.error(), Scanner::StringXrefError::AmbiguousReference);
+    EXPECT_EQ(broad.error().code, ErrorCode::AmbiguousReference);
 }
 
 // Precondition regression: phase-2 reference scanning treats each execute-readable window independently and
@@ -924,22 +918,21 @@ TEST(StringXrefTest, ReferenceStraddlingProtectionSplitReportsNoReference)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old_protect));
 
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
-                                    reinterpret_cast<std::uintptr_t>(base) + page * 3};
+    const Region range{Address{reinterpret_cast<std::uintptr_t>(base)}, page * 3};
 
     // The only reference straddles the window boundary, so phase 2 finds none: fail-closed NoReference, not a wrong
     // hit.
-    const auto straddled = Scanner::find_string_xref(utf8_query("StraddleAnchorString"), range);
+    const auto straddled = scan::find_string_xref(utf8_query("StraddleAnchorString"), range);
     ASSERT_FALSE(straddled.has_value());
-    EXPECT_EQ(straddled.error(), Scanner::StringXrefError::NoReference);
+    EXPECT_EQ(straddled.error().code, ErrorCode::NoReference);
 
     // Positive control: plant a second lea wholly inside window 0. It resolves uniquely, proving the string is findable
     // and a normal reference decodes -- so the miss above is the straddle, not a broken fixture, and the straddling lea
     // is not counted (otherwise this would report AmbiguousReference).
     plant_lea(0x10);
-    const auto in_window = Scanner::find_string_xref(utf8_query("StraddleAnchorString"), range);
+    const auto in_window = scan::find_string_xref(utf8_query("StraddleAnchorString"), range);
     ASSERT_TRUE(in_window.has_value());
-    EXPECT_EQ(*in_window, reinterpret_cast<std::uintptr_t>(base + 0x10));
+    EXPECT_EQ(in_window->raw(), reinterpret_cast<std::uintptr_t>(base + 0x10));
 }
 
 TEST(StringXrefTest, StringPointerSlotResolvesStore)
@@ -956,9 +949,9 @@ TEST(StringXrefTest, StringPointerSlotResolvesStore)
     img.plant_rip_load(0x10, 0x100, LEA);
     img.plant_rip_store(0x17, 0x200, 0);
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotAnchorString"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotAnchorString"), img.range());
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, img.addr(0x200));
+    EXPECT_EQ(result->raw(), img.addr(0x200));
 }
 
 TEST(StringXrefTest, StringPointerSlotRegisterMismatch)
@@ -975,9 +968,9 @@ TEST(StringXrefTest, StringPointerSlotRegisterMismatch)
     img.plant_rip_load(0x10, 0x100, LEA);
     img.plant_rip_store(0x17, 0x200, 1);
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotMismatchAnchor"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotMismatchAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, StringPointerSlotNoStore)
@@ -993,9 +986,9 @@ TEST(StringXrefTest, StringPointerSlotNoStore)
     // forward scan finds nothing.
     img.plant_rip_load(0x10, 0x100, LEA);
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotNoStoreAnchor"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotNoStoreAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, StringPointerSlotIgnoresMisalignedStoreShape)
@@ -1014,9 +1007,9 @@ TEST(StringXrefTest, StringPointerSlotIgnoresMisalignedStoreShape)
     const std::uint8_t mov_rcx_with_embedded_store[] = {0x48, 0xB9, 0x48, 0x89, 0x05, 0x11, 0x22, 0x33, 0x44, 0x55};
     img.write(0x17, mov_rcx_with_embedded_store, sizeof(mov_rcx_with_embedded_store));
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotMisalignedAnchor"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotMisalignedAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, StringPointerSlotStopsAtRegisterClobber)
@@ -1036,9 +1029,9 @@ TEST(StringXrefTest, StringPointerSlotStopsAtRegisterClobber)
     img.write(0x17, clobber_rax, sizeof(clobber_rax));
     img.plant_rip_store(0x1A, 0x200, 0); // mov [rip+slot], rax, after the clobber
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotClobberAnchor"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotClobberAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, StringPointerSlotDoesNotDecodeDataPageStore)
@@ -1066,9 +1059,9 @@ TEST(StringXrefTest, StringPointerSlotDoesNotDecodeDataPageStore)
     std::memcpy(data_store + 3, &disp, sizeof(disp));
     img.write_data(0, data_store, sizeof(data_store));
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotDataPageStoreAnchor"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotDataPageStoreAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, StringPointerSlotR8Register)
@@ -1090,9 +1083,9 @@ TEST(StringXrefTest, StringPointerSlotR8Register)
     img.write(0x13, &disp, sizeof(disp));
     img.plant_rip_store(0x17, 0x200, 8);
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotR8AnchorString"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotR8AnchorString"), img.range());
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, img.addr(0x200));
+    EXPECT_EQ(result->raw(), img.addr(0x200));
 }
 
 TEST(StringXrefTest, StringPointerSlotOutOfWindowStore)
@@ -1109,9 +1102,9 @@ TEST(StringXrefTest, StringPointerSlotOutOfWindowStore)
     img.plant_rip_load(0x10, 0x100, LEA);
     img.plant_rip_store(0x10 + 7 + 0x80, 0x300, 0);
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotFarStoreAnchor"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotFarStoreAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, StringPointerSlotMovLoadHasNoStore)
@@ -1128,9 +1121,9 @@ TEST(StringXrefTest, StringPointerSlotMovLoadHasNoStore)
     img.plant_rip_load(0x10, 0x100, MOV);
     img.plant_rip_store(0x17, 0x200, 0);
 
-    const auto result = Scanner::find_string_xref(slot_query("SlotMovLoadAnchor"), img.range());
+    const auto result = scan::find_string_xref(slot_query("SlotMovLoadAnchor"), img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, StringPointerSlotBroadOnlyReferenceFails)
@@ -1148,25 +1141,24 @@ TEST(StringXrefTest, StringPointerSlotBroadOnlyReferenceFails)
     // cmp dword ptr [rip+disp], 0x01  ->  83 3D <disp32> 01  (7 bytes)
     img.plant_code_rip_insn(0x10, 0x40, {0x83, 0x3D}, 7, {0x01});
 
-    Scanner::StringRefQuery q = slot_query("SlotBroadOnlyAnchor");
+    scan::StringRefQuery q = slot_query("SlotBroadOnlyAnchor");
     q.broad_match = true;
-    const auto result = Scanner::find_string_xref(q, img.range());
+    const auto result = scan::find_string_xref(q, img.range());
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::StringXrefError::StoreNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
 TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 {
-    static_assert(noexcept(Scanner::string_xref_error_to_string(Scanner::StringXrefError::EmptyQuery)));
-    const Scanner::StringXrefError all[] = {
-        Scanner::StringXrefError::EmptyQuery,       Scanner::StringXrefError::InvalidRange,
-        Scanner::StringXrefError::StringNotFound,   Scanner::StringXrefError::StringAmbiguous,
-        Scanner::StringXrefError::NoReference,      Scanner::StringXrefError::AmbiguousReference,
-        Scanner::StringXrefError::FunctionNotFound, Scanner::StringXrefError::StoreNotFound,
+    // Verify that to_string covers all string-xref ErrorCode values and is noexcept.
+    static_assert(noexcept(to_string(ErrorCode::EmptyQuery)));
+    const ErrorCode all[] = {
+        ErrorCode::EmptyQuery,  ErrorCode::InvalidRange,       ErrorCode::StringNotFound,   ErrorCode::StringAmbiguous,
+        ErrorCode::NoReference, ErrorCode::AmbiguousReference, ErrorCode::FunctionNotFound, ErrorCode::StoreNotFound,
     };
-    for (const auto error : all)
+    for (const auto code : all)
     {
-        EXPECT_FALSE(Scanner::string_xref_error_to_string(error).empty());
+        EXPECT_FALSE(to_string(code).empty());
     }
 }
 
@@ -1211,16 +1203,15 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
     std::memcpy(insn + 3, &disp, sizeof(disp));
     const std::uintptr_t reference_site = reinterpret_cast<std::uintptr_t>(insn);
 
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
-                                    reinterpret_cast<std::uintptr_t>(base) + size};
+    const Region range{Address{reinterpret_cast<std::uintptr_t>(base)}, size};
 
-    Scanner::StringRefQuery query = utf8_query("GuardedStringAnchor");
+    scan::StringRefQuery query = utf8_query("GuardedStringAnchor");
     query.broad_match = true; // exercise both the narrow and the broad guarded window scans
 
     // Positive control with no contention: the guarded window scans resolve the planted reference to its site.
-    const auto control = Scanner::find_string_xref(query, range);
+    const auto control = scan::find_string_xref(query, range);
     ASSERT_TRUE(control.has_value());
-    EXPECT_EQ(*control, reference_site);
+    EXPECT_EQ(control->raw(), reference_site);
 
     const std::uintptr_t decommit_page = reinterpret_cast<std::uintptr_t>(trailing_window);
     std::jthread toggler(
@@ -1238,9 +1229,9 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
     // a correct resolve always returns reference_site even when a trailing window faults and is skipped.
     for (int i = 0; i < 600; ++i)
     {
-        const auto result = Scanner::find_string_xref(query, range);
+        const auto result = scan::find_string_xref(query, range);
         ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(*result, reference_site);
+        EXPECT_EQ(result->raw(), reference_site);
     }
 }
 #endif // _MSC_VER || _WIN64

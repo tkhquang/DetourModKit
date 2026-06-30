@@ -105,9 +105,11 @@ if(DMK_BUILD_TESTS)
     target_link_options(hook_target_lib PRIVATE -static-libgcc -static-libstdc++)
   endif()
 
-  # Register tests with CTest
+  # Register tests with CTest. The statically-linked debug test binary is large (tens of MB) and enumerates ~1600
+  # cases, so its first cold --gtest_list_tests launch can exceed the 5s default discovery timeout on a slow or
+  # freshly-built disk; raise the budget so PRE_TEST discovery does not spuriously fail (CTest exit 8).
   include(GoogleTest)
-  gtest_discover_tests(DetourModKit_tests DISCOVERY_MODE PRE_TEST)
+  gtest_discover_tests(DetourModKit_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 120)
 
   # Optional: Add code coverage if requested
   option(DMK_ENABLE_COVERAGE "Enable code coverage reporting" OFF)
@@ -145,6 +147,7 @@ if(DMK_BUILD_BENCHMARKS)
 
   target_include_directories(DetourModKit_bench_scanner PRIVATE
     ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
   )
 
   add_executable(DetourModKit_bench_memory

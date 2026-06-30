@@ -3,7 +3,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <span>
 
 #include "DetourModKit/diagnostics_dump.hpp"
 
@@ -67,7 +66,6 @@ TEST_F(DiagnosticsDumpTest, EmptyInputsProduceZeroes)
     EXPECT_EQ(snapshot.hooks_active, 0u);
     EXPECT_EQ(snapshot.hooks_disabled, 0u);
     EXPECT_EQ(snapshot.hooks_total, 0u);
-    EXPECT_EQ(snapshot.anchor_quality.total, 0u);
     EXPECT_EQ(snapshot.drift_total, 0u);
     EXPECT_EQ(snapshot.drift_healed, 0u);
     EXPECT_EQ(snapshot.drift_failed, 0u);
@@ -111,29 +109,6 @@ TEST_F(DiagnosticsDumpTest, AggregatesHookCounts)
     EXPECT_EQ(snapshot.hooks_total, 2u);
 }
 
-TEST_F(DiagnosticsDumpTest, AggregatesAnchorQuality)
-{
-    const std::array<Anchors::ResolvedAnchor, 3> report{{
-        {"vtable", Anchors::AnchorKind::VtableIdentity, Anchors::AnchorStatus::Resolved, 0x1000},
-        {"pinned", Anchors::AnchorKind::Manual, Anchors::AnchorStatus::Resolved, 0x20},
-        {"global", Anchors::AnchorKind::RipGlobal, Anchors::AnchorStatus::Failed, 0},
-    }};
-
-    const Diagnostics::Snapshot snapshot =
-        Diagnostics::collect(HookManager::get_instance(), report, std::span<const Rtti::DriftEntry>{});
-
-    const Anchors::AnchorQuality expected = Anchors::assess_quality(report);
-    EXPECT_EQ(snapshot.anchor_quality.total, expected.total);
-    EXPECT_EQ(snapshot.anchor_quality.resolved, expected.resolved);
-    EXPECT_EQ(snapshot.anchor_quality.failed, expected.failed);
-    EXPECT_EQ(snapshot.anchor_quality.manual_at_risk, expected.manual_at_risk);
-
-    EXPECT_EQ(snapshot.anchor_quality.total, 3u);
-    EXPECT_EQ(snapshot.anchor_quality.resolved, 2u);
-    EXPECT_EQ(snapshot.anchor_quality.failed, 1u);
-    EXPECT_EQ(snapshot.anchor_quality.manual_at_risk, 1u);
-}
-
 TEST_F(DiagnosticsDumpTest, AggregatesDriftSummary)
 {
     const std::array<Rtti::DriftEntry, 3> drift{{
@@ -142,8 +117,7 @@ TEST_F(DiagnosticsDumpTest, AggregatesDriftSummary)
         {"L2", 0x30, 0, 0, false, {}},
     }};
 
-    const Diagnostics::Snapshot snapshot =
-        Diagnostics::collect(HookManager::get_instance(), std::span<const Anchors::ResolvedAnchor>{}, drift);
+    const Diagnostics::Snapshot snapshot = Diagnostics::collect(HookManager::get_instance(), drift);
 
     EXPECT_EQ(snapshot.drift_total, 3u);
     EXPECT_EQ(snapshot.drift_healed, 2u);

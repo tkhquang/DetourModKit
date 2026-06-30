@@ -41,8 +41,8 @@ namespace DetourModKit
      *          count) rather than a fault or a wrong answer. The forward walker is still safe to call; it just
      *          cannot identify types.
      *
-     *          The primary fallback for an RTTI-off consumer is @ref Scanner::find_string_xref or
-     *          @ref Scanner::read_code_constant, which operate on raw bytes and do not require RTTI records. The
+     *          The primary fallback for an RTTI-off consumer is @ref scan::find_string_xref or
+     *          @ref scan::read_code_constant, which operate on raw bytes and do not require RTTI records. The
      *          long-form failure-mode discussion for each function is in docs/misc/rtti-walker.md and
      *          docs/misc/rtti-self-heal.md.
      */

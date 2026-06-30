@@ -11,7 +11,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Module | Description | Header |
 |--------|-------------|--------|
 | Core Vocabulary (v4) | Strongly-typed `Address` and `Region` value types (constexpr arithmetic, a single audited cast surface, named scope factories), the backend-neutral `Prot` protection flags, and one unified error idiom: the eight per-domain enums folded into one high-byte-tagged `ErrorCode` superset (`category()` recovers the subsystem), a trivially-copyable `Error`, `Result<T> = std::expected<T, Error>`, and the `DMK_TRY` / `DMK_TRY_VOID` propagation macros | `address.hpp`, `region.hpp`, `error.hpp`, `defines.hpp` |
-| AOB Scanner | v4 `scan.hpp` surface with value-semantic `Pattern`, factory-only `Candidate` tiers, borrowed and owned `ScanRequest`, `resolve` / `resolve_batch`, page-gated `scan`, and `unchecked::find_pattern`, backed by the existing SIMD scanner with full-byte and per-nibble wildcards, cross-region-boundary overlap, RIP resolution, prologue-recovery fallback, raw and cascade batch scanning, in-code constants, and string-reference xrefs | `scan.hpp`, `scanner.hpp` |
+| AOB Scanner | v4 `scan.hpp` surface with value-semantic `Pattern`, factory-only `Candidate` tiers, borrowed and owned `ScanRequest`, `resolve` / `resolve_batch`, page-gated `scan`, and `unchecked::find_pattern`, backed by the existing SIMD scanner with full-byte and per-nibble wildcards, cross-region-boundary overlap, RIP resolution, prologue-recovery fallback, raw and resolve-ladder batch scanning, in-code constants, and string-reference xrefs | `scan.hpp` |
 | Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
 | Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
@@ -19,7 +19,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed SEH reads/writes, fault-guarded pointer-chain reads/writes, PE module range queries | `memory.hpp` |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | `rtti.hpp` |
 | RTTI Self-Heal | Reverse-identify the object behind a pointer slot (typed-error and ordered candidate-fallback forms); self-heal a field offset after a patch shifts the struct layout; rigid multi-field drift solver; drift-telemetry report with a durable, diffable manifest (open-failure distinguished from corrupt) | `rtti_dissect.hpp`, `drift_manifest.hpp` |
-| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) plus two-signal quorum corroboration with sub-anchor independence checks, optional post-resolve validators and opt-in validator policies, a manifest quality diagnostic, an address-independent evidence fingerprint for manifest diffing, opt-in parallel table resolution, and a per-game scan profile (broad-mode default, candidate order, backend deny-list), resolved and reported in a single pass | `anchors.hpp`, `profile.hpp` |
+| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, in-code constant, string xref, pinned literal) plus two-signal quorum corroboration with sub-anchor independence checks, optional post-resolve validators and opt-in validator policies, a manifest quality diagnostic, an address-independent evidence fingerprint for manifest diffing, opt-in parallel table resolution, and a per-game scan profile (broad-mode default, candidate order, backend deny-list), resolved and reported in a single pass. **Deferred to a later release.** The four resolution backends ship as `scan::resolve` / `scan::read_code_constant` / `scan::find_string_xref` / `rtti::vtable_for_type`. | `anchors.hpp`, `profile.hpp` (deferred) |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | `event_dispatcher.hpp` |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | `profiler.hpp` |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | `format.hpp` |
@@ -35,23 +35,20 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 <summary><strong>AOB Scanner</strong></summary>
 
 - Find array-of-bytes (signatures) in memory with full-byte literals, full wildcards (`??` / `?`), and per-nibble wildcard tokens (`4?` fixes the high nibble, `?5` the low nibble) for an operand where only one nibble is invariant across builds
-- Rare-byte anchor heuristic: `parse_aob()` scores every fully-known literal byte in the pattern against a small frequency table (`0x00`, `0xCC`, `0x48`, `0x8B`, ...) and caches the rarest byte's index on `CompiledPattern::anchor` (a per-nibble byte is never chosen, since the prefilter needs an exact byte; an all-nibble pattern still resolves via a masked compare at every position). `find_pattern()` drives its `memchr` sweep on that byte, so a signature like `48 8B 05 37 DE AD BE EF` anchors on `0x37` rather than the very common `0x48`, cutting false candidate hits by an order of magnitude on realistic code
+- Rare-byte anchor heuristic: `scan::Pattern::compile()` scores every fully-known literal byte in the pattern against a small frequency table (`0x00`, `0xCC`, `0x48`, `0x8B`, ...) and caches the rarest byte's index (a per-nibble byte is never chosen, since the prefilter needs an exact byte; an all-nibble pattern still resolves via a masked compare at every position). The scan engine drives its `memchr` sweep on that byte, so a signature like `48 8B 05 37 DE AD BE EF` anchors on `0x37` rather than the very common `0x48`, cutting false candidate hits by an order of magnitude on realistic code
 - SIMD-accelerated prefilter and pattern verification:
   - The `memchr` anchor prefilter and the verify pass both tier at runtime: AVX2 (32 bytes/iteration, runtime-detected on Haswell+ CPUs) over an SSE2 baseline (16 bytes/iteration), with a scalar tail. The self-provided prefilter does its own byte comparisons (never calling libc) so the AddressSanitizer interceptor cannot fault on the scanner's in-bounds reads
   - Opt-in AVX-512F + AVX-512BW verify tier (64 bytes/iteration), gated behind the `DMK_ENABLE_AVX512` build option and a runtime CPUID + XGETBV check; off by default and never selected on a CPU that lacks it (it falls back to AVX2)
 - `|` offset markers for targeting a specific instruction within a wider pattern (e.g., `"48 8B 88 B8 00 00 00 | 48 89 4C 24 68"` sets the offset to byte 7)
 - Nth-occurrence matching (1-based) for patterns that hit multiple locations
-- RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `std::expected` with typed `RipResolveError` for actionable diagnostics)
-- `scan_executable_regions()` for scanning all committed executable pages in the process - useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module (pure-execute pages without a read bit are skipped to avoid access violations; a region decommitted or reprotected concurrently mid-sweep is skipped rather than faulting the host on MSVC, where each region read runs inside a structured-exception guard)
-- `scan_readable_regions()` -- the data-section sibling of `scan_executable_regions()` -- sweeps every committed readable page (`.rdata` / `.data`, read-only heaps) to reach C++ vtables, RTTI type descriptors, and read-only metadata the executable-only sweep cannot see (guard / no-access / uncommitted pages are skipped); opt a cascade into it with `resolve_cascade(..., ScannerKind::Readable)`
-- The region-walking sweeps (`scan_executable_regions` / `scan_readable_regions` and the module-scoped scans) carry a `pattern_len - 1` overlap across adjacent accepted `VirtualQuery` regions, so a signature that straddles a protection split (two adjacent regions whose base protections differ, e.g. after a sibling `VirtualProtect` carves up `.text`) is still found, without re-counting a match that lies wholly inside one region
-- `scan_regions_batch()` / `scan_module_batch()` -- opt-in fork-join batch scanners that resolve many compiled patterns concurrently (whole process or one mapped image). Each `BatchScanItem` is one independent serial scan distributed across a transient worker pool, so a startup set of N signatures resolves in roughly the time of the slowest single scan rather than their sum; results come back in input order, each item fails closed on a null/empty pattern, zero occurrence, or no match, and patterns are shared read-only (a compiled `CompiledPattern` is immutable during scanning, so no cloning). Setup/control-plane only -- it spawns and joins threads, so never call it from a hook/input callback or under the loader lock
-- `resolve_cascade_batch()` -- opt-in fork-join resolver for startup target tables. Each `CascadeRequest` dispatches to the existing serial cascade resolver (whole-process, module-scoped, with or without prologue fallback), so candidate priority, uniqueness checks, typed errors, and `winning_name` aliasing stay identical to the one-at-a-time calls while results come back in input order
-- `resolve_cascade()` and the module-scoped `resolve_cascade_in_module()` -- ordered multi-candidate resolution (try signatures in priority order, return the first that resolves), with an optional hooked-prologue recovery pass that recovers an `E9` near-jump, an `FF 25` RIP-relative indirect jump (both the separate-slot form and the 14-byte `FF 25 00000000 <abs64>` inline-target form), and a `mov rax, imm64; jmp rax` overwritten prologue (so a target inline-hooked by another mod with a near or far jump is recovered); the `_in_module` variants confine the scan to one mapped image `[base, end)` and reject out-of-module resolutions, so a generic signature that also matches inside another injected module (a graphics overlay, a sibling mod) cannot shadow the correct in-module target. By default each candidate must match uniquely in the scanned scope: an ambiguous signature (more than one match) falls through to the next candidate instead of silently committing to an arbitrary match, so a too-loose pattern surfaces as a clean failure to fix rather than a wrong hook. Set `require_unique = false` per candidate only to opt out a deliberately non-unique, separately-verified candidate
-- A cascade candidate can carry a name or string resilience tier, not just a byte AOB: `ResolveMode::RttiVtable` resolves `pattern` as an MSVC mangled type name via `Rtti::vtable_for_type`, and `ResolveMode::StringXref` resolves it as a literal string via `find_string_xref` (the four defaulted `xref_*` facet fields tune the query). These sit above the byte tiers in one ordered `AddrCandidate[]` -- "try the RTTI name, else the string xref, else the byte AOB" -- are host-module-scoped when the cascade carries no explicit range, are unique-only by construction (the backend fails closed on ambiguity, so `require_unique` does not apply), and are used automatically by `resolve_cascade_batch` and the prologue-fallback resolvers (which skip them, rewriting only `Direct` rows)
-- `resolve_cascade_in_host_module()` / `resolve_cascade_in_host_module_with_prologue_fallback()` -- one-line convenience overloads that scope a cascade to the host EXE (`host_module_range()`), removing the boilerplate of building the range at every call site. They return `ResolveError::InvalidRange` if the host range cannot be determined. Use them only when the target lives in the host EXE; for a game whose logic is in a separate module (an engine DLL), resolve that module's range and call `resolve_cascade_in_module()` instead
-- `read_code_constant(cc, range?)` -- the code-side twin of the RTTI self-heal: declare an instruction site (an AOB cascade) plus which operand to read, and it decodes the live instruction and returns the current immediate or `[reg + disp]` displacement, so a hand-read array stride or struct displacement re-derives itself after a patch instead of being a baked literal. It always decodes (the `nominal` field is telemetry only, never a short-circuit, so a same-shape / different-value drift is reported as the new value), indexes the **visible** operands, resolves a RIP-relative operand to its absolute target, and fails closed (`DecodeFailed` / `UnexpectedShape` / `OperandOutOfRange`). Built on a Zydis decoder kept entirely inside the implementation, so no consumer needs Zydis headers
-- `is_likely_function_prologue(addr)` heuristic that rejects scan poison (zero pages, alignment pads, bare RET stubs) while still accepting JMP-shaped patched prologues so nested-hook scenarios resolve
+- RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `Result<Address>` with a unified `ErrorCode` for actionable diagnostics)
+- `scan::scan(pattern, scope, occurrence, Pages::Executable)` for scanning all committed executable pages in a region -- useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module (pure-execute pages without a read bit are skipped to avoid access violations; a region decommitted or reprotected concurrently mid-sweep is skipped rather than faulting the host). `Pages::Readable` (the default) widens the sweep to all committed readable pages (`.rdata` / `.data`, read-only heaps) to reach C++ vtables, RTTI type descriptors, and read-only metadata. The unsafe twin `scan::unchecked::find_pattern(region, pattern, occurrence)` accepts a caller-guaranteed-readable region with no page filtering.
+- The region-walking sweeps carry a `pattern_len - 1` overlap across adjacent accepted `VirtualQuery` regions, so a signature that straddles a protection split (two adjacent regions whose base protections differ, e.g. after a sibling `VirtualProtect` carves up `.text`) is still found, without re-counting a match that lies wholly inside one region
+- `scan::resolve_batch(requests, max_workers)` -- opt-in noexcept fork-join resolver for startup target tables. Each `ScanRequest` dispatches to the resolver concurrently and returns one `Result<Hit>` per request in input order. A per-request failure never sinks the batch.
+- `scan::resolve(request)` -- ordered multi-candidate resolution (try `Candidate` tiers in priority order, return the first that resolves), with an optional hooked-prologue recovery pass (`ScanRequest::prologue_fallback = true`) that recovers an `E9` near-jump, an `FF 25` RIP-relative indirect jump, and a `mov rax, imm64; jmp rax` overwritten prologue (so a target inline-hooked by another mod with a near or far jump is recovered). The `ScanRequest::scope` field (a `Region` -- build with `Region::host()`, `Region::module_named(...)`, or `Region::whole_process()`) confines the scan to a single mapped image and rejects out-of-scope resolutions, so a generic signature that also matches inside another injected module (a graphics overlay, a sibling mod) cannot shadow the correct target. By default each candidate must match uniquely in the scope (`require_unique = true`): an ambiguous signature falls through to the next candidate instead of silently committing to an arbitrary match.
+- A `Candidate` can carry a name or string resilience tier, not just a byte AOB: `Candidate::rtti_vtable(name, mangled)` resolves an MSVC mangled type name via `rtti::vtable_for_type`, and `Candidate::string_xref(name, literal)` (or `Candidate::string_xref(name, StringRefQuery{...})` for full facet control) resolves a literal string through `scan::find_string_xref`. These sit above the byte tiers in one ordered ladder -- "try the RTTI name, else the string xref, else the byte AOB" -- are unique-only by construction (the backend fails closed on ambiguity), and are automatically skipped by the prologue-fallback recovery (which only rewrites `Candidate::direct` rows).
+- `scan::read_code_constant(cc, scope)` -- the code-side twin of the RTTI self-heal: declare an instruction site (a `CodeConstant` with a `Candidate` ladder for the site) plus which operand to read (`OperandKind::Immediate` or `MemoryDisplacement`), and it decodes the live instruction and returns the current value. It always decodes (`CodeConstant::nominal` is telemetry only, never a short-circuit), indexes the **visible** operands, resolves a RIP-relative memory operand to its absolute target, and fails closed (`ErrorCode::DecodeFailed` / `UnexpectedShape` / `OperandOutOfRange`). Built on a Zydis decoder kept entirely inside the implementation, so no consumer needs Zydis headers.
+- `scan::is_likely_function_prologue(addr)` heuristic that rejects scan poison (zero pages, alignment pads, bare RET stubs) while still accepting JMP-shaped patched prologues so nested-hook scenarios resolve
 
 </details>
 
@@ -180,7 +177,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 - The reverse direction of the walker, slot-first. It reuses the same verified COL prelude (module-bound-checked, SEH-guarded) rather than duplicating it, and every entry point is noexcept and fails closed
 - `Rtti::identify_pointee_type(slot_addr, out)` reverse-identifies the object a pointer slot refers to. It accepts whichever shape resolves -- a pointer-to-object (deref once, resolve the pointee's vtable) or a direct object base (the slot is the object, its value is the vtable) -- so an object whose vtable lives in a different DLL than the struct still resolves. The reported `was_pointer` flag is a result, not a precondition. `identify_pointee_typed(...)` is the typed form returning the specific fail-closed reason (`IdentifyError`) instead of a bool, and `identify_pointee_type_or(candidate, out, fallbacks...)` probes a primary slot then ordered fallback slots, returning the first that resolves and preserving the primary's error when all fail
 - `Rtti::reverse_scan_block(start, slot_count, out, stride?)` RTTI-labels every pointer slot in a struct (allocating triage tool; init-time only)
-- `Rtti::heal_landmark(lm)` / `Rtti::heal_offset(lm)` -- the self-healing offset resolver. Record a landmark once (`"a field of mangled type T sits near offset O within struct S"`); after a small patch shifts the layout, it scans a `+/-` window around the nominal offset, reverse-RTTI-identifies each slot, and returns the healed field offset. The nominal offset is checked first and short-circuits, the widened scan prefers the nearest match, and an equidistant tie fails closed as `Ambiguous` -- the same `require_unique` philosophy the module-scoped cascade uses, transplanted from an AOB scan to a slot scan
+- `Rtti::heal_landmark(lm)` / `Rtti::heal_offset(lm)` -- the self-healing offset resolver. Record a landmark once (`"a field of mangled type T sits near offset O within struct S"`); after a small patch shifts the layout, it scans a `+/-` window around the nominal offset, reverse-RTTI-identifies each slot, and returns the healed field offset. The nominal offset is checked first and short-circuits, the widened scan prefers the nearest match, and an equidistant tie fails closed as `Ambiguous` -- the same `require_unique` philosophy the module-scoped `resolve()` uses, transplanted from an AOB scan to a slot scan
 - For an embedded object that may use multiple inheritance, record the landmark with `Indirection::CompleteObject`: it matches only the primary subobject (`COL.offset == 0`), so a heal can never latch a secondary base's adjacent vtable (whose COL still names the complete type) and report an offset shifted by the subobject delta. `HealHit::col_offset` reports that delta; when `was_pointer == false`, a nonzero value means the direct-object match landed on a secondary base
 - `Rtti::solve_fingerprint(base, landmarks, window)` recovers a single uniform shift across several co-moving fields when one landmark alone would be ambiguous in a dense region
 - `Rtti::heal_report(landmarks, out)` heals a set in one pass and fills a `DriftEntry` per landmark (`{name, nominal_offset, healed_offset, delta, ok}`) -- a structured "what moved and by how much" report for changelogs, derived purely from the existing heal path
@@ -192,8 +189,10 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <details>
 <summary><strong>Anchor Registry</strong></summary>
 
+**The Anchor Registry (`anchors.hpp`, `profile.hpp`) is deferred to a later release.** The four resolution backends it wraps ship individually as `scan::resolve` / `scan::read_code_constant` / `scan::find_string_xref` / `rtti::vtable_for_type`, and the documentation below describes the intended design for reference.
+
 - One declarative table (`Anchors::Anchor[]`) over the self-healing backends, so every magic constant a mod depends on is declared once with its kind and inputs, then resolved and reported in a single pass instead of a scattered wall of hand-maintained offsets and per-call-site resolvers
-- `AnchorKind` covers the backends that resolve from a module range alone: `VtableIdentity` (`Rtti::vtable_for_type`), `RipGlobal` (an AOB/RIP cascade returning an absolute address), `CodeOperand` (`Scanner::read_code_constant`), `StringXref` (`Scanner::find_string_xref`, the most update-resilient kind: the unique instruction or enclosing function that references an immutable string literal), and `Manual` (a pinned literal, surfaced as at-risk in a report). `Quorum` layers corroboration on top: it accepts a target only when two independent sub-anchors resolve and agree (exact or within a tolerance), so a coincidental match must fool both signals. `CallArgHome` is reserved for a future prologue-dataflow backend and reports `Unsupported`
+- `AnchorKind` covers the backends that resolve from a module range alone: `VtableIdentity` (`rtti::vtable_for_type`), `RipGlobal` (an AOB/RIP cascade returning an absolute address), `CodeOperand` (`scan::read_code_constant`), `StringXref` (`scan::find_string_xref`, the most update-resilient kind: the unique instruction or enclosing function that references an immutable string literal), and `Manual` (a pinned literal, surfaced as at-risk in a report). `Quorum` layers corroboration on top: it accepts a target only when two independent sub-anchors resolve and agree (exact or within a tolerance), so a coincidental match must fool both signals. `CallArgHome` is reserved for a future prologue-dataflow backend and reports `Unsupported`
 - Any backend-resolved anchor may carry an optional `validator` (`bool(*)(value, context) noexcept`) that screens the resolved value and fails the anchor closed when it returns false, letting a caller assert a domain invariant a generic backend cannot know
 - `Anchors::resolve(anchor, range?)` resolves one entry; `resolve_all(anchors, out, range?)` fills a `ResolvedAnchor` report (`{label, kind, status, value}`), and `resolve_all_parallel` does the same work through an opt-in fork-join table resolver. Profile-aware callers have matching `resolve_all_with_profile` and `resolve_all_with_profile_parallel` entry points. Resolution is idempotent and side-effect-free, so re-heal-on-miss is just re-running `resolve` on the failing anchor
 - RTTI pointer-field offset healing (`heal_landmark`) is intentionally not a registry kind: it needs a runtime struct base resolved from another anchor, so it is driven directly once that base is known
@@ -342,7 +341,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 
 - `Diagnostics::record_intentional_leak` / `intentional_leak_count` / `total_intentional_leaks` / `reset_intentional_leaks` -- per-subsystem tallies for the deliberate leak/detach paths DMK takes under the Windows loader lock (a teardown where a join or free would risk deadlock or use-after-unmap). Each site fires at most once per process; relaxed atomics, allocation-free, safe from a `noexcept` destructor
 - Process-wide typed event bus: `Diagnostics::scanner_faults()` and `Diagnostics::hook_lifecycle()` each return one stable `EventDispatcher<>` for the process lifetime. The stateless scanner emits a `ScannerFaultEvent` (skipped-region count + scanned window) once per sweep that skips a region faulting mid-scan; every `HookManager` emits a `HookLifecycleEvent` (`name`, `HookKind`, `HookTransition`) after a create / enable / disable / remove transition completes and its registry locks are released, so a handler runs outside the critical section. Failed operations and idempotent no-ops emit nothing. Both use `emit_safe`, so with no subscribers the cost is a single atomic load after the dispatcher has been constructed
-- `Diagnostics::collect(hooks, anchor_report?, drift_report?)` aggregates the live diagnostics into one `Diagnostics::Snapshot` -- the leak tallies, `get_hook_counts()` folded into active / disabled / total, `assess_quality()` over a resolved anchor report, and a healed/failed count over a `heal_report()` drift report -- so a diagnostics command can capture a one-shot health view in a single call. Setup/control-plane only (it takes a shared lock to read hook counts)
+- `Diagnostics::collect(hooks, drift_report?)` aggregates the live diagnostics into one `Diagnostics::Snapshot` -- the leak tallies, `get_hook_counts()` folded into active / disabled / total, and a healed/failed count over a `heal_report()` drift report -- so a diagnostics command can capture a one-shot health view in a single call. Setup/control-plane only (it takes a shared lock to read hook counts)
 
 </details>
 
@@ -477,10 +476,9 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── region.hpp            <-- v4 Region + Prot flags
     │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
     │   │   ├── scan.hpp              <-- v4 scanning surface (scan::Pattern + resolve / Candidate / ScanRequest)
-    │   │   ├── scanner.hpp           <-- AOB scanner
     │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
     │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (bootstrap.hpp stays light)
-    │   │   ├── detail/               <-- Installed-but-internal headers (async_logger_internal.hpp, hook_impl.hpp, pattern_core.hpp)
+    │   │   ├── detail/               <-- Installed compile-visible support (pattern_core.hpp only; private impl lives in src/internal/)
     │   │   ├── bootstrap.hpp         <-- DllMain lifecycle helpers
     │   │   ├── config.hpp
     │   │   ├── event_dispatcher.hpp  <-- Typed pub/sub with RAII subscriptions
@@ -585,7 +583,7 @@ cmake --preset mingw-debug -DDMK_ENABLE_AVX512=ON
 cmake --build --preset mingw-debug --parallel
 ```
 
-When `DMK_ENABLE_AVX512` is OFF (the default) the tier compiles out entirely. When ON, the AVX-512 intrinsics are confined to that single function via a per-function `target` attribute (no global `/arch:AVX512` or `-mavx512`), so the rest of the library keeps its AVX2 baseline and the produced binary still runs on CPUs without AVX-512: the tier is selected only when a runtime `CPUID` + `XGETBV` check confirms both the CPU and OS support AVX-512F and AVX-512BW, otherwise the scanner falls back to AVX2. `Scanner::active_simd_level()` reports the tier actually in use. The tier's `>= 30%` throughput gate is hardware-specific and can only be measured on a real AVX-512 host. Per-tier correctness (including AVX-512) runs under Intel SDE on every push to main via `.github/workflows/simd-tier-correctness.yml`.
+When `DMK_ENABLE_AVX512` is OFF (the default) the tier compiles out entirely. When ON, the AVX-512 intrinsics are confined to that single function via a per-function `target` attribute (no global `/arch:AVX512` or `-mavx512`), so the rest of the library keeps its AVX2 baseline and the produced binary still runs on CPUs without AVX-512: the tier is selected only when a runtime `CPUID` + `XGETBV` check confirms both the CPU and OS support AVX-512F and AVX-512BW, otherwise the scanner falls back to AVX2. `scan::active_simd_level()` reports the tier actually in use. The tier's `>= 30%` throughput gate is hardware-specific and can only be measured on a real AVX-512 host. Per-tier correctness (including AVX-512) runs under Intel SDE on every push to main via `.github/workflows/simd-tier-correctness.yml`.
 
 ### Enabling Sanitizers
 
@@ -764,7 +762,7 @@ This method uses a pre-built and installed version of DetourModKit.
 
 ## Code Example
 
-> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScanner::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKHookManager`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
+> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScan::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKHookManager`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
 
 ```cpp
 // MyMod/src/main.cpp
@@ -855,53 +853,29 @@ bool InitializeMyMod()
     uintptr_t target_function_address = 0;
 
     // Example: AOB Scan
-    const HMODULE game_module = GetModuleHandleA(nullptr);
-    if (game_module)
+    // DMKScan is the namespace alias for DetourModKit::scan (from scan.hpp).
+    const auto pattern_result = DMKScan::Pattern::compile("48 89 ?? ?? 57");
+    if (pattern_result.has_value())
     {
-        MODULEINFO module_info{};
-        if (GetModuleInformation(GetCurrentProcess(), game_module, &module_info, sizeof(module_info)))
+        // scan::scan walks committed pages in scope; Pages::Executable limits to code pages.
+        const auto host_scope = DetourModKit::Region::host();
+        const auto scan_result = DMKScan::scan(*pattern_result, host_scope, 1,
+                                               DMKScan::Pages::Executable);
+        if (scan_result.has_value())
         {
-            logger.debug("Scanning module at {} size {}",
-                         DMKFormat::format_address(reinterpret_cast<uintptr_t>(module_info.lpBaseOfDll)),
-                         module_info.SizeOfImage);
-
-            // Replace with actual AOB pattern from your target game
-            const std::string aob_sig_str = "48 89 ?? ?? 57";
-            const ptrdiff_t pattern_offset = 0;
-
-            const auto pattern = DMKScanner::parse_aob(aob_sig_str);
-            if (pattern.has_value())
-            {
-                const std::byte *found_pattern = DMKScanner::find_pattern(
-                    reinterpret_cast<const std::byte *>(module_info.lpBaseOfDll),
-                    module_info.SizeOfImage,
-                    *pattern
-                );
-                if (found_pattern)
-                {
-                    target_function_address = reinterpret_cast<uintptr_t>(found_pattern) + pattern_offset;
-                    logger.info("Pattern found at: {}, target address: {}",
-                                DMKFormat::format_address(reinterpret_cast<uintptr_t>(found_pattern)),
-                                DMKFormat::format_address(target_function_address));
-                }
-                else
-                {
-                    logger.error("AOB pattern not found in target module.");
-                }
-            }
-            else
-            {
-                logger.error("Failed to parse AOB pattern: {}", aob_sig_str);
-            }
+            target_function_address = scan_result->value();
+            logger.info("Pattern found at: {}",
+                        DMKFormat::format_address(target_function_address));
         }
         else
         {
-            logger.error("GetModuleInformation failed: {}", GetLastError());
+            logger.error("AOB pattern not found in host module.");
         }
     }
     else
     {
-        logger.error("Failed to get game module handle.");
+        logger.error("Failed to compile AOB pattern: {}",
+                     DetourModKit::to_string(pattern_result.error().code));
     }
 
     if (target_function_address != 0)
