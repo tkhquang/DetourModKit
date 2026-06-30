@@ -4,20 +4,20 @@
 
 DetourModKit's AOB scanner and SEH-guarded probe read deliberately read arbitrary mapped process memory. Under MSVC AddressSanitizer (the `msvc-debug-asan` preset) those reads land on memory ASan has poisoned for its own bookkeeping and are reported as buffer overflows -- even though every read is in bounds of a committed, readable page and never faults in a release build. They are false positives intrinsic to running a whole-process memory scanner inside an ASan-instrumented process.
 
-The fix excludes only the deliberate foreign-memory readers from ASan. The AOB byte-search prefilter routes through a self-provided `dmk_memchr` in every build, so it is immune to libc interceptors by construction; only the `no_sanitize_address` attribute and the `__movsb` copy path remain ASan-conditional under `#if defined(__SANITIZE_ADDRESS__)`. The full test suite still runs -- and passes -- under ASan with the scanner exercised.
+The fix excludes only the deliberate foreign-memory readers from ASan. The AOB byte-search prefilter routes through a self-provided `dmk_memchr` in every build, so it is immune to libc interceptors by construction; only the `no_sanitize_address` attribute and the `__movsb` copy path remain ASan-conditional under `#if defined(__SANITIZE_ADDRESS__)`. The guarded copy lives in the memory engine TU; the public `memory.hpp` header is Win32-free. The full test suite still runs -- and passes -- under ASan with the scanner exercised.
 
 ## What ASan reports
 
 Building the suite under `msvc-debug-asan` without the fix produces reports like:
 
 - `stack-buffer-underflow` / `global-buffer-overflow` in `find_pattern_raw` (`src/internal/scan_engine.cpp`), reached via `scan_readable_regions` -> `scan_regions_filtered`. ASan attributes the address to `find_pattern_raw`'s own stack frame, or to an instrumented global.
-- `global-buffer-overflow` in `seh_read_bytes` (`src/memory.cpp`), reached via the RTTI host-module section walk.
+- `global-buffer-overflow` in `guarded_read_bytes` (`src/internal/memory_guarded.cpp`), reached via the RTTI host-module section walk.
 
 ## Root cause
 
 `scan_readable_regions` enumerates every committed, readable region in the current process with `VirtualQuery` and scans each one for the pattern. Among those regions are the running thread's own stack and the module's data segments -- both of which, under ASan, carry poisoned shadow, because ASan surrounds stack locals and instrumented globals with redzones.
 
-The scanner's reads stay strictly in bounds of the regions `VirtualQuery` reported as readable: the arithmetic in `find_pattern_raw` keeps every access inside `[start, start + region_size)`, and the SIMD verify never reads past `pattern_start + pattern.size()`. So the reads never fault in a release build. They only "fail" because ASan's shadow marks sub-ranges of that mapped, readable memory as off-limits to ordinary code. `seh_read_bytes` is the same: its `__try`-guarded copy reads a mapped data section that happens to contain an instrumented global's redzone.
+The scanner's reads stay strictly in bounds of the regions `VirtualQuery` reported as readable: the arithmetic in `find_pattern_raw` keeps every access inside `[start, start + region_size)`, and the SIMD verify never reads past `pattern_start + pattern.size()`. So the reads never fault in a release build. They only "fail" because ASan's shadow marks sub-ranges of that mapped, readable memory as off-limits to ordinary code. `guarded_read_bytes` is the same: its `__try`-guarded copy reads a mapped data section that happens to contain an instrumented global's redzone.
 
 This is the well-known conflict between AddressSanitizer and code that intentionally reads memory it does not own (memory scanners, conservative garbage collectors, stack walkers). ASan cannot model a process reading its own shadow. It never arises in production: DetourModKit scans a separate target process that is not built with ASan.
 
@@ -30,7 +30,7 @@ A function that reads foreign memory trips ASan two different ways, and each nee
 
 ## The fix
 
-The byte-search prefilter is unconditional: every build routes it through a self-provided `dmk_memchr` that performs its own byte comparisons and never calls into libc, so the interceptor has nothing to hot-patch. Only the `DMK_NO_SANITIZE_ADDRESS` attribute and the `__movsb` copy in `seh_read_bytes` are guarded by `#if defined(__SANITIZE_ADDRESS__)`.
+The byte-search prefilter is unconditional: every build routes it through a self-provided `dmk_memchr` that performs its own byte comparisons and never calls into libc, so the interceptor has nothing to hot-patch. Only the `DMK_NO_SANITIZE_ADDRESS` attribute and the `__movsb` copy in `guarded_read_bytes` are guarded by `#if defined(__SANITIZE_ADDRESS__)`.
 
 `src/internal/scan_engine.cpp`:
 
@@ -38,9 +38,9 @@ The byte-search prefilter is unconditional: every build routes it through a self
 - `no_sanitize_address` on `find_pattern_raw`, `verify_pattern_avx2`, and the `scan_for_byte` helper -- the functions whose instrumented SIMD/scalar loads read the scanned region.
 - `scan_for_byte` replaces the inner-loop `memchr`, routing through the self-provided `dmk_memchr` in all builds (an 8-byte qword loop under MSVC x64, a scalar loop elsewhere), so the interceptor never sees the scan in any configuration.
 
-`src/memory.cpp`:
+`src/internal/memory_guarded.cpp`:
 
-- `seh_read_bytes` copies with the `__movsb` (`rep movsb`) intrinsic under ASan -- it emits the copy inline with no interceptable call -- and with `std::memcpy` otherwise. No `no_sanitize_address` is applied here: the copy is the function's only foreign read, and `__movsb` is neither instrumented nor intercepted, so the attribute would suppress nothing and would be dead.
+- `guarded_read_bytes` copies with the `__movsb` (`rep movsb`) intrinsic under ASan -- it emits the copy inline with no interceptable call -- and with `std::memcpy` otherwise. No `no_sanitize_address` is applied here: the copy is the function's only foreign read, and `__movsb` is neither instrumented nor intercepted, so the attribute would suppress nothing and would be dead.
 
 What this costs: ASan no longer validates the scanner's own reads of arbitrary process memory. That is unavoidable -- those reads are the false-positive source -- and acceptable: the scanner's bounds logic is still exercised under ASan by the tests that scan small, heap-allocated (ASan-tracked) buffers, where a genuine over-read would still be caught, and by the full non-ASan suite.
 
@@ -58,7 +58,7 @@ If a new function deliberately reads memory the process does not own:
 
 1. Mark it `DMK_NO_SANITIZE_ADDRESS`, with the attribute on its first declaration (on MSVC, the header prototype for an out-of-line function).
 2. Route any `memchr`/`memcpy`/`memmove`/`memset` it performs on that memory around the interceptor under `#if defined(__SANITIZE_ADDRESS__)` -- an inline loop, or `__movsb`/`__stosb` for bulk copies/fills.
-3. Decide whether the replacement is unconditional or ASan-only. A primitive on a scan path that must behave identically in every build gets a self-provided unconditional replacement (the AOB prefilter's `dmk_memchr`); a primitive whose libc form is fine outside ASan can keep the libc call under the `#else` branch (the `__movsb` copy in `seh_read_bytes`).
+3. Decide whether the replacement is unconditional or ASan-only. A primitive on a scan path that must behave identically in every build gets a self-provided unconditional replacement (the AOB prefilter's `dmk_memchr`); a primitive whose libc form is fine outside ASan can keep the libc call under the `#else` branch (the `__movsb` copy in `guarded_read_bytes`).
 
 ## References
 

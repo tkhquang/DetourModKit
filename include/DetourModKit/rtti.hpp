@@ -1,7 +1,7 @@
 #ifndef DETOURMODKIT_RTTI_HPP
 #define DETOURMODKIT_RTTI_HPP
 
-#include "DetourModKit/memory.hpp"
+#include "DetourModKit/region.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -63,9 +63,9 @@ namespace DetourModKit
          *          cross-checks the COL against a forged or relocated structure. Any signature other than the x64 value
          *          is rejected.
          *
-         *          Reads up to @p max_len bytes from the name buffer in page-bounded chunks via @ref
-         *          Memory::seh_read_bytes; the first NUL byte terminates the result. All reads are
-         *          SEH-guarded on MSVC and VirtualQuery-guarded on MinGW.
+         *          Reads up to @p max_len bytes from the name buffer in page-bounded chunks through the guarded read
+         *          engine; the first NUL byte terminates the result. All reads are SEH-guarded on MSVC and
+         *          vectored-handler-guarded on MinGW.
          * @param vtable Runtime vtable pointer (the first qword of the object).
          * @param max_len Maximum mangled-name length to copy; clamped to @ref MAX_TYPE_NAME_LEN. Zero is replaced with
          *                @ref DEFAULT_TYPE_NAME_MAX.
@@ -164,8 +164,8 @@ namespace DetourModKit
          *         @p range is invalid, or when more than one distinct primary vtable shares the name (an ambiguous
          *         image: the resolver fails closed rather than guessing).
          */
-        [[nodiscard]] std::optional<std::uintptr_t>
-        vtable_for_type(std::string_view mangled, Memory::ModuleRange range = Memory::host_module_range()) noexcept;
+        [[nodiscard]] std::optional<std::uintptr_t> vtable_for_type(std::string_view mangled,
+                                                                    Region range = Region::host()) noexcept;
 
         /**
          * @brief Collects every sub-object vtable sharing a class's mangled name.
@@ -183,7 +183,7 @@ namespace DetourModKit
          *         any real inheritance graph). A return value greater than @p out_cap signals the output was truncated.
          */
         [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, std::uintptr_t *out, std::size_t out_cap,
-                                                   Memory::ModuleRange range = Memory::host_module_range()) noexcept;
+                                                   Region range = Region::host()) noexcept;
 
         /**
          * @brief Cached, self-healing identity handle for a class vtable.
@@ -207,8 +207,7 @@ namespace DetourModKit
              * @param mangled Exact MSVC mangled name. Stored as a view; the backing storage must outlive the handle.
              * @param range Module image to resolve in. Defaults to the host EXE.
              */
-            explicit TypeIdentity(std::string_view mangled,
-                                  Memory::ModuleRange range = Memory::host_module_range()) noexcept;
+            explicit TypeIdentity(std::string_view mangled, Region range = Region::host()) noexcept;
 
             /**
              * @brief Constructs a cached identity from a null-terminated mangled type name.
@@ -218,7 +217,7 @@ namespace DetourModKit
              * @param mangled Null-terminated MSVC RTTI name. The backing bytes must outlive this identity.
              * @param range Module range searched for the primary vtable.
              */
-            explicit TypeIdentity(const char *mangled, Memory::ModuleRange range = Memory::host_module_range()) noexcept
+            explicit TypeIdentity(const char *mangled, Region range = Region::host()) noexcept
                 : TypeIdentity(mangled != nullptr ? std::string_view(mangled) : std::string_view{}, range)
             {
             }
@@ -229,7 +228,7 @@ namespace DetourModKit
              *          std::string rvalue would dangle as soon as the constructor returns, so it is a compile-time
              *          error.
              */
-            TypeIdentity(std::string &&mangled, Memory::ModuleRange range = Memory::host_module_range()) = delete;
+            TypeIdentity(std::string &&mangled, Region range = Region::host()) = delete;
 
             /**
              * @brief Tests whether @p vtable is this type's primary vtable.
@@ -248,7 +247,7 @@ namespace DetourModKit
 
         private:
             std::string_view m_mangled;
-            Memory::ModuleRange m_range;
+            Region m_range;
 
             // m_cached holds the resolved primary vtable and is written only on a SUCCESSFUL (nonzero) resolve.
             // m_resolved latches that success and is published with release after m_cached is stored, so an

@@ -15,8 +15,8 @@
  */
 
 #include "DetourModKit/rtti_dissect.hpp"
-#include "DetourModKit/memory.hpp"
 
+#include "internal/memory_guarded.hpp"
 #include "rtti_internal.hpp"
 
 #include <cstdint>
@@ -122,7 +122,7 @@ namespace DetourModKit
         if (slot_addr < detail::MIN_VALID_PTR)
             return std::unexpected(IdentifyError::BadSlotAddress);
 
-        const auto slot_opt = Memory::seh_read<std::uintptr_t>(slot_addr);
+        const auto slot_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(slot_addr);
         if (!slot_opt || *slot_opt < detail::MIN_VALID_PTR)
             return std::unexpected(IdentifyError::UnreadableSlot);
         const std::uintptr_t slot_val = *slot_opt;
@@ -135,7 +135,7 @@ namespace DetourModKit
         // Pointer-to-object first: treat slot_val as a pointer to an object and try to resolve the pointee's vtable
         // (*slot_val). A direct object would read its own first vtable entry here, which practically never satisfies
         // the COL signature + pSelf cross-check, so this ordering does not misclassify real direct objects.
-        const auto vt2_opt = Memory::seh_read<std::uintptr_t>(slot_val);
+        const auto vt2_opt = DetourModKit::detail::guarded_read<std::uintptr_t>(slot_val);
         if (vt2_opt && *vt2_opt >= detail::MIN_VALID_PTR && detail::resolve_col_site(*vt2_opt, site))
         {
             was_pointer = true;
@@ -249,7 +249,7 @@ namespace DetourModKit
         //    (4096) << MIN_VALID_PTR (0x10000), the lo/hi derivations below
         //    cannot themselves underflow or wrap.
         const std::uintptr_t nominal_slot = lm.base + static_cast<std::uintptr_t>(lm.nominal_offset);
-        if (!Memory::plausible_userspace_ptr(nominal_slot))
+        if (!DetourModKit::detail::is_plausible_ptr(nominal_slot))
             return std::unexpected(HealError::BadDescriptor);
         std::uintptr_t lo = nominal_slot - lm.window;
         if (lo < detail::MIN_VALID_PTR)
@@ -390,7 +390,7 @@ namespace DetourModKit
             {
                 const std::uintptr_t addr =
                     base + static_cast<std::uintptr_t>(lm.nominal_offset) + static_cast<std::uintptr_t>(delta);
-                const bool ok = Memory::plausible_userspace_ptr(addr) && slot_matches(addr, lm, pt);
+                const bool ok = DetourModKit::detail::is_plausible_ptr(addr) && slot_matches(addr, lm, pt);
                 if (lm.required)
                 {
                     // A missing required landmark disqualifies this delta outright; abandon it without scoring the

@@ -4,45 +4,129 @@
 #include <thread>
 #include <chrono>
 #include <atomic>
+#include <array>
+#include <span>
 #include <windows.h>
 
 #include "DetourModKit/memory.hpp"
-#include "memory_internal.hpp"
+#include "DetourModKit/error.hpp"
+#include "DetourModKit/region.hpp"
+#include "DetourModKit/address.hpp"
+
+// White-box engine seams for the vectored-handler / fault-isolation tests.
+#include "internal/memory_guarded.hpp"
+#include "internal/memory_fault.hpp"
 
 using namespace DetourModKit;
+
+namespace
+{
+    // --- Migration shims to the v4 surface ---------------------------------------------------------------------------
+    // These keep the v3 call shapes the test bodies were written against (raw void*/uintptr_t + size) while routing to
+    // the v4 memory:: surface (Address/Region/Result). They add NO behavior; they only wrap arguments.
+    //
+    // ANTI-PATTERN: these shims re-create the removed v3 call shapes (raw void*/uintptr_t + size) so the existing test
+    // bodies did not have to be rewritten. A test should exercise the v4 surface directly (Address/Region/Result), not
+    // a local adapter that resurrects the old shapes; treat this namespace as a temporary scaffold and remove it by
+    // rewriting the affected bodies to call memory:: directly. (The same scaffold exists in bench_memory.cpp.)
+
+    inline Region region_of(const void *p, std::size_t n) noexcept
+    {
+        return Region{Address{const_cast<void *>(p)}, n};
+    }
+    inline Region region_of(std::uintptr_t p, std::size_t n) noexcept
+    {
+        return Region{Address{p}, n};
+    }
+
+    inline bool is_readable(const void *p, std::size_t n) noexcept
+    {
+        return memory::is_readable(region_of(p, n));
+    }
+    inline bool is_writable(const void *p, std::size_t n) noexcept
+    {
+        return memory::is_writable(region_of(p, n));
+    }
+    inline memory::ReadableStatus is_readable_nonblocking(const void *p, std::size_t n) noexcept
+    {
+        return memory::is_readable_nonblocking(region_of(p, n));
+    }
+
+    inline void invalidate_range(const void *p, std::size_t n) noexcept
+    {
+        memory::invalidate_range(region_of(p, n));
+    }
+
+    // Guarded byte read: returns true on full success, mirroring v3 seh_read_bytes(bool).
+    inline bool read_bytes(std::uintptr_t addr, void *out, std::size_t n) noexcept
+    {
+        if (out == nullptr && n != 0)
+        {
+            return false;
+        }
+        return memory::read_into(Address{addr}, std::span<std::byte>{static_cast<std::byte *>(out), n}).has_value();
+    }
+
+    // Guarded "read pointer, 0 on fault" -- the v3 read_ptr_unsafe contract.
+    inline std::uintptr_t guarded_ptr_or_zero(std::uintptr_t base, std::ptrdiff_t off) noexcept
+    {
+        return memory::read<std::uintptr_t>(Address{base}.offset(off)).value_or(0);
+    }
+
+    // v3 read_ptr_unchecked validated source & result against a plausibility window, then did a raw read. v4 splits
+    // these: is_plausible_ptr is the window screen; unchecked::read is the raw read. This shim reproduces the v3 gated
+    // behavior (0 when source or result is implausible) so the boundary-rejection cases keep asserting through it,
+    // while the happy paths exercise the same unchecked::read the production hot path uses.
+    inline std::uintptr_t screened_unchecked_ptr(std::uintptr_t base, std::ptrdiff_t off,
+                                                 std::uintptr_t min_valid = memory::USERSPACE_PTR_MIN) noexcept
+    {
+        const std::uintptr_t source = base + static_cast<std::uintptr_t>(off);
+        // v3 read_ptr_unchecked source gate: the floor is EXCLUSIVE (one address more conservative than
+        // is_plausible_ptr) because the dereference below is unguarded, so min_valid itself is the first untrusted
+        // address. The ceiling rejects kernel-range / non-canonical sources and subsumes pointer-arithmetic wraparound.
+        if (source <= min_valid || source >= memory::USERSPACE_PTR_MAX)
+        {
+            return 0;
+        }
+        const std::uintptr_t value = memory::unchecked::read<std::uintptr_t>(Address{source});
+        // Apply the same exclusive window to the loaded value so a structurally valid source that yields a kernel-range
+        // or implausible pointer is rejected rather than propagated to the next link of a chain.
+        return (value > min_valid && value < memory::USERSPACE_PTR_MAX) ? value : 0;
+    }
+} // namespace
 
 class MemoryTest : public ::testing::Test
 {
 protected:
-    void SetUp() override { (void)Memory::init_cache(); }
+    void SetUp() override { (void)memory::init_cache(); }
 
-    void TearDown() override { Memory::shutdown_cache(); }
+    void TearDown() override { memory::shutdown_cache(); }
 };
 
 TEST_F(MemoryTest, InitMemoryCache)
 {
-    bool result = Memory::init_cache();
+    bool result = memory::init_cache();
     EXPECT_TRUE(result);
 }
 
 TEST_F(MemoryTest, InitMemoryCache_CustomParams)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
-    bool result = Memory::init_cache(64, 10000);
+    bool result = memory::init_cache(64, 10000);
     EXPECT_TRUE(result);
 }
 
 TEST_F(MemoryTest, ClearMemoryCache)
 {
-    EXPECT_NO_THROW(Memory::clear_cache());
-    EXPECT_NO_THROW(Memory::clear_cache());
-    EXPECT_NO_THROW(Memory::clear_cache());
+    EXPECT_NO_THROW(memory::clear_cache());
+    EXPECT_NO_THROW(memory::clear_cache());
+    EXPECT_NO_THROW(memory::clear_cache());
 }
 
 TEST_F(MemoryTest, GetMemoryCacheStats)
 {
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_FALSE(stats.empty());
     EXPECT_NE(stats.find("Hits:"), std::string::npos);
     EXPECT_NE(stats.find("Misses:"), std::string::npos);
@@ -50,7 +134,7 @@ TEST_F(MemoryTest, GetMemoryCacheStats)
 
 TEST_F(MemoryTest, GetMemoryStats_PopulatedAndConsistentWithString)
 {
-    const Memory::MemoryStats stats = Memory::get_memory_stats();
+    const memory::MemoryStats stats = memory::get_memory_stats();
 
     // SetUp() initialized the cache, so the configuration fields are populated.
     EXPECT_GT(stats.shard_count, 0u);
@@ -60,7 +144,7 @@ TEST_F(MemoryTest, GetMemoryStats_PopulatedAndConsistentWithString)
     EXPECT_TRUE(stats.hit_rate_percent == -1.0 || (stats.hit_rate_percent >= 0.0 && stats.hit_rate_percent <= 100.0));
 
     // get_cache_stats() is a thin formatter over the same snapshot: the struct's counters appear verbatim.
-    const std::string str = Memory::get_cache_stats();
+    const std::string str = memory::get_cache_stats();
     EXPECT_NE(str.find("Shards: " + std::to_string(stats.shard_count)), std::string::npos);
     EXPECT_NE(str.find("Hits: " + std::to_string(stats.hits)), std::string::npos);
     EXPECT_NE(str.find("Misses: " + std::to_string(stats.misses)), std::string::npos);
@@ -68,20 +152,20 @@ TEST_F(MemoryTest, GetMemoryStats_PopulatedAndConsistentWithString)
 
 TEST_F(MemoryTest, GetMemoryStats_NoQueriesSentinel)
 {
-    Memory::clear_cache();
-    const Memory::MemoryStats stats = Memory::get_memory_stats();
+    memory::clear_cache();
+    const memory::MemoryStats stats = memory::get_memory_stats();
     // clear_cache() resets the hit/miss counters and no lookup runs before this read, so the "no queries" state is
     // deterministic and the sentinel must always hold.
     EXPECT_EQ(stats.hits + stats.misses, 0u);
     EXPECT_DOUBLE_EQ(stats.hit_rate_percent, -1.0);
-    EXPECT_NE(Memory::get_cache_stats().find("N/A (no queries tracked)"), std::string::npos);
+    EXPECT_NE(memory::get_cache_stats().find("N/A (no queries tracked)"), std::string::npos);
 }
 
 TEST_F(MemoryTest, IsMemoryReadable_Valid)
 {
     char buffer[100] = {0};
 
-    bool result = Memory::is_readable(buffer, sizeof(buffer));
+    bool result = is_readable(buffer, sizeof(buffer));
     EXPECT_TRUE(result);
 }
 
@@ -89,20 +173,20 @@ TEST_F(MemoryTest, IsMemoryReadable_ValidHeap)
 {
     auto buffer = std::make_unique<char[]>(100);
 
-    bool result = Memory::is_readable(buffer.get(), 100);
+    bool result = is_readable(buffer.get(), 100);
     EXPECT_TRUE(result);
 }
 
 TEST_F(MemoryTest, IsMemoryReadable_SingleByte)
 {
     char c = 'A';
-    bool result = Memory::is_readable(&c, 1);
+    bool result = is_readable(&c, 1);
     EXPECT_TRUE(result);
 }
 
 TEST_F(MemoryTest, IsMemoryReadable_Invalid)
 {
-    bool result = Memory::is_readable(nullptr, 100);
+    bool result = is_readable(nullptr, 100);
     EXPECT_FALSE(result);
 }
 
@@ -110,7 +194,7 @@ TEST_F(MemoryTest, IsMemoryReadable_ZeroSize)
 {
     char buffer[100] = {0};
 
-    bool result = Memory::is_readable(buffer, 0);
+    bool result = is_readable(buffer, 0);
     EXPECT_FALSE(result);
 }
 
@@ -118,7 +202,7 @@ TEST_F(MemoryTest, IsMemoryWritable_Valid)
 {
     char buffer[100] = {0};
 
-    bool result = Memory::is_writable(buffer, sizeof(buffer));
+    bool result = is_writable(buffer, sizeof(buffer));
     EXPECT_TRUE(result);
 }
 
@@ -126,20 +210,20 @@ TEST_F(MemoryTest, IsMemoryWritable_ValidHeap)
 {
     auto buffer = std::make_unique<char[]>(100);
 
-    bool result = Memory::is_writable(buffer.get(), 100);
+    bool result = is_writable(buffer.get(), 100);
     EXPECT_TRUE(result);
 }
 
 TEST_F(MemoryTest, IsMemoryWritable_StackCharArray)
 {
     char buffer[] = "test";
-    bool result = Memory::is_writable(buffer, sizeof(buffer));
+    bool result = is_writable(buffer, sizeof(buffer));
     EXPECT_TRUE(result);
 }
 
 TEST_F(MemoryTest, IsMemoryWritable_Invalid)
 {
-    bool result = Memory::is_writable(nullptr, 100);
+    bool result = is_writable(nullptr, 100);
     EXPECT_FALSE(result);
 }
 
@@ -147,7 +231,7 @@ TEST_F(MemoryTest, IsMemoryWritable_ZeroSize)
 {
     char buffer[100] = {0};
 
-    bool result = Memory::is_writable(buffer, 0);
+    bool result = is_writable(buffer, 0);
     EXPECT_FALSE(result);
 }
 
@@ -157,7 +241,7 @@ TEST_F(MemoryTest, write_bytes)
     std::vector<std::byte> source = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x12},
                                      std::byte{0x34}, std::byte{0x56}, std::byte{0x78}};
 
-    auto result = Memory::write_bytes(target.data(), source.data(), source.size());
+    auto result = memory::write_bytes(Address{target.data()}, std::span<const std::byte>{source});
     EXPECT_TRUE(result.has_value());
 
     for (size_t i = 0; i < source.size(); ++i)
@@ -170,7 +254,7 @@ TEST_F(MemoryTest, write_bytes_NullTarget)
 {
     std::vector<std::byte> source = {std::byte{0x90}, std::byte{0x90}};
 
-    auto result = Memory::write_bytes(nullptr, source.data(), source.size());
+    auto result = memory::write_bytes(Address{nullptr}, std::span<const std::byte>{source});
     EXPECT_FALSE(result.has_value());
 }
 
@@ -178,7 +262,8 @@ TEST_F(MemoryTest, write_bytes_NullSource)
 {
     std::vector<std::byte> target(16, std::byte{0x00});
 
-    auto result = Memory::write_bytes(target.data(), nullptr, 10);
+    auto result = memory::write_bytes(Address{target.data()},
+                                      std::span<const std::byte>{static_cast<const std::byte *>(nullptr), 10});
     EXPECT_FALSE(result.has_value());
 }
 
@@ -187,7 +272,7 @@ TEST_F(MemoryTest, write_bytes_ZeroSize)
     std::vector<std::byte> target(16, std::byte{0x00});
     std::vector<std::byte> source = {std::byte{0x90}};
 
-    auto result = Memory::write_bytes(target.data(), source.data(), 0);
+    auto result = memory::write_bytes(Address{target.data()}, std::span<const std::byte>{source.data(), 0});
     EXPECT_TRUE(result.has_value());
 }
 
@@ -196,7 +281,7 @@ TEST_F(MemoryTest, write_bytes_Large)
     std::vector<std::byte> target(1024, std::byte{0x00});
     std::vector<std::byte> source(512, std::byte{0xCC});
 
-    auto result = Memory::write_bytes(target.data(), source.data(), source.size());
+    auto result = memory::write_bytes(Address{target.data()}, std::span<const std::byte>{source});
     EXPECT_TRUE(result.has_value());
 
     for (size_t i = 0; i < source.size(); ++i)
@@ -214,13 +299,13 @@ TEST_F(MemoryTest, CacheBehavior)
 {
     char buffer[100] = {0};
 
-    bool result1 = Memory::is_readable(buffer, sizeof(buffer));
+    bool result1 = is_readable(buffer, sizeof(buffer));
     EXPECT_TRUE(result1);
 
-    bool result2 = Memory::is_readable(buffer, sizeof(buffer));
+    bool result2 = is_readable(buffer, sizeof(buffer));
     EXPECT_TRUE(result2);
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_FALSE(stats.empty());
 }
 
@@ -229,19 +314,19 @@ TEST_F(MemoryTest, MultipleRegions)
     char buffer1[100] = {0};
     char buffer2[200] = {0};
 
-    EXPECT_TRUE(Memory::is_readable(buffer1, sizeof(buffer1)));
-    EXPECT_TRUE(Memory::is_readable(buffer2, sizeof(buffer2)));
-    EXPECT_TRUE(Memory::is_writable(buffer1, sizeof(buffer1)));
-    EXPECT_TRUE(Memory::is_writable(buffer2, sizeof(buffer2)));
+    EXPECT_TRUE(is_readable(buffer1, sizeof(buffer1)));
+    EXPECT_TRUE(is_readable(buffer2, sizeof(buffer2)));
+    EXPECT_TRUE(is_writable(buffer1, sizeof(buffer1)));
+    EXPECT_TRUE(is_writable(buffer2, sizeof(buffer2)));
 }
 
 TEST_F(MemoryTest, CacheAfterClear)
 {
     char buffer[100] = {0};
 
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
-    Memory::clear_cache();
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
+    memory::clear_cache();
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 }
 
 TEST_F(MemoryTest, InvalidateRangeEvictsMultiPageRegionInterior)
@@ -260,7 +345,7 @@ TEST_F(MemoryTest, InvalidateRangeEvictsMultiPageRegionInterior)
     uint8_t *interior = base + page_size + 64;
 
     // Warm the cache with a READABLE verdict for the interior address.
-    EXPECT_TRUE(Memory::is_readable(interior, 16));
+    EXPECT_TRUE(is_readable(interior, 16));
 
     // Flip the whole region to no-access. The cached entry is now stale: without a correct invalidation a subsequent
     // query would still report READABLE.
@@ -269,10 +354,10 @@ TEST_F(MemoryTest, InvalidateRangeEvictsMultiPageRegionInterior)
 
     // Invalidate the interior address. A correct invalidation evicts the covering entry regardless of which shard
     // stored it.
-    Memory::invalidate_range(interior, 16);
+    invalidate_range(interior, 16);
 
     // The re-query must re-run VirtualQuery and observe the no-access protection.
-    EXPECT_FALSE(Memory::is_readable(interior, 16));
+    EXPECT_FALSE(is_readable(interior, 16));
 
     VirtualProtect(region, region_size, old_protect, &old_protect);
     VirtualFree(region, 0, MEM_RELEASE);
@@ -284,8 +369,8 @@ TEST_F(MemoryTest, CacheClearStressTest)
 
     for (int i = 0; i < 10; ++i)
     {
-        EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
-        Memory::clear_cache();
+        EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
+        memory::clear_cache();
         // Small yield to allow any background threads to process
         std::this_thread::yield();
     }
@@ -295,9 +380,9 @@ TEST_F(MemoryTest, CacheInitClearCycle)
 {
     for (int i = 0; i < 5; ++i)
     {
-        Memory::shutdown_cache();
-        EXPECT_TRUE(Memory::init_cache());
-        Memory::clear_cache();
+        memory::shutdown_cache();
+        EXPECT_TRUE(memory::init_cache());
+        memory::clear_cache();
     }
 }
 
@@ -311,7 +396,7 @@ TEST_F(MemoryTest, write_bytes_DataIntegrity)
 
     std::vector<std::byte> source = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
 
-    auto result = Memory::write_bytes(target.data() + 10, source.data(), source.size());
+    auto result = memory::write_bytes(Address{target.data() + 10}, std::span<const std::byte>{source});
     EXPECT_TRUE(result.has_value());
 
     for (size_t i = 0; i < 10; ++i)
@@ -333,43 +418,43 @@ TEST_F(MemoryTest, write_bytes_DataIntegrity)
 TEST_F(MemoryTest, IsMemoryReadable_StringLiteral)
 {
     const char *str = "Hello, World!";
-    bool result = Memory::is_readable(str, strlen(str));
+    bool result = is_readable(str, strlen(str));
     EXPECT_TRUE(result);
 }
 
 TEST(MemoryErrorTest, ErrorToString)
 {
-    EXPECT_FALSE(memory_error_to_string(MemoryError::NullTargetAddress).empty());
-    EXPECT_FALSE(memory_error_to_string(MemoryError::NullSourceBytes).empty());
-    EXPECT_FALSE(memory_error_to_string(MemoryError::ProtectionChangeFailed).empty());
-    EXPECT_FALSE(memory_error_to_string(MemoryError::ProtectionRestoreFailed).empty());
-    EXPECT_FALSE(memory_error_to_string(MemoryError::SizeTooLarge).empty());
-    EXPECT_FALSE(memory_error_to_string(static_cast<MemoryError>(999)).empty());
+    EXPECT_FALSE(to_string(ErrorCode::NullTargetAddress).empty());
+    EXPECT_FALSE(to_string(ErrorCode::NullSourceBytes).empty());
+    EXPECT_FALSE(to_string(ErrorCode::ProtectionChangeFailed).empty());
+    EXPECT_FALSE(to_string(ErrorCode::ProtectionRestoreFailed).empty());
+    EXPECT_FALSE(to_string(ErrorCode::SizeTooLarge).empty());
+    EXPECT_FALSE(to_string(static_cast<ErrorCode>(999)).empty());
 }
 
 TEST_F(MemoryTest, CacheExpiry)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(64, 10);
+    memory::shutdown_cache();
+    (void)memory::init_cache(64, 10);
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 }
 
 TEST_F(MemoryTest, CacheBehavior_Overlapping)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(64, 10000);
+    memory::shutdown_cache();
+    (void)memory::init_cache(64, 10000);
 
     char buffer[100] = {0};
 
-    EXPECT_TRUE(Memory::is_readable(buffer, 50));
-    EXPECT_TRUE(Memory::is_readable(buffer, 100));
-    EXPECT_TRUE(Memory::is_readable(buffer + 10, 40));
+    EXPECT_TRUE(is_readable(buffer, 50));
+    EXPECT_TRUE(is_readable(buffer, 100));
+    EXPECT_TRUE(is_readable(buffer + 10, 40));
 }
 
 TEST_F(MemoryTest, IsMemoryReadable_ReservedMemory)
@@ -377,7 +462,7 @@ TEST_F(MemoryTest, IsMemoryReadable_ReservedMemory)
     void *reserved = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(reserved, nullptr);
 
-    EXPECT_FALSE(Memory::is_readable(reserved, 1));
+    EXPECT_FALSE(is_readable(reserved, 1));
 
     VirtualFree(reserved, 0, MEM_RELEASE);
 }
@@ -387,7 +472,7 @@ TEST_F(MemoryTest, IsMemoryWritable_ReservedMemory)
     void *reserved = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(reserved, nullptr);
 
-    EXPECT_FALSE(Memory::is_writable(reserved, 1));
+    EXPECT_FALSE(is_writable(reserved, 1));
 
     VirtualFree(reserved, 0, MEM_RELEASE);
 }
@@ -397,7 +482,7 @@ TEST_F(MemoryTest, IsMemoryWritable_ReadOnlyMemory)
     void *readonly = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
     ASSERT_NE(readonly, nullptr);
 
-    EXPECT_FALSE(Memory::is_writable(readonly, 1));
+    EXPECT_FALSE(is_writable(readonly, 1));
 
     VirtualFree(readonly, 0, MEM_RELEASE);
 }
@@ -407,7 +492,7 @@ TEST_F(MemoryTest, IsMemoryReadable_NoAccess)
     void *noaccess = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(noaccess, nullptr);
 
-    EXPECT_FALSE(Memory::is_readable(noaccess, 1));
+    EXPECT_FALSE(is_readable(noaccess, 1));
 
     VirtualFree(noaccess, 0, MEM_RELEASE);
 }
@@ -417,7 +502,7 @@ TEST_F(MemoryTest, IsMemoryWritable_NoAccess)
     void *noaccess = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(noaccess, nullptr);
 
-    EXPECT_FALSE(Memory::is_writable(noaccess, 1));
+    EXPECT_FALSE(is_writable(noaccess, 1));
 
     VirtualFree(noaccess, 0, MEM_RELEASE);
 }
@@ -428,7 +513,7 @@ TEST_F(MemoryTest, IsMemoryReadable_FreedMemory)
     ASSERT_NE(mem, nullptr);
     VirtualFree(mem, 0, MEM_RELEASE);
 
-    EXPECT_FALSE(Memory::is_readable(mem, 1));
+    EXPECT_FALSE(is_readable(mem, 1));
 }
 
 TEST_F(MemoryTest, IsMemoryWritable_ExecuteOnly)
@@ -436,7 +521,7 @@ TEST_F(MemoryTest, IsMemoryWritable_ExecuteOnly)
     void *exec = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE);
     ASSERT_NE(exec, nullptr);
 
-    EXPECT_FALSE(Memory::is_writable(exec, 1));
+    EXPECT_FALSE(is_writable(exec, 1));
 
     VirtualFree(exec, 0, MEM_RELEASE);
 }
@@ -446,16 +531,16 @@ TEST_F(MemoryTest, IsMemoryReadable_ExecuteReadWrite)
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
-    EXPECT_TRUE(Memory::is_readable(mem, 1));
-    EXPECT_TRUE(Memory::is_writable(mem, 1));
+    EXPECT_TRUE(is_readable(mem, 1));
+    EXPECT_TRUE(is_writable(mem, 1));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, CacheLRUEviction)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(2, 60000);
+    memory::shutdown_cache();
+    (void)memory::init_cache(2, 60000);
 
     void *mem1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     void *mem2 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -465,10 +550,10 @@ TEST_F(MemoryTest, CacheLRUEviction)
     ASSERT_NE(mem2, nullptr);
     ASSERT_NE(mem3, nullptr);
 
-    EXPECT_TRUE(Memory::is_readable(mem1, 1));
-    EXPECT_TRUE(Memory::is_readable(mem2, 1));
-    EXPECT_TRUE(Memory::is_readable(mem3, 1));
-    EXPECT_TRUE(Memory::is_readable(mem1, 1));
+    EXPECT_TRUE(is_readable(mem1, 1));
+    EXPECT_TRUE(is_readable(mem2, 1));
+    EXPECT_TRUE(is_readable(mem3, 1));
+    EXPECT_TRUE(is_readable(mem1, 1));
 
     VirtualFree(mem1, 0, MEM_RELEASE);
     VirtualFree(mem2, 0, MEM_RELEASE);
@@ -478,27 +563,28 @@ TEST_F(MemoryTest, CacheLRUEviction)
 TEST_F(MemoryTest, IsMemoryReadable_SizeOverflow)
 {
     char buffer[1] = {0};
-    EXPECT_FALSE(Memory::is_readable(buffer, SIZE_MAX));
+    EXPECT_FALSE(is_readable(buffer, SIZE_MAX));
 }
 
 TEST_F(MemoryTest, IsMemoryWritable_SizeOverflow)
 {
     char buffer[1] = {0};
-    EXPECT_FALSE(Memory::is_writable(buffer, SIZE_MAX));
+    EXPECT_FALSE(is_writable(buffer, SIZE_MAX));
 }
 
 TEST_F(MemoryTest, write_bytes_ErrorTypes)
 {
     std::byte source[] = {std::byte{0x90}};
 
-    auto r1 = Memory::write_bytes(nullptr, source, 1);
+    auto r1 = memory::write_bytes(Address{nullptr}, std::span<const std::byte>{source, 1});
     EXPECT_FALSE(r1.has_value());
-    EXPECT_EQ(r1.error(), MemoryError::NullTargetAddress);
+    EXPECT_EQ(r1.error().code, ErrorCode::NullTargetAddress);
 
     std::byte target[1] = {std::byte{0}};
-    auto r2 = Memory::write_bytes(target, nullptr, 1);
+    auto r2 =
+        memory::write_bytes(Address{target}, std::span<const std::byte>{static_cast<const std::byte *>(nullptr), 1});
     EXPECT_FALSE(r2.has_value());
-    EXPECT_EQ(r2.error(), MemoryError::NullSourceBytes);
+    EXPECT_EQ(r2.error().code, ErrorCode::NullSourceBytes);
 }
 
 TEST_F(MemoryTest, write_bytes_SizeTooLarge)
@@ -506,9 +592,9 @@ TEST_F(MemoryTest, write_bytes_SizeTooLarge)
     std::byte target[1] = {std::byte{0x00}};
     std::byte source[1] = {std::byte{0x90}};
 
-    auto result = Memory::write_bytes(target, source, MAX_WRITE_SIZE + 1);
+    auto result = memory::write_bytes(Address{target}, std::span<const std::byte>{source, memory::MAX_WRITE_SIZE + 1});
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), MemoryError::SizeTooLarge);
+    EXPECT_EQ(result.error().code, ErrorCode::SizeTooLarge);
 }
 
 TEST_F(MemoryTest, write_bytes_ZeroBytes)
@@ -516,7 +602,7 @@ TEST_F(MemoryTest, write_bytes_ZeroBytes)
     std::byte target[4] = {std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC}, std::byte{0xDD}};
     std::byte source[1] = {std::byte{0x00}};
 
-    auto result = Memory::write_bytes(target, source, 0);
+    auto result = memory::write_bytes(Address{target}, std::span<const std::byte>{source, 0});
     EXPECT_TRUE(result.has_value());
 
     EXPECT_EQ(target[0], std::byte{0xAA});
@@ -530,7 +616,7 @@ TEST_F(MemoryTest, write_bytes_Success)
     std::byte *target = reinterpret_cast<std::byte *>(mem);
     std::byte source[] = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
 
-    auto result = Memory::write_bytes(target, source, 3);
+    auto result = memory::write_bytes(Address{target}, std::span<const std::byte>{source, 3});
     EXPECT_TRUE(result.has_value());
 
     EXPECT_EQ(target[0], std::byte{0x90});
@@ -542,15 +628,15 @@ TEST_F(MemoryTest, write_bytes_Success)
 
 TEST_F(MemoryTest, IsMemoryWritable_ValidWritable)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(4, 60000);
+    memory::shutdown_cache();
+    (void)memory::init_cache(4, 60000);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
-    EXPECT_TRUE(Memory::is_writable(mem, 1));
+    EXPECT_TRUE(is_writable(mem, 1));
 
-    EXPECT_TRUE(Memory::is_writable(mem, 1));
+    EXPECT_TRUE(is_writable(mem, 1));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -563,7 +649,8 @@ TEST_F(MemoryTest, write_bytes_PageReadOnly)
     std::byte *target = reinterpret_cast<std::byte *>(mem);
     std::byte source[] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
 
-    auto result = Memory::write_bytes(target, source, sizeof(source));
+    // v4 write_bytes auto-unprotects a read-only page, so the write SUCCEEDS and the bytes change.
+    auto result = memory::write_bytes(Address{target}, std::span<const std::byte>{source, sizeof(source)});
     EXPECT_TRUE(result.has_value());
 
     if (result.has_value())
@@ -586,8 +673,8 @@ TEST_F(MemoryTest, IsMemoryReadable_PageGuard)
     BOOL ok = VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
     ASSERT_TRUE(ok);
 
-    Memory::clear_cache();
-    EXPECT_FALSE(Memory::is_readable(mem, 1));
+    memory::clear_cache();
+    EXPECT_FALSE(is_readable(mem, 1));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -601,8 +688,8 @@ TEST_F(MemoryTest, IsMemoryWritable_PageGuard)
     BOOL ok = VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
     ASSERT_TRUE(ok);
 
-    Memory::clear_cache();
-    EXPECT_FALSE(Memory::is_writable(mem, 1));
+    memory::clear_cache();
+    EXPECT_FALSE(is_writable(mem, 1));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -614,9 +701,9 @@ TEST_F(MemoryTest, IsMemoryReadable_CrossRegionBoundary)
     ASSERT_NE(region1, nullptr);
     ASSERT_NE(region2, nullptr);
 
-    Memory::clear_cache();
+    memory::clear_cache();
     size_t oversized = 4096 + 1;
-    EXPECT_FALSE(Memory::is_readable(region1, oversized));
+    EXPECT_FALSE(is_readable(region1, oversized));
 
     VirtualFree(region1, 0, MEM_RELEASE);
     VirtualFree(region2, 0, MEM_RELEASE);
@@ -624,33 +711,33 @@ TEST_F(MemoryTest, IsMemoryReadable_CrossRegionBoundary)
 
 TEST_F(MemoryTest, InitCacheWithShards)
 {
-    Memory::shutdown_cache();
-    bool result = Memory::init_cache(32, 5000, 4);
+    memory::shutdown_cache();
+    bool result = memory::init_cache(32, 5000, 4);
     EXPECT_TRUE(result);
 
     // Subsequent init with different params returns true but does not reconfigure
-    result = Memory::init_cache(64, 10000, 8);
+    result = memory::init_cache(64, 10000, 8);
     EXPECT_TRUE(result);
 }
 
 TEST_F(MemoryTest, InvalidateRangeBasic)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 4);
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
-    Memory::invalidate_range(buffer, sizeof(buffer));
+    invalidate_range(buffer, sizeof(buffer));
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_FALSE(stats.empty());
 }
 
 TEST_F(MemoryTest, InvalidateRangeNull)
 {
-    EXPECT_NO_THROW(Memory::invalidate_range(nullptr, 100));
-    EXPECT_NO_THROW(Memory::invalidate_range(reinterpret_cast<const void *>(static_cast<uintptr_t>(0x1000)), 0));
+    EXPECT_NO_THROW(invalidate_range(nullptr, 100));
+    EXPECT_NO_THROW(invalidate_range(reinterpret_cast<const void *>(static_cast<uintptr_t>(0x1000)), 0));
 }
 
 // Reader/writer contention stress over the region cache's sorted_ranges insert/erase churn. The shard SRW lock
@@ -660,15 +747,15 @@ TEST_F(MemoryTest, InvalidateRangeNull)
 // asserts the cache returns a consistent result for the same input across many iterations under contention.
 TEST_F(MemoryTest, SortedRangesInsertDuringReadDoesNotCrash)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
     // One shard so every probe and invalidation hashes to the same sorted_ranges container.
-    (void)Memory::init_cache(32, 60000, 1);
+    (void)memory::init_cache(32, 60000, 1);
 
     void *mem = VirtualAlloc(nullptr, 16 * 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
     // Prime the cache so the region's sorted_ranges entry exists before contention starts.
-    EXPECT_TRUE(Memory::is_readable(mem, 64));
+    EXPECT_TRUE(is_readable(mem, 64));
 
     // Interior page: not the region base, so the page-aligned entries.find fast path misses and the lookup falls
     // through to the sorted_ranges upper_bound containment path.
@@ -689,7 +776,7 @@ TEST_F(MemoryTest, SortedRangesInsertDuringReadDoesNotCrash)
             {
                 while (!stop.load(std::memory_order_relaxed))
                 {
-                    (void)Memory::is_readable(interior, 64);
+                    (void)is_readable(interior, 64);
                     reader_count.fetch_add(1, std::memory_order_relaxed);
                 }
             });
@@ -707,7 +794,7 @@ TEST_F(MemoryTest, SortedRangesInsertDuringReadDoesNotCrash)
             }
             for (int i = 0; i < iterations && !stop.load(std::memory_order_relaxed); ++i)
             {
-                Memory::invalidate_range(mem, 64);
+                invalidate_range(mem, 64);
             }
             stop.store(true, std::memory_order_release);
         });
@@ -720,49 +807,49 @@ TEST_F(MemoryTest, SortedRangesInsertDuringReadDoesNotCrash)
 
     EXPECT_GT(reader_count.load(), 0);
     // Final read is still consistent.
-    EXPECT_TRUE(Memory::is_readable(interior, 64));
+    EXPECT_TRUE(is_readable(interior, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, WriteBytesInvalidatesCache)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
     std::byte *target = reinterpret_cast<std::byte *>(mem);
 
-    EXPECT_TRUE(Memory::is_readable(target, 64));
-    EXPECT_TRUE(Memory::is_writable(target, 64));
+    EXPECT_TRUE(is_readable(target, 64));
+    EXPECT_TRUE(is_writable(target, 64));
 
     std::byte source[] = {std::byte{0x90}, std::byte{0x91}, std::byte{0x92}};
-    auto result = Memory::write_bytes(target, source, sizeof(source));
+    auto result = memory::write_bytes(Address{target}, std::span<const std::byte>{source, sizeof(source)});
     EXPECT_TRUE(result.has_value());
 
-    EXPECT_TRUE(Memory::is_readable(target, 64));
-    EXPECT_TRUE(Memory::is_writable(target, 64));
+    EXPECT_TRUE(is_readable(target, 64));
+    EXPECT_TRUE(is_writable(target, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, InvalidateRangeDoesNotAffectOtherRegions)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 4);
 
     char buffer1[100] = {0};
     char buffer2[100] = {0};
 
-    EXPECT_TRUE(Memory::is_readable(buffer1, sizeof(buffer1)));
-    EXPECT_TRUE(Memory::is_readable(buffer2, sizeof(buffer2)));
+    EXPECT_TRUE(is_readable(buffer1, sizeof(buffer1)));
+    EXPECT_TRUE(is_readable(buffer2, sizeof(buffer2)));
 
-    Memory::invalidate_range(buffer1, sizeof(buffer1));
+    invalidate_range(buffer1, sizeof(buffer1));
 
-    EXPECT_TRUE(Memory::is_readable(buffer1, sizeof(buffer1)));
-    EXPECT_TRUE(Memory::is_readable(buffer2, sizeof(buffer2)));
+    EXPECT_TRUE(is_readable(buffer1, sizeof(buffer1)));
+    EXPECT_TRUE(is_readable(buffer2, sizeof(buffer2)));
 }
 
 TEST_F(MemoryTest, ThreadSafetyHighConcurrency)
@@ -782,8 +869,8 @@ TEST_F(MemoryTest, ThreadSafetyHighConcurrency)
                 for (int j = 0; j < iterations; ++j)
                 {
                     const int buf_idx = (i + j) % 4;
-                    if (Memory::is_readable(buffers[buf_idx], sizeof(buffers[buf_idx])) &&
-                        Memory::is_writable(buffers[buf_idx], sizeof(buffers[buf_idx])))
+                    if (is_readable(buffers[buf_idx], sizeof(buffers[buf_idx])) &&
+                        is_writable(buffers[buf_idx], sizeof(buffers[buf_idx])))
                     {
                         success_count.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -801,23 +888,23 @@ TEST_F(MemoryTest, ThreadSafetyHighConcurrency)
 
 TEST_F(MemoryTest, CacheStatsWithShards)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 5000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 5000, 4);
 
     char buffer[100] = {0};
     for (int i = 0; i < 10; ++i)
     {
-        EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+        EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
     }
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_FALSE(stats.empty());
 }
 
 TEST_F(MemoryTest, InvalidateRangeAcrossShards)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(8, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(8, 60000, 4);
 
     void *mem1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     void *mem2 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -825,13 +912,13 @@ TEST_F(MemoryTest, InvalidateRangeAcrossShards)
     ASSERT_NE(mem1, nullptr);
     ASSERT_NE(mem2, nullptr);
 
-    EXPECT_TRUE(Memory::is_readable(mem1, 64));
-    EXPECT_TRUE(Memory::is_readable(mem2, 64));
+    EXPECT_TRUE(is_readable(mem1, 64));
+    EXPECT_TRUE(is_readable(mem2, 64));
 
-    Memory::invalidate_range(mem1, 4096);
+    invalidate_range(mem1, 4096);
 
-    EXPECT_TRUE(Memory::is_readable(mem1, 64));
-    EXPECT_TRUE(Memory::is_readable(mem2, 64));
+    EXPECT_TRUE(is_readable(mem1, 64));
+    EXPECT_TRUE(is_readable(mem2, 64));
 
     VirtualFree(mem1, 0, MEM_RELEASE);
     VirtualFree(mem2, 0, MEM_RELEASE);
@@ -839,8 +926,8 @@ TEST_F(MemoryTest, InvalidateRangeAcrossShards)
 
 TEST_F(MemoryTest, CacheStampedeCoalescing)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
@@ -857,7 +944,7 @@ TEST_F(MemoryTest, CacheStampedeCoalescing)
             {
                 for (int j = 0; j < iterations; ++j)
                 {
-                    if (Memory::is_readable(mem, 64))
+                    if (is_readable(mem, 64))
                     {
                         success_count.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -872,7 +959,7 @@ TEST_F(MemoryTest, CacheStampedeCoalescing)
 
     EXPECT_EQ(success_count.load(), num_threads * iterations);
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("Coalesced:"), std::string::npos);
 
     VirtualFree(mem, 0, MEM_RELEASE);
@@ -880,15 +967,15 @@ TEST_F(MemoryTest, CacheStampedeCoalescing)
 
 TEST_F(MemoryTest, CacheStatsAvailableInRelease)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 5000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 5000, 4);
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
-    EXPECT_TRUE(Memory::is_writable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_writable(buffer, sizeof(buffer)));
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_FALSE(stats.empty());
     EXPECT_NE(stats.find("Hits:"), std::string::npos);
     EXPECT_NE(stats.find("Misses:"), std::string::npos);
@@ -898,41 +985,41 @@ TEST_F(MemoryTest, CacheStatsAvailableInRelease)
 
 TEST_F(MemoryTest, ClearCacheResetsAllStats)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 5000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 5000, 4);
 
     char buffer[100] = {0};
     for (int i = 0; i < 5; ++i)
     {
-        (void)Memory::is_readable(buffer, sizeof(buffer));
+        (void)is_readable(buffer, sizeof(buffer));
     }
 
-    Memory::clear_cache();
+    memory::clear_cache();
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("Hits: 0"), std::string::npos);
     EXPECT_NE(stats.find("Misses: 0"), std::string::npos);
 }
 
 TEST_F(MemoryTest, InvalidateRangeIncrementsCounter)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 60000, 4);
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
-    Memory::invalidate_range(buffer, sizeof(buffer));
+    invalidate_range(buffer, sizeof(buffer));
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("Invalidations:"), std::string::npos);
 }
 
 TEST_F(MemoryTest, HardUpperBoundEnforced)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
     // 1 shard, capacity=2, hard_max = capacity * 2 = 4
-    (void)Memory::init_cache(2, 60000, 1);
+    (void)memory::init_cache(2, 60000, 1);
 
     // Allocate 10 distinct pages to force cache past capacity
     std::vector<void *> regions;
@@ -941,10 +1028,10 @@ TEST_F(MemoryTest, HardUpperBoundEnforced)
         void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         ASSERT_NE(mem, nullptr);
         regions.push_back(mem);
-        EXPECT_TRUE(Memory::is_readable(mem, 1));
+        EXPECT_TRUE(is_readable(mem, 1));
     }
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     // Extract TotalEntries value and verify it respects hard upper bound
     auto pos = stats.find("TotalEntries: ");
     ASSERT_NE(pos, std::string::npos);
@@ -959,90 +1046,90 @@ TEST_F(MemoryTest, HardUpperBoundEnforced)
 
 TEST_F(MemoryTest, BackgroundCleanupThreadRuns)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 10, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 10, 4);
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
     // Background cleanup thread runs every 1 second; sleep long enough for at least one pass
     std::this_thread::sleep_for(std::chrono::milliseconds(1200));
 
     // Cache should still work after background cleanup has run
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_FALSE(stats.empty());
 }
 
 TEST_F(MemoryTest, InvalidateRangeTriggersBackgroundCleanup)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 60000, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
-    EXPECT_TRUE(Memory::is_readable(mem, 64));
+    EXPECT_TRUE(is_readable(mem, 64));
 
     // Invalidate should trigger cleanup request
-    EXPECT_NO_THROW(Memory::invalidate_range(mem, 64));
+    EXPECT_NO_THROW(invalidate_range(mem, 64));
 
     // Cache should still work after invalidation
-    EXPECT_TRUE(Memory::is_readable(mem, 64));
+    EXPECT_TRUE(is_readable(mem, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, DefaultExpiryIs50ms)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
     // Use default parameters (50ms expiry)
-    (void)Memory::init_cache(16, DEFAULT_CACHE_EXPIRY_MS, 4);
+    (void)memory::init_cache(16, memory::DEFAULT_CACHE_EXPIRY_MS, 4);
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("Expiry: 50ms"), std::string::npos);
 }
 
 TEST_F(MemoryTest, OnDemandCleanupStatExists)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 100, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 100, 4);
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("OnDemandCleanups:"), std::string::npos);
 }
 
 TEST_F(MemoryTest, ClearCacheResetsOnDemandCleanupStat)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 100, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 100, 4);
 
     char buffer[100] = {0};
     for (int i = 0; i < 5; ++i)
     {
-        (void)Memory::is_readable(buffer, sizeof(buffer));
+        (void)is_readable(buffer, sizeof(buffer));
     }
 
-    Memory::clear_cache();
+    memory::clear_cache();
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("OnDemandCleanups: 0"), std::string::npos);
 }
 
 TEST_F(MemoryTest, ExpiredEntryTriggersReFetch)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 10, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 10, 4);
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
     // Capture miss count after warm-up
-    std::string stats_before = Memory::get_cache_stats();
+    std::string stats_before = memory::get_cache_stats();
     auto pos_before = stats_before.find("Misses: ");
     ASSERT_NE(pos_before, std::string::npos);
     const uint64_t prev_misses = std::stoull(stats_before.substr(pos_before + 8));
@@ -1051,9 +1138,9 @@ TEST_F(MemoryTest, ExpiredEntryTriggersReFetch)
     std::this_thread::sleep_for(std::chrono::milliseconds(30));
 
     // Re-query should succeed (re-fetch from OS) and register as a new miss
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
-    std::string stats_after = Memory::get_cache_stats();
+    std::string stats_after = memory::get_cache_stats();
     auto pos_after = stats_after.find("Misses: ");
     ASSERT_NE(pos_after, std::string::npos);
     const uint64_t misses = std::stoull(stats_after.substr(pos_after + 8));
@@ -1062,8 +1149,8 @@ TEST_F(MemoryTest, ExpiredEntryTriggersReFetch)
 
 TEST_F(MemoryTest, CacheHitPerformance_SingleThread)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 1);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 1);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
@@ -1071,7 +1158,7 @@ TEST_F(MemoryTest, CacheHitPerformance_SingleThread)
     auto start = std::chrono::high_resolution_clock::now();
     for (int i = 0; i < 1000; ++i)
     {
-        EXPECT_TRUE(Memory::is_readable(mem, 64));
+        EXPECT_TRUE(is_readable(mem, 64));
     }
     auto end = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
@@ -1084,23 +1171,23 @@ TEST_F(MemoryTest, CacheHitPerformance_SingleThread)
 
 TEST_F(MemoryTest, CacheStatsIncludeHardMax)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(16, 5000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(16, 5000, 4);
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("HardMax/Shard:"), std::string::npos);
 }
 
 TEST_F(MemoryTest, ShutdownWhileReadersActive)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 4);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 4);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
 
     // Warm up cache so readers hit the fast path
-    EXPECT_TRUE(Memory::is_readable(mem, 64));
+    EXPECT_TRUE(is_readable(mem, 64));
 
     std::atomic<bool> keep_reading{true};
     std::atomic<int> readers_entered{0};
@@ -1116,7 +1203,7 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
                 while (keep_reading.load(std::memory_order_acquire))
                 {
                     // After shutdown, is_readable falls back to direct VirtualQuery
-                    (void)Memory::is_readable(mem, 64);
+                    (void)is_readable(mem, 64);
                 }
             });
     }
@@ -1129,7 +1216,7 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
 
     // Shutdown on a separate thread while readers are still active. shutdown_cache waits for s_activeReaders == 0
     // before destroying data. Readers that re-enter after shutdown use direct VirtualQuery fallback.
-    std::thread shutdown_thread([&]() { Memory::shutdown_cache(); });
+    std::thread shutdown_thread([&]() { memory::shutdown_cache(); });
 
     // Let shutdown and readers race briefly
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -1145,8 +1232,8 @@ TEST_F(MemoryTest, ShutdownWhileReadersActive)
     shutdown_thread.join();
 
     // Re-init and verify cache still works after concurrent shutdown
-    EXPECT_TRUE(Memory::init_cache());
-    EXPECT_TRUE(Memory::is_readable(mem, 64));
+    EXPECT_TRUE(memory::init_cache());
+    EXPECT_TRUE(is_readable(mem, 64));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -1158,13 +1245,13 @@ TEST_F(MemoryTest, ReinitAfterShutdown_DataIntegrity)
 
     for (int round = 0; round < 3; ++round)
     {
-        Memory::shutdown_cache();
-        EXPECT_TRUE(Memory::init_cache(16, 5000, 4));
+        memory::shutdown_cache();
+        EXPECT_TRUE(memory::init_cache(16, 5000, 4));
 
-        EXPECT_TRUE(Memory::is_readable(mem, 64));
-        EXPECT_TRUE(Memory::is_writable(mem, 64));
+        EXPECT_TRUE(is_readable(mem, 64));
+        EXPECT_TRUE(is_writable(mem, 64));
 
-        std::string stats = Memory::get_cache_stats();
+        std::string stats = memory::get_cache_stats();
         EXPECT_NE(stats.find("Hits:"), std::string::npos);
         EXPECT_NE(stats.find("Misses:"), std::string::npos);
     }
@@ -1175,79 +1262,79 @@ TEST_F(MemoryTest, ReinitAfterShutdown_DataIntegrity)
 TEST_F(MemoryTest, NoCacheFallback_Readable)
 {
     // Shut down cache so is_readable uses direct VirtualQuery fallback
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
-    EXPECT_FALSE(Memory::is_readable(nullptr, 1));
-    EXPECT_FALSE(Memory::is_readable(buffer, 0));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
+    EXPECT_FALSE(is_readable(nullptr, 1));
+    EXPECT_FALSE(is_readable(buffer, 0));
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
 
 TEST_F(MemoryTest, NoCacheFallback_Writable)
 {
     // Shut down cache so is_writable uses direct VirtualQuery fallback
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     char buffer[100] = {0};
-    EXPECT_TRUE(Memory::is_writable(buffer, sizeof(buffer)));
-    EXPECT_FALSE(Memory::is_writable(nullptr, 1));
-    EXPECT_FALSE(Memory::is_writable(buffer, 0));
+    EXPECT_TRUE(is_writable(buffer, sizeof(buffer)));
+    EXPECT_FALSE(is_writable(nullptr, 1));
+    EXPECT_FALSE(is_writable(buffer, 0));
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
 
 TEST_F(MemoryTest, NoCacheFallback_ReservedMemory)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     void *reserved = VirtualAlloc(nullptr, 4096, MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(reserved, nullptr);
 
-    EXPECT_FALSE(Memory::is_readable(reserved, 1));
-    EXPECT_FALSE(Memory::is_writable(reserved, 1));
+    EXPECT_FALSE(is_readable(reserved, 1));
+    EXPECT_FALSE(is_writable(reserved, 1));
 
     VirtualFree(reserved, 0, MEM_RELEASE);
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
 
 TEST_F(MemoryTest, NoCacheFallback_ReadOnlyMemory)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     void *readonly = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
     ASSERT_NE(readonly, nullptr);
 
-    EXPECT_TRUE(Memory::is_readable(readonly, 1));
-    EXPECT_FALSE(Memory::is_writable(readonly, 1));
+    EXPECT_TRUE(is_readable(readonly, 1));
+    EXPECT_FALSE(is_writable(readonly, 1));
 
     VirtualFree(readonly, 0, MEM_RELEASE);
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
 
 TEST_F(MemoryTest, NoCacheFallback_SizeOverflow)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     char buffer[1] = {0};
-    EXPECT_FALSE(Memory::is_readable(buffer, SIZE_MAX));
-    EXPECT_FALSE(Memory::is_writable(buffer, SIZE_MAX));
+    EXPECT_FALSE(is_readable(buffer, SIZE_MAX));
+    EXPECT_FALSE(is_writable(buffer, SIZE_MAX));
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
 
 TEST_F(MemoryTest, CacheRangeLookup_MidRegionHit)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 1);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 1);
 
     // Allocate a large region so VirtualQuery returns a base address that differs from the queried address within the
     // region
@@ -1255,14 +1342,14 @@ TEST_F(MemoryTest, CacheRangeLookup_MidRegionHit)
     ASSERT_NE(mem, nullptr);
 
     // Prime cache with a query at the region base
-    EXPECT_TRUE(Memory::is_readable(mem, 1));
+    EXPECT_TRUE(is_readable(mem, 1));
 
     // Query at an offset within the same region - should hit cache via range lookup
     void *mid = reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(mem) + 8192);
-    EXPECT_TRUE(Memory::is_readable(mid, 64));
-    EXPECT_TRUE(Memory::is_writable(mid, 64));
+    EXPECT_TRUE(is_readable(mid, 64));
+    EXPECT_TRUE(is_writable(mid, 64));
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     auto pos = stats.find("Hits: ");
     ASSERT_NE(pos, std::string::npos);
     const uint64_t hits = std::stoull(stats.substr(pos + 6));
@@ -1274,8 +1361,8 @@ TEST_F(MemoryTest, CacheRangeLookup_MidRegionHit)
 
 TEST_F(MemoryTest, CacheHitRate_RepeatedAccess)
 {
-    Memory::shutdown_cache();
-    (void)Memory::init_cache(32, 60000, 1);
+    memory::shutdown_cache();
+    (void)memory::init_cache(32, 60000, 1);
 
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(mem, nullptr);
@@ -1283,10 +1370,10 @@ TEST_F(MemoryTest, CacheHitRate_RepeatedAccess)
     // First access is a miss, subsequent accesses should hit
     for (int i = 0; i < 100; ++i)
     {
-        EXPECT_TRUE(Memory::is_readable(mem, 64));
+        EXPECT_TRUE(is_readable(mem, 64));
     }
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     auto hits_pos = stats.find("Hits: ");
     auto misses_pos = stats.find("Misses: ");
     ASSERT_NE(hits_pos, std::string::npos);
@@ -1310,11 +1397,11 @@ TEST_F(MemoryTest, IsReadable_AddressOverflow)
     ASSERT_NE(buf, nullptr);
 
     // Prime the cache so the overflow check in is_entry_valid_and_covers is exercised
-    EXPECT_TRUE(Memory::is_readable(buf, 1));
+    EXPECT_TRUE(is_readable(buf, 1));
 
     // size chosen so that (address + size) wraps around
     const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
-    EXPECT_FALSE(Memory::is_readable(buf, wrapping_size));
+    EXPECT_FALSE(is_readable(buf, wrapping_size));
 
     VirtualFree(buf, 0, MEM_RELEASE);
 }
@@ -1324,10 +1411,10 @@ TEST_F(MemoryTest, IsWritable_AddressOverflow)
     void *buf = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(buf, nullptr);
 
-    EXPECT_TRUE(Memory::is_writable(buf, 1));
+    EXPECT_TRUE(is_writable(buf, 1));
 
     const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
-    EXPECT_FALSE(Memory::is_writable(buf, wrapping_size));
+    EXPECT_FALSE(is_writable(buf, wrapping_size));
 
     VirtualFree(buf, 0, MEM_RELEASE);
 }
@@ -1348,7 +1435,7 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
             reader_started.store(true);
             for (int i = 0; i < 100; ++i)
             {
-                (void)Memory::is_readable(mem, 4);
+                (void)is_readable(mem, 4);
             }
             reader_done.store(true);
         });
@@ -1360,13 +1447,13 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentReaders)
     }
 
     // Shutdown should wait for readers to finish without crash
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
     reader.join();
 
     EXPECT_TRUE(reader_done.load());
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
@@ -1399,7 +1486,7 @@ TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
                     {
                         started.fetch_add(1, std::memory_order_acq_rel);
                     }
-                    (void)Memory::is_readable(mem, 4);
+                    (void)is_readable(mem, 4);
                 }
                 finished.fetch_add(1, std::memory_order_acq_rel);
             });
@@ -1410,7 +1497,7 @@ TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
         std::this_thread::yield();
     }
 
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
     for (auto &r : readers)
     {
         r.join();
@@ -1418,13 +1505,13 @@ TEST_F(MemoryTest, ShutdownCache_DrainsManyStripedReaders)
     EXPECT_EQ(finished.load(std::memory_order_acquire), READER_THREADS);
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     // Use a real mapped buffer so VirtualQuery succeeds and the code reaches the overflow guard in the direct
     // (no-cache) path.
@@ -1432,37 +1519,39 @@ TEST_F(MemoryTest, IsReadable_NoCacheInitialized_OverflowGuard)
     ASSERT_NE(buf, nullptr);
 
     const size_t wrapping_size = UINTPTR_MAX - reinterpret_cast<uintptr_t>(buf) + 2;
-    EXPECT_FALSE(Memory::is_readable(buf, wrapping_size));
+    EXPECT_FALSE(is_readable(buf, wrapping_size));
 
     VirtualFree(buf, 0, MEM_RELEASE);
 
     // Re-init for TearDown
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
+
+// --- read<T> / read.value_or(0) (formerly read_ptr_unsafe) -------------------------------------------------------
 
 TEST_F(MemoryTest, ReadPtrUnsafe_ValidPointer)
 {
     uintptr_t value = 0xDEADBEEF;
-    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = guarded_ptr_or_zero(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0xDEADBEEF);
 }
 
 TEST_F(MemoryTest, ReadPtrUnsafe_WithOffset)
 {
     uintptr_t values[2] = {0x11111111, 0x22222222};
-    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
+    uintptr_t result = guarded_ptr_or_zero(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
     EXPECT_EQ(result, 0x22222222);
 }
 
 TEST_F(MemoryTest, ReadPtrUnsafe_NullAddress)
 {
-    uintptr_t result = Memory::read_ptr_unsafe(0, 0);
+    uintptr_t result = guarded_ptr_or_zero(0, 0);
     EXPECT_EQ(result, 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnsafe_InvalidAddress)
 {
-    uintptr_t result = Memory::read_ptr_unsafe(0xDEAD, 0);
+    uintptr_t result = guarded_ptr_or_zero(0xDEAD, 0);
     EXPECT_EQ(result, 0u);
 }
 
@@ -1473,36 +1562,36 @@ TEST_F(MemoryTest, ReadPtrUnsafe_FreedMemory)
     *reinterpret_cast<uintptr_t *>(mem) = 0xCAFEBABE;
     VirtualFree(mem, 0, MEM_RELEASE);
 
-    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    uintptr_t result = guarded_ptr_or_zero(reinterpret_cast<uintptr_t>(mem), 0);
     EXPECT_EQ(result, 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnsafe_HeapAllocation)
 {
     auto buffer = std::make_unique<uintptr_t>(0xABCD1234);
-    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(buffer.get()), 0);
+    uintptr_t result = guarded_ptr_or_zero(reinterpret_cast<uintptr_t>(buffer.get()), 0);
     EXPECT_EQ(result, 0xABCD1234);
 }
 
 TEST_F(MemoryTest, IsReadableNonblocking_ValidMemory)
 {
     char buffer[100] = {0};
-    auto status = Memory::is_readable_nonblocking(buffer, sizeof(buffer));
+    auto status = is_readable_nonblocking(buffer, sizeof(buffer));
     // Cache is not primed, so this will be a cache miss returning Unknown
-    EXPECT_NE(status, Memory::ReadableStatus::NotReadable);
+    EXPECT_NE(status, memory::ReadableStatus::NotReadable);
 }
 
 TEST_F(MemoryTest, IsReadableNonblocking_NullAddress)
 {
-    auto status = Memory::is_readable_nonblocking(nullptr, 100);
-    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+    auto status = is_readable_nonblocking(nullptr, 100);
+    EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
 }
 
 TEST_F(MemoryTest, IsReadableNonblocking_ZeroSize)
 {
     char buffer[100] = {0};
-    auto status = Memory::is_readable_nonblocking(buffer, 0);
-    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+    auto status = is_readable_nonblocking(buffer, 0);
+    EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
 }
 
 TEST_F(MemoryTest, IsReadableNonblocking_NoAccessMemory)
@@ -1511,10 +1600,10 @@ TEST_F(MemoryTest, IsReadableNonblocking_NoAccessMemory)
     ASSERT_NE(noaccess, nullptr);
 
     // Prime cache so nonblocking has data
-    (void)Memory::is_readable(noaccess, 1);
+    (void)is_readable(noaccess, 1);
 
-    auto status = Memory::is_readable_nonblocking(noaccess, 1);
-    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+    auto status = is_readable_nonblocking(noaccess, 1);
+    EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
 
     VirtualFree(noaccess, 0, MEM_RELEASE);
 }
@@ -1524,23 +1613,23 @@ TEST_F(MemoryTest, IsReadableNonblocking_CachedHit)
     char buffer[100] = {0};
 
     // Prime cache with a regular read
-    EXPECT_TRUE(Memory::is_readable(buffer, sizeof(buffer)));
+    EXPECT_TRUE(is_readable(buffer, sizeof(buffer)));
 
     // Nonblocking should hit cache
-    auto status = Memory::is_readable_nonblocking(buffer, sizeof(buffer));
-    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+    auto status = is_readable_nonblocking(buffer, sizeof(buffer));
+    EXPECT_EQ(status, memory::ReadableStatus::Readable);
 }
 
 TEST_F(MemoryTest, IsReadableNonblocking_NoCacheInitialized)
 {
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     char buffer[100] = {0};
-    auto status = Memory::is_readable_nonblocking(buffer, sizeof(buffer));
+    auto status = is_readable_nonblocking(buffer, sizeof(buffer));
     // Falls back to direct VirtualQuery when cache is not initialized
-    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+    EXPECT_EQ(status, memory::ReadableStatus::Readable);
 
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
 
 TEST_F(MemoryTest, IsReadableNonblocking_FreedMemory)
@@ -1549,13 +1638,13 @@ TEST_F(MemoryTest, IsReadableNonblocking_FreedMemory)
     ASSERT_NE(mem, nullptr);
     VirtualFree(mem, 0, MEM_RELEASE);
 
-    Memory::clear_cache();
-    Memory::shutdown_cache();
+    memory::clear_cache();
+    memory::shutdown_cache();
 
-    auto status = Memory::is_readable_nonblocking(mem, 1);
-    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+    auto status = is_readable_nonblocking(mem, 1);
+    EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
 
-    (void)Memory::init_cache();
+    (void)memory::init_cache();
 }
 
 TEST_F(MemoryTest, ReadPtrUnsafe_NoAccessPage)
@@ -1563,7 +1652,7 @@ TEST_F(MemoryTest, ReadPtrUnsafe_NoAccessPage)
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(mem, nullptr);
 
-    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    uintptr_t result = guarded_ptr_or_zero(reinterpret_cast<uintptr_t>(mem), 0);
     EXPECT_EQ(result, 0u);
 
     VirtualFree(mem, 0, MEM_RELEASE);
@@ -1578,7 +1667,7 @@ TEST_F(MemoryTest, ReadPtrUnsafe_GuardPage)
     DWORD old_protect;
     VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
 
-    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    uintptr_t result = guarded_ptr_or_zero(reinterpret_cast<uintptr_t>(mem), 0);
     // MSVC SEH catches the guard-page exception and returns 0. MinGW's vectored fault handler swallows the same
     // STATUS_GUARD_PAGE_VIOLATION and returns 0.
     EXPECT_EQ(result, 0u);
@@ -1595,7 +1684,7 @@ TEST_F(MemoryTest, ReadPtrUnsafe_ReadOnlyPage)
     DWORD old_protect;
     VirtualProtect(mem, 4096, PAGE_READONLY, &old_protect);
 
-    uintptr_t result = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(mem), 0);
+    uintptr_t result = guarded_ptr_or_zero(reinterpret_cast<uintptr_t>(mem), 0);
     EXPECT_EQ(result, 0xFEEDFACE);
 
     VirtualFree(mem, 0, MEM_RELEASE);
@@ -1605,65 +1694,67 @@ TEST_F(MemoryTest, ReadPtrUnsafe_NegativeOffset)
 {
     uintptr_t values[3] = {0xAAAAAAAA, 0xBBBBBBBB, 0xCCCCCCCC};
     uintptr_t base = reinterpret_cast<uintptr_t>(&values[2]);
-    uintptr_t result = Memory::read_ptr_unsafe(base, -static_cast<ptrdiff_t>(sizeof(uintptr_t)));
+    uintptr_t result = guarded_ptr_or_zero(base, -static_cast<ptrdiff_t>(sizeof(uintptr_t)));
     EXPECT_EQ(result, 0xBBBBBBBB);
 }
 
-// --- Tests for read_ptr_unchecked (inline hot-path pointer dereference) ---
+// --- read_ptr_unchecked: window screen via is_plausible_ptr + unchecked::read raw read ---------------------------
 
 TEST_F(MemoryTest, ReadPtrUnchecked_ValidHighPointer)
 {
     uintptr_t value = 0x00007FF700000000;
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0x00007FF700000000);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsNullValue)
 {
     uintptr_t value = 0;
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsLowPointer)
 {
     uintptr_t value = 0x1000;
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsBoundaryValue)
 {
+    // The result gate floor is EXCLUSIVE at min_valid (0x10000), so a loaded value exactly at the floor is rejected.
     uintptr_t value = 0x10000;
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_AcceptsAboveBoundary)
 {
     uintptr_t value = 0x10001;
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0);
+    EXPECT_TRUE(memory::is_plausible_ptr(Address{value}));
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0);
     EXPECT_EQ(result, 0x10001);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_WithOffset)
 {
     uintptr_t values[2] = {0x1000, 0x00007FF700001234};
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(values), sizeof(uintptr_t));
     EXPECT_EQ(result, 0x00007FF700001234);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_CustomThreshold)
 {
     uintptr_t value = 0x500;
-    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0, 0x1000), 0u);
-    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0, 0x100), 0x500);
+    EXPECT_EQ(screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0, 0x1000), 0u);
+    EXPECT_EQ(screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0, 0x100), 0x500);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_ZeroThreshold)
 {
     uintptr_t value = 1;
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&value), 0, 0);
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&value), 0, 0);
     EXPECT_EQ(result, 1u);
 }
 
@@ -1673,10 +1764,10 @@ TEST_F(MemoryTest, IsReadableNonblocking_ReservedMemory)
     ASSERT_NE(reserved, nullptr);
 
     // Prime cache
-    (void)Memory::is_readable(reserved, 1);
+    (void)is_readable(reserved, 1);
 
-    auto status = Memory::is_readable_nonblocking(reserved, 1);
-    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+    auto status = is_readable_nonblocking(reserved, 1);
+    EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
 
     VirtualFree(reserved, 0, MEM_RELEASE);
 }
@@ -1689,12 +1780,12 @@ TEST_F(MemoryTest, IsReadableNonblocking_GuardPage)
     DWORD old_protect;
     VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect);
 
-    Memory::clear_cache();
+    memory::clear_cache();
     // Prime cache with guard-page state
-    (void)Memory::is_readable(mem, 1);
+    (void)is_readable(mem, 1);
 
-    auto status = Memory::is_readable_nonblocking(mem, 1);
-    EXPECT_EQ(status, Memory::ReadableStatus::NotReadable);
+    auto status = is_readable_nonblocking(mem, 1);
+    EXPECT_EQ(status, memory::ReadableStatus::NotReadable);
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -1705,10 +1796,10 @@ TEST_F(MemoryTest, IsReadableNonblocking_ReadOnlyPage)
     ASSERT_NE(mem, nullptr);
 
     // Prime cache
-    (void)Memory::is_readable(mem, 1);
+    (void)is_readable(mem, 1);
 
-    auto status = Memory::is_readable_nonblocking(mem, 1);
-    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+    auto status = is_readable_nonblocking(mem, 1);
+    EXPECT_EQ(status, memory::ReadableStatus::Readable);
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -1716,9 +1807,9 @@ TEST_F(MemoryTest, IsReadableNonblocking_ReadOnlyPage)
 TEST_F(MemoryTest, IsReadableNonblocking_SizeOverflow)
 {
     char buffer[1] = {0};
-    auto status = Memory::is_readable_nonblocking(buffer, SIZE_MAX);
+    auto status = is_readable_nonblocking(buffer, SIZE_MAX);
     // Overflow in address arithmetic must not yield Readable.
-    EXPECT_NE(status, Memory::ReadableStatus::Readable);
+    EXPECT_NE(status, memory::ReadableStatus::Readable);
 }
 
 TEST_F(MemoryTest, IsReadableNonblocking_HeapAllocation)
@@ -1726,17 +1817,17 @@ TEST_F(MemoryTest, IsReadableNonblocking_HeapAllocation)
     auto buffer = std::make_unique<char[]>(100);
 
     // Prime cache
-    (void)Memory::is_readable(buffer.get(), 100);
+    (void)is_readable(buffer.get(), 100);
 
-    auto status = Memory::is_readable_nonblocking(buffer.get(), 100);
-    EXPECT_EQ(status, Memory::ReadableStatus::Readable);
+    auto status = is_readable_nonblocking(buffer.get(), 100);
+    EXPECT_EQ(status, memory::ReadableStatus::Readable);
 }
 
 TEST_F(MemoryTest, ReadableStatus_EnumValues)
 {
-    EXPECT_NE(Memory::ReadableStatus::Readable, Memory::ReadableStatus::NotReadable);
-    EXPECT_NE(Memory::ReadableStatus::Readable, Memory::ReadableStatus::Unknown);
-    EXPECT_NE(Memory::ReadableStatus::NotReadable, Memory::ReadableStatus::Unknown);
+    EXPECT_NE(memory::ReadableStatus::Readable, memory::ReadableStatus::NotReadable);
+    EXPECT_NE(memory::ReadableStatus::Readable, memory::ReadableStatus::Unknown);
+    EXPECT_NE(memory::ReadableStatus::NotReadable, memory::ReadableStatus::Unknown);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_SourceInLowAddressRange)
@@ -1745,7 +1836,7 @@ TEST_F(MemoryTest, ReadPtrUnchecked_SourceInLowAddressRange)
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
+    uintptr_t result = screened_unchecked_ptr(base, offset, min_valid);
     EXPECT_EQ(result, 0u);
 }
 
@@ -1755,7 +1846,7 @@ TEST_F(MemoryTest, ReadPtrUnchecked_SourceAtMinValid)
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
+    uintptr_t result = screened_unchecked_ptr(base, offset, min_valid);
     EXPECT_EQ(result, 0u);
 }
 
@@ -1766,7 +1857,7 @@ TEST_F(MemoryTest, ReadPtrUnchecked_ValidSourceLowResult)
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
+    uintptr_t result = screened_unchecked_ptr(base, offset, min_valid);
     EXPECT_EQ(result, 0u);
 }
 
@@ -1777,7 +1868,7 @@ TEST_F(MemoryTest, ReadPtrUnchecked_ValidSourceValidResult)
     ptrdiff_t offset = 0;
     uintptr_t min_valid = 0x10000;
 
-    uintptr_t result = Memory::read_ptr_unchecked(base, offset, min_valid);
+    uintptr_t result = screened_unchecked_ptr(base, offset, min_valid);
     EXPECT_EQ(result, high_value);
 }
 
@@ -1786,22 +1877,24 @@ TEST_F(MemoryTest, ReadPtrUnchecked_RejectsKernelRangeSource)
     // A kernel-range source is rejected by the upper-bound guard before any dereference (early return), so this is safe
     // to call with a non-readable base.
     const uintptr_t base = 0xFFFF800000000000ULL;
-    EXPECT_EQ(Memory::read_ptr_unchecked(base, 0), 0u);
+    EXPECT_FALSE(memory::is_plausible_ptr(Address{base}));
+    EXPECT_EQ(screened_unchecked_ptr(base, 0), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsSourceAtCeiling)
 {
     // USERSPACE_PTR_MAX is the first non-canonical address; the window is half-open, so a source exactly at the ceiling
     // is rejected (also before any dereference).
-    EXPECT_EQ(Memory::read_ptr_unchecked(Memory::USERSPACE_PTR_MAX, 0), 0u);
+    EXPECT_FALSE(memory::is_plausible_ptr(Address{memory::USERSPACE_PTR_MAX}));
+    EXPECT_EQ(screened_unchecked_ptr(memory::USERSPACE_PTR_MAX, 0), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsSourceOffsetCrossingCeiling)
 {
     // A positive offset that carries the source up to the ceiling is rejected; this is also how the range guard
     // subsumes pointer-arithmetic wraparound.
-    const uintptr_t base = Memory::USERSPACE_PTR_MAX - 0x100;
-    EXPECT_EQ(Memory::read_ptr_unchecked(base, 0x100), 0u);
+    const uintptr_t base = memory::USERSPACE_PTR_MAX - 0x100;
+    EXPECT_EQ(screened_unchecked_ptr(base, 0x100), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsKernelRangeResult)
@@ -1809,19 +1902,19 @@ TEST_F(MemoryTest, ReadPtrUnchecked_RejectsKernelRangeResult)
     // A structurally valid source that yields a kernel-range pointer must not be propagated down the chain; the result
     // guard rejects it like the source guard.
     uintptr_t kernel_value = 0xFFFF800000000000ULL;
-    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&kernel_value), 0), 0u);
+    EXPECT_EQ(screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&kernel_value), 0), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_RejectsResultAtCeiling)
 {
-    uintptr_t ceiling_value = Memory::USERSPACE_PTR_MAX;
-    EXPECT_EQ(Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&ceiling_value), 0), 0u);
+    uintptr_t ceiling_value = memory::USERSPACE_PTR_MAX;
+    EXPECT_EQ(screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&ceiling_value), 0), 0u);
 }
 
 TEST_F(MemoryTest, ReadPtrUnchecked_AcceptsResultJustBelowCeiling)
 {
-    uintptr_t high_value = Memory::USERSPACE_PTR_MAX - 1;
-    uintptr_t result = Memory::read_ptr_unchecked(reinterpret_cast<uintptr_t>(&high_value), 0);
+    uintptr_t high_value = memory::USERSPACE_PTR_MAX - 1;
+    uintptr_t result = screened_unchecked_ptr(reinterpret_cast<uintptr_t>(&high_value), 0);
     EXPECT_EQ(result, high_value);
 }
 
@@ -1830,7 +1923,7 @@ TEST_F(MemoryTest, InvalidateRange_WraparoundAddress)
     uintptr_t near_max = UINTPTR_MAX - 0x10;
     size_t large_size = 0x100;
 
-    EXPECT_NO_THROW(Memory::invalidate_range(reinterpret_cast<const void *>(near_max), large_size));
+    EXPECT_NO_THROW(invalidate_range(reinterpret_cast<const void *>(near_max), large_size));
 }
 
 TEST_F(MemoryTest, WriteBytesToReadOnlyMemory_ExercisesVirtualProtect)
@@ -1839,7 +1932,8 @@ TEST_F(MemoryTest, WriteBytesToReadOnlyMemory_ExercisesVirtualProtect)
     ASSERT_NE(mem, nullptr);
 
     std::byte data[] = {std::byte{0xDE}, std::byte{0xAD}};
-    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+    auto result =
+        memory::write_bytes(Address{static_cast<std::byte *>(mem)}, std::span<const std::byte>{data, sizeof(data)});
 
     // write_bytes changes protection temporarily; this should succeed
     if (result.has_value())
@@ -1848,7 +1942,7 @@ TEST_F(MemoryTest, WriteBytesToReadOnlyMemory_ExercisesVirtualProtect)
     }
     else
     {
-        EXPECT_EQ(result.error(), MemoryError::ProtectionChangeFailed);
+        EXPECT_EQ(result.error().code, ErrorCode::ProtectionChangeFailed);
     }
 
     VirtualFree(mem, 0, MEM_RELEASE);
@@ -1860,7 +1954,8 @@ TEST_F(MemoryTest, WriteBytesToExecuteReadPage_ExercisesFlushCache)
     ASSERT_NE(mem, nullptr);
 
     std::byte data[] = {std::byte{0x90}, std::byte{0x90}, std::byte{0xC3}};
-    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+    auto result =
+        memory::write_bytes(Address{static_cast<std::byte *>(mem)}, std::span<const std::byte>{data, sizeof(data)});
     ASSERT_TRUE(result.has_value());
 
     EXPECT_EQ(std::memcmp(mem, data, sizeof(data)), 0);
@@ -1874,12 +1969,12 @@ TEST_F(MemoryTest, IsReadableNonblocking_LargeValidRegion)
     ASSERT_NE(mem, nullptr);
 
     // First call populates cache
-    auto status1 = Memory::is_readable_nonblocking(mem, 0x10000);
-    EXPECT_NE(status1, Memory::ReadableStatus::NotReadable);
+    auto status1 = is_readable_nonblocking(mem, 0x10000);
+    EXPECT_NE(status1, memory::ReadableStatus::NotReadable);
 
     // Second call should hit cache
-    auto status2 = Memory::is_readable_nonblocking(mem, 0x10000);
-    EXPECT_NE(status2, Memory::ReadableStatus::NotReadable);
+    auto status2 = is_readable_nonblocking(mem, 0x10000);
+    EXPECT_NE(status2, memory::ReadableStatus::NotReadable);
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -1889,11 +1984,11 @@ TEST_F(MemoryTest, ReadPtrUnsafe_AfterCachePrime)
     uintptr_t value = 0xDEADBEEF;
     auto addr = reinterpret_cast<uintptr_t>(&value);
 
-    // Prime the cache with a readable check. read_ptr_unsafe consults no cache (the fault guard makes a probe
+    // Prime the cache with a readable check. read consults no cache (the fault guard makes a probe
     // unnecessary), so this only confirms a primed region still reads back its value through the guarded path.
-    EXPECT_TRUE(Memory::is_readable(&value, sizeof(uintptr_t)));
+    EXPECT_TRUE(is_readable(&value, sizeof(uintptr_t)));
 
-    uintptr_t result = Memory::read_ptr_unsafe(addr, 0);
+    uintptr_t result = guarded_ptr_or_zero(addr, 0);
     EXPECT_EQ(result, value);
 }
 
@@ -1903,59 +1998,60 @@ TEST_F(MemoryTest, WriteBytesInvalidatesAndRevalidates)
     ASSERT_NE(mem, nullptr);
 
     // Prime the cache
-    EXPECT_TRUE(Memory::is_readable(mem, 4));
+    EXPECT_TRUE(is_readable(mem, 4));
 
     // Write invalidates cached region
     std::byte data[] = {std::byte{0xAA}, std::byte{0xBB}};
-    auto result = Memory::write_bytes(static_cast<std::byte *>(mem), data, sizeof(data));
+    auto result =
+        memory::write_bytes(Address{static_cast<std::byte *>(mem)}, std::span<const std::byte>{data, sizeof(data)});
     ASSERT_TRUE(result.has_value());
 
     // Subsequent check should still work (re-fetches into cache)
-    EXPECT_TRUE(Memory::is_readable(mem, 4));
+    EXPECT_TRUE(is_readable(mem, 4));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
 TEST(MemoryErrorTest, MemoryErrorToString_IsNoexcept)
 {
-    static_assert(noexcept(memory_error_to_string(MemoryError::NullTargetAddress)));
+    static_assert(noexcept(to_string(ErrorCode::NullTargetAddress)));
 }
 
-// --- Tests for seh_read_bytes ---
+// --- Tests for read_into (formerly seh_read_bytes) ----------------------------------------------------------------
 
 TEST_F(MemoryTest, SehReadBytes_ValidStackBuffer)
 {
     const uint64_t source = 0xCAFEBABEDEADBEEFULL;
-    uint64_t out = 0;
-    EXPECT_TRUE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&source), &out, sizeof(out)));
-    EXPECT_EQ(out, source);
+    auto value = memory::read<uint64_t>(Address{reinterpret_cast<uintptr_t>(&source)});
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(*value, source);
 }
 
 TEST_F(MemoryTest, SehReadBytes_ZeroBytesIsNoOp)
 {
     char dst = 'X';
-    EXPECT_TRUE(Memory::seh_read_bytes(0x1000, &dst, 0));
+    EXPECT_TRUE(read_bytes(0x1000, &dst, 0));
     EXPECT_EQ(dst, 'X');
 }
 
 TEST_F(MemoryTest, SehReadBytes_NullOutRejected)
 {
     const uint32_t source = 0xDEADC0DE;
-    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&source), nullptr, sizeof(source)));
+    EXPECT_FALSE(read_bytes(reinterpret_cast<uintptr_t>(&source), nullptr, sizeof(source)));
 }
 
 TEST_F(MemoryTest, SehReadBytes_LowAddressRejected)
 {
     uint32_t out = 0xAAAAAAAA;
-    EXPECT_FALSE(Memory::seh_read_bytes(0x100, &out, sizeof(out)));
-    EXPECT_FALSE(Memory::seh_read_bytes(0xFFFF, &out, sizeof(out)));
+    EXPECT_FALSE(read_bytes(0x100, &out, sizeof(out)));
+    EXPECT_FALSE(read_bytes(0xFFFF, &out, sizeof(out)));
 }
 
 TEST_F(MemoryTest, SehReadBytes_AddressWraparoundRejected)
 {
     uint64_t out = 0;
     const uintptr_t near_max = UINTPTR_MAX - 8;
-    EXPECT_FALSE(Memory::seh_read_bytes(near_max, &out, 64));
+    EXPECT_FALSE(read_bytes(near_max, &out, 64));
 }
 
 TEST_F(MemoryTest, SehReadBytes_FreedMemoryReturnsFalse)
@@ -1966,7 +2062,7 @@ TEST_F(MemoryTest, SehReadBytes_FreedMemoryReturnsFalse)
     VirtualFree(mem, 0, MEM_RELEASE);
 
     uint64_t out = 0;
-    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
+    EXPECT_FALSE(read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
 }
 
 TEST_F(MemoryTest, SehReadBytes_NoAccessReturnsFalse)
@@ -1975,7 +2071,7 @@ TEST_F(MemoryTest, SehReadBytes_NoAccessReturnsFalse)
     ASSERT_NE(mem, nullptr);
 
     uint64_t out = 0;
-    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
+    EXPECT_FALSE(read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -1990,7 +2086,7 @@ TEST_F(MemoryTest, SehReadBytes_GuardPageReturnsFalse)
     ASSERT_TRUE(VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old_protect));
 
     uint64_t out = 0;
-    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
+    EXPECT_FALSE(read_bytes(reinterpret_cast<uintptr_t>(mem), &out, sizeof(out)));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
@@ -2003,17 +2099,17 @@ TEST_F(MemoryTest, SehReadBytes_LargeRangePartialUnmapped)
     ASSERT_NE(mem, nullptr);
 
     std::vector<uint8_t> buf(8192, 0);
-    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(mem), buf.data(), buf.size()));
+    EXPECT_FALSE(read_bytes(reinterpret_cast<uintptr_t>(mem), buf.data(), buf.size()));
 
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
-// --- Tests for seh_read<T> ---
+// --- Tests for read<T> (formerly seh_read<T>) ---------------------------------------------------------------------
 
 TEST_F(MemoryTest, SehRead_Uintptr)
 {
     const uintptr_t source = 0xFEEDFACEBADDCAFEULL;
-    auto value = Memory::seh_read<uintptr_t>(reinterpret_cast<uintptr_t>(&source));
+    auto value = memory::read<uintptr_t>(Address{reinterpret_cast<uintptr_t>(&source)});
     ASSERT_TRUE(value.has_value());
     EXPECT_EQ(*value, source);
 }
@@ -2021,7 +2117,7 @@ TEST_F(MemoryTest, SehRead_Uintptr)
 TEST_F(MemoryTest, SehRead_Uint32)
 {
     const uint32_t source = 0xABCDEF01u;
-    auto value = Memory::seh_read<uint32_t>(reinterpret_cast<uintptr_t>(&source));
+    auto value = memory::read<uint32_t>(Address{reinterpret_cast<uintptr_t>(&source)});
     ASSERT_TRUE(value.has_value());
     EXPECT_EQ(*value, source);
 }
@@ -2037,7 +2133,7 @@ TEST_F(MemoryTest, SehRead_Struct)
     static_assert(std::is_trivially_copyable_v<Sample>);
     const Sample source{0x11111111u, 0x22222222u, 0x3333333344444444ULL};
 
-    auto value = Memory::seh_read<Sample>(reinterpret_cast<uintptr_t>(&source));
+    auto value = memory::read<Sample>(Address{reinterpret_cast<uintptr_t>(&source)});
     ASSERT_TRUE(value.has_value());
     EXPECT_EQ(value->a, source.a);
     EXPECT_EQ(value->b, source.b);
@@ -2046,13 +2142,13 @@ TEST_F(MemoryTest, SehRead_Struct)
 
 TEST_F(MemoryTest, SehRead_NullAddressReturnsNullopt)
 {
-    auto value = Memory::seh_read<uint64_t>(0);
+    auto value = memory::read<uint64_t>(Address{static_cast<std::uintptr_t>(0)});
     EXPECT_FALSE(value.has_value());
 }
 
 TEST_F(MemoryTest, SehRead_LowAddressReturnsNullopt)
 {
-    auto value = Memory::seh_read<uint64_t>(0x100);
+    auto value = memory::read<uint64_t>(Address{static_cast<std::uintptr_t>(0x100)});
     EXPECT_FALSE(value.has_value());
 }
 
@@ -2063,123 +2159,126 @@ TEST_F(MemoryTest, SehRead_FreedMemoryReturnsNullopt)
     *reinterpret_cast<uint64_t *>(mem) = 0xDEADBEEFu;
     VirtualFree(mem, 0, MEM_RELEASE);
 
-    auto value = Memory::seh_read<uint64_t>(reinterpret_cast<uintptr_t>(mem));
+    auto value = memory::read<uint64_t>(Address{reinterpret_cast<uintptr_t>(mem)});
     EXPECT_FALSE(value.has_value());
 }
 
-// --- Tests for ModuleRange / module_range_for / own_module_range / host_module_range ---
+// --- Tests for Region / module_of / Region::own / Region::host (formerly ModuleRange family) ---------------------
 
 TEST_F(MemoryTest, ModuleRange_DefaultIsInvalid)
 {
-    Memory::ModuleRange range;
-    EXPECT_FALSE(range.valid());
-    EXPECT_EQ(range.base, 0u);
-    EXPECT_EQ(range.end, 0u);
+    Region range;
+    EXPECT_EQ(range.size, 0u);
+    EXPECT_FALSE(static_cast<bool>(range.base));
+    EXPECT_EQ(range.base.raw(), 0u);
+    EXPECT_EQ(range.end().raw(), 0u);
 }
 
 TEST_F(MemoryTest, ModuleRange_ContainsRejectsInvalid)
 {
-    Memory::ModuleRange range;
-    EXPECT_FALSE(Memory::contains(range, 0x1000));
+    Region range;
+    EXPECT_FALSE(range.contains(Address{static_cast<std::uintptr_t>(0x1000)}));
 }
 
 TEST_F(MemoryTest, ModuleRange_ContainsBoundary)
 {
-    constexpr Memory::ModuleRange range{0x10000, 0x20000};
-    EXPECT_TRUE(Memory::contains(range, 0x10000));
-    EXPECT_TRUE(Memory::contains(range, 0x1FFFF));
-    EXPECT_FALSE(Memory::contains(range, 0x20000));
-    EXPECT_FALSE(Memory::contains(range, 0xFFFF));
+    constexpr Region range{Address{static_cast<std::uintptr_t>(0x10000)}, 0x10000};
+    EXPECT_TRUE(range.contains(Address{static_cast<std::uintptr_t>(0x10000)}));
+    EXPECT_TRUE(range.contains(Address{static_cast<std::uintptr_t>(0x1FFFF)}));
+    EXPECT_FALSE(range.contains(Address{static_cast<std::uintptr_t>(0x20000)}));
+    EXPECT_FALSE(range.contains(Address{static_cast<std::uintptr_t>(0xFFFF)}));
 }
 
 TEST_F(MemoryTest, ModuleRange_ConstexprValid)
 {
-    static_assert(Memory::ModuleRange{0x10000, 0x20000}.valid());
-    static_assert(!Memory::ModuleRange{0, 0x20000}.valid());
-    static_assert(!Memory::ModuleRange{0x20000, 0x10000}.valid());
-    static_assert(Memory::contains(Memory::ModuleRange{0x1000, 0x2000}, 0x1500));
+    static_assert(Region{Address{static_cast<std::uintptr_t>(0x10000)}, 0x10000}.size != 0);
+    static_assert(Region{Address{static_cast<std::uintptr_t>(0x1000)}, 0x1000}.contains(
+        Address{static_cast<std::uintptr_t>(0x1500)}));
 }
 
 TEST_F(MemoryTest, ModuleRangeFor_NullReturnsNullopt)
 {
-    EXPECT_FALSE(Memory::module_range_for(nullptr).has_value());
+    const Region range = memory::module_of(Address{nullptr});
+    EXPECT_EQ(range.size, 0u);
+    EXPECT_FALSE(static_cast<bool>(range.base));
 }
 
 TEST_F(MemoryTest, ModuleRangeFor_OwnFunctionResolves)
 {
     // The test exe is itself a loaded module; resolving any address in it must return a valid range that contains the
     // queried address.
-    const auto range = Memory::module_range_for(reinterpret_cast<const void *>(&Memory::module_range_for));
-    ASSERT_TRUE(range.has_value());
-    EXPECT_TRUE(range->valid());
-    EXPECT_TRUE(Memory::contains(*range, reinterpret_cast<uintptr_t>(&Memory::module_range_for)));
+    const Address probe{reinterpret_cast<const void *>(&memory::module_of)};
+    const Region range = memory::module_of(probe);
+    ASSERT_NE(range.size, 0u);
+    EXPECT_TRUE(range.contains(probe));
 }
 
 TEST_F(MemoryTest, ModuleRangeFor_HeapAddressReturnsNullopt)
 {
     // A heap allocation lives in committed memory that is not part of any loaded image, so GetModuleHandleEx returns
-    // nullptr and the function returns std::nullopt.
+    // nullptr and the function returns an empty Region.
     auto buffer = std::make_unique<int>(42);
-    const auto range = Memory::module_range_for(buffer.get());
-    EXPECT_FALSE(range.has_value());
+    const Region range = memory::module_of(Address{buffer.get()});
+    EXPECT_EQ(range.size, 0u);
+    EXPECT_FALSE(static_cast<bool>(range.base));
 }
 
 TEST_F(MemoryTest, ModuleRangeFor_CacheReturnsConsistentValue)
 {
-    const void *probe = reinterpret_cast<const void *>(&Memory::own_module_range);
-    const auto first = Memory::module_range_for(probe);
-    ASSERT_TRUE(first.has_value());
+    const Address probe{reinterpret_cast<const void *>(&Region::own)};
+    const Region first = memory::module_of(probe);
+    ASSERT_NE(first.size, 0u);
 
-    const auto second = Memory::module_range_for(probe);
-    ASSERT_TRUE(second.has_value());
+    const Region second = memory::module_of(probe);
+    ASSERT_NE(second.size, 0u);
 
-    EXPECT_EQ(first->base, second->base);
-    EXPECT_EQ(first->end, second->end);
+    EXPECT_EQ(first.base.raw(), second.base.raw());
+    EXPECT_EQ(first.end().raw(), second.end().raw());
 }
 
 TEST_F(MemoryTest, OwnModuleRange_IsValid)
 {
-    const auto range = Memory::own_module_range();
-    EXPECT_TRUE(range.valid());
-    EXPECT_TRUE(Memory::contains(range, reinterpret_cast<uintptr_t>(&Memory::own_module_range)));
+    const Region range = Region::own();
+    EXPECT_NE(range.size, 0u);
+    EXPECT_TRUE(range.contains(Address{reinterpret_cast<const void *>(&Region::own)}));
 }
 
 TEST_F(MemoryTest, OwnModuleRange_StableAcrossCalls)
 {
-    const auto a = Memory::own_module_range();
-    const auto b = Memory::own_module_range();
-    EXPECT_EQ(a.base, b.base);
-    EXPECT_EQ(a.end, b.end);
+    const Region a = Region::own();
+    const Region b = Region::own();
+    EXPECT_EQ(a.base.raw(), b.base.raw());
+    EXPECT_EQ(a.end().raw(), b.end().raw());
 }
 
 TEST_F(MemoryTest, HostModuleRange_IsValid)
 {
-    const auto range = Memory::host_module_range();
-    EXPECT_TRUE(range.valid());
+    const Region range = Region::host();
+    EXPECT_NE(range.size, 0u);
 
     // The test executable's main() symbol lives inside the host EXE image.
     HMODULE host = GetModuleHandleW(nullptr);
     ASSERT_NE(host, nullptr);
-    EXPECT_EQ(range.base, reinterpret_cast<uintptr_t>(host));
+    EXPECT_EQ(range.base.raw(), reinterpret_cast<uintptr_t>(host));
 }
 
 TEST_F(MemoryTest, HostModuleRange_ContainsItself)
 {
-    // The test process is its own host; any code address inside the test exe must fall inside host_module_range().
-    const auto range = Memory::host_module_range();
-    ASSERT_TRUE(range.valid());
+    // The test process is its own host; any code address inside the test exe must fall inside host().
+    const Region range = Region::host();
+    ASSERT_NE(range.size, 0u);
 
     HMODULE host = GetModuleHandleW(nullptr);
     ASSERT_NE(host, nullptr);
-    EXPECT_TRUE(Memory::contains(range, reinterpret_cast<uintptr_t>(host)));
+    EXPECT_TRUE(range.contains(Address{reinterpret_cast<void *>(host)}));
 }
 
 TEST_F(MemoryTest, HostModuleRange_StableAcrossCalls)
 {
-    const auto a = Memory::host_module_range();
-    const auto b = Memory::host_module_range();
-    EXPECT_EQ(a.base, b.base);
-    EXPECT_EQ(a.end, b.end);
+    const Region a = Region::host();
+    const Region b = Region::host();
+    EXPECT_EQ(a.base.raw(), b.base.raw());
+    EXPECT_EQ(a.end().raw(), b.end().raw());
 }
 
 TEST_F(MemoryTest, ModuleRangeFor_KernelModuleResolves)
@@ -2188,19 +2287,18 @@ TEST_F(MemoryTest, ModuleRangeFor_KernelModuleResolves)
     HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
     ASSERT_NE(kernel, nullptr);
 
-    const auto range = Memory::module_range_for(reinterpret_cast<const void *>(kernel));
-    ASSERT_TRUE(range.has_value());
-    EXPECT_TRUE(range->valid());
-    EXPECT_EQ(range->base, reinterpret_cast<uintptr_t>(kernel));
+    const Region range = memory::module_of(Address{reinterpret_cast<void *>(kernel)});
+    ASSERT_NE(range.size, 0u);
+    EXPECT_EQ(range.base.raw(), reinterpret_cast<uintptr_t>(kernel));
 }
 
 // Every SEH-guarded foreign read must swallow EXCEPTION_IN_PAGE_ERROR (a file-backed page failing to page in) alongside
 // the access-violation and guard-page faults, or the fault continues the handler search and terminates the host. The
-// four __except filters in memory.cpp and the region/window guards in scanner.cpp / string_xref.cpp share this single
-// predicate, so pinning it pins all of them.
+// __except filters in the memory engine and the region/window guards in the scan engine share this single predicate, so
+// pinning it pins all of them.
 TEST(MemoryGuardedReadFault, AcceptsForeignReadFaultsAndRejectsOthers)
 {
-    using Memory::detail::is_guarded_read_fault;
+    using detail::is_guarded_read_fault;
 
     // The three codes a guarded probe owns. Spelled via the Windows macros here to prove the predicate's literals match
     // the platform values.
@@ -2220,7 +2318,7 @@ TEST(MemoryGuardedReadFault, AcceptsForeignReadFaultsAndRejectsOthers)
     EXPECT_FALSE(is_guarded_read_fault(static_cast<unsigned long>(EXCEPTION_INT_DIVIDE_BY_ZERO)));  // 0xC0000094
 }
 
-// read_ptr_unsafe reads through std::memcpy rather than a *reinterpret_cast deref, so a misaligned foreign pointer is
+// read reads through std::memcpy rather than a *reinterpret_cast deref, so a misaligned foreign pointer is
 // read without invoking the undefined behavior of dereferencing a misaligned pointer. A pointer-sized value planted at
 // an odd offset must round-trip exactly.
 TEST_F(MemoryTest, ReadPtrUnsafeReadsMisalignedPointer)
@@ -2233,34 +2331,34 @@ TEST_F(MemoryTest, ReadPtrUnsafeReadsMisalignedPointer)
     constexpr ptrdiff_t MISALIGNED_OFFSET = 1; // deliberately not a multiple of alignof(uintptr_t)
     std::memcpy(base + MISALIGNED_OFFSET, &SENTINEL, sizeof(SENTINEL));
 
-    const std::uintptr_t value = Memory::read_ptr_unsafe(reinterpret_cast<std::uintptr_t>(base), MISALIGNED_OFFSET);
+    const std::uintptr_t value = guarded_ptr_or_zero(reinterpret_cast<std::uintptr_t>(base), MISALIGNED_OFFSET);
     EXPECT_EQ(value, SENTINEL);
 
     // An unmapped low address still fails closed to 0 (the fault is swallowed, not propagated).
-    EXPECT_EQ(Memory::read_ptr_unsafe(0, 0), 0u);
+    EXPECT_EQ(guarded_ptr_or_zero(0, 0), 0u);
 
     VirtualFree(region, 0, MEM_RELEASE);
 }
 
 // is_readable / is_writable must fall back to a direct VirtualQuery whenever the cache reports zero shards. The
 // externally reachable zero-shard state is "cache not initialized"; the same code path also serves the brief init
-// publication window where s_cache_initialized is true but s_shard_count is still 0. Returning false there would
-// wrongly report a readable region as non-readable, so the fallback must produce correct answers without the cache.
+// publication window where the cache flag is true but the shard count is still 0. Returning false there would wrongly
+// report a readable region as non-readable, so the fallback must produce correct answers without the cache.
 TEST(MemoryUninitializedCache, PermissionChecksFallBackToDirectQuery)
 {
     // Force the zero-shard state regardless of prior tests' cache lifecycle.
-    Memory::shutdown_cache();
+    memory::shutdown_cache();
 
     void *region = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     ASSERT_NE(region, nullptr);
 
-    EXPECT_TRUE(Memory::is_readable(region, 64));
-    EXPECT_TRUE(Memory::is_writable(region, 64));
+    EXPECT_TRUE(is_readable(region, 64));
+    EXPECT_TRUE(is_writable(region, 64));
 
     DWORD old_protect = 0;
     ASSERT_NE(VirtualProtect(region, 4096, PAGE_NOACCESS, &old_protect), 0);
-    EXPECT_FALSE(Memory::is_readable(region, 64));
-    EXPECT_FALSE(Memory::is_writable(region, 64));
+    EXPECT_FALSE(is_readable(region, 64));
+    EXPECT_FALSE(is_writable(region, 64));
 
     VirtualProtect(region, 4096, old_protect, &old_protect);
     VirtualFree(region, 0, MEM_RELEASE);
@@ -2275,13 +2373,13 @@ TEST_F(MemoryTest, SehReadBytes_ReservedUncommittedReturnsFalse)
     ASSERT_NE(reserved, nullptr);
 
     uint64_t out = 0;
-    EXPECT_FALSE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(reserved), &out, sizeof(out)));
+    EXPECT_FALSE(read_bytes(reinterpret_cast<uintptr_t>(reserved), &out, sizeof(out)));
 
     VirtualFree(reserved, 0, MEM_RELEASE);
 }
 
 // With the cache reporting a page readable, an external reprotect to PAGE_NOACCESS must not crash a subsequent
-// read_ptr_unsafe. The guarded read must ignore stale protection data and fail closed through the same "0 on fault"
+// guarded read. The guarded read must ignore stale protection data and fail closed through the same "0 on fault"
 // contract on both toolchains.
 TEST_F(MemoryTest, ReadPtrUnsafeSurvivesStaleCacheReprotect)
 {
@@ -2291,8 +2389,8 @@ TEST_F(MemoryTest, ReadPtrUnsafeSurvivesStaleCacheReprotect)
     *reinterpret_cast<uintptr_t *>(region) = 0xABCDEF0123456789ULL;
 
     // Prime the cache so the region is recorded as readable.
-    EXPECT_TRUE(Memory::is_readable(region, sizeof(uintptr_t)));
-    EXPECT_EQ(Memory::read_ptr_unsafe(addr, 0), 0xABCDEF0123456789ULL);
+    EXPECT_TRUE(is_readable(region, sizeof(uintptr_t)));
+    EXPECT_EQ(guarded_ptr_or_zero(addr, 0), 0xABCDEF0123456789ULL);
 
     // Reprotect out from under the still-readable cache entry. The cache is not invalidated, so a cache-trusting read
     // would dereference a now-inaccessible page.
@@ -2300,7 +2398,7 @@ TEST_F(MemoryTest, ReadPtrUnsafeSurvivesStaleCacheReprotect)
     ASSERT_NE(VirtualProtect(region, 4096, PAGE_NOACCESS, &old_protect), 0);
 
     // The fault is swallowed and reported as the pointer-read failure value.
-    EXPECT_EQ(Memory::read_ptr_unsafe(addr, 0), 0u);
+    EXPECT_EQ(guarded_ptr_or_zero(addr, 0), 0u);
 
     VirtualProtect(region, 4096, old_protect, &old_protect);
     VirtualFree(region, 0, MEM_RELEASE);
@@ -2320,6 +2418,7 @@ namespace
 // registered. Exercise both list orderings (consumer registered before and after DMK's handler exists) and assert the
 // guarded reads still fail closed on bad memory and succeed on live memory. On MSVC there is no DMK VEH; the consumer
 // handler simply passes the first-chance fault through to the frame-based __except, so the test is meaningful on both.
+// White-box: drives the engine's detail::guarded_read_bytes seam directly.
 TEST_F(MemoryTest, VectoredHandlerCoexistsWithConsumerHandler)
 {
     void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -2333,10 +2432,10 @@ TEST_F(MemoryTest, VectoredHandlerCoexistsWithConsumerHandler)
     auto exercise = [&]()
     {
         uint64_t out = 0;
-        EXPECT_FALSE(Memory::seh_read_bytes(bad_addr, &out, sizeof(out)));
-        EXPECT_EQ(Memory::read_ptr_unsafe(bad_addr, 0), 0u);
+        EXPECT_FALSE(detail::guarded_read_bytes(bad_addr, &out, sizeof(out)));
+        EXPECT_EQ(guarded_ptr_or_zero(bad_addr, 0), 0u);
         out = 0;
-        EXPECT_TRUE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&live), &out, sizeof(out)));
+        EXPECT_TRUE(detail::guarded_read_bytes(reinterpret_cast<uintptr_t>(&live), &out, sizeof(out)));
         EXPECT_EQ(out, live);
     };
 
@@ -2360,18 +2459,18 @@ TEST_F(MemoryTest, VectoredHandlerCoexistsWithConsumerHandler)
 TEST_F(MemoryTest, ReadPtrUnsafeWraparoundAndLowAddressReturnZero)
 {
     // An 8-byte read would wrap past the top of the address space.
-    EXPECT_EQ(Memory::read_ptr_unsafe(UINTPTR_MAX - 3, 0), 0u);
+    EXPECT_EQ(guarded_ptr_or_zero(UINTPTR_MAX - 3, 0), 0u);
 
     // Below the user-mode floor.
-    EXPECT_EQ(Memory::read_ptr_unsafe(0x100, 0), 0u);
+    EXPECT_EQ(guarded_ptr_or_zero(0x100, 0), 0u);
 
     // A low base plus a large negative offset underflows the source to a high, unmapped address; still 0, no crash.
-    EXPECT_EQ(Memory::read_ptr_unsafe(0x20000, -static_cast<ptrdiff_t>(0x30000)), 0u);
+    EXPECT_EQ(guarded_ptr_or_zero(0x20000, -static_cast<ptrdiff_t>(0x30000)), 0u);
 }
 
 // Each guarded read arms its own per-read guard published to a thread-local slot, so concurrent reads of mixed
 // good/bad memory across many threads must each get the right answer with no cross-thread guard corruption and no
-// crash. This pins the per-thread isolation of the fault guard.
+// crash. This pins the per-thread isolation of the fault guard. White-box: drives detail::guarded_read_bytes.
 TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
 {
     void *good = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -2379,12 +2478,9 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
     constexpr uintptr_t SENTINEL = 0x5151515151515151ULL;
     *reinterpret_cast<uintptr_t *>(good) = SENTINEL;
 
-    // A deliberately non-readable page the test owns until teardown. This used to MEM_RELEASE a PAGE_READWRITE region
-    // to get an unmapped address, but a released VA can be recycled and remapped by the allocations that spawning the
-    // reader threads triggers (thread stacks/TEBs, more so under AddressSanitizer); a read then lands on live memory
-    // instead of faulting, so the "must fault to 0" assertion flaked on about one read in many thousands. A committed
-    // PAGE_NOACCESS page the test holds faults deterministically and cannot be recycled, so it exercises the guard's
-    // per-thread fault isolation without that artifact.
+    // A deliberately non-readable page the test owns until teardown. A committed PAGE_NOACCESS page faults
+    // deterministically and cannot be recycled, so it exercises the guard's per-thread fault isolation without the
+    // artifact of a released VA being remapped by the thread-spawn allocations.
     void *unreadable = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(unreadable, nullptr);
 
@@ -2399,12 +2495,16 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
                 {
                     if (t % 2 == 0)
                     {
-                        if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0) != SENTINEL)
+                        uintptr_t v = 0;
+                        if (!detail::guarded_read_bytes(reinterpret_cast<uintptr_t>(good), &v, sizeof(v)) ||
+                            v != SENTINEL)
                             all_correct.store(false, std::memory_order_relaxed);
                     }
-                    else if (Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(unreadable), 0) != 0u)
+                    else
                     {
-                        all_correct.store(false, std::memory_order_relaxed);
+                        uintptr_t v = 0;
+                        if (detail::guarded_read_bytes(reinterpret_cast<uintptr_t>(unreadable), &v, sizeof(v)))
+                            all_correct.store(false, std::memory_order_relaxed);
                     }
                 }
             });
@@ -2420,7 +2520,7 @@ TEST_F(MemoryTest, GuardedReadsAreThreadIsolatedUnderConcurrency)
 // shutdown_cache removes the MinGW vectored handler; it must drain reads still on the handler path first, so a fault
 // cannot arrive after the handler is gone. Race continuous guarded reads (some faulting) against repeated
 // shutdown/re-init and assert survival, then that the subsystem still answers. On MSVC there is no handler to remove,
-// so this exercises read_ptr_unsafe / cache-shutdown concurrency.
+// so this exercises guarded-read / cache-shutdown concurrency. White-box: drives detail::guarded_read_bytes.
 TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
 {
     void *good = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -2446,13 +2546,14 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
                 void *const target = (t % 2) ? unreadable : good;
                 while (!stop.load(std::memory_order_acquire))
                 {
-                    const uintptr_t v = Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(target), 0);
+                    uintptr_t v = 0;
+                    const bool ok = detail::guarded_read_bytes(reinterpret_cast<uintptr_t>(target), &v, sizeof(v));
                     if (target == good)
                     {
-                        if (v == SENTINEL)
+                        if (ok && v == SENTINEL)
                             seen_good.fetch_add(1, std::memory_order_relaxed);
                     }
-                    else if (v == 0u)
+                    else if (!ok)
                     {
                         seen_fault.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -2468,15 +2569,17 @@ TEST_F(MemoryTest, GuardedReadsSurviveConcurrentShutdown)
 
     for (int round = 0; round < 12; ++round)
     {
-        Memory::shutdown_cache();
-        (void)Memory::init_cache();
+        memory::shutdown_cache();
+        (void)memory::init_cache();
     }
 
     stop.store(true, std::memory_order_release);
     for (auto &th : readers)
         th.join();
 
-    EXPECT_EQ(Memory::read_ptr_unsafe(reinterpret_cast<uintptr_t>(good), 0), SENTINEL);
+    uintptr_t final_value = 0;
+    EXPECT_TRUE(detail::guarded_read_bytes(reinterpret_cast<uintptr_t>(good), &final_value, sizeof(final_value)));
+    EXPECT_EQ(final_value, SENTINEL);
     VirtualFree(unreadable, 0, MEM_RELEASE);
     VirtualFree(good, 0, MEM_RELEASE);
 }
@@ -2513,13 +2616,13 @@ namespace
 // TlsGetValue and sees null), never claimed or hijacked. Here a worker thread that has never issued a DMK guarded read
 // faults on a no-access page while DMK's handler is installed; a consumer handler recovers it. A spurious DMK claim
 // (longjmp into a frame that never armed) or a crash would fail this. On MSVC there is no DMK handler, so the consumer
-// simply recovers the fault directly.
+// simply recovers the fault directly. White-box: arms via detail::guarded_read_bytes.
 TEST_F(MemoryTest, UnarmedThreadFaultIsPassedThroughNotClaimed)
 {
     // Arm and disarm DMK's handler on this thread so it is installed for the process.
     uint64_t probe_src = 0xC3C3C3C3C3C3C3C3ULL;
     uint64_t probe_out = 0;
-    ASSERT_TRUE(Memory::seh_read_bytes(reinterpret_cast<uintptr_t>(&probe_src), &probe_out, sizeof(probe_out)));
+    ASSERT_TRUE(detail::guarded_read_bytes(reinterpret_cast<uintptr_t>(&probe_src), &probe_out, sizeof(probe_out)));
 
     void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(page, nullptr);
@@ -2551,7 +2654,7 @@ TEST_F(MemoryTest, UnarmedThreadFaultIsPassedThroughNotClaimed)
     VirtualFree(page, 0, MEM_RELEASE);
 }
 
-// Coverage for the per-frame guarded WRITE primitives (seh_write_bytes, seh_write). They write to already-writable
+// Coverage for the per-frame guarded WRITE primitives (write_bytes / write). They write to already-writable
 // memory under a fault guard, changing no page protection and running no i-cache flush or cache invalidation, so they
 // need no cache state; the fixture's cache is left in its default state.
 
@@ -2560,11 +2663,11 @@ TEST_F(MemoryTest, SehWrite_TypedRoundTripsToLocal)
     uint64_t target = 0;
     const uint64_t expected = 0x1122334455667788ull;
 
-    EXPECT_TRUE(Memory::seh_write<uint64_t>(reinterpret_cast<uintptr_t>(&target), expected));
+    EXPECT_TRUE(memory::write<uint64_t>(Address{reinterpret_cast<uintptr_t>(&target)}, expected).has_value());
     EXPECT_EQ(target, expected);
 
     // Read it back through the guarded read primitive to confirm the byte image matches.
-    const auto value = Memory::seh_read<uint64_t>(reinterpret_cast<uintptr_t>(&target));
+    const auto value = memory::read<uint64_t>(Address{reinterpret_cast<uintptr_t>(&target)});
     ASSERT_TRUE(value.has_value());
     EXPECT_EQ(*value, expected);
 }
@@ -2575,7 +2678,8 @@ TEST_F(MemoryTest, SehWriteBytes_RoundTripsToHeap)
     std::memset(buffer.get(), 0, 16);
     const std::byte source[] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
 
-    EXPECT_TRUE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(buffer.get()), source, sizeof(source)));
+    EXPECT_TRUE(
+        memory::write_bytes(Address{buffer.get()}, std::span<const std::byte>{source, sizeof(source)}).has_value());
 
     for (size_t i = 0; i < sizeof(source); ++i)
     {
@@ -2591,7 +2695,9 @@ TEST_F(MemoryTest, SehWriteBytes_ZeroBytesIsNoOpSuccess)
     const uint64_t source = 0x0;
 
     // Zero-byte write is a no-op success that leaves the target unchanged.
-    EXPECT_TRUE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(&target), &source, 0));
+    EXPECT_TRUE(memory::write_bytes(Address{reinterpret_cast<uintptr_t>(&target)},
+                                    std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), 0})
+                    .has_value());
     EXPECT_EQ(target, 0xFEEDFACEull);
 }
 
@@ -2600,7 +2706,10 @@ TEST_F(MemoryTest, SehWriteBytes_NullSourceReturnsFalse)
     uint64_t target = 0xFEEDFACEull;
 
     // nullptr source is rejected without a write.
-    EXPECT_FALSE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(&target), nullptr, sizeof(target)));
+    EXPECT_FALSE(
+        memory::write_bytes(Address{reinterpret_cast<uintptr_t>(&target)},
+                            std::span<const std::byte>{static_cast<const std::byte *>(nullptr), sizeof(target)})
+            .has_value());
     EXPECT_EQ(target, 0xFEEDFACEull);
 }
 
@@ -2609,13 +2718,16 @@ TEST_F(MemoryTest, SehWriteBytes_LowAddressReturnsFalse)
     const uint32_t source = 0x11223344u;
 
     // An address below 0x10000 (the Windows reserved low range) is rejected without a write and must not crash.
-    EXPECT_FALSE(Memory::seh_write_bytes(static_cast<uintptr_t>(0x100), &source, sizeof(source)));
+    EXPECT_FALSE(
+        memory::write_bytes(Address{static_cast<uintptr_t>(0x100)},
+                            std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)})
+            .has_value());
 }
 
-// FAULT-GUARD proof: a write into a committed PAGE_READONLY page must be caught by the SEH/VEH guard and return false,
-// not fault the host, and must leave the page bytes unchanged. The page is held until TearDown via the local scope
-// (never MEM_RELEASE'd before the assertions) so a released VA cannot be remapped and the fault stays deterministic.
-TEST_F(MemoryTest, SehWriteBytes_ReadOnlyPageFaultsClosed)
+// BEHAVIOR FLIP (v3 -> v4): v4 write_bytes auto-unprotects, so a write into a committed PAGE_READONLY page now SUCCEEDS
+// and the bytes change, where v3 fails-closed. The page is held until TearDown via the local scope so a released VA
+// cannot be remapped and the result stays deterministic.
+TEST_F(MemoryTest, WriteBytes_ReadOnlyPageUnprotectsAndSucceeds)
 {
     // A page seeded as PAGE_READWRITE so we can plant a known sentinel, then flipped to PAGE_READONLY before the write.
     void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -2628,25 +2740,135 @@ TEST_F(MemoryTest, SehWriteBytes_ReadOnlyPageFaultsClosed)
     ASSERT_NE(VirtualProtect(page, 4096, PAGE_READONLY, &old_protect), 0);
 
     const uint32_t source = 0xDEADBEEFu;
-    // The guarded write must fail closed: the access violation is swallowed and false is returned.
-    EXPECT_FALSE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(page), &source, sizeof(source)));
+    // The guarded write takes the slow path: change protection to writable, copy, restore. It SUCCEEDS.
+    auto result = memory::write_bytes(
+        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+    EXPECT_TRUE(result.has_value());
 
-    // Restore write access to read the page back and prove the bytes never changed.
-    ASSERT_NE(VirtualProtect(page, 4096, old_protect, &old_protect), 0);
-    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), SENTINEL);
+    // The byte image changed to the new value.
+    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), source);
 
     VirtualFree(page, 0, MEM_RELEASE);
 }
 
-// FAULT-GUARD proof, no-access variant: a write into a committed PAGE_NOACCESS page must also be caught and return
-// false. The page is held until after the assertion (never released early) so the fault is deterministic.
-TEST_F(MemoryTest, SehWriteBytes_NoAccessPageFaultsClosed)
+// BEHAVIOR FLIP (v3 -> v4), no-access variant: a COMMITTED PAGE_NOACCESS page can be reprotected to writable by
+// VirtualProtect, so v4 write_bytes takes its auto-unprotect slow path and the write SUCCEEDS (v3 fails-closed). A
+// genuinely unmapped / freed region cannot be reprotected and still fails closed (covered by the freed-memory read
+// paths and WriteBytesToReadOnlyMemory's ProtectionChangeFailed branch). The page is held until after the assertion so
+// the result is deterministic.
+TEST_F(MemoryTest, WriteBytes_NoAccessPageUnprotectsAndSucceeds)
 {
     void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(page, nullptr);
 
     const uint32_t source = 0xDEADBEEFu;
-    EXPECT_FALSE(Memory::seh_write_bytes(reinterpret_cast<uintptr_t>(page), &source, sizeof(source)));
+    auto result = memory::write_bytes(
+        Address{page}, std::span<const std::byte>{reinterpret_cast<const std::byte *>(&source), sizeof(source)});
+    EXPECT_TRUE(result.has_value());
+
+    // Read the bytes back (the page is writable post-restore-to-NOACCESS only on the page itself, so verify via a
+    // temporary reprotect to readable).
+    DWORD old_protect = 0;
+    ASSERT_NE(VirtualProtect(page, 4096, PAGE_READWRITE, &old_protect), 0);
+    EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), source);
 
     VirtualFree(page, 0, MEM_RELEASE);
+}
+
+// === NEW v4 cases (no legacy equivalent) ==========================================================================
+
+// (a) ProtectGuard lifecycle.
+TEST_F(MemoryTest, ProtectGuard_MakeOnReadOnlyPageSucceedsAndRestores)
+{
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(page, nullptr);
+
+    {
+        auto guard = memory::ProtectGuard::make(Region{Address{page}, 4096}, Prot::RW);
+        ASSERT_TRUE(guard.has_value());
+        EXPECT_TRUE(static_cast<bool>(*guard));
+
+        // While the guard is armed the page is writable: a plain store does not fault.
+        *reinterpret_cast<uint32_t *>(page) = 0xC0FFEEu;
+        EXPECT_EQ(*reinterpret_cast<uint32_t *>(page), 0xC0FFEEu);
+    } // guard destructor restores PAGE_READONLY here
+
+    // After restoration the page is read-only again: is_writable must report false.
+    EXPECT_FALSE(is_writable(page, 4));
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ProtectGuard_MoveOnlyMovedFromIsFalsy)
+{
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(page, nullptr);
+
+    auto made = memory::ProtectGuard::make(Region{Address{page}, 4096}, Prot::RW);
+    ASSERT_TRUE(made.has_value());
+
+    memory::ProtectGuard original = std::move(*made);
+    EXPECT_TRUE(static_cast<bool>(original));
+
+    memory::ProtectGuard moved = std::move(original);
+    // The moved-from guard is disarmed (falsy); the destination owns the restore.
+    EXPECT_FALSE(static_cast<bool>(original));
+    EXPECT_TRUE(static_cast<bool>(moved));
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ProtectGuard_ReleaseLeavesProtectionChanged)
+{
+    void *page = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(page, nullptr);
+
+    {
+        auto guard = memory::ProtectGuard::make(Region{Address{page}, 4096}, Prot::RW);
+        ASSERT_TRUE(guard.has_value());
+        EXPECT_TRUE(static_cast<bool>(*guard));
+        guard->release();
+        // After release() the guard is disarmed and the destructor will NOT restore the original protection.
+        EXPECT_FALSE(static_cast<bool>(*guard));
+    }
+
+    // Protection was left changed to RW, so the page is still writable after the guard's scope ended.
+    EXPECT_TRUE(is_writable(page, 4));
+
+    VirtualFree(page, 0, MEM_RELEASE);
+}
+
+TEST_F(MemoryTest, ProtectGuard_MakeOnEmptyRegionFails)
+{
+    auto guard = memory::ProtectGuard::make(Region{}, Prot::RW);
+    ASSERT_FALSE(guard.has_value());
+    EXPECT_EQ(guard.error().code, ErrorCode::ProtectionChangeFailed);
+}
+
+// (b) unchecked::read happy path on a known local.
+TEST_F(MemoryTest, UncheckedRead_HappyPathOnKnownLocal)
+{
+    const uint64_t value = 0x0123456789ABCDEFull;
+    const uint64_t got = memory::unchecked::read<uint64_t>(Address{reinterpret_cast<uintptr_t>(&value)});
+    EXPECT_EQ(got, value);
+}
+
+// (c) Region::own() is valid and contains a DMK function; module_of an in-image address returns a region containing it.
+TEST_F(MemoryTest, RegionOwn_ContainsDmkFunctionAndModuleOfAgrees)
+{
+    const Address fn{reinterpret_cast<const void *>(&memory::init_cache)};
+
+    const Region own = Region::own();
+    ASSERT_NE(own.size, 0u);
+    EXPECT_TRUE(own.contains(fn));
+
+    const Region module = memory::module_of(fn);
+    ASSERT_NE(module.size, 0u);
+    EXPECT_TRUE(module.contains(fn));
+}
+
+// (d) to_string(ErrorCode::ReadFaulted) round-trips to its exact name.
+TEST(MemoryErrorTest, ToString_ReadFaulted)
+{
+    EXPECT_EQ(to_string(ErrorCode::ReadFaulted), "ReadFaulted");
 }

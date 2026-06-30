@@ -63,6 +63,18 @@ LEGACY_HEADERS = (
 LEGACY_SCAN_TOKEN = re.compile(
     r'(\bScanner::|\bresolve_cascade|\bRipResolveError\b|\bResolveError\b|\bStringXrefError\b'
     r'|\bAddrCandidate\b|\bResolveMode\b|\bResolveHit\b|\bCascadeRequest\b|\bCompiledPattern\b)')
+# --- v4 memory clean-break gate ---
+# The legacy memory surface (namespace Memory, MemoryError, the seh_*/read_ptr_* primitives, the
+# ModuleRange family, plausible_userspace_ptr) was reshaped into namespace memory + the unified
+# ErrorCode + the src/internal/ guarded engine. None of these spellings may reappear in this repo's
+# own sources. Matched after comment stripping, so the v3-migration notes in memory.hpp / error.hpp
+# (which mention the old names as prose) do not trip the gate. ModuleRangeCache / module_range_cache /
+# module_range_from_handle are NOT matched (no \b ModuleRange \b boundary, lowercase, or distinct name).
+LEGACY_MEMORY_TOKEN = re.compile(
+    r'(\bMemory::|\bMemoryError\b|\bmemory_error_to_string\b'
+    r'|\bseh_read|\bseh_write|\bseh_resolve'
+    r'|\bread_ptr_unsafe\b|\bread_ptr_unchecked\b|\bplausible_userspace_ptr\b'
+    r'|\bModuleRange\b|\bmodule_range_for\b|\bown_module_range\b|\bhost_module_range\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
@@ -152,6 +164,11 @@ def main():
         if (REPO / legacy).is_file():
             violations.append(f"{legacy}: legacy scan header still present; the v4 public surface is scan.hpp")
 
+    # v4 memory gate A: the relocated private fault header must not reappear at its old path.
+    if (REPO / "src" / "memory_internal.hpp").is_file():
+        violations.append(
+            "src/memory_internal.hpp: legacy private header still present; it moved to src/internal/memory_fault.hpp")
+
     # v4 scan gate B: include/DetourModKit/detail/ holds only allowlisted compile-visible support headers.
     detail_dir = REPO / "include" / "DetourModKit" / "detail"
     if detail_dir.is_dir():
@@ -207,6 +224,13 @@ def main():
             if lm:
                 violations.append(
                     f"{rel}:{n}: legacy scan symbol '{lm.group(1).strip()}' (replaced by the v4 scan surface)")
+
+        # v4 memory gate D: no legacy memory symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            mm = LEGACY_MEMORY_TOKEN.search(line)
+            if mm:
+                violations.append(
+                    f"{rel}:{n}: legacy memory symbol '{mm.group(1).strip()}' (replaced by the v4 memory surface)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")

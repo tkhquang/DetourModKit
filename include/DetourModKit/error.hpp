@@ -163,7 +163,7 @@ namespace DetourModKit
         /// String xref: no pointer-slot store of the loaded pointer follows the reference.
         StoreNotFound,
 
-        // Memory (0x03xx): the former MemoryError, 5 codes
+        // Memory (0x03xx): the former MemoryError plus the guarded-read fault code
         /// The write target address was null.
         NullTargetAddress = 0x0300,
         /// The source byte span was null.
@@ -174,6 +174,8 @@ namespace DetourModKit
         ProtectionChangeFailed,
         /// Restoring the original page protection failed.
         ProtectionRestoreFailed,
+        /// A guarded read faulted; Error::detail holds the faulting address, or the failing hop index for walk.
+        ReadFaulted,
 
         // Rtti (0x04xx): the former IdentifyError + HealError
         /// The slot address was null or below the user-mode floor; no read was attempted.
@@ -347,6 +349,8 @@ namespace DetourModKit
             return "ProtectionChangeFailed";
         case ErrorCode::ProtectionRestoreFailed:
             return "ProtectionRestoreFailed";
+        case ErrorCode::ReadFaulted:
+            return "ReadFaulted";
         case ErrorCode::BadSlotAddress:
             return "BadSlotAddress";
         case ErrorCode::UnreadableSlot:

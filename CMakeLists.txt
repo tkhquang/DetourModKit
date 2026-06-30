@@ -298,7 +298,7 @@ target_include_directories(DetourModKit
 
   # For DetourModKit's own sources to find its private engine headers without `../` paths: src/ TUs
   # include "internal/scan_engine.hpp" etc., and src/internal/ TUs include the shared src/ headers
-  # ("x86_decode.hpp", "fork_join.hpp", "memory_internal.hpp"). These headers are never installed.
+  # ("x86_decode.hpp", "fork_join.hpp"). These headers are never installed.
   "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 

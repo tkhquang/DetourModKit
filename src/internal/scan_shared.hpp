@@ -3,8 +3,8 @@
 
 /**
  * @file internal/scan_shared.hpp
- * @brief Small shared helpers for the public scan-module TUs: Region <-> ModuleRange conversion, the bounded
- *        haystack-frequency anchor override, and the per-byte-tier resolution arithmetic.
+ * @brief Small shared helpers for the public scan-module TUs: the bounded haystack-frequency anchor override and the
+ *        per-byte-tier resolution arithmetic.
  * @details Never installed. The scan_matching, scan_resolution, and scan_prologue_recovery TUs all turn a value Pattern
  *          into an EnginePattern with a haystack-chosen anchor and screen byte-tier resolutions through the same
  *          plausible-userspace floor, so those helpers live here in one place rather than being duplicated. The anchor
@@ -12,9 +12,9 @@
  *          masked compare still decides every accepted position.
  */
 
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 
-#include "DetourModKit/memory.hpp"
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
@@ -27,14 +27,6 @@ namespace DetourModKit
 {
     namespace detail
     {
-        // Convert a Region into the engine's half-open ModuleRange [base, end). An empty Region (the fail-closed
-        // result every Region factory returns when its scope cannot be resolved) yields an invalid ModuleRange, which
-        // both the page-gated scanners and the contains() screen treat as "resolve nothing".
-        [[nodiscard]] inline Memory::ModuleRange to_module_range(Region scope) noexcept
-        {
-            return Memory::ModuleRange{scope.base.raw(), scope.end().raw()};
-        }
-
         // Bounded haystack sampling budget. A byte-frequency ranking needs only a representative sample, not the whole
         // image: 64 page reads (256 KiB) strided across the scope are ample to rank 256 byte values, and the fixed cap
         // keeps anchor selection a constant cost regardless of scope size so it never approaches the cost of the scan
@@ -53,7 +45,7 @@ namespace DetourModKit
         };
 
         // Sample a bounded, strided set of pages from the scope and tally a 256-bin byte-frequency histogram. Reads go
-        // through seh_read_bytes one page at a time, so an unmapped / guard page inside the scope is skipped rather
+        // through guarded_read_bytes one page at a time, so an unmapped / guard page inside the scope is skipped rather
         // than faulting the host; the stride spreads the sample across .text and .rdata / .data so the frequencies
         // reflect the whole image, not just its first pages. Entirely stack-based (the histogram and the page buffer
         // are locals), so it never allocates and is safe to call from the noexcept scan paths.
@@ -74,7 +66,7 @@ namespace DetourModKit
                 const std::uintptr_t page_address = base + static_cast<std::uintptr_t>(page) * SAMPLE_PAGE;
                 const std::size_t remaining = scope.size - page * SAMPLE_PAGE;
                 const std::size_t want = (remaining < SAMPLE_PAGE) ? remaining : SAMPLE_PAGE;
-                if (!Memory::seh_read_bytes(page_address, buffer.data(), want))
+                if (!guarded_read_bytes(page_address, buffer.data(), want))
                 {
                     // A page that faults mid-read is skipped; the sample stays a valid (smaller) lower bound.
                     continue;
@@ -140,7 +132,7 @@ namespace DetourModKit
                                                                           const scan::DirectPattern &direct) noexcept
         {
             const std::uintptr_t resolved = match + static_cast<std::uintptr_t>(direct.walk_back);
-            if (!Memory::plausible_userspace_ptr(resolved))
+            if (!is_plausible_ptr(resolved))
             {
                 return std::nullopt;
             }
@@ -154,7 +146,7 @@ namespace DetourModKit
         resolve_rip_relative_candidate(std::uintptr_t match, const scan::RipRelativePattern &rip) noexcept
         {
             const std::uintptr_t displacement_address = match + static_cast<std::uintptr_t>(rip.displacement_at);
-            const std::optional<std::int32_t> displacement = Memory::seh_read<std::int32_t>(displacement_address);
+            const std::optional<std::int32_t> displacement = guarded_read<std::int32_t>(displacement_address);
             if (!displacement)
             {
                 return std::nullopt;
@@ -162,7 +154,7 @@ namespace DetourModKit
             const std::uintptr_t next_instruction = match + static_cast<std::uintptr_t>(rip.instruction_length);
             const std::uintptr_t resolved =
                 static_cast<std::uintptr_t>(static_cast<std::int64_t>(next_instruction) + *displacement);
-            if (!Memory::plausible_userspace_ptr(resolved))
+            if (!is_plausible_ptr(resolved))
             {
                 return std::nullopt;
             }

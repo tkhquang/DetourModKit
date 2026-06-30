@@ -15,7 +15,7 @@ Names are returned in MSVC mangled form, for example `.?AVMyClass@ns@@`. Compare
 The walker treats the following layout as a long-term contract. It has been stable across every Visual C++ release since VS 2010 and is what IDA Pro, Ghidra, Binary Ninja, MinHook, SafetyHook, Detours, and EasyHook all rely on:
 
 ```text
-vtable[0]   --> first virtual method                  (the qword Memory::seh_read returns when reading *obj)
+vtable[0]   --> first virtual method                  (the qword memory::read returns when reading *obj)
 vtable[-1]  --> RTTICompleteObjectLocator *col        (qword stored immediately before the vtable)
 
 col + 0x00  : DWORD signature           (1 on x64, 0 on x86)
@@ -58,7 +58,7 @@ constexpr std::string_view k_actor_rtti = ".?AVActorComponent@engine@@";
 
 bool actor_is_ready(std::uintptr_t actor_ptr) noexcept
 {
-    const auto vt_opt = DMK::Memory::seh_read<std::uintptr_t>(actor_ptr);
+    const auto vt_opt = DMK::memory::read<std::uintptr_t>(DMK::Address{actor_ptr});
     if (!vt_opt)
         return false;
     return DMK::Rtti::vtable_is_type(*vt_opt, k_actor_rtti);
@@ -126,12 +126,12 @@ namespace { DMK::Rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
 
 bool is_combat_camera(std::uintptr_t obj) noexcept
 {
-    const auto vt = DMK::Memory::seh_read<std::uintptr_t>(obj);
+    const auto vt = DMK::memory::read<std::uintptr_t>(DMK::Address{obj});
     return vt && g_camera_id.matches(*vt); // resolves once, then a qword compare
 }
 ```
 
-Scoping to one `ModuleRange` (the default is the host EXE) is load-bearing for correctness, not just ergonomics: the same mangled name can appear in several loaded modules. Pass the game module's range explicitly when the target type lives in a separate DLL.
+Scoping to one `Region` (the default is the host EXE) is load-bearing for correctness, not just ergonomics: the same mangled name can appear in several loaded modules. Pass the game module's range explicitly when the target type lives in a separate DLL.
 
 ## Performance notes
 
@@ -154,6 +154,6 @@ None of these raise an exception; the caller can treat all failure modes uniform
 
 ## MinGW support
 
-The walker works correctly on both MSVC and MinGW builds of DetourModKit when targeting MSVC-compiled binaries (the typical use case for game mods). The underlying `Memory::seh_read_bytes` primitive uses `__try` / `__except` on MSVC and the process-wide vectored fault guard on MinGW. Both toolchains fail closed on unreadable RTTI pages and produce identical results for stable game state; MSVC remains faster because its x64 SEH tables add no success-path setup.
+The walker works correctly on both MSVC and MinGW builds of DetourModKit when targeting MSVC-compiled binaries (the typical use case for game mods). The underlying guarded read engine behind `memory::read_into` uses `__try` / `__except` on MSVC and the process-wide vectored fault guard on MinGW. Both toolchains fail closed on unreadable RTTI pages and produce identical results for stable game state; MSVC remains faster because its x64 SEH tables add no success-path setup.
 
 Note: the walker reads the MSVC RTTI ABI. If the target object was compiled by GCC or Clang for the Itanium C++ ABI, the layout at `vtable - 8` is different and the walker will fail. This is by design; DetourModKit consumers building mods for MSVC-compiled games (every major Windows game engine since 2010) will not encounter Itanium RTTI in their target processes.

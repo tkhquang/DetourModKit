@@ -66,7 +66,7 @@ When `true`, the create/apply path pre-flight-decodes the first byte of the orig
 
 If the first byte is `0xEB` (jmp rel8) or `0xE9` (jmp rel32), the decoder resolves the jump target through the existing `x86_decode` helpers and rejects the slot when the target is in the same module as the slot. A slot whose first instruction is a same-module jump is a jump stub (e.g. an incremental-link ILT entry or a patched slot), not a function body; MSVC adjustor thunks for multiple-inheritance vtables start with the this-adjust instruction and pass. Known false positive: consumer binaries built with `/INCREMENTAL` route every function through an ILT jump stub, which this check rejects. Real functions and tail-calls to a foreign module (`mov reg,reg; jmp <external>`) pass.
 
-The decoder is allocation-free, no-throw, and uses `Memory::seh_read_bytes` for the single byte it needs. A slot whose first byte is unreadable fails the check (no proof of function).
+The decoder is allocation-free, no-throw, and uses the guarded `memory::read` for the single byte it needs. A slot whose first byte is unreadable fails the check (no proof of function).
 
 The pre-flight decodes slot 0 only; `hook_vmt_method` does not re-check the slot it replaces.
 

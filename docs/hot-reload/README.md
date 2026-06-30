@@ -671,7 +671,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **DMK singletons (Logger, HookManager, etc.):** **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
 
-**Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `Memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
+**Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Hooks restore original bytes via SafetyHook; direct `memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
 
 **Config file on disk:** **Persists** across reloads. Edit the INI, press reload, and new values take effect.
 
@@ -716,7 +716,8 @@ void apply_patch(std::byte* addr, const std::byte* new_bytes, size_t len)
     patch.original_bytes.resize(len);
     std::copy_n(addr, len, patch.original_bytes.data());
 
-    auto result = DMKMemory::write_bytes(addr, new_bytes, len);
+    auto result = DMKMemory::write_bytes(
+        DMK::Address{addr}, std::span<const std::byte>{new_bytes, len});
     if (!result) {
         DMKLogger::get_instance().error("apply_patch: write_bytes failed");
         return;
@@ -729,7 +730,7 @@ void revert_all_patches()
     for (auto it = s_active_patches.rbegin(); it != s_active_patches.rend(); ++it)
     {
         auto result = DMKMemory::write_bytes(
-            it->address, it->original_bytes.data(), it->original_bytes.size());
+            DMK::Address{it->address}, std::span<const std::byte>{it->original_bytes});
         if (!result) {
             DMKLogger::get_instance().error("revert_all_patches: write_bytes failed");
         }

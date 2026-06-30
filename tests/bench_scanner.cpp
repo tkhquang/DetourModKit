@@ -21,6 +21,7 @@
  */
 
 #include "DetourModKit/scan.hpp"
+#include "internal/memory_guarded.hpp"
 #include "internal/scan_engine.hpp"
 
 #include <algorithm>
@@ -176,10 +177,10 @@ namespace
 
         [[nodiscard]] std::size_t size() const noexcept { return m_size; }
 
-        [[nodiscard]] DetourModKit::Memory::ModuleRange range() const noexcept
+        [[nodiscard]] DetourModKit::detail::ModuleSpan range() const noexcept
         {
             const auto base = reinterpret_cast<std::uintptr_t>(m_base);
-            return DetourModKit::Memory::ModuleRange{base, base + m_size};
+            return DetourModKit::detail::ModuleSpan{base, base + m_size};
         }
 
     private:
@@ -449,7 +450,7 @@ namespace
         std::vector<scan::OwnedScanRequest> owned(target_count);
         std::vector<std::uintptr_t> expected(target_count, 0);
 
-        const Memory::ModuleRange mod_range = page.range();
+        const detail::ModuleSpan mod_range = page.range();
         const Region mod_region{Address{mod_range.base}, mod_range.end - mod_range.base};
         const std::size_t spacing = (module_size - 8192u) / target_count;
         for (std::size_t i = 0; i < target_count; ++i)

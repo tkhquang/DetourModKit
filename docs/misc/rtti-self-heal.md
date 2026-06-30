@@ -179,7 +179,7 @@ A drift report is the signal that a patch moved a layout. When it shows a field 
 
 ## Performance and the init-time contract
 
-`Memory::module_range_for` issues a `GetModuleHandleEx` lookup on **every** call, even a cache hit. `identify_pointee_type` calls it up to twice per slot, so a naive window scan is thousands of syscalls. Therefore `heal_landmark`, `solve_fingerprint`, and `reverse_scan_block` are documented **init-time / re-heal-on-miss**, not per-frame. The `window` is capped at `MAX_HEAL_WINDOW` (4096 bytes, 512 slots per side) so the worst case is bounded, and `heal_landmark` reuses one stack `PointeeType` so the heal path allocates nothing.
+`memory::module_of` issues a `GetModuleHandleEx` lookup on **every** call, even a cache hit. `identify_pointee_type` calls it up to twice per slot, so a naive window scan is thousands of syscalls. Therefore `heal_landmark`, `solve_fingerprint`, and `reverse_scan_block` are documented **init-time / re-heal-on-miss**, not per-frame. The `window` is capped at `MAX_HEAL_WINDOW` (4096 bytes, 512 slots per side) so the worst case is bounded, and `heal_landmark` reuses one stack `PointeeType` so the heal path allocates nothing.
 
 ## Failure modes (all fail closed)
 

@@ -46,7 +46,7 @@ namespace DMKScan = DetourModKit::scan;
 namespace DMKString = DetourModKit::String;
 namespace DMKFormat = DetourModKit::Format;
 namespace DMKFilesystem = DetourModKit::Filesystem;
-namespace DMKMemory = DetourModKit::Memory;
+namespace DMKMemory = DetourModKit::memory;
 namespace DMKMath = DetourModKit::Math;
 namespace DMKBootstrap = DetourModKit::Bootstrap;
 namespace DMKRtti = DetourModKit::Rtti;
@@ -111,7 +111,7 @@ inline void DMK_Shutdown() noexcept
     DetourModKit::HookManager::get_instance().shutdown();
 
     // 4. Memory cache (background cleanup thread must stop before Logger shuts down)
-    DetourModKit::Memory::shutdown_cache();
+    DetourModKit::memory::shutdown_cache();
 
     // 5. Clear registered config items (static vector cleanup)
     DetourModKit::Config::clear_registered_items();

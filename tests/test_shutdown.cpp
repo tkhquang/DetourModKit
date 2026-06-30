@@ -121,16 +121,16 @@ TEST_F(DMKShutdownTest, ShutdownWithLoggerConfigured)
 
 TEST_F(DMKShutdownTest, ShutdownWithMemoryCacheInitialized)
 {
-    bool init_ok = Memory::init_cache();
+    bool init_ok = memory::init_cache();
     ASSERT_TRUE(init_ok);
 
     DMK_Shutdown();
 
     // After shutdown, re-init should succeed and stats should reflect a fresh cache
-    bool reinit_ok = Memory::init_cache();
+    bool reinit_ok = memory::init_cache();
     ASSERT_TRUE(reinit_ok);
 
-    std::string stats = Memory::get_cache_stats();
+    std::string stats = memory::get_cache_stats();
     EXPECT_NE(stats.find("Hits: 0"), std::string::npos);
     EXPECT_NE(stats.find("Misses: 0"), std::string::npos);
 }
