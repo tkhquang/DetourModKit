@@ -384,7 +384,7 @@ namespace DetourModKit::Bootstrap
                 // callbacks for held bindings live in the unloading Logic DLL;
                 // running them under loader lock is the deadlock-or-crash vector that the leak-on-purpose discipline
                 // was set up to forbid.
-                bindings_removed += InputManager::get_instance().remove_binding_by_name(name, false);
+                bindings_removed += input::Input::instance().remove_bindings_by_name(name, false);
             }
             catch (const std::exception &e)
             {
@@ -399,7 +399,7 @@ namespace DetourModKit::Bootstrap
 
         logger.info("Bootstrap: on_logic_dll_unload drained {} binding(s).", bindings_removed);
 
-        // Wipe the Config registry last because the prior hook and binding teardown may invoke a registered setter one
+        // Wipe the config registry last because the prior hook and binding teardown may invoke a registered setter one
         // final time (a setter that observes a binding-driven flag, for instance). Clearing first would orphan that
         // final-fire path mid-call. The registered std::function setters' call operators, vtables, and destructors live
         // in the Logic DLL's
@@ -412,8 +412,8 @@ namespace DetourModKit::Bootstrap
         // A survivor would call into unmapped pages after the DLL goes away, and would make the next attach's
         // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
         // no-op when no watcher is running.
-        Config::disable_auto_reload();
-        Config::clear_registered_items();
+        config::disable_auto_reload();
+        config::clear();
     }
 
     void on_logic_dll_unload_all() noexcept
@@ -431,7 +431,7 @@ namespace DetourModKit::Bootstrap
         bool bindings_cleared = false;
         try
         {
-            InputManager::get_instance().clear_bindings(false);
+            input::Input::instance().clear_bindings(false);
             bindings_cleared = true;
         }
         catch (const std::exception &e)
@@ -468,7 +468,7 @@ namespace DetourModKit::Bootstrap
             }
         }
 
-        // Wipe the Config registry last for the same reason as the named-list overload: the prior remove_all_hooks /
+        // Wipe the config registry last for the same reason as the named-list overload: the prior remove_all_hooks /
         // clear_bindings calls may fire a registered setter one final time, and clearing first would orphan that path.
         // The registered std::function setters' call operators, vtables,
         // and destructors live in the unloading Logic DLL's .text;
@@ -479,7 +479,7 @@ namespace DetourModKit::Bootstrap
         // A survivor would call into unmapped pages after the DLL goes away, and would make the next attach's
         // enable_auto_reload() report AlreadyRunning instead of starting fresh. disable_auto_reload() is noexcept and a
         // no-op when no watcher is running.
-        Config::disable_auto_reload();
-        Config::clear_registered_items();
+        config::disable_auto_reload();
+        config::clear();
     }
 } // namespace DetourModKit::Bootstrap

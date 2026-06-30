@@ -1,12 +1,12 @@
-#ifndef DETOURMODKIT_INPUT_KEY_CACHE_HPP
-#define DETOURMODKIT_INPUT_KEY_CACHE_HPP
+#ifndef DETOURMODKIT_INTERNAL_INPUT_KEY_CACHE_HPP
+#define DETOURMODKIT_INTERNAL_INPUT_KEY_CACHE_HPP
 
 /**
  * @file input_key_cache.hpp
  * @brief Internal per-poll-cycle memoization of virtual-key down-state.
  * @details Poll-thread-private helper used by InputPoller's binding-evaluation pass. Windows-agnostic and
  *          allocation-free so it can be unit-tested off a live message queue (the down-state probe is injected),
- *          mirroring the src-internal header pattern used by input_intercept.hpp. Not installed.
+ *          mirroring the src/internal engine-header pattern. Not installed.
  */
 
 #include <array>
@@ -69,4 +69,4 @@ namespace DetourModKit::detail
     };
 } // namespace DetourModKit::detail
 
-#endif // DETOURMODKIT_INPUT_KEY_CACHE_HPP
+#endif // DETOURMODKIT_INTERNAL_INPUT_KEY_CACHE_HPP
