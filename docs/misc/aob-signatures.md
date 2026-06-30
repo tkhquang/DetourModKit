@@ -694,6 +694,7 @@ Anonymous signatures make regressions unreadable. Attach a human-friendly label 
 
 ```cpp
 namespace sc = DetourModKit::scan;
+namespace hk = DetourModKit::hook;
 
 const auto pat_result = sc::Pattern::compile("E8 ?? ?? ?? ?? 48 89 43 10");
 if (!pat_result) return;
@@ -705,11 +706,38 @@ if (!hit) return;
 const auto target = sc::resolve_rip_relative(*hit, /*displacement_offset=*/1, /*instruction_length=*/5);
 if (!target) return;
 
-hook_mgr.create_inline_hook("callee_hook", target->value(), &Detour_Callee,
-                            reinterpret_cast<void**>(&g_callee_orig), {});
+// hook::inline_at takes the resolved Address directly and returns a move-only RAII Hook. inline_at does the single
+// function-to-void* cast for you; hold the handle for the hook's lifetime (here, a function-static optional).
+static std::optional<hk::Hook> g_callee_hook;
+auto installed = hk::inline_at(
+    hk::InlineRequest{.name = "callee_hook", .target = *target}, &Detour_Callee);
+if (!installed)
+{
+    logger.error("callee hook failed: {}", installed.error().message());
+    return;
+}
+g_callee_hook.emplace(std::move(*installed));
+// Inside Detour_Callee, reach the original via g_callee_hook->original<CalleeFn>() (typed trampoline) or
+// g_callee_hook->call<Ret>(args...) (guarded original-call). No separate "original" out-pointer is registered.
 ```
 
 If your pattern embeds a `|` marker, `scan::scan` has already applied `Pattern::offset()` to the returned address: pass it directly to `resolve_rip_relative`. Adding the offset again would double-apply and advance past the opcode.
+
+> Resolve-on-install alternative. When the target is a *function entry* found by a `direct` candidate (not a two-step RIP resolution like the one above), skip the manual scan and hand a `scan::OwnedScanRequest` straight to `inline_at` / `mid_at` as the `target`. The verb resolves the ladder at install time, so the same `OwnedScanRequest` you would pass to `scan::resolve` doubles as the hook target:
+>
+> ```cpp
+> hk::inline_at(
+>     hk::InlineRequest{
+>         .name = "weapon_fire",
+>         .target = sc::OwnedScanRequest{
+>             .ladder = {sc::Candidate::direct("weapon_fire_v1",
+>                            sc::Pattern::literal("48 89 5C 24 ?? 57 48 83 EC 30"))},
+>             .label = "weapon_fire",
+>             .scope = DetourModKit::Region::host(),
+>         },
+>     },
+>     &Detour_WeaponFire);
+> ```
 
 ### 8.2 Resolve a global pointer via `mov rax, [rip+disp32]`
 

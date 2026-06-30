@@ -5,8 +5,8 @@ Enforces the boundary invariants introduced when the 4.0.0 public surface was en
 
   1. The SafetyHook backend is confined. No public API header may include or name the backend
      (safetyhook), pull <psapi.h>, or reference Zydis/Zycore. The single sanctioned coupling
-     point is the non-installed src/internal/hook_backend.hpp, which only src/hook_manager.cpp
-     includes. A consumer that includes hook_manager.hpp must therefore compile with SafetyHook
+     point is the non-installed src/internal/hook_backend.hpp, which only src/hook.cpp
+     includes. A consumer that includes hook.hpp must therefore compile with SafetyHook
      off its own include path.
 
   2. hook::MidContext is never defined. It is an opaque, pass-through alias for the backend's
@@ -28,7 +28,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The one non-installed private header allowed to see the backend; only src/hook_manager.cpp includes it. It lives
+# The one non-installed private header allowed to see the backend; only src/hook.cpp includes it. It lives
 # under src/internal/ (not a public header), so the public-surface backend check below already skips it; the constant
 # is kept for documentation and to localize the sanctioned coupling point.
 BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
@@ -49,12 +49,13 @@ MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?Mi
 # Matches a class/struct DECLARATION token for an async-logger internal type (decl or def alike).
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
 
-# --- v4 scan clean-break gates ---
-# The legacy scan public surface is deleted; these files must not reappear.
+# --- v4 clean-break gates ---
+# Legacy public headers deleted by a clean-break reshape; none may reappear.
 LEGACY_HEADERS = (
     "include/DetourModKit/scanner.hpp",
     "include/DetourModKit/anchors.hpp",
     "include/DetourModKit/profile.hpp",
+    "include/DetourModKit/hook_manager.hpp",
 )
 # Legacy scan symbols the v4 surface replaced. None may appear in this repo's own sources: the engine is
 # DetourModKit::detail::EnginePattern / find_pattern, the resolver is scan::resolve / scan::Candidate, and
@@ -75,6 +76,20 @@ LEGACY_MEMORY_TOKEN = re.compile(
     r'|\bseh_read|\bseh_write|\bseh_resolve'
     r'|\bread_ptr_unsafe\b|\bread_ptr_unchecked\b|\bplausible_userspace_ptr\b'
     r'|\bModuleRange\b|\bmodule_range_for\b|\bown_module_range\b|\bhost_module_range\b)')
+# --- v4 hook clean-break gate ---
+# The legacy hook public surface (the HookManager singleton + name registry, HookError / HookConfig / VmtHookConfig,
+# InlineProloguePolicy, HookStatus / HookType, and the create_*_hook / hook_vmt_method / with_vmt_method entry points)
+# was reshaped into the free-function hook:: surface (inline_at / mid_at / install_all / Hook / VmtHook) over the
+# unified ErrorCode. None of these spellings may reappear. Matched after comment stripping. HookManager:: is gated
+# with the scope operator, not a bare \bHookManager\b, on purpose -- broadening to the bare token is both unnecessary
+# and wrong: the HookManager class is deleted, so any standalone-type spelling (HookManager x;, HookManager *, or
+# using X = HookManager) is already a hard compile error that needs no gate; and a bare token would false-positive on
+# the surviving Diagnostics::LeakSubsystem::HookManager enumerator (a distinct, legitimate name that FOLLOWS '::').
+# The scope-only form targets exactly the legacy static-call spelling, the one that could otherwise read as plausible.
+LEGACY_HOOK_TOKEN = re.compile(
+    r'(\bHookManager::|\bHookError\b|\bHookConfig\b|\bVmtHookConfig\b|\bInlineProloguePolicy\b'
+    r'|\bHookStatus\b|\bHookType\b|\bcreate_inline_hook\b|\bcreate_mid_hook\b'
+    r'|\bhook_vmt_method\b|\bwith_vmt_method\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
@@ -159,10 +174,10 @@ def line_of(text, index):
 def main():
     violations = []
 
-    # v4 scan gate A: the deleted legacy scan headers must not reappear.
+    # v4 gate A: the deleted legacy public headers must not reappear.
     for legacy in LEGACY_HEADERS:
         if (REPO / legacy).is_file():
-            violations.append(f"{legacy}: legacy scan header still present; the v4 public surface is scan.hpp")
+            violations.append(f"{legacy}: legacy public header still present; it was replaced by the v4 surface")
 
     # v4 memory gate A: the relocated private fault header must not reappear at its old path.
     if (REPO / "src" / "memory_internal.hpp").is_file():
@@ -231,6 +246,13 @@ def main():
             if mm:
                 violations.append(
                     f"{rel}:{n}: legacy memory symbol '{mm.group(1).strip()}' (replaced by the v4 memory surface)")
+
+        # v4 hook gate D: no legacy hook symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            hm = LEGACY_HOOK_TOKEN.search(line)
+            if hm:
+                violations.append(
+                    f"{rel}:{n}: legacy hook symbol '{hm.group(1).strip()}' (replaced by the v4 hook surface)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")

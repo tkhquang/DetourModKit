@@ -12,10 +12,10 @@
  *               code, so it is invisible to GetAsyncKeyState. A window-procedure subclass intercepts WM_MOUSEWHEEL /
  *               WM_MOUSEHWHEEL and latches each notch for the poll loop to consume.
  *
- *          Ownership: this module owns its safetyhook InlineHook objects directly
- *          rather than registering them with HookManager. The poll thread reads the XInput trampoline pointer every
- *          cycle, and the hook lifetime must be coupled to the poll thread's lifetime; routing it through the shared
- *          HookManager registry would let remove_all_hooks() free the trampoline underneath a live poll thread.
+ *          Ownership: this module owns its safetyhook InlineHook objects directly rather than through a separately
+ *          owned DMK Hook handle. The poll thread reads the XInput trampoline pointer every cycle, and the hook
+ *          lifetime must be coupled to the poll thread's lifetime; a handle owned elsewhere could be dropped (freeing
+ *          the trampoline) underneath a live poll thread.
  *
  *          State the detours read lives in file-scope statics (not InputPoller members) so that on the loader-lock
  *          teardown path -- where InputPoller is leaked and its poll thread detached -- the still-installed detours

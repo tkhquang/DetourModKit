@@ -12,7 +12,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 |--------|-------------|--------|
 | Core Vocabulary (v4) | Strongly-typed `Address` and `Region` value types (constexpr arithmetic, a single audited cast surface, named scope factories), the backend-neutral `Prot` protection flags, and one unified error idiom: the eight per-domain enums folded into one high-byte-tagged `ErrorCode` superset (`category()` recovers the subsystem), a trivially-copyable `Error`, `Result<T> = std::expected<T, Error>`, and the `DMK_TRY` / `DMK_TRY_VOID` propagation macros | `address.hpp`, `region.hpp`, `error.hpp`, `defines.hpp` |
 | AOB Scanner | v4 `scan.hpp` surface with value-semantic `Pattern`, factory-only `Candidate` tiers, borrowed and owned `ScanRequest`, `resolve` / `resolve_batch`, page-gated `scan`, and `unchecked::find_pattern`, backed by the existing SIMD scanner with full-byte and per-nibble wildcards, cross-region-boundary overlap, RIP resolution, prologue-recovery fallback, raw and resolve-ladder batch scanning, in-code constants, and string-reference xrefs | `scan.hpp` |
-| Hook Manager | Inline, mid-function, and VMT hooks via SafetyHook with cross-module duplicate-hook detection | `hook_manager.hpp` |
+| Hook (v4) | Free verbs (`hook::inline_at` / `mid_at` / `install_all` / `vmt_for`) returning move-only RAII `Hook` / `VmtHook` handles whose destructors restore the prologue, with the SafetyHook backend fully hidden behind an opaque `hook::MidContext` | `hook.hpp` |
 | Configuration | INI-based settings with key combo support and hot-reload (file watcher + hotkey) | `config.hpp`, `config_watcher.hpp` |
 | Logger | Synchronous singleton logger with format strings | `logger.hpp` |
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
@@ -53,19 +53,17 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 </details>
 
 <details>
-<summary><strong>Hook Manager</strong></summary>
+<summary><strong>Hook (v4)</strong></summary>
 
-- C++ wrapper around [SafetyHook](https://github.com/cursey/safetyhook) for creating and managing hooks. The backend is confined to the library: no public header includes or names SafetyHook, and a mid-hook detour takes an opaque `hook::MidContext` read/written through `gpr()` / `stack_pointer()` / `instruction_pointer()` / `xmm()` accessors, so a consumer writes a detour without SafetyHook on its own include path
-- **Inline hooks** and **mid-function hooks** - target functions by direct address or AOB scan
-  - **Same-address layering is teardown-safe**: when more than one managed hook stacks on one address, bulk teardown (`remove_all_hooks`, `shutdown`, the destructor) disables and destroys them newest-first so each prologue restore lands on still-valid bytes instead of a freed trampoline. `HookConfig::fail_if_already_hooked` refuses a second managed hook on an address this HookManager already hooks (a registry-exact check, in addition to the prologue-byte heuristic that catches foreign-module hooks); explicit single removals must still be ordered newest-first by the caller.
-  - **Unsafe-prologue pre-flight**: inline and mid hook creation decodes the target's first byte under a fault guard and flags a leading `E8` (call rel32) or `0xCC`/`0xCD` (breakpoint) prologue -- a relative call whose displacement would be relocated wrongly, or an already-patched / padding entry. `HookConfig::prologue_policy` selects `InlineProloguePolicy::Warn` (the default: log and install anyway, preserving prior behaviour) or `Fail` (refuse with `HookError::TargetPrologueUnsafe`).
-- **VMT (virtual method table) hooks** - clone an object's vtable and apply it to one or more objects
-  - **Per-method slot replacement (`hook_vmt_method`) and the `with_vmt_method()` accessor are deferred to a post-4.0.0 VMT release.** The object-level clone / apply / remove API and its `VmtHookConfig` pre-flight ship now; the method-redirection layer (and its SafetyHook-typed callback) lands in a later release that also resolves the apply-to race
-  - Apply a single cloned vtable to multiple objects
-  - **`VmtHookConfig` symmetric with inline `HookConfig`**: opt-in `fail_if_already_hooked` refuses a second create/apply whose vptr is already on a clone owned by this HookManager (the silent double-clone bug class), and opt-in `fail_on_non_function_pointer` pre-flight-decodes the first byte of the original vtable slot to reject int3 padding/breakpoints and same-module jump stubs. Both default to off; the single-arg `create_vmt_hook(name, object)` and `apply_vmt_hook(name, object)` overloads are preserved for backward compatibility.
-- **Convenience helpers**: `try_install_inline` / `try_install_inline_aob` / `try_install_mid` / `try_install_mid_aob` fuse `create_*_hook` with single-line Error logging on failure, returning `optional<string>` of the registered name
-- **Duplicate-target query**: `HookManager::is_target_already_hooked(addr)` reports whether the local registry already patches a given address with an inline or mid hook (does not see hooks installed by other statically-linked DMK consumers in the same process)
-- **Batch toggling**: `enable_hooks` / `disable_hooks` (by name span) and `enable_all_hooks` / `disable_all_hooks` toggle many hooks under one lock acquisition for startup and hot-reload phases, returning the count affected (ergonomics, not a performance change: SafetyHook installs via a vectored exception handler and does not suspend threads)
+- Free-verb API around [SafetyHook](https://github.com/cursey/safetyhook): `hook::inline_at` / `hook::mid_at` install one hook and return a move-only RAII `Hook` whose destructor restores the prologue, so a hook's lifetime is its handle's scope (no central singleton, no name-keyed registry). The backend is confined to the library: no public header includes or names SafetyHook, and a mid-hook detour takes an opaque `hook::MidContext` read/written through `gpr()` / `stack_pointer()` / `resume_stack_pointer()` / `instruction_pointer()` / `flags()` / `xmm()` accessors, so a consumer writes a detour without SafetyHook on its own include path
+- **Inline hooks** and **mid-function hooks** - the `InlineRequest` / `MidRequest` `target` is either an absolute `Address` or a `scan::OwnedScanRequest` resolved at install time (resolve-on-install)
+  - `Hook::original<Fn>()` returns the typed trampoline (the UNGUARDED fast path, inline-only); `Hook::call<Ret>(args...)` calls the original through the trampoline under a DMK-owned per-hook `std::recursive_mutex` (by-value `Args` so the reconstructed `Ret(*)(Args...)` is the real by-value C ABI), returning `Ret{}` when the hook is inactive. `enable()` / `disable()` return `Result<void>` and toggle via an atomic CAS; `is_enabled()`, `name()`, and `operator bool` query state; `release()` detaches the hook so it stays installed for the process lifetime
+  - **Same-address layering is teardown-safe by RAII contract**: when two hooks layer on one address, destroy the newest handle first (natural reverse-order destruction of stack/member handles satisfies this automatically). A process-wide ledger detects and warns on an out-of-order teardown instead of silently corrupting the restore. `~Hook` is a loader-lock leaf: under the loader lock it pins the module and records an intentional leak rather than restoring
+  - **Unsafe-prologue pre-flight**: inline and mid hook creation decodes the target's first byte under a fault guard and flags a leading `E8` (call rel32) or `0xCC`/`0xCD` (breakpoint) prologue -- a relative call whose displacement would be relocated wrongly, or an already-patched / padding entry. `Options::prologue` selects `Prologue::Fail` (the v4 default, safe-by-default: refuse with `ErrorCode::TargetPrologueUnsafe`) or `Prologue::Relocate` (log and install anyway, the old v3 `Warn` behaviour). `Options::fail_if_already_hooked` refuses an install when an exact same-kit ledger hit or a foreign-JMP prologue heuristic shows the target is already hooked
+- **Declarative install tables**: `hook::install_all(span<const HookSpec>)` installs a whole table in one call, returning one `InstallOutcome{name, severity, Result<Hook>}` per row. Each `HookSpec::inline_hook` / `mid_hook` factory carries a per-row `Severity`: a `Mandatory` miss fails the whole call and rolls back; a `BestEffort` miss is recorded per-row and skipped while the call still succeeds
+- **VMT (virtual method table) hooks** - `hook::vmt_for(name, object, VmtOptions{...})` clones an object's vtable and returns a move-only `VmtHook`; `apply_to(object)` / `remove_from(object)` add or restore additional objects and `~VmtHook` restores every applied vptr newest-first. `VmtOptions::fail_if_already_hooked` rejects a double-clone, `fail_on_non_function_pointer` pre-flight-decodes the slot to reject int3 padding/breakpoints and same-module jump stubs. Per-method slot replacement (`hook_method<Fn>`) is deferred to a later VMT release
+- **Duplicate-target query**: `hook::is_target_hooked(Address)` reports whether a hook from this kit currently patches a given address (an exact same-kit ledger query; it does not see hooks installed by other statically-linked DMK consumers in the same process). To also catch foreign hooks, set `Options::fail_if_already_hooked` on the install
+- **Unified errors**: every verb returns `Result<T>` over the unified `ErrorCode`; read `result.error().message()` / `result.error().code` (the old `HookError` / `HookStatus` / `HookType` enums and `error_to_string` are folded into the one error idiom)
 
 </details>
 
@@ -341,8 +339,8 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <summary><strong>Diagnostics</strong></summary>
 
 - `Diagnostics::record_intentional_leak` / `intentional_leak_count` / `total_intentional_leaks` / `reset_intentional_leaks` -- per-subsystem tallies for the deliberate leak/detach paths DMK takes under the Windows loader lock (a teardown where a join or free would risk deadlock or use-after-unmap). Each site fires at most once per process; relaxed atomics, allocation-free, safe from a `noexcept` destructor
-- Process-wide typed event bus: `Diagnostics::scanner_faults()` and `Diagnostics::hook_lifecycle()` each return one stable `EventDispatcher<>` for the process lifetime. The stateless scanner emits a `ScannerFaultEvent` (skipped-region count + scanned window) once per sweep that skips a region faulting mid-scan; every `HookManager` emits a `HookLifecycleEvent` (`name`, `HookKind`, `HookTransition`) after a create / enable / disable / remove transition completes and its registry locks are released, so a handler runs outside the critical section. Failed operations and idempotent no-ops emit nothing. Both use `emit_safe`, so with no subscribers the cost is a single atomic load after the dispatcher has been constructed
-- `Diagnostics::collect(hooks, drift_report?)` aggregates the live diagnostics into one `Diagnostics::Snapshot` -- the leak tallies, `get_hook_counts()` folded into active / disabled / total, and a healed/failed count over a `heal_report()` drift report -- so a diagnostics command can capture a one-shot health view in a single call. Setup/control-plane only (it takes a shared lock to read hook counts)
+- Process-wide typed event bus: `Diagnostics::scanner_faults()` and `Diagnostics::hook_lifecycle()` each return one stable `EventDispatcher<>` for the process lifetime. The stateless scanner emits a `ScannerFaultEvent` (skipped-region count + scanned window) once per sweep that skips a region faulting mid-scan; a `Hook` emits a `HookLifecycleEvent` (`name`, `HookKind`, `HookTransition`) after a create / enable / disable / remove transition completes, so a handler runs outside the hook's critical section. Failed operations and idempotent no-ops emit nothing. Both use `emit_safe`, so with no subscribers the cost is a single atomic load after the dispatcher has been constructed
+- `Diagnostics::collect(drift_report?)` aggregates the live diagnostics into one `Diagnostics::Snapshot` -- the leak tallies and a healed/failed count over a `heal_report()` drift report -- so a diagnostics command can capture a one-shot health view in a single call
 
 </details>
 
@@ -449,7 +447,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     ```
 
     The package smoke project includes the installed headers, links the
-    installed `DetourModKit::DetourModKit` target, and touches `HookManager`
+    installed `DetourModKit::DetourModKit` target, and touches `hook::inline_at`
     so the static dependency chain is pulled into the consumer link.
 
 > [!NOTE]
@@ -488,7 +486,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── memory.hpp            <-- Memory utilities
     │   │   ├── profiler.hpp          <-- Scoped timing (zero-cost when disabled)
     │   │   ├── filesystem.hpp        <-- Filesystem utilities
-    │   │   ├── hook_manager.hpp      <-- Hook management
+    │   │   ├── hook.hpp             <-- v4 hooking surface (inline_at / mid_at / install_all / vmt_for -> RAII Hook)
     │   │   ├── input.hpp             <-- Input/hotkey system
     │   │   ├── input_codes.hpp       <-- Unified input codes (keyboard/mouse/gamepad)
     │   │   ├── logger.hpp            <-- Synchronous logger
@@ -763,21 +761,25 @@ This method uses a pre-built and installed version of DetourModKit.
 
 ## Code Example
 
-> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScan::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKHookManager`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
+> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScan::`, `DMKHook::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
 
 ```cpp
 // MyMod/src/main.cpp
 #include <windows.h>
 #include <Psapi.h>
 
+#include <optional>   // the RAII Hook handle is stored in an std::optional global
+
 // Single include for all DetourModKit functionality
 #include <DetourModKit.hpp>
 
-// A mid-hook detour takes DetourModKit::hook::MidContext (from hook_manager.hpp, pulled in by the umbrella above),
-// so a detour body no longer needs SafetyHook on the include path. SafetyHook headers are still installed alongside
-// DetourModKit and remain available; add `#include <safetyhook.hpp>` only if you call SafetyHook directly for
-// something else. SimpleIni is an internal build-time dependency and is NOT installed; do not include <SimpleIni.h>
-// from a find_package consumer. Use the DetourModKit::Config API for INI access instead.
+// The v4 hooking surface lives in hook.hpp (pulled in by the umbrella above): hook::inline_at / mid_at install a hook
+// and hand back a move-only RAII DetourModKit::hook::Hook whose destructor restores the prologue. A mid-hook detour
+// takes an opaque DetourModKit::hook::MidContext, so a detour body no longer needs SafetyHook on the include path.
+// SafetyHook headers are still installed alongside DetourModKit and remain available; add `#include <safetyhook.hpp>`
+// only if you call SafetyHook directly for something else. SimpleIni is an internal build-time dependency and is NOT
+// installed; do not include <SimpleIni.h> from a find_package consumer. Use the DetourModKit::Config API for INI
+// access instead.
 
 // Global variables for your mod's configuration
 struct ModConfiguration
@@ -790,7 +792,11 @@ struct ModConfiguration
 
 // Example Hook: Target function signature
 using OriginalGameFunction_PrintMessage_t = void (__stdcall *)(const char *message, int type);
-OriginalGameFunction_PrintMessage_t original_GameFunction_PrintMessage = nullptr;
+
+// The hook is owned by its RAII handle. Hook is move-only with no default constructor, so a global one lives in an
+// std::optional that InitializeMyMod engages via std::optional::emplace; dropping it (or letting it leave scope)
+// restores the original prologue.
+std::optional<DMKHook::Hook> g_print_hook;
 
 // Detour function
 void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
@@ -798,20 +804,23 @@ void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
     auto &logger = DMKLogger::get_instance();
     logger.info("Detour_GameFunction_PrintMessage CALLED! Original message: \"{}\", type: {}", message, type);
 
-    if (g_mod_config.enable_greeting_hook)
+    // original<Fn>() is the typed trampoline to the un-hooked function (UNGUARDED fast path). It is non-null only
+    // while the hook is engaged; use call<Ret>(args...) instead if a teardown can race this detour.
+    const auto call_original =
+        g_print_hook ? g_print_hook->original<OriginalGameFunction_PrintMessage_t>() : nullptr;
+    if (!call_original)
     {
-        logger.debug("Modifying message because greeting hook is enabled.");
-        if (original_GameFunction_PrintMessage)
-        {
-            original_GameFunction_PrintMessage("Hello from DetourModKit! Hooked!", type + 100);
-        }
         return;
     }
 
-    if (original_GameFunction_PrintMessage)
+    if (g_mod_config.enable_greeting_hook)
     {
-        original_GameFunction_PrintMessage(message, type);
+        logger.debug("Modifying message because greeting hook is enabled.");
+        call_original("Hello from DetourModKit! Hooked!", type + 100);
+        return;
     }
+
+    call_original(message, type);
 }
 
 // Mod Initialization Function (runs on DMKBootstrap's worker thread, off the loader lock)
@@ -848,62 +857,40 @@ bool InitializeMyMod()
     logger.info("MyMod configuration loaded and applied.");
     DMKConfig::log_all();
 
-    // Initialize Hooks
-    auto &hook_manager = DMKHookManager::get_instance();
+    // Initialize Hooks (v4: free verbs returning a move-only RAII Hook handle).
+    // DMKScan is the namespace alias for DetourModKit::scan (from scan.hpp); DMKHook for DetourModKit::hook.
 
-    uintptr_t target_function_address = 0;
+    // The hook target is a scan::OwnedScanRequest: hook::inline_at resolves it at install time (resolve-on-install)
+    // and never carries a dangling pattern span. A one-candidate ladder is the simplest form; ship a fallback
+    // ladder for a long-lived mod (see the AOB Signature Scanning Guide).
+    DMKScan::OwnedScanRequest target{
+        .ladder = {DMKScan::Candidate::direct("GameFunction_PrintMessage",
+                                              DMKScan::Pattern::literal("48 89 ?? ?? 57"))},
+        .label = "GameFunction_PrintMessage",
+        .scope = DetourModKit::Region::host(),   // the host EXE; defaults here too
+    };
 
-    // Example: AOB Scan
-    // DMKScan is the namespace alias for DetourModKit::scan (from scan.hpp).
-    const auto pattern_result = DMKScan::Pattern::compile("48 89 ?? ?? 57");
-    if (pattern_result.has_value())
+    // inline_at performs the single audited function-to-void* cast for you; the call site writes no reinterpret_cast.
+    // Options::prologue defaults to Prologue::Fail (v4 safe-by-default: an E8/CC/CD prologue is refused with
+    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = DMKHook::Prologue::Relocate} for the old install-anyway.
+    auto result = DMKHook::inline_at(
+        DMKHook::InlineRequest{
+            .name = "GameFunction_PrintMessage_Hook",
+            .target = std::move(target),
+        },
+        &Detour_GameFunction_PrintMessage);
+
+    if (result.has_value())
     {
-        // scan::scan walks committed pages in scope; Pages::Executable limits to code pages.
-        const auto host_scope = DetourModKit::Region::host();
-        const auto scan_result = DMKScan::scan(*pattern_result, host_scope, 1,
-                                               DMKScan::Pages::Executable);
-        if (scan_result.has_value())
-        {
-            target_function_address = scan_result->value();
-            logger.info("Pattern found at: {}",
-                        DMKFormat::format_address(target_function_address));
-        }
-        else
-        {
-            logger.error("AOB pattern not found in host module.");
-        }
+        // Take ownership of the RAII handle for the hook's lifetime. While it lives, the detour is engaged and
+        // g_print_hook->original<Fn>() is the trampoline; dropping it restores the prologue.
+        g_print_hook.emplace(std::move(*result));
+        logger.info("Successfully installed hook: {}", g_print_hook->name());
     }
     else
     {
-        logger.error("Failed to compile AOB pattern: {}",
-                     DetourModKit::to_string(pattern_result.error().code));
-    }
-
-    if (target_function_address != 0)
-    {
-        const DMKHookConfig hook_cfg;
-        auto result = hook_manager.create_inline_hook(
-            "GameFunction_PrintMessage_Hook",
-            target_function_address,
-            reinterpret_cast<void *>(Detour_GameFunction_PrintMessage),
-            reinterpret_cast<void **>(&original_GameFunction_PrintMessage),
-            hook_cfg
-        );
-
-        if (result.has_value())
-        {
-            logger.info("Successfully created hook: {}", result.value());
-        }
-        else
-        {
-            logger.error("Failed to create hook: {}",
-                         DMK::Hook::error_to_string(result.error()));
-            return false;
-        }
-    }
-    else
-    {
-        logger.warning("Target address is 0 or not found. Hook not created.");
+        logger.error("Failed to install hook: {}", result.error().message());
+        return false;
     }
 
     // Register hotkey bindings with the InputManager (after hooks are ready).
@@ -932,9 +919,12 @@ bool InitializeMyMod()
 void ShutdownMyMod()
 {
     DMKLogger::get_instance().info("MyMod Shutting Down...");
+    // Drop the RAII Hook handle to restore the prologue before the kit tears down. If several hooks layer on one
+    // address, destroy them newest-first (reset the most-recently-installed handle first).
+    g_print_hook.reset();
     // DMK_Shutdown() is invoked automatically by on_dll_detach() after this
     // function returns, in the correct order:
-    //   Config auto-reload watcher -> InputManager -> HookManager -> Memory cache -> Config registry -> Logger
+    //   Config auto-reload watcher -> InputManager -> Memory cache -> Config registry -> Logger
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
