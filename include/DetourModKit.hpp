@@ -1,8 +1,8 @@
-#ifndef DETOURMODKIT_DMK_HPP
-#define DETOURMODKIT_DMK_HPP
+#ifndef DETOURMODKIT_HPP
+#define DETOURMODKIT_HPP
 
 /**
- * @file dmk.hpp
+ * @file DetourModKit.hpp
  * @brief The DetourModKit umbrella header and the process-lifecycle surface (Session / bootstrap / ModInfo).
  * @details A single include point for the whole kit. It aggregates every public module header and then adds the RAII
  *          Session and the DllMain bootstrap entry points that own a mod's process lifetime. Include this to reach all
@@ -298,46 +298,4 @@ namespace DetourModKit
     void on_logic_dll_unload_all() noexcept;
 } // namespace DetourModKit
 
-/**
- * @brief Convenient namespace aliases for common DetourModKit usage patterns.
- * @details These aliases allow for shorter, more readable code. Example: DMK::Logger instead of DetourModKit::Logger.
- */
-namespace DMK = DetourModKit;
-namespace DMKConfig = DetourModKit::config;
-namespace DMKInput = DetourModKit::input;
-namespace DMKScan = DetourModKit::scan;
-namespace DMKHook = DetourModKit::hook;
-namespace DMKString = DetourModKit::String;
-namespace DMKFormat = DetourModKit::Format;
-namespace DMKFilesystem = DetourModKit::Filesystem;
-namespace DMKMemory = DetourModKit::memory;
-namespace DMKMath = DetourModKit::Math;
-namespace DMKRtti = DetourModKit::rtti;
-
-#ifndef DMK_NO_SHORT_NAMES
-/**
- * @brief Convenient type aliases for commonly used DetourModKit types.
- * @details Shorter names for frequently used types. Define DMK_NO_SHORT_NAMES before including this header to disable.
- */
-using DMKSession = DetourModKit::Session;
-using DMKModInfo = DetourModKit::ModInfo;
-using DMKLogger = DetourModKit::Logger;
-using DMKStoppableWorker = DetourModKit::StoppableWorker;
-using DMKBindingGuard = DetourModKit::input::BindingGuard;
-using DMKScope = DetourModKit::input::Scope;
-using DMKLogLevel = DetourModKit::LogLevel;
-using DMKAsyncLogger = DetourModKit::AsyncLogger;
-using DMKAsyncLoggerConfig = DetourModKit::AsyncLoggerConfig;
-using DMKOverflowPolicy = DetourModKit::OverflowPolicy;
-using DMKComboBinding = DetourModKit::input::ComboBinding;
-using DMKTrigger = DetourModKit::input::Trigger;
-using DMKInputSource = DetourModKit::InputSource;
-using DMKInputCode = DetourModKit::InputCode;
-using DMKKeyCombo = DetourModKit::input::KeyCombo;
-using DMKKeyComboList = DetourModKit::input::KeyComboList;
-using DMKProfiler = DetourModKit::Profiler;
-using DMKScopedProfile = DetourModKit::ScopedProfile;
-using DMKProfileSample = DetourModKit::ProfileSample;
-#endif // DMK_NO_SHORT_NAMES
-
-#endif // DETOURMODKIT_DMK_HPP
+#endif // DETOURMODKIT_HPP

@@ -3,6 +3,7 @@
 
 #include "internal/async_logger_queue.hpp"
 #include "platform.hpp"
+#include "internal/win_file_stream.hpp"
 
 #include <algorithm>
 #include <condition_variable>
@@ -445,7 +446,7 @@ namespace DetourModKit
     // public call to the matching Impl method.
     struct AsyncLogger::Impl
     {
-        Impl(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+        Impl(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
              std::shared_ptr<std::mutex> log_mutex);
         ~Impl() noexcept;
 
@@ -481,7 +482,7 @@ namespace DetourModKit
         detail::DynamicMPMCQueue m_queue;
         AsyncLoggerConfig m_config;
 
-        std::shared_ptr<WinFileStream> m_file_stream;
+        std::shared_ptr<detail::WinFileStream> m_file_stream;
         std::shared_ptr<std::mutex> m_log_mutex;
 
         std::jthread m_writer_thread;
@@ -500,7 +501,7 @@ namespace DetourModKit
         std::atomic<size_t> m_dropped_messages{0};
     };
 
-    AsyncLogger::Impl::Impl(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+    AsyncLogger::Impl::Impl(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
                             std::shared_ptr<std::mutex> log_mutex)
         : m_queue(config.queue_capacity), m_config(config), m_file_stream(std::move(file_stream)),
           m_log_mutex(std::move(log_mutex))
@@ -620,8 +621,8 @@ namespace DetourModKit
             {
                 pin_current_module();
                 m_writer_thread.detach();
-                DetourModKit::Diagnostics::record_intentional_leak(
-                    DetourModKit::Diagnostics::LeakSubsystem::AsyncLogger);
+                DetourModKit::diagnostics::record_intentional_leak(
+                    DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
             }
             else
             {
@@ -936,7 +937,7 @@ namespace DetourModKit
     // AsyncLogger is a thin facade: construction builds the Impl (which validates the config and starts the writer
     // thread), and every public method forwards to it. The out-of-line destructor sees the complete Impl so the
     // unique_ptr can delete it (Impl::~Impl drains and joins the writer).
-    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex)
         : m_impl(std::make_unique<Impl>(config, std::move(file_stream), std::move(log_mutex)))
     {

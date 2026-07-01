@@ -14,7 +14,7 @@ Invariants enforced against the prefix (argv[1]):
     * lib*/cmake/safetyhook, lib*/cmake/Zydis, lib*/cmake/Zycore (backend package configs; a find_package(safetyhook)
       must NOT be satisfiable from a DetourModKit prefix)
     * the deleted v4 legacy public headers under include/DetourModKit/ (scanner/anchors/profile/hook_manager/
-      config_watcher/bootstrap/diagnostics_dump) and the root include/DetourModKit.hpp umbrella
+      config_watcher/bootstrap/diagnostics_dump) and the interim in-directory umbrella include/DetourModKit/dmk.hpp
     * include/DetourModKit/internal/ (the true-private engine is never installed)
 
   REQUIRED (must be present) -- the package must actually be usable by a find_package consumer:
@@ -22,7 +22,7 @@ Invariants enforced against the prefix (argv[1]):
     * the three dependency archives shipped for DetourModKit::deps (safetyhook, Zydis, Zycore), in either the MinGW
       (lib<name>.a) or MSVC (<name>.lib) spelling
     * the package config trio (DetourModKitConfig.cmake / DetourModKitConfigVersion.cmake / DetourModKitTargets.cmake)
-    * the public umbrella header include/DetourModKit/dmk.hpp and the generated include/DetourModKit/version.hpp
+    * the public umbrella header include/DetourModKit.hpp and the generated include/DetourModKit/version.hpp
 
 Exit status is 1 with offenders printed when any invariant is violated, else 0. The DirectXMath re-export is deliberate
 and default-on, so this gate does not treat include/DirectXMath as a leak; a prefix built with DMK_INSTALL_DIRECTXMATH
@@ -46,7 +46,7 @@ LEGACY_INSTALLED_HEADERS = (
     "include/DetourModKit/config_watcher.hpp",
     "include/DetourModKit/bootstrap.hpp",
     "include/DetourModKit/diagnostics_dump.hpp",
-    "include/DetourModKit.hpp",
+    "include/DetourModKit/dmk.hpp",
 )
 
 
@@ -113,7 +113,7 @@ def main():
     for config in ("DetourModKitConfig.cmake", "DetourModKitConfigVersion.cmake", "DetourModKitTargets.cmake"):
         if not (cmake_dir / config).is_file():
             violations.append(f"missing {libdir.name}/cmake/DetourModKit/{config}")
-    for header in ("include/DetourModKit/dmk.hpp", "include/DetourModKit/version.hpp"):
+    for header in ("include/DetourModKit.hpp", "include/DetourModKit/version.hpp"):
         if not (prefix / header).is_file():
             violations.append(f"missing public header {header}")
 

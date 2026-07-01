@@ -5,7 +5,7 @@
  * @file diagnostics.hpp
  * @brief Consumer-queryable counters for DMK's intentional leak / detach paths, a process-wide diagnostic event bus
  *        for scanner-fault and hook-lifecycle transitions, and a one-call runtime-diagnostics @ref
- *        DetourModKit::Diagnostics::Snapshot aggregator.
+ *        DetourModKit::diagnostics::Snapshot aggregator.
  */
 
 #include "DetourModKit/anchor.hpp"
@@ -20,7 +20,7 @@
 
 namespace DetourModKit
 {
-    namespace Diagnostics
+    namespace diagnostics
     {
         /**
          * @enum LeakSubsystem
@@ -211,7 +211,7 @@ namespace DetourModKit
          */
         [[nodiscard]] Snapshot collect(std::span<const rtti::DriftEntry> drift_report = {},
                                        std::span<const anchor::ResolvedAnchor> anchor_report = {});
-    } // namespace Diagnostics
+    } // namespace diagnostics
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_DIAGNOSTICS_HPP

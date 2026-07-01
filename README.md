@@ -27,7 +27,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Math Utilities | Angle conversions (header-only) | `math.hpp` |
 | Version Macros | Compile-time version checking generated from CMake | `version.hpp` |
 | Input System | Hotkey monitoring with background polling (keyboard/mouse/gamepad) | `input.hpp`, `input_codes.hpp` |
-| Session and Bootstrap | RAII process lifetime with ordered teardown, DllMain scaffolding, instance mutex, process gate, lifecycle worker | `dmk.hpp` |
+| Session and Bootstrap | RAII process lifetime with ordered teardown, DllMain scaffolding, instance mutex, process gate, lifecycle worker | `DetourModKit.hpp` |
 | Diagnostics | Consumer-queryable counters for intentional loader-lock leak/detach events per subsystem, a process-wide typed event bus for scanner-fault and hook install/enable/disable/remove transitions, and a one-call snapshot aggregator over the counters, hook counts, anchor quality, and drift report | `diagnostics.hpp` |
 | Stoppable Worker | RAII named `std::jthread` wrapper, loader-lock-safe teardown | `detail/worker.hpp` |
 
@@ -329,7 +329,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <details>
 <summary><strong>Stoppable Worker</strong></summary>
 
-- `DMKStoppableWorker` - RAII wrapper around `std::jthread` with a descriptive name, `std::stop_token` cooperation, and loader-lock-safe teardown
+- `DMK::StoppableWorker` - RAII wrapper around `std::jthread` with a descriptive name, `std::stop_token` cooperation, and loader-lock-safe teardown
 - Body is invoked with a `std::stop_token` and must poll `stop_requested()` cooperatively
 - Destructor (and explicit `shutdown()`) requests stop and joins the thread; when called under the Windows loader lock the thread is detached instead, pinning the module so code pages stay mapped
 - Non-copyable and non-movable: the name, stop state, and thread handle form a single invariant
@@ -340,9 +340,9 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <details>
 <summary><strong>Diagnostics</strong></summary>
 
-- `Diagnostics::record_intentional_leak` / `intentional_leak_count` / `total_intentional_leaks` / `reset_intentional_leaks` -- per-subsystem tallies for the deliberate leak/detach paths DMK takes under the Windows loader lock (a teardown where a join or free would risk deadlock or use-after-unmap). Each site fires at most once per process; relaxed atomics, allocation-free, safe from a `noexcept` destructor
-- Process-wide typed event bus: `Diagnostics::scanner_faults()` and `Diagnostics::hook_lifecycle()` each return one stable `EventDispatcher<>` for the process lifetime. The stateless scanner emits a `ScannerFaultEvent` (skipped-region count + scanned window) once per sweep that skips a region faulting mid-scan; a `Hook` emits a `HookLifecycleEvent` (`name`, `HookKind`, `HookTransition`) after a create / enable / disable / remove transition completes, so a handler runs outside the hook's critical section. Failed operations and idempotent no-ops emit nothing. Both use `emit_safe`, so with no subscribers the cost is a single atomic load after the dispatcher has been constructed
-- `Diagnostics::collect(drift_report?, anchor_report?)` aggregates the live diagnostics into one `Diagnostics::Snapshot` -- the leak tallies, the live hook population (`hooks_total` / `hooks_active` / `hooks_disabled`, derived from the hook-lifecycle transition stream), a healed/failed count over a `heal_report()` drift report, and an `anchor_quality` roll-up (via `anchor::assess_quality`) over a resolved-anchor report -- so a diagnostics command can capture a one-shot health view in a single call
+- `diagnostics::record_intentional_leak` / `intentional_leak_count` / `total_intentional_leaks` / `reset_intentional_leaks` -- per-subsystem tallies for the deliberate leak/detach paths DMK takes under the Windows loader lock (a teardown where a join or free would risk deadlock or use-after-unmap). Each site fires at most once per process; relaxed atomics, allocation-free, safe from a `noexcept` destructor
+- Process-wide typed event bus: `diagnostics::scanner_faults()` and `diagnostics::hook_lifecycle()` each return one stable `EventDispatcher<>` for the process lifetime. The stateless scanner emits a `ScannerFaultEvent` (skipped-region count + scanned window) once per sweep that skips a region faulting mid-scan; a `Hook` emits a `HookLifecycleEvent` (`name`, `HookKind`, `HookTransition`) after a create / enable / disable / remove transition completes, so a handler runs outside the hook's critical section. Failed operations and idempotent no-ops emit nothing. Both use `emit_safe`, so with no subscribers the cost is a single atomic load after the dispatcher has been constructed
+- `diagnostics::collect(drift_report?, anchor_report?)` aggregates the live diagnostics into one `diagnostics::Snapshot` -- the leak tallies, the live hook population (`hooks_total` / `hooks_active` / `hooks_disabled`, derived from the hook-lifecycle transition stream), a healed/failed count over a `heal_report()` drift report, and an `anchor_quality` roll-up (via `anchor::assess_quality`) over a resolved-anchor report -- so a diagnostics command can capture a one-shot health view in a single call
 
 </details>
 
@@ -459,7 +459,10 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
 > Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
 > along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
 > with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE
-> linkage so unused DetourModKit symbols are stripped at final link time. MinGW Release builds
+> linkage so unused DetourModKit symbols are stripped at final link time. LTO is suppressed on
+> GCC 15+ (MinGW): its `lto1` mis-links an LTO-built static archive at the consumer's final link
+> (`two or more sections for .gnu.lto_*`), so on that toolchain DetourModKit ships plain object
+> code to keep the archive linkable by any consumer; GCC 13.x and MSVC are unaffected. MinGW Release builds
 > use `-O2` (overriding CMake's default `-O3`) for a better code-size/performance tradeoff.
 > MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
 > Release builds omit debug info entirely to minimize binary size.
@@ -474,17 +477,17 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     ```text
     <install_prefix>/
     ├── include/
+    │   ├── DetourModKit.hpp          <-- Umbrella + Session / bootstrap / bootstrap_detach / ModInfo (DllMain lifecycle)
     │   ├── DetourModKit/             <-- DetourModKit public headers
-    │   │   ├── defines.hpp           <-- v4 portability macros + `dmk` alias
+    │   │   ├── defines.hpp           <-- v4 portability macros + `dmk`/`DMK` aliases
     │   │   ├── address.hpp           <-- v4 Address value type
     │   │   ├── region.hpp            <-- v4 Region + Prot flags
     │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
     │   │   ├── scan.hpp              <-- v4 scanning surface (scan::Pattern + resolve / Candidate / ScanRequest)
     │   │   ├── anchor.hpp            <-- Declarative anchor registry (namespace anchor): AnchorKind / Anchor / ResolvedAnchor / AnchorQuality / ScanProfile / resolve_all / anchor_fingerprint
     │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
-    │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (logger.hpp / dmk.hpp stay light)
-    │   │   ├── detail/               <-- Installed compile-visible support (pattern_core.hpp + demoted headers: event_dispatcher.hpp, win_file_stream.hpp, worker.hpp, drift_manifest.hpp; private impl lives in src/internal/)
-    │   │   ├── dmk.hpp               <-- Umbrella + Session / bootstrap / bootstrap_detach / ModInfo (DllMain lifecycle)
+    │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (logger.hpp / DetourModKit.hpp stay light)
+    │   │   ├── detail/               <-- Installed compile-visible support (pattern_core.hpp + demoted headers: event_dispatcher.hpp, worker.hpp, drift_manifest.hpp; private impl lives in src/internal/)
     │   │   ├── config.hpp
     │   │   ├── diagnostics.hpp       <-- Per-subsystem intentional-leak counters + process-wide event bus + one-call Snapshot aggregator (hooks_total/active/disabled, anchor quality, drift report)
     │   │   ├── format.hpp            <-- String & format utilities
@@ -778,7 +781,7 @@ This method uses a pre-built and installed version of DetourModKit.
 
 ## Code Example
 
-> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit/dmk.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScan::`, `DMKHook::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
+> **The `dmk` / `DMK` namespace aliases:** every DetourModKit header pulls in both `namespace dmk = DetourModKit` and `namespace DMK = DetourModKit` (defined in `defines.hpp`), so mod code can write `DMK::hook`, `DMK::scan`, `DMK::config`, `DMK::Logger`, and so on in place of the fully spelled `DetourModKit::`. They are the same alias in two casings; the examples below use `DMK`. Pick one and stay consistent, or ignore both and use the fully qualified `DetourModKit::` names. There is no flat `DMKConfig` / `DMKSession` alias set and nothing is injected into the global namespace, so the aliases cannot collide with your own symbols.
 
 ```cpp
 // MyMod/src/main.cpp
@@ -788,7 +791,7 @@ This method uses a pre-built and installed version of DetourModKit.
 #include <optional>   // the RAII Hook handle is stored in an std::optional global
 
 // Single include for all DetourModKit functionality (umbrella + Session / bootstrap lifecycle)
-#include <DetourModKit/dmk.hpp>
+#include <DetourModKit.hpp>
 
 // The v4 hooking surface lives in hook.hpp (pulled in by the umbrella above): hook::inline_at / mid_at install a hook
 // and hand back a move-only RAII DetourModKit::hook::Hook whose destructor restores the prologue. A mid-hook detour
@@ -803,8 +806,8 @@ struct ModConfiguration
 {
     bool enable_greeting_hook = true;
     std::string log_level_setting = "INFO";
-    DMKKeyComboList toggle_combo;
-    DMKKeyComboList hold_scroll_combo;
+    DMK::input::KeyComboList toggle_combo;
+    DMK::input::KeyComboList hold_scroll_combo;
 } g_mod_config;
 
 // Example Hook: Target function signature
@@ -813,7 +816,7 @@ using OriginalGameFunction_PrintMessage_t = void (__stdcall *)(const char *messa
 // The hook is owned by its RAII handle. Hook is move-only with no default constructor, so a global one lives in an
 // std::optional that InitializeMyMod engages via std::optional::emplace; dropping it (or letting it leave scope)
 // restores the original prologue.
-std::optional<DMKHook::Hook> g_print_hook;
+std::optional<DMK::hook::Hook> g_print_hook;
 
 // Detour function
 void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
@@ -849,9 +852,9 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
     auto &logger = session.log();
 
     // Bind your configuration variables (callback-store API; config::bind<T> is the atomic hot path)
-    DMKConfig::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
+    DMK::config::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
         [](bool v) { g_mod_config.enable_greeting_hook = v; }, true);
-    DMKConfig::bind_string("Debug", "LogLevel", "Log Level",
+    DMK::config::bind_string("Debug", "LogLevel", "Log Level",
         [](std::string_view v) { g_mod_config.log_level_setting = std::string{v}; }, "INFO");
 
     // Bind hotkey combos from INI (modifier+trigger format)
@@ -860,10 +863,10 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
     // Hex VK codes still work: "0x72", "0x11+0x72"
     // Mouse: "Mouse4", "Ctrl+Mouse1"
     // Gamepad: "Gamepad_A", "Gamepad_LB+Gamepad_A"
-    DMKConfig::bind_combos("Hotkeys", "ToggleKey", "Toggle Keys",
-        [](const DMKKeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
-    DMKConfig::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
-        [](const DMKKeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
+    DMK::config::bind_combos("Hotkeys", "ToggleKey", "Toggle Keys",
+        [](const DMK::input::KeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
+    DMK::config::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
+        [](const DMK::input::KeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file (after the binds above, so load() applies file values to them). session.ini()
     // is a thin handle to the same process config registry the free config:: functions act on.
@@ -874,26 +877,26 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
 
     // Log the loaded configuration
     logger.info("MyMod configuration loaded and applied.");
-    DMKConfig::log_all();
+    DMK::config::log_all();
 
     // Initialize Hooks (v4: free verbs returning a move-only RAII Hook handle).
-    // DMKScan is the namespace alias for DetourModKit::scan (from scan.hpp); DMKHook for DetourModKit::hook.
+    // DMK::scan is the alias for DetourModKit::scan (from scan.hpp); DMK::hook for DetourModKit::hook.
 
     // The hook target is a scan::OwnedScanRequest: hook::inline_at resolves it at install time (resolve-on-install)
     // and never carries a dangling pattern span. A one-candidate ladder is the simplest form; ship a fallback
     // ladder for a long-lived mod (see the AOB Signature Scanning Guide).
-    DMKScan::OwnedScanRequest target{
-        .ladder = {DMKScan::Candidate::direct("GameFunction_PrintMessage",
-                                              DMKScan::Pattern::literal("48 89 ?? ?? 57"))},
+    DMK::scan::OwnedScanRequest target{
+        .ladder = {DMK::scan::Candidate::direct("GameFunction_PrintMessage",
+                                              DMK::scan::Pattern::literal("48 89 ?? ?? 57"))},
         .label = "GameFunction_PrintMessage",
         .scope = DetourModKit::Region::host(),   // the host EXE; defaults here too
     };
 
     // inline_at performs the single audited function-to-void* cast for you; the call site writes no reinterpret_cast.
     // Options::prologue defaults to Prologue::Fail (v4 safe-by-default: an E8/CC/CD prologue is refused with
-    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = DMKHook::Prologue::Relocate} for the old install-anyway.
-    auto result = DMKHook::inline_at(
-        DMKHook::InlineRequest{
+    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = DMK::hook::Prologue::Relocate} for the old install-anyway.
+    auto result = DMK::hook::inline_at(
+        DMK::hook::InlineRequest{
             .name = "GameFunction_PrintMessage_Hook",
             .target = std::move(target),
         },
@@ -919,9 +922,9 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
     // park the move-only guard in the process-default scope so it lives for the
     // process. (config::press_combo / hold_combo wrap this with INI parsing and
     // hand back the guard directly, no Result to unwrap.)
-    if (auto toggle = DMKInput::register_combo({
+    if (auto toggle = DMK::input::register_combo({
             .name = "toggle_view",
-            .trigger = DMKInput::Trigger::Press,
+            .trigger = DMK::input::Trigger::Press,
             .combos = g_mod_config.toggle_combo,
             .on_press = []() { DMK::log().info("Toggle key pressed!"); },
         }))
@@ -930,9 +933,9 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
         session.scope().add(std::move(*toggle));
     }
 
-    if (auto scroll = DMKInput::register_combo({
+    if (auto scroll = DMK::input::register_combo({
             .name = "hold_scroll",
-            .trigger = DMKInput::Trigger::Hold,
+            .trigger = DMK::input::Trigger::Hold,
             .combos = g_mod_config.hold_scroll_combo,
             .on_state_change = [](bool held)
             { DMK::log().info("Hold scroll: {}", held ? "active" : "released"); },
@@ -942,7 +945,7 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
     }
 
     // Start the input polling thread (focus-aware by default)
-    (void)DMKInput::Input::instance().start();
+    (void)DMK::input::Input::instance().start();
 
     logger.info("MyMod Initialized using DetourModKit!");
     return {}; // success

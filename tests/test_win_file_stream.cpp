@@ -6,9 +6,13 @@
 #include <thread>
 #include <windows.h>
 
-#include "DetourModKit/detail/win_file_stream.hpp"
+#include "internal/win_file_stream.hpp"
 
 using namespace DetourModKit;
+// White-box access: WinFileStream / WinFileStreamBuf are the Win32-backed file-stream types, now defined in the
+// non-installed internal/win_file_stream.hpp and living in the detail namespace. These tests drive that stream buffer
+// directly, so they include the private header and reach into detail deliberately; production consumers never do.
+using namespace DetourModKit::detail;
 
 class WinFileStreamBufTest : public ::testing::Test
 {

@@ -36,7 +36,7 @@ namespace DetourModKit
                 // Use the address of the public function to locate the containing module (DLL or EXE).
                 if (!GetModuleHandleExW(
                         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                        reinterpret_cast<LPCWSTR>(&Filesystem::get_runtime_directory), &h_self_module) ||
+                        reinterpret_cast<LPCWSTR>(&filesystem::get_runtime_directory), &h_self_module) ||
                     h_self_module == nullptr)
                 {
                     const DWORD last_error = GetLastError();
@@ -131,7 +131,7 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    std::wstring DetourModKit::Filesystem::get_runtime_directory()
+    std::wstring DetourModKit::filesystem::get_runtime_directory()
     {
         // C++11 magic statics guarantee thread-safe, one-time initialization. The module directory never changes at
         // runtime, so caching is safe.
@@ -168,7 +168,7 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    std::string DetourModKit::Filesystem::get_runtime_directory_utf8()
+    std::string DetourModKit::filesystem::get_runtime_directory_utf8()
     {
         static const std::string cached_directory_utf8 = to_utf8(get_runtime_directory());
         return cached_directory_utf8;

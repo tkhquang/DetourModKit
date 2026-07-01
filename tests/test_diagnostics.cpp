@@ -10,8 +10,8 @@
 #include "DetourModKit/hook.hpp"
 
 using namespace DetourModKit;
-using DetourModKit::Diagnostics::LeakSubsystem;
-namespace diag = DetourModKit::Diagnostics;
+using DetourModKit::diagnostics::LeakSubsystem;
+namespace diag = DetourModKit::diagnostics;
 
 #if defined(_MSC_VER)
 #define DMK_TEST_NOINLINE __declspec(noinline)

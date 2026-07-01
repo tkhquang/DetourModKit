@@ -25,7 +25,7 @@ namespace DetourModKit
      *          lives behind a pimpl (Impl, defined in src/async_logger.cpp over the non-installed
      *          src/internal/async_logger_queue.hpp), so this public header names none of it and a consumer compiles
      *          with the queue / pool / threading internals off its include path.
-     * @note Uses shared_ptr<WinFileStream> to safely handle Logger reconfiguration during runtime.
+     * @note Uses shared_ptr<detail::WinFileStream> to safely handle Logger reconfiguration during runtime.
      */
     class AsyncLogger
     {
@@ -36,7 +36,7 @@ namespace DetourModKit
          * @param file_stream Shared pointer to the output file stream (allows safe reconfigure).
          * @param log_mutex Shared pointer to the mutex protecting the file stream.
          */
-        explicit AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+        explicit AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex);
 
         ~AsyncLogger() noexcept;

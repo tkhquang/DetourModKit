@@ -1376,8 +1376,8 @@ namespace
     struct CapturedLifecycle
     {
         std::string name;
-        Diagnostics::HookKind kind;
-        Diagnostics::HookTransition transition;
+        diagnostics::HookKind kind;
+        diagnostics::HookTransition transition;
     };
 } // namespace
 
@@ -1385,7 +1385,7 @@ TEST(HookLifecycle, InlineEventsAreEmitted)
 {
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
+        diagnostics::hook_lifecycle().subscribe([&events](const diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     {
@@ -1398,14 +1398,14 @@ TEST(HookLifecycle, InlineEventsAreEmitted)
     }
 
     ASSERT_EQ(events.size(), 4u);
-    EXPECT_EQ(events[0].transition, Diagnostics::HookTransition::Created);
-    EXPECT_EQ(events[1].transition, Diagnostics::HookTransition::Disabled);
-    EXPECT_EQ(events[2].transition, Diagnostics::HookTransition::Enabled);
-    EXPECT_EQ(events[3].transition, Diagnostics::HookTransition::Removed);
+    EXPECT_EQ(events[0].transition, diagnostics::HookTransition::Created);
+    EXPECT_EQ(events[1].transition, diagnostics::HookTransition::Disabled);
+    EXPECT_EQ(events[2].transition, diagnostics::HookTransition::Enabled);
+    EXPECT_EQ(events[3].transition, diagnostics::HookTransition::Removed);
     for (const auto &e : events)
     {
         EXPECT_EQ(e.name, "LifecycleHook");
-        EXPECT_EQ(e.kind, Diagnostics::HookKind::Inline);
+        EXPECT_EQ(e.kind, diagnostics::HookKind::Inline);
     }
 }
 
@@ -1413,7 +1413,7 @@ TEST(HookLifecycle, MidEventReportsMidKind)
 {
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
+        diagnostics::hook_lifecycle().subscribe([&events](const diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     auto detour = [](MidContext &) {};
@@ -1422,8 +1422,8 @@ TEST(HookLifecycle, MidEventReportsMidKind)
     Hook h = std::move(*r);
 
     ASSERT_GE(events.size(), 1u);
-    EXPECT_EQ(events[0].transition, Diagnostics::HookTransition::Created);
-    EXPECT_EQ(events[0].kind, Diagnostics::HookKind::Mid);
+    EXPECT_EQ(events[0].transition, diagnostics::HookTransition::Created);
+    EXPECT_EQ(events[0].kind, diagnostics::HookKind::Mid);
 }
 
 TEST(HookLifecycle, VmtEventReportsVmtKind)
@@ -1431,7 +1431,7 @@ TEST(HookLifecycle, VmtEventReportsVmtKind)
     auto target = std::make_unique<VmtTestTarget>();
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
+        diagnostics::hook_lifecycle().subscribe([&events](const diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     {
@@ -1442,17 +1442,17 @@ TEST(HookLifecycle, VmtEventReportsVmtKind)
 
     ASSERT_EQ(events.size(), 2u);
     EXPECT_EQ(events[0].name, "VmtLifecycleHook");
-    EXPECT_EQ(events[0].kind, Diagnostics::HookKind::Vmt);
-    EXPECT_EQ(events[0].transition, Diagnostics::HookTransition::Created);
+    EXPECT_EQ(events[0].kind, diagnostics::HookKind::Vmt);
+    EXPECT_EQ(events[0].transition, diagnostics::HookTransition::Created);
     EXPECT_EQ(events[1].name, "VmtLifecycleHook");
-    EXPECT_EQ(events[1].kind, Diagnostics::HookKind::Vmt);
-    EXPECT_EQ(events[1].transition, Diagnostics::HookTransition::Removed);
+    EXPECT_EQ(events[1].kind, diagnostics::HookKind::Vmt);
+    EXPECT_EQ(events[1].transition, diagnostics::HookTransition::Removed);
 }
 
 TEST(HookLifecycle, NotEmittedForFailedCreate)
 {
     int count = 0;
-    auto sub = Diagnostics::hook_lifecycle().subscribe([&count](const Diagnostics::HookLifecycleEvent &) { ++count; });
+    auto sub = diagnostics::hook_lifecycle().subscribe([&count](const diagnostics::HookLifecycleEvent &) { ++count; });
 
     // A failed create (null object) is not a transition, so nothing is emitted.
     Result<VmtHook> r = vmt_for("FailedVmtLifecycleHook", nullptr);
@@ -1464,7 +1464,7 @@ TEST(HookLifecycle, NotEmittedForNoOpTransition)
 {
     std::vector<CapturedLifecycle> events;
     auto sub =
-        Diagnostics::hook_lifecycle().subscribe([&events](const Diagnostics::HookLifecycleEvent &e)
+        diagnostics::hook_lifecycle().subscribe([&events](const diagnostics::HookLifecycleEvent &e)
                                                 { events.push_back({std::string(e.name), e.kind, e.transition}); });
 
     // Dedicated leak target: this test ends with release(), leaking the detour for the process lifetime.
