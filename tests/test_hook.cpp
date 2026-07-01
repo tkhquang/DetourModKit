@@ -781,8 +781,8 @@ TEST(HookInstallAll, AllocFailureReturnsOutOfMemoryWithoutEscaping)
 
     Result<std::vector<InstallOutcome>> res;
     {
-        // Budget 0: the first allocation (the outcomes container reserve) fails before any row is attempted.
-        // install_all must catch the bad_alloc at its noexcept boundary and report Error{OutOfMemory}.
+        // Budget 0: the first allocation (the outcomes container reserve) fails before any row is attempted, so
+        // install_all catches the bad_alloc at its noexcept boundary and reports Error{OutOfMemory}.
         dmk_test::AllocFailScope fail(0);
         res = install_all(table);
     }
