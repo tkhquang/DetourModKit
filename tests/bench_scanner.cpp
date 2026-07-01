@@ -489,12 +489,13 @@ namespace
             }
         }
 
-        const auto warm_batch = scan::resolve_batch(std::span{requests}, max_workers);
-        if (warm_batch.size() != target_count)
+        const auto warm_result = scan::resolve_batch(std::span{requests}, max_workers);
+        if (!warm_result || warm_result->size() != target_count)
         {
             std::fprintf(stderr, "[bench] resolver batch sanity returned wrong size\n");
             return;
         }
+        const auto &warm_batch = *warm_result;
         for (std::size_t i = 0; i < target_count; ++i)
         {
             if (!warm_batch[i] || warm_batch[i]->address.raw() != expected[i])
@@ -520,11 +521,18 @@ namespace
             median_us_per_iter(iterations, samples,
                                [&]()
                                {
-                                   const auto results = scan::resolve_batch(std::span{requests}, max_workers);
-                                   for (std::size_t ri = 0; ri < results.size(); ++ri)
+                                   const auto batch = scan::resolve_batch(std::span{requests}, max_workers);
+                                   if (batch)
                                    {
-                                       const auto &hit = results[ri];
-                                       s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
+                                       // Index the inner vector rather than range-for over it: a range-for forces the
+                                       // GCC 15 libstdc++ <expected> equality-constraint to be evaluated for the bare
+                                       // expected element type, which self-recurses and fails to compile. Indexed
+                                       // access never drags operator== into overload resolution.
+                                       for (std::size_t ri = 0; ri < batch->size(); ++ri)
+                                       {
+                                           const auto &hit = (*batch)[ri];
+                                           s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
+                                       }
                                    }
                                });
 

@@ -572,7 +572,9 @@ TEST(ScanResolve, ResolveBatchReturnsPerRequestResultsInOrder)
         scan::ScanRequest{.ladder = missing_ladder, .scope = buffer.region()},
     };
 
-    const std::vector<Result<scan::Hit>> results = scan::resolve_batch(requests);
+    const auto batch = scan::resolve_batch(requests);
+    ASSERT_TRUE(batch.has_value());
+    const auto &results = *batch;
     ASSERT_EQ(results.size(), 3U);
     ASSERT_TRUE(results[0].has_value());
     EXPECT_EQ(results[0]->address.raw(), buffer.address_of(0x100));
@@ -596,6 +598,72 @@ TEST(ScanResolve, OwnedScanRequestViewResolves)
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(0x100));
     EXPECT_EQ(hit->winning_name, "owned");
+}
+
+// The resolver's page-class knob (ScanRequest::pages). A byte candidate can restrict its sweep to executable pages so a
+// signature that has to land on an instruction cannot alias an identical run in a data section. The discriminating case
+// is a match that lives only on a non-executable page: Readable resolves it, Executable excludes it.
+TEST(ScanResolve, ExecutablePagesExcludeDataMatchThatReadableResolves)
+{
+    ReadableBuffer data(0x400); // A heap page: committed and readable, but NOT executable -- a data-section stand-in.
+    data.put(0x100, {0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("data-sig", scan::Pattern::literal("DE AD BE EF 11 22"))};
+
+    // Readable accepts data pages, so the data-section match resolves at its planted address.
+    const scan::ScanRequest readable_request{
+        .ladder = ladder, .label = "readable-data", .scope = data.region(), .pages = scan::Pages::Readable};
+    const auto readable_hit = scan::resolve(readable_request);
+    ASSERT_TRUE(readable_hit.has_value()) << readable_hit.error().message();
+    EXPECT_EQ(readable_hit->address.raw(), data.address_of(0x100));
+
+    // Executable narrows to code pages; the same match sits on a non-executable heap page, so it is now unreachable and
+    // the resolve fails closed rather than committing to a data-page address.
+    const scan::ScanRequest executable_request{
+        .ladder = ladder, .label = "executable-only", .scope = data.region(), .pages = scan::Pages::Executable};
+    const auto executable_hit = scan::resolve(executable_request);
+    ASSERT_FALSE(executable_hit.has_value());
+    EXPECT_EQ(executable_hit.error().code, ErrorCode::NoMatch);
+}
+
+// The other direction: Executable is not merely "always empty" -- a match that genuinely sits on an executable page
+// resolves under it, so the knob selects code pages rather than rejecting everything.
+TEST(ScanResolve, ExecutablePagesResolveGenuineCodeMatch)
+{
+    ExecutableBuffer code(0x1000); // VirtualAlloc PAGE_EXECUTE_READWRITE: a real executable page.
+    ASSERT_TRUE(code.valid());
+    code.put(0x080, {0x0F, 0x1F, 0x44, 0x00, 0x00, 0x90}); // A distinctive byte run against the 0xCC fill.
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("code-sig", scan::Pattern::literal("0F 1F 44 00 00 90"))};
+
+    const scan::ScanRequest executable_request{
+        .ladder = ladder, .label = "code", .scope = code.region(), .pages = scan::Pages::Executable};
+    const auto hit = scan::resolve(executable_request);
+    ASSERT_TRUE(hit.has_value()) << hit.error().message();
+    EXPECT_EQ(hit->address.raw(), code.address_of(0x080));
+}
+
+// candidate_order_to_string is a constexpr, noexcept, total value map. Its switch has no default, so -Wswitch guards a
+// missing enumerator at compile time; these checks additionally pin the callback-safe noexcept contract and the
+// "Unknown" out-of-range fallback for a value read from possibly corrupted memory. The static_asserts prove the map is
+// usable in a constant expression.
+static_assert(noexcept(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared)),
+              "candidate_order_to_string must be noexcept: it is a callback-safe pure value map.");
+static_assert(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared) == "AsDeclared");
+static_assert(scan::candidate_order_to_string(scan::CandidateOrder::UniqueFirst) == "UniqueFirst");
+static_assert(scan::candidate_order_to_string(static_cast<scan::CandidateOrder>(0xFF)) == "Unknown");
+
+TEST(ScanResolve, CandidateOrderToStringIsTotalAndDistinct)
+{
+    // Every declared enumerator maps to its own non-empty name.
+    EXPECT_EQ(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared), "AsDeclared");
+    EXPECT_EQ(scan::candidate_order_to_string(scan::CandidateOrder::UniqueFirst), "UniqueFirst");
+    EXPECT_NE(scan::candidate_order_to_string(scan::CandidateOrder::AsDeclared),
+              scan::candidate_order_to_string(scan::CandidateOrder::UniqueFirst));
+
+    // An out-of-range value (e.g. a byte read from corrupted state cast to the enum) degrades to a stable sentinel
+    // rather than returning a dangling or empty view.
+    EXPECT_EQ(scan::candidate_order_to_string(static_cast<scan::CandidateOrder>(0xFF)), "Unknown");
 }
 
 TEST(ScanResolve, BorrowBuildsAResolvableRequest)

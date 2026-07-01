@@ -10,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "DetourModKit/diagnostics.hpp"
@@ -1210,4 +1211,169 @@ TEST(HookLifecycle, NotEmittedForNoOpTransition)
     ASSERT_TRUE(h.enable().has_value());
     EXPECT_EQ(events.size(), 1u);
     h.release(); // detach without a Removed transition path through teardown
+}
+
+// ----------------------------------------------------------------------------
+// Concurrency + reentrancy: the per-hook status machine and the call() guard under thread stress and self-reentry. The
+// per-hook recursive_mutex is held across call(), and disable()/~Hook must drain that mutex before the trampoline can
+// be restored or freed. These tests pin the caller-visible guarantees directly, including a parked original that keeps
+// the guard held until the test releases it.
+// ----------------------------------------------------------------------------
+namespace
+{
+    // Reentrancy fixture: a recursive target whose self-call re-enters the hooked prologue, so a detour that forwards
+    // through call() is invoked again on the SAME thread while call() already holds the per-hook guard.
+    std::atomic<int> s_reentrant_detour_calls{0};
+    Hook *s_reentrant_hook = nullptr;
+
+    DMK_TEST_NOINLINE int reentrant_target(int n)
+    {
+        if (n <= 0)
+        {
+            return 0;
+        }
+        // The recursive call resolves to reentrant_target's patched entry, so each level re-enters the detour.
+        return reentrant_target(n - 1) + 1;
+    }
+
+    int reentrant_detour(int n)
+    {
+        s_reentrant_detour_calls.fetch_add(1, std::memory_order_relaxed);
+        // Forward to the original through the guarded call(): it re-acquires the per-hook recursive_mutex. The original
+        // recurses back into this detour on the same thread, so the guard MUST be recursive or this self-deadlocks.
+        return s_reentrant_hook->call<int>(n);
+    }
+
+    // Drain fixture: an original that parks inside call() (so call() keeps holding the guard) until the test releases
+    // it, giving a second thread a window to attempt disable() and observe that it waits for the in-flight call.
+    std::atomic<bool> s_original_parked{false};
+    std::atomic<bool> s_release_original{false};
+
+    DMK_TEST_NOINLINE int parking_original(int x)
+    {
+        s_original_parked.store(true, std::memory_order_release);
+        while (!s_release_original.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+        volatile int r = x;
+        return r;
+    }
+} // namespace
+
+TEST(HookConcurrency, ConcurrentEnableDisableIsRaceSafe)
+{
+    Result<Hook> r = inline_at(InlineRequest{.name = "ConcEnableDisable", .target = addr_of(&echo)}, &echo_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+
+    // Several threads hammer enable()/disable() on the same hook. The per-hook guard and status machine must fold the
+    // storm into legal transitions, and the backend must remain callable afterward.
+    constexpr int THREADS = 6;
+    constexpr int ITERATIONS = 500;
+    std::atomic<bool> go{false};
+    std::vector<std::thread> pool;
+    pool.reserve(THREADS);
+    for (int t = 0; t < THREADS; ++t)
+    {
+        pool.emplace_back(
+            [&h, &go, t]()
+            {
+                while (!go.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+                for (int i = 0; i < ITERATIONS; ++i)
+                {
+                    if (((t + i) & 1) == 0)
+                    {
+                        (void)h.enable();
+                    }
+                    else
+                    {
+                        (void)h.disable();
+                    }
+                }
+            });
+    }
+    go.store(true, std::memory_order_release);
+    for (std::thread &worker : pool)
+    {
+        worker.join();
+    }
+
+    // The hook survived the storm: brought to a known state, both dispatch paths still work end to end.
+    ASSERT_TRUE(h.enable().has_value());
+    EXPECT_EQ(echo(7), 107);      // enabled: the detour adds 100
+    EXPECT_EQ(h.call<int>(7), 7); // original body through the trampoline
+    ASSERT_TRUE(h.disable().has_value());
+    EXPECT_EQ(echo(7), 7); // disabled: original prologue restored
+}
+
+TEST(HookConcurrency, ReentrantCallFromDetourRequiresRecursiveGuard)
+{
+    Result<Hook> r =
+        inline_at(InlineRequest{.name = "Reentrant", .target = addr_of(&reentrant_target)}, &reentrant_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+    s_reentrant_hook = &h;
+    s_reentrant_detour_calls.store(0, std::memory_order_relaxed);
+
+    // Invoking the hooked entry fires the detour, which forwards through the guarded call(); the original recurses into
+    // the hooked entry, re-entering the detour on the same thread. call() holds a per-hook recursive_mutex across the
+    // whole invocation, so the nested call() re-locks instead of self-deadlocking. A plain mutex would hang this line.
+    const int result = reentrant_target(4);
+    EXPECT_EQ(result, 4);                                                   // recursion adds 1 four times down to 0
+    EXPECT_EQ(s_reentrant_detour_calls.load(std::memory_order_relaxed), 5); // detour fired at depths 4,3,2,1,0
+
+    s_reentrant_hook = nullptr;
+}
+
+TEST(HookConcurrency, DisableDrainsAnInFlightCall)
+{
+    Result<Hook> r = inline_at(InlineRequest{.name = "DrainCall", .target = addr_of(&parking_original)}, &echo_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook h = std::move(*r);
+    s_original_parked.store(false, std::memory_order_release);
+    s_release_original.store(false, std::memory_order_release);
+
+    // Thread A enters call(), which acquires the per-hook guard and runs the original; the original parks, so the guard
+    // stays held for as long as the test wants.
+    std::thread caller([&h]() { (void)h.call<int>(7); });
+    while (!s_original_parked.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // Thread B attempts disable() while the call is parked. disable() acquires the SAME guard, so it MUST block until
+    // the call releases it -- it must never free the trampoline out from under the in-flight original.
+    std::atomic<bool> disable_started{false};
+    std::atomic<bool> disable_returned{false};
+    std::thread disabler(
+        [&h, &disable_started, &disable_returned]()
+        {
+            disable_started.store(true, std::memory_order_release);
+            (void)h.disable();
+            disable_returned.store(true, std::memory_order_release);
+        });
+    while (!disable_started.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    // While the original is parked the guard is physically held, so disable() must not complete. A broken drain
+    // (disable freeing the trampoline without waiting) can flip this flag before the release below.
+    for (int spin = 0; spin < 1000; ++spin)
+    {
+        ASSERT_FALSE(disable_returned.load(std::memory_order_acquire))
+            << "disable() completed while a guarded call() was still in flight (drain violated)";
+        std::this_thread::yield();
+    }
+
+    // Release the original; the call returns, the guard drops, and disable() drains through to completion.
+    s_release_original.store(true, std::memory_order_release);
+    disabler.join();
+    caller.join();
+    EXPECT_TRUE(disable_returned.load(std::memory_order_acquire));
+    EXPECT_FALSE(h.is_enabled());
 }

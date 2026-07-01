@@ -70,6 +70,25 @@ else()
   # GCC/Clang specific flags
   add_compile_options(-Wall -Wextra -Wpedantic -Wshadow)
 
+  # -Wdangling-reference (GCC 13+) flags a reference bound to a temporary that is destroyed at the end of the
+  # full expression. That is precisely the failure mode of the by-value view seams in this library: the
+  # OwnedScanRequest -> ScanRequest borrow, the Region/Pattern accessors that return by value, and any
+  # `const auto& r = returns_by_value();` in a consumer. The option is a GCC-only spelling: Clang rejects the
+  # exact name (it diagnoses the same class of bug under -Wdangling, which is on by default) and GCC before 13
+  # does not know it either. Probe for acceptance instead of hardcoding it so Clang and older GCC keep building
+  # warning-clean; check_cxx_compiler_flag treats the "unknown warning option" diagnostic as a rejection, so a
+  # non-supporting compiler simply does not receive the flag and DMK_WARNINGS_AS_ERRORS cannot escalate a
+  # -Wunknown-warning-option into a hard configure failure. The flag is guarded with COMPILE_LANGUAGE:CXX
+  # because this directory-scoped option is also inherited by the vendored Zydis/Zycore C sources added below,
+  # and cc1 emits a "valid for C++ but not for C" note for every C translation unit otherwise; the guard keeps
+  # the flag on DetourModKit's own C++ objects (a C++-only concept anyway) and off the C dependency build.
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-Wdangling-reference" DMK_HAS_WDANGLING_REFERENCE)
+
+  if(DMK_HAS_WDANGLING_REFERENCE)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wdangling-reference>)
+  endif()
+
   if(DMK_WARNINGS_AS_ERRORS)
     add_compile_options(-Werror)
   endif()
@@ -86,6 +105,48 @@ else()
   # Suppress specific GCC/Clang warnings if they are noisy or from dependencies
   # add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
+
+# --- C++23 standard-library feature probes ---
+# DetourModKit's public contract is built directly on three C++23 *library* facilities:
+#   * std::expected           (<expected>)   -- the Result<T> error-as-value type every fallible API returns.
+#   * std::move_only_function (<functional>) -- the type-erased, move-only callback storage in the Session
+#                                               bootstrap surface and the RTTI dissection visitors.
+#   * std::format             (<format>)     -- the formatting layer beneath the logger and diagnostics.
+# target_compile_features(... cxx_std_23) below enforces the *language* level, but a toolchain can accept
+# -std=c++23 while shipping a standard library that predates one of these headers; older libstdc++/libc++
+# pairings do exactly that. Without an explicit gate such a toolchain fails deep inside the first public
+# header with an opaque "no member named 'expected' in namespace std" error that points at library code
+# rather than the real cause. Probe each feature-test macro at configure time so an under-provisioned
+# standard library is reported once, by name, with a minimum toolchain, before any object is compiled.
+include(CheckCXXSourceCompiles)
+
+# The probes must see the same C++23 level the library is built at. try_compile honours CMAKE_CXX_STANDARD /
+# CMAKE_CXX_STANDARD_REQUIRED / CMAKE_CXX_EXTENSIONS (CMP0067 is NEW under this file's cmake_minimum_required),
+# and those variables are set above, so every probe already compiles as strict C++23 with no per-check flag
+# override.
+function(_dmk_require_library_feature header macro feature min_toolchain)
+  # A bare include of the header plus a preprocessor assertion on its feature-test macro is sufficient: the
+  # probe fails if the header is missing entirely, and also if the library ships the header but has not yet
+  # implemented (and therefore does not advertise) the feature.
+  check_cxx_source_compiles(
+    "#include <${header}>
+     #ifndef ${macro}
+     #error feature-test macro not defined
+     #endif
+     int main() { return 0; }"
+    ${macro}_present)
+
+  if(NOT ${macro}_present)
+    message(FATAL_ERROR
+      "DetourModKit requires the C++23 library facility ${feature} (${macro}, from <${header}>), but the "
+      "configured standard library does not provide it. A compiler that accepts -std=c++23 is not enough; the "
+      "standard library must implement the facility too. Upgrade the standard library to at least ${min_toolchain}.")
+  endif()
+endfunction()
+
+_dmk_require_library_feature(expected   __cpp_lib_expected           "std::expected"           "GCC 12+, MSVC 19.33+ (VS 2022 17.3), or libc++ 16+")
+_dmk_require_library_feature(functional __cpp_lib_move_only_function "std::move_only_function" "GCC 12+ or MSVC 19.32+ (VS 2022 17.2)")
+_dmk_require_library_feature(format     __cpp_lib_format             "std::format"             "GCC 13+, MSVC 19.29+ (VS 2019 16.10), or libc++ 17+")
 
 # --- Dependencies ---
 # SimpleIni will be added as an include directory directly to the DetourModKit target.

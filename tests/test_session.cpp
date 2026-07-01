@@ -471,6 +471,104 @@ TEST(SessionTeardown, AbandonSkipsOrderedTeardown)
     EXPECT_EQ(sentinel.use_count(), 1L);
 }
 
+// The full reverse-dependency teardown as one integration test. The per-leaf SessionTeardown cases each exercise a
+// single subsystem in isolation; this activates ALL of them in one Session -- the config registry and its auto-reload
+// watcher, an input binding, the memory cache, and the logger -- then destroys the Session and asserts every leaf shut
+// down. It pins that ~Session runs the WHOLE ordered sequence (config watcher -> input -> memory cache -> config
+// registry -> logger, logger last) to completion when the entire stack coexists, so no leaf is skipped or
+// short-circuited by another's teardown.
+TEST(SessionTeardown, FullStackTeardownShutsEveryLeafDown)
+{
+    input::Input::instance().shutdown(); // deterministic input baseline
+    config::clear();
+
+    const auto ini_path = std::filesystem::temp_directory_path() /
+                          ("test_session_fullstack_" + std::to_string(GetCurrentProcessId()) + ".ini");
+    {
+        std::ofstream ofs(ini_path);
+        ofs << "[Section]\nKey=1\n";
+    }
+    const auto log_path = std::filesystem::temp_directory_path() /
+                          ("test_session_fullstack_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::filesystem::remove(log_path);
+
+    auto registry_sentinel = std::make_shared<int>(0);
+    constexpr std::string_view kMarker = "full-stack teardown marker";
+
+    {
+        Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_path.string()});
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        Session s = std::move(*r);
+        s.log().set_log_level(LogLevel::Info);
+
+        // Config registry: a bound setter that captures the sentinel, so releasing it proves config::clear() ran.
+        config::bind_int("Section", "Key", "fullstack_registry", [registry_sentinel](int) {}, 1);
+        // Auto-reload watcher: load then enable so a background poll thread is live.
+        ASSERT_NO_THROW(config::load(ini_path.string()));
+        ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started);
+        // Input: one live binding.
+        (void)input::register_combo(input::ComboBinding{.name = std::string{"fullstack_key"},
+                                                        .trigger = input::Trigger::Press,
+                                                        .combos = {{{keyboard_key(0x42)}, {}}},
+                                                        .on_press = []() {},
+                                                        .on_state_change = {}});
+        EXPECT_EQ(input::Input::instance().binding_count(), 1u);
+        // Memory cache: live.
+        ASSERT_TRUE(memory::init_cache());
+        // Logger: a line that must survive the flush the teardown performs last.
+        s.log().log(LogLevel::Info, kMarker);
+        EXPECT_GE(registry_sentinel.use_count(), 2L);
+        // s destructs here: the full ordered teardown runs across the whole stack.
+    }
+
+    // Input subsystem down.
+    EXPECT_EQ(input::Input::instance().binding_count(), 0u) << "input subsystem must be shut down";
+    // Config registry cleared (the bound setter, and its sentinel capture, released).
+    EXPECT_EQ(registry_sentinel.use_count(), 1L) << "config registry must be cleared";
+
+    // Memory cache reset: a fresh re-init reports zeroed stats.
+    ASSERT_TRUE(memory::init_cache());
+    const std::string stats = memory::get_cache_stats();
+    EXPECT_NE(stats.find("Hits: 0"), std::string::npos) << "memory cache must be reset";
+    memory::shutdown_cache();
+
+    // Logger flushed last: the marker reached disk before the sink closed.
+    std::ifstream in(log_path);
+    ASSERT_TRUE(in.is_open()) << "teardown must have flushed and closed the logger";
+    bool found = false;
+    for (std::string line; std::getline(in, line);)
+    {
+        if (line.find(kMarker) != std::string::npos)
+        {
+            found = true;
+            break;
+        }
+    }
+    in.close();
+    EXPECT_TRUE(found) << "logger must flush last, capturing lines logged during the session";
+
+    // Auto-reload watcher stopped: re-enabling in a fresh Session returns Started, not AlreadyRunning.
+    {
+        Result<Session> r2 = start_local_session("SESS_TEST", "sess_test_fullstack_2.log");
+        ASSERT_TRUE(r2.has_value()) << r2.error().message();
+        Session s2 = std::move(*r2);
+        config::bind_int("Section", "Key", "fullstack_watcher_2", [](int) {}, 1);
+        ASSERT_NO_THROW(config::load(ini_path.string()));
+        EXPECT_EQ(config::enable_auto_reload(std::chrono::milliseconds{50}), config::AutoReloadStatus::Started)
+            << "the prior teardown must have stopped the auto-reload watcher";
+        config::disable_auto_reload();
+    }
+
+    if (std::filesystem::exists(ini_path))
+    {
+        std::filesystem::remove(ini_path);
+    }
+    if (std::filesystem::exists(log_path))
+    {
+        std::filesystem::remove(log_path);
+    }
+}
+
 // The ordered teardown must NOT touch hooks: each hook is owned by the caller's Hook handle. Prove a Hook dropped
 // before teardown is already unhooked, and teardown still runs its non-hook steps cleanly.
 namespace

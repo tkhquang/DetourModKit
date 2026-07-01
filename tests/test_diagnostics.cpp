@@ -166,20 +166,30 @@ TEST(DiagnosticsEventBusTest, HookLifecycleEmitReachesSubscriber)
 {
     diag::HookLifecycleEvent received{};
     int hits = 0;
-    auto sub = diag::hook_lifecycle().subscribe(
-        [&received, &hits](const diag::HookLifecycleEvent &e)
-        {
-            received = e;
-            ++hits;
-        });
+    {
+        auto sub = diag::hook_lifecycle().subscribe(
+            [&received, &hits](const diag::HookLifecycleEvent &e)
+            {
+                received = e;
+                ++hits;
+            });
 
+        diag::hook_lifecycle().emit_safe(diag::HookLifecycleEvent{.name = "camera",
+                                                                  .ledger_id = 42,
+                                                                  .kind = diag::HookKind::Mid,
+                                                                  .transition = diag::HookTransition::Enabled});
+
+        EXPECT_EQ(hits, 1);
+        EXPECT_EQ(received.name, "camera");
+        EXPECT_EQ(received.ledger_id, 42u);
+        EXPECT_EQ(received.kind, diag::HookKind::Mid);
+        EXPECT_EQ(received.transition, diag::HookTransition::Enabled);
+    }
+
+    // If the population subscriber is active because tests are shuffled, pair the synthetic Enabled event so it cannot
+    // leave a live slot behind.
     diag::hook_lifecycle().emit_safe(diag::HookLifecycleEvent{
-        .name = "camera", .kind = diag::HookKind::Mid, .transition = diag::HookTransition::Enabled});
-
-    EXPECT_EQ(hits, 1);
-    EXPECT_EQ(received.name, "camera");
-    EXPECT_EQ(received.kind, diag::HookKind::Mid);
-    EXPECT_EQ(received.transition, diag::HookTransition::Enabled);
+        .name = "camera", .ledger_id = 42, .kind = diag::HookKind::Mid, .transition = diag::HookTransition::Removed});
 }
 
 TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
@@ -390,4 +400,58 @@ TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
     EXPECT_EQ(after.hooks_total, before.hooks_total); // back to baseline
     EXPECT_EQ(after.hooks_active, before.hooks_active);
     EXPECT_EQ(after.hooks_disabled, before.hooks_disabled);
+}
+
+TEST_F(DiagnosticsSnapshotTest, SameNamedHooksOnDistinctTargetsEachCountAndSurviveRemoval)
+{
+    // The population tally keys on each hook's process-unique ledger id rather than on the hook name. Two hooks may
+    // legitimately share a name (here "SharedName" on two distinct targets). If the tally keyed on the name, both would
+    // fold into one map entry, the active/disabled split would be corrupted, and a single Removed would erase the
+    // shared entry and drop the still-live survivor from the count as well. Deltas are taken around the pair because
+    // the population is process-global.
+    const diag::Snapshot before = diag::collect();
+
+    {
+        // The survivor lives in the outer scope; both hooks carry the same name on distinct targets. The detour only
+        // has to match the target signature (the hooks are never invoked here), so the add detour serves both.
+        Result<hook::Hook> survivor =
+            hook::inline_at(hook::InlineRequest{.name = "SharedName", .target = target_address(&lifecycle_target_mul)},
+                            &lifecycle_detour_add);
+        ASSERT_TRUE(survivor.has_value()) << survivor.error().message();
+        hook::Hook h_survivor = std::move(*survivor);
+
+        {
+            Result<hook::Hook> doomed = hook::inline_at(
+                hook::InlineRequest{.name = "SharedName", .target = target_address(&lifecycle_target_add)},
+                &lifecycle_detour_add);
+            ASSERT_TRUE(doomed.has_value()) << doomed.error().message();
+            hook::Hook h_doomed = std::move(*doomed);
+
+            // Both live and armed. A name-keyed tally would have collapsed the shared name and reported only +1 here.
+            const diag::Snapshot both = diag::collect();
+            EXPECT_EQ(both.hooks_total, before.hooks_total + 2);
+            EXPECT_EQ(both.hooks_active, before.hooks_active + 2);
+            EXPECT_EQ(both.hooks_disabled, before.hooks_disabled);
+
+            // Disabling one must move exactly one hook to disabled, not flip a shared entry and mis-split both.
+            ASSERT_TRUE(h_doomed.disable().has_value());
+            const diag::Snapshot split = diag::collect();
+            EXPECT_EQ(split.hooks_total, before.hooks_total + 2);
+            EXPECT_EQ(split.hooks_active, before.hooks_active + 1);
+            EXPECT_EQ(split.hooks_disabled, before.hooks_disabled + 1);
+            // Inner block exit destroys h_doomed, emitting Removed for its ledger id only.
+        }
+
+        // The survivor's slot is untouched by the other hook's removal: still live and still armed.
+        const diag::Snapshot after_removal = diag::collect();
+        EXPECT_EQ(after_removal.hooks_total, before.hooks_total + 1);
+        EXPECT_EQ(after_removal.hooks_active, before.hooks_active + 1);
+        EXPECT_EQ(after_removal.hooks_disabled, before.hooks_disabled);
+        // Outer block exit destroys h_survivor, returning the population to baseline.
+    }
+
+    const diag::Snapshot restored = diag::collect();
+    EXPECT_EQ(restored.hooks_total, before.hooks_total);
+    EXPECT_EQ(restored.hooks_active, before.hooks_active);
+    EXPECT_EQ(restored.hooks_disabled, before.hooks_disabled);
 }
