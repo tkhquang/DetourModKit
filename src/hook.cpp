@@ -346,14 +346,14 @@ namespace DetourModKit
             }
         }
 
-        /// Emits a hook lifecycle event, swallowing any sink failure so a noexcept teardown path stays no-throw.
-        void emit_lifecycle(std::string_view name, Diagnostics::HookKind kind,
+        /// Emits a hook lifecycle event, swallowing any sink failure so a noexcept path stays no-throw.
+        void emit_lifecycle(std::string_view name, std::uint64_t ledger_id, Diagnostics::HookKind kind,
                             Diagnostics::HookTransition transition) noexcept
         {
             try
             {
-                Diagnostics::hook_lifecycle().emit_safe(
-                    Diagnostics::HookLifecycleEvent{.name = name, .kind = kind, .transition = transition});
+                Diagnostics::hook_lifecycle().emit_safe(Diagnostics::HookLifecycleEvent{
+                    .name = name, .ledger_id = ledger_id, .kind = kind, .transition = transition});
             }
             catch (...)
             {
@@ -611,7 +611,7 @@ namespace DetourModKit
                     "layered hooks newest-first to avoid a trampoline use-after-free.",
                     name, Format::format_address(target), newer);
             }
-            emit_lifecycle(name, kind, Diagnostics::HookTransition::Removed);
+            emit_lifecycle(name, ledger_id, kind, Diagnostics::HookTransition::Removed);
         }
 
         Hook::operator bool() const noexcept
@@ -690,11 +690,13 @@ namespace DetourModKit
                 const Diagnostics::HookKind kind =
                     m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
                 const std::string_view name = m_impl->name;
+                const std::uint64_t ledger_id = m_impl->ledger_id;
                 // Release the call guard before dispatching the lifecycle event: emit_lifecycle runs arbitrary
                 // subscriber code, which must not execute while DMK's per-hook mutex is held (CP.22 -- never call
-                // unknown code under a lock). enable() does not reset m_impl, so the captured name view stays valid.
+                // unknown code under a lock). enable() does not reset m_impl, so the captured name view and ledger id
+                // stay valid.
                 guard.unlock();
-                emit_lifecycle(name, kind, Diagnostics::HookTransition::Enabled);
+                emit_lifecycle(name, ledger_id, kind, Diagnostics::HookTransition::Enabled);
                 return {};
             }
             m_impl->status.store(HookState::Disabled, std::memory_order_release);
@@ -728,10 +730,11 @@ namespace DetourModKit
                 const Diagnostics::HookKind kind =
                     m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
                 const std::string_view name = m_impl->name;
+                const std::uint64_t ledger_id = m_impl->ledger_id;
                 // Release the call guard before dispatching the lifecycle event (CP.22, see enable()); disable() does
-                // not reset m_impl, so the captured name view stays valid past the unlock.
+                // not reset m_impl, so the captured name view and ledger id stay valid past the unlock.
                 guard.unlock();
-                emit_lifecycle(name, kind, Diagnostics::HookTransition::Disabled);
+                emit_lifecycle(name, ledger_id, kind, Diagnostics::HookTransition::Disabled);
                 return {};
             }
             m_impl->status.store(HookState::Active, std::memory_order_release);
@@ -799,7 +802,8 @@ namespace DetourModKit
                     log().info("hook::inline_at: created inline hook '{}' at {}.", created_name,
                                Format::format_address(target));
                     impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_hook(target);
-                    emit_lifecycle(created_name, Diagnostics::HookKind::Inline, Diagnostics::HookTransition::Created);
+                    emit_lifecycle(created_name, impl->ledger_id, Diagnostics::HookKind::Inline,
+                                   Diagnostics::HookTransition::Created);
                     return Hook(std::move(impl));
                 }
                 catch (const std::bad_alloc &)
@@ -856,7 +860,8 @@ namespace DetourModKit
                 const std::string_view created_name = impl->name;
                 log().info("hook::mid_at: created mid hook '{}' at {}.", created_name, Format::format_address(target));
                 impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_hook(target);
-                emit_lifecycle(created_name, Diagnostics::HookKind::Mid, Diagnostics::HookTransition::Created);
+                emit_lifecycle(created_name, impl->ledger_id, Diagnostics::HookKind::Mid,
+                               Diagnostics::HookTransition::Created);
                 return Hook(std::move(impl));
             }
             catch (const std::bad_alloc &)
@@ -961,7 +966,7 @@ namespace DetourModKit
             // seeing the clone base as live until its restore completes instead of racing a half-removed clone.
             m_impl.reset();
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
-            emit_lifecycle(name, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Removed);
+            emit_lifecycle(name, ledger_id, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Removed);
         }
 
         VmtHook::operator bool() const noexcept
@@ -1131,7 +1136,8 @@ namespace DetourModKit
                 log().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
                            Format::format_address(reinterpret_cast<std::uintptr_t>(object)));
                 impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_vmt(*base);
-                emit_lifecycle(created_name, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Created);
+                emit_lifecycle(created_name, impl->ledger_id, Diagnostics::HookKind::Vmt,
+                               Diagnostics::HookTransition::Created);
                 return VmtHook(std::move(impl));
             }
             catch (const std::bad_alloc &)

@@ -71,7 +71,7 @@ namespace DetourModKit
         }
 
         ScanRequest borrow(std::span<const Candidate> ladder, std::string_view label, Region scope,
-                           bool prologue_fallback, bool require_unique, CandidateOrder order) noexcept
+                           bool prologue_fallback, bool require_unique, CandidateOrder order, Pages pages) noexcept
         {
             return ScanRequest{
                 .ladder = ladder,
@@ -80,6 +80,7 @@ namespace DetourModKit
                 .prologue_fallback = prologue_fallback,
                 .require_unique = require_unique,
                 .order = order,
+                .pages = pages,
             };
         }
     } // namespace scan

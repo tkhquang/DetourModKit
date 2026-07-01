@@ -18,6 +18,8 @@
 #include "internal/scan_prologue_recovery.hpp"
 #include "internal/scan_shared.hpp"
 
+#include "DetourModKit/format.hpp"
+#include "DetourModKit/logger.hpp"
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/rtti.hpp"
 
@@ -28,6 +30,8 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -67,6 +71,49 @@ namespace DetourModKit
                 }
                 return nullptr;
             }
+
+            // Resolver observability: one line names the winning candidate on success, a distinct line marks
+            // hooked-prologue recovery, and a miss records how many ladder rows were tried. These helpers do not alter
+            // the address or outcome: formatting/allocation failures are swallowed so a diagnostic cannot turn a
+            // genuine hit into a failure. The request label is echoed so callers can correlate logs with the site they
+            // asked to resolve.
+            void log_resolved(const ScanRequest &request, const Hit &hit, bool via_prologue_recovery) noexcept
+            {
+                try
+                {
+                    const std::string where = Format::format_address(hit.address.raw());
+                    if (via_prologue_recovery)
+                    {
+                        (void)DetourModKit::log().try_log(
+                            LogLevel::Debug,
+                            "scan::resolve: '{}' recovered {} via hooked-prologue reconstruction of candidate '{}'.",
+                            request.label, where, hit.winning_name);
+                    }
+                    else
+                    {
+                        (void)DetourModKit::log().try_log(LogLevel::Debug,
+                                                          "scan::resolve: '{}' resolved {} via candidate '{}'.",
+                                                          request.label, where, hit.winning_name);
+                    }
+                }
+                catch (...)
+                {
+                    // Best-effort diagnostic only: never let a logging allocation perturb the resolve() result.
+                }
+            }
+
+            void log_unresolved(const ScanRequest &request, std::string_view reason) noexcept
+            {
+                try
+                {
+                    (void)DetourModKit::log().try_log(LogLevel::Warning,
+                                                      "scan::resolve: '{}' matched no candidate across {} tried ({}).",
+                                                      request.label, request.ladder.size(), reason);
+                }
+                catch (...)
+                {
+                }
+            }
         } // namespace
 
         Result<Hit> resolve(const ScanRequest &request)
@@ -99,7 +146,9 @@ namespace DetourModKit
                         DetourModKit::rtti::vtable_for_type(rtti->mangled, request.scope);
                     if (vtable && range.contains(vtable->raw()))
                     {
-                        return Hit{*vtable, candidate.name()};
+                        const Hit hit{*vtable, candidate.name()};
+                        log_resolved(request, hit, false);
+                        return hit;
                     }
                     continue;
                 }
@@ -117,7 +166,9 @@ namespace DetourModKit
                     const Result<Address> site = find_string_xref(query, request.scope);
                     if (site && range.contains(site->raw()))
                     {
-                        return Hit{*site, candidate.name()};
+                        const Hit hit{*site, candidate.name()};
+                        log_resolved(request, hit, false);
+                        return hit;
                     }
                     continue;
                 }
@@ -135,7 +186,9 @@ namespace DetourModKit
                 }
                 const detail::EnginePattern compiled = detail::to_engine_pattern(*pattern, *histogram);
 
-                const detail::MatchResult first = detail::scan_module_readable(compiled, range, 1);
+                // Honour the request's page class: Readable sweeps code + data, while Executable narrows to code pages
+                // so an instruction signature cannot alias an identical run in data.
+                const detail::MatchResult first = detail::scan_module_pages(compiled, range, request.pages, 1);
                 if (first.match == nullptr)
                 {
                     continue;
@@ -144,7 +197,7 @@ namespace DetourModKit
                 bool ambiguous = false;
                 if (request.require_unique)
                 {
-                    const detail::MatchResult second = detail::scan_module_readable(compiled, range, 2);
+                    const detail::MatchResult second = detail::scan_module_pages(compiled, range, request.pages, 2);
                     ambiguous = second.match != nullptr;
                     incomplete = incomplete || second.incomplete;
                 }
@@ -168,7 +221,9 @@ namespace DetourModKit
                     // module); reject it here so the ladder falls through instead of committing out of scope.
                     continue;
                 }
-                return Hit{Address{*resolved}, candidate.name()};
+                const Hit hit{Address{*resolved}, candidate.name()};
+                log_resolved(request, hit, false);
+                return hit;
             }
 
             if (request.prologue_fallback)
@@ -177,6 +232,7 @@ namespace DetourModKit
                     request, std::span<const std::size_t>{order.data(), ordered_count}, range);
                 if (fallback.hit)
                 {
+                    log_resolved(request, *fallback.hit, true);
                     return *fallback.hit;
                 }
                 if (fallback.had_direct && fallback.not_applicable)
@@ -184,14 +240,17 @@ namespace DetourModKit
                     // A Direct candidate existed to rebuild, but its literal tail was too short for any shape. This is
                     // a distinct diagnostic from a plain miss (a name/string/RipRelative-only ladder has no Direct
                     // row).
+                    log_unresolved(request, "prologue recovery had no rebuildable Direct candidate");
                     return std::unexpected(Error{ErrorCode::PrologueFallbackNotApplicable, "scan::resolve"});
                 }
             }
 
+            log_unresolved(request, "no ladder candidate resolved uniquely in scope");
             return std::unexpected(Error{ErrorCode::NoMatch, "scan::resolve"});
         }
 
-        std::vector<Result<Hit>> resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers) noexcept
+        Result<std::vector<Result<Hit>>> resolve_batch(std::span<const ScanRequest> requests,
+                                                       std::size_t max_workers) noexcept
         {
             try
             {
@@ -213,11 +272,15 @@ namespace DetourModKit
             }
             catch (const std::bad_alloc &)
             {
-                return {};
+                // The per-request result container itself could not be allocated under true out-of-memory, so there is
+                // no batch to hand back. The whole-batch failure rides the OUTER Result, which a caller must unwrap
+                // before touching any per-request slot -- there is no silently-undersized vector to index past the end
+                // of. Error is const-char*-backed, so building it here allocates nothing and keeps this path no-throw.
+                return std::unexpected(Error{ErrorCode::OutOfMemory, "scan::resolve_batch"});
             }
             catch (...)
             {
-                return {};
+                return std::unexpected(Error{ErrorCode::Unknown, "scan::resolve_batch"});
             }
         }
     } // namespace scan

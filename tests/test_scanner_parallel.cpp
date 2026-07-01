@@ -388,8 +388,10 @@ TEST(ScannerBatchTest, ModuleBatchInvalidRangeFailsClosed)
 TEST(ScannerBatchTest, ResolveBatchEmptyReturnsEmpty)
 {
     const std::vector<scan::ScanRequest> requests;
-    const auto results = scan::resolve_batch(requests);
-    EXPECT_EQ(results.size(), 0u);
+    const auto batch = scan::resolve_batch(requests);
+    // No requests is a successful whole-batch outcome carrying an empty per-request vector, NOT a whole-batch failure.
+    ASSERT_TRUE(batch.has_value());
+    EXPECT_EQ(batch->size(), 0u);
 }
 
 TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
@@ -423,7 +425,9 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
     const std::vector<scan::ScanRequest> requests{module_request, fallback_request, whole_process_request,
                                                   empty_request, invalid_range_request};
 
-    const auto results = scan::resolve_batch(requests, 4);
+    const auto batch = scan::resolve_batch(requests, 4);
+    ASSERT_TRUE(batch.has_value());
+    const auto &results = *batch;
     ASSERT_EQ(results.size(), requests.size());
 
     const auto serial_module = scan::resolve(module_request);
@@ -497,7 +501,9 @@ TEST(ScannerBatchTest, ResolveBatchWorkerCountYieldsIdenticalResults)
     // sweep drives many requests through the shared fork-join driver to exercise the work-stealing concurrent path.
     for (const std::size_t workers : {std::size_t{1}, std::size_t{4}, std::size_t{1024}, std::size_t{0}})
     {
-        const auto results = scan::resolve_batch(requests, workers);
+        const auto batch = scan::resolve_batch(requests, workers);
+        ASSERT_TRUE(batch.has_value()) << "workers=" << workers;
+        const auto &results = *batch;
         ASSERT_EQ(results.size(), REQUEST_COUNT) << "workers=" << workers;
         for (std::size_t i = 0; i < REQUEST_COUNT; ++i)
         {
@@ -548,7 +554,9 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
     // off the calling thread. The copies alias one immutable candidate and scope, so agreement is the race check.
     constexpr std::size_t REQUEST_COUNT = 4;
     const std::vector<scan::ScanRequest> requests(REQUEST_COUNT, request);
-    const auto results = scan::resolve_batch(requests, REQUEST_COUNT);
+    const auto batch = scan::resolve_batch(requests, REQUEST_COUNT);
+    ASSERT_TRUE(batch.has_value());
+    const auto &results = *batch;
     ASSERT_EQ(results.size(), REQUEST_COUNT);
 
     const auto serial = scan::resolve(request);
@@ -569,9 +577,10 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
 // contract has two arms, both driven here through the thread-local allocation-failure injector on a SERIAL batch
 // (max_workers == 1) so every allocation lands on the test thread deterministically:
 //   1. If the N-entry result container itself cannot be allocated, the whole batch fails: resolve_batch catches the
-//      bad_alloc at the noexcept boundary and returns an EMPTY vector, so size() != requests.size() is the signal.
-//   2. If the container is built but a per-request resolve throws bad_alloc, only that slot degrades to
-//      Error{OutOfMemory}; the batch still returns one result per request.
+//      bad_alloc at the noexcept boundary and returns the OUTER Result as Error{OutOfMemory}. The signal is explicit
+//      (an unwrap the caller cannot skip), not a silently-undersized vector, so it mirrors hook::install_all.
+//   2. If the container is built but a per-request resolve throws bad_alloc, the outer Result succeeds and only that
+//      slot degrades to Error{OutOfMemory}; the inner vector still has one result per request.
 // The fork-join driver's own two-tier catch (a non-bad_alloc throw keeps the fail-closed seed) is proven directly by
 // the last test, which needs no injection.
 // ----------------------------------------------------------------------------
@@ -581,7 +590,7 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
 static_assert(noexcept(scan::resolve_batch(std::span<const scan::ScanRequest>{}, std::size_t{1})),
               "scan::resolve_batch must be noexcept: it is the never-terminate batch boundary.");
 
-TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsEmptyWholeBatchSignal)
+TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsOuterErrorWholeBatchSignal)
 {
     CommittedPage code_page(64 * 1024, PAGE_EXECUTE_READWRITE);
     ASSERT_NE(code_page.base, nullptr);
@@ -595,19 +604,20 @@ TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsEmptyWholeBatchSi
     const std::vector<scan::ScanRequest> requests{request, request, request};
     const std::span<const scan::ScanRequest> view{requests};
 
-    std::vector<Result<scan::Hit>> results;
+    Result<std::vector<Result<scan::Hit>>> results;
     {
         // Budget 0: the very first allocation (the result container inside run_fork_join) fails, so resolve_batch
-        // swallows the bad_alloc at its noexcept boundary and hands back an empty vector (the whole-batch signal).
+        // swallows the bad_alloc at its noexcept boundary and reports the whole-batch failure on the OUTER Result.
+        // Building Error{OutOfMemory} allocates nothing (its `where` is a const char*), so this path stays no-throw
+        // even with every allocation failing.
         dmk_test::AllocFailScope fail(0);
         results = scan::resolve_batch(view, 1);
     }
 
-    // Whole-batch out-of-memory signal: the returned size no longer matches the request count. Compare sizes rather
-    // than calling vector::empty(), whose begin() == end() drags std::expected's operator== into overload resolution
-    // and trips a libstdc++ constraint-recursion diagnostic on this element type.
-    EXPECT_EQ(results.size(), 0u);
-    EXPECT_NE(results.size(), requests.size());
+    // Whole-batch out-of-memory signal: the outer Result holds no per-request vector at all, so a caller must unwrap
+    // it before indexing and cannot silently proceed on a truncated batch.
+    ASSERT_FALSE(results.has_value());
+    EXPECT_EQ(results.error().code, ErrorCode::OutOfMemory);
 }
 
 TEST(ScannerBatchTest, ResolveBatchPerRequestAllocFailureDegradesToOutOfMemory)
@@ -636,21 +646,25 @@ TEST(ScannerBatchTest, ResolveBatchPerRequestAllocFailureDegradesToOutOfMemory)
     }
     const std::span<const scan::ScanRequest> view{requests};
 
-    std::vector<Result<scan::Hit>> results;
+    Result<std::vector<Result<scan::Hit>>> results;
     {
         // Budget 1: the result container (one allocation) is built and fail-closed-seeded, then every per-request
         // resolve throws bad_alloc on its first internal allocation. Each throw is caught inside resolve_batch's
-        // per-request wrapper and mapped to Error{OutOfMemory}, so the batch still returns one result per request.
+        // per-request wrapper and mapped to Error{OutOfMemory}, so the outer Result succeeds and the inner vector
+        // still holds one result per request.
         dmk_test::AllocFailScope fail(1);
         results = scan::resolve_batch(view, 1);
     }
 
-    // The container survived, so this is per-request degradation, not the whole-batch signal.
-    ASSERT_EQ(results.size(), requests.size());
-    for (std::size_t i = 0; i < results.size(); ++i)
+    // The container survived, so the outer Result succeeds and this is per-request degradation, not the whole-batch
+    // signal.
+    ASSERT_TRUE(results.has_value());
+    const auto &batch = *results;
+    ASSERT_EQ(batch.size(), requests.size());
+    for (std::size_t i = 0; i < batch.size(); ++i)
     {
-        ASSERT_FALSE(results[i].has_value()) << "item=" << i;
-        EXPECT_EQ(results[i].error().code, ErrorCode::OutOfMemory) << "item=" << i;
+        ASSERT_FALSE(batch[i].has_value()) << "item=" << i;
+        EXPECT_EQ(batch[i].error().code, ErrorCode::OutOfMemory) << "item=" << i;
     }
 }
 

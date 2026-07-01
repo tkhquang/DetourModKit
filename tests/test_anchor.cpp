@@ -1004,6 +1004,41 @@ TEST(AnchorFingerprintTest, CascadePatternContentIsEvidence)
     EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(b));
 }
 
+TEST(AnchorFingerprintTest, CascadeFieldBoundaryResistsByteRedistribution)
+{
+    // Two RipGlobal cascades of the same cardinality cover the identical "AA BB CC" stream, differing only in where
+    // the boundary between patterns falls: [AA BB][CC] vs [AA][BB CC]. Each pattern's bytes/mask are length-prefixed in
+    // the fingerprint, so the prefix pins each pattern's extent and moving the boundary is different evidence.
+    const sc::Candidate split_left[] = {sc::Candidate::direct("c0", aob("AA BB")),
+                                        sc::Candidate::direct("c1", aob("CC"))};
+    const sc::Candidate split_right[] = {sc::Candidate::direct("c0", aob("AA")),
+                                         sc::Candidate::direct("c1", aob("BB CC"))};
+    an::Anchor a{};
+    a.kind = an::AnchorKind::RipGlobal;
+    a.site = split_left;
+    an::Anchor b{};
+    b.kind = an::AnchorKind::RipGlobal;
+    b.site = split_right;
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(b));
+}
+
+TEST(AnchorFingerprintTest, CascadeCardinalityIsEvidence)
+{
+    // A single candidate versus the same candidate repeated: [c] vs [c, c]. Per-candidate content is byte-identical, so
+    // only the cascade length differs. The cascade's leading count prefix makes cardinality evidence, so a duplicated
+    // ladder row cannot alias the singleton it duplicates.
+    const sc::Candidate one[] = {sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??"))};
+    const sc::Candidate two[] = {sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??")),
+                                 sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??"))};
+    an::Anchor a{};
+    a.kind = an::AnchorKind::RipGlobal;
+    a.site = one;
+    an::Anchor b{};
+    b.kind = an::AnchorKind::RipGlobal;
+    b.site = two;
+    EXPECT_NE(an::anchor_fingerprint(a), an::anchor_fingerprint(b));
+}
+
 TEST(AnchorFingerprintTest, CascadeWildcardMaskIsEvidence)
 {
     const sc::Candidate site_a[] = {sc::Candidate::direct("c", aob("48 8B 05 ?? ?? ?? ??"))};

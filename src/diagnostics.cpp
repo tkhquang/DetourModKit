@@ -10,8 +10,8 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <mutex>
-#include <string>
 #include <unordered_map>
 
 namespace DetourModKit
@@ -32,10 +32,20 @@ namespace DetourModKit
             // The safety ledger (src/internal/hook_ledger.hpp) tracks live hooks for duplicate / teardown-order
             // detection but records no enable state and exposes no enumeration, so it cannot supply the active-vs-
             // disabled split on its own. The lifecycle stream carries exactly the missing piece -- every completed
-            // Created / Enabled / Disabled / Removed transition, tagged with the hook id -- so one `name -> enabled`
-            // map fed by a permanent subscription is the single self-consistent source for all three population
-            // figures (total = live entries, active = enabled entries, disabled = the remainder). Deriving all three
-            // from one map guarantees total == active + disabled, which two independent sources could not.
+            // Created / Enabled / Disabled / Removed transition, tagged with the hook's process-unique ledger id -- so
+            // one `ledger id -> enabled` map fed by a permanent subscription is the single self-consistent source for
+            // all three population figures (total = live entries, active = enabled entries, disabled = the remainder).
+            // Deriving all three from one map guarantees total == active + disabled, which two independent sources
+            // could not.
+            //
+            // The key is the ledger id, NOT the hook name. Names are caller-chosen and may repeat: two hooks can share
+            // one name on distinct targets (e.g. the same logical patch installed on two objects). Keying on the name
+            // would fold both into a single map entry, so the tally would report one hook where two are live, and a
+            // Removed for either would erase the shared entry and drop the survivor from the count as well. The ledger
+            // id is minted once per hook and never collides, so each live hook occupies its own entry and a Removed
+            // clears only that hook's slot. (Ledger id 0 is the untracked sentinel a hook takes only when its ledger
+            // bookkeeping failed under memory pressure; such hooks are already indistinguishable everywhere, so their
+            // collapse here is consistent with that degraded state rather than a new defect.)
             class HookPopulation
             {
             public:
@@ -54,13 +64,13 @@ namespace DetourModKit
                         {
                         case HookTransition::Created:
                         case HookTransition::Enabled:
-                            m_live[std::string(event.name)] = true;
+                            m_live[event.ledger_id] = true;
                             break;
                         case HookTransition::Disabled:
-                            m_live[std::string(event.name)] = false;
+                            m_live[event.ledger_id] = false;
                             break;
                         case HookTransition::Removed:
-                            m_live.erase(std::string(event.name));
+                            m_live.erase(event.ledger_id);
                             break;
                         }
                     }
@@ -89,8 +99,8 @@ namespace DetourModKit
 
             private:
                 mutable std::mutex m_mutex;
-                std::unordered_map<std::string, bool> m_live; // hook id -> enabled
-                Subscription m_subscription;                  // declared last: subscribes after the map/mutex exist
+                std::unordered_map<std::uint64_t, bool> m_live; // ledger id -> enabled
+                Subscription m_subscription;                    // declared last: subscribes after the map/mutex exist
             };
 
             HookPopulation &hook_population()
