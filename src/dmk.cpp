@@ -1,4 +1,4 @@
-#include "DetourModKit/dmk.hpp"
+#include "DetourModKit.hpp"
 
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/diagnostics.hpp"
@@ -483,7 +483,7 @@ namespace DetourModKit
                 s_shutdown_event = nullptr;
             }
             s_module = nullptr;
-            Diagnostics::record_intentional_leak(Diagnostics::LeakSubsystem::Bootstrap);
+            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             return;
         }
 
@@ -504,7 +504,7 @@ namespace DetourModKit
             // calls request_shutdown() off the loader lock first (which routes to the join path below); DetourModKit
             // does not guarantee graceful worker teardown for a bare FreeLibrary. s_module is not touched by the
             // worker, so clear it so module_handle() stops naming the unloading module.
-            Diagnostics::record_intentional_leak(Diagnostics::LeakSubsystem::Bootstrap);
+            diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             s_module = nullptr;
             return;
         }

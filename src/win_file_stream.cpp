@@ -1,4 +1,4 @@
-#include "DetourModKit/detail/win_file_stream.hpp"
+#include "internal/win_file_stream.hpp"
 
 #include <windows.h>
 #include <algorithm>
@@ -6,7 +6,7 @@
 #include <climits>
 #include <cstring>
 
-namespace DetourModKit
+namespace DetourModKit::detail
 {
     // --- WinFileStreamBuf ---
 
@@ -228,4 +228,4 @@ namespace DetourModKit
         m_buf.close();
     }
 
-} // namespace DetourModKit
+} // namespace DetourModKit::detail

@@ -3,6 +3,7 @@
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "platform.hpp"
+#include "internal/win_file_stream.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -53,7 +54,7 @@ namespace DetourModKit
             if (leaked != nullptr)
             {
                 (void)leaked;
-                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
                 return;
             }
 
@@ -62,7 +63,7 @@ namespace DetourModKit
             if (virtual_cell != nullptr)
             {
                 new (virtual_cell) std::shared_ptr<AsyncLogger>(std::move(logger));
-                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
                 return;
             }
 
@@ -73,8 +74,8 @@ namespace DetourModKit
                 if (slot.occupied.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
                 {
                     new (static_cast<void *>(slot.storage)) std::shared_ptr<AsyncLogger>(std::move(logger));
-                    DetourModKit::Diagnostics::record_intentional_leak(
-                        DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                    DetourModKit::diagnostics::record_intentional_leak(
+                        DetourModKit::diagnostics::LeakSubsystem::Logger);
                     return;
                 }
             }
@@ -169,7 +170,8 @@ namespace DetourModKit
     }
 
     Logger::Logger()
-        : m_log_file_stream_ptr(std::make_shared<WinFileStream>()), m_log_mutex_ptr(std::make_shared<std::mutex>())
+        : m_log_file_stream_ptr(std::make_shared<detail::WinFileStream>()),
+          m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
         const auto config = get_static_config();
         m_log_prefix = config->log_prefix;
@@ -181,7 +183,8 @@ namespace DetourModKit
 
     Logger::Logger(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
         : m_log_prefix(prefix), m_log_file_name(file_name), m_timestamp_format(timestamp_fmt),
-          m_log_file_stream_ptr(std::make_shared<WinFileStream>()), m_log_mutex_ptr(std::make_shared<std::mutex>())
+          m_log_file_stream_ptr(std::make_shared<detail::WinFileStream>()),
+          m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
         open_sink(false);
     }
@@ -417,7 +420,7 @@ namespace DetourModKit
 
         try
         {
-            std::wstring module_dir = Filesystem::get_runtime_directory();
+            std::wstring module_dir = filesystem::get_runtime_directory();
             if (module_dir.empty() || module_dir == L".")
             {
                 std::cerr << "[" << m_log_prefix << " Logger PATH_WARNING] "

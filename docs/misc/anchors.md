@@ -117,7 +117,7 @@ for (std::size_t i = 0; i < n; ++i)
 
 Every backend already fails closed, so a missing constant surfaces as `AnchorStatus::Failed` (no value invented), and `Manual` anchors stand out as the ones a future patch can silently break.
 
-`anchor::assess_quality(report)` rolls the same `ResolvedAnchor[]` into an `AnchorQuality` summary in one pass (no re-resolve): how many resolved, failed, are pinned `Manual` literals that cannot self-heal (`manual_at_risk`), or are corroborated quorums (the strongest evidence). It is a cheap, allocation-free way to gate "is this manifest healthy enough to run?" or to log a one-line robustness snapshot per build. The same summary is what `Diagnostics::collect(drift_report, anchor_report)` folds into its `Snapshot.anchor_quality` field.
+`anchor::assess_quality(report)` rolls the same `ResolvedAnchor[]` into an `AnchorQuality` summary in one pass (no re-resolve): how many resolved, failed, are pinned `Manual` literals that cannot self-heal (`manual_at_risk`), or are corroborated quorums (the strongest evidence). It is a cheap, allocation-free way to gate "is this manifest healthy enough to run?" or to log a one-line robustness snapshot per build. The same summary is what `diagnostics::collect(drift_report, anchor_report)` folds into its `Snapshot.anchor_quality` field.
 
 ## Anchor fingerprints
 

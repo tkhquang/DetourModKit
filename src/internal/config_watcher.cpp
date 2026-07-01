@@ -232,8 +232,8 @@ namespace DetourModKit
                 {
                     (void)m_impl.release();
                 }
-                DetourModKit::Diagnostics::record_intentional_leak(
-                    DetourModKit::Diagnostics::LeakSubsystem::ConfigWatcher);
+                DetourModKit::diagnostics::record_intentional_leak(
+                    DetourModKit::diagnostics::LeakSubsystem::ConfigWatcher);
                 return;
             }
 

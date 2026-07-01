@@ -42,8 +42,8 @@ namespace DetourModKit
 {
     namespace config
     {
-        using DetourModKit::Filesystem::get_runtime_directory;
-        using DetourModKit::String::trim;
+        using DetourModKit::filesystem::get_runtime_directory;
+        using DetourModKit::string::trim;
 
         // Anonymous namespace for internal helpers and storage.
         namespace

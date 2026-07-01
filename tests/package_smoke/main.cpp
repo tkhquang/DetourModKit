@@ -1,11 +1,4 @@
-#include <DetourModKit/dmk.hpp>
-
-/*
- * dmk.hpp is the umbrella + process-lifecycle surface, but it does not pull in these two demote-candidate headers.
- * Include them directly so the installed package's non-umbrella-reachable headers are also compile-checked against the
- * consumer toolchain by this smoke test.
- */
-#include <DetourModKit/detail/win_file_stream.hpp>
+#include <DetourModKit.hpp>
 
 int main()
 {

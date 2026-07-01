@@ -209,7 +209,7 @@ namespace DetourModKit
                 // allocate on first use, so diagnostics must never change the scan result.
                 try
                 {
-                    Diagnostics::scanner_faults().emit_safe(Diagnostics::ScannerFaultEvent{
+                    diagnostics::scanner_faults().emit_safe(diagnostics::ScannerFaultEvent{
                         .faulted_regions = faulted_regions, .window_low = window_lo, .window_high = window_hi});
                 }
                 catch (...)

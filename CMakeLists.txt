@@ -575,9 +575,14 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
 )
 
-# The umbrella + process-lifecycle surface is include/DetourModKit/dmk.hpp; it ships through the module-headers glob
-# above (installed to include/DetourModKit) like every other public header. The v3 root-level DetourModKit.hpp umbrella
-# was replaced by dmk.hpp in the v4 clean break and no longer exists to install.
+# The umbrella + process-lifecycle surface is the root-level include/DetourModKit.hpp, placed beside (not inside) the
+# include/DetourModKit/ module directory so a consumer writes <DetourModKit.hpp> with no doubled path (the Boost.Asio
+# shape: an <asio.hpp> umbrella beside the <asio/...> parts). Because it lives one directory above the module-headers
+# glob, it is not swept up by that glob and needs its own rule installing it at the include-dir root.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+)
 
 # Install DirectXMath headers, gated on DMK_INSTALL_DIRECTXMATH. When the re-export is off, nothing DirectXMath ships
 # and the install-interface include path attached above is likewise omitted, so an opted-out prefix carries only
@@ -757,11 +762,28 @@ endif()
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported LANGUAGES CXX OUTPUT _ipo_error)
 
-if(_ipo_supported)
+# DetourModKit ships as a static archive that the consumer links into the final mod DLL, so enabling LTO here bakes
+# GIMPLE bytecode into the archive that the CONSUMER's linker must recompile (lto1) at its own final link. GCC 15's
+# lto1 has a defect that aborts that consumer link with "two or more sections for .gnu.lto_*" on the duplicate COMDAT
+# sections of weak template instantiations (std::atomic / std::vector specializations, etc.) pulled from the archive.
+# It is not fixable from the consumer side without every consumer passing -fno-lto, and slim vs fat LTO objects makes
+# no difference (the driver still invokes lto1 on the bytecode). GCC 13.x and MSVC's /GL LTCG are unaffected, so LTO
+# stays enabled there and is suppressed only on the broken GCC major version, keeping the shipped archive linkable by
+# any consumer regardless of their toolchain. Narrow the version guard once a fixed GCC 15.x is confirmed upstream.
+set(_dmk_lto_broken OFF)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+  set(_dmk_lto_broken ON)
+endif()
+
+if(_ipo_supported AND NOT _dmk_lto_broken)
   set_target_properties(DetourModKit PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_RELEASE ON
   )
   message(STATUS "LTO enabled for DetourModKit Release builds")
+elseif(_dmk_lto_broken)
+  message(STATUS
+    "LTO disabled: GCC ${CMAKE_CXX_COMPILER_VERSION} lto1 mis-links LTO static archives at the consumer's final link; "
+    "shipping non-LTO objects for a portable archive")
 else()
   message(STATUS "LTO not supported: ${_ipo_error}")
 endif()

@@ -440,7 +440,7 @@ tests/
 ├── test_profiler.cpp           # Profiler tests
 ├── test_scan_resolve.cpp       # AOB scanner and resolver tests (scan::Pattern, scan::resolve)
 ├── test_session.cpp            # Session lifecycle, bootstrap worker, and ordered ~Session teardown tests
-├── test_string.cpp             # String::trim cases (shares format.hpp with test_format.cpp -- surface split)
+├── test_string.cpp             # string::trim cases (shares format.hpp with test_format.cpp -- surface split)
 ├── test_win_file_stream.cpp    # Win32 file stream tests
 ├── test_worker.cpp             # StoppableWorker jthread RAII tests
 └── test_x86_decode.cpp         # x86 control-flow instruction decoders (internal)

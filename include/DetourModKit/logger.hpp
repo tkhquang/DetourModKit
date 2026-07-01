@@ -25,7 +25,6 @@
  */
 
 #include "DetourModKit/async_logger_config.hpp"
-#include "DetourModKit/detail/win_file_stream.hpp"
 
 #include <array>
 #include <atomic>
@@ -39,6 +38,15 @@
 
 namespace DetourModKit
 {
+    namespace detail
+    {
+        // Forward-declared so this public header carries only a shared_ptr<detail::WinFileStream> without pulling the
+        // Win32-backed file-stream definition (private, in src/internal/) onto a consumer's include path. Logger's
+        // special members are out-of-line, so the shared_ptr is instantiated only in logger.cpp, where the complete
+        // type is visible.
+        class WinFileStream;
+    } // namespace detail
+
     /**
      * @enum LogLevel
      * @brief Severity levels for log messages, ordered from least to most severe.
@@ -223,7 +231,7 @@ namespace DetourModKit
          * @details Flushes pending async messages first. If the writer thread is detached because this runs under the
          *          Windows loader lock (e.g. during DLL unload), the AsyncLogger is intentionally leaked and the module
          *          pinned so the detached thread never outlives the object's storage or code pages; the event is
-         *          recorded via Diagnostics::record_intentional_leak.
+         *          recorded via diagnostics::record_intentional_leak.
          * @note Setup/control-plane only: joins or detaches the writer thread and takes the async lifecycle mutex.
          */
         void disable_async_mode() noexcept;
@@ -489,7 +497,7 @@ namespace DetourModKit
         std::string m_log_file_name;
         std::string m_timestamp_format;
 
-        std::shared_ptr<WinFileStream> m_log_file_stream_ptr;
+        std::shared_ptr<detail::WinFileStream> m_log_file_stream_ptr;
         std::shared_ptr<std::mutex> m_log_mutex_ptr;
         std::atomic<LogLevel> m_current_log_level{LogLevel::Info};
         std::atomic<bool> m_shutdown_called{false};

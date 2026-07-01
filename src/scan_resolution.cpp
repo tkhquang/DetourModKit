@@ -81,7 +81,7 @@ namespace DetourModKit
             {
                 try
                 {
-                    const std::string where = Format::format_address(hit.address.raw());
+                    const std::string where = format::format_address(hit.address.raw());
                     if (via_prologue_recovery)
                     {
                         (void)DetourModKit::log().try_log(
