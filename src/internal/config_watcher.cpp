@@ -278,8 +278,7 @@ namespace DetourModKit
 
             if (m_impl->directory_wide.empty() || m_impl->filename_wide.empty())
             {
-                Logger::get_instance().error("ConfigWatcher: invalid INI path '{}'; cannot start.",
-                                             m_impl->ini_path_utf8);
+                log().error("ConfigWatcher: invalid INI path '{}'; cannot start.", m_impl->ini_path_utf8);
                 return false;
             }
 
@@ -334,8 +333,7 @@ namespace DetourModKit
 
                     if (!dir_handle.valid())
                     {
-                        Logger::get_instance().error("ConfigWatcher '{}': CreateFileW failed (GLE={}).", label,
-                                                     ::GetLastError());
+                        log().error("ConfigWatcher '{}': CreateFileW failed (GLE={}).", label, ::GetLastError());
                         open_result->set_value(false);
                         return;
                     }
@@ -343,8 +341,7 @@ namespace DetourModKit
                     event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
                     if (!event_handle.valid())
                     {
-                        Logger::get_instance().error("ConfigWatcher '{}': CreateEventW failed (GLE={}).", label,
-                                                     ::GetLastError());
+                        log().error("ConfigWatcher '{}': CreateEventW failed (GLE={}).", label, ::GetLastError());
                         open_result->set_value(false);
                         return;
                     }
@@ -371,8 +368,8 @@ namespace DetourModKit
                                                     NOTIFY_FILTER, &bytes_returned, &overlapped, nullptr);
                         if (!ok)
                         {
-                            Logger::get_instance().error("ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).",
-                                                         label, ::GetLastError());
+                            log().error("ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).", label,
+                                        ::GetLastError());
                             return false;
                         }
                         return true;
@@ -422,10 +419,10 @@ namespace DetourModKit
                                 // Directory handle closed or I/O cancelled externally (e.g. the watched parent
                                 // directory was removed or renamed). We cannot recover a handle to a vanished directory
                                 // here; surface the event at warning level so users notice.
-                                Logger::get_instance().warning("ConfigWatcher '{}': directory handle "
-                                                               "invalidated (parent removed/renamed); "
-                                                               "watcher thread exiting.",
-                                                               label);
+                                log().warning("ConfigWatcher '{}': directory handle "
+                                              "invalidated (parent removed/renamed); "
+                                              "watcher thread exiting.",
+                                              label);
                                 break;
                             }
 
@@ -436,10 +433,10 @@ namespace DetourModKit
                                 // coalesced match, re-issue the read, and let debounce deduplicate.
                                 if (!overflow_logged)
                                 {
-                                    Logger::get_instance().debug("ConfigWatcher '{}': notification "
-                                                                 "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
-                                                                 "coalescing dropped events.",
-                                                                 label);
+                                    log().debug("ConfigWatcher '{}': notification "
+                                                "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
+                                                "coalescing dropped events.",
+                                                label);
                                     overflow_logged = true;
                                 }
                                 pending = true;
@@ -455,8 +452,7 @@ namespace DetourModKit
                                 continue;
                             }
 
-                            Logger::get_instance().error("ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).",
-                                                         label, err);
+                            log().error("ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).", label, err);
                             break;
                         }
 
@@ -469,10 +465,10 @@ namespace DetourModKit
                             // ERROR_NOTIFY_ENUM_DIR above: mark pending, re-issue, let debounce deduplicate.
                             if (!overflow_logged)
                             {
-                                Logger::get_instance().debug("ConfigWatcher '{}': notification buffer "
-                                                             "overflowed (zero-byte completion); "
-                                                             "coalescing dropped events.",
-                                                             label);
+                                log().debug("ConfigWatcher '{}': notification buffer "
+                                            "overflowed (zero-byte completion); "
+                                            "coalescing dropped events.",
+                                            label);
                                 overflow_logged = true;
                             }
                             matched = true;
@@ -605,10 +601,10 @@ namespace DetourModKit
 
                     if (!drained)
                     {
-                        Logger::get_instance().warning("ConfigWatcher '{}': pending directory notification did "
-                                                       "not drain after cancel + handle close; leaking the watch "
-                                                       "buffer to stay memory-safe.",
-                                                       label);
+                        log().warning("ConfigWatcher '{}': pending directory notification did "
+                                      "not drain after cancel + handle close; leaking the watch "
+                                      "buffer to stay memory-safe.",
+                                      label);
                         (void)io.release();
                     }
 
@@ -644,9 +640,8 @@ namespace DetourModKit
                 }
                 else
                 {
-                    Logger::get_instance().warning(
-                        "ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
-                        m_impl->ini_path_utf8);
+                    log().warning("ConfigWatcher '{}': start handshake timed out after 5s; treating as failed.",
+                                  m_impl->ini_path_utf8);
                     started = false;
                 }
             }

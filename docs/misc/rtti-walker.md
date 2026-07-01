@@ -94,7 +94,7 @@ To disable caching, pass `nullptr` for `vtable_cache`. To support tables that in
 char rtti_buf[128];
 const std::size_t n = DMK::Rtti::type_name_into(vt, rtti_buf, sizeof(rtti_buf));
 if (n > 0)
-    DMK::Logger::get_instance().log(DMK::LogLevel::Debug, "vtable type = {}", rtti_buf);
+    DMK::log().log(DMK::LogLevel::Debug, "vtable type = {}", rtti_buf);
 ```
 
 `type_name_into` is the right choice for per-frame probes or diagnostic captures that must not allocate. The buffer is always NUL-terminated when `out_len > 0`, and the failure path sets `out[0] = '\0'` so misuse cannot leak stale stack contents.

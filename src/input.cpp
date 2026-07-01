@@ -89,7 +89,7 @@ namespace DetourModKit
                 }
                 catch (...)
                 {
-                    (void)Logger::get_instance().log_noexcept(
+                    (void)log().log_noexcept(
                         LogLevel::Error, "BindingGuard: hold release action threw; suppressed in noexcept teardown");
                 }
             }
@@ -269,7 +269,7 @@ namespace DetourModKit
 
                 if (m_impl->m_poller)
                 {
-                    Logger::get_instance().debug("input::Input: start() called while already running; no-op.");
+                    log().debug("input::Input: start() called while already running; no-op.");
                     return {};
                 }
 
@@ -282,7 +282,7 @@ namespace DetourModKit
                     return {};
                 }
 
-                Logger &logger = Logger::get_instance();
+                Logger &logger = log();
                 logger.info("input::Input: Starting with {} binding(s), poll interval {}ms", m_impl->m_pending.size(),
                             settings.poll_interval.count());
                 for (const auto &binding : m_impl->m_pending)
@@ -411,8 +411,8 @@ namespace DetourModKit
                     if (indices.empty())
                     {
                         lock.unlock();
-                        (void)Logger::get_instance().try_log(
-                            LogLevel::Debug, "input::Input: rebind(\"{}\") ignored: name not found", name);
+                        (void)log().try_log(LogLevel::Debug, "input::Input: rebind(\"{}\") ignored: name not found",
+                                            name);
                         return std::unexpected(Error{ErrorCode::InvalidArg, "input::rebind"});
                     }
 
@@ -487,8 +487,7 @@ namespace DetourModKit
             {
                 // rebind is noexcept-friendly via Result; on out-of-memory the pending bindings are left unchanged
                 // (allocation precedes the move-commit).
-                (void)Logger::get_instance().try_log(LogLevel::Error,
-                                                     "input::Input: out of memory in rebind; bindings unchanged");
+                (void)log().try_log(LogLevel::Error, "input::Input: out of memory in rebind; bindings unchanged");
                 return std::unexpected(Error{ErrorCode::OutOfMemory, "input::rebind"});
             }
 

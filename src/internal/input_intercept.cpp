@@ -526,7 +526,7 @@ namespace DetourModKit::detail
             s_xinput_hook = {};
             if (!s_xinput_enable_warned.exchange(true, std::memory_order_relaxed))
             {
-                (void)Logger::get_instance().try_log(
+                (void)log().try_log(
                     LogLevel::Warning,
                     "InputIntercept: XInputGetState hook created but enable() failed; gamepad input interception is "
                     "inactive. The poll loop will retry.");
@@ -555,7 +555,7 @@ namespace DetourModKit::detail
                     s_xinput_ex_hook = {};
                     if (!s_xinput_ex_enable_warned.exchange(true, std::memory_order_relaxed))
                     {
-                        (void)Logger::get_instance().try_log(
+                        (void)log().try_log(
                             LogLevel::Warning,
                             "InputIntercept: XInputGetStateEx (ordinal 100) hook created but enable() failed; the "
                             "Guide button will not be masked. Primary XInput interception remains active.");

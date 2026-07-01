@@ -270,10 +270,10 @@ namespace DetourModKit
                 {
                     const std::string_view name_view =
                         binding_log_name.empty() ? std::string_view{"<unnamed>"} : binding_log_name;
-                    Logger::get_instance().warning("Config: combo string \"{}\" for binding '{}' did not parse to any "
-                                                   "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
-                                                   "out explicitly.",
-                                                   effective, name_view);
+                    log().warning("Config: combo string \"{}\" for binding '{}' did not parse to any "
+                                  "valid keys; binding will be unbound. Use \"\" or \"NONE\" to opt "
+                                  "out explicitly.",
+                                  effective, name_view);
                 }
 
                 return result;
@@ -766,7 +766,7 @@ namespace DetourModKit
             private:
                 void service_loop(std::stop_token st) noexcept
                 {
-                    DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
+                    DetourModKit::Logger &logger = DetourModKit::log();
 
                     // Wake the CV when the worker is asked to stop so the blocked wait exits promptly instead of
                     // waiting for the next press.
@@ -963,8 +963,8 @@ namespace DetourModKit
         void bind_log_level(std::string_view section, std::string_view key, std::string_view default_value)
         {
             bind_string(
-                section, key, "Log level", [](std::string_view value)
-                { Logger::get_instance().set_log_level(Logger::string_to_log_level(value)); }, default_value);
+                section, key, "Log level",
+                [](std::string_view value) { log().set_log_level(string_to_log_level(value)); }, default_value);
         }
 
         void bind_combos(std::string_view section, std::string_view key, std::string_view display_name,
@@ -1040,10 +1040,10 @@ namespace DetourModKit
                 }
                 else
                 {
-                    (void)Logger::get_instance().try_log(LogLevel::Error,
-                                                         "Config: failed to register input binding '{}' for '{}'; "
-                                                         "binding will be inert.",
-                                                         binding_name_str, log_name);
+                    (void)log().try_log(LogLevel::Error,
+                                        "Config: failed to register input binding '{}' for '{}'; "
+                                        "binding will be inert.",
+                                        binding_name_str, log_name);
                 }
 
                 // Register the live-rebind config item under (section, ini_key). The setter rebinds the named binding
@@ -1089,7 +1089,7 @@ namespace DetourModKit
             {
                 std::lock_guard<std::mutex> lock(get_config_mutex());
 
-                Logger &logger = Logger::get_instance();
+                Logger &logger = log();
                 std::filesystem::path ini_path = get_ini_file_path(std::string(ini_filename), logger);
                 // convert to narrow string for logger formatting
                 std::string ini_path_str = ini_path.string();
@@ -1153,7 +1153,7 @@ namespace DetourModKit
             // reload() share the same per-setter isolation so one bad item degrades to a logged warning instead of
             // aborting the whole load. The logger is acquired outside the config mutex -- a custom Logger sink that
             // re-enters config cannot AB/BA deadlock here.
-            Logger &setter_logger = Logger::get_instance();
+            Logger &setter_logger = log();
             for (auto &cb : deferred_callbacks)
             {
                 try
@@ -1198,7 +1198,7 @@ namespace DetourModKit
                         return false;
                     }
 
-                    DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
+                    DetourModKit::Logger &logger = DetourModKit::log();
                     std::filesystem::path ini_path = get_ini_file_path(ini_filename, logger);
                     std::string ini_path_str = ini_path.string();
 
@@ -1280,7 +1280,7 @@ namespace DetourModKit
                 // pattern). Wrap each call so a single throwing setter cannot prevent the remaining setters from seeing
                 // the refreshed values. Logger::error() below is also outside the config mutex -- a custom Logger sink
                 // that re-enters config cannot AB/BA deadlock here.
-                DetourModKit::Logger &logger = DetourModKit::Logger::get_instance();
+                DetourModKit::Logger &logger = DetourModKit::log();
                 for (auto &cb : deferred_callbacks)
                 {
                     try
@@ -1311,7 +1311,7 @@ namespace DetourModKit
         {
             const std::string ini_filename = snapshot_last_loaded_ini_path();
 
-            Logger &logger = Logger::get_instance();
+            Logger &logger = log();
 
             if (ini_filename.empty())
             {
@@ -1387,7 +1387,7 @@ namespace DetourModKit
                 // own disable flag.
                 if (watcher && watcher->is_worker_thread(std::this_thread::get_id()))
                 {
-                    Logger::get_instance().error(
+                    log().error(
                         "Config: disable_auto_reload() called from the watcher thread; ignoring to avoid self-join "
                         "deadlock. Call from a different thread or disable the hotkey binding instead.");
                     return;
@@ -1405,9 +1405,8 @@ namespace DetourModKit
             // whether to fall back to a different combo or skip the hotkey entirely.
             if (default_combo.empty())
             {
-                Logger::get_instance().warning(
-                    "Config: reload_hotkey('{}', '<empty>') rejected; provide a non-empty default combo.",
-                    std::string(ini_key));
+                log().warning("Config: reload_hotkey('{}', '<empty>') rejected; provide a non-empty default combo.",
+                              std::string(ini_key));
                 return false;
             }
 
@@ -1475,7 +1474,7 @@ namespace DetourModKit
         {
             std::lock_guard<std::mutex> lock(get_config_mutex());
 
-            Logger &logger = Logger::get_instance();
+            Logger &logger = log();
             const auto &items = get_registered_config_items();
             if (items.empty())
             {
@@ -1510,7 +1509,7 @@ namespace DetourModKit
         {
             std::lock_guard<std::mutex> lock(get_config_mutex());
 
-            Logger &logger = Logger::get_instance();
+            Logger &logger = log();
             size_t count = get_registered_config_items().size();
             // Logging routes through try_log (the no-throw, fail-closed path) rather than debug(): debug() formats
             // through a potentially-throwing sink, which would break this noexcept contract on a format or sink

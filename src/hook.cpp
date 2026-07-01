@@ -390,7 +390,7 @@ namespace DetourModKit
                 {
                     return std::unexpected(Error{ErrorCode::TargetAlreadyHookedInProcess, where, address});
                 }
-                (void)Logger::get_instance().try_log(
+                (void)log().try_log(
                     LogLevel::Warning,
                     "hook: '{}' layers on a hook this kit already placed at {}; destroy layered hooks newest-first.",
                     name, Format::format_address(address));
@@ -404,7 +404,7 @@ namespace DetourModKit
                     {
                         return std::unexpected(Error{ErrorCode::TargetAlreadyHookedInProcess, where, address});
                     }
-                    (void)Logger::get_instance().try_log(
+                    (void)log().try_log(
                         LogLevel::Warning,
                         "hook: '{}' target {} is already inline-hooked by another module (JMP -> {}); layering on top.",
                         name, Format::format_address(address), Format::format_address(prehook.jmp_destination));
@@ -420,7 +420,7 @@ namespace DetourModKit
                 {
                     return std::unexpected(Error{ErrorCode::TargetPrologueUnsafe, where, address});
                 }
-                (void)Logger::get_instance().try_log(
+                (void)log().try_log(
                     LogLevel::Warning,
                     "hook: '{}' target {} begins with {}; installed anyway under the Relocate prologue policy.", name,
                     Format::format_address(address), prologue_risk_description(risk));
@@ -605,7 +605,7 @@ namespace DetourModKit
             {
                 // Best-effort warning on a noexcept teardown path: try_log swallows any formatting/sink failure so a
                 // log allocation under memory pressure cannot throw out of the destructor.
-                (void)Logger::get_instance().try_log(
+                (void)log().try_log(
                     LogLevel::Warning,
                     "hook: '{}' at {} destroyed while {} newer hook(s) remain layered on the same target; destroy "
                     "layered hooks newest-first to avoid a trampoline use-after-free.",
@@ -783,9 +783,8 @@ namespace DetourModKit
                                                                   safetyhook::InlineHook::Default);
                     if (!created)
                     {
-                        Logger::get_instance().error("hook::inline_at: backend create failed for '{}' at {}: {}",
-                                                     request.name, Format::format_address(target),
-                                                     backend_error_string(created.error()));
+                        log().error("hook::inline_at: backend create failed for '{}' at {}: {}", request.name,
+                                    Format::format_address(target), backend_error_string(created.error()));
                         return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
                     }
                     auto backend_hook = std::move(created.value());
@@ -797,8 +796,8 @@ namespace DetourModKit
                     auto impl = std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target,
                                                              0, state);
                     const std::string_view created_name = impl->name;
-                    Logger::get_instance().info("hook::inline_at: created inline hook '{}' at {}.", created_name,
-                                                Format::format_address(target));
+                    log().info("hook::inline_at: created inline hook '{}' at {}.", created_name,
+                               Format::format_address(target));
                     impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_hook(target);
                     emit_lifecycle(created_name, Diagnostics::HookKind::Inline, Diagnostics::HookTransition::Created);
                     return Hook(std::move(impl));
@@ -843,8 +842,8 @@ namespace DetourModKit
                                                            to_backend_detour(detour), safetyhook::MidHook::Default);
                 if (!created)
                 {
-                    Logger::get_instance().error("hook::mid_at: backend create failed for '{}' at {}: {}", request.name,
-                                                 Format::format_address(target), backend_error_string(created.error()));
+                    log().error("hook::mid_at: backend create failed for '{}' at {}: {}", request.name,
+                                Format::format_address(target), backend_error_string(created.error()));
                     return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
                 }
                 auto backend_hook = std::move(created.value());
@@ -855,8 +854,7 @@ namespace DetourModKit
                 auto impl =
                     std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target, 0, state);
                 const std::string_view created_name = impl->name;
-                Logger::get_instance().info("hook::mid_at: created mid hook '{}' at {}.", created_name,
-                                            Format::format_address(target));
+                log().info("hook::mid_at: created mid hook '{}' at {}.", created_name, Format::format_address(target));
                 impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_hook(target);
                 emit_lifecycle(created_name, Diagnostics::HookKind::Mid, Diagnostics::HookTransition::Created);
                 return Hook(std::move(impl));
@@ -1130,8 +1128,8 @@ namespace DetourModKit
                 // leaving a phantom ledger entry. record_vmt is noexcept and nothing fallible runs after it.
                 auto impl = std::make_unique<VmtHook::Impl>(std::move(backend_hook), std::move(name), *base, 0);
                 const std::string_view created_name = impl->name;
-                Logger::get_instance().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
-                                            Format::format_address(reinterpret_cast<std::uintptr_t>(object)));
+                log().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
+                           Format::format_address(reinterpret_cast<std::uintptr_t>(object)));
                 impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_vmt(*base);
                 emit_lifecycle(created_name, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Created);
                 return VmtHook(std::move(impl));

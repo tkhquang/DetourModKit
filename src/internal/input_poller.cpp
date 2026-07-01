@@ -420,9 +420,9 @@ namespace DetourModKit
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_has_wheel_consume_bindings.store(false, std::memory_order_relaxed);
                 publish_gamepad_consume_rules(nullptr, 0);
-                (void)Logger::get_instance().try_log(
-                    LogLevel::Error, "InputPoller: out of memory rebuilding modifier caches; "
-                                     "name lookup and input interception disabled until the next successful rebuild");
+                (void)log().try_log(LogLevel::Error,
+                                    "InputPoller: out of memory rebuilding modifier caches; "
+                                    "name lookup and input interception disabled until the next successful rebuild");
             }
         }
 
@@ -435,7 +435,7 @@ namespace DetourModKit
         {
             if (m_poll_thread.joinable())
             {
-                Logger::get_instance().debug("InputPoller: start() called while already running; no-op.");
+                log().debug("InputPoller: start() called while already running; no-op.");
                 return;
             }
 
@@ -882,8 +882,8 @@ namespace DetourModKit
                     // poll thread. The gamepad suppression publish below still runs from whatever was accumulated, and
                     // self-heals next cycle.
                     pending.clear();
-                    (void)Logger::get_instance().try_log(
-                        LogLevel::Error, "InputPoller: failed staging poll-cycle callbacks; callbacks skipped");
+                    (void)log().try_log(LogLevel::Error,
+                                        "InputPoller: failed staging poll-cycle callbacks; callbacks skipped");
                 }
 
                 // Publish the gamepad suppression mask for the XInput detour. The consume-until-release latch keeps a
@@ -927,13 +927,13 @@ namespace DetourModKit
                     }
                     catch (const std::exception &e)
                     {
-                        (void)Logger::get_instance().try_log(
-                            LogLevel::Error, "InputPoller: Exception in callback \"{}\": {}", callback.name, e.what());
+                        (void)log().try_log(LogLevel::Error, "InputPoller: Exception in callback \"{}\": {}",
+                                            callback.name, e.what());
                     }
                     catch (...)
                     {
-                        (void)Logger::get_instance().try_log(
-                            LogLevel::Error, "InputPoller: Unknown exception in callback \"{}\"", callback.name);
+                        (void)log().try_log(LogLevel::Error, "InputPoller: Unknown exception in callback \"{}\"",
+                                            callback.name);
                     }
                 }
 
@@ -957,8 +957,8 @@ namespace DetourModKit
                     // Release the writer lock before logging so the emit does not run inside the critical section
                     // (deferred-logging convention).
                     lock.unlock();
-                    (void)Logger::get_instance().try_log(
-                        LogLevel::Debug, "InputPoller: update_combos(\"{}\") ignored: name not found", name);
+                    (void)log().try_log(LogLevel::Debug, "InputPoller: update_combos(\"{}\") ignored: name not found",
+                                        name);
                     return false;
                 }
 
@@ -1088,8 +1088,7 @@ namespace DetourModKit
             {
                 // Out of memory during the rebuild. update_combos is noexcept; the poller is left unchanged (Phase 1
                 // allocates before any mutation) and no release callbacks are fired.
-                (void)Logger::get_instance().try_log(LogLevel::Error,
-                                                     "InputPoller: out of memory in update_combos; combos unchanged");
+                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in update_combos; combos unchanged");
                 return false;
             }
 
@@ -1104,15 +1103,14 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    (void)Logger::get_instance().try_log(LogLevel::Error,
-                                                         "InputPoller: Exception in hold release callback \"{}\": {}",
-                                                         hold_release_names[i], e.what());
+                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
+                                        hold_release_names[i], e.what());
                 }
                 catch (...)
                 {
-                    (void)Logger::get_instance().try_log(
-                        LogLevel::Error, "InputPoller: Unknown exception in hold release callback \"{}\"",
-                        hold_release_names[i]);
+                    (void)log().try_log(LogLevel::Error,
+                                        "InputPoller: Unknown exception in hold release callback \"{}\"",
+                                        hold_release_names[i]);
                 }
             }
 
@@ -1151,8 +1149,7 @@ namespace DetourModKit
             {
                 // Out of memory growing the poller. add_binding is noexcept and reachable from teardown, so the binding
                 // is dropped (the poller is left exactly as it was) rather than terminating the host.
-                (void)Logger::get_instance().try_log(LogLevel::Error,
-                                                     "InputPoller: out of memory in add_binding; binding not added");
+                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in add_binding; binding not added");
             }
         }
 
@@ -1234,8 +1231,8 @@ namespace DetourModKit
             {
                 // Out of memory preparing the reshape. remove_bindings_by_name is noexcept and reachable from teardown;
                 // the poller is left unchanged (allocation precedes erasure) and no callbacks are fired.
-                (void)Logger::get_instance().try_log(
-                    LogLevel::Error, "InputPoller: out of memory in remove_bindings_by_name; bindings unchanged");
+                (void)log().try_log(LogLevel::Error,
+                                    "InputPoller: out of memory in remove_bindings_by_name; bindings unchanged");
                 return 0;
             }
 
@@ -1247,15 +1244,14 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    (void)Logger::get_instance().try_log(LogLevel::Error,
-                                                         "InputPoller: Exception in hold release callback \"{}\": {}",
-                                                         hold_release_names[i], e.what());
+                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
+                                        hold_release_names[i], e.what());
                 }
                 catch (...)
                 {
-                    (void)Logger::get_instance().try_log(
-                        LogLevel::Error, "InputPoller: Unknown exception in hold release callback \"{}\"",
-                        hold_release_names[i]);
+                    (void)log().try_log(LogLevel::Error,
+                                        "InputPoller: Unknown exception in hold release callback \"{}\"",
+                                        hold_release_names[i]);
                 }
             }
 
@@ -1304,8 +1300,8 @@ namespace DetourModKit
             }
             catch (...)
             {
-                (void)Logger::get_instance().try_log(
-                    LogLevel::Error, "InputPoller: out of memory in clear_bindings; bindings unchanged");
+                (void)log().try_log(LogLevel::Error,
+                                    "InputPoller: out of memory in clear_bindings; bindings unchanged");
                 return;
             }
 
@@ -1317,13 +1313,13 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    (void)Logger::get_instance().try_log(
-                        LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}", name, e.what());
+                    (void)log().try_log(LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
+                                        name, e.what());
                 }
                 catch (...)
                 {
-                    (void)Logger::get_instance().try_log(
-                        LogLevel::Error, "InputPoller: Unknown exception in hold release callback \"{}\"", name);
+                    (void)log().try_log(LogLevel::Error,
+                                        "InputPoller: Unknown exception in hold release callback \"{}\"", name);
                 }
             }
         }
@@ -1345,15 +1341,15 @@ namespace DetourModKit
                         }
                         catch (const std::exception &e)
                         {
-                            (void)Logger::get_instance().try_log(
-                                LogLevel::Error, "InputPoller: Exception in hold release callback \"{}\": {}",
-                                binding.name, e.what());
+                            (void)log().try_log(LogLevel::Error,
+                                                "InputPoller: Exception in hold release callback \"{}\": {}",
+                                                binding.name, e.what());
                         }
                         catch (...)
                         {
-                            (void)Logger::get_instance().try_log(
-                                LogLevel::Error, "InputPoller: Unknown exception in hold release callback \"{}\"",
-                                binding.name);
+                            (void)log().try_log(LogLevel::Error,
+                                                "InputPoller: Unknown exception in hold release callback \"{}\"",
+                                                binding.name);
                         }
                     }
                 }

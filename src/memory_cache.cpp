@@ -705,11 +705,10 @@ namespace DetourModKit
                     // A shard that stayed contended across every retry keeps its entries until the configured expiry
                     // sweeps them. Surface it for diagnosis instead of skipping silently; try_log keeps this noexcept
                     // path honest when the level is enabled.
-                    (void)Logger::get_instance().try_log(
-                        LogLevel::Debug,
-                        "MemoryCache: invalidate_range left {} contended shard(s) unswept; "
-                        "stale entries persist until expiry.",
-                        skipped_shards);
+                    (void)log().try_log(LogLevel::Debug,
+                                        "MemoryCache: invalidate_range left {} contended shard(s) unswept; "
+                                        "stale entries persist until expiry.",
+                                        skipped_shards);
                 }
             }
 
@@ -738,7 +737,7 @@ namespace DetourModKit
                 }
                 catch (const std::bad_alloc &)
                 {
-                    Logger::get_instance().error("MemoryCache: Failed to allocate memory for cache shards.");
+                    log().error("MemoryCache: Failed to allocate memory for cache shards.");
                     s_cache_shards.reset();
                     s_cache_initialized.store(false, std::memory_order_relaxed);
                     return false;
@@ -749,9 +748,8 @@ namespace DetourModKit
                 s_configured_expiry_ms.store(expiry_ms, std::memory_order_release);
                 s_last_cleanup_time_ns.store(current_time_ns(), std::memory_order_release);
 
-                Logger::get_instance().debug(
-                    "MemoryCache: Initialized with {} shards ({} entries/shard, {}ms expiry, {} max).", shard_count,
-                    entries_per_shard, expiry_ms, hard_max_per_shard);
+                log().debug("MemoryCache: Initialized with {} shards ({} entries/shard, {}ms expiry, {} max).",
+                            shard_count, entries_per_shard, expiry_ms, hard_max_per_shard);
 
                 return true;
             }
@@ -932,8 +930,7 @@ namespace DetourModKit
                 catch (const std::system_error &)
                 {
                     s_cleanup_thread_running.store(false, std::memory_order_release);
-                    Logger::get_instance().debug(
-                        "MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
+                    log().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
                 }
 
                 // Last-resort safety net: clean up if the consumer forgets to call shutdown_cache. The handler detects
@@ -1011,7 +1008,7 @@ namespace DetourModKit
             // Diagnostic-only tail; clear_cache is noexcept, so a sink or format failure drops the line.
             try
             {
-                Logger::get_instance().debug("MemoryCache: All entries cleared.");
+                log().debug("MemoryCache: All entries cleared.");
             }
             catch (...)
             {
@@ -1099,7 +1096,7 @@ namespace DetourModKit
 
             try
             {
-                Logger::get_instance().debug("MemoryCache: Shutdown complete.");
+                log().debug("MemoryCache: Shutdown complete.");
             }
             catch (...)
             {

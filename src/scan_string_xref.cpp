@@ -132,7 +132,7 @@ namespace DetourModKit
                 {
                     return;
                 }
-                (void)Logger::get_instance().try_log(
+                (void)log().try_log(
                     LogLevel::Debug,
                     "scan::find_string_xref: skipped {} executable window(s) that faulted mid-scan (concurrent "
                     "decommit/reprotect).",

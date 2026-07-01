@@ -17,7 +17,7 @@ Re-runs every bound setter against the INI path last passed to `config::load()`.
 ```cpp
 if (!config::reload())
 {
-    Logger::get_instance().warning("Cannot reload: config::load() was never called");
+    log().warning("Cannot reload: config::load() was never called");
 }
 ```
 
@@ -44,12 +44,12 @@ const auto status = config::enable_auto_reload(
     {
         if (content_changed)
         {
-            Logger::get_instance().info("Config reloaded");
+            log().info("Config reloaded");
         }
     });
 if (status != config::AutoReloadStatus::Started)
 {
-    Logger::get_instance().warning("Auto-reload did not start");
+    log().warning("Auto-reload did not start");
 }
 ```
 

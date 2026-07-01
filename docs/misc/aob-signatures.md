@@ -335,7 +335,7 @@ const dmk::Address hit = *scan_result;
 const auto resolved = sc::resolve_rip_relative(hit, /*displacement_offset=*/3, /*instruction_length=*/7);
 if (!resolved)
 {
-    dmk::Logger::get_instance().error(
+    dmk::log().error(
         "RIP resolve failed: {}",
         dmk::to_string(resolved.error().code));
     return false;
@@ -410,8 +410,8 @@ sc::StringRefQuery query{
 const auto site = sc::find_string_xref(query); // defaults to Region::host()
 if (!site)
 {
-    dmk::Logger::get_instance().error("string xref failed: {}",
-                                      dmk::to_string(site.error().code));
+    dmk::log().error("string xref failed: {}",
+                     dmk::to_string(site.error().code));
     return false;
 }
 // site->value() is the address of the `lea`/`mov` that loads the string. With
@@ -516,13 +516,13 @@ const sc::ScanRequest req = sc::borrow(k_weapon_fire_candidates, "weapon_fire");
 const auto hit = sc::resolve(req);
 if (!hit)
 {
-    DetourModKit::Logger::get_instance().error(
+    DetourModKit::log().error(
         "weapon_fire cascade failed: {}",
         DetourModKit::to_string(hit.error().code));
     return false;
 }
 
-DetourModKit::Logger::get_instance().info(
+DetourModKit::log().info(
     "resolved {} at {:#x}", hit->winning_name, hit->address.raw());
 ```
 

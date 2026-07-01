@@ -196,7 +196,7 @@ namespace DetourModKit
                 // Best-effort diagnosis only; the sweep already skipped each faulted region and continued.
                 try
                 {
-                    (void)Logger::get_instance().try_log(
+                    (void)log().try_log(
                         LogLevel::Debug,
                         "Scanner: skipped {} region(s) that faulted mid-scan (concurrent decommit/reprotect).",
                         faulted_regions);
