@@ -8,8 +8,8 @@ DetourModKit is a C++23 static library for Windows game modding. It provides AOB
 
 **Key dependencies (git submodules):**
 
-- `external/safetyhook` -- inline/mid-function hooking (links Zydis/Zycore). v4 confines it to `src/hook.cpp` + the non-installed `src/internal/hook_backend.hpp`; no public header includes or names it, so a consumer that includes `hook.hpp` compiles with SafetyHook off its include path (`scripts/check_header_hygiene.py` enforces this)
-- `external/DirectXMath` -- header-only math library
+- `external/safetyhook` -- inline/mid-function hooking (links Zydis/Zycore). v4 confines it to two internal islands: the public `hook::` surface's pimpl (`src/hook.cpp` + the non-installed `src/internal/hook_backend.hpp`) and the internal active-input layer (`src/internal/input_intercept.cpp`, which owns its own XInput inline hooks because it needs create-disabled trampoline ordering the public surface does not expose). No public header includes or names it, so a consumer that includes `hook.hpp` compiles with SafetyHook off its include path, and its headers are not installed with the package (only its static archive ships, for the transitive link). `scripts/check_header_hygiene.py` enforces both the public-surface and the source-level (island) confinement, and `scripts/check_install_prefix.py` enforces that an installed prefix never exposes the backend
+- `external/DirectXMath` -- header-only math library, re-exported to `find_package` consumers by default (so a mod can `#include <DirectXMath.h>` transitively); set `-DDMK_INSTALL_DIRECTXMATH=OFF` for a prefix that ships only DetourModKit's own headers
 - `external/simpleini` -- INI file parser (header-only)
 
 ## Build and test commands
@@ -422,7 +422,7 @@ These are called at 60+ fps from game hook callbacks. Never add allocations, exc
 - **Do not weaken** atomic memory orderings without proving correctness.
 - **Do not skip** running the test suite before committing.
 - **Do not publish** release packages before debug tests, release builds, and installed-package smoke tests pass for both MinGW and MSVC.
-- **Do not tag** a release whose version differs from `CMakeLists.txt` `project(VERSION ...)`. The release version is single-sourced from there: the generated `DetourModKitConfigVersion.cmake` and the `DMK_VERSION_*` macros derive from it, so a tag that disagrees would ship a package whose `find_package` version check and `DMK_VERSION_AT_LEAST` contradict the tag. The `validate-version` job in `.github/workflows/release.yml` fails closed when the dispatch `version` input does not match, so bump `project(VERSION)` first.
+- **Do not tag** a release whose version differs from `CMakeLists.txt` `project(VERSION ...)`. The release version is single-sourced from there: the generated `DetourModKitConfigVersion.cmake` and the `DMK_VERSION_*` macros derive from it, so a tag that disagrees would ship a package whose `find_package` version check and `DMK_VERSION_AT_LEAST` contradict the tag. The `validate-version` job in `.github/workflows/release.yml` fails closed when the dispatch `version` input does not match, and also cross-checks the one literal version assertion in `tests/test_version.cpp` (`VersionTest.MacrosMatchProjectVersion`) against `project(VERSION)`, so a bump that forgets that test is caught at validate time rather than only at `ctest`. Bump both `project(VERSION)` and the test literal together.
 - **Do not add** Windows API calls without `#ifdef _WIN32` guards in headers (implementation files are Windows-only, but headers should remain clean).
 - **Do not commit** build artifacts, `.exe`, `.a`, `.lib`, `.obj`, or `.pdb` files.
 - **Do not remove** or weaken existing tests. Add new tests for new code.

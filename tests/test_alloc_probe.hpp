@@ -28,6 +28,14 @@ namespace dmk_test
      *          the container through and fails every per-item allocation after it (exercising per-request
      *          degradation). Keep the armed window as tight as possible -- ideally spanning only the single call
      *          under test -- so the injector never trips GoogleTest's own bookkeeping allocations.
+     *
+     *          The budget counts the code-under-test's OWN allocations, so it relies on the standard library issuing
+     *          no hidden per-container bookkeeping allocation on construction. libstdc++ (MinGW) satisfies this; MSVC's
+     *          debug STL does NOT at its default iterator-debug level, where a std::vector allocates a hidden proxy
+     *          from inside a noexcept constructor (failing which would terminate before the code under test could
+     *          catch it). The MSVC Debug build therefore pins _ITERATOR_DEBUG_LEVEL=0 (see CMakeLists.txt) so its debug
+     *          std::vector makes no such proxy allocation, which keeps this allocation counting exact and the same
+     *          budgets valid on both toolchains.
      * @param allow Number of further operator new calls to let succeed before failing (clamped at 0).
      */
     void arm_alloc_failure(long long allow) noexcept;

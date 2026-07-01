@@ -597,8 +597,8 @@ TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsEmptyWholeBatchSi
 
     std::vector<Result<scan::Hit>> results;
     {
-        // Budget 0: the very first allocation (the result container inside run_fork_join) fails. resolve_batch must
-        // swallow the bad_alloc at its noexcept boundary and hand back an empty vector.
+        // Budget 0: the very first allocation (the result container inside run_fork_join) fails, so resolve_batch
+        // swallows the bad_alloc at its noexcept boundary and hands back an empty vector (the whole-batch signal).
         dmk_test::AllocFailScope fail(0);
         results = scan::resolve_batch(view, 1);
     }

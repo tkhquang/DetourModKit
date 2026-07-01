@@ -55,6 +55,27 @@ jobs:
             echo "::error::Release version '${INPUT_VERSION}' does not match CMakeLists.txt project(VERSION) '${PROJECT_VERSION}'. Bump project(VERSION) first so the shipped ConfigVersion and DMK_VERSION_* macros match the tag."
             exit 1
           fi
+          # Cross-check the one literal version assertion in the test suite (VersionTest.MacrosMatchProjectVersion) against
+          # project(VERSION). project(VERSION) drives the generated DMK_VERSION_* macros, but the test pins them with a
+          # hand-written literal that a bump must touch separately; without this gate a bump that updates CMakeLists but
+          # forgets tests/test_version.cpp still tags and only fails later at ctest. Fail closed here at validate time.
+          # grep -m1 (first match) rather than piping to head, and `|| true` so a no-match yields an empty string
+          # instead of aborting the step: this job runs under GitHub Actions' default `bash -eo pipefail`, where a
+          # `grep ... | head` pipeline propagates grep's non-zero exit and `set -e` would kill the step before the
+          # empty-value guard below could emit its diagnostic. With this form a missing literal reaches that guard.
+          TEST_MAJOR="$(grep -m1 -oP 'DMK_VERSION_MAJOR,\s*\K[0-9]+' tests/test_version.cpp || true)"
+          TEST_MINOR="$(grep -m1 -oP 'DMK_VERSION_MINOR,\s*\K[0-9]+' tests/test_version.cpp || true)"
+          TEST_PATCH="$(grep -m1 -oP 'DMK_VERSION_PATCH,\s*\K[0-9]+' tests/test_version.cpp || true)"
+          TEST_VERSION="${TEST_MAJOR}.${TEST_MINOR}.${TEST_PATCH}"
+          echo "test_version.cpp literal: ${TEST_VERSION}"
+          if [ -z "${TEST_MAJOR}" ] || [ -z "${TEST_MINOR}" ] || [ -z "${TEST_PATCH}" ]; then
+            echo "::error::Could not parse the DMK_VERSION_* literals from tests/test_version.cpp"
+            exit 1
+          fi
+          if [ "${TEST_VERSION}" != "${PROJECT_VERSION}" ]; then
+            echo "::error::tests/test_version.cpp literal '${TEST_VERSION}' does not match CMakeLists.txt project(VERSION) '${PROJECT_VERSION}'. Update the VersionTest.MacrosMatchProjectVersion literals so the pinned assertion tracks the bump."
+            exit 1
+          fi
           echo "Version check passed."
         shell: bash
 
@@ -136,6 +157,14 @@ jobs:
             Write-Warning "Install directory '${installDir}' is empty!"
           }
         shell: pwsh
+
+      - name: Assert Install-Prefix Hygiene (MinGW)
+        run: |
+          # Prove the installed artifact upholds the v4 encapsulation contract: the SafetyHook backend stays hidden
+          # (no include/safetyhook*, no lib/cmake/safetyhook), no deleted legacy public header or private engine ships,
+          # and the archives + package config + public umbrella that a find_package consumer needs are all present.
+          python scripts/check_install_prefix.py "${{ github.workspace }}/install_package/mingw"
+        shell: bash
 
       - name: Smoke Test Installed Package (MinGW)
         run: |
@@ -237,6 +266,10 @@ jobs:
             Write-Warning "Install directory '${installDir}' is empty!"
           }
         shell: pwsh
+
+      - name: Assert Install-Prefix Hygiene (MSVC)
+        run: python scripts/check_install_prefix.py "${{ github.workspace }}/install_package/msvc"
+        shell: bash
 
       - name: Smoke Test Installed Package (MSVC)
         run: |

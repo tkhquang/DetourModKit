@@ -3,11 +3,16 @@
 
 Enforces the boundary invariants introduced when the 4.0.0 public surface was encapsulated:
 
-  1. The SafetyHook backend is confined. No public API header may include or name the backend
-     (safetyhook), pull <psapi.h>, or reference Zydis/Zycore. The single sanctioned coupling
-     point is the non-installed src/internal/hook_backend.hpp, which only src/hook.cpp
-     includes. A consumer that includes hook.hpp must therefore compile with SafetyHook
-     off its own include path.
+  1. The SafetyHook backend is confined, at two levels.
+       (a) Public surface: no public API header may include or name the backend (safetyhook), pull <psapi.h>, or
+           reference Zydis/Zycore, so a consumer that includes a public header compiles with SafetyHook off its own
+           include path.
+       (b) Source level: within this repository's own library sources (src/), only the sanctioned backend islands may
+           include the backend header or name a safetyhook:: symbol. Two islands exist: the public hook:: surface's
+           pimpl (src/internal/hook_backend.hpp, whose bodies the single TU src/hook.cpp completes) and the internal
+           active-input layer (src/internal/input_intercept.cpp), which owns its own XInput inline hooks directly
+           because it needs the create-disabled / publish-trampoline-before-enable ordering the public hook:: surface
+           does not expose. Any other src/ file that reaches the backend is drift and fails this gate.
 
   2. hook::MidContext is never defined. It is an opaque, pass-through alias for the backend's
      captured register context: the Context64 <-> MidContext reinterpret_cast
@@ -28,10 +33,20 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 
-# The one non-installed private header allowed to see the backend; only src/hook.cpp includes it. It lives
-# under src/internal/ (not a public header), so the public-surface backend check below already skips it; the constant
-# is kept for documentation and to localize the sanctioned coupling point.
+# The non-installed private header that carries the public hook:: surface's pimpl bodies; only src/hook.cpp includes
+# it. It lives under src/internal/ (not a public header), so the public-surface backend check below already skips it;
+# the constant is kept for documentation and to localize the primary sanctioned coupling point.
 BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
+# The sanctioned SafetyHook backend islands: the ONLY repository sources permitted to include the backend header or
+# name a safetyhook:: symbol (rule 1b). Everything else must reach hooking through the public hook:: surface, so the
+# backend stays swappable and its heavy headers never spread across the tree. Enforced only within src/ (the library's
+# own implementation): the parked per-method-VMT fixtures in tests/ legitimately name the backend behind an #if 0, and
+# white-box tests are outside the library-confinement invariant this gate protects.
+BACKEND_SOURCE_ISLANDS = {
+    BACKEND_BRIDGE_HEADER,               # src/internal/hook_backend.hpp: the hook:: pimpl bodies
+    "src/hook.cpp",                      # the one TU that completes those bodies over safetyhook::
+    "src/internal/input_intercept.cpp",  # the XInput/window-subclass active-input layer, owning its own inline hooks
+}
 ASYNC_INTERNAL_HEADER = "src/internal/async_logger_queue.hpp"
 
 CPP_SUFFIXES = (".hpp", ".cpp", ".h", ".cc", ".inl")
@@ -300,6 +315,18 @@ def main():
                     violations.append(f"{rel}:{n}: public header includes <psapi.h>")
                 if ZYDIS_REF.search(line):
                     violations.append(f"{rel}:{n}: public header references Zydis/Zycore")
+
+        # Rule 1b: source-level backend confinement. Within the library's own sources, only the sanctioned backend
+        # islands may include the backend header or name a safetyhook:: symbol; anything else is drift. Scoped to src/
+        # so a white-box test (and the parked #if 0 per-method-VMT fixtures under tests/) is not swept up by this
+        # library-only invariant. This is what makes the "only the sanctioned islands see the backend" claim in the
+        # module docstring an enforced gate rather than an unchecked assertion.
+        if rel.startswith("src/") and rel not in BACKEND_SOURCE_ISLANDS:
+            for n, line in enumerate(lines, 1):
+                if SAFETYHOOK_INCLUDE.search(line):
+                    violations.append(f"{rel}:{n}: source includes the SafetyHook backend outside a sanctioned island")
+                if SAFETYHOOK_NS.search(line):
+                    violations.append(f"{rel}:{n}: source names safetyhook:: outside a sanctioned island (backend drift)")
 
         # Rule 2: MidContext must never be defined (anywhere in this repo's sources).
         m = MIDCONTEXT_DEF.search(text)
