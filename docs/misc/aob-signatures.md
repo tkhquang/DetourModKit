@@ -126,7 +126,7 @@ Public namespace: `DetourModKit::scan`. Errors are returned as `Result<T>` (`std
 #include <DetourModKit/scan.hpp>
 
 namespace dmk = DetourModKit;
-namespace sc = dmk::scan;
+namespace sc = DMK::scan;
 
 const auto pattern_result = sc::Pattern::compile("48 8B 05 ?? ?? ?? ?? 48 85 C0");
 if (!pattern_result)
@@ -148,7 +148,7 @@ static constexpr sc::Pattern k_pattern = sc::Pattern::literal("48 8B 05 ?? ?? ??
 Use `scan::scan(pattern, scope, occurrence, pages)` with a `Region` scope. `Region::module_named(L"game.exe")` limits the sweep to a single module image.
 
 ```cpp
-const auto scope = dmk::Region::module_named(L"game.exe");
+const auto scope = DMK::Region::module_named(L"game.exe");
 const auto match = sc::scan(pattern, scope, 1, sc::Pages::Executable);
 if (!match)
 {
@@ -157,7 +157,7 @@ if (!match)
 // match->value() is the Address of the `|`-marked byte (or the pattern start
 // when no `|` marker is present). scan() applies Pattern::offset() internally;
 // do NOT add it yourself.
-const dmk::Address target = *match;
+const DMK::Address target = *match;
 ```
 
 ### 4.3 Nth occurrence
@@ -175,7 +175,7 @@ Passing `0` yields `ErrorCode::NoMatch` by contract.
 When the target binary is packed, decrypted into anonymous executable pages, or you don't know which module owns the code yet, use `Region::whole_process()` as the scope with `Pages::Executable`. It walks `VirtualQuery` and scans every committed `PAGE_EXECUTE_READ*` region that isn't a guard page.
 
 ```cpp
-const auto match = sc::scan(pattern, dmk::Region::whole_process(), 1, sc::Pages::Executable);
+const auto match = sc::scan(pattern, DMK::Region::whole_process(), 1, sc::Pages::Executable);
 ```
 
 Pure-execute pages (`PAGE_EXECUTE` with no read bit) are skipped deliberately: such pages are not guaranteed readable. Only `PAGE_EXECUTE_READ`, `PAGE_EXECUTE_READWRITE`, and `PAGE_EXECUTE_WRITECOPY` regions are inspected; guard and no-access pages are skipped unconditionally.
@@ -208,7 +208,7 @@ Implication: a pattern whose literal bytes are all REX prefixes / common opcodes
 `Pages::Executable` filters to execute-readable pages, so it cannot reach `.rdata` / `.data`. When the thing you need to locate is data rather than code, use `Pages::Readable` (the default). It accepts every committed readable region (`PAGE_READONLY`, `PAGE_READWRITE`, `PAGE_WRITECOPY`, and the three execute-readable variants), so it reaches C++ vtables, RTTI type descriptors, localized string pools, and read-only metadata tables.
 
 ```cpp
-const auto match = sc::scan(pattern, dmk::Region::whole_process(), 1, sc::Pages::Readable);
+const auto match = sc::scan(pattern, DMK::Region::whole_process(), 1, sc::Pages::Readable);
 ```
 
 It applies `Pattern::offset()` exactly once, identically to `Pages::Executable`. The accepted set is a strict superset: a pattern present in `.text` is found by both. Guard pages (`PAGE_GUARD`), no-access pages (`PAGE_NOACCESS`), and uncommitted regions are skipped and never dereferenced.
@@ -337,18 +337,18 @@ const auto scan_result = sc::scan(pattern, scope, 1, sc::Pages::Executable);
 if (!scan_result)
     return false;
 
-const dmk::Address hit = *scan_result;
+const DMK::Address hit = *scan_result;
 // Suppose the matched instruction is `mov rax, [rip+disp32]` (7 bytes, disp32 at offset 3).
 const auto resolved = sc::resolve_rip_relative(hit, /*displacement_offset=*/3, /*instruction_length=*/7);
 if (!resolved)
 {
-    dmk::log().error(
+    DMK::log().error(
         "RIP resolve failed: {}",
-        dmk::to_string(resolved.error().code));
+        DMK::to_string(resolved.error().code));
     return false;
 }
 
-const dmk::Address absolute = *resolved;
+const DMK::Address absolute = *resolved;
 ```
 
 Error values (all unified under `ErrorCode`):
@@ -380,7 +380,7 @@ Example:
 ```cpp
 // search is a Region covering the short window to scan.
 const auto resolved = sc::find_and_resolve_rip_relative(
-    dmk::Region{hit, 64},      // short search window from the match
+    DMK::Region{hit, 64},      // short search window from the match
     sc::PREFIX_CALL_REL32,            // E8
     /*instruction_length=*/5);        // E8 + disp32
 ```
@@ -417,8 +417,8 @@ sc::StringRefQuery query{
 const auto site = sc::find_string_xref(query); // defaults to Region::host()
 if (!site)
 {
-    dmk::log().error("string xref failed: {}",
-                     dmk::to_string(site.error().code));
+    DMK::log().error("string xref failed: {}",
+                     DMK::to_string(site.error().code));
     return false;
 }
 // site->value() is the address of the `lea`/`mov` that loads the string. With
@@ -675,7 +675,7 @@ if (hit) logger.info("resolved via {}", hit->winning_name);
 A lone signature hit is necessary but not sufficient. Two lightweight checks catch the overwhelming majority of mis-hits:
 
 - **First-byte sanity check.** A function prologue does not start with `0x00`, `0xC2`, `0xC3`, or (usually) `0xCC`. Use `scan::is_likely_function_prologue(addr)` to reject scan poison before handing the address to SafetyHook. The helper accepts `0xE9` / `0xEB` / `0xFF 0x25` so a target already inline-hooked by another mod still passes.
-- **`memory::is_readable()` guard.** Before reading more than a single byte (for example, disassembling a 5-byte trampoline or copying out an RTTI string), confirm the entire span is inside a committed page with an expected protection flag. It takes a `Region` now: `memory::is_readable(dmk::Region{addr, n})`.
+- **`memory::is_readable()` guard.** Before reading more than a single byte (for example, disassembling a 5-byte trampoline or copying out an RTTI string), confirm the entire span is inside a committed page with an expected protection flag. It takes a `Region` now: `memory::is_readable(DMK::Region{addr, n})`.
 
 ```cpp
 if (!DetourModKit::scan::is_likely_function_prologue(resolved_addr))
@@ -765,7 +765,7 @@ if (!ptr_addr)
 }
 
 // ptr_addr is the absolute address of the pointer slot, not the pointee.
-auto global_ptr = dmk::memory::read<std::uintptr_t>(*ptr_addr).value_or(0);
+auto global_ptr = DMK::memory::read<std::uintptr_t>(*ptr_addr).value_or(0);
 ```
 
 If `hit` came from a pattern with a `|` offset marker, `scan::scan` has already applied the offset: pass `*hit` directly. Adding the offset would double-apply and start the search window past the intended opcode.

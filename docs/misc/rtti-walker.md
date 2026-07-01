@@ -56,12 +56,12 @@ The forward entry points are noexcept and SEH-guarded; an unmapped page, missing
 
 constexpr std::string_view k_actor_rtti = ".?AVActorComponent@engine@@";
 
-bool actor_is_ready(dmk::Address actor_ptr) noexcept
+bool actor_is_ready(DMK::Address actor_ptr) noexcept
 {
-    const auto vt_opt = dmk::memory::read<dmk::Address>(actor_ptr);
+    const auto vt_opt = DMK::memory::read<DMK::Address>(actor_ptr);
     if (!vt_opt)
         return false;
-    return dmk::rtti::vtable_is_type(*vt_opt, k_actor_rtti);
+    return DMK::rtti::vtable_is_type(*vt_opt, k_actor_rtti);
 }
 ```
 
@@ -70,15 +70,15 @@ bool actor_is_ready(dmk::Address actor_ptr) noexcept
 ```cpp
 namespace
 {
-    std::atomic<dmk::Address> g_camera_vt_cache{dmk::Address{}};
+    std::atomic<DMK::Address> g_camera_vt_cache{DMK::Address{}};
 }
 
-std::optional<dmk::Address> find_camera_component(dmk::Address table) noexcept
+std::optional<DMK::Address> find_camera_component(DMK::Address table) noexcept
 {
     constexpr std::size_t k_component_slots = 64;
     constexpr std::string_view k_camera_rtti = ".?AVCameraComponent@engine@@";
 
-    return dmk::rtti::find_in_pointer_table(
+    return DMK::rtti::find_in_pointer_table(
         table, k_component_slots, k_camera_rtti, &g_camera_vt_cache);
 }
 ```
@@ -91,9 +91,9 @@ To disable caching, pass `nullptr` for `vtable_cache`. To support tables that in
 
 ```cpp
 char rtti_buf[128];
-const std::size_t n = dmk::rtti::type_name_into(vt, rtti_buf, sizeof(rtti_buf));
+const std::size_t n = DMK::rtti::type_name_into(vt, rtti_buf, sizeof(rtti_buf));
 if (n > 0)
-    dmk::log().log(dmk::LogLevel::Debug, "vtable type = {}", rtti_buf);
+    DMK::log().log(DMK::LogLevel::Debug, "vtable type = {}", rtti_buf);
 ```
 
 `type_name_into` is the right choice for per-frame probes or diagnostic captures that must not allocate. The buffer is always NUL-terminated when `out_len > 0`, and the failure path sets `out[0] = '\0'` so misuse cannot leak stale stack contents.
@@ -104,7 +104,7 @@ The walker runs vtable to name. The inverse, name to vtable, is the natural way 
 
 ```cpp
 // Resolve once at init; key on the stable class name, not a vtable literal.
-const auto vt = dmk::rtti::vtable_for_type(".?AVGameAudioEffect@engine@@");
+const auto vt = DMK::rtti::vtable_for_type(".?AVGameAudioEffect@engine@@");
 if (vt)
     g_audio_effect_vtable = *vt;
 ```
@@ -121,11 +121,11 @@ Multiple inheritance and `/OPT:ICF`:
 For a cached per-frame identity check, wrap it in `rtti::TypeIdentity`. `TypeIdentity` owns its mangled name (it copies the `std::string_view` into an internal `std::string`), so the handle is self-contained and any string source -- including a temporary -- is safe to pass:
 
 ```cpp
-namespace { dmk::rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
+namespace { DMK::rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
 
-bool is_combat_camera(dmk::Address obj) noexcept
+bool is_combat_camera(DMK::Address obj) noexcept
 {
-    const auto vt = dmk::memory::read<dmk::Address>(obj);
+    const auto vt = DMK::memory::read<DMK::Address>(obj);
     return vt && g_camera_id.matches(*vt); // resolves once, then a qword compare
 }
 ```

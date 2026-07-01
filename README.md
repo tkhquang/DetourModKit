@@ -329,7 +329,7 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <details>
 <summary><strong>Stoppable Worker</strong></summary>
 
-- `dmk::StoppableWorker` - RAII wrapper around `std::jthread` with a descriptive name, `std::stop_token` cooperation, and loader-lock-safe teardown
+- `DMK::StoppableWorker` - RAII wrapper around `std::jthread` with a descriptive name, `std::stop_token` cooperation, and loader-lock-safe teardown
 - Body is invoked with a `std::stop_token` and must poll `stop_requested()` cooperatively
 - Destructor (and explicit `shutdown()`) requests stop and joins the thread; when called under the Windows loader lock the thread is detached instead, pinning the module so code pages stay mapped
 - Non-copyable and non-movable: the name, stop state, and thread handle form a single invariant
@@ -479,7 +479,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     ├── include/
     │   ├── DetourModKit.hpp          <-- Umbrella + Session / bootstrap / bootstrap_detach / ModInfo (DllMain lifecycle)
     │   ├── DetourModKit/             <-- DetourModKit public headers
-    │   │   ├── defines.hpp           <-- v4 portability macros + `dmk` alias
+    │   │   ├── defines.hpp           <-- v4 portability macros + `dmk`/`DMK` aliases
     │   │   ├── address.hpp           <-- v4 Address value type
     │   │   ├── region.hpp            <-- v4 Region + Prot flags
     │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
@@ -781,7 +781,7 @@ This method uses a pre-built and installed version of DetourModKit.
 
 ## Code Example
 
-> **The `dmk` namespace alias:** every DetourModKit header pulls in `namespace dmk = DetourModKit` (defined in `defines.hpp`), so mod code can write `dmk::hook`, `dmk::scan`, `dmk::config`, `dmk::Logger`, and so on in place of the fully spelled `DetourModKit::`. It is the single convenience alias -- there are no `DMK`-prefixed aliases -- and it costs nothing to skip: use the fully qualified `DetourModKit::` names if you prefer them. To coin your own short name, add a one-line `namespace mk = DetourModKit;` in your own code.
+> **The `dmk` / `DMK` namespace aliases:** every DetourModKit header pulls in both `namespace dmk = DetourModKit` and `namespace DMK = DetourModKit` (defined in `defines.hpp`), so mod code can write `DMK::hook`, `DMK::scan`, `DMK::config`, `DMK::Logger`, and so on in place of the fully spelled `DetourModKit::`. They are the same alias in two casings; the examples below use `DMK`. Pick one and stay consistent, or ignore both and use the fully qualified `DetourModKit::` names. There is no flat `DMKConfig` / `DMKSession` alias set and nothing is injected into the global namespace, so the aliases cannot collide with your own symbols.
 
 ```cpp
 // MyMod/src/main.cpp
@@ -806,8 +806,8 @@ struct ModConfiguration
 {
     bool enable_greeting_hook = true;
     std::string log_level_setting = "INFO";
-    dmk::input::KeyComboList toggle_combo;
-    dmk::input::KeyComboList hold_scroll_combo;
+    DMK::input::KeyComboList toggle_combo;
+    DMK::input::KeyComboList hold_scroll_combo;
 } g_mod_config;
 
 // Example Hook: Target function signature
@@ -816,12 +816,12 @@ using OriginalGameFunction_PrintMessage_t = void (__stdcall *)(const char *messa
 // The hook is owned by its RAII handle. Hook is move-only with no default constructor, so a global one lives in an
 // std::optional that InitializeMyMod engages via std::optional::emplace; dropping it (or letting it leave scope)
 // restores the original prologue.
-std::optional<dmk::hook::Hook> g_print_hook;
+std::optional<DMK::hook::Hook> g_print_hook;
 
 // Detour function
 void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
 {
-    auto &logger = dmk::log();
+    auto &logger = DMK::log();
     logger.info("Detour_GameFunction_PrintMessage CALLED! Original message: \"{}\", type: {}", message, type);
 
     // original<Fn>() is the typed trampoline to the un-hooked function (UNGUARDED fast path). It is non-null only
@@ -845,16 +845,16 @@ void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
 
 // Mod init callback (runs on the bootstrap worker thread, off the loader lock). It receives the live Session and
 // returns a Result<void>, so an init failure is a value logged on the worker, never a throw across the loader lock.
-dmk::Result<void> InitializeMyMod(dmk::Session &session)
+DMK::Result<void> InitializeMyMod(DMK::Session &session)
 {
     // Logger + async mode are already configured by bootstrap() using the ModInfo passed into the attach call below.
-    // session.log() is the same process-default logger dmk::log() returns.
+    // session.log() is the same process-default logger DMK::log() returns.
     auto &logger = session.log();
 
     // Bind your configuration variables (callback-store API; config::bind<T> is the atomic hot path)
-    dmk::config::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
+    DMK::config::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
         [](bool v) { g_mod_config.enable_greeting_hook = v; }, true);
-    dmk::config::bind_string("Debug", "LogLevel", "Log Level",
+    DMK::config::bind_string("Debug", "LogLevel", "Log Level",
         [](std::string_view v) { g_mod_config.log_level_setting = std::string{v}; }, "INFO");
 
     // Bind hotkey combos from INI (modifier+trigger format)
@@ -863,40 +863,40 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
     // Hex VK codes still work: "0x72", "0x11+0x72"
     // Mouse: "Mouse4", "Ctrl+Mouse1"
     // Gamepad: "Gamepad_A", "Gamepad_LB+Gamepad_A"
-    dmk::config::bind_combos("Hotkeys", "ToggleKey", "Toggle Keys",
-        [](const dmk::input::KeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
-    dmk::config::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
-        [](const dmk::input::KeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
+    DMK::config::bind_combos("Hotkeys", "ToggleKey", "Toggle Keys",
+        [](const DMK::input::KeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
+    DMK::config::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
+        [](const DMK::input::KeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file (after the binds above, so load() applies file values to them). session.ini()
     // is a thin handle to the same process config registry the free config:: functions act on.
     session.ini().load("MyMod.ini");
 
     // Apply LogLevel from loaded configuration
-    logger.set_log_level(dmk::string_to_log_level(g_mod_config.log_level_setting));
+    logger.set_log_level(DMK::string_to_log_level(g_mod_config.log_level_setting));
 
     // Log the loaded configuration
     logger.info("MyMod configuration loaded and applied.");
-    dmk::config::log_all();
+    DMK::config::log_all();
 
     // Initialize Hooks (v4: free verbs returning a move-only RAII Hook handle).
-    // dmk::scan is the alias for DetourModKit::scan (from scan.hpp); dmk::hook for DetourModKit::hook.
+    // DMK::scan is the alias for DetourModKit::scan (from scan.hpp); DMK::hook for DetourModKit::hook.
 
     // The hook target is a scan::OwnedScanRequest: hook::inline_at resolves it at install time (resolve-on-install)
     // and never carries a dangling pattern span. A one-candidate ladder is the simplest form; ship a fallback
     // ladder for a long-lived mod (see the AOB Signature Scanning Guide).
-    dmk::scan::OwnedScanRequest target{
-        .ladder = {dmk::scan::Candidate::direct("GameFunction_PrintMessage",
-                                              dmk::scan::Pattern::literal("48 89 ?? ?? 57"))},
+    DMK::scan::OwnedScanRequest target{
+        .ladder = {DMK::scan::Candidate::direct("GameFunction_PrintMessage",
+                                              DMK::scan::Pattern::literal("48 89 ?? ?? 57"))},
         .label = "GameFunction_PrintMessage",
         .scope = DetourModKit::Region::host(),   // the host EXE; defaults here too
     };
 
     // inline_at performs the single audited function-to-void* cast for you; the call site writes no reinterpret_cast.
     // Options::prologue defaults to Prologue::Fail (v4 safe-by-default: an E8/CC/CD prologue is refused with
-    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = dmk::hook::Prologue::Relocate} for the old install-anyway.
-    auto result = dmk::hook::inline_at(
-        dmk::hook::InlineRequest{
+    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = DMK::hook::Prologue::Relocate} for the old install-anyway.
+    auto result = DMK::hook::inline_at(
+        DMK::hook::InlineRequest{
             .name = "GameFunction_PrintMessage_Hook",
             .target = std::move(target),
         },
@@ -922,30 +922,30 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
     // park the move-only guard in the process-default scope so it lives for the
     // process. (config::press_combo / hold_combo wrap this with INI parsing and
     // hand back the guard directly, no Result to unwrap.)
-    if (auto toggle = dmk::input::register_combo({
+    if (auto toggle = DMK::input::register_combo({
             .name = "toggle_view",
-            .trigger = dmk::input::Trigger::Press,
+            .trigger = DMK::input::Trigger::Press,
             .combos = g_mod_config.toggle_combo,
-            .on_press = []() { dmk::log().info("Toggle key pressed!"); },
+            .on_press = []() { DMK::log().info("Toggle key pressed!"); },
         }))
     {
         // Park the guard in the Session's scope: ~Session clears it first, in reverse insertion order.
         session.scope().add(std::move(*toggle));
     }
 
-    if (auto scroll = dmk::input::register_combo({
+    if (auto scroll = DMK::input::register_combo({
             .name = "hold_scroll",
-            .trigger = dmk::input::Trigger::Hold,
+            .trigger = DMK::input::Trigger::Hold,
             .combos = g_mod_config.hold_scroll_combo,
             .on_state_change = [](bool held)
-            { dmk::log().info("Hold scroll: {}", held ? "active" : "released"); },
+            { DMK::log().info("Hold scroll: {}", held ? "active" : "released"); },
         }))
     {
         session.scope().add(std::move(*scroll));
     }
 
     // Start the input polling thread (focus-aware by default)
-    (void)dmk::input::Input::instance().start();
+    (void)DMK::input::Input::instance().start();
 
     logger.info("MyMod Initialized using DetourModKit!");
     return {}; // success
@@ -955,7 +955,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH)
     {
-        dmk::ModInfo info{
+        DMK::ModInfo info{
             .name = "MyMod",                            // logger prefix + mod identity
             .log_file = "MyMod.log",
             .game_process_name = "MyGame.exe",          // optional -- set "" to disable
@@ -966,7 +966,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         // bootstrap() spawns the worker, runs InitializeMyMod(session) off the loader lock, and hosts the Session until
         // detach. It returns Result<void>; a failure (process gate / instance mutex / worker spawn) declines the load.
-        return dmk::bootstrap(info, &InitializeMyMod).has_value() ? TRUE : FALSE;
+        return DMK::bootstrap(info, &InitializeMyMod).has_value() ? TRUE : FALSE;
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH)
     {
@@ -977,16 +977,16 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_print_hook.reset();
         }
         // NULL -> the ordered ~Session teardown; non-NULL -> abandon (do nothing).
-        dmk::bootstrap_detach(lpReserved);
+        DMK::bootstrap_detach(lpReserved);
     }
     return TRUE;
 }
 ```
 
 > [!WARNING]
-> `dmk::bootstrap()` runs `InitializeMyMod` on a dedicated worker thread, so it
+> `DMK::bootstrap()` runs `InitializeMyMod` on a dedicated worker thread, so it
 > executes off the loader lock, and `~Session` runs the ordered teardown there too.
-> For a dynamic `FreeLibrary` unload, call `dmk::request_shutdown()` *before* issuing
+> For a dynamic `FreeLibrary` unload, call `DMK::request_shutdown()` *before* issuing
 > `FreeLibrary` so the worker has time to drain (and drop your caller-owned `Hook`
 > handles to restore prologues). Each subsystem also detects the loader lock and will
 > detach background threads instead of joining them, but requesting shutdown early
