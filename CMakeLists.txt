@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(DetourModKit VERSION 3.9.0 LANGUAGES CXX)
+project(DetourModKit VERSION 4.0.0 LANGUAGES CXX)
 
 # GNUInstallDirs defines CMAKE_INSTALL_LIBDIR / BINDIR / INCLUDEDIR / DOCDIR. It must be included before any
 # install() rule reads those variables; otherwise they expand to empty and components land at the install-prefix
@@ -36,6 +36,24 @@ if(MSVC)
   # Security hardening: ASLR, DEP, and Control Flow Guard
   add_link_options(/DYNAMICBASE /NXCOMPAT /GUARD:CF)
   add_compile_options(/guard:cf)
+
+  # Pin the debug STL to _ITERATOR_DEBUG_LEVEL=0 for the Debug config. At the default debug level (>= 1, what /MDd
+  # selects) MSVC's std::vector and std::string allocate a hidden _Container_proxy through operator new the moment they
+  # are constructed -- including from inside their noexcept constructors, an allocation libstdc++ never makes. That
+  # breaks the out-of-memory contract tests: they inject allocation failure with a thread-local throwing operator new,
+  # and failing one of those proxy allocations makes bad_alloc escape a noexcept function, which calls std::terminate
+  # and aborts the process before the library's own catch can turn the failure into a degraded result. In particular a
+  # whole-batch resolver failure (which must fail the result container's allocation and propagate to the noexcept
+  # boundary) has no realizable injection point under debug iterators, because that container allocation is one of the
+  # noexcept-context proxies. Turning the debug iterators off removes the hidden proxies, so the injected failure lands
+  # on the library's own throwing-context allocation exactly as it does on libstdc++ and the contract is testable
+  # identically on both toolchains. The never-terminate-under-OOM guarantee itself is unaffected (it is real in every
+  # config and is also exercised on the MSVC release STL, which runs at level 0). This is set globally -- before the
+  # external subdirectories are added -- because _ITERATOR_DEBUG_LEVEL must be identical across every object linked into
+  # one binary; a per-target mismatch is an LNK2038 at link time. The rest of the Debug diagnostics are untouched:
+  # NDEBUG stays unset so assert() still fires, and the debug CRT heap checks, /RTC runtime checks, and
+  # AddressSanitizer all keep working.
+  add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
 
   # Debug builds: embed CodeView debug info directly into .obj files (/Z7)
   # to avoid PDB file locking issues during parallel builds.
@@ -105,7 +123,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   # SafetyHook and its dependencies (Zydis, Zycore) should also be built as static libraries.
   # Setting BUILD_SHARED_LIBS to OFF globally (done above) should influence this for
   # well-behaved CMake subprojects. Explicit definitions below will reinforce this.
-  add_subdirectory(external/safetyhook SYSTEM) # SYSTEM suppresses compiler warnings from external headers
+  #
+  # EXCLUDE_FROM_ALL keeps the backend out of the install prefix. SafetyHook's own CMakeLists registers
+  # unconditional install() rules for its headers, its lib/cmake/safetyhook export set, and its archives, with no
+  # SAFETYHOOK_INSTALL toggle to disable them. Adding the subdirectory with EXCLUDE_FROM_ALL causes CMake to ignore
+  # every install() rule defined in it (and below, so Zydis/Zycore too) when installing DetourModKit's prefix, so the
+  # backend is never advertised: no include/safetyhook*, no find_package(safetyhook)-satisfiable config. The backend
+  # is still built here because DetourModKit links it, and an inter-target dependency supersedes the ALL exclusion.
+  # DetourModKit ships the dependency archives itself, as plain files, through the DetourModKit::deps imported target
+  # (see the install(FILES ...) of _dmk_dep_archives below), so a find_package consumer still links the static chain.
+  # SYSTEM suppresses compiler warnings from the external headers.
+  add_subdirectory(external/safetyhook EXCLUDE_FROM_ALL SYSTEM)
 
   # Suppress all warnings when compiling external dependency sources
   foreach(_ext_target safetyhook Zydis Zycore)
@@ -133,6 +161,13 @@ endif()
 # wiring their own submodule. The PUBLIC include interface and the header install below ship it to find_package
 # consumers for that reason. This is intentional: dropping it is a breaking change for any downstream that relies
 # on the transitive include path.
+#
+# The re-export is on by default so existing consumers keep the transitive include path unchanged. A packager who
+# wants a prefix that ships only DetourModKit's own public headers (no vendored third-party tree) can turn it off.
+# Because the library never includes DirectXMath in its own build, the switch is purely an install/interface concern:
+# it gates only whether the vendored headers and the install-interface include directory reach find_package consumers,
+# and never affects DetourModKit's own compilation or the build-tree (add_subdirectory) include path.
+option(DMK_INSTALL_DIRECTXMATH "Install and re-export the vendored DirectXMath headers to find_package consumers" ON)
 set(DIRECTXMATH_INCLUDE_DIR "")
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/DirectXMath/Inc/DirectXMath.h")
@@ -287,9 +322,10 @@ target_include_directories(DetourModKit
   # Generated headers (version.hpp)
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
 
-  # DirectXMath headers for both build and install interfaces
+  # DirectXMath headers for the build interface (add_subdirectory consumers). The install-interface counterpart is
+  # attached separately below, gated on DMK_INSTALL_DIRECTXMATH, so a prefix that opts out of the re-export does not
+  # advertise an include path pointing at headers it never installed.
   $<BUILD_INTERFACE:${DIRECTXMATH_INCLUDE_DIR}>
-  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath>
 
   PRIVATE
 
@@ -311,6 +347,16 @@ target_include_directories(DetourModKit SYSTEM
   "${CMAKE_CURRENT_SOURCE_DIR}/external/simpleini"
   "${DIRECTXMATH_INCLUDE_DIR}"
 )
+
+# The DirectXMath install-interface include path is attached only when the re-export is installed, so an opted-out
+# prefix never exports an include directory pointing at DirectXMath headers it did not ship. Kept SYSTEM to mirror the
+# build-interface DirectXMath include above (external headers, their warnings suppressed for consumers too).
+if(DMK_INSTALL_DIRECTXMATH)
+  target_include_directories(DetourModKit SYSTEM
+    PUBLIC
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath>
+  )
+endif()
 
 # --- Linking Dependencies for DetourModKit ---
 if(TARGET ${SAFETYHOOK_LIBRARY_TARGET_NAME})
@@ -472,26 +518,32 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
 # above (installed to include/DetourModKit) like every other public header. The v3 root-level DetourModKit.hpp umbrella
 # was replaced by dmk.hpp in the v4 clean break and no longer exists to install.
 
-# Install DirectXMath headers
-if(DIRECTXMATH_INCLUDE_DIR AND EXISTS "${DIRECTXMATH_INCLUDE_DIR}")
-  file(GLOB _directxmath_headers_for_install
-    LIST_DIRECTORIES false
-    "${DIRECTXMATH_INCLUDE_DIR}/*.h"
-    "${DIRECTXMATH_INCLUDE_DIR}/*.hpp"
-    "${DIRECTXMATH_INCLUDE_DIR}/*.inl"
-  )
-
-  if(_directxmath_headers_for_install)
-    install(FILES ${_directxmath_headers_for_install}
-      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath"
-      COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+# Install DirectXMath headers, gated on DMK_INSTALL_DIRECTXMATH. When the re-export is off, nothing DirectXMath ships
+# and the install-interface include path attached above is likewise omitted, so an opted-out prefix carries only
+# DetourModKit's own public headers rather than a vendored third-party tree.
+if(DMK_INSTALL_DIRECTXMATH)
+  if(DIRECTXMATH_INCLUDE_DIR AND EXISTS "${DIRECTXMATH_INCLUDE_DIR}")
+    file(GLOB _directxmath_headers_for_install
+      LIST_DIRECTORIES false
+      "${DIRECTXMATH_INCLUDE_DIR}/*.h"
+      "${DIRECTXMATH_INCLUDE_DIR}/*.hpp"
+      "${DIRECTXMATH_INCLUDE_DIR}/*.inl"
     )
-    message(STATUS "DirectXMath headers will be installed from: ${DIRECTXMATH_INCLUDE_DIR}")
+
+    if(_directxmath_headers_for_install)
+      install(FILES ${_directxmath_headers_for_install}
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath"
+        COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+      )
+      message(STATUS "DirectXMath headers will be installed from: ${DIRECTXMATH_INCLUDE_DIR}")
+    else()
+      message(WARNING "No DirectXMath headers found in '${DIRECTXMATH_INCLUDE_DIR}' to install.")
+    endif()
   else()
-    message(WARNING "No DirectXMath headers found in '${DIRECTXMATH_INCLUDE_DIR}' to install.")
+    message(WARNING "DirectXMath include directory not found or empty: ${DIRECTXMATH_INCLUDE_DIR}")
   endif()
 else()
-  message(WARNING "DirectXMath include directory not found or empty: ${DIRECTXMATH_INCLUDE_DIR}")
+  message(STATUS "DirectXMath re-export disabled (DMK_INSTALL_DIRECTXMATH=OFF); the prefix will not ship DirectXMath headers.")
 endif()
 
 # --- CMake Package Configuration for Consumers ---
