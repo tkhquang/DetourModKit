@@ -27,7 +27,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | Math Utilities | Angle conversions (header-only) | `math.hpp` |
 | Version Macros | Compile-time version checking generated from CMake | `version.hpp` |
 | Input System | Hotkey monitoring with background polling (keyboard/mouse/gamepad) | `input.hpp`, `input_codes.hpp` |
-| Mod Bootstrap | DllMain scaffolding, instance mutex, process gate, lifecycle worker | `bootstrap.hpp` |
+| Session and Bootstrap | RAII process lifetime with ordered teardown, DllMain scaffolding, instance mutex, process gate, lifecycle worker | `dmk.hpp` |
 | Diagnostics | Consumer-queryable counters for intentional loader-lock leak/detach events per subsystem, a process-wide typed event bus for scanner-fault and hook install/enable/disable/remove transitions, and a one-call snapshot aggregator over the counters, hook counts, anchor quality, and drift report | `diagnostics.hpp`, `diagnostics_dump.hpp` |
 | Stoppable Worker | RAII named `std::jthread` wrapper, loader-lock-safe teardown | `worker.hpp` |
 
@@ -310,19 +310,20 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 </details>
 
 <details>
-<summary><strong>Mod Bootstrap</strong></summary>
+<summary><strong>Session and Mod Bootstrap</strong></summary>
 
-- `DMKBootstrap::on_dll_attach()` / `on_dll_detach()` pair that replaces the manual `DllMain` + `CreateThread` + `InitThread` scaffolding every mod would otherwise write
-- Configures `Logger` (`prefix` + `log_file`) and enables async logging (`async_cfg`) automatically before the user init function runs, so the first message travels the async path
-- Optional process-name gate (`game_process_name`): short-circuits attach when the DLL is loaded into a non-matching executable (case-insensitive basename)
-- Optional per-PID named mutex (`instance_mutex_prefix`): blocks duplicate ASI loads from double-initializing
-- Runs `init_fn` and `shutdown_fn` on a dedicated Win32 worker thread off the loader lock, so both are free to call into Win32 APIs that would otherwise deadlock under `DllMain`
-- `DMK_Shutdown()` is invoked unconditionally after the user shutdown function, guaranteeing the correct teardown order
-- `request_shutdown()` signals the worker to drain so a mod can trigger its own unload before `FreeLibrary` and keep teardown off the loader lock (see the [Hot-Reload Guide](docs/hot-reload/README.md))
-- Handles the `DLL_PROCESS_DETACH` process-exit vs dynamic-unload distinction automatically via `lpvReserved`
-- `on_logic_dll_unload(hook_names, binding_names)` drops only the per-Logic-DLL hooks and bindings owned by the caller, leaving Logger and Config alive for whichever container hosts the next Logic-DLL incarnation
-- `on_logic_dll_unload_all()` is the catch-all variant for callers without an explicit name registry; in a host that loads multiple Logic DLLs sharing one DMK instance, prefer the named-list overload because the catch-all rips out every Logic DLL's state
-- Hot-reload teardown: `Bootstrap::on_logic_dll_unload` is the lighter alternative to `DMK_Shutdown` for multi-DLL or fast-iteration setups (see [docs/hot-reload/README.md](docs/hot-reload/README.md))
+- `Session` is the RAII owner of a mod's process lifetime: its destructor runs the correctly ordered teardown of every process-wide subsystem, replacing the error-prone manual shutdown sequencing a mod would otherwise write by hand. Two ways to build one: `Session::start(ModInfo)` (synchronous, returns `Result<Session>`; the simple/testable path) and `bootstrap(ModInfo, on_ready)` (the DllMain path)
+- `bootstrap()` / `bootstrap_detach()` replace the manual `DllMain` + `CreateThread` + `InitThread` scaffolding every mod would otherwise write; `bootstrap()` spawns a worker thread that runs `on_ready(Session&)` off the loader lock, then hosts the Session until detach
+- Configures `Logger` (`name` prefix + `log_file`) and enables async logging (`log`) automatically before `on_ready` runs, so the first message travels the async path
+- Optional process-name gate (`game_process_name`): a mismatch makes `start()` return `ErrorCode::ProcessMismatch` so the DLL can decline to load in the wrong executable (case-insensitive basename)
+- Optional per-PID named mutex (`instance_mutex_prefix`): a duplicate load returns `ErrorCode::InstanceAlreadyRunning`
+- `on_ready` runs on a dedicated Win32 worker thread off the loader lock, free to call Win32 APIs that would deadlock under `DllMain`; there is no separate shutdown callback, because `~Session` (RAII) is the teardown
+- `~Session` clears the mod's `input::Scope` first, then tears down the config watcher, input, memory cache, config registry, and logger (last) in reverse dependency order; each subsystem embeds its own loader-lock guard (join when safe, detach-and-leak when the loader lock is held)
+- `request_shutdown()` signals the worker to drain so a mod can trigger its own clean unload before `FreeLibrary` and keep teardown off the loader lock (see the [Hot-Reload Guide](docs/hot-reload/README.md))
+- `bootstrap_detach(lpvReserved)` handles the `DLL_PROCESS_DETACH` process-exit vs dynamic-unload distinction automatically: `NULL` runs the ordered teardown, non-`NULL` takes the `abandon()` path (do nothing; the OS reclaims a dying process)
+- `on_logic_dll_unload(binding_names)` drops only the named per-Logic-DLL bindings and the config registry, leaving Logger alive for whichever container hosts the next Logic-DLL incarnation (hooks are caller-owned RAII and are never touched)
+- `on_logic_dll_unload_all()` is the catch-all variant for callers without an explicit name registry; in a host that loads multiple Logic DLLs sharing one DMK instance, prefer the named-list overload because the catch-all rips out every Logic DLL's bindings
+- Hot-reload teardown: `on_logic_dll_unload` is the lighter alternative to a full `~Session` for multi-DLL or fast-iteration setups (see [docs/hot-reload/README.md](docs/hot-reload/README.md))
 
 </details>
 
@@ -478,9 +479,9 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
     │   │   ├── scan.hpp              <-- v4 scanning surface (scan::Pattern + resolve / Candidate / ScanRequest)
     │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
-    │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (bootstrap.hpp stays light)
+    │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (logger.hpp / dmk.hpp stay light)
     │   │   ├── detail/               <-- Installed compile-visible support (pattern_core.hpp only; private impl lives in src/internal/)
-    │   │   ├── bootstrap.hpp         <-- DllMain lifecycle helpers
+    │   │   ├── dmk.hpp               <-- Umbrella + Session / bootstrap / bootstrap_detach / ModInfo (DllMain lifecycle)
     │   │   ├── config.hpp
     │   │   ├── event_dispatcher.hpp  <-- Typed pub/sub with RAII subscriptions
     │   │   ├── format.hpp            <-- String & format utilities
@@ -496,7 +497,6 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── win_file_stream.hpp   <-- Win32 shared-access file stream
     │   │   ├── worker.hpp            <-- StoppableWorker (std::jthread RAII wrapper)
     │   │   └── ...
-    │   ├── DetourModKit.hpp          <-- Main DetourModKit include
     │   ├── DirectXMath/              <-- DirectXMath headers
     │   │   ├── DirectXMath.h
     │   │   ├── DirectXMathVector.inl
@@ -763,7 +763,7 @@ This method uses a pre-built and installed version of DetourModKit.
 
 ## Code Example
 
-> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScan::`, `DMKHook::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
+> **Short names and `DMK_NO_SHORT_NAMES`:** including `<DetourModKit/dmk.hpp>` introduces `DMK`-prefixed convenience aliases. The namespace aliases (`DMK::`, `DMKConfig::`, `DMKScan::`, `DMKHook::`, ...) are always present, and the type aliases used below (`DMKLogger`, `DMKKeyComboList`, ...) keep mod code terse. They are all `DMK`-prefixed, so collision risk is low. For a larger consumer project that prefers to keep the global namespace minimal, define `DMK_NO_SHORT_NAMES` before the include to drop the type aliases (the `DMK::` namespace aliases remain) and use the fully qualified `DetourModKit::` names instead.
 
 ```cpp
 // MyMod/src/main.cpp
@@ -772,8 +772,8 @@ This method uses a pre-built and installed version of DetourModKit.
 
 #include <optional>   // the RAII Hook handle is stored in an std::optional global
 
-// Single include for all DetourModKit functionality
-#include <DetourModKit.hpp>
+// Single include for all DetourModKit functionality (umbrella + Session / bootstrap lifecycle)
+#include <DetourModKit/dmk.hpp>
 
 // The v4 hooking surface lives in hook.hpp (pulled in by the umbrella above): hook::inline_at / mid_at install a hook
 // and hand back a move-only RAII DetourModKit::hook::Hook whose destructor restores the prologue. A mid-hook detour
@@ -825,12 +825,13 @@ void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
     call_original(message, type);
 }
 
-// Mod Initialization Function (runs on DMKBootstrap's worker thread, off the loader lock)
-bool InitializeMyMod()
+// Mod init callback (runs on the bootstrap worker thread, off the loader lock). It receives the live Session and
+// returns a Result<void>, so an init failure is a value logged on the worker, never a throw across the loader lock.
+DMK::Result<void> InitializeMyMod(DMK::Session &session)
 {
-    // Logger + async mode are already configured by DMKBootstrap::on_dll_attach()
-    // using the ModInfo passed into the attach call below.
-    auto &logger = DMK::log();
+    // Logger + async mode are already configured by bootstrap() using the ModInfo passed into the attach call below.
+    // session.log() is the same process-default logger DMK::log() returns.
+    auto &logger = session.log();
 
     // Bind your configuration variables (callback-store API; config::bind<T> is the atomic hot path)
     DMKConfig::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
@@ -849,8 +850,9 @@ bool InitializeMyMod()
     DMKConfig::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
         [](const DMKKeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
 
-    // Load configuration from INI file
-    DMKConfig::load("MyMod.ini");
+    // Load configuration from INI file (after the binds above, so load() applies file values to them). session.ini()
+    // is a thin handle to the same process config registry the free config:: functions act on.
+    session.ini().load("MyMod.ini");
 
     // Apply LogLevel from loaded configuration
     logger.set_log_level(DMK::string_to_log_level(g_mod_config.log_level_setting));
@@ -909,7 +911,8 @@ bool InitializeMyMod()
             .on_press = []() { DMK::log().info("Toggle key pressed!"); },
         }))
     {
-        DMKInput::scope().add(std::move(*toggle));
+        // Park the guard in the Session's scope: ~Session clears it first, in reverse insertion order.
+        session.scope().add(std::move(*toggle));
     }
 
     if (auto scroll = DMKInput::register_combo({
@@ -920,62 +923,58 @@ bool InitializeMyMod()
             { DMK::log().info("Hold scroll: {}", held ? "active" : "released"); },
         }))
     {
-        DMKInput::scope().add(std::move(*scroll));
+        session.scope().add(std::move(*scroll));
     }
 
     // Start the input polling thread (focus-aware by default)
     (void)DMKInput::Input::instance().start();
 
     logger.info("MyMod Initialized using DetourModKit!");
-    return true;
-}
-
-// Mod Shutdown Function (runs on DMKBootstrap's worker thread, before DMK_Shutdown())
-void ShutdownMyMod()
-{
-    DMK::log().info("MyMod Shutting Down...");
-    // Drop the RAII Hook handle to restore the prologue before the kit tears down. If several hooks layer on one
-    // address, destroy them newest-first (reset the most-recently-installed handle first).
-    g_print_hook.reset();
-    // DMK_Shutdown() is invoked automatically by on_dll_detach() after this
-    // function returns, in the correct order:
-    //   config auto-reload watcher -> input system -> Memory cache -> config registry -> Logger
+    return {}; // success
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved)
 {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH)
     {
-        DMKBootstrap::ModInfo info{
-            .prefix = "MyMod",
+        DMK::ModInfo info{
+            .name = "MyMod",                            // logger prefix + mod identity
             .log_file = "MyMod.log",
             .game_process_name = "MyGame.exe",          // optional -- set "" to disable
             .instance_mutex_prefix = "MyMod_Instance",  // optional -- set "" to disable
         };
-        info.async_cfg.queue_capacity = 8192;
-        info.async_cfg.batch_size = 64;
+        info.log.queue_capacity = 8192;
+        info.log.batch_size = 64;
 
-        return DMKBootstrap::on_dll_attach(hModule, info,
-                                           &InitializeMyMod,
-                                           &ShutdownMyMod);
+        // bootstrap() spawns the worker, runs InitializeMyMod(session) off the loader lock, and hosts the Session until
+        // detach. It returns Result<void>; a failure (process gate / instance mutex / worker spawn) declines the load.
+        return DMK::bootstrap(info, &InitializeMyMod).has_value() ? TRUE : FALSE;
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH)
     {
-        DMKBootstrap::on_dll_detach(lpReserved != nullptr);
+        // Drop caller-owned hooks to restore prologues on an explicit FreeLibrary (lpReserved == NULL). On process exit
+        // (lpReserved != NULL) leave them: the OS reclaims a dying process and touching patched pages is a UAF.
+        if (lpReserved == nullptr)
+        {
+            g_print_hook.reset();
+        }
+        // NULL -> the ordered ~Session teardown; non-NULL -> abandon (do nothing).
+        DMK::bootstrap_detach(lpReserved);
     }
     return TRUE;
 }
 ```
 
 > [!WARNING]
-> `DMKBootstrap::on_dll_attach()` runs `InitializeMyMod` / `ShutdownMyMod` on a
-> dedicated worker thread, so both execute off the loader lock. For a dynamic
-> `FreeLibrary` unload, call `DMKBootstrap::request_shutdown()` *before* issuing
-> `FreeLibrary` so the worker has time to drain. Each subsystem also detects the
-> loader lock and will detach background threads instead of joining them, but
-> requesting shutdown early ensures all log messages are flushed and hooks are
-> cleanly removed. See the [Hot-Reload Guide](docs/hot-reload/README.md) for the
-> recommended two-DLL architecture.
+> `DMK::bootstrap()` runs `InitializeMyMod` on a dedicated worker thread, so it
+> executes off the loader lock, and `~Session` runs the ordered teardown there too.
+> For a dynamic `FreeLibrary` unload, call `DMK::request_shutdown()` *before* issuing
+> `FreeLibrary` so the worker has time to drain (and drop your caller-owned `Hook`
+> handles to restore prologues). Each subsystem also detects the loader lock and will
+> detach background threads instead of joining them, but requesting shutdown early
+> ensures all log messages are flushed. See the
+> [Hot-Reload Guide](docs/hot-reload/README.md) for the recommended two-DLL
+> architecture.
 
 ## Configuration File Example
 

@@ -50,13 +50,16 @@ MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?Mi
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
 
 # --- v4 clean-break gates ---
-# Legacy public headers deleted by a clean-break reshape; none may reappear.
+# Legacy public headers deleted by a clean-break reshape; none may reappear. The root-level DetourModKit.hpp umbrella and
+# bootstrap.hpp were both folded into the v4 dmk.hpp (umbrella + Session/bootstrap/ModInfo) in the lifecycle reshape.
 LEGACY_HEADERS = (
     "include/DetourModKit/scanner.hpp",
     "include/DetourModKit/anchors.hpp",
     "include/DetourModKit/profile.hpp",
     "include/DetourModKit/hook_manager.hpp",
     "include/DetourModKit/config_watcher.hpp",
+    "include/DetourModKit/bootstrap.hpp",
+    "include/DetourModKit.hpp",
 )
 # Legacy scan symbols the v4 surface replaced. None may appear in this repo's own sources: the engine is
 # DetourModKit::detail::EnginePattern / find_pattern, the resolver is scan::resolve / scan::Candidate, and
@@ -122,6 +125,16 @@ LEGACY_INPUT_TOKEN = re.compile(
 # comment stripping, so v3-migration prose does not trip the gate.
 LEGACY_LOGGER_TOKEN = re.compile(
     r'(\bLogger::get_instance\b|\bLogger::string_to_log_level\b|\blog_level_to_string\b)')
+# --- v4 lifecycle clean-break gate ---
+# The legacy lifecycle surface (the standalone DMK_Shutdown() ordered-teardown free function, the namespace Bootstrap
+# scaffolding, and its on_dll_attach / on_dll_detach entry points) was reshaped into the RAII Session (whose destructor
+# runs the ordered teardown) plus the free bootstrap() / bootstrap_detach() / request_shutdown() surface in dmk.hpp.
+# None of these spellings may reappear in this repo's own sources. Bootstrap:: is gated with the scope operator (not a
+# bare token) on purpose: the surviving Diagnostics::LeakSubsystem::Bootstrap enumerator is a distinct, legitimate name
+# that FOLLOWS '::', so a bare token would false-positive on it. Matched after comment stripping, so v3-migration prose
+# does not trip the gate.
+LEGACY_LIFECYCLE_TOKEN = re.compile(
+    r'(\bDMK_Shutdown\b|\bBootstrap::|\bon_dll_attach\b|\bon_dll_detach\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
@@ -306,6 +319,13 @@ def main():
             if gm:
                 violations.append(
                     f"{rel}:{n}: legacy logger symbol '{gm.group(1).strip()}' (replaced by the v4 logger surface)")
+
+        # v4 lifecycle gate D: no legacy lifecycle symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            fm = LEGACY_LIFECYCLE_TOKEN.search(line)
+            if fm:
+                violations.append(
+                    f"{rel}:{n}: legacy lifecycle symbol '{fm.group(1).strip()}' (replaced by the v4 Session/dmk.hpp surface)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")

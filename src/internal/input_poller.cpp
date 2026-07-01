@@ -1172,7 +1172,7 @@ namespace DetourModKit
                 std::sort(indices.begin(), indices.end());
 
                 // Capture release callbacks for active hold bindings before erasure; fire them after the lock is
-                // released so user code is free to call back into the facade. The Bootstrap unload path passes
+                // released so user code is free to call back into the facade. The on_logic_dll_unload path passes
                 // invoke_callbacks=false to skip this step because the user callbacks live in a Logic DLL whose code
                 // pages may be about to be unmapped.
                 if (invoke_callbacks)
@@ -1266,7 +1266,7 @@ namespace DetourModKit
             {
                 std::unique_lock lock(m_bindings_rw_mutex);
                 // Skip the release-callback capture entirely on the loader-lock path
-                // (Bootstrap::on_logic_dll_unload_all). Running user callbacks under loader lock is unsafe because the
+                // (on_logic_dll_unload_all). Running user callbacks under loader lock is unsafe because the
                 // Logic DLL hosting those callbacks may be in the middle of being unmapped, and any callback that
                 // touches Win32 LoadLibrary family or a peer DllMain's mutex would deadlock.
                 if (invoke_callbacks)
