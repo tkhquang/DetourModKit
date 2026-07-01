@@ -450,11 +450,15 @@ namespace DetourModKit
          */
         enum class HealEscalation : std::uint8_t
         {
-            /// A REQUIRED landmark that stays unresolved after a scan logs at Warning (the "kept nominal, re-author if
-            /// drifted" headline); an OPTIONAL landmark's miss stays at Debug. The default.
+            /**
+             * A REQUIRED landmark that stays unresolved after a scan logs at Warning (the "kept nominal, re-author if
+             * drifted" headline); an OPTIONAL landmark's miss stays at Debug. The default.
+             */
             WarnRequired = 0,
-            /// Every miss (required or optional) stays at Debug -- for a group whose target is legitimately absent much
-            /// of the time and whose miss is not itself actionable.
+            /**
+             * Every miss (required or optional) stays at Debug -- for a group whose target is legitimately absent much
+             * of the time and whose miss is not itself actionable.
+             */
             Quiet = 1
         };
 
@@ -573,8 +577,10 @@ namespace DetourModKit
         public:
             /// A cheap per-frame precondition; returning false skips the group's scan without spending the interval.
             using Gate = std::move_only_function<bool()>;
-            /// A group's heal work; returning true latches the group (no more scans). Returning false retries next
-            /// interval.
+            /**
+             * A group's heal work; returning true latches the group (no more scans). Returning false retries next
+             * interval.
+             */
             using Work = std::move_only_function<bool(HealRun &)>;
 
             /**
