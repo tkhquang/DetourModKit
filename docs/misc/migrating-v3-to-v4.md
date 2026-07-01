@@ -2,8 +2,7 @@
 
 v4.0.0 is a deliberate clean break: it ships zero legacy spellings and drops backward compatibility to
 establish a 100% modern C++23 surface. Every distinct v3 capability survives in a clean v4 idiom -- this
-guide maps the old surface onto the new one. Nothing here is a capability loss except the one documented
-deferral (per-method VMT hooking).
+guide maps the old surface onto the new one. Nothing here is a capability loss.
 
 ## At a glance
 
@@ -35,8 +34,14 @@ The `HookManager` singleton and its aggregate operations are removed:
 - Install a hook with `hook::inline_at` / `hook::mid_at` / `hook::vmt_for`; drop the returned handle to
   unhook. The declarative `hook::install_all(span<HookSpec>) -> Result<vector<InstallOutcome>>` table folds
   the ceremony into rows with a per-row `Mandatory` / `BestEffort` severity.
-- **Per-method typed VMT hooking is deferred** to a later release. Object-level VMT hooking (`vmt_for` /
-  `apply_to` / `remove_from`, restoring every vptr on drop) ships in v4.0.0.
+- **VMT hooking** is the RAII `VmtHook` from `vmt_for` (object-level clone / `apply_to` / `remove_from`,
+  restoring every vptr on drop). The v3 name-keyed method surface maps onto handle methods:
+  `hook_vmt_method(name, index, detour)` -> `vh.hook_method<Fn>(index, detour)`; the `with_vmt_method(name,
+  index, cb)` accessor -> `vh.original<Fn>(index)` (a typed pre-hook function pointer the detour calls directly,
+  so the reader-lock callback is no longer needed); `remove_vmt_method(name, index)` -> `vh.remove_method(index)`.
+  The v3 per-method original-call helpers (`thiscall` / `ccall` / `stdcall` / `fastcall`, reached through the
+  `with_vmt_method` callback) collapse into the single `VmtHook::original<Fn>(index)` because Win64 has one
+  calling convention; encode the convention in `Fn` if you ever target x86.
 
 ## Scanning: one resolver surface
 
