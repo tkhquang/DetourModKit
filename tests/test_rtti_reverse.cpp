@@ -314,6 +314,28 @@ TEST_F(RttiReverseTest, TypeIdentityOwnsNameAcceptsAnyStringSource)
     SUCCEED();
 }
 
+TEST_F(RttiReverseTest, TypeIdentityOwnedNameSurvivesSourceDestruction)
+{
+    const std::uintptr_t vt = build_synth(".?AVRevOwned@@", 0x00);
+    ASSERT_NE(vt, 0u);
+
+    // Build the identity from a TEMPORARY std::string, then let that source string die BEFORE resolving. TypeIdentity
+    // copies the name into owned storage, so the later resolve reads the owned copy; had it kept a borrowed
+    // string_view, this would read the freed (SSO stack) storage and mis-resolve. The handle is non-movable, so it is
+    // constructed in place inside the optional.
+    std::optional<rtti::TypeIdentity> identity;
+    {
+        std::string transient = ".?AVRevOwned@@";
+        identity.emplace(std::string_view(transient), pool_range());
+    } // transient destroyed here; its storage is now free
+    ASSERT_TRUE(identity.has_value());
+
+    const auto resolved = identity->vtable();
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(resolved->raw(), vt);
+    EXPECT_TRUE(identity->matches(Address{vt}));
+}
+
 TEST_F(RttiReverseTest, VtablesForTypeOrdersByColOffset)
 {
     // Plant the sub-objects in non-ascending COL.offset discovery order (the pool lays them out by allocation address)

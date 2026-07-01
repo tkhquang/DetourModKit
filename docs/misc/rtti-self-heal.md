@@ -24,7 +24,7 @@ After a patch moves the pointer to `O' = O +/- delta`, `heal_landmark` scans a w
 
 The one constraint: `T` must be a type that is **stable across patches** (a base/engine type, not a game-specific most-derived subtype), because matching is byte-exact on the most-derived mangled name. A subtype rename defeats healing and fails closed via `HealNoMatch`.
 
-All addresses on this surface are the value-typed `Address` (from `address.hpp`), and every fallible resolver returns `Result<T>` over the unified `ErrorCode` (the former `IdentifyError` / `HealError` enums folded into the `ErrorCategory::Rtti` block: `BadSlotAddress` / `UnreadableSlot` / `NoRtti` / `BadDescriptor` / `HealNoMatch` / `HealAmbiguous`).
+All addresses on this surface are the value-typed `Address` (from `address.hpp`). The typed resolvers (`identify_pointee_typed`, `heal_landmark`, `solve_fingerprint`) return `Result<T>` over the unified `ErrorCode`; the boolean `identify_pointee_type` and the count-returning `reverse_scan_block` keep their lightweight shapes rather than a `Result`. The former `IdentifyError` / `HealError` enums fold into the `ErrorCategory::Rtti` block: `BadSlotAddress` / `UnreadableSlot` / `NoRtti` / `BadDescriptor` / `HealNoMatch` / `HealAmbiguous`.
 
 ## The layers
 

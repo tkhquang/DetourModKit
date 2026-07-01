@@ -495,6 +495,14 @@ namespace DetourModKit
         class HealRun
         {
         public:
+            // Non-owning, scheduler-scoped, and valid only for the duration of one work callback: it aliases the
+            // scheduler's config and warn-once state. Copying or moving it would let a callback smuggle those aliases
+            // out to outlive the scheduler, so every copy/move is deleted to make the transient lifetime unextendable.
+            HealRun(const HealRun &) = delete;
+            HealRun &operator=(const HealRun &) = delete;
+            HealRun(HealRun &&) = delete;
+            HealRun &operator=(HealRun &&) = delete;
+
             /**
              * @brief Heal one landmark from a live base and publish the result to a caller-owned offset slot.
              * @details Copies @p landmark, fills its base with @p base, and runs @ref heal_landmark. On a resolve the
@@ -510,8 +518,8 @@ namespace DetourModKit
              * @param required Whether an unresolved miss escalates to Warning under @ref HealEscalation::WarnRequired.
              * @return The @ref heal_landmark result (the caller can inspect the details or the Error).
              */
-            Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
-                                      std::atomic<std::ptrdiff_t> &slot, bool required = true) noexcept;
+            [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
+                                                    std::atomic<std::ptrdiff_t> &slot, bool required = true) noexcept;
 
             /**
              * @brief Report a drift a group recovered itself (e.g. through @ref solve_fingerprint), so the one-shot
@@ -580,7 +588,7 @@ namespace DetourModKit
             HealScheduler &operator=(HealScheduler &&) noexcept;
             HealScheduler(const HealScheduler &) = delete;
             HealScheduler &operator=(const HealScheduler &) = delete;
-            ~HealScheduler();
+            ~HealScheduler() noexcept;
 
             /**
              * @brief Registers an independently-latched heal group.
@@ -589,6 +597,10 @@ namespace DetourModKit
              * @param gate Optional per-frame precondition, evaluated before the interval countdown. When it returns
              *             false the group is skipped silently and the interval budget is not spent, so a not-yet-live
              *             target is polled cheaply every frame until it appears.
+             * @note An empty @p work is ignored (no group is registered), since a group with no heal work could never
+             *       resolve. Primarily a setup call; if invoked re-entrantly from within a running @ref tick (a work or
+             *       gate callback adding a group), the new group is deferred and starts scanning on the next tick, so
+             *       it never reallocates the group container while tick is iterating it.
              */
             void add_group(Work work, Gate gate = {});
 

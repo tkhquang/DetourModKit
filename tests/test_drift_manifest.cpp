@@ -38,6 +38,8 @@ TEST(DriftManifestTest, RoundTripPreservesEntries)
     EXPECT_EQ((*parsed)[0].healed_offset, 0x18);
     EXPECT_EQ((*parsed)[0].delta, 0x8);
     EXPECT_TRUE((*parsed)[0].ok);
+    // A successful entry's error is Ok and must round-trip as Ok, not collapse into a failure token.
+    EXPECT_EQ((*parsed)[0].error, ErrorCode::Ok);
 
     EXPECT_EQ((*parsed)[1].name, name_b);
     EXPECT_FALSE((*parsed)[1].ok);

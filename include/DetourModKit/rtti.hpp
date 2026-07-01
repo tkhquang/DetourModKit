@@ -86,6 +86,9 @@ namespace DetourModKit
          * @param out_len Capacity of @p out including the NUL terminator. The function never writes more than @p
          *                out_len bytes.
          * @return Number of name bytes written (excluding the NUL terminator), or 0 on failure or empty output.
+         * @note Zero-allocation, but each call runs the loader-querying COL prelude (a GetModuleHandleEx-class lookup),
+         *       so it is an occasional identity probe, not a zero-cost per-frame test; cache a @ref TypeIdentity when
+         *       checking the same type every frame.
          */
         [[nodiscard]] std::size_t type_name_into(Address vtable, char *out, std::size_t out_len) noexcept;
 
@@ -99,6 +102,8 @@ namespace DetourModKit
          * @param expected Mangled name to compare against. Must be non-empty and shorter than @ref MAX_TYPE_NAME_LEN.
          * @return true on exact match; false on mismatch, on any read failure, or when @p expected is empty or
          *         oversized.
+         * @note Each call runs the loader-querying COL prelude, so it is an occasional identity probe, not a zero-cost
+         *       per-frame test; cache a @ref TypeIdentity when checking the same type every frame.
          */
         [[nodiscard]] bool vtable_is_type(Address vtable, std::string_view expected) noexcept;
 
@@ -127,6 +132,8 @@ namespace DetourModKit
          *               pointer array; pass a larger stride for tables that interleave per-slot metadata between
          *               pointers.
          * @return The object pointer (the value stored in the slot) on first match, or std::nullopt if no slot matched.
+         * @note The cold path runs the RTTI walk per slot (setup / first-resolve cost); the warm-cache path is a single
+         *       qword compare per slot, so pass a @p vtable_cache whenever this is called repeatedly.
          * @warning The warm-cache path assumes one canonical vtable address per expected name. If multiple derived
          *          concrete classes share the same base-mangled name and the table holds a mix of them, only slots
          *          whose vtable equals the
@@ -162,6 +169,8 @@ namespace DetourModKit
          * @return The primary vtable address on a unique match; std::nullopt when no COL.offset == 0 match exists, when
          *         @p range is invalid, or when more than one distinct primary vtable shares the name (an ambiguous
          *         image: the resolver fails closed rather than guessing).
+         * @note Setup/control-plane only: it sweeps the module's readable sections, so run it once at init (or behind a
+         *       cached @ref TypeIdentity), never per-frame.
          */
         [[nodiscard]] std::optional<Address> vtable_for_type(std::string_view mangled,
                                                              Region range = Region::host()) noexcept;
@@ -180,6 +189,7 @@ namespace DetourModKit
          * @param range Module image to search. Defaults to the host EXE.
          * @return Total number of distinct matching vtables found (capped at an internal upper bound that far exceeds
          *         any real inheritance graph). A return value greater than @p out_cap signals the output was truncated.
+         * @note Setup/control-plane only: a full module-section sweep, like @ref vtable_for_type; run it at init.
          */
         [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
                                                    Region range = Region::host()) noexcept;
@@ -221,12 +231,16 @@ namespace DetourModKit
              *          missing type never matches.
              * @param vtable Candidate vtable (an object's first qword).
              * @return true when @p vtable equals the resolved primary vtable.
+             * @note Callback-safe once warm: the first call resolves (a module sweep), every later call is a single
+             *       cached qword compare, so this is the per-frame identity check.
              */
             [[nodiscard]] bool matches(Address vtable) const noexcept;
 
             /**
              * @brief Returns the resolved primary vtable, resolving on first use.
              * @return The vtable address, or std::nullopt if it cannot be resolved in the configured module range.
+             * @note The first call resolves (a setup-cost module sweep); the result is cached, so a later call is a
+             *       relaxed atomic load.
              */
             [[nodiscard]] std::optional<Address> vtable() const noexcept;
 

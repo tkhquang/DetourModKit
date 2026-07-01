@@ -26,6 +26,7 @@
 #include "rtti_internal.hpp"
 
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <utility>
 
@@ -469,6 +470,11 @@ namespace DetourModKit
         // every group even when several fields moved on the same frame.
         std::atomic<bool> drift_warned{false};
         std::vector<Group> groups;
+        // Groups registered from within a running tick() (a callback calling add_group) are staged here and merged into
+        // `groups` after the scan loop, so add_group can never reallocate `groups` while tick's range-for holds a
+        // reference into it.
+        std::vector<Group> pending;
+        bool ticking = false;
     };
 
     Result<rtti::HealScheduler> rtti::HealScheduler::start(HealConfig config) noexcept
@@ -492,19 +498,30 @@ namespace DetourModKit
     rtti::HealScheduler::HealScheduler(std::unique_ptr<Impl> impl) noexcept : m_impl(std::move(impl)) {}
     rtti::HealScheduler::HealScheduler(HealScheduler &&) noexcept = default;
     rtti::HealScheduler &rtti::HealScheduler::operator=(HealScheduler &&) noexcept = default;
-    rtti::HealScheduler::~HealScheduler() = default;
+    rtti::HealScheduler::~HealScheduler() noexcept = default;
 
     void rtti::HealScheduler::add_group(Work work, Gate gate)
     {
         if (!m_impl)
             return;
-        m_impl->groups.push_back(Impl::Group{std::move(work), std::move(gate), false, 0});
+        // A group with no heal work can never resolve; ignore an empty callback rather than let it reach tick(), where
+        // invoking an empty std::move_only_function would be undefined behavior.
+        if (!work)
+            return;
+        // Defer a group added from within a running tick (a work/gate callback re-entering add_group) so tick's
+        // range-for reference into `groups` is never invalidated by a reallocation mid-iteration; it starts scanning on
+        // the next tick.
+        std::vector<Impl::Group> &target = m_impl->ticking ? m_impl->pending : m_impl->groups;
+        target.push_back(Impl::Group{std::move(work), std::move(gate), false, 0});
     }
 
     void rtti::HealScheduler::tick() noexcept
     {
         if (!m_impl)
             return;
+        // Mark the scan in flight so a re-entrant add_group (from a work/gate callback) defers into `pending` rather
+        // than mutating `groups` under the range-for below.
+        m_impl->ticking = true;
         for (Impl::Group &group : m_impl->groups)
         {
             if (group.latched)
@@ -551,6 +568,24 @@ namespace DetourModKit
             }
             if (resolved)
                 group.latched = true;
+        }
+
+        // The scan loop is done; adopt any groups a callback deferred while ticking. insert() reserves once up front
+        // (so on OOM it throws before moving any element, leaving `pending` intact to retry next tick) and then
+        // move-constructs each element (a std::move_only_function move is noexcept), keeping tick() noexcept.
+        m_impl->ticking = false;
+        if (!m_impl->pending.empty())
+        {
+            try
+            {
+                m_impl->groups.insert(m_impl->groups.end(), std::make_move_iterator(m_impl->pending.begin()),
+                                      std::make_move_iterator(m_impl->pending.end()));
+                m_impl->pending.clear();
+            }
+            catch (...)
+            {
+                // Allocation failed; leave `pending` untouched so the deferred groups are retried on the next tick.
+            }
         }
     }
 

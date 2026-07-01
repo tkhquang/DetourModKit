@@ -661,6 +661,15 @@ namespace
             std::memcpy(reinterpret_cast<std::byte *>(base()) + byte_off, &value, sizeof(value));
         }
     };
+
+    // Assert a heal / fingerprint Result carries a BadDescriptor error WITHOUT tripping std::expected::error()'s
+    // has_value() == false precondition when the call unexpectedly succeeds: ASSERT_FALSE returns from this helper
+    // (not the test), so the error() read is skipped and a regression reports a clean failure rather than UB.
+    template <typename R> void expect_bad_descriptor(const R &result)
+    {
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::BadDescriptor);
+    }
 } // anonymous namespace
 
 TEST_F(RttiDissectTest, Heal_NoDriftHealsToNominalAndIgnoresSameTypedNeighbor)
@@ -1051,50 +1060,37 @@ TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)
     const std::uintptr_t base = st.base();
 
     // Low base.
-    EXPECT_EQ(rtti::heal_landmark({.base = Address{0x100}, .expected_mangled = ".?AVBad@@"}).error().code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{0x100}, .expected_mangled = ".?AVBad@@"}));
 
     // Empty expected name.
-    EXPECT_EQ(rtti::heal_landmark({.base = Address{base}, .expected_mangled = ""}).error().code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = ""}));
 
     // Oversized expected name.
     const std::string huge(rtti::MAX_TYPE_NAME_LEN + 1, 'X');
-    EXPECT_EQ(rtti::heal_landmark({.base = Address{base}, .expected_mangled = huge}).error().code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = huge}));
 
     // Expected name of exactly MAX_TYPE_NAME_LEN: the guard is size() >=
     // MAX_TYPE_NAME_LEN, so this length is the first rejected one (pins the boundary against an off-by-one that would
     // let it through).
     const std::string at_cap(rtti::MAX_TYPE_NAME_LEN, 'X');
-    EXPECT_EQ(rtti::heal_landmark({.base = Address{base}, .expected_mangled = at_cap}).error().code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = at_cap}));
 
     // Window over the hard cap.
-    EXPECT_EQ(rtti::heal_landmark({.base = Address{base},
-                                   .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-                                   .window = rtti::MAX_HEAL_WINDOW + 1,
-                                   .expected_mangled = ".?AVBad@@"})
-                  .error()
-                  .code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
+                                               .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+                                               .window = rtti::MAX_HEAL_WINDOW + 1,
+                                               .expected_mangled = ".?AVBad@@"}));
 
     // Unknown indirection enumerator.
-    EXPECT_EQ(rtti::heal_landmark({.base = Address{base},
-                                   .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-                                   .expected_mangled = ".?AVBad@@",
-                                   .indirection = static_cast<rtti::Indirection>(99)})
-                  .error()
-                  .code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
+                                               .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+                                               .expected_mangled = ".?AVBad@@",
+                                               .indirection = static_cast<rtti::Indirection>(99)}));
 
     // nominal_offset drives the address out of the user-mode window.
-    EXPECT_EQ(rtti::heal_landmark({.base = Address{base},
-                                   .nominal_offset = -static_cast<std::ptrdiff_t>(base),
-                                   .expected_mangled = ".?AVBad@@"})
-                  .error()
-                  .code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
+                                               .nominal_offset = -static_cast<std::ptrdiff_t>(base),
+                                               .expected_mangled = ".?AVBad@@"}));
 }
 
 TEST_F(RttiDissectTest, Heal_AllocatesNothing)
@@ -1342,15 +1338,13 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
     const std::uintptr_t base = st.base();
 
     // Empty span.
-    EXPECT_EQ(rtti::solve_fingerprint(Address{base}, std::span<const rtti::Landmark>{}, 0x20).error().code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, std::span<const rtti::Landmark>{}, 0x20));
 
     // Low base.
-    EXPECT_EQ(rtti::solve_fingerprint(Address{0x100}, fp_required(0x100), 0x20).error().code, ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{0x100}, fp_required(0x100), 0x20));
 
     // Window over the hard cap.
-    EXPECT_EQ(rtti::solve_fingerprint(Address{base}, fp_required(base), rtti::MAX_HEAL_WINDOW + 1).error().code,
-              ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, fp_required(base), rtti::MAX_HEAL_WINDOW + 1));
 
     // Over the landmark cap.
     std::array<rtti::Landmark, rtti::MAX_FINGERPRINT_LANDMARKS + 1> too_many{};
@@ -1359,7 +1353,7 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
         lm.base = Address{base};
         lm.expected_mangled = ".?AVCap@@";
     }
-    EXPECT_EQ(rtti::solve_fingerprint(Address{base}, too_many, 0x20).error().code, ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, too_many, 0x20));
 
     // Every landmark optional: nothing to anchor on.
     std::array<rtti::Landmark, 2> all_optional{
@@ -1368,7 +1362,7 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
         rtti::Landmark{
             .base = Address{base}, .nominal_offset = FP_OB, .expected_mangled = ".?AVCap@@", .required = false},
     };
-    EXPECT_EQ(rtti::solve_fingerprint(Address{base}, all_optional, 0x20).error().code, ErrorCode::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, all_optional, 0x20));
 }
 
 // --- heal_report (drift telemetry) ---

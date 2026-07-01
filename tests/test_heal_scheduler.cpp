@@ -191,6 +191,43 @@ TEST(HealSchedulerTest, MovedFromSchedulerIsInert)
     EXPECT_TRUE(moved.all_resolved());
 }
 
+TEST(HealSchedulerTest, AddGroupFromCallbackDefersToNextTick)
+{
+    auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+
+    int a = 0;
+    int b = 0;
+    // Group A registers group B from inside its own work callback. The defer-queue must apply B only after tick's scan
+    // loop, so the range-for over the group vector is never invalidated by a reallocation mid-iteration (the UB a naive
+    // push_back-during-iteration would cause).
+    sched.add_group(
+        [&](rtti::HealRun &)
+        {
+            ++a;
+            if (a == 1)
+            {
+                sched.add_group(
+                    [&](rtti::HealRun &) noexcept
+                    {
+                        ++b;
+                        return true;
+                    });
+            }
+            return true; // A latches on its first scan
+        });
+
+    sched.tick(); // A scans (deferring B); A latches; B has not run yet
+    EXPECT_EQ(a, 1);
+    EXPECT_EQ(b, 0);
+    EXPECT_FALSE(sched.all_resolved()) << "B is registered but not yet latched";
+
+    sched.tick(); // A is latched (skipped); the deferred B now scans and latches
+    EXPECT_EQ(b, 1);
+    EXPECT_TRUE(sched.all_resolved());
+}
+
 // --- heal_into behaviour (with synthetic RTTI) -------------------------------------------------------------------
 
 namespace
