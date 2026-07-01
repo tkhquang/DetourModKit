@@ -9,10 +9,10 @@
 
 #include <process.h> // _getpid for collision-free temp paths under parallel CTest
 
-using DetourModKit::Rtti::DriftEntry;
-using DetourModKit::Rtti::HealError;
-using DetourModKit::Rtti::ManifestError;
-namespace rtti = DetourModKit::Rtti;
+using DetourModKit::ErrorCode;
+using DetourModKit::rtti::DriftEntry;
+using DetourModKit::rtti::ManifestError;
+namespace rtti = DetourModKit::rtti;
 
 TEST(DriftManifestTest, RoundTripPreservesEntries)
 {
@@ -27,7 +27,7 @@ TEST(DriftManifestTest, RoundTripPreservesEntries)
     entries[1].name = name_b;
     entries[1].nominal_offset = 0x40;
     entries[1].ok = false;
-    entries[1].error = HealError::NoMatch;
+    entries[1].error = ErrorCode::HealNoMatch;
 
     const auto parsed = rtti::parse_drift_report(rtti::serialize_drift_report(entries));
     ASSERT_TRUE(parsed.has_value());
@@ -41,7 +41,7 @@ TEST(DriftManifestTest, RoundTripPreservesEntries)
 
     EXPECT_EQ((*parsed)[1].name, name_b);
     EXPECT_FALSE((*parsed)[1].ok);
-    EXPECT_EQ((*parsed)[1].error, HealError::NoMatch);
+    EXPECT_EQ((*parsed)[1].error, ErrorCode::HealNoMatch);
 }
 
 TEST(DriftManifestTest, NameSurvivesSourceDestruction)

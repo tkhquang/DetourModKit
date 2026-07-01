@@ -7,7 +7,7 @@
  *
  * Houses the verified COL -> TypeDescriptor walk (@ref resolve_col_site) and the page-bounded name copy (@ref
  * read_name_seh) that both the forward walker (type_name_of / vtable_is_type) and the reverse dissector
- * (identify_pointee_type / heal_landmark) consume. The structures and helpers live in DetourModKit::Rtti::detail and
+ * (identify_pointee_type / heal_landmark) consume. The structures and helpers live in DetourModKit::rtti::detail and
  * are NOT part of the installed public surface; ColHead in particular encodes a raw ABI layout that must never leak
  * into a consumer-visible header.
  */
@@ -20,7 +20,7 @@
 
 namespace DetourModKit
 {
-    namespace Rtti
+    namespace rtti
     {
         namespace detail
         {
@@ -106,7 +106,7 @@ namespace DetourModKit
              */
             [[nodiscard]] std::size_t read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len) noexcept;
         } // namespace detail
-    } // namespace Rtti
+    } // namespace rtti
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_RTTI_INTERNAL_HPP

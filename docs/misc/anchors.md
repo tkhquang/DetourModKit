@@ -17,7 +17,7 @@ The registry unifies the self-healing backends that resolve from a module range 
 
 | `AnchorKind` | Backend | Resolves to |
 |--------------|---------|-------------|
-| `VtableIdentity` | `Rtti::vtable_for_type` | A class vtable address, keyed on its mangled name |
+| `VtableIdentity` | `rtti::vtable_for_type` | A class vtable address, keyed on its mangled name |
 | `RipGlobal` | `Scanner::resolve_cascade_in_module` | An absolute address (Direct or RIP-relative candidates) |
 | `CodeOperand` | `Scanner::read_code_constant` | An in-code immediate or `[reg + disp]` displacement |
 | `StringXref` | `Scanner::find_string_xref` | The instruction (or enclosing function) that references an immutable string literal |
@@ -63,7 +63,7 @@ Two opt-in policy flags harden this further (both default to preserving the exis
 
 When a target can be expressed more than one way, prefer the most update-resilient backend: `StringXref` > `VtableIdentity` > `RipGlobal` > `CodeOperand`, with `Quorum` over two of those raising confidence further and `Manual` as the last resort.
 
-RTTI pointer-field offset healing (`Rtti::heal_landmark`) is intentionally **not** a registry kind: it needs a runtime struct base that is itself resolved from another anchor, so it is driven directly once that base is known (see [rtti-self-heal.md](rtti-self-heal.md)).
+RTTI pointer-field offset healing (`rtti::heal_landmark`) is intentionally **not** a registry kind: it needs a runtime struct base that is itself resolved from another anchor, so it is driven directly once that base is known (see [rtti-self-heal.md](rtti-self-heal.md)).
 
 ## Declaring and resolving a table
 

@@ -15,7 +15,7 @@
 #include "DetourModKit/rtti.hpp"
 
 namespace memory = DetourModKit::memory;
-namespace Rtti = DetourModKit::Rtti;
+namespace rtti = DetourModKit::rtti;
 using DetourModKit::Address;
 using DetourModKit::Region;
 
@@ -118,17 +118,17 @@ TEST_F(RttiReverseTest, SingleInheritanceResolvesPrimaryVtable)
     const std::uintptr_t vt = build_synth(".?AVRevSingle@@", 0);
     ASSERT_NE(vt, 0u);
 
-    const auto found = Rtti::vtable_for_type(".?AVRevSingle@@", pool_range());
+    const auto found = rtti::vtable_for_type(".?AVRevSingle@@", pool_range());
     ASSERT_TRUE(found.has_value());
-    EXPECT_EQ(*found, vt);
+    EXPECT_EQ(found->raw(), vt);
 
     // Round-trip invariant: the reverse result must satisfy the forward check.
-    EXPECT_TRUE(Rtti::vtable_is_type(*found, ".?AVRevSingle@@"));
+    EXPECT_TRUE(rtti::vtable_is_type(*found, ".?AVRevSingle@@"));
 
-    std::uintptr_t all[4] = {};
-    const std::size_t n = Rtti::vtables_for_type(".?AVRevSingle@@", all, 4, pool_range());
+    Address all[4] = {};
+    const std::size_t n = rtti::vtables_for_type(".?AVRevSingle@@", all, 4, pool_range());
     EXPECT_EQ(n, 1u);
-    EXPECT_EQ(all[0], vt);
+    EXPECT_EQ(all[0].raw(), vt);
 }
 
 TEST_F(RttiReverseTest, MultipleInheritanceReturnsAllSubObjectVtables)
@@ -141,16 +141,16 @@ TEST_F(RttiReverseTest, MultipleInheritanceReturnsAllSubObjectVtables)
     ASSERT_NE(secondary, 0u);
 
     // The singular resolver returns only the offset==0 primary.
-    const auto found = Rtti::vtable_for_type(".?AVRevMulti@@", pool_range());
+    const auto found = rtti::vtable_for_type(".?AVRevMulti@@", pool_range());
     ASSERT_TRUE(found.has_value());
-    EXPECT_EQ(*found, primary);
+    EXPECT_EQ(found->raw(), primary);
 
     // The plural resolver returns both, primary (offset 0) first.
-    std::uintptr_t all[4] = {};
-    const std::size_t n = Rtti::vtables_for_type(".?AVRevMulti@@", all, 4, pool_range());
+    Address all[4] = {};
+    const std::size_t n = rtti::vtables_for_type(".?AVRevMulti@@", all, 4, pool_range());
     ASSERT_EQ(n, 2u);
-    EXPECT_EQ(all[0], primary);
-    EXPECT_EQ(all[1], secondary);
+    EXPECT_EQ(all[0].raw(), primary);
+    EXPECT_EQ(all[1].raw(), secondary);
 }
 
 TEST_F(RttiReverseTest, AmbiguousPrimaryFailsClosed)
@@ -160,11 +160,11 @@ TEST_F(RttiReverseTest, AmbiguousPrimaryFailsClosed)
     ASSERT_NE(build_synth(".?AVRevDup@@", 0), 0u);
     ASSERT_NE(build_synth(".?AVRevDup@@", 0), 0u);
 
-    EXPECT_FALSE(Rtti::vtable_for_type(".?AVRevDup@@", pool_range()).has_value());
+    EXPECT_FALSE(rtti::vtable_for_type(".?AVRevDup@@", pool_range()).has_value());
 
     // The plural form still reports both distinct matches.
-    std::uintptr_t all[4] = {};
-    const std::size_t n = Rtti::vtables_for_type(".?AVRevDup@@", all, 4, pool_range());
+    Address all[4] = {};
+    const std::size_t n = rtti::vtables_for_type(".?AVRevDup@@", all, 4, pool_range());
     EXPECT_EQ(n, 2u);
 }
 
@@ -184,21 +184,21 @@ TEST_F(RttiReverseTest, PrimaryFailsClosedWhenMatchCollectorSaturates)
         ASSERT_NE(build_synth(".?AVRevSaturate@@", 0x10), 0u);
     }
 
-    EXPECT_FALSE(Rtti::vtable_for_type(".?AVRevSaturate@@", pool_range()).has_value());
+    EXPECT_FALSE(rtti::vtable_for_type(".?AVRevSaturate@@", pool_range()).has_value());
 
     // The plural form does not fail closed -- it is inherently multi-valued -- and reports the saturated count (capped
     // at MAX_REVERSE_MATCHES) so a caller can detect the truncation itself.
-    std::uintptr_t all[cap] = {};
-    EXPECT_EQ(Rtti::vtables_for_type(".?AVRevSaturate@@", all, cap, pool_range()), cap);
+    Address all[cap] = {};
+    EXPECT_EQ(rtti::vtables_for_type(".?AVRevSaturate@@", all, cap, pool_range()), cap);
 }
 
 TEST_F(RttiReverseTest, UnknownNameReturnsNullopt)
 {
     ASSERT_NE(build_synth(".?AVRevPresent@@", 0), 0u);
 
-    EXPECT_FALSE(Rtti::vtable_for_type(".?AVRevAbsent@@", pool_range()).has_value());
-    std::uintptr_t all[4] = {};
-    EXPECT_EQ(Rtti::vtables_for_type(".?AVRevAbsent@@", all, 4, pool_range()), 0u);
+    EXPECT_FALSE(rtti::vtable_for_type(".?AVRevAbsent@@", pool_range()).has_value());
+    Address all[4] = {};
+    EXPECT_EQ(rtti::vtables_for_type(".?AVRevAbsent@@", all, 4, pool_range()), 0u);
 }
 
 TEST_F(RttiReverseTest, InvalidRangeReturnsNullopt)
@@ -206,9 +206,9 @@ TEST_F(RttiReverseTest, InvalidRangeReturnsNullopt)
     ASSERT_NE(build_synth(".?AVRevInvalid@@", 0), 0u);
 
     const Region invalid{}; // base == size == 0 => empty range
-    EXPECT_FALSE(Rtti::vtable_for_type(".?AVRevInvalid@@", invalid).has_value());
-    std::uintptr_t all[4] = {};
-    EXPECT_EQ(Rtti::vtables_for_type(".?AVRevInvalid@@", all, 4, invalid), 0u);
+    EXPECT_FALSE(rtti::vtable_for_type(".?AVRevInvalid@@", invalid).has_value());
+    Address all[4] = {};
+    EXPECT_EQ(rtti::vtables_for_type(".?AVRevInvalid@@", all, 4, invalid), 0u);
 }
 
 TEST_F(RttiReverseTest, VtablesForTypeCountOnlyWithNullOut)
@@ -217,7 +217,7 @@ TEST_F(RttiReverseTest, VtablesForTypeCountOnlyWithNullOut)
     ASSERT_NE(build_synth(".?AVRevCount@@", 0x08), 0u);
 
     // A count-only query (null buffer, zero capacity) returns the total without writing anything.
-    EXPECT_EQ(Rtti::vtables_for_type(".?AVRevCount@@", nullptr, 0, pool_range()), 2u);
+    EXPECT_EQ(rtti::vtables_for_type(".?AVRevCount@@", nullptr, 0, pool_range()), 2u);
 }
 
 TEST_F(RttiReverseTest, TypeIdentityCachesAndMatches)
@@ -225,23 +225,23 @@ TEST_F(RttiReverseTest, TypeIdentityCachesAndMatches)
     const std::uintptr_t vt = build_synth(".?AVRevIdentity@@", 0);
     ASSERT_NE(vt, 0u);
 
-    Rtti::TypeIdentity id(".?AVRevIdentity@@", pool_range());
+    rtti::TypeIdentity id(".?AVRevIdentity@@", pool_range());
     const auto v1 = id.vtable();
     ASSERT_TRUE(v1.has_value());
-    EXPECT_EQ(*v1, vt);
+    EXPECT_EQ(v1->raw(), vt);
 
     // Second call takes the warm-cache path and yields the same result.
     EXPECT_EQ(id.vtable(), v1);
 
-    EXPECT_TRUE(id.matches(vt));
-    EXPECT_FALSE(id.matches(vt + 8)); // a different address is not this type
+    EXPECT_TRUE(id.matches(Address{vt}));
+    EXPECT_FALSE(id.matches(Address{vt + 8})); // a different address is not this type
 }
 
 TEST_F(RttiReverseTest, TypeIdentityUnresolvedNeverMatches)
 {
-    Rtti::TypeIdentity id(".?AVRevNeverThere@@", pool_range());
+    rtti::TypeIdentity id(".?AVRevNeverThere@@", pool_range());
     EXPECT_FALSE(id.vtable().has_value());
-    EXPECT_FALSE(id.matches(0x1000));
+    EXPECT_FALSE(id.matches(Address{0x1000}));
 }
 
 TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
@@ -252,7 +252,7 @@ TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
     const std::uintptr_t pool_base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
     const Region full_pool{Address{pool_base}, s_rev_pool.size()};
 
-    Rtti::TypeIdentity id(".?AVRevLateBind@@", full_pool);
+    rtti::TypeIdentity id(".?AVRevLateBind@@", full_pool);
     EXPECT_FALSE(id.vtable().has_value());
 
     const std::uintptr_t vt = build_synth(".?AVRevLateBind@@", 0);
@@ -260,7 +260,7 @@ TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
 
     const auto resolved = id.vtable();
     ASSERT_TRUE(resolved.has_value());
-    EXPECT_EQ(*resolved, vt);
+    EXPECT_EQ(resolved->raw(), vt);
 
     // The successful resolve now latches: the warm path returns the same value.
     EXPECT_EQ(id.vtable(), resolved);
@@ -278,9 +278,9 @@ TEST_F(RttiReverseTest, FindsFixtureViaHostModuleSectionWalk)
     ASSERT_TRUE(host.size != 0);
     ASSERT_TRUE(host.contains(Address{vt}));
 
-    const auto found = Rtti::vtable_for_type(".?AVRevHostWalk@@", host);
+    const auto found = rtti::vtable_for_type(".?AVRevHostWalk@@", host);
     ASSERT_TRUE(found.has_value());
-    EXPECT_EQ(*found, vt);
+    EXPECT_EQ(found->raw(), vt);
 }
 
 TEST_F(RttiReverseTest, VtablesForTypeTruncatesButReportsFullCount)
@@ -292,23 +292,24 @@ TEST_F(RttiReverseTest, VtablesForTypeTruncatesButReportsFullCount)
 
     // out_cap (1) is smaller than the number of matches (2): the return value reports the full count so the caller can
     // detect truncation, and the single written slot is the primary (offset 0 sorts first).
-    std::uintptr_t all[1] = {};
-    const std::size_t n = Rtti::vtables_for_type(".?AVRevTrunc@@", all, 1, pool_range());
+    Address all[1] = {};
+    const std::size_t n = rtti::vtables_for_type(".?AVRevTrunc@@", all, 1, pool_range());
     EXPECT_EQ(n, 2u);
-    EXPECT_EQ(all[0], primary);
+    EXPECT_EQ(all[0].raw(), primary);
 }
 
-TEST_F(RttiReverseTest, TypeIdentityRejectsStringTemporaryAtCompileTime)
+TEST_F(RttiReverseTest, TypeIdentityOwnsNameAcceptsAnyStringSource)
 {
-    // TypeIdentity stores the name as a non-owning view, so a std::string rvalue would dangle the moment the
-    // constructor returns. The deleted std::string&& overload rejects that temporary at compile time, while a literal
-    // (const char*), a std::string_view, and a long-lived std::string lvalue all bind the view safely.
-    static_assert(!std::is_constructible_v<Rtti::TypeIdentity, std::string &&>,
-                  "a std::string temporary must be rejected (the stored view would dangle)");
-    static_assert(std::is_constructible_v<Rtti::TypeIdentity, const char *>,
+    // TypeIdentity now owns its name: the constructor takes a std::string_view and copies it into an internal
+    // std::string, so nothing borrowed can dangle. Every string source is therefore safe to construct from -- a literal
+    // (const char*), a std::string_view, a long-lived std::string lvalue, and even a std::string temporary (its
+    // contents are copied before it dies).
+    static_assert(std::is_constructible_v<rtti::TypeIdentity, std::string &&>,
+                  "a std::string temporary must construct (its contents are copied into the owned name)");
+    static_assert(std::is_constructible_v<rtti::TypeIdentity, const char *>,
                   "a string literal (const char*) must construct");
-    static_assert(std::is_constructible_v<Rtti::TypeIdentity, std::string_view>, "a std::string_view must construct");
-    static_assert(std::is_constructible_v<Rtti::TypeIdentity, std::string &>,
+    static_assert(std::is_constructible_v<rtti::TypeIdentity, std::string_view>, "a std::string_view must construct");
+    static_assert(std::is_constructible_v<rtti::TypeIdentity, std::string &>,
                   "a long-lived std::string lvalue must construct");
     SUCCEED();
 }
@@ -324,10 +325,10 @@ TEST_F(RttiReverseTest, VtablesForTypeOrdersByColOffset)
     ASSERT_NE(vt00, 0u);
     ASSERT_NE(vt10, 0u);
 
-    std::uintptr_t all[4] = {};
-    const std::size_t n = Rtti::vtables_for_type(".?AVRevOrder@@", all, 4, pool_range());
+    Address all[4] = {};
+    const std::size_t n = rtti::vtables_for_type(".?AVRevOrder@@", all, 4, pool_range());
     ASSERT_EQ(n, 3u);
-    EXPECT_EQ(all[0], vt00); // offset 0x00
-    EXPECT_EQ(all[1], vt10); // offset 0x10
-    EXPECT_EQ(all[2], vt20); // offset 0x20
+    EXPECT_EQ(all[0].raw(), vt00); // offset 0x00
+    EXPECT_EQ(all[1].raw(), vt10); // offset 0x10
+    EXPECT_EQ(all[2].raw(), vt20); // offset 0x20
 }
