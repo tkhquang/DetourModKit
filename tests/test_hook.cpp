@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +16,8 @@
 #include "DetourModKit/hook.hpp"
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
+
+#include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
 // The SafetyHook backend is confined to the library: a detour names only these DMK-owned hook types, exactly as a
@@ -760,6 +763,34 @@ TEST(HookInstallAll, BestEffortMissStillSucceedsWithMandatoryHit)
     // The mandatory row landed.
     EXPECT_EQ((*res)[1].name, "MandHit2");
     EXPECT_TRUE((*res)[1].hook.has_value()) << (*res)[1].hook.error().message();
+}
+
+// install_all shares the never-terminate contract with scan::resolve_batch: it is noexcept and, under true
+// out-of-memory, reports the failure in its own result shape rather than terminating the host. Its shape is a
+// single Result<vector<InstallOutcome>>, so a container-allocation failure surfaces as unexpected(Error{OutOfMemory}),
+// not an empty vector. Pin the noexcept property at compile time so a signature change cannot silently drop it.
+static_assert(noexcept(install_all(std::span<const HookSpec>{})),
+              "hook::install_all must be noexcept: it degrades under OOM rather than terminating the host.");
+
+TEST(HookInstallAll, AllocFailureReturnsOutOfMemoryWithoutEscaping)
+{
+    const HookSpec table[] = {
+        HookSpec::inline_hook("OomRow", resolvable_request("OomRowPat", &install_target_one), &install_detour_one,
+                              Severity::Mandatory),
+    };
+
+    Result<std::vector<InstallOutcome>> res;
+    {
+        // Budget 0: the first allocation (the outcomes container reserve) fails before any row is attempted.
+        // install_all must catch the bad_alloc at its noexcept boundary and report Error{OutOfMemory}.
+        dmk_test::AllocFailScope fail(0);
+        res = install_all(table);
+    }
+
+    ASSERT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code, ErrorCode::OutOfMemory);
+    // The container failed before the first row, so nothing was installed.
+    EXPECT_FALSE(is_target_hooked(addr_of(&install_target_one)));
 }
 
 // ----------------------------------------------------------------------------
