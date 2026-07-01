@@ -114,6 +114,8 @@ static_assert(category(ErrorCode::BadSlotAddress) == ErrorCategory::Rtti);
 static_assert(category(ErrorCode::HealAmbiguous) == ErrorCategory::Rtti);
 static_assert(category(ErrorCode::MissingHeader) == ErrorCategory::Manifest);
 static_assert(category(ErrorCode::FileOpenFailed) == ErrorCategory::Manifest);
+static_assert(category(ErrorCode::ProcessMismatch) == ErrorCategory::Lifecycle);
+static_assert(category(ErrorCode::SystemCallFailed) == ErrorCategory::Lifecycle);
 
 TEST(FoundationErrorCode, CategoryMatchesSubsystem)
 {
@@ -122,14 +124,17 @@ TEST(FoundationErrorCode, CategoryMatchesSubsystem)
     EXPECT_EQ(category(ErrorCode::ImplausibleTarget), ErrorCategory::Scan);
     EXPECT_EQ(category(ErrorCode::ProtectionRestoreFailed), ErrorCategory::Memory);
     EXPECT_EQ(category(ErrorCode::HealNoMatch), ErrorCategory::Rtti);
+    EXPECT_EQ(category(ErrorCode::InstanceAlreadyRunning), ErrorCategory::Lifecycle);
 }
 
 TEST(FoundationErrorCode, ToStringNamesCodeAndCategory)
 {
     EXPECT_EQ(to_string(ErrorCode::BackendFailed), "BackendFailed");
     EXPECT_EQ(to_string(ErrorCode::HealNoMatch), "HealNoMatch");
+    EXPECT_EQ(to_string(ErrorCode::InstanceAlreadyRunning), "InstanceAlreadyRunning");
     EXPECT_EQ(to_string(ErrorCategory::Scan), "scan");
     EXPECT_EQ(to_string(ErrorCategory::Manifest), "manifest");
+    EXPECT_EQ(to_string(ErrorCategory::Lifecycle), "lifecycle");
 }
 
 TEST(FoundationErrorCode, MessageIsGreppableByCategoryAndCode)
