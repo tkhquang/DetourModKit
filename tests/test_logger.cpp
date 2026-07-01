@@ -1707,9 +1707,12 @@ TEST_F(LoggerTest, RawStringViewLog_HasNoSourceStamp)
     ASSERT_NE(pos, std::string::npos);
     auto line_start = content.rfind('\n', pos);
     line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
-    const std::string line = content.substr(line_start, pos - line_start);
-    EXPECT_EQ(line.find("[test_logger.cpp:"), std::string::npos)
-        << "the raw log(level, string_view) overload must not carry a source-location stamp";
+    const std::string prefix = content.substr(line_start, pos - line_start);
+    // Assert no source stamp of ANY kind: the message must begin immediately after the fixed " :: " delimiter, so a
+    // located "[file:line]" prefix from any file (not just this test's basename) would break the check.
+    EXPECT_TRUE(prefix.ends_with(":: ")) << "raw log(level, string_view) must place the message directly after the "
+                                            "delimiter, with no source stamp; prefix was '"
+                                         << prefix << "'";
 }
 
 TEST_F(LoggerTest, ConstructYourOwn_WritesToDedicatedSink)
@@ -1721,17 +1724,31 @@ TEST_F(LoggerTest, ConstructYourOwn_WritesToDedicatedSink)
         std::filesystem::temp_directory_path() / ("test_logger_own_" + std::to_string(GetCurrentProcessId()) + "_" +
                                                   std::to_string(s_own_counter.fetch_add(1)) + ".log");
 
+    // The fixture points log() at m_test_log_file, so this marker lands in the process-default sink.
+    Logger &default_logger = log();
+    default_logger.set_log_level(LogLevel::Info);
+    default_logger.info("DEFAULT_SINK_MARKER_w2");
+
     {
         Logger custom("CUSTOM", own_file.string(), "%Y-%m-%d %H:%M:%S");
         custom.set_log_level(LogLevel::Info);
         custom.info("OWN_SINK_MARKER_q9");
         custom.flush();
     } // custom destroyed here: the sink is flushed and closed before the file is re-read.
+    default_logger.flush();
 
-    std::ifstream ifs(own_file);
-    ASSERT_TRUE(ifs.is_open());
-    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-    EXPECT_NE(content.find("OWN_SINK_MARKER_q9"), std::string::npos);
+    // Each sink holds only its own marker: the dedicated Logger and the process default never cross-contaminate.
+    std::ifstream own_ifs(own_file);
+    ASSERT_TRUE(own_ifs.is_open());
+    const std::string own_content((std::istreambuf_iterator<char>(own_ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(own_content.find("OWN_SINK_MARKER_q9"), std::string::npos);
+    EXPECT_EQ(own_content.find("DEFAULT_SINK_MARKER_w2"), std::string::npos);
+
+    std::ifstream default_ifs(m_test_log_file);
+    ASSERT_TRUE(default_ifs.is_open());
+    const std::string default_content((std::istreambuf_iterator<char>(default_ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(default_content.find("DEFAULT_SINK_MARKER_w2"), std::string::npos);
+    EXPECT_EQ(default_content.find("OWN_SINK_MARKER_q9"), std::string::npos);
 
     try
     {

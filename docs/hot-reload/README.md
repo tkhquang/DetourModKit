@@ -678,7 +678,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **Global variables in logic DLL:** Reset to initial values on reload. This is expected - design for it.
 
-**DMK process state (Logger, etc.):** **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first access after `LoadLibrary` (the process logger is reached through `log()`). The new instance starts with default state. `Init()` must re-configure it (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
+**DMK process state (Logger, config, memory cache, etc.):** `DMK_Shutdown()` tears down live DMK state before `FreeLibrary`. The process-default logger is intentionally not reclaimed by CRT static destructors; `DMK_Shutdown()` flushes and closes its sink, while the logger storage may remain allocated so late teardown logging cannot touch freed storage. The next `Init()` must re-configure logging (e.g., `Logger::configure()`, `set_log_level()`) and re-register config/input state.
 
 **Hooks:** There is no hook singleton in v4. Each `hook::inline_at` / `mid_at` / `vmt_for` returns a caller-owned RAII `Hook` (or `VmtHook`) handle that lives in the logic DLL's memory. Drop those handles in `Shutdown()` *before* `FreeLibrary` so each destructor restores the original bytes while the code pages are still mapped. A handle that is leaked across `FreeLibrary` leaves the game running a detour into unmapped memory.
 
@@ -754,7 +754,7 @@ void revert_all_patches()
 
 ### 4. Logger File Handles
 
-The DMK Logger opens a file handle when its sink is constructed (configured via `Logger::configure()`). On reload, `Shutdown()` closes the file, and the new `Init()` call to `Logger::configure()` reopens it. The logger appends by default via `WinFileStream`, so logs accumulate across reloads. If you need a clean log per session, delete the log file in `Init()` before calling `configure()`.
+The DMK Logger opens a file handle when its sink is constructed (configured via `Logger::configure()`). On reload, `DMK_Shutdown()` closes the file, and the new `Init()` call to `Logger::configure()` reopens it. The process-default logger storage is intentionally process-lifetime, so skipping `DMK_Shutdown()` can leave the old sink and async writer alive after the logic DLL unloads. The logger appends by default via `WinFileStream`, so logs accumulate across reloads. If you need a clean log per session, delete the log file in `Init()` before calling `configure()`.
 
 **AsyncLogger:** If you are using the async logging backend, call `DMK_Shutdown()` to flush the async queue before `FreeLibrary` unloads the DLL. Failing to flush can lose buffered log entries or cause the background writer thread to access unmapped memory.
 
@@ -856,7 +856,7 @@ When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
 **TLS (`thread_local` variables):** If your logic DLL declares `thread_local` variables, be aware that `FreeLibrary` does **not** run TLS destructors for threads that were not created by the DLL. This can leak resources. Avoid `thread_local` in logic DLLs, or ensure cleanup runs in `Shutdown()`.
 
-**Static constructors/destructors:** `FreeLibrary` runs destructors for file-scope `static` objects in the logic DLL. If those destructors depend on external state (game memory, other DLLs), they may crash. Prefer explicit init/shutdown functions over static constructors. DetourModKit singletons are safe because `DMK_Shutdown()` runs them in controlled order *before* `FreeLibrary`.
+**Static constructors/destructors:** `FreeLibrary` runs destructors for file-scope `static` objects in the logic DLL. If those destructors depend on external state (game memory, other DLLs), they may crash. Prefer explicit init/shutdown functions over static constructors. DetourModKit subsystems are safe when `DMK_Shutdown()` runs them in controlled order *before* `FreeLibrary`; the process-default logger deliberately avoids CRT destruction and relies on that explicit shutdown to close its sink.
 
 ### 9. Background Thread Lifecycle
 
@@ -1165,7 +1165,7 @@ Each DLL exports its own `Init()` / `Shutdown()` pair. The loader manages them a
 
 ## Topology Variant: Persistent Host with Swappable Logic DLLs
 
-The standard two-DLL pattern above static-links DMK into the *Logic DLL*: each reload cycle destroys and reconstructs the DMK singletons alongside the rest of the mod state. This is the recommended default and works well when a single mod owns the process.
+The standard two-DLL pattern above static-links DMK into the *Logic DLL*: each reload cycle tears down live DMK state with `DMK_Shutdown()` and rebuilds it on the next `LoadLibrary` alongside the rest of the mod state. Some intentionally leaked storage may remain process-lifetime to avoid unsafe static destruction, but the file handles, worker threads, registries, and caches are closed or cleared by explicit shutdown. This is the recommended default and works well when a single mod owns the process.
 
 DMK also supports a second topology where DMK is static-linked into the **loader** (or a shared host module) and survives every Logic-DLL unload. This is the right choice when:
 
@@ -1208,8 +1208,8 @@ When choosing between the two topologies:
 
 | Concern                     | DMK in Logic DLL (default)              | DMK in Loader (persistent host)               |
 |-----------------------------|-----------------------------------------|-----------------------------------------------|
-| Singleton lifetime          | One reload cycle                        | Process lifetime                              |
-| Logger / config / Watcher   | Reconstructed each reload               | Outlive every Logic-DLL unload                |
+| Live DMK state lifetime     | One reload cycle                        | Process lifetime                              |
+| Logger / config / Watcher   | Shut down and configured each reload    | Outlive every Logic-DLL unload                |
 | Logic-DLL `Shutdown()` does | `DMK_Shutdown()`                        | `Bootstrap::on_logic_dll_unload(...)`         |
 | Process-exit cleanup        | `DMK_Shutdown()` from final `Shutdown()`| `DMK_Shutdown()` from the host's `DllMain`    |
 | Multiple Logic DLLs         | Each ships its own DMK copy             | One DMK instance shared by all                |
@@ -1279,7 +1279,7 @@ The persistent-host topology calls `Init()` once per Logic-DLL load. Every call 
 
 Notes on individual rows:
 
-- **`Logger::configure`**: If the file path differs from the previous call, the open log handle is rotated under lock; the writer thread is preserved. The internal `shutdown_called_` flag is reset on every call so the logger is usable again after a reload.
+- **`Logger::configure`**: If the file path differs from the previous call, the open log handle is rotated under lock; the writer thread is preserved. The internal `m_shutdown_called` flag is reset on every call so the logger is usable again after a reload.
 - **`hook::inline_at` / `mid_at`**: NOT replace-on-duplicate. The same-kit ledger is keyed by `name` (and target), and a second `inline_at` / `mid_at` with the same `name` while a live `Hook` still targets it fails fast with `HookAlreadyExists` so a stale detour is never silently swapped (which would leave the old detour code mapped into the trampoline). Drop the prior `Hook` handle before re-installing.
 - **`config::bind_*` (string, int, float, bool, combos)**: If a binding with the same `(section, ini_key)` already exists, the prior item and its setter closure are overwritten in place. Re-binding with a fresh setter from the new Logic DLL replaces the stale closure cleanly.
 - **`config::press_combo` / `hold_combo`**: The config item itself follows replace-on-duplicate semantics. The input binding it creates does not, because `input::register_combo` is append-only (see next row). Drop the prior binding via `input::Input::remove_bindings_by_name(name)` to avoid duplicates.

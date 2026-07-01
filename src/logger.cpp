@@ -583,12 +583,16 @@ namespace DetourModKit
 
     Logger &log() noexcept
     {
-        // The process-default logger. A function-local static so it is created on first use from the configuration
-        // configure() published, and never destroyed before the process exits (so late log() calls during teardown
-        // stay valid). Constructing it can allocate; under true out-of-memory at first use the noexcept boundary
-        // converts that throw into termination, which is the only sane outcome when the logger itself cannot start.
-        static Logger instance;
-        return instance;
+        // The process-default logger, allocated once and INTENTIONALLY never destroyed. A plain function-local static
+        // Logger would be reclaimed during CRT atexit teardown, so a later static destructor or a detached thread that
+        // logs after that point would touch freed storage. Holding the object behind a leaked pointer keeps it alive
+        // for the whole process; the pointer itself is a reachable static, so a leak sanitizer sees the allocation as
+        // still-reachable rather than leaked. shutdown() (invoked by the Session / DMK_Shutdown) flushes and closes the
+        // sink explicitly, so the deliberate leak costs only the object's storage, never a lost flush. Constructing it
+        // can allocate; under true out-of-memory at first use the noexcept boundary turns that throw into termination,
+        // the only sane outcome when the logger itself cannot start.
+        static Logger *const instance = new Logger();
+        return *instance;
     }
 
 } // namespace DetourModKit

@@ -136,7 +136,7 @@ TEST_F(DMKShutdownTest, DisablesAutoReloadWatcher)
 TEST_F(DMKShutdownTest, ShutdownWithLoggerConfigured)
 {
     auto log_path = std::filesystem::temp_directory_path() / "test_shutdown_logger.log";
-    log().configure("DMK_TEST", log_path.string(), "%Y-%m-%d %H:%M:%S");
+    Logger::configure("DMK_TEST", log_path.string(), "%Y-%m-%d %H:%M:%S");
     log().log(LogLevel::Info, "Shutdown test message");
 
     EXPECT_NO_THROW(DMK_Shutdown());

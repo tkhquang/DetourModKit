@@ -61,6 +61,7 @@ namespace DetourModKit
      * @details The switch lists every enumerator with no default arm, so adding a future level without a case is a
      *          -Wswitch warning rather than a silent "UNKNOWN"; the trailing return only covers a value cast in from
      *          outside the enum's domain.
+     * @note Callback-safe: pure, allocation-free, and noexcept.
      */
     [[nodiscard]] constexpr std::string_view to_string(LogLevel level) noexcept
     {
@@ -86,6 +87,8 @@ namespace DetourModKit
      * @return The matching LogLevel, or LogLevel::Info when the string is unrecognized (a warning is written to
      *         stderr).
      * @details The fail-soft default to Info keeps a typo in an INI "LogLevel" key from silencing the log entirely.
+     * @note Setup/control-plane only: allocates while upper-casing and may write to stderr; call from config parsing,
+     *       not from a hot path.
      */
     [[nodiscard]] LogLevel string_to_log_level(std::string_view level_str);
 
@@ -180,9 +183,9 @@ namespace DetourModKit
 
         /**
          * @brief Publishes the process default configuration and applies it to the process-default logger.
-         * @details Sets the prefix / file / timestamp that a subsequently default-constructed Logger (including the one
-         *          behind log()) starts from, and reconfigures the existing process default if it has already been
-         *          created. Allowed even after shutdown() so a test fixture or a re-attach can reuse the sink.
+         * @details Sets the prefix / file / timestamp used by the process default, creating it on first configure or
+         *          reconfiguring it when it already exists. Allowed even after shutdown() so a test fixture or a
+         *          re-attach can reuse the sink.
          * @param prefix Default log prefix string.
          * @param file_name Default log file name.
          * @param timestamp_fmt Default timestamp format string (strftime compatible).
@@ -221,15 +224,18 @@ namespace DetourModKit
          *          Windows loader lock (e.g. during DLL unload), the AsyncLogger is intentionally leaked and the module
          *          pinned so the detached thread never outlives the object's storage or code pages; the event is
          *          recorded via Diagnostics::record_intentional_leak.
+         * @note Setup/control-plane only: joins or detaches the writer thread and takes the async lifecycle mutex.
          */
         void disable_async_mode() noexcept;
 
-        /// Returns true when asynchronous logging is currently enabled.
+        /// Returns true when asynchronous logging is currently enabled. Callback-safe (a lock-free atomic read).
         [[nodiscard]] bool is_async_mode_enabled() const noexcept;
 
         /**
          * @brief Flushes pending log output.
          * @details In async mode, waits for the queue to drain; in sync mode, flushes the file stream.
+         * @note Best-effort and noexcept: in sync mode it locks and blocks on file I/O, so it is control-plane, not
+         *       callback-safe.
          */
         void flush() noexcept;
 
@@ -237,10 +243,11 @@ namespace DetourModKit
          * @brief Shuts the logger down: drains async output and closes the file without logging.
          * @details Safe to call during teardown; idempotent with the destructor. After shutdown() the destructor is a
          *          no-op, preventing use-after-free if other globals are already gone.
+         * @note Setup/control-plane only: drains the writer thread and closes the file; not callback-safe.
          */
         void shutdown() noexcept;
 
-        /// Returns the current minimum level; a record below this level is dropped before formatting.
+        /// Returns the current minimum level; a record below this level is dropped before formatting. Callback-safe.
         [[nodiscard]] LogLevel get_log_level() const noexcept
         {
             return m_current_log_level.load(std::memory_order_acquire);
@@ -251,6 +258,7 @@ namespace DetourModKit
          * @param level The level to test.
          * @return true when a message at this level would be recorded.
          * @details Gate expensive trace-only work behind this (e.g. building a string solely to log it).
+         * @note Callback-safe: a lock-free atomic read.
          */
         [[nodiscard]] bool is_enabled(LogLevel level) const noexcept
         {
@@ -260,6 +268,7 @@ namespace DetourModKit
         /**
          * @brief Sets the minimum level for messages to be recorded.
          * @param level The minimum LogLevel to record; an out-of-range value is ignored with a warning.
+         * @note Setup/control-plane only: emits a log line about the change, so it can allocate and do sink I/O.
          */
         void set_log_level(LogLevel level);
 
@@ -291,7 +300,8 @@ namespace DetourModKit
          * @param message The already-rendered message.
          * @return true if the message was handed to the sink, false if filtered out or an internal failure was
          *         suppressed.
-         * @note Callback-safe and best-effort: non-blocking, fails closed, never throws.
+         * @note No-throw and best-effort: fails closed, never throws. It is non-blocking only in async mode; the
+         *       synchronous sink locks and does file I/O, so enable_async_mode() first for a callback-safe hot path.
          */
         [[nodiscard]] bool log_noexcept(LogLevel level, std::string_view message) noexcept;
 
@@ -304,6 +314,8 @@ namespace DetourModKit
          * @param level The level of the message.
          * @param fmt The format string (auto-wrapped into a LocatedFormat capturing the call site).
          * @param args The arguments substituted into the format string.
+         * @note Best-effort: it renders the line then routes through log(level, string_view), inheriting that
+         *       overload's delivery and callback-safety notes (callback-safe only in async mode).
          */
         template <typename... Args>
         void log(LogLevel level, LocatedFormat<std::type_identity_t<Args>...> fmt, Args &&...args)
@@ -319,6 +331,7 @@ namespace DetourModKit
          * @name Level-named convenience loggers
          * @brief Shorthand for log(LogLevel::X, fmt, args...); each auto-stamps the call site. See log() for the
          *        delivery and lazy-evaluation contract.
+         * @note Best-effort: same callback-safety as log() (callback-safe only in async mode).
          * @{
          */
         template <typename... Args> void trace(LocatedFormat<std::type_identity_t<Args>...> fmt, Args &&...args)
@@ -354,7 +367,10 @@ namespace DetourModKit
          *          inside hook callbacks. Arguments are formatted only when @p level is enabled.
          * @return true if the message was handed to the sink, false if filtered out or dropped because
          *         formatting/logging failed.
-         * @note Callback-safe and best-effort: formats and logs without throwing.
+         * @note No-throw and best-effort: it swallows every std::format and sink failure, so it will not terminate a
+         *       noexcept boundary. It is NOT unconditionally callback-safe: format_located() may heap-allocate on an
+         *       over-long line, and the synchronous sink locks and does file I/O, so for a non-blocking hot path
+         *       enable_async_mode() first, exactly as for log().
          */
         template <typename... Args>
         [[nodiscard]] bool try_log(LogLevel level, LocatedFormat<std::type_identity_t<Args>...> fmt,
@@ -461,7 +477,8 @@ namespace DetourModKit
         static std::shared_ptr<const StaticConfig> get_static_config();
         static void set_static_config(std::shared_ptr<const StaticConfig> config);
 
-        // log() returns a reference to a function-local-static Logger, so it needs access to the private constructor.
+        // log() owns the process-default Logger through a process-lifetime allocation, so it needs access to the
+        // private constructor.
         friend Logger &log() noexcept;
 
         // Lock ordering (must be acquired in this order to prevent deadlock):
@@ -491,8 +508,12 @@ namespace DetourModKit
      * @brief Returns the process-default Logger.
      * @details The common logging entry point: log().info("..."). The default is created on first use from the
      *          configuration last published by Logger::configure() (or the built-in defaults). Construct your own
-     *          Logger for a dedicated sink. The reference is stable for the life of the process.
+     *          Logger for a dedicated sink. The instance is intentionally never destroyed, so the reference stays valid
+     *          for the whole process, including static-destructor and detached-thread logging during teardown; call
+     *          log().shutdown() (or let the Session do it) to flush and close the sink.
      * @return A reference to the single process-default Logger.
+     * @note Steady-state callback-safe: after first use it is a noexcept reference accessor. First use constructs the
+     *       logger and can allocate/open the sink, so initialize it from setup code before calling log() on a hot path.
      */
     [[nodiscard]] Logger &log() noexcept;
 } // namespace DetourModKit
