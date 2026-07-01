@@ -146,5 +146,5 @@ Mods normally own exactly one INI, so this is not a practical constraint. Multi-
 
 - [`config.hpp`](../../include/DetourModKit/config.hpp)
 - [`input.hpp`](../../include/DetourModKit/input.hpp) - the combo binding surface `press_combo` / `hold_combo` fuse onto.
-- [`worker.hpp`](../../include/DetourModKit/worker.hpp) - `StoppableWorker` RAII wrapper the watcher builds on.
+- [`worker.hpp`](../../include/DetourModKit/detail/worker.hpp) - `StoppableWorker` RAII wrapper the watcher builds on.
 - [Two-DLL hot-reload guide](../hot-reload/README.md) - reloading mod code, not config values.

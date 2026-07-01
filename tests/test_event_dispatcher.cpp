@@ -4,7 +4,7 @@
 // include) so it affects only this translation unit.
 #define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1
 
-#include "DetourModKit/event_dispatcher.hpp"
+#include "DetourModKit/detail/event_dispatcher.hpp"
 
 #include <atomic>
 #include <chrono>

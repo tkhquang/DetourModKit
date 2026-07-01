@@ -3,7 +3,7 @@
  * @brief Durable serialization of self-heal drift reports.
  */
 
-#include "DetourModKit/drift_manifest.hpp"
+#include "DetourModKit/detail/drift_manifest.hpp"
 
 #include <charconv>
 #include <fstream>
@@ -81,6 +81,13 @@ namespace DetourModKit
                 const auto result = std::from_chars(begin, end, out);
                 return result.ec == std::errc{} && result.ptr == end;
             }
+
+            // Fail-closed manifest error: a code from the unified ErrorCategory::Manifest block, tagged with the
+            // module label. Error construction never allocates, so this is safe on any path.
+            [[nodiscard]] std::unexpected<Error> manifest_error(ErrorCode code) noexcept
+            {
+                return std::unexpected(Error{code, "rtti::drift_manifest"});
+            }
         } // anonymous namespace
 
         std::string serialize_drift_report(std::span<const DriftEntry> entries)
@@ -107,7 +114,7 @@ namespace DetourModKit
             return out;
         }
 
-        std::expected<std::vector<DriftRecord>, ManifestError> parse_drift_report(std::string_view text)
+        Result<std::vector<DriftRecord>> parse_drift_report(std::string_view text)
         {
             std::vector<DriftRecord> records;
             bool header_seen = false;
@@ -133,7 +140,7 @@ namespace DetourModKit
                 {
                     if (line != MANIFEST_HEADER)
                     {
-                        return std::unexpected(ManifestError::MissingHeader);
+                        return manifest_error(ErrorCode::MissingHeader);
                     }
                     header_seen = true;
                     continue;
@@ -164,7 +171,7 @@ namespace DetourModKit
                 }
                 if (too_many || field_count != 6)
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
 
                 DriftRecord record;
@@ -172,7 +179,7 @@ namespace DetourModKit
                 if (!parse_offset(fields[1], record.nominal_offset) || !parse_offset(fields[2], record.healed_offset) ||
                     !parse_offset(fields[3], record.delta))
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
                 if (fields[4] == "1")
                 {
@@ -184,18 +191,18 @@ namespace DetourModKit
                 }
                 else
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
                 if (!parse_heal_error(fields[5], record.error))
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
                 records.push_back(std::move(record));
             }
 
             if (!header_seen)
             {
-                return std::unexpected(ManifestError::MissingHeader);
+                return manifest_error(ErrorCode::MissingHeader);
             }
             return records;
         }
@@ -214,7 +221,7 @@ namespace DetourModKit
             return static_cast<bool>(file);
         }
 
-        std::expected<std::vector<DriftRecord>, ManifestError> read_drift_report_from_file(const std::string &path)
+        Result<std::vector<DriftRecord>> read_drift_report_from_file(const std::string &path)
         {
             std::ifstream file(path, std::ios::binary);
             if (!file)
@@ -222,7 +229,7 @@ namespace DetourModKit
                 // An open failure (missing file, lock, permission, or a directory) is distinct from a
                 // present-but-corrupt manifest: the latter flows through parse_drift_report and reports MissingHeader /
                 // MalformedLine.
-                return std::unexpected(ManifestError::FileOpenFailed);
+                return manifest_error(ErrorCode::FileOpenFailed);
             }
             const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             return parse_drift_report(text);

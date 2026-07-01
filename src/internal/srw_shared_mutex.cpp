@@ -1,4 +1,4 @@
-#include "DetourModKit/srw_shared_mutex.hpp"
+#include "internal/srw_shared_mutex.hpp"
 
 #include <windows.h>
 #include <new>

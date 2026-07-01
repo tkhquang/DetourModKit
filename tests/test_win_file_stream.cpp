@@ -6,7 +6,7 @@
 #include <thread>
 #include <windows.h>
 
-#include "DetourModKit/win_file_stream.hpp"
+#include "DetourModKit/detail/win_file_stream.hpp"
 
 using namespace DetourModKit;
 

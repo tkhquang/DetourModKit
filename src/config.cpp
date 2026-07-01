@@ -14,7 +14,7 @@
 #include "DetourModKit/logger.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
-#include "DetourModKit/worker.hpp"
+#include "DetourModKit/detail/worker.hpp"
 
 #include "internal/config_watcher.hpp"
 
