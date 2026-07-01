@@ -468,16 +468,9 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
 )
 
-# Install the centralized DetourModKit.hpp header
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp")
-  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-    COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
-  )
-  message(STATUS "Centralized DetourModKit.hpp header will be installed.")
-else()
-  message(WARNING "Centralized header 'include/DetourModKit.hpp' not found.")
-endif()
+# The umbrella + process-lifecycle surface is include/DetourModKit/dmk.hpp; it ships through the module-headers glob
+# above (installed to include/DetourModKit) like every other public header. The v3 root-level DetourModKit.hpp umbrella
+# was replaced by dmk.hpp in the v4 clean break and no longer exists to install.
 
 # Install DirectXMath headers
 if(DIRECTXMATH_INCLUDE_DIR AND EXISTS "${DIRECTXMATH_INCLUDE_DIR}")

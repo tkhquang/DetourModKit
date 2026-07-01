@@ -421,7 +421,6 @@ tests/
 │   ├── CMakeLists.txt          # Minimal installed-package consumer project
 │   └── main.cpp                # Smoke executable that forces a DetourModKit link
 ├── test_async_logger.cpp       # Async logger tests
-├── test_bootstrap.cpp          # DllMain lifecycle and instance-gate tests
 ├── test_config.cpp             # Configuration tests
 ├── test_config_watcher.cpp     # INI hot-reload watcher tests
 ├── test_event_dispatcher.cpp   # Event dispatcher tests (incl. fast-path and snapshot stability)
@@ -439,7 +438,7 @@ tests/
 ├── test_platform.cpp           # Platform detection and version macro tests
 ├── test_profiler.cpp           # Profiler tests
 ├── test_scan_resolve.cpp       # AOB scanner and resolver tests (scan::Pattern, scan::resolve)
-├── test_shutdown.cpp           # DMK_Shutdown orchestration tests
+├── test_session.cpp            # Session lifecycle, bootstrap worker, and ordered ~Session teardown tests
 ├── test_string.cpp             # String::trim cases (shares format.hpp with test_format.cpp -- surface split)
 ├── test_win_file_stream.cpp    # Win32 file stream tests
 ├── test_worker.cpp             # StoppableWorker jthread RAII tests

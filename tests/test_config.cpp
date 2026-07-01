@@ -24,7 +24,7 @@ using DetourModKit::gamepad_button;
 using DetourModKit::keyboard_key;
 using DetourModKit::mouse_button;
 
-// clear() runs inside the noexcept DMK_Shutdown teardown chain, so a throw from it would terminate the host. Its
+// clear() runs inside the noexcept Session teardown chain, so a throw from it would terminate the host. Its
 // diagnostic logging routes through the no-throw try_log path to keep the contract honest; pin it here.
 static_assert(noexcept(config::clear()),
               "config::clear() must be noexcept (it runs inside the noexcept teardown chain).");

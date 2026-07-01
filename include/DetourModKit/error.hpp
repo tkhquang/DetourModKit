@@ -52,7 +52,9 @@ namespace DetourModKit
         /// Reverse-RTTI identification and self-heal (the former IdentifyError / HealError).
         Rtti = 0x04,
         /// Drift-manifest serialize/parse (the former ManifestError).
-        Manifest = 0x05
+        Manifest = 0x05,
+        /// Session / bootstrap process lifecycle (start, single-instance gating, worker spawn).
+        Lifecycle = 0x06
     };
 
     /**
@@ -199,7 +201,17 @@ namespace DetourModKit
         /// A record line had the wrong field count or an unparseable field.
         MalformedLine,
         /// The file could not be opened (missing, locked, denied, or not a regular file).
-        FileOpenFailed
+        FileOpenFailed,
+
+        // Lifecycle (0x06xx): Session / bootstrap process lifecycle
+        /// The running executable did not match ModInfo::game_process_name; the session declined to load (not a fault).
+        ProcessMismatch = 0x0600,
+        /// The single-instance mutex was already held: another load of this mod is already live in the process.
+        InstanceAlreadyRunning,
+        /// start()/bootstrap() was called while a Session is already active in this process (a caller sequencing bug).
+        SessionAlreadyActive,
+        /// A Win32 lifecycle primitive (mutex/event/thread) failed to create; Error::detail = GetLastError().
+        SystemCallFailed
     };
 
     /**
@@ -235,6 +247,8 @@ namespace DetourModKit
             return "rtti";
         case ErrorCategory::Manifest:
             return "manifest";
+        case ErrorCategory::Lifecycle:
+            return "lifecycle";
         }
         return "unknown";
     }
@@ -373,6 +387,14 @@ namespace DetourModKit
             return "MalformedLine";
         case ErrorCode::FileOpenFailed:
             return "FileOpenFailed";
+        case ErrorCode::ProcessMismatch:
+            return "ProcessMismatch";
+        case ErrorCode::InstanceAlreadyRunning:
+            return "InstanceAlreadyRunning";
+        case ErrorCode::SessionAlreadyActive:
+            return "SessionAlreadyActive";
+        case ErrorCode::SystemCallFailed:
+            return "SystemCallFailed";
         }
         return "UnknownCode";
     }

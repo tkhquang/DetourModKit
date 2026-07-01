@@ -367,7 +367,7 @@ TEST_F(HookIntegrationTest, HotReload_ShutdownAndRecreate)
 
     EXPECT_EQ(m_fn_compute_damage(4, 6), 20);
 
-    // Simulate a DMK_Shutdown sequence: drop every handle, which restores every prologue.
+    // Simulate a Session teardown sequence: drop every handle, which restores every prologue.
     drop_all_hooks();
     s_original_compute_damage = nullptr;
 
