@@ -4,7 +4,7 @@
 
 [Features](#features) | [Building](#building-detourmodkit-static-library-via-cmake) | [Testing](#running-unit-tests) | [Guides](#guides) | [Integration](#using-detourmodkit-in-your-mod-project) | [Example](#code-example)
 
-DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, input handling, configuration management, and DLL lifecycle orchestration. It targets Windows x64 and builds under both MSVC 2022+ and MinGW (GCC 12+).
+DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks in game modding, particularly for creating mods that involve memory scanning, hooking, input handling, configuration management, and DLL lifecycle orchestration. It targets Windows x64 and builds under both MSVC 2022+ and MinGW (GCC 13+).
 
 ## Features
 
@@ -44,7 +44,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 - RIP-relative instruction resolution for extracting absolute addresses from x86-64 code (returns `Result<Address>` with a unified `ErrorCode` for actionable diagnostics)
 - `scan::scan(pattern, scope, occurrence, Pages::Executable)` for scanning all committed executable pages in a region -- useful for games with packed or protected binaries that unpack code into anonymous memory outside any loaded module (pure-execute pages without a read bit are skipped to avoid access violations; a region decommitted or reprotected concurrently mid-sweep is skipped rather than faulting the host). `Pages::Readable` (the default) widens the sweep to all committed readable pages (`.rdata` / `.data`, read-only heaps) to reach C++ vtables, RTTI type descriptors, and read-only metadata. The unsafe twin `scan::unchecked::find_pattern(region, pattern, occurrence)` accepts a caller-guaranteed-readable region with no page filtering.
 - The region-walking sweeps carry a `pattern_len - 1` overlap across adjacent accepted `VirtualQuery` regions, so a signature that straddles a protection split (two adjacent regions whose base protections differ, e.g. after a sibling `VirtualProtect` carves up `.text`) is still found, without re-counting a match that lies wholly inside one region
-- `scan::resolve_batch(requests, max_workers)` -- opt-in noexcept fork-join resolver for startup target tables. Each `ScanRequest` dispatches to the resolver concurrently and returns one `Result<Hit>` per request in input order. A per-request failure never sinks the batch.
+- `scan::resolve_batch(requests, max_workers)` -- opt-in noexcept fork-join resolver for startup target tables. Returns `Result<std::vector<Result<Hit>>>`: the outer `Result` is the whole-batch signal (`Error{OutOfMemory}` when even the result container cannot be allocated, mirroring `hook::install_all`), and the inner vector holds one `Result<Hit>` per request in input order. A per-request failure never sinks the batch.
 - `scan::resolve(request)` -- ordered multi-candidate resolution (try `Candidate` tiers in priority order, return the first that resolves), with an optional hooked-prologue recovery pass (`ScanRequest::prologue_fallback = true`) that recovers an `E9` near-jump, an `FF 25` RIP-relative indirect jump, and a `mov rax, imm64; jmp rax` overwritten prologue (so a target inline-hooked by another mod with a near or far jump is recovered). The `ScanRequest::scope` field (a `Region` -- build with `Region::host()`, `Region::module_named(...)`, or `Region::whole_process()`) confines the scan to a single mapped image and rejects out-of-scope resolutions, so a generic signature that also matches inside another injected module (a graphics overlay, a sibling mod) cannot shadow the correct target. By default each candidate must match uniquely in the scope (`require_unique = true`): an ambiguous signature falls through to the next candidate instead of silently committing to an arbitrary match.
 - A `Candidate` can carry a name or string resilience tier, not just a byte AOB: `Candidate::rtti_vtable(name, mangled)` resolves an MSVC mangled type name via `rtti::vtable_for_type`, and `Candidate::string_xref(name, literal)` (or `Candidate::string_xref(name, StringRefQuery{...})` for full facet control) resolves a literal string through `scan::find_string_xref`. These sit above the byte tiers in one ordered ladder -- "try the RTTI name, else the string xref, else the byte AOB" -- are unique-only by construction (the backend fails closed on ambiguity), and are automatically skipped by the prologue-fallback recovery (which only rewrites `Candidate::direct` rows).
 - `scan::read_code_constant(cc, scope)` -- the code-side twin of the RTTI self-heal: declare an instruction site (a `CodeConstant` with a `Candidate` ladder for the site) plus which operand to read (`OperandKind::Immediate` or `MemoryDisplacement`), and it decodes the live instruction and returns the current value. It always decodes (`CodeConstant::nominal` is telemetry only, never a short-circuit), indexes the **visible** operands, resolves a RIP-relative memory operand to its absolute target, and fails closed (`ErrorCode::DecodeFailed` / `UnexpectedShape` / `OperandOutOfRange`). Built on a Zydis decoder kept entirely inside the implementation, so no consumer needs Zydis headers.
@@ -364,11 +364,14 @@ For detailed coverage analysis and test architecture, see the [Test Coverage Gui
 * [Hot-Reload Development Guide](docs/hot-reload/README.md) - Development workflow for iterating on hooks with live reload
 * [Config Hot-Reload Guide](docs/config-hot-reload/README.md) - INI filesystem watcher and hotkey-triggered `config::reload()`
 * [Test Coverage Guide](docs/tests/README.md) - Coverage analysis, test architecture, and module-level breakdown
+* [Migrating from v3.x to v4.0.0](docs/misc/migrating-v3-to-v4.md) - Maps the old surface onto the clean-break v4 API (errors-as-values, RAII hooks, the `scan::resolve` surface, and the ABI contract)
 
 ## Prerequisites
 
-* A C++ compiler supporting C++23 (e.g., MinGW g++ 12+ or newer, MSVC 2022+).
-* [CMake](https://cmake.org/) 3.25 or newer.
+* A C++ compiler **and standard library** supporting C++23 (e.g., MinGW g++ 13+ or MSVC 2022 17.4+). The
+  library needs `std::expected`, `std::move_only_function`, and `std::format`; g++ 13 is the first GCC with all
+  three, and configure probes for them and fails early on an older standard library.
+* [CMake](https://cmake.org/) 3.28 or newer.
 * [Ninja](https://ninja-build.org/) build system (ships with Visual Studio; for MSYS2: `pacman -S ninja`).
 * `make` (optional, for the Makefile wrapper -- e.g., `mingw32-make` for MinGW environments).
 * Git (for cloning and managing submodules).
@@ -614,6 +617,24 @@ All pull requests to `main` are automatically tested via CI with an **80% minimu
 ## Using DetourModKit in Your Mod Project
 
 There are two main approaches to integrate DetourModKit into your project:
+
+> **ABI / toolchain compatibility (read this first).** DetourModKit is a C++23 **static** library whose entire
+> public surface is C++ -- there is no `extern "C"` boundary anywhere. The archive bakes in the compiler's name
+> mangling, its exception model, and the exact layout of every standard-library type that crosses the API
+> (`std::string`, `std::vector`, `std::expected`, `std::move_only_function`, and the containers inside
+> `Result<T>`). None of that is stable across toolchains, so link DetourModKit only from a build that matches on
+> every axis:
+>
+> - **Same compiler family and ABI.** MinGW-GCC and MSVC archives are not interchangeable; a release is
+>   compiler-specific by construction. Rebuild from source (Method 1) if you switch compilers.
+> - **Same C++ standard library, at C++23 or newer.** The library requires `<expected>`,
+>   `std::move_only_function`, and `<format>`; the CMake configure step probes for these and fails early with a
+>   clear message if the standard library is too old.
+> - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime
+>   must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent
+>   ODR undefined behaviour at worst. (This is why the shipped Debug preset pins `_ITERATOR_DEBUG_LEVEL=0`.)
+>
+> There is no ABI shim: consume the package from the same toolchain that produced it.
 
 ### Method 1: Using DetourModKit as a Submodule (Recommended)
 

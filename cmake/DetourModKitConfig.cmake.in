@@ -4,6 +4,22 @@
 
 set(DetourModKit_VERSION "@PROJECT_VERSION@")
 
+# --- ABI / toolchain compatibility contract ---
+# DetourModKit is a C++23 *static* library and its entire exported surface is C++ -- there is no extern "C"
+# boundary anywhere in the public headers. The archive therefore hard-codes the compiler's name mangling, its
+# exception model, and the exact memory layout of every standard-library type that crosses the API (std::string,
+# std::vector, std::expected, std::move_only_function, and the containers inside Result<T>). None of that is
+# stable across toolchains or even across STL debug levels of the same toolchain, so a consumer MUST link this
+# package with a build that matches on every one of these axes:
+#   * Same compiler family and ABI. MinGW-GCC archives and MSVC archives are not interchangeable; a release is
+#     compiler-specific by construction.
+#   * Same C++ standard library implementation and a C++23-or-newer language level.
+#   * Matching CRT / iterator-debug configuration. On MSVC, _ITERATOR_DEBUG_LEVEL and the /MD vs /MDd runtime
+#     must agree with the archive; a mismatch changes container layout and surfaces as LNK2038 at best or silent
+#     ODR undefined behaviour at worst.
+# There is no ABI shim to paper over a mismatch: consume DetourModKit from the same toolchain that produced the
+# installed prefix. The STATUS line below restates this so it is visible in a fresh consumer's configure log.
+
 # --- Static dependency archives (DetourModKit::deps) ---
 # DetourModKit is a static library; its SafetyHook/Zydis/Zycore dependencies are
 # shipped as plain archives next to it. They cannot be re-exported as CMake
@@ -38,3 +54,5 @@ endif()
 check_required_components(DetourModKit)
 
 message(STATUS "Found DetourModKit: ${DetourModKit_VERSION}")
+message(STATUS "DetourModKit ABI: C++23 static library, no extern \"C\" boundary -- "
+  "link only from the same compiler/STL/CRT toolchain that built this prefix.")

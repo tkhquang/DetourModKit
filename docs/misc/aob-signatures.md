@@ -305,13 +305,20 @@ owned.push_back(sc::OwnedScanRequest{
 std::vector<sc::ScanRequest> views;
 for (const auto& o : owned) views.push_back(o.view());
 
-const auto results = sc::resolve_batch(views, /*max_workers=*/4);
+// The outer Result is the whole-batch signal; unwrap it before indexing the per-request inner vector.
+const auto batch = sc::resolve_batch(views, /*max_workers=*/4);
+if (!batch) { /* whole-batch OOM: batch.error().code == ErrorCode::OutOfMemory */ return; }
+const auto& results = *batch;
+// Index the inner vector (do not range-for over it: a bare std::expected element trips a
+// GCC libstdc++ <expected> equality-constraint recursion; indexed access sidesteps it).
+for (std::size_t i = 0; i < results.size(); ++i) { /* results[i] is the Result<Hit> for views[i] */ }
 ```
 
 Key properties:
 
-- **Input-order results.** `results[i]` always corresponds to `views[i]`, regardless of which worker finished first.
-- **Per-request fail-closed.** A failure in one request never poisons the rest; `results[i].error()` carries the `Error` for that slot.
+- **Whole-batch signal.** The outer `Result` fails with `Error{OutOfMemory}` only when the per-request result container itself cannot be allocated, so a caller cannot silently proceed on a truncated batch (the same shape as `hook::install_all`).
+- **Input-order results.** Inside the unwrapped vector, `(*batch)[i]` always corresponds to `views[i]`, regardless of which worker finished first.
+- **Per-request fail-closed.** A failure in one request never poisons the rest; `(*batch)[i].error()` carries the `Error` for that slot.
 - **Read-only sharing, no cloning.** `Pattern` is value-semantic and immutable; workers share the caller's compiled patterns directly with no re-derive.
 - **Worker count.** `0` (the default) uses `std::thread::hardware_concurrency()` clamped to the request count; the calling thread participates. A single-item batch runs inline with no thread spawn.
 
@@ -458,6 +465,7 @@ struct ScanRequest
     bool prologue_fallback = false;
     bool require_unique = true;
     CandidateOrder order = CandidateOrder::AsDeclared;
+    Pages pages = Pages::Readable;  // byte tiers scan this page class; Executable narrows to code
 };
 
 struct OwnedScanRequest  // for stored / deferred resolution
@@ -468,6 +476,7 @@ struct OwnedScanRequest  // for stored / deferred resolution
     bool prologue_fallback = false;
     bool require_unique = true;
     CandidateOrder order = CandidateOrder::AsDeclared;
+    Pages pages = Pages::Readable;
     ScanRequest view() const noexcept;
 };
 
@@ -475,7 +484,8 @@ struct OwnedScanRequest  // for stored / deferred resolution
 ScanRequest borrow(span<const Candidate> ladder, string_view label = {},
                    Region scope = Region::host(),
                    bool prologue_fallback = false, bool require_unique = true,
-                   CandidateOrder order = CandidateOrder::AsDeclared) noexcept;
+                   CandidateOrder order = CandidateOrder::AsDeclared,
+                   Pages pages = Pages::Readable) noexcept;
 
 struct Hit
 {
@@ -486,12 +496,13 @@ struct Hit
 // Single resolve: tries candidates in order, returns first that resolves.
 [[nodiscard]] Result<Hit> resolve(const ScanRequest& request);
 
-// Fork-join batch; noexcept -- per-request failures never sink the batch.
-[[nodiscard]] std::vector<Result<Hit>>
+// Fork-join batch; noexcept. The OUTER Result is the whole-batch signal (Error{OutOfMemory} when even the
+// result container cannot be allocated); the inner vector holds one Result<Hit> per request, in order.
+[[nodiscard]] Result<std::vector<Result<Hit>>>
 resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
 ```
 
-`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named(L"game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages. `prologue_fallback = true` selects the hooked-prologue recovery path. `resolve_batch` dispatches each request to the resolver concurrently and returns one `Result<Hit>` per request in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
+`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named(L"game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages. `prologue_fallback = true` selects the hooked-prologue recovery path. `pages` selects which page class the byte tiers scan: `Pages::Readable` (default) covers code and data, `Pages::Executable` narrows to code so a byte signature that must land on an instruction cannot alias an identical run in a data section. `resolve_batch` dispatches each request to the resolver concurrently; unwrap the outer `Result` (a whole-batch OOM failure lands there, mirroring `hook::install_all`), then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
 
 ### 6.3 Basic usage
 

@@ -134,8 +134,10 @@ namespace DetourModKit
          */
         struct HookLifecycleEvent
         {
-            /// The hook id. Valid only for the duration of the emit call; copy to retain.
+            /// The hook id (the caller-supplied name). Valid only for the duration of the emit call; copy to retain.
             std::string_view name;
+            /// Process-unique lifetime identity for this hook; 0 means the hook is untracked.
+            std::uint64_t ledger_id = 0;
             /// The hook flavor.
             HookKind kind = HookKind::Inline;
             /// The transition that occurred.

@@ -630,6 +630,8 @@ namespace DetourModKit::scan
         bool require_unique = true;
         /// How the ladder is ordered before it is tried.
         CandidateOrder order = CandidateOrder::AsDeclared;
+        /// Page-protection class the Direct / RipRelative byte tiers scan.
+        Pages pages = Pages::Readable;
     };
 
     /**
@@ -642,7 +644,8 @@ namespace DetourModKit::scan
     [[nodiscard]] ScanRequest borrow(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                      std::string_view label DMK_LIFETIMEBOUND = {}, Region scope = Region::host(),
                                      bool prologue_fallback = false, bool require_unique = true,
-                                     CandidateOrder order = CandidateOrder::AsDeclared) noexcept;
+                                     CandidateOrder order = CandidateOrder::AsDeclared,
+                                     Pages pages = Pages::Readable) noexcept;
 
     /**
      * @struct OwnedScanRequest
@@ -666,6 +669,8 @@ namespace DetourModKit::scan
         bool require_unique = true;
         /// Ladder ordering policy.
         CandidateOrder order = CandidateOrder::AsDeclared;
+        /// Page-protection class the byte tiers scan (see @ref ScanRequest::pages).
+        Pages pages = Pages::Readable;
 
         /**
          * @brief Returns a borrowed ScanRequest viewing this object's owned storage.
@@ -680,6 +685,7 @@ namespace DetourModKit::scan
                 .prologue_fallback = prologue_fallback,
                 .require_unique = require_unique,
                 .order = order,
+                .pages = pages,
             };
         }
     };
@@ -716,16 +722,20 @@ namespace DetourModKit::scan
      * @brief Resolves a batch of requests concurrently, returning one Result per request in input order.
      * @param requests The requests to resolve.
      * @param max_workers Upper bound on worker threads (0 = auto-select from hardware concurrency).
-     * @return One Result<Hit> per input request, in order.
-     * @details noexcept by contract: a per-request allocation failure is reported as Error{OutOfMemory} and any other
-     *          per-request exception leaves that slot at the seeded Error{NoMatch}, so one failing request never sinks
-     *          the batch. The result vector is allocated and seeded up front; if that initial allocation itself fails
-     *          under true out-of-memory, the function returns an empty vector, so a caller that indexes the result must
-     *          treat a size mismatch as a whole-batch allocation failure.
+     * @return On success, the inner vector holds one @ref Hit-or-Error per input request, in order. On a WHOLE-BATCH
+     *         failure (the per-request result container itself could not be allocated under true out-of-memory) the
+     *         OUTER Result carries Error{OutOfMemory} and there is no inner vector.
+     * @details noexcept by contract, and the two failure layers are distinct so no failure is ever silent. A
+     *          PER-REQUEST allocation failure is reported as that slot's Error{OutOfMemory}, and any other per-request
+     *          exception leaves that slot at the seeded Error{NoMatch}, so one failing request never sinks the batch.
+     *          A WHOLE-BATCH allocation failure -- when even the seeded result vector cannot be built -- is reported on
+     *          the outer Result instead of an easily-ignored empty vector, so a caller must unwrap the outer Result
+     *          before indexing and cannot silently proceed on a truncated batch. This mirrors @ref hook::install_all,
+     *          whose outer Result is likewise the whole-batch signal.
      * @note Setup/control-plane only: spawns a worker pool and allocates; a startup-time batch, not a per-frame call.
      */
-    [[nodiscard]] std::vector<Result<Hit>> resolve_batch(std::span<const ScanRequest> requests,
-                                                         std::size_t max_workers = 0) noexcept;
+    [[nodiscard]] Result<std::vector<Result<Hit>>> resolve_batch(std::span<const ScanRequest> requests,
+                                                                 std::size_t max_workers = 0) noexcept;
 
     /**
      * @brief Scans one Pattern over a known scope and returns the Nth match address.

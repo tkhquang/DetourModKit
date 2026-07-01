@@ -31,6 +31,7 @@
 
 #include <array>
 #include <bit>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -484,11 +485,25 @@ namespace DetourModKit
              *          lookup. Use it only for pointers the caller has proven are alive this frame (for example a game
              *          object known to be live). For anything that may be stale, use the guarded @ref read.
              * @note Callback-safe by construction (it does nothing but copy), but UNSAFE on an invalid address.
+             * @note A debug-only `assert(is_readable(...))` catches a violated precondition during development: in a
+             *       Debug build (NDEBUG unset) a stale or unmapped address trips the assert at the offending call site
+             *       instead of a raw access violation deep in the copy. The whole expression is compiled out under
+             *       NDEBUG, so a Release build pays nothing and keeps the "single inlined copy" cost. In Release there
+             *       is therefore NO diagnostic at all -- an invalid address faults the host exactly as documented above,
+             *       which is the price of the `unchecked` fast path; reach for the guarded @ref read when the address
+             *       might be stale.
              */
             template <class T>
                 requires std::is_trivially_copyable_v<T>
             [[nodiscard]] T read(Address address) noexcept
             {
+                // Dev-only guard: is_readable() consults the protection cache / VirtualQuery, which is why it lives on
+                // the setup path and not here, so it must NOT run in Release -- assert() discards the entire call under
+                // NDEBUG, leaving the fast path a bare copy. In Debug it converts the caller's "I have proven this is
+                // safe" contract into a checkable invariant.
+                assert(
+                    is_readable(Region{address, sizeof(T)}) &&
+                    "unchecked::read<T>: address is not fully readable; the caller's safety precondition is violated");
                 std::array<std::byte, sizeof(T)> storage{};
                 std::memcpy(storage.data(), address.as<const void *>(), sizeof(T));
                 return std::bit_cast<T>(storage);
