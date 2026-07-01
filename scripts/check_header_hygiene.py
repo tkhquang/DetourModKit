@@ -112,6 +112,16 @@ LEGACY_CONFIG_TOKEN = re.compile(
 LEGACY_INPUT_TOKEN = re.compile(
     r'(\bInputManager\b|\bInputMode\b|\bInputBindingGuard\b|\bupdate_binding_combos\b|\binput_mode_to_string\b'
     r'|\bregister_press\b|\bregister_hold\b)')
+# --- v4 logger clean-break gate ---
+# The legacy logger surface (the Logger::get_instance() singleton accessor, the log_level_to_string free function, and
+# the Logger::string_to_log_level static) was reshaped into the free log() value-facade accessor, the to_string(LogLevel)
+# overload, and a free string_to_log_level. None of these spellings may reappear in this repo's own sources. The Logger
+# class name itself SURVIVES as the v4 value facade (class Logger, the log() return type, "construct your own"), so it is
+# gated only with the scope operator on the two deleted statics -- a bare \bLogger\b would false-positive on every
+# legitimate v4 site (and on AsyncLogger). log_level_to_string is a distinct deleted free-function name. Matched after
+# comment stripping, so v3-migration prose does not trip the gate.
+LEGACY_LOGGER_TOKEN = re.compile(
+    r'(\bLogger::get_instance\b|\bLogger::string_to_log_level\b|\blog_level_to_string\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
@@ -247,7 +257,7 @@ def main():
                 am = ASYNC_INTERNAL_DECL.search(line)
                 if am:
                     violations.append(
-                        f"{rel}:{n}: {am.group(1)} declared outside detail/async_logger_internal.hpp")
+                        f"{rel}:{n}: {am.group(1)} declared outside {ASYNC_INTERNAL_HEADER}")
 
         # v4 scan gate C: no public header reaches into the non-installed private engine under src/internal/.
         if is_public_header:
@@ -289,6 +299,13 @@ def main():
             if im:
                 violations.append(
                     f"{rel}:{n}: legacy input symbol '{im.group(1).strip()}' (replaced by the v4 input surface)")
+
+        # v4 logger gate D: no legacy logger symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            gm = LEGACY_LOGGER_TOKEN.search(line)
+            if gm:
+                violations.append(
+                    f"{rel}:{n}: legacy logger symbol '{gm.group(1).strip()}' (replaced by the v4 logger surface)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")

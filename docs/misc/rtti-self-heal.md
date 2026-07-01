@@ -63,7 +63,7 @@ std::vector<Rtti::LabeledSlot> slots;
 // vector instead, so the count is intentionally discarded.
 (void)Rtti::reverse_scan_block(struct_base, 64, slots); // 64 pointer-sized slots
 for (const auto &s : slots)
-    Logger::get_instance().log(LogLevel::Debug, "[+{:#x}] {} {}",
+    log().log(LogLevel::Debug, "[+{:#x}] {} {}",
         s.slot_index * sizeof(void *),
         s.type.was_pointer ? "->" : "(direct)",
         s.type.name());
@@ -88,7 +88,7 @@ lm.base = resolved_player_struct;          // from a Scanner cascade / AOB ancho
 if (const auto off = Rtti::heal_offset(lm))
     player_health_offset = *off;           // healed; feed into the pointer chain
 else
-    Logger::get_instance().log(LogLevel::Warning,
+    log().log(LogLevel::Warning,
         "health landmark lost; binary changed too much -- re-author it");
 ```
 

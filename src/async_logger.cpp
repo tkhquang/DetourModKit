@@ -554,8 +554,7 @@ namespace DetourModKit
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
             *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
                            << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: " << message
-                           << '\n';
+                           << "[" << std::setw(7) << std::left << to_string(level) << "] :: " << message << '\n';
             m_file_stream->flush();
 
             // Surface a write/flush failure through the no-throw delivery bool.
@@ -823,8 +822,8 @@ namespace DetourModKit
 
             *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str()) << "."
                            << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(msg.level)
-                           << "] :: " << msg.message() << '\n';
+                           << "[" << std::setw(7) << std::left << to_string(msg.level) << "] :: " << msg.message()
+                           << '\n';
         }
 
         m_file_stream->flush();
@@ -917,7 +916,7 @@ namespace DetourModKit
                 std::chrono::duration_cast<std::chrono::milliseconds>(message.timestamp.time_since_epoch()) % 1000;
             *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
                            << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(message.level)
+                           << "[" << std::setw(7) << std::left << to_string(message.level)
                            << "] :: " << message.message() << '\n';
             m_file_stream->flush();
 

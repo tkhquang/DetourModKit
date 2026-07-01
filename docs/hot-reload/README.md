@@ -118,7 +118,7 @@ extern "C" __declspec(dllexport) bool Init()
     try
     {
         DMKLogger::configure("MyMod", "mod_logic.log", "%Y-%m-%d %H:%M:%S");
-        auto& logger = DMKLogger::get_instance();
+        auto& logger = DMK::log();
         logger.set_log_level(DMKLogLevel::Debug);
         logger.info("mod_logic: Init() called");
 
@@ -155,7 +155,7 @@ extern "C" __declspec(dllexport) bool Init()
 
 extern "C" __declspec(dllexport) void Shutdown()
 {
-    auto& logger = DMKLogger::get_instance();
+    auto& logger = DMK::log();
     logger.info("mod_logic: Shutdown() called");
 
     // Drop any caller-owned Hook handles first (their destructors unhook),
@@ -678,7 +678,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **Global variables in logic DLL:** Reset to initial values on reload. This is expected - design for it.
 
-**DMK singletons (Logger, etc.):** **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first `get_instance()` call after `LoadLibrary`. The new instance starts with default state. `Init()` must re-configure them (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
+**DMK process state (Logger, etc.):** **Destroyed** during `FreeLibrary` (static-local destructors run), then **reconstructed** on first access after `LoadLibrary` (the process logger is reached through `log()`). The new instance starts with default state. `Init()` must re-configure it (e.g., `Logger::configure()`, `set_log_level()`). `Shutdown()` must be called *before* `FreeLibrary` so destruction order is controlled, not random.
 
 **Hooks:** There is no hook singleton in v4. Each `hook::inline_at` / `mid_at` / `vmt_for` returns a caller-owned RAII `Hook` (or `VmtHook`) handle that lives in the logic DLL's memory. Drop those handles in `Shutdown()` *before* `FreeLibrary` so each destructor restores the original bytes while the code pages are still mapped. A handle that is leaked across `FreeLibrary` leaves the game running a detour into unmapped memory.
 
@@ -730,7 +730,7 @@ void apply_patch(std::byte* addr, const std::byte* new_bytes, size_t len)
     auto result = DMKMemory::write_bytes(
         DMK::Address{addr}, std::span<const std::byte>{new_bytes, len});
     if (!result) {
-        DMKLogger::get_instance().error("apply_patch: write_bytes failed");
+        DMK::log().error("apply_patch: write_bytes failed");
         return;
     }
     s_active_patches.push_back(std::move(patch));
@@ -743,7 +743,7 @@ void revert_all_patches()
         auto result = DMKMemory::write_bytes(
             DMK::Address{it->address}, std::span<const std::byte>{it->original_bytes});
         if (!result) {
-            DMKLogger::get_instance().error("revert_all_patches: write_bytes failed");
+            DMK::log().error("revert_all_patches: write_bytes failed");
         }
     }
     s_active_patches.clear();
@@ -754,7 +754,7 @@ void revert_all_patches()
 
 ### 4. Logger File Handles
 
-The DMK Logger opens a file handle when the singleton is constructed (configured via `Logger::configure()`). On reload, `Shutdown()` closes the file, and the new `Init()` call to `Logger::configure()` reopens it. The logger appends by default via `WinFileStream`, so logs accumulate across reloads. If you need a clean log per session, delete the log file in `Init()` before calling `configure()`.
+The DMK Logger opens a file handle when its sink is constructed (configured via `Logger::configure()`). On reload, `Shutdown()` closes the file, and the new `Init()` call to `Logger::configure()` reopens it. The logger appends by default via `WinFileStream`, so logs accumulate across reloads. If you need a clean log per session, delete the log file in `Init()` before calling `configure()`.
 
 **AsyncLogger:** If you are using the async logging backend, call `DMK_Shutdown()` to flush the async queue before `FreeLibrary` unloads the DLL. Failing to flush can lose buffered log entries or cause the background writer thread to access unmapped memory.
 

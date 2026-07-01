@@ -14,7 +14,7 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 | AOB Scanner | v4 `scan.hpp` surface with value-semantic `Pattern`, factory-only `Candidate` tiers, borrowed and owned `ScanRequest`, `resolve` / `resolve_batch`, page-gated `scan`, and `unchecked::find_pattern`, backed by the existing SIMD scanner with full-byte and per-nibble wildcards, cross-region-boundary overlap, RIP resolution, prologue-recovery fallback, raw and resolve-ladder batch scanning, in-code constants, and string-reference xrefs | `scan.hpp` |
 | Hook (v4) | Free verbs (`hook::inline_at` / `mid_at` / `install_all` / `vmt_for`) returning move-only RAII `Hook` / `VmtHook` handles whose destructors restore the prologue, with the SafetyHook backend fully hidden behind an opaque `hook::MidContext` | `hook.hpp` |
 | Configuration | INI-based settings with key combo support and hot-reload (folded-in file watcher + hotkey) | `config.hpp` |
-| Logger | Synchronous singleton logger with format strings | `logger.hpp` |
+| Logger | Process logger value facade with format strings | `logger.hpp` |
 | Async Logger | Lock-free bounded queue logger with batched writes | `async_logger.hpp` |
 | Memory Utilities | Readability checks, region cache, safe pointer reads, typed fault-guarded reads/writes (`Result<T>`), fault-guarded pointer-chain walks, page-protection guards, PE module range queries | `memory.hpp` |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | `rtti.hpp` |
@@ -103,7 +103,7 @@ config::load("mymod.ini");
                                  {
                                      if (content_changed)
                                      {
-                                         Logger::get_instance().info("Config reloaded");
+                                         log().info("Config reloaded");
                                      }
                                  });
 
@@ -119,10 +119,11 @@ See the [Config Hot-Reload Guide](docs/config-hot-reload/README.md) for the thre
 <details>
 <summary><strong>Logger</strong></summary>
 
-- Flexible singleton logger for outputting messages to a log file
+- Process logger value facade reached through the free function `log()` for outputting messages to a log file; construct a dedicated `Logger custom("Prefix", "file.log", "%Y-%m-%d %H:%M:%S")` pointed at its own sink when you need a separate stream (`Logger` is non-copyable and non-movable)
 - Configurable log levels, timestamps, and prefixes
 - Async logging for high-throughput scenarios
 - Format string placeholders for concise log messages
+- Formatted methods auto-stamp each record with the call site via `std::source_location`, rendered as a compact `[file:line]` prefix right after the `::` separator
 - Concurrent file access via Win32 shared-access file handles (log files readable by external tools while logging is active)
 - `is_enabled(LogLevel)` for gating expensive trace-only work
 
@@ -802,7 +803,7 @@ std::optional<DMKHook::Hook> g_print_hook;
 // Detour function
 void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
 {
-    auto &logger = DMKLogger::get_instance();
+    auto &logger = DMK::log();
     logger.info("Detour_GameFunction_PrintMessage CALLED! Original message: \"{}\", type: {}", message, type);
 
     // original<Fn>() is the typed trampoline to the un-hooked function (UNGUARDED fast path). It is non-null only
@@ -829,7 +830,7 @@ bool InitializeMyMod()
 {
     // Logger + async mode are already configured by DMKBootstrap::on_dll_attach()
     // using the ModInfo passed into the attach call below.
-    auto &logger = DMKLogger::get_instance();
+    auto &logger = DMK::log();
 
     // Bind your configuration variables (callback-store API; config::bind<T> is the atomic hot path)
     DMKConfig::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
@@ -852,7 +853,7 @@ bool InitializeMyMod()
     DMKConfig::load("MyMod.ini");
 
     // Apply LogLevel from loaded configuration
-    logger.set_log_level(DMKLogger::string_to_log_level(g_mod_config.log_level_setting));
+    logger.set_log_level(DMK::string_to_log_level(g_mod_config.log_level_setting));
 
     // Log the loaded configuration
     logger.info("MyMod configuration loaded and applied.");
@@ -905,7 +906,7 @@ bool InitializeMyMod()
             .name = "toggle_view",
             .trigger = DMKInput::Trigger::Press,
             .combos = g_mod_config.toggle_combo,
-            .on_press = []() { DMKLogger::get_instance().info("Toggle key pressed!"); },
+            .on_press = []() { DMK::log().info("Toggle key pressed!"); },
         }))
     {
         DMKInput::scope().add(std::move(*toggle));
@@ -916,7 +917,7 @@ bool InitializeMyMod()
             .trigger = DMKInput::Trigger::Hold,
             .combos = g_mod_config.hold_scroll_combo,
             .on_state_change = [](bool held)
-            { DMKLogger::get_instance().info("Hold scroll: {}", held ? "active" : "released"); },
+            { DMK::log().info("Hold scroll: {}", held ? "active" : "released"); },
         }))
     {
         DMKInput::scope().add(std::move(*scroll));
@@ -932,7 +933,7 @@ bool InitializeMyMod()
 // Mod Shutdown Function (runs on DMKBootstrap's worker thread, before DMK_Shutdown())
 void ShutdownMyMod()
 {
-    DMKLogger::get_instance().info("MyMod Shutting Down...");
+    DMK::log().info("MyMod Shutting Down...");
     // Drop the RAII Hook handle to restore the prologue before the kit tears down. If several hooks layer on one
     // address, destroy them newest-first (reset the most-recently-installed handle first).
     g_print_hook.reset();

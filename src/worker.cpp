@@ -11,7 +11,7 @@ namespace DetourModKit
     {
         if (!body)
         {
-            Logger::get_instance().error("StoppableWorker '{}': empty body; no thread started.", m_name);
+            log().error("StoppableWorker '{}': empty body; no thread started.", m_name);
             m_joined.store(true, std::memory_order_release);
             return;
         }
@@ -25,11 +25,11 @@ namespace DetourModKit
                 }
                 catch (const std::exception &e)
                 {
-                    Logger::get_instance().error("StoppableWorker '{}': unhandled exception: {}", label, e.what());
+                    log().error("StoppableWorker '{}': unhandled exception: {}", label, e.what());
                 }
                 catch (...)
                 {
-                    Logger::get_instance().error("StoppableWorker '{}': unknown exception escaped body.", label);
+                    log().error("StoppableWorker '{}': unknown exception escaped body.", label);
                 }
             });
 
@@ -40,7 +40,7 @@ namespace DetourModKit
         // std::jthread handle concurrently with shutdown()'s join()/detach().
         m_started.store(true, std::memory_order_release);
 
-        Logger::get_instance().debug("StoppableWorker '{}' started.", m_name);
+        log().debug("StoppableWorker '{}' started.", m_name);
     }
 
     StoppableWorker::~StoppableWorker() noexcept

@@ -374,7 +374,7 @@ int main()
 {
     // Silence write_bytes' success/debug logging so we time the memory work, not the log path. The level gate is an
     // atomic check before any string formatting, so Error-level leaves the hot ops uninstrumented.
-    DetourModKit::Logger::get_instance().set_log_level(DetourModKit::LogLevel::Error);
+    DetourModKit::log().set_log_level(DetourModKit::LogLevel::Error);
 
     constexpr std::size_t ITERS = 200000;
     constexpr std::size_t SAMPLES = 15;

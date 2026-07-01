@@ -2248,12 +2248,12 @@ TEST_F(ConfigTest, RegisterLogLevel_RoundTripFromIni)
         ini_file << "[Logging]\nLevel=DEBUG\n";
     }
 
-    const LogLevel original = Logger::get_instance().get_log_level();
+    const LogLevel original = log().get_log_level();
     config::bind_log_level("Logging", "Level", "INFO");
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
-    EXPECT_EQ(Logger::get_instance().get_log_level(), LogLevel::Debug);
+    EXPECT_EQ(log().get_log_level(), LogLevel::Debug);
 
-    Logger::get_instance().set_log_level(original);
+    log().set_log_level(original);
 }
 
 TEST_F(ConfigTest, RegisterAtomic_BoolRoundTrip)
@@ -2380,7 +2380,7 @@ namespace
             const int n = counter.fetch_add(1, std::memory_order_relaxed);
             m_capture_file = std::filesystem::temp_directory_path() /
                              ("dmk_capture_" + std::to_string(_getpid()) + "_" + std::to_string(n) + ".log");
-            auto &logger = DetourModKit::Logger::get_instance();
+            auto &logger = DetourModKit::log();
             m_previous_async = logger.is_async_mode_enabled();
             if (m_previous_async)
             {
@@ -2393,7 +2393,7 @@ namespace
 
         ~LoggerFileCapture()
         {
-            auto &logger = DetourModKit::Logger::get_instance();
+            auto &logger = DetourModKit::log();
             logger.flush();
             const auto parking =
                 std::filesystem::temp_directory_path() / ("dmk_capture_parked_" + std::to_string(_getpid()) + ".log");
@@ -2412,7 +2412,7 @@ namespace
 
         [[nodiscard]] std::string read_all() const
         {
-            DetourModKit::Logger::get_instance().flush();
+            DetourModKit::log().flush();
             std::ifstream in(m_capture_file);
             if (!in)
             {

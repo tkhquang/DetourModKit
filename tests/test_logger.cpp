@@ -70,41 +70,43 @@ protected:
 
 TEST_F(LoggerTest, LogLevelToString)
 {
-    EXPECT_EQ(log_level_to_string(LogLevel::Trace), "TRACE");
-    EXPECT_EQ(log_level_to_string(LogLevel::Debug), "DEBUG");
-    EXPECT_EQ(log_level_to_string(LogLevel::Info), "INFO");
-    EXPECT_EQ(log_level_to_string(LogLevel::Warning), "WARNING");
-    EXPECT_EQ(log_level_to_string(LogLevel::Error), "ERROR");
+    EXPECT_EQ(to_string(LogLevel::Trace), "TRACE");
+    EXPECT_EQ(to_string(LogLevel::Debug), "DEBUG");
+    EXPECT_EQ(to_string(LogLevel::Info), "INFO");
+    EXPECT_EQ(to_string(LogLevel::Warning), "WARNING");
+    EXPECT_EQ(to_string(LogLevel::Error), "ERROR");
 }
 
 TEST_F(LoggerTest, StringToLogLevel)
 {
-    EXPECT_EQ(Logger::string_to_log_level("TRACE"), LogLevel::Trace);
-    EXPECT_EQ(Logger::string_to_log_level("trace"), LogLevel::Trace);
-    EXPECT_EQ(Logger::string_to_log_level("DEBUG"), LogLevel::Debug);
-    EXPECT_EQ(Logger::string_to_log_level("debug"), LogLevel::Debug);
-    EXPECT_EQ(Logger::string_to_log_level("INFO"), LogLevel::Info);
-    EXPECT_EQ(Logger::string_to_log_level("info"), LogLevel::Info);
-    EXPECT_EQ(Logger::string_to_log_level("WARNING"), LogLevel::Warning);
-    EXPECT_EQ(Logger::string_to_log_level("warning"), LogLevel::Warning);
-    EXPECT_EQ(Logger::string_to_log_level("ERROR"), LogLevel::Error);
-    EXPECT_EQ(Logger::string_to_log_level("error"), LogLevel::Error);
+    EXPECT_EQ(string_to_log_level("TRACE"), LogLevel::Trace);
+    EXPECT_EQ(string_to_log_level("trace"), LogLevel::Trace);
+    EXPECT_EQ(string_to_log_level("DEBUG"), LogLevel::Debug);
+    EXPECT_EQ(string_to_log_level("debug"), LogLevel::Debug);
+    EXPECT_EQ(string_to_log_level("INFO"), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("info"), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("WARNING"), LogLevel::Warning);
+    EXPECT_EQ(string_to_log_level("warning"), LogLevel::Warning);
+    EXPECT_EQ(string_to_log_level("ERROR"), LogLevel::Error);
+    EXPECT_EQ(string_to_log_level("error"), LogLevel::Error);
 
-    EXPECT_EQ(Logger::string_to_log_level("INVALID"), LogLevel::Info);
-    EXPECT_EQ(Logger::string_to_log_level(""), LogLevel::Info);
-    EXPECT_EQ(Logger::string_to_log_level("XYZ"), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("INVALID"), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level(""), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("XYZ"), LogLevel::Info);
 }
 
-TEST(LoggerSingleton, GetInstance)
+TEST(LoggerProcessDefault, LogReturnsStableReference)
 {
-    Logger &instance1 = Logger::get_instance();
-    Logger &instance2 = Logger::get_instance();
+    // log() returns the process-default Logger, and the reference is stable for the life of the process, so repeated
+    // calls yield the same object.
+    Logger &instance1 = log();
+    Logger &instance2 = log();
     EXPECT_EQ(&instance1, &instance2);
 }
 
 TEST_F(LoggerTest, SetAndGetLogLevel)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     logger.set_log_level(LogLevel::Warning);
     EXPECT_EQ(logger.get_log_level(), LogLevel::Warning);
@@ -124,7 +126,7 @@ TEST_F(LoggerTest, SetAndGetLogLevel)
 
 TEST_F(LoggerTest, BasicLogging)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.log(LogLevel::Info, "Test info message"));
     EXPECT_NO_THROW(logger.log(LogLevel::Debug, "Test debug message"));
@@ -135,7 +137,7 @@ TEST_F(LoggerTest, BasicLogging)
 
 TEST_F(LoggerTest, FormattedLogging)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.log(LogLevel::Info, "Test value: {}", 42));
     EXPECT_NO_THROW(logger.log(LogLevel::Debug, "Test string: {}", std::string("hello")));
@@ -145,7 +147,7 @@ TEST_F(LoggerTest, FormattedLogging)
 
 TEST_F(LoggerTest, ConvenienceMethods)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.trace("Trace message"));
     EXPECT_NO_THROW(logger.debug("Debug message"));
@@ -162,7 +164,7 @@ TEST_F(LoggerTest, ConvenienceMethods)
 
 TEST_F(LoggerTest, LogLevelFiltering)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Warning);
 
     EXPECT_NO_THROW(logger.log(LogLevel::Trace, "Should not appear"));
@@ -175,13 +177,13 @@ TEST_F(LoggerTest, LogLevelFiltering)
 
 TEST_F(LoggerTest, Flush)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     EXPECT_NO_THROW(logger.flush());
 }
 
 TEST_F(LoggerTest, AsyncMode)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.enable_async_mode());
     EXPECT_TRUE(logger.is_async_mode_enabled());
@@ -192,7 +194,7 @@ TEST_F(LoggerTest, AsyncMode)
 
 TEST_F(LoggerTest, AsyncModeWithConfig)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     AsyncLoggerConfig config;
     config.batch_size = 10;
@@ -207,7 +209,7 @@ TEST_F(LoggerTest, AsyncModeWithConfig)
 
 TEST_F(LoggerTest, AsyncModeLogging)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.enable_async_mode());
     EXPECT_TRUE(logger.is_async_mode_enabled());
@@ -224,7 +226,7 @@ TEST_F(LoggerTest, AsyncModeLogging)
 
 TEST_F(LoggerTest, ThreadSafety)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     std::vector<std::thread> threads;
@@ -253,7 +255,7 @@ TEST_F(LoggerTest, ThreadSafety)
 
 TEST_F(LoggerTest, Reconfigure)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     auto new_log_file = std::filesystem::temp_directory_path() /
                         ("test_logger_reconfig_" + std::to_string(GetCurrentProcessId()) + ".log");
@@ -281,7 +283,7 @@ TEST_F(LoggerTest, ConfigureStatic)
 
     EXPECT_NO_THROW(Logger::configure("CONFIG_PREFIX", config_log_file.string(), "%Y-%m-%d"));
 
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     EXPECT_NO_THROW(logger.info("Message after static configure"));
 
     try
@@ -298,7 +300,7 @@ TEST_F(LoggerTest, ConfigureStatic)
 
 TEST_F(LoggerTest, Shutdown)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.shutdown());
 
@@ -307,7 +309,7 @@ TEST_F(LoggerTest, Shutdown)
 
 TEST_F(LoggerTest, LoggingAfterShutdown)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.shutdown());
 
@@ -316,7 +318,7 @@ TEST_F(LoggerTest, LoggingAfterShutdown)
 
 TEST_F(LoggerTest, AsyncModeInvalidConfig)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     AsyncLoggerConfig config;
     config.queue_capacity = 100;
@@ -328,7 +330,7 @@ TEST_F(LoggerTest, AsyncModeInvalidConfig)
 
 TEST_F(LoggerTest, LongMessages)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     std::string long_message(1000, 'X');
     EXPECT_NO_THROW(logger.info("{}", long_message));
@@ -339,7 +341,7 @@ TEST_F(LoggerTest, LongMessages)
 
 TEST_F(LoggerTest, SpecialCharacters)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info("Special: !@#$%^&*()"));
     EXPECT_NO_THROW(logger.info("Unicode: \u00e9\u00e8\u00ea"));
@@ -350,7 +352,7 @@ TEST_F(LoggerTest, SpecialCharacters)
 
 TEST_F(LoggerTest, EmptyMessage)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info(""));
     EXPECT_NO_THROW(logger.debug(""));
@@ -359,7 +361,7 @@ TEST_F(LoggerTest, EmptyMessage)
 
 TEST_F(LoggerTest, LogLevelFiltering_Formatted)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Warning);
 
     EXPECT_NO_THROW(logger.trace("Trace: {}", 1));
@@ -372,7 +374,7 @@ TEST_F(LoggerTest, LogLevelFiltering_Formatted)
 
 TEST_F(LoggerTest, LogLevelFiltering_Convenience)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Error);
 
     EXPECT_NO_THROW(logger.trace("Trace message"));
@@ -386,27 +388,27 @@ TEST_F(LoggerTest, LogLevelFiltering_Convenience)
 TEST_F(LoggerTest, LogLevelToString_Invalid)
 {
     LogLevel invalid_level = static_cast<LogLevel>(99);
-    EXPECT_EQ(log_level_to_string(invalid_level), "UNKNOWN");
+    EXPECT_EQ(to_string(invalid_level), "UNKNOWN");
 }
 
 TEST_F(LoggerTest, StringToLogLevel_VariousCases)
 {
-    EXPECT_EQ(Logger::string_to_log_level("Trace"), LogLevel::Trace);
-    EXPECT_EQ(Logger::string_to_log_level("DEBUG"), LogLevel::Debug);
-    EXPECT_EQ(Logger::string_to_log_level("Info"), LogLevel::Info);
-    EXPECT_EQ(Logger::string_to_log_level("WARNING"), LogLevel::Warning);
-    EXPECT_EQ(Logger::string_to_log_level("Error"), LogLevel::Error);
+    EXPECT_EQ(string_to_log_level("Trace"), LogLevel::Trace);
+    EXPECT_EQ(string_to_log_level("DEBUG"), LogLevel::Debug);
+    EXPECT_EQ(string_to_log_level("Info"), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("WARNING"), LogLevel::Warning);
+    EXPECT_EQ(string_to_log_level("Error"), LogLevel::Error);
 
-    EXPECT_EQ(Logger::string_to_log_level(" trace "), LogLevel::Info);
-    EXPECT_EQ(Logger::string_to_log_level("debug "), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level(" trace "), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("debug "), LogLevel::Info);
 
-    EXPECT_EQ(Logger::string_to_log_level("123"), LogLevel::Info);
-    EXPECT_EQ(Logger::string_to_log_level("0"), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("123"), LogLevel::Info);
+    EXPECT_EQ(string_to_log_level("0"), LogLevel::Info);
 }
 
 TEST_F(LoggerTest, LongFormatString)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(
         logger.info("This is a very long format string with many placeholders: {} {} {} {} {} {} {} {} {} {}", 1, 2, 3,
@@ -415,7 +417,7 @@ TEST_F(LoggerTest, LongFormatString)
 
 TEST_F(LoggerTest, SpecialFormatCharacters)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info("Braces: {{ and }}"));
     EXPECT_NO_THROW(logger.info("Percent: %%"));
@@ -427,7 +429,7 @@ TEST_F(LoggerTest, SpecialFormatCharacters)
 
 TEST_F(LoggerTest, MultipleArguments)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info("One arg: {}", 1));
     EXPECT_NO_THROW(logger.info("Two args: {} {}", 1, 2));
@@ -438,7 +440,7 @@ TEST_F(LoggerTest, MultipleArguments)
 
 TEST_F(LoggerTest, DifferentArgumentTypes)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info("Int: {}", 42));
     EXPECT_NO_THROW(logger.info("Float: {}", 3.14f));
@@ -451,14 +453,14 @@ TEST_F(LoggerTest, DifferentArgumentTypes)
 
 TEST_F(LoggerTest, MixedTypesInFormat)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info("Mixed: {} {} {} {} {}", 1, "two", 3.0f, true, 'X'));
 }
 
 TEST_F(LoggerTest, UnicodeCharacters)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info("Unicode: \u00e9\u00e8\u00ea"));
     // U+1F600 (grinning face) as raw UTF-8 bytes so the narrow literal needs no code-page conversion: the
@@ -468,7 +470,7 @@ TEST_F(LoggerTest, UnicodeCharacters)
 
 TEST_F(LoggerTest, NullPointerInFormat)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     void *ptr = nullptr;
     EXPECT_NO_THROW(logger.info("Null pointer: {}", ptr));
@@ -476,7 +478,7 @@ TEST_F(LoggerTest, NullPointerInFormat)
 
 TEST_F(LoggerTest, FormatSpecifiers_BasicTypes)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_NO_THROW(logger.info("Large int: {}", 2147483647));
     EXPECT_NO_THROW(logger.info("Negative float: {}", -3.14f));
@@ -490,7 +492,7 @@ TEST_F(LoggerTest, FormatSpecifiers_BasicTypes)
 
 TEST_F(LoggerTest, FormatSpecifiers_Containers)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     std::vector<int> vec = {1, 2, 3, 4, 5};
     EXPECT_NO_THROW(logger.info("Vector size: {}", vec.size()));
@@ -509,7 +511,7 @@ TEST_F(LoggerTest, FormatSpecifiers_Containers)
 
 TEST_F(LoggerTest, FormatSpecifiers_SmartPointers)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     auto shared = std::make_shared<int>(42);
     EXPECT_NO_THROW(logger.info("Shared ptr value: {}", *shared));
@@ -524,7 +526,7 @@ TEST_F(LoggerTest, FormatSpecifiers_SmartPointers)
 
 TEST_F(LoggerTest, StringView)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     std::string_view sv = "string view";
     EXPECT_NO_THROW(logger.info("String view: {}", sv));
@@ -532,7 +534,7 @@ TEST_F(LoggerTest, StringView)
 
 TEST_F(LoggerTest, Atomic)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     std::atomic<int> atomic{42};
     EXPECT_NO_THROW(logger.info("Atomic: {}", atomic.load()));
@@ -540,7 +542,7 @@ TEST_F(LoggerTest, Atomic)
 
 TEST_F(LoggerTest, ConvenienceMethods_AtTrace)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     EXPECT_NO_THROW(logger.trace("Trace test: {}", 1));
@@ -558,7 +560,7 @@ TEST_F(LoggerTest, ConvenienceMethods_AtTrace)
 
 TEST_F(LoggerTest, ConvenienceMethods_AtDebug)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Debug);
 
     EXPECT_NO_THROW(logger.trace("Trace filtered"));
@@ -570,7 +572,7 @@ TEST_F(LoggerTest, ConvenienceMethods_AtDebug)
 
 TEST_F(LoggerTest, ConvenienceMethods_AtInfo)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     EXPECT_NO_THROW(logger.trace("Trace filtered"));
@@ -582,7 +584,7 @@ TEST_F(LoggerTest, ConvenienceMethods_AtInfo)
 
 TEST_F(LoggerTest, ConvenienceMethods_AtWarning)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Warning);
 
     EXPECT_NO_THROW(logger.trace("Trace filtered"));
@@ -594,7 +596,7 @@ TEST_F(LoggerTest, ConvenienceMethods_AtWarning)
 
 TEST_F(LoggerTest, ConvenienceMethods_AtError)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Error);
 
     EXPECT_NO_THROW(logger.trace("Trace filtered"));
@@ -606,7 +608,7 @@ TEST_F(LoggerTest, ConvenienceMethods_AtError)
 
 TEST_F(LoggerTest, SetLogLevel_InvalidLevel)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     logger.set_log_level(LogLevel::Info);
     EXPECT_EQ(logger.get_log_level(), LogLevel::Info);
@@ -620,7 +622,7 @@ TEST_F(LoggerTest, SetLogLevel_InvalidLevel)
 
 TEST_F(LoggerTest, Flush_InAsyncMode)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     AsyncLoggerConfig config;
     config.batch_size = 10;
@@ -640,7 +642,7 @@ TEST_F(LoggerTest, Flush_InAsyncMode)
 
 TEST_F(LoggerTest, EnableAsyncMode_InvalidCapacity_Handled)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     EXPECT_FALSE(logger.is_async_mode_enabled());
 
     AsyncLoggerConfig config;
@@ -653,7 +655,7 @@ TEST_F(LoggerTest, EnableAsyncMode_InvalidCapacity_Handled)
 
 TEST_F(LoggerTest, AsyncMode_AllLevels)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     logger.enable_async_mode();
@@ -671,7 +673,7 @@ TEST_F(LoggerTest, AsyncMode_AllLevels)
 
 TEST_F(LoggerTest, AllLevelTemplates_WithFormatArgs)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     EXPECT_NO_THROW(logger.trace("trace int: {}", 42));
@@ -696,7 +698,7 @@ TEST_F(LoggerTest, AllLevelTemplates_WithFormatArgs)
 
 TEST_F(LoggerTest, LogLevelFiltering_SkipsBelowLevel)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Error);
 
     EXPECT_NO_THROW(logger.trace("filtered trace: {}", 1));
@@ -711,7 +713,7 @@ TEST_F(LoggerTest, LogLevelFiltering_SkipsBelowLevel)
 
 TEST_F(LoggerTest, AsyncMode_EnableTwice)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     logger.enable_async_mode();
     EXPECT_TRUE(logger.is_async_mode_enabled());
@@ -724,7 +726,7 @@ TEST_F(LoggerTest, AsyncMode_EnableTwice)
 
 TEST_F(LoggerTest, AsyncMode_DisableWhenNotEnabled)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     EXPECT_FALSE(logger.is_async_mode_enabled());
     EXPECT_NO_THROW(logger.disable_async_mode());
@@ -733,7 +735,7 @@ TEST_F(LoggerTest, AsyncMode_DisableWhenNotEnabled)
 
 TEST_F(LoggerTest, AsyncMode_CustomConfig)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     AsyncLoggerConfig config;
     config.queue_capacity = 512;
@@ -751,14 +753,14 @@ TEST_F(LoggerTest, AsyncMode_CustomConfig)
 
 TEST_F(LoggerTest, Flush_SyncMode)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.info("Pre-flush message");
     EXPECT_NO_THROW(logger.flush());
 }
 
 TEST_F(LoggerTest, Flush_AsyncMode)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     logger.enable_async_mode();
     logger.info("Async pre-flush");
@@ -768,7 +770,7 @@ TEST_F(LoggerTest, Flush_AsyncMode)
 
 TEST_F(LoggerTest, LogFileContentVerification)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.info("UNIQUE_VERIFY_MSG_7a3b");
@@ -782,7 +784,7 @@ TEST_F(LoggerTest, LogFileContentVerification)
 
 TEST_F(LoggerTest, LogLevelFiltering_OutputVerification)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Warning);
 
     logger.debug("FILTERED_DEBUG_MSG_9x2k");
@@ -798,7 +800,7 @@ TEST_F(LoggerTest, LogLevelFiltering_OutputVerification)
 
 TEST_F(LoggerTest, Reconfigure_SwitchesFile)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.info("MSG_IN_FILE_A_5t1w");
@@ -829,14 +831,14 @@ TEST_F(LoggerTest, Reconfigure_SwitchesFile)
 
 TEST_F(LoggerTest, ErrorOnInvalidLogPath)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     EXPECT_NO_THROW(logger.reconfigure("TEST", "/nonexistent_dir_12345/foo.log", "%Y-%m-%d %H:%M:%S"));
     EXPECT_NO_THROW(logger.info("Message after bad path"));
 }
 
 TEST_F(LoggerTest, Shutdown_AtomicCAS_OneShotExecution)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     logger.enable_async_mode();
@@ -866,7 +868,7 @@ TEST_F(LoggerTest, Shutdown_AtomicCAS_OneShotExecution)
 
 TEST_F(LoggerTest, ShutdownAndDestructor_Idempotent)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     logger.enable_async_mode();
@@ -881,7 +883,7 @@ TEST_F(LoggerTest, ShutdownAndDestructor_Idempotent)
 
 TEST_F(LoggerTest, ConcurrentShutdownAndLog)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     logger.enable_async_mode();
@@ -921,7 +923,7 @@ TEST_F(LoggerTest, ConcurrentShutdownAndLog)
 
 TEST_F(LoggerTest, AsyncMode_OutputVerification)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.enable_async_mode();
@@ -948,7 +950,7 @@ TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
         {
             while (!stop.load(std::memory_order_acquire))
             {
-                auto level = Logger::string_to_log_level("INVALID_LEVEL");
+                auto level = string_to_log_level("INVALID_LEVEL");
                 EXPECT_EQ(level, LogLevel::Info);
             }
         });
@@ -973,7 +975,7 @@ TEST_F(LoggerTest, StringToLogLevel_ConcurrentWithConfigure)
 
 TEST_F(LoggerTest, Reconfigure_InvalidPath_KeepsOldFile)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.info("BEFORE_INVALID_RECONFIG_3k7m");
@@ -992,7 +994,7 @@ TEST_F(LoggerTest, Reconfigure_InvalidPath_KeepsOldFile)
 
 TEST_F(LoggerTest, FlushAsync_DrainsPendingMessages)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.enable_async_mode();
@@ -1015,7 +1017,7 @@ TEST_F(LoggerTest, FlushAsync_DrainsPendingMessages)
 
 TEST_F(LoggerTest, ShutdownWithAsyncMode_NoHang)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.enable_async_mode();
@@ -1042,7 +1044,7 @@ TEST_F(LoggerTest, Configure_AbsolutePath_Works)
 
     Logger::configure("ABS_TEST", abs_log_file.string(), "%Y-%m-%d %H:%M:%S");
 
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
     logger.info("ABS_PATH_VERIFY_2w5q");
     logger.flush();
@@ -1066,7 +1068,7 @@ TEST_F(LoggerTest, Configure_AbsolutePath_Works)
 
 TEST_F(LoggerTest, Reconfigure_WhileAsyncMode_Works)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.enable_async_mode();
@@ -1100,7 +1102,7 @@ TEST_F(LoggerTest, Reconfigure_WhileAsyncMode_Works)
 
 TEST_F(LoggerTest, AsyncMode_ConcurrentLogAndDisable)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     constexpr int iterations = 200;
@@ -1162,7 +1164,7 @@ TEST_F(LoggerTest, DisableAsyncMode_NoLeakInNormalContext)
     // Outside the Windows loader lock, disable_async_mode() joins the writer thread and drops the AsyncLogger normally:
     // the loader-lock leak/detach path (which records a Logger intentional-leak event) must not run. A spurious leak
     // here would mean the writer was detached and the object orphaned when a clean join was possible.
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     const std::size_t before = Diagnostics::intentional_leak_count(Diagnostics::LeakSubsystem::Logger);
@@ -1185,7 +1187,7 @@ TEST_F(LoggerTest, DisableAsyncMode_NoLeakInNormalContext)
 
 TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     logger.info("TIMESTAMP_CHECK_MSG_2k4j");
@@ -1214,7 +1216,7 @@ TEST_F(LoggerTest, TimestampFormat_StrftimeOutput)
 
 TEST_F(LoggerTest, ConcurrentFileAccess_ReadWhileLogging)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     const int pre_open_count = 10;
@@ -1267,7 +1269,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ReadWhileLogging)
 
 TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     logger.info("BEFORE_EXCLUSIVE_OPEN");
@@ -1302,7 +1304,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_ExclusiveReadWhileLogging)
 
 TEST_F(LoggerTest, ConcurrentFileAccess_RepeatedOpenClose)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     const int iterations = 5;
@@ -1344,7 +1346,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_RepeatedOpenClose)
 
 TEST_F(LoggerTest, ConcurrentFileAccess_AsyncModeReadWhileLogging)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     logger.enable_async_mode();
@@ -1390,7 +1392,7 @@ TEST_F(LoggerTest, ConcurrentFileAccess_AsyncModeReadWhileLogging)
 
 TEST_F(LoggerTest, SetLogLevel_SameLevel_NoLogMessage)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     // Stabilize: set to Trace, then set again -- second call must be silent
     logger.set_log_level(LogLevel::Trace);
@@ -1414,7 +1416,7 @@ TEST_F(LoggerTest, SetLogLevel_SameLevel_NoLogMessage)
 
 TEST_F(LoggerTest, SetLogLevel_DifferentLevel_LogsChange)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Debug);
     logger.set_log_level(LogLevel::Info);
     logger.flush();
@@ -1428,7 +1430,7 @@ TEST_F(LoggerTest, SetLogLevel_DifferentLevel_LogsChange)
 
 TEST_F(LoggerTest, IsEnabled_AtCurrentLevel)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
     EXPECT_TRUE(logger.is_enabled(LogLevel::Info));
@@ -1440,7 +1442,7 @@ TEST_F(LoggerTest, IsEnabled_AtCurrentLevel)
 
 TEST_F(LoggerTest, IsEnabled_TraceLevel)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     EXPECT_TRUE(logger.is_enabled(LogLevel::Trace));
@@ -1452,7 +1454,7 @@ TEST_F(LoggerTest, IsEnabled_TraceLevel)
 
 TEST_F(LoggerTest, IsEnabled_ErrorLevel)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Error);
 
     EXPECT_FALSE(logger.is_enabled(LogLevel::Trace));
@@ -1464,7 +1466,7 @@ TEST_F(LoggerTest, IsEnabled_ErrorLevel)
 
 TEST_F(LoggerTest, IsEnabled_ConsistentWithGetLogLevel)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
 
     const LogLevel all_levels[] = {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning,
                                    LogLevel::Error};
@@ -1484,7 +1486,7 @@ TEST_F(LoggerTest, IsEnabled_ConsistentWithGetLogLevel)
 
 TEST_F(LoggerTest, Reconfigure_SameParams_SkipsReopen)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     auto first_file = m_test_log_file;
@@ -1504,7 +1506,7 @@ TEST_F(LoggerTest, Reconfigure_SameParams_SkipsReopen)
 
 TEST_F(LoggerTest, Reconfigure_AfterShutdown_Succeeds)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.shutdown();
 
     // Reconfigure after shutdown should reopen and work
@@ -1520,7 +1522,7 @@ TEST_F(LoggerTest, Reconfigure_AfterShutdown_Succeeds)
 
 TEST_F(LoggerTest, Log_ErrorLevel_WhenFileClosed_WritesToStderr)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.shutdown();
 
     // Reconfigure to an invalid path so the file stream fails to open
@@ -1537,7 +1539,7 @@ TEST_F(LoggerTest, Log_ErrorLevel_WhenFileClosed_WritesToStderr)
 
 TEST_F(LoggerTest, Log_InfoLevel_WhenFileClosed_SilentlyDropped)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.shutdown();
     Logger::configure("DROP_TEST", "Z:\\nonexistent_dir_12345\\impossible.log", "%H:%M:%S");
 
@@ -1552,7 +1554,7 @@ TEST_F(LoggerTest, Log_InfoLevel_WhenFileClosed_SilentlyDropped)
 
 TEST_F(LoggerTest, LogNoexcept_IsNoThrowAndWritesMessage)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     // The no-throw entry point must be declared noexcept so it is safe to call from hook callbacks and other
@@ -1571,7 +1573,7 @@ TEST_F(LoggerTest, LogNoexcept_IsNoThrowAndWritesMessage)
 
 TEST_F(LoggerTest, LogNoexcept_ReturnsFalseWhenFilteredOut)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Error);
 
     EXPECT_FALSE(logger.log_noexcept(LogLevel::Debug, "below the threshold"));
@@ -1580,7 +1582,7 @@ TEST_F(LoggerTest, LogNoexcept_ReturnsFalseWhenFilteredOut)
 
 TEST_F(LoggerTest, TryLog_IsNoThrowAndFormatsMessage)
 {
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     // try_log is declared noexcept, but noexcept(try_log(level, "{}", arg)) is not a useful probe: the
@@ -1613,8 +1615,8 @@ TEST(LoggerConfigureOverload, TwoArgConfigureUsesDefaultTimestamp)
 {
     const auto path = make_logger_overload_path();
     Logger::configure("PFX", path.string());
-    Logger::get_instance().info("hello");
-    Logger::get_instance().flush();
+    log().info("hello");
+    log().flush();
     EXPECT_TRUE(std::filesystem::exists(path));
     std::filesystem::remove(path);
 }
@@ -1625,7 +1627,7 @@ TEST_F(LoggerTest, FormattedAsyncLog_FitsInlineBufferWithoutHeapAllocation)
     // buffer, so a line that fits never materializes a heap std::format temporary. The allocation probe
     // is thread-local, so it counts only this (producer) thread's allocations and the async writer
     // thread's are invisible to it.
-    Logger &logger = Logger::get_instance();
+    Logger &logger = log();
     logger.set_log_level(LogLevel::Trace);
 
     AsyncLoggerConfig config;
@@ -1661,4 +1663,92 @@ TEST_F(LoggerTest, FormattedAsyncLog_FitsInlineBufferWithoutHeapAllocation)
     EXPECT_GT(control_allocs, 0) << "a line exceeding the inline buffer is expected to allocate, validating the probe";
 
     logger.disable_async_mode();
+}
+
+TEST_F(LoggerTest, SourceLocation_StampsFileAndLine)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+
+    // The formatted (LocatedFormat) path auto-stamps the call site as a compact [file:line] prefix. Capture the line
+    // number of the info() call from __LINE__ so the assertion is exact (it tracks future edits to this file) rather
+    // than a loose digit search.
+    const unsigned call_line = static_cast<unsigned>(__LINE__) + 1;
+    logger.info("SOURCE_STAMP_MARKER_{}", 7);
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    EXPECT_NE(content.find("SOURCE_STAMP_MARKER_7"), std::string::npos);
+    const std::string expected_stamp = "[test_logger.cpp:" + std::to_string(call_line) + "]";
+    EXPECT_NE(content.find(expected_stamp), std::string::npos)
+        << "expected the rendered line to carry the source stamp " << expected_stamp;
+}
+
+TEST_F(LoggerTest, RawStringViewLog_HasNoSourceStamp)
+{
+    Logger &logger = log();
+    logger.set_log_level(LogLevel::Info);
+
+    // The pre-formatted log(level, string_view) overload is selected for a runtime string (the consteval LocatedFormat
+    // constructor is not viable for a non-constant argument), so it carries no [file:line] stamp. This documents the
+    // two-tier split: located formatting stamps, pre-built strings do not.
+    const std::string prebuilt = "PREBUILT_NO_STAMP_MARKER_k3";
+    logger.log(LogLevel::Info, std::string_view(prebuilt));
+    logger.flush();
+
+    std::ifstream ifs(m_test_log_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+    const auto pos = content.find("PREBUILT_NO_STAMP_MARKER_k3");
+    ASSERT_NE(pos, std::string::npos);
+    auto line_start = content.rfind('\n', pos);
+    line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+    const std::string line = content.substr(line_start, pos - line_start);
+    EXPECT_EQ(line.find("[test_logger.cpp:"), std::string::npos)
+        << "the raw log(level, string_view) overload must not carry a source-location stamp";
+}
+
+TEST_F(LoggerTest, ConstructYourOwn_WritesToDedicatedSink)
+{
+    // The value facade is constructible: a Logger pointed at its own file logs independently of the process default
+    // reached through log(), so a subsystem can own a private sink without disturbing the global one.
+    static std::atomic<int> s_own_counter{0};
+    const auto own_file =
+        std::filesystem::temp_directory_path() / ("test_logger_own_" + std::to_string(GetCurrentProcessId()) + "_" +
+                                                  std::to_string(s_own_counter.fetch_add(1)) + ".log");
+
+    {
+        Logger custom("CUSTOM", own_file.string(), "%Y-%m-%d %H:%M:%S");
+        custom.set_log_level(LogLevel::Info);
+        custom.info("OWN_SINK_MARKER_q9");
+        custom.flush();
+    } // custom destroyed here: the sink is flushed and closed before the file is re-read.
+
+    std::ifstream ifs(own_file);
+    ASSERT_TRUE(ifs.is_open());
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    EXPECT_NE(content.find("OWN_SINK_MARKER_q9"), std::string::npos);
+
+    try
+    {
+        if (std::filesystem::exists(own_file))
+            std::filesystem::remove(own_file);
+    }
+    catch (const std::filesystem::filesystem_error &)
+    {
+    }
+}
+
+TEST_F(LoggerTest, ToString_RoundTripsWithStringToLogLevel)
+{
+    // to_string(LogLevel) and string_to_log_level are inverses for every named level.
+    const LogLevel levels[] = {LogLevel::Trace, LogLevel::Debug, LogLevel::Info, LogLevel::Warning, LogLevel::Error};
+    for (auto level : levels)
+    {
+        EXPECT_EQ(string_to_log_level(to_string(level)), level);
+    }
 }
