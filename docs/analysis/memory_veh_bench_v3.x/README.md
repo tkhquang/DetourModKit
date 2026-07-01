@@ -1,5 +1,7 @@
 # Memory microbenchmark: MinGW vectored-handler fault guard
 
+> Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
+
 This directory captures a run of `tests/bench_memory.cpp` against the `Memory` read primitives on **MinGW**, where the `seh_read` family is guarded by a process-wide vectored exception handler (VEH) rather than a per-call `VirtualQuery`. It is the MinGW companion to the MSVC numbers in [../memory_bench_v3.x](../memory_bench_v3.x): the same harness, run once per toolchain, so the two columns below are directly comparable.
 
 The question is "does the VEH actually buy anything on MinGW?" The VirtualQuery-validated baseline issues a `VirtualQuery` syscall on every terminal read (and one per link on a chain walk) because GCC has no zero-cost frame-based SEH. The VEH path removes that syscall entirely: the success path is a single `rep movsb` under a thread-local guard, and a read fault is recovered with a non-unwinding `__builtin_setjmp` / `__builtin_longjmp` (the GCC equivalent of Frida's `_setjmp(env, NULL)`). The per-thread guard is published through a Win32 TLS slot read with `TlsGetValue`, which is allocation-free and safe to touch from the exception-dispatch context (a `thread_local` / `__thread` would lower to `__emutls_get_address`, which allocates and locks on first access -- forbidden in a handler).

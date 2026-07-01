@@ -225,7 +225,7 @@ The obvious data signature for a class is its vtable header: the RTTI Complete O
 The robust anchor is the RTTI **type-descriptor name** string itself, for example the mangled `.?AVClassName@ns@@`. It is plain ASCII baked into the binary, fully ASLR-invariant, and tens of literal bytes long, so it effectively never collides. The flow is:
 
 1. Use `scan::scan` with `Pages::Readable` to search for the mangled name string and find the `TypeDescriptor`.
-2. Walk the MSVC RTTI structures from the descriptor to the vtable (see [rtti-walker.md](rtti-walker.md), which documents the COL / TypeDescriptor / self-RVA layout the `rtti` module already encodes).
+2. Walk the MSVC RTTI structures from the descriptor to the vtable (see [rtti-walker.md](../guides/rtti/rtti-walker.md), which documents the COL / TypeDescriptor / self-RVA layout the `rtti` module already encodes).
 
 This pairs with the `rtti` walker's opposite direction (vtable to name): one finds a vtable from a known name, the other recovers a name from a known vtable.
 
@@ -434,7 +434,7 @@ Recognized forms. Phase 2 has two modes, both gated by the same exact-target and
 - Default (`broad_match = false`): a shape scan for the dominant 64-bit string loads, `REX.W lea`/`mov reg, [rip+disp32]` (opcodes `8D` / `8B` with a RIP-relative ModRM). These instructions are self-delimiting from their byte shape, so the scan needs no instruction alignment and cannot desync on data or jump tables embedded in `.text`. This is the fast, robust default.
 - `broad_match = true`: keeps the default all-offset shape scan, then adds a Zydis-verified linear sweep that decodes the instruction stream and matches any RIP-relative memory operand resolving to the string. This additionally catches the rarer shapes the shape scan does not model -- `cmp [rip+d], imm`, `push [rip+d]`, a 32-bit (no-REX) `lea`/`mov`, and similar. The sweep restarts at the next byte on a decode failure to realign past embedded data, and any hit already found by the default scan is counted only once. Prefer broad mode only when the default reports `NoReference` for a target you know is referenced, since it does extra decode work.
 
-A shape the active mode does not model reports an error rather than a guess. One shape is out of scope for both modes: an indirect `call`/`jmp` through a `.data` pointer that itself holds the string address (a two-level indirection rather than a direct RIP reference to the string). Choose a string that is referenced exactly once; short, common strings are pooled and shared. This backend is also exposed declaratively as `AnchorKind::StringXref` in the [anchor registry](anchors.md).
+A shape the active mode does not model reports an error rather than a guess. One shape is out of scope for both modes: an indirect `call`/`jmp` through a `.data` pointer that itself holds the string address (a two-level indirection rather than a direct RIP reference to the string). Choose a string that is referenced exactly once; short, common strings are pooled and shared. This backend is also exposed declaratively as `AnchorKind::StringXref` in the [anchor registry](../guides/scanning/anchors.md).
 
 Return modes. `XrefReturn::ReferencingInstruction` (default) returns the load site; `XrefReturn::EnclosingFunction` back-scans to the function prologue that uses it. `XrefReturn::StringPointerSlot` is for the common pattern where a game caches the loaded string pointer into a global: when the unique reference is a `lea reg, [rip+string]` immediately (within a bounded forward window) followed by a `mov [rip+slot], reg` that stores the same register into a global slot, it returns the effective address of that slot rather than the load site. This resolves a cached global string pointer in one call. It applies only to the `lea` shape (a `mov reg, [rip+string]` load already delivered the value to a register); a register mismatch, an out-of-window store, a broad-only reference, or no matching store reports `ErrorCode::StoreNotFound`. The store match is first-within-window (compilers emit the cache next to the load), not uniqueness-checked, and an intervening reuse of the register is not modelled.
 
@@ -585,7 +585,7 @@ Three properties are load-bearing:
 - **Uniqueness is the backend's job.** `require_unique` has no effect for `rtti_vtable` or `string_xref` candidates: the backends fail closed on ambiguity by construction, mapping directly to "fall through to the next candidate" without a byte-mode uniqueness rescan.
 - **Prologue fallback ignores them.** The fallback pass only rewrites `direct`-tier candidates, so a name/string tier is inherently stomp-immune: it either resolved on the happy path or is skipped unchanged.
 
-The two backends themselves (`rtti::vtable_for_type` and `scan::find_string_xref`) are documented in full in [rtti-walker.md](rtti-walker.md) and the string-xref tour above; this section only covers expressing them inside a ladder.
+The two backends themselves (`rtti::vtable_for_type` and `scan::find_string_xref`) are documented in full in [rtti-walker.md](../guides/rtti/rtti-walker.md) and the string-xref tour above; this section only covers expressing them inside a ladder.
 
 ### 6.6 Ordering and logging
 

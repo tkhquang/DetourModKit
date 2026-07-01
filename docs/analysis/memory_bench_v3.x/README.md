@@ -1,6 +1,8 @@
 # Memory microbenchmark: validation predicate vs direct SEH-guarded read
 
-This directory captures a run of `tests/bench_memory.cpp` against the production `Memory` paths. The benchmark quantifies the per-call cost of each way to read game memory from a hot path, so a caller can choose between a validation predicate (`is_readable` / `is_writable`) and a direct SEH-guarded read (`seh_read`, `seh_read_chain`) with data rather than intuition. The guidance these numbers back is in [../../misc/hot-path-memory.md](../../misc/hot-path-memory.md).
+> Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
+
+This directory captures a run of `tests/bench_memory.cpp` against the production `Memory` paths. The benchmark quantifies the per-call cost of each way to read game memory from a hot path, so a caller can choose between a validation predicate (`is_readable` / `is_writable`) and a direct SEH-guarded read (`seh_read`, `seh_read_chain`) with data rather than intuition. The guidance these numbers back is in [Hot-Path Memory](../../guides/memory/hot-path-memory.md).
 
 The benchmark measures:
 
@@ -119,6 +121,6 @@ A local MinGW release recheck of phase `[9]` reports 1.10/2.47/6.12/13.33 Mops/s
 ## Caveats
 
 - Numbers are from a single development machine and are illustrative. The miss-path cost is dominated by `VirtualQuery` latency and shard-lock contention, so it varies by CPU, Windows build, and core count. Run the bench for your own target; the qualitative result (predicate expensive on the hot path, direct read cheap, chain cheap) holds across machines.
-- These are MSVC numbers, the shipping configuration. On MinGW there is no SEH, so `seh_read` / `seh_read_chain` fall back to a `VirtualQuery`-guarded read and pay a syscall per access; on that toolchain the gated walk can be faster than the chain primitives, which is why mod builds target MSVC and why `read_ptr_unchecked` is the recommended MinGW hot-path read (see [../../misc/hot-path-memory.md](../../misc/hot-path-memory.md)).
+- These are MSVC numbers, the shipping configuration. On MinGW there is no SEH, so `seh_read` / `seh_read_chain` fall back to a `VirtualQuery`-guarded read and pay a syscall per access; on that toolchain the gated walk can be faster than the chain primitives, which is why mod builds target MSVC and why `read_ptr_unchecked` is the recommended MinGW hot-path read (see [Hot-Path Memory](../../guides/memory/hot-path-memory.md)).
 - On MinGW the benchmark targets are built with the same Release LTO as the library (`INTERPROCEDURAL_OPTIMIZATION_RELEASE`, set in `tests/CMakeLists.txt` when IPO is supported), so each bench object and the LTO-only library archive form one LTO unit. This sidesteps a GCC linker-plugin bug where a mixed link (a non-LTO bench object against the LTO Release archive) re-emits libstdc++'s C++20-constrained `std::thread` / `std::tuple` linkonce symbol twice and fails with a spurious multiple-definition. No manual step is needed; do not force a non-LTO Release for the bench, since that mixed link is exactly what triggers the failure. The library and tests are unaffected.
 - The probe model uses synthetic page-per-object churn to force the miss path. A real hook whose objects share pages will miss less often and see a smaller gate penalty, but the structural point (the predicate adds a lock and a possible syscall the direct read does not) is independent of the hit rate.
