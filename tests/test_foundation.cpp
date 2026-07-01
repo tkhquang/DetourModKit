@@ -131,7 +131,10 @@ TEST(FoundationErrorCode, ToStringNamesCodeAndCategory)
 {
     EXPECT_EQ(to_string(ErrorCode::BackendFailed), "BackendFailed");
     EXPECT_EQ(to_string(ErrorCode::HealNoMatch), "HealNoMatch");
+    EXPECT_EQ(to_string(ErrorCode::ProcessMismatch), "ProcessMismatch");
     EXPECT_EQ(to_string(ErrorCode::InstanceAlreadyRunning), "InstanceAlreadyRunning");
+    EXPECT_EQ(to_string(ErrorCode::SessionAlreadyActive), "SessionAlreadyActive");
+    EXPECT_EQ(to_string(ErrorCode::SystemCallFailed), "SystemCallFailed");
     EXPECT_EQ(to_string(ErrorCategory::Scan), "scan");
     EXPECT_EQ(to_string(ErrorCategory::Manifest), "manifest");
     EXPECT_EQ(to_string(ErrorCategory::Lifecycle), "lifecycle");

@@ -364,17 +364,38 @@ TEST(SessionTeardown, StopsAutoReloadWatcherFirst)
 
 TEST(SessionTeardown, FlushesConfiguredLogger)
 {
-    auto log_path = std::filesystem::temp_directory_path() / "test_session_logger.log";
+    // Temp files here are named with the PID: under ctest PRE_TEST discovery each case runs in its own process, so the
+    // PID makes the path unique across parallel cases (which never share a process) and repeated runs (each cleans up).
+    const auto log_path = std::filesystem::temp_directory_path() /
+                          ("test_session_logger_" + std::to_string(GetCurrentProcessId()) + ".log");
+    std::filesystem::remove(log_path); // start clean so the read-back sees only this run's line
+
+    constexpr std::string_view kMarker = "Session teardown test message";
     {
         Result<Session> r = Session::start(ModInfo{.name = "SESS_TEST", .log_file = log_path.string()});
         ASSERT_TRUE(r.has_value()) << r.error().message();
         Session s = std::move(*r);
-        s.log().log(LogLevel::Info, "Session teardown test message");
-        EXPECT_NO_THROW({
-            Session moved = std::move(s);
-            (void)moved;
-        });
+        s.log().set_log_level(LogLevel::Info); // deterministic: do not depend on a prior test's level
+        s.log().log(LogLevel::Info, kMarker);
+        // Destroying the Session must run log().shutdown(), which flushes the async queue and closes the sink.
+        Session moved = std::move(s);
+        (void)moved;
     }
+
+    // Prove teardown actually FLUSHED the logger (not merely that it did not throw): the line must now be on disk.
+    std::ifstream in(log_path);
+    ASSERT_TRUE(in.is_open()) << "teardown should have created and flushed the log file";
+    bool found = false;
+    for (std::string line; std::getline(in, line);)
+    {
+        if (line.find(kMarker) != std::string::npos)
+        {
+            found = true;
+            break;
+        }
+    }
+    in.close();
+    EXPECT_TRUE(found) << "~Session must flush the configured logger; the logged line was not on disk";
 
     if (std::filesystem::exists(log_path))
     {

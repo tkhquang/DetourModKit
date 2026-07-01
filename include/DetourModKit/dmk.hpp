@@ -129,8 +129,11 @@ namespace DetourModKit
          */
         [[nodiscard]] static Result<Session> start(ModInfo info) noexcept;
 
+        /** @brief Move-constructs, transferring the live teardown; the moved-from Session is left inert. */
         Session(Session &&other) noexcept;
+        /** @brief Move-assigns: ends this Session (ordered teardown) if it was active, then adopts @p other. */
         Session &operator=(Session &&other) noexcept;
+        /** @brief Deleted: Session is move-only; its teardown and single-instance guard cannot be copied. */
         Session(const Session &) = delete;
         Session &operator=(const Session &) = delete;
 
@@ -236,14 +239,19 @@ namespace DetourModKit
      *
      *          Idempotent: subsequent calls are no-ops.
      * @param reserved DllMain's lpvReserved (NULL for FreeLibrary, non-NULL for process exit).
+     * @note Setup/control-plane only: call it solely from DllMain's DLL_PROCESS_DETACH path. Loader-lock-safe (it never
+     *       waits or joins under the loader lock); best-effort on a bare FreeLibrary, where the worker drains
+     *       asynchronously.
      */
     void bootstrap_detach(void *reserved) noexcept;
 
     /**
      * @brief Signals the bootstrap worker to run its teardown so a mod can drain cleanly before FreeLibrary.
-     * @details Safe from any thread. Non-blocking: it does not wait for the worker. A no-op if bootstrap() never ran or
-     *          teardown already completed. This is the handshake that turns a dynamic unload into a clean one: signal,
-     *          let the worker join the subsystem threads while the DLL is still mapped, then FreeLibrary.
+     * @details Non-blocking: it does not wait for the worker. A no-op if bootstrap() never ran or teardown already
+     *          completed. This is the handshake that turns a dynamic unload into a clean one: signal, let the worker
+     *          join the subsystem threads while the DLL is still mapped, then FreeLibrary.
+     * @note Callback-safe: safe from any thread (a hook, an input callback, or DllMain). It only signals an event and
+     *       never allocates, waits, or joins.
      */
     void request_shutdown() noexcept;
 
@@ -264,9 +272,11 @@ namespace DetourModKit
      *          use-after-unload hazards on the next load. Hooks are NOT touched: each is owned by a caller-held Hook
      *          handle and unhooks when that handle drops. Idempotent.
      *
-     * @param binding_names Names of bindings registered via input::register_combo (or config::press_combo /
-     * hold_combo).
-     * @note noexcept: consumers may call it from a DllMain detach path. Every internal throw is caught and logged.
+     * @param binding_names Names registered via input::register_combo (or config::press_combo / hold_combo).
+     * @note Setup/control-plane only and loader-lock-safe: intended for a Logic-DLL Shutdown() or a DllMain detach
+     * path.
+     *       noexcept and best-effort -- every internal throw (including logging) is caught, so nothing crosses the
+     *       boundary.
      * @warning Stop and join every consumer-owned worker thread, and drop the Logic DLL's Hook handles, before the
      *          loader reclaims that DLL's .text -- a thread that fires a hook after the unload executes freed code.
      */
@@ -279,7 +289,8 @@ namespace DetourModKit
      *          auto-reload watcher, then clears the config registry, for the same use-after-unload reasons. Hooks are
      *          not touched (caller-owned). Idempotent.
      *
-     * @note noexcept: safe from a DllMain detach path; internal throws are caught and logged.
+     * @note Setup/control-plane only and loader-lock-safe: safe from a Logic-DLL Shutdown() or a DllMain detach path.
+     *       noexcept and best-effort -- internal throws (including logging) are caught, so nothing crosses the edge.
      * @warning In a host running multiple Logic DLLs over one process-wide DetourModKit, this rips out the OTHER Logic
      *          DLLs' bindings too; prefer on_logic_dll_unload() with an explicit name list in that topology. The same
      *          worker-thread and Hook-handle teardown warning as on_logic_dll_unload() applies.

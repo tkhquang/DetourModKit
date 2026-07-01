@@ -561,15 +561,36 @@ namespace DetourModKit
             }
             catch (const std::exception &e)
             {
-                logger.error("on_logic_dll_unload: exception removing binding '{}': {}", name, e.what());
+                // The formatted logger.error can itself throw (bad_alloc while rendering, or a sink error), so wrap it:
+                // this is a noexcept helper on a DllMain / loader-lock path, where an escaping throw reaches
+                // std::terminate and takes down the host. Same guarding as on_logic_dll_unload_all below.
+                try
+                {
+                    logger.error("on_logic_dll_unload: exception removing binding '{}': {}", name, e.what());
+                }
+                catch (...)
+                {
+                }
             }
             catch (...)
             {
-                logger.error("on_logic_dll_unload: unknown exception removing binding '{}'.", name);
+                try
+                {
+                    logger.error("on_logic_dll_unload: unknown exception removing binding '{}'.", name);
+                }
+                catch (...)
+                {
+                }
             }
         }
 
-        logger.info("on_logic_dll_unload: drained {} binding(s).", bindings_removed);
+        try
+        {
+            logger.info("on_logic_dll_unload: drained {} binding(s).", bindings_removed);
+        }
+        catch (...)
+        {
+        }
 
         // Wipe the config registry last: the prior binding teardown may fire a registered setter one final time (a
         // setter observing a binding-driven flag, say), and clearing first would orphan that final-fire path mid-call.
