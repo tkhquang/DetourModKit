@@ -135,6 +135,20 @@ LEGACY_LOGGER_TOKEN = re.compile(
 # does not trip the gate.
 LEGACY_LIFECYCLE_TOKEN = re.compile(
     r'(\bDMK_Shutdown\b|\bBootstrap::|\bon_dll_attach\b|\bon_dll_detach\b)')
+# --- v4 rtti clean-break gate ---
+# The legacy rtti surface (the PascalCase namespace Rtti, the per-domain IdentifyError / HealError enums, their
+# identify_error_to_string / heal_error_to_string mappers, and the lossy heal_offset wrapper) was reshaped into the
+# lowercase namespace rtti over the Address / Result vocabulary; the two enums folded into the unified ErrorCode's
+# ErrorCategory::Rtti block (BadSlotAddress / UnreadableSlot / NoRtti / BadDescriptor / HealNoMatch / HealAmbiguous),
+# and heal_offset was dropped in favour of the Result-returning heal_landmark. None of these spellings may reappear.
+# Rtti:: is gated with the scope operator (PascalCase) so it targets exactly the deleted legacy namespace-qualified
+# spelling: the surviving ErrorCategory::Rtti enumerator has Rtti FOLLOWING '::' (never preceding it), so \bRtti:: does
+# not match it, and the v4 surface is lowercase rtti::. heal_offset is gated as a whole token, so the surviving
+# healed_offset field (a distinct name) is not matched. Matched after comment stripping, so v3-migration prose does not
+# trip the gate.
+LEGACY_RTTI_TOKEN = re.compile(
+    r'(\bRtti::|\bIdentifyError\b|\bHealError\b'
+    r'|\bidentify_error_to_string\b|\bheal_error_to_string\b|\bheal_offset\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
@@ -326,6 +340,13 @@ def main():
             if fm:
                 violations.append(
                     f"{rel}:{n}: legacy lifecycle symbol '{fm.group(1).strip()}' (replaced by the v4 Session/dmk.hpp surface)")
+
+        # v4 rtti gate D: no legacy rtti symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            rm = LEGACY_RTTI_TOKEN.search(line)
+            if rm:
+                violations.append(
+                    f"{rel}:{n}: legacy rtti symbol '{rm.group(1).strip()}' (replaced by the v4 rtti surface)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")

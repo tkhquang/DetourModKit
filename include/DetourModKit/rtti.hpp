@@ -5,7 +5,6 @@
 
 #include <atomic>
 #include <cstddef>
-#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -13,7 +12,7 @@
 namespace DetourModKit
 {
     /**
-     * @namespace DetourModKit::Rtti
+     * @namespace DetourModKit::rtti
      * @brief MSVC RTTI introspection primitives.
      * @details Walks the x64 MSVC C++ ABI structures laid down by the Visual
      *          Studio toolchain to recover the mangled type-descriptor name for a runtime object pointed to by a
@@ -34,7 +33,7 @@ namespace DetourModKit
      *          @ref type_name_into, @ref vtable_is_type, @ref find_in_pointer_table, the reverse-direction
      *          @ref vtable_for_type / @ref vtables_for_type / @ref TypeIdentity::matches, and the self-heal backends
      *          in @ref rtti_dissect.hpp (which include @ref identify_pointee_type, @ref reverse_scan_block,
-     *          @ref heal_landmark, @ref heal_offset, and @ref solve_fingerprint) -- is built on the
+     *          @ref heal_landmark, and @ref solve_fingerprint) -- is built on the
      *          COL/TypeDescriptor layout above. When the host binary is compiled with RTTI disabled (`/GR-` for MSVC
      *          and clang-cl), the TypeDescriptor records DMK needs to read are not emitted, and every RTTI-based
      *          resolver returns its fail-closed sentinel (`std::nullopt`, `std::unexpected`, `false`, or a zero
@@ -46,7 +45,7 @@ namespace DetourModKit
      *          long-form failure-mode discussion for each function is in docs/misc/rtti-walker.md and
      *          docs/misc/rtti-self-heal.md.
      */
-    namespace Rtti
+    namespace rtti
     {
         /// Default cap on the mangled-name length read into a heap-allocated string.
         inline constexpr std::size_t DEFAULT_TYPE_NAME_MAX = 256;
@@ -74,7 +73,7 @@ namespace DetourModKit
          * @note Performs one heap allocation for the returned std::string. For per-frame identity probes use @ref
          *       vtable_is_type or @ref type_name_into to avoid the allocation.
          */
-        [[nodiscard]] std::optional<std::string> type_name_of(std::uintptr_t vtable,
+        [[nodiscard]] std::optional<std::string> type_name_of(Address vtable,
                                                               std::size_t max_len = DEFAULT_TYPE_NAME_MAX) noexcept;
 
         /**
@@ -87,8 +86,11 @@ namespace DetourModKit
          * @param out_len Capacity of @p out including the NUL terminator. The function never writes more than @p
          *                out_len bytes.
          * @return Number of name bytes written (excluding the NUL terminator), or 0 on failure or empty output.
+         * @note Zero-allocation, but each call runs the loader-querying COL prelude (a GetModuleHandleEx-class lookup),
+         *       so it is an occasional identity probe, not a zero-cost per-frame test; cache a @ref TypeIdentity when
+         *       checking the same type every frame.
          */
-        [[nodiscard]] std::size_t type_name_into(std::uintptr_t vtable, char *out, std::size_t out_len) noexcept;
+        [[nodiscard]] std::size_t type_name_into(Address vtable, char *out, std::size_t out_len) noexcept;
 
         /**
          * @brief Tests whether the MSVC RTTI mangled name for @p vtable equals @p expected exactly.
@@ -100,8 +102,10 @@ namespace DetourModKit
          * @param expected Mangled name to compare against. Must be non-empty and shorter than @ref MAX_TYPE_NAME_LEN.
          * @return true on exact match; false on mismatch, on any read failure, or when @p expected is empty or
          *         oversized.
+         * @note Each call runs the loader-querying COL prelude, so it is an occasional identity probe, not a zero-cost
+         *       per-frame test; cache a @ref TypeIdentity when checking the same type every frame.
          */
-        [[nodiscard]] bool vtable_is_type(std::uintptr_t vtable, std::string_view expected) noexcept;
+        [[nodiscard]] bool vtable_is_type(Address vtable, std::string_view expected) noexcept;
 
         /**
          * @brief Scans a pointer-table for the first slot whose object has the given RTTI type-descriptor name.
@@ -118,8 +122,8 @@ namespace DetourModKit
          *          warm path. Cache writes use a single relaxed store because concurrent first-callers converge on the
          *          same vtable value (image-resident vtables are unique per concrete type).
          *
-         *          Caller-owned cache shape: one std::atomic<std::uintptr_t> per expected name, default-initialised to
-         *          zero. Zero encodes "cold".
+         *          Caller-owned cache shape: one std::atomic<Address> per expected name, default-initialised to a null
+         *          Address. A null Address encodes "cold".
          * @param table Base address of the pointer table.
          * @param slot_count Number of slots to scan.
          * @param expected Mangled name to match.
@@ -128,6 +132,8 @@ namespace DetourModKit
          *               pointer array; pass a larger stride for tables that interleave per-slot metadata between
          *               pointers.
          * @return The object pointer (the value stored in the slot) on first match, or std::nullopt if no slot matched.
+         * @note The cold path runs the RTTI walk per slot (setup / first-resolve cost); the warm-cache path is a single
+         *       qword compare per slot, so pass a @p vtable_cache whenever this is called repeatedly.
          * @warning The warm-cache path assumes one canonical vtable address per expected name. If multiple derived
          *          concrete classes share the same base-mangled name and the table holds a mix of them, only slots
          *          whose vtable equals the
@@ -135,9 +141,9 @@ namespace DetourModKit
          *          other matches are skipped. For MSVC RTTI this is correct because mangled names encode the
          *          most-derived class, not the base.
          */
-        [[nodiscard]] std::optional<std::uintptr_t>
-        find_in_pointer_table(std::uintptr_t table, std::size_t slot_count, std::string_view expected,
-                              std::atomic<std::uintptr_t> *vtable_cache = nullptr,
+        [[nodiscard]] std::optional<Address>
+        find_in_pointer_table(Address table, std::size_t slot_count, std::string_view expected,
+                              std::atomic<Address> *vtable_cache = nullptr,
                               std::size_t stride = sizeof(std::uintptr_t)) noexcept;
 
         /**
@@ -163,9 +169,11 @@ namespace DetourModKit
          * @return The primary vtable address on a unique match; std::nullopt when no COL.offset == 0 match exists, when
          *         @p range is invalid, or when more than one distinct primary vtable shares the name (an ambiguous
          *         image: the resolver fails closed rather than guessing).
+         * @note Setup/control-plane only: it sweeps the module's readable sections, so run it once at init (or behind a
+         *       cached @ref TypeIdentity), never per-frame.
          */
-        [[nodiscard]] std::optional<std::uintptr_t> vtable_for_type(std::string_view mangled,
-                                                                    Region range = Region::host()) noexcept;
+        [[nodiscard]] std::optional<Address> vtable_for_type(std::string_view mangled,
+                                                             Region range = Region::host()) noexcept;
 
         /**
          * @brief Collects every sub-object vtable sharing a class's mangled name.
@@ -181,8 +189,9 @@ namespace DetourModKit
          * @param range Module image to search. Defaults to the host EXE.
          * @return Total number of distinct matching vtables found (capped at an internal upper bound that far exceeds
          *         any real inheritance graph). A return value greater than @p out_cap signals the output was truncated.
+         * @note Setup/control-plane only: a full module-section sweep, like @ref vtable_for_type; run it at init.
          */
-        [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, std::uintptr_t *out, std::size_t out_cap,
+        [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
                                                    Region range = Region::host()) noexcept;
 
         /**
@@ -196,39 +205,25 @@ namespace DetourModKit
          *       COL-anchored value), never from the vtable's slot contents: under the MSVC linker's identical-COMDAT
          *       folding (/OPT:ICF) two distinct classes can share folded function-pointer slots, so a slot-content
          *       comparison is not class-unique.
-         * @note Holds the name as a non-owning view; the backing string must outlive the handle. Non-copyable and
-         *       non-movable (it owns atomic cache state); hold it as a static or a long-lived member.
+         * @note Owns its mangled name (a private std::string copy), so it is self-contained: a string literal, a
+         *       std::string_view into any storage, or a std::string temporary can all initialise it safely with no
+         *       lifetime coupling to the caller's buffer. Non-copyable and non-movable (it owns atomic cache state);
+         *       hold it as a static or a long-lived member.
          */
         class TypeIdentity
         {
         public:
             /**
-             * @brief Constructs an identity for @p mangled, scoped to @p range.
-             * @param mangled Exact MSVC mangled name. Stored as a view; the backing storage must outlive the handle.
+             * @brief Constructs a cached identity for @p mangled, scoped to @p range.
+             * @details Copies @p mangled into an owned std::string, so a string literal, a std::string_view, or a
+             *          std::string temporary all bind safely without the caller having to keep the backing bytes alive.
+             * @param mangled Exact MSVC mangled name. Copied into owned storage.
              * @param range Module image to resolve in. Defaults to the host EXE.
              */
-            explicit TypeIdentity(std::string_view mangled, Region range = Region::host()) noexcept;
+            explicit TypeIdentity(std::string_view mangled, Region range = Region::host());
 
-            /**
-             * @brief Constructs a cached identity from a null-terminated mangled type name.
-             * @details This exact-match overload keeps string-literal call sites unambiguous while the deleted
-             *          std::string rvalue overload rejects dangling temporaries. A null pointer is treated as an empty
-             *          name and resolves to no match.
-             * @param mangled Null-terminated MSVC RTTI name. The backing bytes must outlive this identity.
-             * @param range Module range searched for the primary vtable.
-             */
-            explicit TypeIdentity(const char *mangled, Region range = Region::host()) noexcept
-                : TypeIdentity(mangled != nullptr ? std::string_view(mangled) : std::string_view{}, range)
-            {
-            }
-
-            /**
-             * @brief Rejects std::string temporaries because the identity stores a non-owning view.
-             * @details A string literal, std::string_view, or long-lived std::string lvalue can still bind safely. A
-             *          std::string rvalue would dangle as soon as the constructor returns, so it is a compile-time
-             *          error.
-             */
-            TypeIdentity(std::string &&mangled, Region range = Region::host()) = delete;
+            TypeIdentity(const TypeIdentity &) = delete;
+            TypeIdentity &operator=(const TypeIdentity &) = delete;
 
             /**
              * @brief Tests whether @p vtable is this type's primary vtable.
@@ -236,28 +231,32 @@ namespace DetourModKit
              *          missing type never matches.
              * @param vtable Candidate vtable (an object's first qword).
              * @return true when @p vtable equals the resolved primary vtable.
+             * @note Callback-safe once warm: the first call resolves (a module sweep), every later call is a single
+             *       cached qword compare, so this is the per-frame identity check.
              */
-            [[nodiscard]] bool matches(std::uintptr_t vtable) const noexcept;
+            [[nodiscard]] bool matches(Address vtable) const noexcept;
 
             /**
              * @brief Returns the resolved primary vtable, resolving on first use.
              * @return The vtable address, or std::nullopt if it cannot be resolved in the configured module range.
+             * @note The first call resolves (a setup-cost module sweep); the result is cached, so a later call is a
+             *       relaxed atomic load.
              */
-            [[nodiscard]] std::optional<std::uintptr_t> vtable() const noexcept;
+            [[nodiscard]] std::optional<Address> vtable() const noexcept;
 
         private:
-            std::string_view m_mangled;
+            std::string m_mangled;
             Region m_range;
 
-            // m_cached holds the resolved primary vtable and is written only on a SUCCESSFUL (nonzero) resolve.
+            // m_cached holds the resolved primary vtable and is written only on a SUCCESSFUL (non-null) resolve.
             // m_resolved latches that success and is published with release after m_cached is stored, so an
             // acquire-load that observes m_resolved == true also observes the cached value. A failed resolve latches
             // neither flag, so a later call retries once the type becomes resolvable instead of caching the miss as
             // permanent.
-            mutable std::atomic<std::uintptr_t> m_cached{0};
+            mutable std::atomic<Address> m_cached{Address{}};
             mutable std::atomic<bool> m_resolved{false};
         };
-    } // namespace Rtti
+    } // namespace rtti
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_RTTI_HPP

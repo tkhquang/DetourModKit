@@ -6,7 +6,7 @@
  * @brief One-call aggregator that snapshots DMK's runtime diagnostics -- intentional-leak counters and self-heal
  *        drift -- into a single struct.
  * @details Each piece is already queryable on its own (@ref DetourModKit::Diagnostics::intentional_leak_count, @ref
- *          DetourModKit::Rtti::heal_report). This header only bundles them so a consumer can capture a one-shot health
+ *          DetourModKit::rtti::heal_report). This header only bundles them so a consumer can capture a one-shot health
  *          view in a single call instead of stitching the sources together by hand.
  */
 
@@ -37,7 +37,7 @@ namespace DetourModKit
 
             /// Landmarks in the supplied drift report.
             std::size_t drift_total = 0;
-            /// Landmarks that healed (@ref Rtti::DriftEntry::ok).
+            /// Landmarks that healed (@ref rtti::DriftEntry::ok).
             std::size_t drift_healed = 0;
             /// Landmarks that failed to heal.
             std::size_t drift_failed = 0;
@@ -46,13 +46,13 @@ namespace DetourModKit
         /**
          * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
          * @details Reads the process-wide intentional-leak counters and counts healed vs failed entries in
-         *          @p drift_report. The drift report is caller-owned (typically the output of @ref Rtti::heal_report);
+         *          @p drift_report. The drift report is caller-owned (typically the output of @ref rtti::heal_report);
          *          pass an empty span to skip the drift summary.
          * @param drift_report A self-heal drift report, or an empty span to skip the drift summary.
          * @return The aggregated snapshot.
          * @note Setup/control-plane only: not callback-safe. Call it from init / a worker / a diagnostics command.
          */
-        [[nodiscard]] Snapshot collect(std::span<const Rtti::DriftEntry> drift_report = {});
+        [[nodiscard]] Snapshot collect(std::span<const rtti::DriftEntry> drift_report = {});
     } // namespace Diagnostics
 } // namespace DetourModKit
 

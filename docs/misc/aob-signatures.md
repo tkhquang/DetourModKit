@@ -225,9 +225,9 @@ The obvious data signature for a class is its vtable header: the RTTI Complete O
 The robust anchor is the RTTI **type-descriptor name** string itself, for example the mangled `.?AVClassName@ns@@`. It is plain ASCII baked into the binary, fully ASLR-invariant, and tens of literal bytes long, so it effectively never collides. The flow is:
 
 1. Use `scan::scan` with `Pages::Readable` to search for the mangled name string and find the `TypeDescriptor`.
-2. Walk the MSVC RTTI structures from the descriptor to the vtable (see [rtti-walker.md](rtti-walker.md), which documents the COL / TypeDescriptor / self-RVA layout the `Rtti` module already encodes).
+2. Walk the MSVC RTTI structures from the descriptor to the vtable (see [rtti-walker.md](rtti-walker.md), which documents the COL / TypeDescriptor / self-RVA layout the `rtti` module already encodes).
 
-This pairs with the `Rtti` walker's opposite direction (vtable to name): one finds a vtable from a known name, the other recovers a name from a known vtable.
+This pairs with the `rtti` walker's opposite direction (vtable to name): one finds a vtable from a known name, the other recovers a name from a known vtable.
 
 #### Using the readable scanner inside a cascade
 

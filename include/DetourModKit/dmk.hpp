@@ -312,7 +312,7 @@ namespace DMKFormat = DetourModKit::Format;
 namespace DMKFilesystem = DetourModKit::Filesystem;
 namespace DMKMemory = DetourModKit::memory;
 namespace DMKMath = DetourModKit::Math;
-namespace DMKRtti = DetourModKit::Rtti;
+namespace DMKRtti = DetourModKit::rtti;
 
 #ifndef DMK_NO_SHORT_NAMES
 /**

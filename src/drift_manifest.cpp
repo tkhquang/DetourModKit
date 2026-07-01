@@ -12,45 +12,58 @@
 
 namespace DetourModKit
 {
-    namespace Rtti
+    namespace rtti
     {
         namespace
         {
             constexpr std::string_view MANIFEST_HEADER = "# DetourModKit drift manifest v1";
             constexpr char FIELD_SEP = '\t';
 
-            // Stable round-trip tokens for HealError, deliberately distinct from the verbose human-readable
-            // heal_error_to_string text (which is for logs):
-            // a manifest must parse back even if the log wording is reworded.
-            [[nodiscard]] std::string_view heal_error_token(HealError error) noexcept
+            // Stable round-trip tokens for the Rtti-block heal ErrorCodes, deliberately distinct from the verbose
+            // human-readable Error::message() text (which is for logs): a manifest must parse back even if the log
+            // wording is reworded, so the token strings are frozen independently of the enumerator spellings.
+            // A drift entry's error is meaningful only when ok == false, and heal_report only ever writes Ok (the
+            // healed default) or one of the three Rtti-block heal codes. Give each a distinct token -- including Ok --
+            // so the ErrorCode round-trips exactly rather than a successful entry's Ok collapsing to a failure token.
+            // The default arm still maps any unexpected code to BadDescriptor so a malformed producer never emits an
+            // untokenizable field.
+            [[nodiscard]] std::string_view heal_error_token(ErrorCode error) noexcept
             {
                 switch (error)
                 {
-                case HealError::BadDescriptor:
+                case ErrorCode::Ok:
+                    return "Ok";
+                case ErrorCode::BadDescriptor:
                     return "BadDescriptor";
-                case HealError::NoMatch:
+                case ErrorCode::HealNoMatch:
                     return "NoMatch";
-                case HealError::Ambiguous:
+                case ErrorCode::HealAmbiguous:
                     return "Ambiguous";
+                default:
+                    return "BadDescriptor";
                 }
-                return "BadDescriptor";
             }
 
-            [[nodiscard]] bool parse_heal_error(std::string_view token, HealError &out) noexcept
+            [[nodiscard]] bool parse_heal_error(std::string_view token, ErrorCode &out) noexcept
             {
+                if (token == "Ok")
+                {
+                    out = ErrorCode::Ok;
+                    return true;
+                }
                 if (token == "BadDescriptor")
                 {
-                    out = HealError::BadDescriptor;
+                    out = ErrorCode::BadDescriptor;
                     return true;
                 }
                 if (token == "NoMatch")
                 {
-                    out = HealError::NoMatch;
+                    out = ErrorCode::HealNoMatch;
                     return true;
                 }
                 if (token == "Ambiguous")
                 {
-                    out = HealError::Ambiguous;
+                    out = ErrorCode::HealAmbiguous;
                     return true;
                 }
                 return false;
@@ -214,5 +227,5 @@ namespace DetourModKit
             const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             return parse_drift_report(text);
         }
-    } // namespace Rtti
+    } // namespace rtti
 } // namespace DetourModKit
