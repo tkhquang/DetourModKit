@@ -13,7 +13,7 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/srw_shared_mutex.hpp"
+#include "internal/srw_shared_mutex.hpp"
 #include "platform.hpp"
 #include "internal/memory_guarded.hpp"
 

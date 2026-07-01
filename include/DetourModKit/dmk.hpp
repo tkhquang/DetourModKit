@@ -18,13 +18,13 @@
 
 // Foundation vocabulary and every public module. bootstrap.hpp is deliberately absent: its Session/bootstrap surface
 // lives in this header now.
+#include "DetourModKit/anchor.hpp"
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/async_logger_config.hpp"
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/diagnostics.hpp"
-#include "DetourModKit/diagnostics_dump.hpp"
-#include "DetourModKit/drift_manifest.hpp"
-#include "DetourModKit/event_dispatcher.hpp"
+#include "DetourModKit/detail/drift_manifest.hpp"
+#include "DetourModKit/detail/event_dispatcher.hpp"
 #include "DetourModKit/filesystem.hpp"
 #include "DetourModKit/format.hpp"
 #include "DetourModKit/hook.hpp"
@@ -37,7 +37,7 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 #include "DetourModKit/scan.hpp"
-#include "DetourModKit/worker.hpp"
+#include "DetourModKit/detail/worker.hpp"
 
 #include <functional>
 #include <span>

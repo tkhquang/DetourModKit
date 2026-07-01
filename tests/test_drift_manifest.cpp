@@ -4,14 +4,13 @@
 #include <span>
 #include <string>
 
-#include "DetourModKit/drift_manifest.hpp"
+#include "DetourModKit/detail/drift_manifest.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
 #include <process.h> // _getpid for collision-free temp paths under parallel CTest
 
 using DetourModKit::ErrorCode;
 using DetourModKit::rtti::DriftEntry;
-using DetourModKit::rtti::ManifestError;
 namespace rtti = DetourModKit::rtti;
 
 TEST(DriftManifestTest, RoundTripPreservesEntries)
@@ -91,7 +90,7 @@ TEST(DriftManifestTest, ParseRejectsMissingHeader)
 {
     const auto parsed = rtti::parse_drift_report("not a header\nfoo\t1\t2\t3\t1\tNoMatch\n");
     ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error(), ManifestError::MissingHeader);
+    EXPECT_EQ(parsed.error().code, ErrorCode::MissingHeader);
 }
 
 TEST(DriftManifestTest, ParseRejectsMalformedLine)
@@ -99,14 +98,14 @@ TEST(DriftManifestTest, ParseRejectsMalformedLine)
     // Header present, but a record line with too few fields.
     const auto parsed = rtti::parse_drift_report("# DetourModKit drift manifest v1\nfoo\t1\t2\n");
     ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error(), ManifestError::MalformedLine);
+    EXPECT_EQ(parsed.error().code, ErrorCode::MalformedLine);
 }
 
 TEST(DriftManifestTest, ParseRejectsNonNumericOffset)
 {
     const auto parsed = rtti::parse_drift_report("# DetourModKit drift manifest v1\nfoo\tNaN\t2\t3\t1\tNoMatch\n");
     ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error(), ManifestError::MalformedLine);
+    EXPECT_EQ(parsed.error().code, ErrorCode::MalformedLine);
 }
 
 TEST(DriftManifestTest, ParseToleratesBlankLinesAndCrlf)
@@ -144,7 +143,7 @@ TEST(DriftManifestTest, ReadMissingFileFailsClosed)
     const auto parsed = rtti::read_drift_report_from_file("dmk_definitely_no_such_manifest.tmp");
     ASSERT_FALSE(parsed.has_value());
     // A file that cannot be opened is an open failure, distinct from a present-but-corrupt manifest.
-    EXPECT_EQ(parsed.error(), ManifestError::FileOpenFailed);
+    EXPECT_EQ(parsed.error().code, ErrorCode::FileOpenFailed);
 }
 
 TEST(DriftManifestTest, ReadPresentButCorruptIsParseError)
@@ -161,7 +160,7 @@ TEST(DriftManifestTest, ReadPresentButCorruptIsParseError)
     const auto parsed = rtti::read_drift_report_from_file(path);
     std::remove(path.c_str());
     ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error(), ManifestError::MissingHeader);
+    EXPECT_EQ(parsed.error().code, ErrorCode::MissingHeader);
 }
 
 TEST(DriftManifestTest, ReadEmptyFileFailsAsCorrupt)
@@ -176,18 +175,18 @@ TEST(DriftManifestTest, ReadEmptyFileFailsAsCorrupt)
     const auto parsed = rtti::read_drift_report_from_file(path);
     std::remove(path.c_str());
     ASSERT_FALSE(parsed.has_value());
-    EXPECT_EQ(parsed.error(), ManifestError::MissingHeader);
+    EXPECT_EQ(parsed.error().code, ErrorCode::MissingHeader);
 }
 
-TEST(DriftManifestTest, ManifestErrorStringsAreDistinct)
+TEST(DriftManifestTest, ManifestErrorCodesStringifyDistinctly)
 {
-    EXPECT_NE(rtti::manifest_error_to_string(ManifestError::MissingHeader),
-              rtti::manifest_error_to_string(ManifestError::MalformedLine));
-    EXPECT_NE(rtti::manifest_error_to_string(ManifestError::MalformedLine),
-              rtti::manifest_error_to_string(ManifestError::FileOpenFailed));
-    EXPECT_NE(rtti::manifest_error_to_string(ManifestError::MissingHeader),
-              rtti::manifest_error_to_string(ManifestError::FileOpenFailed));
-    EXPECT_FALSE(rtti::manifest_error_to_string(ManifestError::MissingHeader).empty());
-    EXPECT_FALSE(rtti::manifest_error_to_string(ManifestError::MalformedLine).empty());
-    EXPECT_FALSE(rtti::manifest_error_to_string(ManifestError::FileOpenFailed).empty());
+    // The former ManifestError enum folded into the unified ErrorCode's ErrorCategory::Manifest block; the three
+    // manifest codes must still stringify to distinct, non-empty labels through the single to_string(ErrorCode).
+    using DetourModKit::to_string;
+    EXPECT_NE(to_string(ErrorCode::MissingHeader), to_string(ErrorCode::MalformedLine));
+    EXPECT_NE(to_string(ErrorCode::MalformedLine), to_string(ErrorCode::FileOpenFailed));
+    EXPECT_NE(to_string(ErrorCode::MissingHeader), to_string(ErrorCode::FileOpenFailed));
+    EXPECT_FALSE(to_string(ErrorCode::MissingHeader).empty());
+    EXPECT_FALSE(to_string(ErrorCode::MalformedLine).empty());
+    EXPECT_FALSE(to_string(ErrorCode::FileOpenFailed).empty());
 }

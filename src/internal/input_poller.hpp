@@ -18,7 +18,7 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/input_codes.hpp"
-#include "DetourModKit/srw_shared_mutex.hpp"
+#include "internal/srw_shared_mutex.hpp"
 
 #include <atomic>
 #include <chrono>

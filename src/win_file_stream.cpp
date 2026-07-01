@@ -1,4 +1,4 @@
-#include "DetourModKit/win_file_stream.hpp"
+#include "DetourModKit/detail/win_file_stream.hpp"
 
 #include <windows.h>
 #include <algorithm>

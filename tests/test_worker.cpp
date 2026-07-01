@@ -7,7 +7,7 @@
 #include <thread>
 #include <vector>
 
-#include "DetourModKit/worker.hpp"
+#include "DetourModKit/detail/worker.hpp"
 
 using namespace DetourModKit;
 

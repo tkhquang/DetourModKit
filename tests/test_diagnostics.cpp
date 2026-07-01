@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <vector>
@@ -288,4 +289,105 @@ TEST(DiagnosticsHookLifecycleTest, VmtHookEmitsVmtKindCreatedRemoved)
     EXPECT_EQ(events[1].name, "VmtLifecycleHook");
     EXPECT_EQ(events[1].kind, diag::HookKind::Vmt);
     EXPECT_EQ(events[1].transition, diag::HookTransition::Removed);
+}
+
+// ---- Runtime-diagnostics Snapshot: the one-call aggregator folded in from diagnostics_dump ----
+
+class DiagnosticsSnapshotTest : public ::testing::Test
+{
+protected:
+    void SetUp() override { diag::reset_intentional_leaks(); }
+
+    void TearDown() override { diag::reset_intentional_leaks(); }
+};
+
+TEST_F(DiagnosticsSnapshotTest, EmptyInputsProduceZeroes)
+{
+    const diag::Snapshot snapshot = diag::collect();
+
+    EXPECT_EQ(snapshot.total_intentional_leaks, 0u);
+    EXPECT_EQ(snapshot.drift_total, 0u);
+    EXPECT_EQ(snapshot.drift_healed, 0u);
+    EXPECT_EQ(snapshot.drift_failed, 0u);
+    // No anchor report was passed, so the quality roll-up is empty.
+    EXPECT_EQ(snapshot.anchor_quality.total, 0u);
+}
+
+TEST_F(DiagnosticsSnapshotTest, AggregatesLeakCounters)
+{
+    diag::record_intentional_leak(LeakSubsystem::Logger);
+    diag::record_intentional_leak(LeakSubsystem::Logger);
+    diag::record_intentional_leak(LeakSubsystem::Worker);
+
+    const diag::Snapshot snapshot = diag::collect();
+
+    EXPECT_EQ(snapshot.intentional_leaks[static_cast<std::size_t>(LeakSubsystem::Logger)], 2u);
+    EXPECT_EQ(snapshot.intentional_leaks[static_cast<std::size_t>(LeakSubsystem::Worker)], 1u);
+    EXPECT_EQ(snapshot.intentional_leaks[static_cast<std::size_t>(LeakSubsystem::HookManager)], 0u);
+    EXPECT_EQ(snapshot.total_intentional_leaks, 3u);
+}
+
+TEST_F(DiagnosticsSnapshotTest, AggregatesDriftSummary)
+{
+    const std::array<rtti::DriftEntry, 3> drift{{
+        {"L0", 0x10, 0x10, 0, true, {}},
+        {"L1", 0x20, 0x28, 8, true, {}},
+        {"L2", 0x30, 0, 0, false, {}},
+    }};
+
+    const diag::Snapshot snapshot = diag::collect(drift);
+
+    EXPECT_EQ(snapshot.drift_total, 3u);
+    EXPECT_EQ(snapshot.drift_healed, 2u);
+    EXPECT_EQ(snapshot.drift_failed, 1u);
+}
+
+TEST_F(DiagnosticsSnapshotTest, AggregatesAnchorQuality)
+{
+    const std::array<anchor::ResolvedAnchor, 4> report{{
+        {"a", anchor::AnchorKind::RipGlobal, anchor::AnchorStatus::Resolved, 1},
+        {"b", anchor::AnchorKind::CodeOperand, anchor::AnchorStatus::Failed, 0},
+        {"c", anchor::AnchorKind::Manual, anchor::AnchorStatus::Resolved, 2},
+        {"d", anchor::AnchorKind::Quorum, anchor::AnchorStatus::Resolved, 3},
+    }};
+
+    const diag::Snapshot snapshot = diag::collect({}, report);
+
+    EXPECT_EQ(snapshot.anchor_quality.total, 4u);
+    EXPECT_EQ(snapshot.anchor_quality.resolved, 3u);
+    EXPECT_EQ(snapshot.anchor_quality.failed, 1u);
+    EXPECT_EQ(snapshot.anchor_quality.manual_at_risk, 1u); // the Manual entry
+    EXPECT_EQ(snapshot.anchor_quality.corroborated, 1u);   // the resolved Quorum
+}
+
+TEST_F(DiagnosticsSnapshotTest, CountsLiveHookPopulation)
+{
+    // The population is derived from the process-wide hook-lifecycle stream, so assert on DELTAS around one hook rather
+    // than absolute counts. The lifecycle emit is synchronous on the installing thread, so the tally is up to date by
+    // the time inline_at / disable() returns.
+    const diag::Snapshot before = diag::collect();
+
+    {
+        Result<hook::Hook> r = hook::inline_at(
+            hook::InlineRequest{.name = "PopulationHook", .target = target_address(&lifecycle_target_add)},
+            &lifecycle_detour_add);
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        hook::Hook h = std::move(*r);
+
+        const diag::Snapshot armed = diag::collect();
+        EXPECT_EQ(armed.hooks_total, before.hooks_total + 1);   // created live
+        EXPECT_EQ(armed.hooks_active, before.hooks_active + 1); // and armed on install
+
+        ASSERT_TRUE(h.disable().has_value());
+        const diag::Snapshot disabled = diag::collect();
+        EXPECT_EQ(disabled.hooks_total, before.hooks_total + 1);       // still live
+        EXPECT_EQ(disabled.hooks_active, before.hooks_active);         // no longer armed
+        EXPECT_EQ(disabled.hooks_disabled, before.hooks_disabled + 1); // now counted disabled
+        // Drop the handle (block exit) to emit Removed.
+    }
+
+    const diag::Snapshot after = diag::collect();
+    EXPECT_EQ(after.hooks_total, before.hooks_total); // back to baseline
+    EXPECT_EQ(after.hooks_active, before.hooks_active);
+    EXPECT_EQ(after.hooks_disabled, before.hooks_disabled);
 }

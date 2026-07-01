@@ -7,7 +7,7 @@
 #include "DetourModKit/diagnostics.hpp"
 
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/worker.hpp"
+#include "DetourModKit/detail/worker.hpp"
 #include "platform.hpp"
 
 #include <windows.h>
