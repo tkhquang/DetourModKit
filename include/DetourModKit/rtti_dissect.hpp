@@ -3,7 +3,7 @@
 
 /**
  * @file rtti_dissect.hpp
- * @brief Reverse-direction RTTI dissection and self-healing offsets.
+ * @brief Reverse-direction RTTI dissection, self-healing offsets, and the frame-scheduled heal runner.
  * @details The forward walker in rtti.hpp answers "what type is the object behind this vtable?". This header answers
  *          the inverse, slot-first questions a mod actually asks against a drifting game binary:
  *
@@ -11,31 +11,36 @@
  *            slot refer to, and what is its RTTI type?" (the per-slot primitive).
  *          - @ref reverse_scan_block -- "RTTI-label every pointer slot in
  *            this struct" (allocating, init-time/tooling triage).
- *          - @ref heal_landmark / @ref heal_offset -- "a small patch shifted
- *            the layout; find where the field of type T moved to" (the self-healing offset resolver).
+ *          - @ref heal_landmark -- "a small patch shifted the layout; find
+ *            where the field of type T moved to" (the self-healing offset resolver).
  *          - @ref solve_fingerprint -- "several fields co-moved; find the
  *            single uniform shift that satisfies every landmark" (rigid multi-field drift recovery).
+ *          - @ref HealScheduler -- "run those heals on a frame cadence, latch
+ *            each group once it resolves, and warn once when the layout has actually drifted" (the render-loop driver).
  *
- *          Every entry point is noexcept and fails closed. All reads go through the same SEH-guarded,
+ *          Every non-scheduler entry point is noexcept and fails closed. All reads go through the same SEH-guarded,
  *          module-bound-checked prelude the forward walker uses, so an unmapped page, a forged COL, or an ambiguous
  *          match is a clean failure return, never a fault and never a silently-wrong offset. Matching compares MSVC
  *          mangled bytes exactly; no UnDecorateSymbolName runs on any path. Scope is x64 MSVC.
  */
 
+#include "DetourModKit/error.hpp"
 #include "DetourModKit/rtti.hpp"
 
+#include <atomic>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <expected>
-#include <optional>
+#include <functional>
+#include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace DetourModKit
 {
-    namespace Rtti
+    namespace rtti
     {
         /**
          * @brief Hard cap on a self-heal search radius (bytes per side). Bounds the worst-case probe count so an
@@ -60,19 +65,19 @@ namespace DetourModKit
         struct PointeeType
         {
             /// Resolved vtable pointer.
-            std::uintptr_t vtable = 0;
+            Address vtable{};
             /// COL the vtable points back to.
-            std::uintptr_t col_addr = 0;
+            Address col_addr{};
             /// TypeDescriptor base.
-            std::uintptr_t td_addr = 0;
+            Address td_addr{};
             /// Mangled-name buffer (td_addr + 0x10).
-            std::uintptr_t name_addr = 0;
+            Address name_addr{};
             /// Start of the resolved (sub)object.
-            std::uintptr_t object_base = 0;
+            Address object_base{};
             /// object_base - col_offset (underflow-clamped).
-            std::uintptr_t complete_obj = 0;
+            Address complete_obj{};
             /// Raw qword read at the probed slot.
-            std::uintptr_t pointer_value = 0;
+            Address pointer_value{};
             /// COL.offset (+0x04): this vtable's offset in the complete object.
             std::uint32_t col_offset = 0;
             /// true when the slot held a pointer-to-object (deref'd once).
@@ -80,35 +85,11 @@ namespace DetourModKit
             /// Length of the mangled name in @ref name_buf.
             std::uint16_t name_len = 0;
             /// NUL-terminated mangled name.
-            char name_buf[Rtti::MAX_TYPE_NAME_LEN + 1] = {};
+            char name_buf[MAX_TYPE_NAME_LEN + 1] = {};
 
             /// Non-owning view of the mangled name held in @ref name_buf.
             [[nodiscard]] std::string_view name() const noexcept { return std::string_view(name_buf, name_len); }
         };
-
-        /**
-         * @enum IdentifyError
-         * @brief Reason a per-slot reverse-RTTI probe rejected a candidate slot. Every value fails closed.
-         * @details Ordered by the L1 control flow so the earliest failure is the most specific diagnostic a cascade can
-         *          surface. The bool @ref identify_pointee_type collapses all of these to a false return; the typed
-         *          @ref identify_pointee_typed and the @ref identify_pointee_type_or cascade preserve them.
-         */
-        enum class IdentifyError : std::uint8_t
-        {
-            /// The slot address itself was null or below the user-mode floor; no read was attempted.
-            BadSlotAddress,
-            /// The slot read faulted, or the qword held a null/low value.
-            UnreadableSlot,
-            /// The slot resolved to neither a pointer-to-object nor a direct object with a verifiable COL.
-            NoRtti
-        };
-
-        /**
-         * @brief Human-readable mapping for @ref IdentifyError.
-         * @param error The error code.
-         * @return A string view describing the error.
-         */
-        [[nodiscard]] std::string_view identify_error_to_string(IdentifyError error) noexcept;
 
         /**
          * @brief Reverse-RTTI-identify the object a pointer slot refers to.
@@ -129,32 +110,34 @@ namespace DetourModKit
          * @return true when a real RTTI type resolved, false on a null/low slot, an unreadable slot, or neither shape
          *         resolving.
          */
-        [[nodiscard]] bool identify_pointee_type(std::uintptr_t slot_addr, PointeeType &out) noexcept;
+        [[nodiscard]] bool identify_pointee_type(Address slot_addr, PointeeType &out) noexcept;
 
         /**
          * @brief Typed form of @ref identify_pointee_type.
-         * @details Same probe and same @p out contract, but reports the specific fail-closed reason instead of a bool.
-         *          @ref identify_pointee_type is exactly @c has_value() over this -- one probe, one prelude walk, one
-         *          implementation. Use this (or @ref identify_pointee_type_or) when the reason for a miss matters
-         *          (cascade diagnostics, telemetry); use the bool form otherwise.
+         * @details Same probe and same @p out contract, but reports the specific fail-closed reason through the unified
+         *          Error channel instead of a bool. @ref identify_pointee_type is exactly @c has_value() over this --
+         *          one probe, one prelude walk, one implementation. The Error's code is one of
+         *          @ref ErrorCode::BadSlotAddress (null/low slot), @ref ErrorCode::UnreadableSlot (faulted or null/low
+         *          slot value), or @ref ErrorCode::NoRtti (neither shape carried a verifiable COL). Use this (or @ref
+         *          identify_pointee_type_or) when the reason for a miss matters (cascade diagnostics, telemetry); use
+         *          the bool form otherwise.
          * @param slot_addr Address of the pointer-sized slot to probe.
          * @param out Receives the identification on success; unspecified on an error return.
-         * @return A value on resolve, or the typed reason on failure.
+         * @return A value on resolve, or the typed Error on failure.
          */
-        [[nodiscard]] std::expected<void, IdentifyError> identify_pointee_typed(std::uintptr_t slot_addr,
-                                                                                PointeeType &out) noexcept;
+        [[nodiscard]] Result<void> identify_pointee_typed(Address slot_addr, PointeeType &out) noexcept;
 
         /**
          * @concept SlotAddress
-         * @brief A value usable as a probe slot address: convertible to a raw pointer-sized integer.
+         * @brief A value usable as a probe slot address: an @ref Address (or nullptr).
          * @details Constrains the @ref identify_pointee_type_or fallback pack so every alternate is a candidate
-         * ADDRESS,
-         *          not a callable or an unrelated type. A raw pointer is intentionally rejected (it is not implicitly
-         *          convertible to std::uintptr_t), steering consumers to pass an explicit reinterpret_cast as the rest
-         *          of the API expects. A hard, readable compile error beats a deep template instantiation failure.
+         *          ADDRESS. A raw pointer or a bare integer is intentionally rejected: Address's pointer/integer
+         *          constructors are explicit, so a consumer wraps one in `Address{...}` at the call site, exactly as
+         *          the rest of the API expects. A hard, readable compile error beats a deep template instantiation
+         *          failure.
          */
         template <typename T>
-        concept SlotAddress = std::convertible_to<T, std::uintptr_t>;
+        concept SlotAddress = std::convertible_to<T, Address>;
 
         /**
          * @brief Reverse-RTTI-identify the first of several candidate slots that resolves.
@@ -169,27 +152,26 @@ namespace DetourModKit
          *          the only disambiguator -- a consumer needing type discrimination uses @ref heal_landmark / @ref
          *          solve_fingerprint instead. On a failure return @p out is reset to a default-constructed @ref
          *          PointeeType, so a caller that ignores the error never reads a slot's partially written fields.
-         * @tparam Fallbacks Pack of alternate slot addresses, each convertible to std::uintptr_t.
+         * @tparam Fallbacks Pack of alternate slot addresses, each an @ref Address.
          * @param candidate The primary slot address to probe first.
          * @param out Receives the first resolving slot's identification; reset to a default PointeeType on failure.
          * @param fallbacks Alternate slot addresses, tried in order after @p candidate.
-         * @return A value on the first resolve (@p out populated), or the @p candidate's @ref IdentifyError when all
-         *         candidates fail.
+         * @return A value on first resolve (@p out populated), or the @p candidate's Error when all candidates fail.
          */
         template <SlotAddress... Fallbacks>
-        [[nodiscard]] std::expected<void, IdentifyError>
-        identify_pointee_type_or(std::uintptr_t candidate, PointeeType &out, Fallbacks... fallbacks) noexcept
+        [[nodiscard]] Result<void> identify_pointee_type_or(Address candidate, PointeeType &out,
+                                                            Fallbacks... fallbacks) noexcept
         {
             // Capture the primary's typed error before the fold runs so a later probe cannot clobber the value we
-            // preserve; std::expected::error() is a plain enum copy.
-            auto primary = identify_pointee_typed(candidate, out);
+            // preserve; Error is a trivially copyable value.
+            Result<void> primary = identify_pointee_typed(candidate, out);
             if (primary)
             {
                 return {};
             }
             // Unary left fold over ||: left-to-right, short-circuiting at the first resolver, so no fallback past the
             // winner is probed.
-            const bool any = (identify_pointee_typed(static_cast<std::uintptr_t>(fallbacks), out).has_value() || ...);
+            const bool any = (identify_pointee_typed(static_cast<Address>(fallbacks), out).has_value() || ...);
             if (any)
             {
                 return {};
@@ -199,7 +181,7 @@ namespace DetourModKit
             // ignores the error code from reading partially-written fields, while the FIRST (primary) error is still
             // the one surfaced.
             out = PointeeType{};
-            return std::unexpected(primary.error());
+            return primary;
         }
 
         /**
@@ -209,7 +191,7 @@ namespace DetourModKit
         struct LabeledSlot
         {
             /// Address of the resolved slot.
-            std::uintptr_t slot_addr = 0;
+            Address slot_addr{};
             /// Zero-based index of the slot in the swept block.
             std::size_t slot_index = 0;
             /// Reverse-identified type (carries its own name buffer).
@@ -232,7 +214,7 @@ namespace DetourModKit
          *       returns 0. If a reallocation of @p out throws, the sweep stops early and returns the count appended so
          *       far (the noexcept contract holds).
          */
-        [[nodiscard]] std::size_t reverse_scan_block(std::uintptr_t start, std::size_t slot_count,
+        [[nodiscard]] std::size_t reverse_scan_block(Address start, std::size_t slot_count,
                                                      std::vector<LabeledSlot> &out,
                                                      std::size_t stride = sizeof(std::uintptr_t)) noexcept;
 
@@ -245,7 +227,7 @@ namespace DetourModKit
          * @param stride Byte distance between adjacent slots. Zero is treated as sizeof(std::uintptr_t).
          * @return Number of slots appended to @p out.
          */
-        [[nodiscard]] std::size_t reverse_scan_block_bytes(std::uintptr_t start, std::size_t byte_len,
+        [[nodiscard]] std::size_t reverse_scan_block_bytes(Address start, std::size_t byte_len,
                                                            std::vector<LabeledSlot> &out,
                                                            std::size_t stride = sizeof(std::uintptr_t)) noexcept;
 
@@ -282,20 +264,6 @@ namespace DetourModKit
         };
 
         /**
-         * @enum HealError
-         * @brief Reasons a self-heal resolve may fail. Every value fails closed.
-         */
-        enum class HealError : std::uint8_t
-        {
-            /// The landmark/fingerprint is malformed; no memory was touched.
-            BadDescriptor,
-            /// No slot in the window resolved to the expected type.
-            NoMatch,
-            /// Equidistant slots both match (heal) or tied-score deltas (fingerprint).
-            Ambiguous
-        };
-
-        /**
          * @struct Landmark
          * @brief A consumer-owned, serializable record of "a field of a known type lives near a known offset within a
          *        struct."
@@ -303,31 +271,25 @@ namespace DetourModKit
          *          an owned copy of @ref expected_mangled, @ref indirection, @ref stride, and (for fingerprints) @ref
          *          required. @ref base is never persisted: it is an ASLR'd runtime address resolved fresh each session
          *          (typically from a scan::resolve ladder/AOB anchor or a live object pointer) and filled in at call
-         *          time. The in-code common case is a @c static @c constexpr Landmark with a mangled string literal,
-         *          mirroring a scan::Candidate ladder.
+         *          time.
          * @note @ref expected_mangled must name a type that is stable across patches (a base/engine type, not a
          *       game-specific most-derived subtype), because matching is byte-exact on the most-derived name. A subtype
-         *       rename defeats healing and fails closed via @ref HealError::NoMatch.
+         *       rename defeats healing and fails closed via @ref ErrorCode::HealNoMatch.
+         * @note @ref expected_mangled is OWNED (a std::string), so a Landmark is self-contained and safe to build from
+         *       a string literal, a config-loaded value, or any transient string_view without a dangling view: the
+         *       common in-code form is a Landmark built from a mangled string literal, mirroring a scan::Candidate
+         *       ladder.
          */
         struct Landmark
         {
             /// Resolved struct base. Filled at call time; never persisted.
-            std::uintptr_t base = 0;
+            Address base{};
             /// Last known field offset within @ref base.
             std::ptrdiff_t nominal_offset = 0;
             /// Search radius per side in bytes (capped at MAX_HEAL_WINDOW).
             std::size_t window = 0x40;
-            /**
-             * @brief MSVC mangled name to match. Aliases caller storage.
-             * @note Non-owning view: the backing bytes must outlive every heal call that reads this landmark. A string
-             *       literal (the documented common case) and any longer-lived std::string / std::string_view are safe.
-             *       Initialising this field from a std::string temporary dangles the view as soon as the full
-             *       expression ends -- a latent use-after-free. Because Landmark is an aggregate (so a heal template
-             *       can be a @c static @c constexpr designated initializer and stay serializable), this cannot be
-             *       rejected with a deleted rvalue overload the way @ref Rtti::TypeIdentity does; the consumer owns the
-             *       lifetime.
-             */
-            std::string_view expected_mangled;
+            /// Owned MSVC mangled name to match (byte-exact on the most-derived name).
+            std::string expected_mangled;
             /// Required slot shape.
             Indirection indirection = Indirection::PointerToObject;
             /// Probe step (and candidate alignment). Zero -> 8.
@@ -345,11 +307,11 @@ namespace DetourModKit
             /// slot_addr - base: the field offset to use (== nominal_offset on no drift).
             std::ptrdiff_t healed_offset = 0;
             /// Address of the matching slot.
-            std::uintptr_t slot_addr = 0;
+            Address slot_addr{};
             /// Resolved object base behind the slot.
-            std::uintptr_t object_addr = 0;
+            Address object_addr{};
             /// Resolved vtable of the matched object.
-            std::uintptr_t vtable = 0;
+            Address vtable{};
             /**
              * @brief COL.offset of the matched object: 0 for the primary (complete) subobject, nonzero for a
              *        multiple-inheritance secondary base.
@@ -374,12 +336,12 @@ namespace DetourModKit
          *          mangled name byte-equals @c expected_mangled.
          * @param lm The landmark, with @c base filled in.
          * @return The healed offset and match details, or:
-         *         - @ref HealError::BadDescriptor for a malformed landmark
+         *         - @ref ErrorCode::BadDescriptor for a malformed landmark
          *           (low @c base, empty/oversized name, unknown @c indirection, @c window over MAX_HEAL_WINDOW, or a
          *           nominal address outside
          *           the user-mode window), before any read;
-         *         - @ref HealError::NoMatch when no slot matched;
-         *         - @ref HealError::Ambiguous when both the @c +d and @c -d slots
+         *         - @ref ErrorCode::HealNoMatch when no slot matched;
+         *         - @ref ErrorCode::HealAmbiguous when both the @c +d and @c -d slots
          *           at the nearest matching distance match (an irreducible tie).
          * @warning FAIL-WRONG HAZARD when the window is crowded with same-typed slots. A single landmark resolves to
          * the
@@ -389,7 +351,7 @@ namespace DetourModKit
          *            nearer one is returned before the intended field is ever probed);
          *          - under multiple inheritance, a secondary base subobject whose vtable sits nearer than the primary
          *            and whose COL still names the complete type (use @ref Indirection::CompleteObject to reject it).
-         *          The @ref HealError::Ambiguous result fires ONLY for an exact +/- distance tie at the nearest
+         *          The @ref ErrorCode::HealAmbiguous result fires ONLY for an exact +/- distance tie at the nearest
          *          matching ring, never for a nearer decoy, so a wrong-but-nearer slot is not flagged. Whenever the
          *          window may be crowded -- a struct that holds more than one field of @c expected_mangled's type, or
          *          an object that may use multiple inheritance -- prefer @ref solve_fingerprint, which disambiguates
@@ -398,29 +360,7 @@ namespace DetourModKit
          * @note Init-time / re-heal-on-miss, not per-frame: each probe runs the syscall-heavy prelude up to twice. The
          *       window cap bounds the worst case. Allocates nothing (one reused stack @ref PointeeType).
          */
-        [[nodiscard]] std::expected<HealHit, HealError> heal_landmark(const Landmark &lm) noexcept;
-
-        /**
-         * @brief Convenience wrapper over @ref heal_landmark returning just the healed byte offset.
-         * @details Feeds straight into a @c std::span<const std::ptrdiff_t> pointer-chain API.
-         * @param lm The landmark, with @c base filled in.
-         * @return The healed offset, or std::nullopt on any failure.
-         * @warning Inherits @ref heal_landmark's crowding FAIL-WRONG HAZARD, and discards every signal that would let a
-         *          caller detect it: the std::nullopt return collapses all @ref HealError reasons, and the dropped @ref
-         *          HealHit::col_offset / @ref HealHit::was_pointer hide a secondary-base or direct-object match. A
-         *          strictly-nearer same-typed decoy (or an MI secondary base) still wins SILENTLY and yields a
-         *          confidently-wrong offset with no indication. Use this only when the window cannot be crowded; when
-         *          it can, call @ref heal_landmark (to inspect the full @ref HealHit) or @ref solve_fingerprint (to
-         *          disambiguate structurally across several co-moving fields).
-         */
-        [[nodiscard]] std::optional<std::ptrdiff_t> heal_offset(const Landmark &lm) noexcept;
-
-        /**
-         * @brief Human-readable mapping for @ref HealError.
-         * @param error The error code.
-         * @return A string view describing the error.
-         */
-        [[nodiscard]] std::string_view heal_error_to_string(HealError error) noexcept;
+        [[nodiscard]] Result<HealHit> heal_landmark(const Landmark &lm) noexcept;
 
         /**
          * @struct FingerprintHit
@@ -452,22 +392,22 @@ namespace DetourModKit
          *           per-landmark window).
          * @param window_bytes Maximum uniform shift to search per side, capped at MAX_HEAL_WINDOW.
          * @return The recovered delta, or:
-         *         - @ref HealError::BadDescriptor for an empty span, over-cap
+         *         - @ref ErrorCode::BadDescriptor for an empty span, over-cap
          *           span, no required landmark, an oversized @p window_bytes, a
          *           malformed landmark, or a low @p base;
-         *         - @ref HealError::NoMatch when no delta satisfied every
+         *         - @ref ErrorCode::HealNoMatch when no delta satisfied every
          *           required landmark;
-         *         - @ref HealError::Ambiguous when two or more deltas tie for the
+         *         - @ref ErrorCode::HealAmbiguous when two or more deltas tie for the
          *           most optional matches.
          * @note Each landmark in @p fp must have a distinct @c nominal_offset. Corroboration is scored by counting the
          *       required landmarks satisfied at a delta, so two landmarks sharing a nominal_offset would probe the same
-         *       slot and double-count it. Duplicate offsets are rejected as @ref HealError::BadDescriptor before any
+         *       slot and double-count it. Duplicate offsets are rejected as @ref ErrorCode::BadDescriptor before any
          *       memory is touched.
          * @warning Init-time only: the probe count is (2 * window_bytes / 8 + 1) * fp.size() prelude walks. Allocates
          *          nothing.
          */
-        [[nodiscard]] std::expected<FingerprintHit, HealError>
-        solve_fingerprint(std::uintptr_t base, std::span<const Landmark> fp, std::size_t window_bytes) noexcept;
+        [[nodiscard]] Result<FingerprintHit> solve_fingerprint(Address base, std::span<const Landmark> fp,
+                                                               std::size_t window_bytes) noexcept;
 
         /**
          * @struct DriftEntry
@@ -488,22 +428,200 @@ namespace DetourModKit
             std::ptrdiff_t delta = 0;
             /// Whether the landmark healed.
             bool ok = false;
-            /// Failure reason; meaningful only when @ref ok is false.
-            HealError error{};
+            /// Failure code (its category is @ref ErrorCategory::Rtti); meaningful only when @ref ok is false.
+            ErrorCode error{ErrorCode::Ok};
         };
 
         /**
          * @brief Heals a set of landmarks and writes a per-landmark drift report.
          * @details Runs @ref heal_landmark on each landmark in order and records the outcome (nominal, healed, delta,
-         *          or the typed failure) into @p out. Each landmark must already have its @c base filled in, exactly as
-         *          for a direct @ref heal_landmark call. This is a thin aggregation over the existing heal path: it
-         *          performs no read the individual heals would not, and allocates nothing.
+         *          or the typed failure code) into @p out. Each landmark must already have its @c base filled in,
+         *          exactly as for a direct @ref heal_landmark call. This is a thin aggregation over the existing heal
+         *          path: it performs no read the individual heals would not, and allocates nothing.
          * @param landmarks The landmarks to heal (each with @c base set).
          * @param out Destination, parallel to @p landmarks. At most @c out.size() entries are written.
          * @return The number of entries written: @c min(landmarks.size(), out.size()).
          */
         [[nodiscard]] std::size_t heal_report(std::span<const Landmark> landmarks, std::span<DriftEntry> out) noexcept;
-    } // namespace Rtti
+
+        /**
+         * @enum HealEscalation
+         * @brief Log-severity policy a @ref HealScheduler applies to a landmark that does not resolve during a scan.
+         */
+        enum class HealEscalation : std::uint8_t
+        {
+            /// A REQUIRED landmark that stays unresolved after a scan logs at Warning (the "kept nominal, re-author if
+            /// drifted" headline); an OPTIONAL landmark's miss stays at Debug. The default.
+            WarnRequired = 0,
+            /// Every miss (required or optional) stays at Debug -- for a group whose target is legitimately absent much
+            /// of the time and whose miss is not itself actionable.
+            Quiet = 1
+        };
+
+        /**
+         * @struct HealConfig
+         * @brief Tunables for a @ref HealScheduler: retry cadence, drift-warning threshold, and miss escalation.
+         */
+        struct HealConfig
+        {
+            /**
+             * @brief Frames between retry scans of an un-latched group. A group that does not resolve is re-attempted
+             *        on this cadence, never every frame (the RTTI prelude is syscall-heavy), with NO attempt cap: it
+             *        keeps retrying until it resolves, then latches and stops. This is a fixed interval, deliberately
+             *        NOT a geometric backoff -- a target that is briefly absent (a load, a menu) reappears on a
+             *        predictable schedule rather than after an ever-growing wait.
+             * @note A value of 0 is rejected by @ref HealScheduler::start with @ref ErrorCode::InvalidArg.
+             */
+            std::uint32_t interval_frames = 30;
+            /**
+             * @brief A realised drift whose absolute delta exceeds this threshold fires the one-shot layout-drift
+             *        Warning. The default of 0 warns on ANY nonzero drift.
+             */
+            std::ptrdiff_t drift_warn_threshold = 0;
+            /// Log-severity policy for a landmark that does not resolve during a scan.
+            HealEscalation escalate = HealEscalation::WarnRequired;
+        };
+
+        class HealScheduler;
+
+        /**
+         * @class HealRun
+         * @brief The per-scan heal context a @ref HealScheduler hands to a group's work callback.
+         * @details Owns the store-on-success, fail-closed-on-miss, per-outcome logging, and one-shot drift-Warning
+         *          machinery, so a group callback only expresses WHICH landmarks to heal from WHICH live base. It is a
+         *          transient view over the scheduler's state, valid only for the duration of the callback; do not store
+         *          it.
+         */
+        class HealRun
+        {
+        public:
+            // Non-owning, scheduler-scoped, and valid only for the duration of one work callback: it aliases the
+            // scheduler's config and warn-once state. Copying or moving it would let a callback smuggle those aliases
+            // out to outlive the scheduler, so every copy/move is deleted to make the transient lifetime unextendable.
+            HealRun(const HealRun &) = delete;
+            HealRun &operator=(const HealRun &) = delete;
+            HealRun(HealRun &&) = delete;
+            HealRun &operator=(HealRun &&) = delete;
+
+            /**
+             * @brief Heal one landmark from a live base and publish the result to a caller-owned offset slot.
+             * @details Copies @p landmark, fills its base with @p base, and runs @ref heal_landmark. On a resolve the
+             *          @p slot takes the healed offset (which equals the nominal when nothing drifted, via the nominal
+             *          short-circuit) and the outcome is logged (a recovered drift at Info plus the one-shot drift
+             *          Warning; a confirmation at nominal at Debug). On a miss the @p slot is left untouched (fail
+             *          closed: it keeps whatever nominal it was seeded with) and the miss is logged per the config's
+             *          @ref HealConfig::escalate policy and @p required flag.
+             * @param label Short human-readable field name for the log lines.
+             * @param landmark The landmark template; its own @c base is ignored in favour of @p base.
+             * @param base The live, resolved struct base for this frame.
+             * @param slot The caller-owned offset cache slot (typically seeded with the nominal offset).
+             * @param required Whether an unresolved miss escalates to Warning under @ref HealEscalation::WarnRequired.
+             * @return The @ref heal_landmark result (the caller can inspect the details or the Error).
+             */
+            [[nodiscard]] Result<HealHit> heal_into(std::string_view label, const Landmark &landmark, Address base,
+                                                    std::atomic<std::ptrdiff_t> &slot, bool required = true) noexcept;
+
+            /**
+             * @brief Report a drift a group recovered itself (e.g. through @ref solve_fingerprint), so the one-shot
+             *        Warning and the per-field Info line fire consistently with @ref heal_into.
+             * @details Use this for a corroborated bracket that writes its own slots: after storing the shifted
+             *          offsets, call note_drift once per moved field. A zero delta logs a nominal confirmation at Debug
+             *          and fires no Warning.
+             * @param label Short human-readable field name.
+             * @param nominal_offset The field's last-known offset.
+             * @param healed_offset The recovered offset.
+             */
+            void note_drift(std::string_view label, std::ptrdiff_t nominal_offset,
+                            std::ptrdiff_t healed_offset) noexcept;
+
+        private:
+            friend class HealScheduler;
+            HealRun(const HealConfig &config, std::atomic<bool> &drift_warned) noexcept
+                : m_config(config), m_drift_warned(drift_warned)
+            {
+            }
+
+            // Fires the one-shot layout-drift Warning if |delta| exceeds the configured threshold and no earlier drift
+            // has already claimed the latch (CAS, so exactly one Warning is emitted across the whole scheduler).
+            void warn_drift_once(std::string_view label, std::ptrdiff_t delta) noexcept;
+
+            const HealConfig &m_config;
+            std::atomic<bool> &m_drift_warned;
+        };
+
+        /**
+         * @class HealScheduler
+         * @brief Frame-driven runner for a set of independently-latched self-heal groups.
+         * @details Captures the recurring render-loop pattern of a self-healing offset cache: on each @ref tick, every
+         *          un-latched group that has waited out the configured frame interval runs its heal work; a group that
+         *          reports success latches and stops being scanned, and the FIRST realised drift across all groups
+         *          fires exactly one process-wide layout-drift Warning (a CAS one-shot). A group can also carry a cheap
+         *          per-frame gate that runs BEFORE the interval countdown, so a target that is not constructed yet is
+         *          skipped silently without spending the retry budget or logging.
+         *
+         *          The scheduler owns the cadence, the per-group latches, and the warn-once state; each group's work
+         *          callback expresses only its own heal logic (a single @ref HealRun::heal_into, a @ref
+         *          solve_fingerprint bracket, a dependent hop through a healed offset, ...) and returns whether
+         *          the group has fully resolved. There is NO attempt cap: an unresolved group is retried on the fixed
+         *          interval for as long as it takes, then latches.
+         * @note Render-thread only. The scheduler is single-owner and move-only; construct it once (via @ref start) and
+         *       drive it from the same thread that walks the pointer chains. The offset SLOTS a group writes are the
+         *       cross-thread channel (a std::atomic<std::ptrdiff_t> per offset), not the scheduler itself.
+         */
+        class HealScheduler
+        {
+        public:
+            /// A cheap per-frame precondition; returning false skips the group's scan without spending the interval.
+            using Gate = std::move_only_function<bool()>;
+            /// A group's heal work; returning true latches the group (no more scans). Returning false retries next
+            /// interval.
+            using Work = std::move_only_function<bool(HealRun &)>;
+
+            /**
+             * @brief Constructs a scheduler with the given config.
+             * @param config Retry cadence, drift-warning threshold, and miss escalation.
+             * @return The scheduler, or @ref ErrorCode::InvalidArg when @c config.interval_frames is 0.
+             */
+            [[nodiscard]] static Result<HealScheduler> start(HealConfig config = {}) noexcept;
+
+            HealScheduler(HealScheduler &&) noexcept;
+            HealScheduler &operator=(HealScheduler &&) noexcept;
+            HealScheduler(const HealScheduler &) = delete;
+            HealScheduler &operator=(const HealScheduler &) = delete;
+            ~HealScheduler() noexcept;
+
+            /**
+             * @brief Registers an independently-latched heal group.
+             * @param work The group's heal work, run on the configured interval while un-latched. Returning true
+             *             latches the group; returning false retries on the next interval.
+             * @param gate Optional per-frame precondition, evaluated before the interval countdown. When it returns
+             *             false the group is skipped silently and the interval budget is not spent, so a not-yet-live
+             *             target is polled cheaply every frame until it appears.
+             * @note An empty @p work is ignored (no group is registered), since a group with no heal work could never
+             *       resolve. Primarily a setup call; if invoked re-entrantly from within a running @ref tick (a work or
+             *       gate callback adding a group), the new group is deferred and starts scanning on the next tick, so
+             *       it never reallocates the group container while tick is iterating it.
+             */
+            void add_group(Work work, Gate gate = {});
+
+            /**
+             * @brief Advances the scheduler by one frame: scans every un-latched, gate-passing, interval-due group.
+             * @details Never throws; a work or gate callback that throws is treated as "did not resolve this frame".
+             */
+            void tick() noexcept;
+
+            /// Returns true when every registered group has latched (vacuously true with no groups).
+            [[nodiscard]] bool all_resolved() const noexcept;
+
+            /// Returns the config the scheduler was started with.
+            [[nodiscard]] const HealConfig &config() const noexcept;
+
+        private:
+            struct Impl;
+            explicit HealScheduler(std::unique_ptr<Impl> impl) noexcept;
+            std::unique_ptr<Impl> m_impl;
+        };
+    } // namespace rtti
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_RTTI_DISSECT_HPP

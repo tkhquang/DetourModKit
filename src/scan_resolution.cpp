@@ -93,10 +93,13 @@ namespace DetourModKit
 
                 if (const RttiVtable *rtti = candidate.as_rtti_vtable())
                 {
-                    const std::optional<std::uintptr_t> vtable = Rtti::vtable_for_type(rtti->mangled, request.scope);
-                    if (vtable && range.contains(*vtable))
+                    // Fully qualify the namespace: the local `rtti` pointer would otherwise shadow the `rtti` module
+                    // namespace and make `rtti::vtable_for_type` name the variable instead.
+                    const std::optional<Address> vtable =
+                        DetourModKit::rtti::vtable_for_type(rtti->mangled, request.scope);
+                    if (vtable && range.contains(vtable->raw()))
                     {
-                        return Hit{Address{*vtable}, candidate.name()};
+                        return Hit{*vtable, candidate.name()};
                     }
                     continue;
                 }

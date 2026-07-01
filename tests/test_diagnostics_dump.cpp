@@ -41,7 +41,7 @@ TEST_F(DiagnosticsDumpTest, AggregatesLeakCounters)
 
 TEST_F(DiagnosticsDumpTest, AggregatesDriftSummary)
 {
-    const std::array<Rtti::DriftEntry, 3> drift{{
+    const std::array<rtti::DriftEntry, 3> drift{{
         {"L0", 0x10, 0x10, 0, true, {}},
         {"L1", 0x20, 0x28, 8, true, {}},
         {"L2", 0x30, 0, 0, false, {}},

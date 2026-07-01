@@ -11,7 +11,7 @@ namespace DetourModKit
 {
     namespace Diagnostics
     {
-        Snapshot collect(std::span<const Rtti::DriftEntry> drift_report)
+        Snapshot collect(std::span<const rtti::DriftEntry> drift_report)
         {
             Snapshot snapshot;
 
@@ -22,7 +22,7 @@ namespace DetourModKit
             snapshot.total_intentional_leaks = total_intentional_leaks();
 
             snapshot.drift_total = drift_report.size();
-            for (const Rtti::DriftEntry &entry : drift_report)
+            for (const rtti::DriftEntry &entry : drift_report)
             {
                 if (entry.ok)
                 {

@@ -14,7 +14,8 @@
 #include "DetourModKit/rtti.hpp"
 
 namespace memory = DetourModKit::memory;
-namespace Rtti = DetourModKit::Rtti;
+namespace rtti = DetourModKit::rtti;
+using DetourModKit::Address;
 
 namespace
 {
@@ -170,7 +171,7 @@ protected:
 TEST_F(RttiTest, TypeNameOf_BasicSyntheticName)
 {
     SyntheticVtable v(".?AVMyClass@ns@@");
-    auto name = Rtti::type_name_of(v.vtable());
+    auto name = rtti::type_name_of(Address{v.vtable()});
     ASSERT_TRUE(name.has_value());
     EXPECT_EQ(*name, ".?AVMyClass@ns@@");
 }
@@ -178,7 +179,7 @@ TEST_F(RttiTest, TypeNameOf_BasicSyntheticName)
 TEST_F(RttiTest, TypeNameOf_EmptyName)
 {
     SyntheticVtable v("");
-    auto name = Rtti::type_name_of(v.vtable());
+    auto name = rtti::type_name_of(Address{v.vtable()});
     // An empty name is a zero-byte read; read_name_seh returns 0 written.
     EXPECT_FALSE(name.has_value());
 }
@@ -187,7 +188,7 @@ TEST_F(RttiTest, TypeNameOf_LongName)
 {
     const std::string long_name(200, 'A');
     SyntheticVtable v(long_name);
-    auto name = Rtti::type_name_of(v.vtable());
+    auto name = rtti::type_name_of(Address{v.vtable()});
     ASSERT_TRUE(name.has_value());
     EXPECT_EQ(*name, long_name);
 }
@@ -196,7 +197,7 @@ TEST_F(RttiTest, TypeNameOf_TruncatesAtMaxLen)
 {
     const std::string long_name(300, 'B');
     SyntheticVtable v(long_name);
-    auto name = Rtti::type_name_of(v.vtable(), 64);
+    auto name = rtti::type_name_of(Address{v.vtable()}, 64);
     ASSERT_TRUE(name.has_value());
     EXPECT_EQ(name->size(), 64u);
     EXPECT_EQ(*name, std::string(64, 'B'));
@@ -204,18 +205,18 @@ TEST_F(RttiTest, TypeNameOf_TruncatesAtMaxLen)
 
 TEST_F(RttiTest, TypeNameOf_NullVtableRejected)
 {
-    EXPECT_FALSE(Rtti::type_name_of(0).has_value());
+    EXPECT_FALSE(rtti::type_name_of(Address{}).has_value());
 }
 
 TEST_F(RttiTest, TypeNameOf_LowVtableRejected)
 {
-    EXPECT_FALSE(Rtti::type_name_of(0x100).has_value());
+    EXPECT_FALSE(rtti::type_name_of(Address{0x100}).has_value());
 }
 
 TEST_F(RttiTest, TypeNameOf_ZeroMaxLenUsesDefault)
 {
     SyntheticVtable v(".?AVDefaultLen@@");
-    auto name = Rtti::type_name_of(v.vtable(), 0);
+    auto name = rtti::type_name_of(Address{v.vtable()}, 0);
     ASSERT_TRUE(name.has_value());
     EXPECT_EQ(*name, ".?AVDefaultLen@@");
 }
@@ -226,7 +227,7 @@ TEST_F(RttiTest, TypeNameInto_WritesNulTerminatedName)
 {
     SyntheticVtable v(".?AVBuffer@@");
     char out[64] = {0};
-    const std::size_t written = Rtti::type_name_into(v.vtable(), out, sizeof(out));
+    const std::size_t written = rtti::type_name_into(Address{v.vtable()}, out, sizeof(out));
     EXPECT_EQ(written, 12u);
     EXPECT_STREQ(out, ".?AVBuffer@@");
 }
@@ -234,14 +235,14 @@ TEST_F(RttiTest, TypeNameInto_WritesNulTerminatedName)
 TEST_F(RttiTest, TypeNameInto_NullBufferReturnsZero)
 {
     SyntheticVtable v(".?AVNullBuf@@");
-    EXPECT_EQ(Rtti::type_name_into(v.vtable(), nullptr, 64), 0u);
+    EXPECT_EQ(rtti::type_name_into(Address{v.vtable()}, nullptr, 64), 0u);
 }
 
 TEST_F(RttiTest, TypeNameInto_ZeroLenReturnsZero)
 {
     SyntheticVtable v(".?AVZeroLen@@");
     char out[1] = {'X'};
-    EXPECT_EQ(Rtti::type_name_into(v.vtable(), out, 0), 0u);
+    EXPECT_EQ(rtti::type_name_into(Address{v.vtable()}, out, 0), 0u);
     EXPECT_EQ(out[0], 'X');
 }
 
@@ -249,7 +250,7 @@ TEST_F(RttiTest, TypeNameInto_TruncatesAndNulTerminates)
 {
     SyntheticVtable v("ABCDEFGH");
     char out[5] = {0};
-    const std::size_t written = Rtti::type_name_into(v.vtable(), out, sizeof(out));
+    const std::size_t written = rtti::type_name_into(Address{v.vtable()}, out, sizeof(out));
     EXPECT_EQ(written, 4u);
     EXPECT_STREQ(out, "ABCD");
 }
@@ -258,7 +259,7 @@ TEST_F(RttiTest, TypeNameInto_FailureClearsBuffer)
 {
     char out[16];
     std::memset(out, 'Z', sizeof(out));
-    EXPECT_EQ(Rtti::type_name_into(0, out, sizeof(out)), 0u);
+    EXPECT_EQ(rtti::type_name_into(Address{}, out, sizeof(out)), 0u);
     EXPECT_EQ(out[0], '\0');
 }
 
@@ -267,48 +268,48 @@ TEST_F(RttiTest, TypeNameInto_FailureClearsBuffer)
 TEST_F(RttiTest, VtableIsType_ExactMatch)
 {
     SyntheticVtable v(".?AVExact@@");
-    EXPECT_TRUE(Rtti::vtable_is_type(v.vtable(), ".?AVExact@@"));
+    EXPECT_TRUE(rtti::vtable_is_type(Address{v.vtable()}, ".?AVExact@@"));
 }
 
 TEST_F(RttiTest, VtableIsType_MismatchReturnsFalse)
 {
     SyntheticVtable v(".?AVOne@@");
-    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), ".?AVTwo@@"));
+    EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, ".?AVTwo@@"));
 }
 
 TEST_F(RttiTest, VtableIsType_RejectsProperPrefix)
 {
     SyntheticVtable v(".?AVFullName@@");
-    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), ".?AVFull"));
+    EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, ".?AVFull"));
 }
 
 TEST_F(RttiTest, VtableIsType_RejectsProperSuffix)
 {
     SyntheticVtable v(".?AVMyClass@@");
-    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), "MyClass@@"));
+    EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, "MyClass@@"));
 }
 
 TEST_F(RttiTest, VtableIsType_EmptyExpectedRejected)
 {
     SyntheticVtable v(".?AVSomething@@");
-    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), ""));
+    EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, ""));
 }
 
 TEST_F(RttiTest, VtableIsType_NullVtableRejected)
 {
-    EXPECT_FALSE(Rtti::vtable_is_type(0, ".?AVAnything@@"));
+    EXPECT_FALSE(rtti::vtable_is_type(Address{}, ".?AVAnything@@"));
 }
 
 TEST_F(RttiTest, VtableIsType_LowVtableRejected)
 {
-    EXPECT_FALSE(Rtti::vtable_is_type(0x100, ".?AVAnything@@"));
+    EXPECT_FALSE(rtti::vtable_is_type(Address{0x100}, ".?AVAnything@@"));
 }
 
 TEST_F(RttiTest, VtableIsType_OversizedExpectedRejected)
 {
     SyntheticVtable v(".?AVSize@@");
-    const std::string huge(Rtti::MAX_TYPE_NAME_LEN + 1, 'X');
-    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), huge));
+    const std::string huge(rtti::MAX_TYPE_NAME_LEN + 1, 'X');
+    EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, huge));
 }
 
 // --- find_in_pointer_table ---
@@ -328,10 +329,10 @@ TEST_F(RttiTest, FindInTable_HitsFirstMatchingSlot)
         obj_other_b.address(),
     };
 
-    auto hit =
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVTarget@@");
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                           ".?AVTarget@@");
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(*hit, obj_target.address());
+    EXPECT_EQ(hit->raw(), obj_target.address());
 }
 
 TEST_F(RttiTest, FindInTable_NoMatchReturnsNullopt)
@@ -342,8 +343,8 @@ TEST_F(RttiTest, FindInTable_NoMatchReturnsNullopt)
 
     std::array<std::uintptr_t, 2> table{obj_a.address(), obj_b.address()};
 
-    auto hit =
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVMissing@@");
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                           ".?AVMissing@@");
     EXPECT_FALSE(hit.has_value());
 }
 
@@ -354,10 +355,10 @@ TEST_F(RttiTest, FindInTable_SkipsNullSlots)
 
     std::array<std::uintptr_t, 4> table{0, 0, obj.address(), 0};
 
-    auto hit =
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVNullSkip@@");
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                           ".?AVNullSkip@@");
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(*hit, obj.address());
+    EXPECT_EQ(hit->raw(), obj.address());
 }
 
 TEST_F(RttiTest, FindInTable_SkipsLowAddressSlots)
@@ -367,10 +368,10 @@ TEST_F(RttiTest, FindInTable_SkipsLowAddressSlots)
 
     std::array<std::uintptr_t, 3> table{0x100, 0x200, obj.address()};
 
-    auto hit =
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVLowSkip@@");
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                           ".?AVLowSkip@@");
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(*hit, obj.address());
+    EXPECT_EQ(hit->raw(), obj.address());
 }
 
 TEST_F(RttiTest, FindInTable_CachePopulatedOnFirstHit)
@@ -380,11 +381,11 @@ TEST_F(RttiTest, FindInTable_CachePopulatedOnFirstHit)
 
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    std::atomic<std::uintptr_t> cache{0};
-    auto hit = Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(),
+    std::atomic<Address> cache{Address{}};
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
                                            ".?AVCacheTest@@", &cache);
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(cache.load(), target.vtable());
+    EXPECT_EQ(cache.load().raw(), target.vtable());
 }
 
 TEST_F(RttiTest, FindInTable_WarmCacheSkipsRttiWalk)
@@ -397,11 +398,11 @@ TEST_F(RttiTest, FindInTable_WarmCacheSkipsRttiWalk)
     std::array<std::uintptr_t, 2> table{obj_other.address(), obj_target.address()};
 
     // Pre-seed the cache with the target vtable; the warm path is now active.
-    std::atomic<std::uintptr_t> cache{target.vtable()};
-    auto hit =
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVWarm@@", &cache);
+    std::atomic<Address> cache{Address{target.vtable()}};
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                           ".?AVWarm@@", &cache);
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(*hit, obj_target.address());
+    EXPECT_EQ(hit->raw(), obj_target.address());
 }
 
 TEST_F(RttiTest, FindInTable_WarmCacheRejectsForeignVtables)
@@ -413,15 +414,15 @@ TEST_F(RttiTest, FindInTable_WarmCacheRejectsForeignVtables)
 
     // Cache points at an entirely unrelated vtable address. The single slot does not match the cached vtable, so the
     // warm path returns nullopt without ever invoking the RTTI walker.
-    std::atomic<std::uintptr_t> cache{0xDEADBEEFCAFEULL};
-    auto hit = Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), ".?AVWrong@@",
-                                           &cache);
+    std::atomic<Address> cache{Address{0xDEADBEEFCAFEULL}};
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
+                                           ".?AVWrong@@", &cache);
     EXPECT_FALSE(hit.has_value());
 }
 
 TEST_F(RttiTest, FindInTable_NullTableRejected)
 {
-    EXPECT_FALSE(Rtti::find_in_pointer_table(0, 4, ".?AVNull@@").has_value());
+    EXPECT_FALSE(rtti::find_in_pointer_table(Address{}, 4, ".?AVNull@@").has_value());
 }
 
 TEST_F(RttiTest, FindInTable_ZeroSlotsRejected)
@@ -430,8 +431,8 @@ TEST_F(RttiTest, FindInTable_ZeroSlotsRejected)
     SyntheticObject obj(v.vtable());
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    EXPECT_FALSE(
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), 0, ".?AVZero@@").has_value());
+    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, 0, ".?AVZero@@")
+                     .has_value());
 }
 
 TEST_F(RttiTest, FindInTable_EmptyExpectedRejected)
@@ -440,8 +441,8 @@ TEST_F(RttiTest, FindInTable_EmptyExpectedRejected)
     SyntheticObject obj(v.vtable());
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    EXPECT_FALSE(
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(), "").has_value());
+    EXPECT_FALSE(rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(), "")
+                     .has_value());
 }
 
 TEST_F(RttiTest, FindInTable_CustomStrideSkipsInterleavedMetadata)
@@ -453,10 +454,10 @@ TEST_F(RttiTest, FindInTable_CustomStrideSkipsInterleavedMetadata)
     // pointer.
     std::array<std::uintptr_t, 4> table{obj.address(), 0xAAAAAAAAu, obj.address(), 0xBBBBBBBBu};
 
-    auto hit =
-        Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), 2, ".?AVStride@@", nullptr, 16);
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, 2, ".?AVStride@@",
+                                           nullptr, 16);
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(*hit, obj.address());
+    EXPECT_EQ(hit->raw(), obj.address());
 }
 
 TEST_F(RttiTest, FindInTable_ZeroStrideDefaultsToQword)
@@ -466,16 +467,16 @@ TEST_F(RttiTest, FindInTable_ZeroStrideDefaultsToQword)
 
     std::array<std::uintptr_t, 1> table{obj.address()};
 
-    auto hit = Rtti::find_in_pointer_table(reinterpret_cast<std::uintptr_t>(table.data()), table.size(),
+    auto hit = rtti::find_in_pointer_table(Address{reinterpret_cast<std::uintptr_t>(table.data())}, table.size(),
                                            ".?AVZeroStride@@", nullptr, 0);
     ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(*hit, obj.address());
+    EXPECT_EQ(hit->raw(), obj.address());
 }
 
 TEST_F(RttiTest, FindInTable_OverflowingRangeRejected)
 {
     // (table + slot_count * stride) wraps; should be treated as invalid.
-    EXPECT_FALSE(Rtti::find_in_pointer_table(UINTPTR_MAX - 8, 4, ".?AVAnything@@", nullptr, 16).has_value());
+    EXPECT_FALSE(rtti::find_in_pointer_table(Address{UINTPTR_MAX - 8}, 4, ".?AVAnything@@", nullptr, 16).has_value());
 }
 
 // --- Bound-check guards against poisoned RTTI fields ---
@@ -487,12 +488,12 @@ TEST_F(RttiTest, ResolveRejectsPoisonedTypeDescriptorRva)
     SyntheticVtable v(".?AVValid@@");
     v.poison_type_descriptor_rva(0x7FFFFFFFu);
 
-    EXPECT_FALSE(Rtti::type_name_of(v.vtable()).has_value());
-    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), ".?AVValid@@"));
+    EXPECT_FALSE(rtti::type_name_of(Address{v.vtable()}).has_value());
+    EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, ".?AVValid@@"));
 
     char buf[64];
     std::memset(buf, 'Z', sizeof(buf));
-    EXPECT_EQ(Rtti::type_name_into(v.vtable(), buf, sizeof(buf)), 0u);
+    EXPECT_EQ(rtti::type_name_into(Address{v.vtable()}, buf, sizeof(buf)), 0u);
     EXPECT_EQ(buf[0], '\0');
 }
 
@@ -504,8 +505,8 @@ TEST_F(RttiTest, ResolveRejectsPoisonedSelfRva)
     SyntheticVtable v(".?AVValid@@");
     v.poison_self_rva(1);
 
-    EXPECT_FALSE(Rtti::type_name_of(v.vtable()).has_value());
-    EXPECT_FALSE(Rtti::vtable_is_type(v.vtable(), ".?AVValid@@"));
+    EXPECT_FALSE(rtti::type_name_of(Address{v.vtable()}).has_value());
+    EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, ".?AVValid@@"));
 }
 
 TEST_F(RttiTest, ResolveRejectsHeapAllocatedVtable)
@@ -519,14 +520,14 @@ TEST_F(RttiTest, ResolveRejectsHeapAllocatedVtable)
     (*buf)[3] = 0;
     const std::uintptr_t fake_vt = reinterpret_cast<std::uintptr_t>(buf->data() + 2);
 
-    EXPECT_FALSE(Rtti::type_name_of(fake_vt).has_value());
-    EXPECT_FALSE(Rtti::vtable_is_type(fake_vt, ".?AVAnything@@"));
+    EXPECT_FALSE(rtti::type_name_of(Address{fake_vt}).has_value());
+    EXPECT_FALSE(rtti::vtable_is_type(Address{fake_vt}, ".?AVAnything@@"));
 }
 
 // --- Default values / constants ---
 
 TEST(RttiConstantsTest, Defaults)
 {
-    static_assert(Rtti::DEFAULT_TYPE_NAME_MAX > 0);
-    static_assert(Rtti::MAX_TYPE_NAME_LEN > Rtti::DEFAULT_TYPE_NAME_MAX);
+    static_assert(rtti::DEFAULT_TYPE_NAME_MAX > 0);
+    static_assert(rtti::MAX_TYPE_NAME_LEN > rtti::DEFAULT_TYPE_NAME_MAX);
 }

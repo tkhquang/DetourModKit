@@ -3,8 +3,8 @@
 
 /**
  * @file drift_manifest.hpp
- * @brief Durable serialization of self-heal drift reports (@ref DetourModKit::Rtti::DriftEntry).
- * @details Lets a consumer persist a @ref DetourModKit::Rtti::heal_report across game versions and diff the saved
+ * @brief Durable serialization of self-heal drift reports (@ref DetourModKit::rtti::DriftEntry).
+ * @details Lets a consumer persist a @ref DetourModKit::rtti::heal_report across game versions and diff the saved
  *          manifests to see which offsets moved between patches, instead of only logging the live telemetry once per
  *          run.
  */
@@ -21,7 +21,7 @@
 
 namespace DetourModKit
 {
-    namespace Rtti
+    namespace rtti
     {
         /**
          * @struct DriftRecord
@@ -41,8 +41,8 @@ namespace DetourModKit
             std::ptrdiff_t delta = 0;
             /// Whether the landmark healed.
             bool ok = false;
-            /// Failure reason (meaningful only when @ref ok is false).
-            HealError error{};
+            /// Failure code (its category is @ref ErrorCategory::Rtti); meaningful only when @ref ok is false.
+            ErrorCode error{ErrorCode::Ok};
         };
 
         /**
@@ -82,7 +82,7 @@ namespace DetourModKit
          * @brief Serializes a drift report to a durable, line-oriented manifest.
          * @details Emits a versioned header line followed by one tab-separated line per entry (name, nominal_offset,
          *          healed_offset, delta, ok, error). The error is written as a stable token, not the human-readable
-         *          @ref heal_error_to_string text, so the manifest round-trips. Names are assumed free of tab and
+         *          @ref Error::message() text, so the manifest round-trips. Names are assumed free of tab and
          *          newline (MSVC mangled type names are).
          * @param entries The drift entries to serialize (e.g. from @ref heal_report).
          * @return The manifest text.
@@ -121,7 +121,7 @@ namespace DetourModKit
          */
         [[nodiscard]] std::expected<std::vector<DriftRecord>, ManifestError>
         read_drift_report_from_file(const std::string &path);
-    } // namespace Rtti
+    } // namespace rtti
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_DRIFT_MANIFEST_HPP

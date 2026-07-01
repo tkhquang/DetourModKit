@@ -1,6 +1,6 @@
 # MSVC RTTI walker (`rtti.hpp`)
 
-DetourModKit ships a small RTTI introspection module for MSVC-built x64 targets. It recovers an object's concrete type from a runtime vtable pointer by walking the RTTICompleteObjectLocator (COL) and TypeDescriptor structures the Visual C++ compiler emits for every polymorphic class. The walker operates on raw addresses, never invokes `typeid()` or `dynamic_cast`, and works across DLL boundaries against third-party MSVC binaries that ship without symbols (game engines, middleware).
+DetourModKit ships a small RTTI introspection module (namespace `DetourModKit::rtti`) for MSVC-built x64 targets. It recovers an object's concrete type from a runtime vtable pointer by walking the RTTICompleteObjectLocator (COL) and TypeDescriptor structures the Visual C++ compiler emits for every polymorphic class. The walker operates on value-typed `DetourModKit::Address` handles, never invokes `typeid()` or `dynamic_cast`, and works across DLL boundaries against third-party MSVC binaries that ship without symbols (game engines, middleware).
 
 The walker is the right tool when you need to:
 
@@ -36,13 +36,13 @@ RVAs are 32-bit unsigned offsets relative to the **owning module's** image base,
 
 | Function | Use when |
 |----------|----------|
-| `Rtti::type_name_of(vtable, max_len)` | You want the name as a `std::string` for logging or one-shot inspection. One heap allocation per call. |
-| `Rtti::type_name_into(vtable, buf, len)` | You want the same answer with zero allocation. Returns bytes written; output is always NUL-terminated when `len > 0`. |
-| `Rtti::vtable_is_type(vtable, expected)` | You only need a yes/no identity probe. Reads `expected.size() + 1` bytes and short-circuits. No allocation. |
-| `Rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<uintptr_t>` cache slot reduces steady-state cost to a single qword compare per slot. |
-| `Rtti::vtable_for_type(mangled, range?)` | You know a stable class name and want its primary (most-derived) vtable address, scoped to one module. The name-keyed inverse of `vtable_is_type`. |
-| `Rtti::vtables_for_type(mangled, out, cap, range?)` | The class may be multiply/virtually inherited and you want every sub-object vtable that shares the name, not just the primary. |
-| `Rtti::TypeIdentity(mangled, range?)` | You want a cached, name-keyed identity handle: resolve the primary vtable once, then `matches(vtable)` is a single qword compare. |
+| `rtti::type_name_of(vtable, max_len)` | You want the name as a `std::string` for logging or one-shot inspection. One heap allocation per call. |
+| `rtti::type_name_into(vtable, buf, len)` | You want the same answer with zero allocation. Returns bytes written; output is always NUL-terminated when `len > 0`. |
+| `rtti::vtable_is_type(vtable, expected)` | You only need a yes/no identity probe. Reads `expected.size() + 1` bytes and short-circuits. No allocation. |
+| `rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<Address>` cache slot reduces steady-state cost to a single qword compare per slot. |
+| `rtti::vtable_for_type(mangled, range?)` | You know a stable class name and want its primary (most-derived) vtable address, scoped to one module. The name-keyed inverse of `vtable_is_type`. |
+| `rtti::vtables_for_type(mangled, out, cap, range?)` | The class may be multiply/virtually inherited and you want every sub-object vtable that shares the name, not just the primary. |
+| `rtti::TypeIdentity(mangled, range?)` | You want a cached, name-keyed identity handle: resolve the primary vtable once, then `matches(vtable)` is a single qword compare. |
 
 The forward entry points are noexcept and SEH-guarded; an unmapped page, missing COL, or zero RVA produces a failure return rather than a fault. The reverse resolvers (`vtable_for_type`, `vtables_for_type`) and `TypeIdentity` are SEH-guarded as well and return `std::nullopt` / a zero count on any failure.
 
@@ -56,12 +56,12 @@ The forward entry points are noexcept and SEH-guarded; an unmapped page, missing
 
 constexpr std::string_view k_actor_rtti = ".?AVActorComponent@engine@@";
 
-bool actor_is_ready(std::uintptr_t actor_ptr) noexcept
+bool actor_is_ready(DMK::Address actor_ptr) noexcept
 {
-    const auto vt_opt = DMK::memory::read<std::uintptr_t>(DMK::Address{actor_ptr});
+    const auto vt_opt = DMK::memory::read<DMK::Address>(actor_ptr);
     if (!vt_opt)
         return false;
-    return DMK::Rtti::vtable_is_type(*vt_opt, k_actor_rtti);
+    return DMK::rtti::vtable_is_type(*vt_opt, k_actor_rtti);
 }
 ```
 
@@ -70,17 +70,16 @@ bool actor_is_ready(std::uintptr_t actor_ptr) noexcept
 ```cpp
 namespace
 {
-    std::atomic<std::uintptr_t> g_camera_vt_cache{0};
+    std::atomic<DMK::Address> g_camera_vt_cache{DMK::Address{}};
 }
 
-std::uintptr_t find_camera_component(std::uintptr_t table) noexcept
+std::optional<DMK::Address> find_camera_component(DMK::Address table) noexcept
 {
     constexpr std::size_t k_component_slots = 64;
     constexpr std::string_view k_camera_rtti = ".?AVCameraComponent@engine@@";
 
-    return DMK::Rtti::find_in_pointer_table(
-               table, k_component_slots, k_camera_rtti, &g_camera_vt_cache)
-        .value_or(0);
+    return DMK::rtti::find_in_pointer_table(
+        table, k_component_slots, k_camera_rtti, &g_camera_vt_cache);
 }
 ```
 
@@ -92,7 +91,7 @@ To disable caching, pass `nullptr` for `vtable_cache`. To support tables that in
 
 ```cpp
 char rtti_buf[128];
-const std::size_t n = DMK::Rtti::type_name_into(vt, rtti_buf, sizeof(rtti_buf));
+const std::size_t n = DMK::rtti::type_name_into(vt, rtti_buf, sizeof(rtti_buf));
 if (n > 0)
     DMK::log().log(DMK::LogLevel::Debug, "vtable type = {}", rtti_buf);
 ```
@@ -101,11 +100,11 @@ if (n > 0)
 
 ### Resolving a vtable from a type name (reverse direction)
 
-The walker runs vtable to name. The inverse, name to vtable, is the natural way to bootstrap a class marker at init: you know the mangled name but not yet the vtable address. `Rtti::vtable_for_type` does this directly.
+The walker runs vtable to name. The inverse, name to vtable, is the natural way to bootstrap a class marker at init: you know the mangled name but not yet the vtable address. `rtti::vtable_for_type` does this directly.
 
 ```cpp
 // Resolve once at init; key on the stable class name, not a vtable literal.
-const auto vt = DMK::Rtti::vtable_for_type(".?AVGameAudioEffect@engine@@");
+const auto vt = DMK::rtti::vtable_for_type(".?AVGameAudioEffect@engine@@");
 if (vt)
     g_audio_effect_vtable = *vt;
 ```
@@ -119,14 +118,14 @@ Multiple inheritance and `/OPT:ICF`:
 - `vtable_for_type` returns the **primary** vtable (the COL whose `offset` is 0), which is the value an object pointer's first qword holds for a most-derived instance. A class used only as a secondary or virtual base has its first qword pointing at a `COL.offset != 0` sub-object vtable; use `vtables_for_type` to get every sub-object vtable. An ambiguous primary (the same name with two distinct offset-0 vtables, for example a type linked into the image twice) fails closed and returns `std::nullopt`.
 - Take identity from the returned vtable **address** (the `[-1]`-COL-anchored value), never from the vtable's slot contents: under the linker's identical-COMDAT folding (`/OPT:ICF`) two distinct classes can share folded function-pointer slots, so a slot-content comparison is not class-unique.
 
-For a cached per-frame identity check, wrap it in `Rtti::TypeIdentity`:
+For a cached per-frame identity check, wrap it in `rtti::TypeIdentity`. `TypeIdentity` owns its mangled name (it copies the `std::string_view` into an internal `std::string`), so the handle is self-contained and any string source -- including a temporary -- is safe to pass:
 
 ```cpp
-namespace { DMK::Rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
+namespace { DMK::rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
 
-bool is_combat_camera(std::uintptr_t obj) noexcept
+bool is_combat_camera(DMK::Address obj) noexcept
 {
-    const auto vt = DMK::memory::read<std::uintptr_t>(DMK::Address{obj});
+    const auto vt = DMK::memory::read<DMK::Address>(obj);
     return vt && g_camera_id.matches(*vt); // resolves once, then a qword compare
 }
 ```
