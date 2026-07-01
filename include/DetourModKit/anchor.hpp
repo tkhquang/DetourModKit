@@ -50,13 +50,18 @@ namespace DetourModKit
             RipGlobal,
             /// An in-code immediate or `[reg + disp]` displacement, via @ref scan::read_code_constant.
             CodeOperand,
-            /// The instruction (or enclosing function) that references an immutable string literal, via
-            /// @ref scan::find_string_xref. The most update-resilient kind.
+            /**
+             * @brief The instruction (or enclosing function) that references an immutable string literal, via
+             *        @ref scan::find_string_xref. The most update-resilient kind.
+             */
             StringXref,
             /// A pinned literal with no backend; reported as at-risk because it cannot self-heal.
             Manual,
-            /// Reserved for a future prologue-dataflow backend (a call argument to its register/stack home). Declaring
-            /// it now keeps a registry table forward-compatible; it currently reports @ref AnchorStatus::Unsupported.
+            /**
+             * @brief Reserved for a future prologue-dataflow backend (a call argument to its register/stack home).
+             *        Declaring it now keeps a registry table forward-compatible; it currently reports
+             *        @ref AnchorStatus::Unsupported.
+             */
             CallArgHome,
             /// A corroborated value accepted only when two independent sub-anchors both resolve and agree.
             Quorum
@@ -75,8 +80,10 @@ namespace DetourModKit
         {
             /// The two resolved values must be identical (the default, strongest policy).
             ExactValue,
-            /// Accept a gap of at most @ref Anchor::quorum_tolerance; a negative tolerance fails closed (never
-            /// accepts).
+            /**
+             * @brief Accept a gap of at most @ref Anchor::quorum_tolerance; a negative tolerance fails closed
+             *        (never accepts).
+             */
             WithinTolerance
         };
 
@@ -90,8 +97,10 @@ namespace DetourModKit
             Unresolved,
             /// The backend resolved a value and every applicable validator/corroboration check passed.
             Resolved,
-            /// The backend missed, a validator rejected the value, a denied backend was requested, or a quorum
-            /// disagreed; no value is invented (fail closed).
+            /**
+             * @brief The backend missed, a validator rejected the value, a denied backend was requested, or a quorum
+             *        disagreed; no value is invented (fail closed).
+             */
             Failed,
             /// The kind has no resolver yet (@ref AnchorKind::CallArgHome).
             Unsupported,
@@ -130,8 +139,10 @@ namespace DetourModKit
             /// VtableIdentity: the MSVC mangled type name, e.g. ".?AVGameAudioEffect@engine@@".
             std::string_view mangled;
 
-            /// RipGlobal / CodeOperand: the candidate ladder resolving to the address or the instruction site.
-            /// Borrowed.
+            /**
+             * @brief RipGlobal / CodeOperand: the candidate ladder resolving to the address or the instruction site.
+             *        Borrowed.
+             */
             std::span<const scan::Candidate> site;
             /// CodeOperand: whether to read an immediate or a memory-operand displacement.
             scan::OperandKind operand_kind = scan::OperandKind::Immediate;
@@ -154,15 +165,21 @@ namespace DetourModKit
             /// Manual: the pinned literal value, taken as-is (unless @ref validate_manual runs the validator on it).
             std::int64_t manual_value = 0;
 
-            /// Optional post-resolve predicate; nullptr skips validation. Never applied to Manual unless
-            /// @ref validate_manual, nor to CallArgHome; for a Quorum it runs once on the corroborated value.
+            /**
+             * @brief Optional post-resolve predicate; nullptr skips validation. Never applied to Manual unless
+             *        @ref validate_manual, nor to CallArgHome; for a Quorum it runs once on the corroborated value.
+             */
             AnchorValidator validator = nullptr;
             /// Opaque pointer forwarded verbatim to @ref validator.
             const void *validator_context = nullptr;
             /// Run @ref validator on a Manual anchor too, instead of taking the pinned literal unchecked.
             bool validate_manual = false;
-            /// Reject a backend-resolvable anchor that carries no @ref validator (status Failed). A Quorum is exempt,
-            /// because its two-signal corroboration already is the verification.
+            /**
+             * @brief Reject a backend-resolvable anchor that carries no @ref validator (status Failed). Only the four
+             *        backend kinds are subject to this: a pinned Manual literal and a Quorum are both exempt -- a
+             *        Manual is not a resolved target, and a Quorum's two-signal corroboration is already the
+             *        verification.
+             */
             bool require_validator = false;
 
             /// Quorum: the first sub-anchor (non-owning; keep it alive across the resolve call).
@@ -226,8 +243,10 @@ namespace DetourModKit
          */
         struct ScanProfile
         {
-            /// Widen the broad string-xref sweep on for StringXref anchors. It can only widen: a per-anchor
-            /// @ref Anchor::xref_broad_match still wins, so this never forces broad mode off.
+            /**
+             * @brief Widen the broad string-xref sweep on for StringXref anchors. It can only widen: a per-anchor
+             *        @ref Anchor::xref_broad_match still wins, so this never forces broad mode off.
+             */
             bool default_broad_string_xref = false;
             /// The candidate ordering applied to RipGlobal / CodeOperand ladders (reuses the scan module's policy).
             scan::CandidateOrder candidate_order = scan::CandidateOrder::AsDeclared;

@@ -165,11 +165,14 @@ namespace DetourModKit
         {
             Snapshot snapshot;
 
+            // Derive the total by summing the per-subsystem values captured into this snapshot (rather than a second
+            // independent total_intentional_leaks() read), so snapshot.total_intentional_leaks always equals the sum of
+            // the breakdown even if a counter is incremented concurrently between the copy and the total.
             for (std::size_t i = 0; i < snapshot.intentional_leaks.size(); ++i)
             {
                 snapshot.intentional_leaks[i] = intentional_leak_count(static_cast<LeakSubsystem>(i));
+                snapshot.total_intentional_leaks += snapshot.intentional_leaks[i];
             }
-            snapshot.total_intentional_leaks = total_intentional_leaks();
 
             hook_population().counts(snapshot.hooks_total, snapshot.hooks_active, snapshot.hooks_disabled);
 

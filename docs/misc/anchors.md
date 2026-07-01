@@ -1,11 +1,6 @@
 # Anchor Registry (`anchor.hpp`)
 
-> Status (v4.0.0): the declarative Anchor Registry is a first-class module, `anchor.hpp` / `namespace
-> DetourModKit::anchor`. It composes the four self-healing backends that survived the scan clean-break:
-> `scan::resolve` (the `RipGlobal` cascade), `scan::read_code_constant` (the `CodeOperand` backend),
-> `scan::find_string_xref` (the `StringXref` backend), and `rtti::vtable_for_type` (the `VtableIdentity` backend).
-> Candidate ladders are `scan::Candidate` values and the resolve scope is a `Region`; the module adds no scanning of
-> its own, only the declarative table, the quorum corroboration, the validators, and the drift report on top.
+> Status (v4.0.0): the declarative Anchor Registry is a first-class module, `anchor.hpp` / `namespace DetourModKit::anchor`. It composes the four self-healing backends that survived the scan clean-break: `scan::resolve` (the `RipGlobal` cascade), `scan::read_code_constant` (the `CodeOperand` backend), `scan::find_string_xref` (the `StringXref` backend), and `rtti::vtable_for_type` (the `VtableIdentity` backend). Candidate ladders are `scan::Candidate` values and the resolve scope is a `Region`; the module adds no scanning of its own, only the declarative table, the quorum corroboration, the validators, and the drift report on top.
 
 A mod against a fast-patching game accumulates a wall of patch-fragile constants: a vtable matched by literal, a global resolved by AOB, a struct stride read out of a dispatch loop, the occasional pinned offset. The Anchor Registry collapses that wall into one declarative table. Each constant is declared once with the kind of anchor it is and the inputs its backend needs; the whole table is resolved at init and reported uniformly, so "this mod is broken on the new patch" becomes a precise, machine-readable diff instead of a debugging session.
 

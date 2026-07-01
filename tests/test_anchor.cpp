@@ -292,6 +292,11 @@ TEST(AnchorTest, StringXrefFailsClosedWhenAbsent)
 
 TEST(AnchorTest, VtableIdentityFailsClosedWhenAbsent)
 {
+    // The VtableIdentity SUCCESS dispatch (rtti::vtable_for_type -> commit_resolved) is not re-tested here: building a
+    // resolvable target needs the ~130-line synthetic MSVC-RTTI vtable fixture from tests/test_rtti.cpp (a real
+    // GCC/MSVC type would not carry the MSVC RTTI layout the walker reads on both toolchains). vtable_for_type success
+    // is covered there, and the commit path is shared with the CodeOperand / RipGlobal / StringXref resolve tests
+    // above; this case pins the anchor-side failure wiring (bogus name -> fail closed).
     an::Anchor anchor{};
     anchor.label = "vtable";
     anchor.kind = an::AnchorKind::VtableIdentity;
@@ -493,6 +498,23 @@ TEST(AnchorTest, RequireValidatorIgnoredForManualByDefault)
     const an::ResolvedAnchor result = an::resolve(anchor);
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(result.value, 0x22);
+}
+
+TEST(AnchorTest, RequireValidatorExemptsManualWhenValidated)
+{
+    // require_validator is a backend-target policy, so it never rejects a pinned Manual literal for lacking a validator
+    // -- even when validate_manual routes the Manual through the validator path with no validator attached. This
+    // contradictory-but-benign config resolves rather than fails, matching the anchor.hpp contract (Manual is not a
+    // resolved target). With a validator missing there is simply nothing to run.
+    an::Anchor anchor{};
+    anchor.kind = an::AnchorKind::Manual;
+    anchor.manual_value = 0x44;
+    anchor.validate_manual = true;   // route through the commit_resolved validator path
+    anchor.require_validator = true; // but Manual is exempt from the no-validator rejection (only backends are subject)
+
+    const an::ResolvedAnchor result = an::resolve(anchor);
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0x44);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

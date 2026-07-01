@@ -134,9 +134,12 @@ namespace DetourModKit
             void commit_resolved(const Anchor &anchor, ResolvedAnchor &result, std::int64_t value) noexcept
             {
                 // Opt-in required-validator policy: a backend-resolved (function/global) target with no domain check is
-                // treated as unverified and fails closed. A Quorum is exempt -- its two-signal corroboration already is
-                // the verification -- so a caller is not forced to also attach a validator to a corroborated anchor.
-                if (anchor.require_validator && anchor.kind != AnchorKind::Quorum && anchor.validator == nullptr)
+                // treated as unverified and fails closed. Manual and Quorum are both exempt -- a pinned Manual literal
+                // is not a resolved target (require_validator is a backend-target policy, and a Manual only reaches
+                // this path at all via validate_manual), and a Quorum's two-signal corroboration is already the
+                // verification. Only the four backend kinds reach this rejection.
+                if (anchor.require_validator && anchor.kind != AnchorKind::Quorum &&
+                    anchor.kind != AnchorKind::Manual && anchor.validator == nullptr)
                 {
                     result.status = AnchorStatus::Failed;
                     result.value = 0;
