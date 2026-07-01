@@ -611,7 +611,7 @@ namespace DetourModKit
                 // Mirrors clear_bindings(invoke_callbacks=false).
                 pin_current_module();
                 m_poll_thread.detach();
-                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Input);
+                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
                 m_running.store(false, std::memory_order_release);
                 return;
             }

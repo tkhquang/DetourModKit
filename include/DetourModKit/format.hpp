@@ -18,7 +18,7 @@
 
 namespace DetourModKit
 {
-    namespace String
+    namespace string
     {
         /**
          * @brief Trims leading and trailing whitespace characters from a string.
@@ -41,9 +41,9 @@ namespace DetourModKit
             const size_t last_non_whitespace = s.find_last_not_of(whitespace_chars);
             return std::string(s.substr(first_non_whitespace, (last_non_whitespace - first_non_whitespace + 1)));
         }
-    } // namespace String
+    } // namespace string
 
-    namespace Format
+    namespace format
     {
         /**
          * @brief Formats a memory address as a hexadecimal string.
@@ -163,7 +163,7 @@ namespace DetourModKit
             return format_int_vector(keys);
         }
 
-    } // namespace Format
+    } // namespace format
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_FORMAT_HPP

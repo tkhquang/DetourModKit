@@ -16,6 +16,7 @@
 #include "DetourModKit/async_logger.hpp"
 
 #include "internal/async_logger_queue.hpp"
+#include "internal/win_file_stream.hpp"
 
 using namespace DetourModKit;
 // White-box access: StringPool, LogMessage, and DynamicMPMCQueue (plus their sizing constants) are the AsyncLogger

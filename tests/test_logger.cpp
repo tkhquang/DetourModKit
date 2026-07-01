@@ -1167,7 +1167,7 @@ TEST_F(LoggerTest, DisableAsyncMode_NoLeakInNormalContext)
     Logger &logger = log();
     logger.set_log_level(LogLevel::Info);
 
-    const std::size_t before = Diagnostics::intentional_leak_count(Diagnostics::LeakSubsystem::Logger);
+    const std::size_t before = diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger);
 
     logger.enable_async_mode();
     ASSERT_TRUE(logger.is_async_mode_enabled());
@@ -1176,7 +1176,7 @@ TEST_F(LoggerTest, DisableAsyncMode_NoLeakInNormalContext)
     EXPECT_FALSE(logger.is_async_mode_enabled());
     logger.flush();
 
-    EXPECT_EQ(Diagnostics::intentional_leak_count(Diagnostics::LeakSubsystem::Logger), before)
+    EXPECT_EQ(diagnostics::intentional_leak_count(diagnostics::LeakSubsystem::Logger), before)
         << "disable_async_mode() must not take the loader-lock leak path when the loader lock is not held";
 
     std::ifstream ifs(m_test_log_file);

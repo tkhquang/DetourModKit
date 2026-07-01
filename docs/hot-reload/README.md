@@ -99,7 +99,7 @@ This is where your actual mod code lives. It links against DetourModKit as a sta
 
 ```cpp
 #include "exports.hpp"
-#include <DetourModKit/dmk.hpp>
+#include <DetourModKit.hpp>
 #include <optional>
 #include <windows.h>
 
@@ -114,7 +114,7 @@ static HMODULE s_this_module = nullptr;
 
 // The live DMK Session. Its destructor runs the ordered teardown, so it is
 // the last thing standing and the first thing dropped in Shutdown().
-static std::optional<DMK::Session> s_session;
+static std::optional<dmk::Session> s_session;
 
 // --- Exported functions ---
 
@@ -124,14 +124,14 @@ extern "C" __declspec(dllexport) bool Init()
     {
         // Session::start runs the synchronous gate + single-instance guard,
         // then configures the process-default logger.
-        auto session = DMK::Session::start(
+        auto session = dmk::Session::start(
             {.name = "MyMod", .log_file = "mod_logic.log"});
         if (!session)
             return false;
 
         s_session.emplace(std::move(*session));
         auto& logger = s_session->log();
-        logger.set_log_level(DMK::LogLevel::Debug);
+        logger.set_log_level(dmk::LogLevel::Debug);
         logger.info("mod_logic: Init() called");
 
         setup_config();
@@ -217,20 +217,20 @@ static bool setup_hooks()
 
 static void setup_config()
 {
-    // DMKConfig::bind_float("Camera", "FOV", "Field of View",
+    // dmk::config::bind_float("Camera", "FOV", "Field of View",
     //     [](float val) { g_fov = val; }, 90.0f);
-    // DMKConfig::load("mod_config.ini");
+    // dmk::config::load("mod_config.ini");
 }
 
 static void setup_input()
 {
-    // DMKInput::scope().add(*DMKInput::register_combo({...}));
-    // DMKInput::Input::instance().start();
+    // dmk::input::scope().add(*dmk::input::register_combo({...}));
+    // dmk::input::Input::instance().start();
 }
 ```
 
 > [!TIP]
-> Any background threads spawned from `Init()` (deferred scanning, periodic polling, async I/O, etc.) must be joined before the `Session` teardown runs -- otherwise `FreeLibrary` will unload code pages that the thread is still executing from. The easiest way to get this right is to wrap them in [`DMKStoppableWorker`](../../include/DetourModKit/detail/worker.hpp) and reset the owning pointer at the top of `Shutdown()`, before destroying the `Session`. See [Section 9](#9-background-thread-lifecycle) below.
+> Any background threads spawned from `Init()` (deferred scanning, periodic polling, async I/O, etc.) must be joined before the `Session` teardown runs -- otherwise `FreeLibrary` will unload code pages that the thread is still executing from. The easiest way to get this right is to wrap them in [`dmk::StoppableWorker`](../../include/DetourModKit/detail/worker.hpp) and reset the owning pointer at the top of `Shutdown()`, before destroying the `Session`. See [Section 9](#9-background-thread-lifecycle) below.
 
 ### Step 3: Implement the Loader ASI
 
@@ -739,10 +739,10 @@ void apply_patch(std::byte* addr, const std::byte* new_bytes, size_t len)
     patch.original_bytes.resize(len);
     std::copy_n(addr, len, patch.original_bytes.data());
 
-    auto result = DMKMemory::write_bytes(
-        DMK::Address{addr}, std::span<const std::byte>{new_bytes, len});
+    auto result = dmk::memory::write_bytes(
+        dmk::Address{addr}, std::span<const std::byte>{new_bytes, len});
     if (!result) {
-        DMK::log().error("apply_patch: write_bytes failed");
+        dmk::log().error("apply_patch: write_bytes failed");
         return;
     }
     s_active_patches.push_back(std::move(patch));
@@ -752,10 +752,10 @@ void revert_all_patches()
 {
     for (auto it = s_active_patches.rbegin(); it != s_active_patches.rend(); ++it)
     {
-        auto result = DMKMemory::write_bytes(
-            DMK::Address{it->address}, std::span<const std::byte>{it->original_bytes});
+        auto result = dmk::memory::write_bytes(
+            dmk::Address{it->address}, std::span<const std::byte>{it->original_bytes});
         if (!result) {
-            DMK::log().error("revert_all_patches: write_bytes failed");
+            dmk::log().error("revert_all_patches: write_bytes failed");
         }
     }
     s_active_patches.clear();
@@ -874,14 +874,14 @@ When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
 If your logic DLL spawns background threads (e.g., for deferred scanning, periodic polling, or async I/O), you **must** join them in `Shutdown()` before destroying the `Session`. A thread that outlives `FreeLibrary` will execute unmapped code and crash.
 
-**Recommended:** use [`DMKStoppableWorker`](../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`, requests stop on destruction, and falls back to `detach()` when it detects the Windows loader lock (pinning the module so code pages stay mapped). This encapsulates the bounded-join pattern shown below and makes it a one-liner:
+**Recommended:** use [`dmk::StoppableWorker`](../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`, requests stop on destruction, and falls back to `detach()` when it detects the Windows loader lock (pinning the module so code pages stay mapped). This encapsulates the bounded-join pattern shown below and makes it a one-liner:
 
 ```cpp
 // At file scope in the logic DLL
-static std::unique_ptr<DMKStoppableWorker> s_scan_worker;
+static std::unique_ptr<dmk::StoppableWorker> s_scan_worker;
 
 // In Init():
-s_scan_worker = std::make_unique<DMKStoppableWorker>(
+s_scan_worker = std::make_unique<dmk::StoppableWorker>(
     "my_mod.scan",
     [](std::stop_token tok) {
         while (!tok.stop_requested())
@@ -1203,7 +1203,7 @@ extern "C" __declspec(dllexport) void Shutdown()
     };
 
     // Tears down only the named bindings and their config-bound setters.
-    DMK::on_logic_dll_unload(binding_names);
+    dmk::on_logic_dll_unload(binding_names);
 }
 ```
 
@@ -1264,7 +1264,7 @@ extern "C" __declspec(dllexport) void Shutdown()
     //    rewrite, so they must be quiescent here. Drop the Hook handles
     //    (each destructor unhooks), then clear bindings and config.
     s_hooks.clear(); // std::vector<DetourModKit::hook::Hook>
-    DMK::on_logic_dll_unload(binding_names);
+    dmk::on_logic_dll_unload(binding_names);
 
     // 3. Return from Shutdown(). The loader's FreeLibrary call follows.
 }
@@ -1340,5 +1340,5 @@ The `NONE` sentinel is whole-string only by design: a `NONE` token nested inside
 
 - [Project README](../../README.md) - Overview, build instructions, and API reference
 - [Test Coverage Guide](../tests/README.md) - Testing strategy, coverage analysis, and test architecture
-- [`dmk.hpp`](../../include/DetourModKit/dmk.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
-- [`worker.hpp`](../../include/DetourModKit/detail/worker.hpp) - `DMKStoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`
+- [`DetourModKit.hpp`](../../include/DetourModKit.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
+- [`worker.hpp`](../../include/DetourModKit/detail/worker.hpp) - `dmk::StoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`

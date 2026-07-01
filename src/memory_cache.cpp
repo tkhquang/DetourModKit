@@ -957,8 +957,8 @@ namespace DetourModKit
                                     {
                                         pin_current_module();
                                         s_cleanup_thread.detach();
-                                        DetourModKit::Diagnostics::record_intentional_leak(
-                                            DetourModKit::Diagnostics::LeakSubsystem::MemoryCache);
+                                        DetourModKit::diagnostics::record_intentional_leak(
+                                            DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
                                     }
                                     s_cache_initialized.store(false, std::memory_order_release);
                                     return;
@@ -1030,8 +1030,8 @@ namespace DetourModKit
                     // cannot exit while the loader lock is held. Pin the module so its code stays valid, then detach.
                     pin_current_module();
                     s_cleanup_thread.detach();
-                    DetourModKit::Diagnostics::record_intentional_leak(
-                        DetourModKit::Diagnostics::LeakSubsystem::MemoryCache);
+                    DetourModKit::diagnostics::record_intentional_leak(
+                        DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
                 }
                 else
                 {

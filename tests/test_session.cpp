@@ -14,7 +14,7 @@
 
 #include <windows.h>
 
-#include "DetourModKit/dmk.hpp"
+#include "DetourModKit.hpp"
 
 using namespace DetourModKit;
 using namespace DetourModKit::hook;

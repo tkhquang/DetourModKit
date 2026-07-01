@@ -82,7 +82,7 @@ namespace DetourModKit
         {
             detail::pin_current_module();
             m_thread.detach();
-            DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Worker);
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Worker);
             return;
         }
 

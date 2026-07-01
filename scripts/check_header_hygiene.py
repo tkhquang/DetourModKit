@@ -65,8 +65,10 @@ MIDCONTEXT_DEF = re.compile(r'\b(?:struct|class)\s+(?:alignas\s*\([^)]*\)\s*)?Mi
 ASYNC_INTERNAL_DECL = re.compile(r'\b(?:class|struct)\s+(StringPool|LogMessage|DynamicMPMCQueue)\b')
 
 # --- v4 clean-break gates ---
-# Legacy public headers deleted by a clean-break reshape; none may reappear. The root-level DetourModKit.hpp umbrella and
-# bootstrap.hpp were both folded into the v4 dmk.hpp (umbrella + Session/bootstrap/ModInfo) in the lifecycle reshape.
+# Legacy public headers deleted by a clean-break reshape; none may reappear. bootstrap.hpp was folded into the root-level
+# DetourModKit.hpp umbrella (which also carries the Session / bootstrap / ModInfo lifecycle surface). dmk.hpp was the
+# interim in-directory umbrella spelling; the umbrella is the root-level DetourModKit.hpp, so the abbreviated in-directory
+# name must not reappear.
 LEGACY_HEADERS = (
     "include/DetourModKit/scanner.hpp",
     "include/DetourModKit/anchors.hpp",
@@ -74,7 +76,7 @@ LEGACY_HEADERS = (
     "include/DetourModKit/hook_manager.hpp",
     "include/DetourModKit/config_watcher.hpp",
     "include/DetourModKit/bootstrap.hpp",
-    "include/DetourModKit.hpp",
+    "include/DetourModKit/dmk.hpp",
     "include/DetourModKit/diagnostics_dump.hpp",
 )
 # Public headers DEMOTED (moved, not deleted): each keeps its capability but leaves
@@ -83,7 +85,7 @@ LEGACY_HEADERS = (
 # header or the umbrella still includes it); a src/internal/ home makes it truly private (no public includer).
 DEMOTED_HEADERS = {
     "include/DetourModKit/worker.hpp": "include/DetourModKit/detail/worker.hpp",
-    "include/DetourModKit/win_file_stream.hpp": "include/DetourModKit/detail/win_file_stream.hpp",
+    "include/DetourModKit/win_file_stream.hpp": "src/internal/win_file_stream.hpp",
     "include/DetourModKit/event_dispatcher.hpp": "include/DetourModKit/detail/event_dispatcher.hpp",
     "include/DetourModKit/drift_manifest.hpp": "include/DetourModKit/detail/drift_manifest.hpp",
     "include/DetourModKit/srw_shared_mutex.hpp": "src/internal/srw_shared_mutex.hpp",
@@ -115,7 +117,7 @@ LEGACY_MEMORY_TOKEN = re.compile(
 # with the scope operator, not a bare \bHookManager\b, on purpose -- broadening to the bare token is both unnecessary
 # and wrong: the HookManager class is deleted, so any standalone-type spelling (HookManager x;, HookManager *, or
 # using X = HookManager) is already a hard compile error that needs no gate; and a bare token would false-positive on
-# the surviving Diagnostics::LeakSubsystem::HookManager enumerator (a distinct, legitimate name that FOLLOWS '::').
+# the surviving diagnostics::LeakSubsystem::HookManager enumerator (a distinct, legitimate name that FOLLOWS '::').
 # The scope-only form targets exactly the legacy static-call spelling, the one that could otherwise read as plausible.
 LEGACY_HOOK_TOKEN = re.compile(
     r'(\bHookManager::|\bHookError\b|\bHookConfig\b|\bVmtHookConfig\b|\bInlineProloguePolicy\b'
@@ -155,9 +157,9 @@ LEGACY_LOGGER_TOKEN = re.compile(
 # --- v4 lifecycle clean-break gate ---
 # The legacy lifecycle surface (the standalone DMK_Shutdown() ordered-teardown free function, the namespace Bootstrap
 # scaffolding, and its on_dll_attach / on_dll_detach entry points) was reshaped into the RAII Session (whose destructor
-# runs the ordered teardown) plus the free bootstrap() / bootstrap_detach() / request_shutdown() surface in dmk.hpp.
+# runs the ordered teardown) plus the free bootstrap() / bootstrap_detach() / request_shutdown() surface in DetourModKit.hpp.
 # None of these spellings may reappear in this repo's own sources. Bootstrap:: is gated with the scope operator (not a
-# bare token) on purpose: the surviving Diagnostics::LeakSubsystem::Bootstrap enumerator is a distinct, legitimate name
+# bare token) on purpose: the surviving diagnostics::LeakSubsystem::Bootstrap enumerator is a distinct, legitimate name
 # that FOLLOWS '::', so a bare token would false-positive on it. Matched after comment stripping, so v3-migration prose
 # does not trip the gate.
 LEGACY_LIFECYCLE_TOKEN = re.compile(
@@ -187,16 +189,15 @@ LEGACY_MANIFEST_TOKEN = re.compile(r'(\bManifestError\b|\bmanifest_error_to_stri
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
 # include/DetourModKit/detail/ is allowlisted. A detail/ header is installed (it ships with the package), so it
 # is reserved for compile-visible support a PUBLIC header still needs across the include boundary: either tiny
-# must-ship layout/parser support (pattern_core), or a header a public header / the dmk.hpp umbrella still includes
+# must-ship layout/parser support (pattern_core), or a header a public header / the DetourModKit.hpp umbrella still includes
 # to keep a v3 capability reachable in clean v4 idiom. True-private implementation with no public includer belongs
 # in src/internal/ (never installed), not here. A new detail header must be justified and added below, not slipped
 # in silently.
 ALLOWED_DETAIL_HEADERS = {
     "pattern_core.hpp",      # by-value inline storage + constexpr parser of public scan::Pattern
     "event_dispatcher.hpp",  # EventDispatcher<T> template returned by-reference from public diagnostics.hpp
-    "win_file_stream.hpp",   # WinFileStream held by shared_ptr in public logger.hpp / async_logger.hpp
-    "worker.hpp",            # StoppableWorker utility kept reachable via the dmk.hpp umbrella (DMKStoppableWorker)
-    "drift_manifest.hpp",    # drift-report persistence kept reachable via the dmk.hpp umbrella
+    "worker.hpp",            # StoppableWorker utility kept reachable via the DetourModKit.hpp umbrella
+    "drift_manifest.hpp",    # drift-report persistence kept reachable via the DetourModKit.hpp umbrella
 }
 
 
@@ -397,7 +398,7 @@ def main():
             fm = LEGACY_LIFECYCLE_TOKEN.search(line)
             if fm:
                 violations.append(
-                    f"{rel}:{n}: legacy lifecycle symbol '{fm.group(1).strip()}' (replaced by the v4 Session/dmk.hpp surface)")
+                    f"{rel}:{n}: legacy lifecycle symbol '{fm.group(1).strip()}' (replaced by the v4 Session/DetourModKit.hpp surface)")
 
         # v4 rtti gate D: no legacy rtti symbol survives in this repo's own sources.
         for n, line in enumerate(lines, 1):

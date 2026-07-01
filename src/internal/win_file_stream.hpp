@@ -6,10 +6,10 @@
 #include <ostream>
 #include <string>
 
-namespace DetourModKit
+namespace DetourModKit::detail
 {
     /// Opaque Win32 HANDLE type to avoid including <windows.h> in headers.
-    using win_handle_t = void *;
+    using WinHandle = void *;
 
     /**
      * @class WinFileStreamBuf
@@ -44,7 +44,7 @@ namespace DetourModKit
     private:
         bool flush_buffer() noexcept;
 
-        win_handle_t m_handle;
+        WinHandle m_handle;
         std::array<char, BUFFER_SIZE> m_buffer;
     };
 
@@ -75,6 +75,6 @@ namespace DetourModKit
         WinFileStreamBuf m_buf;
     };
 
-} // namespace DetourModKit
+} // namespace DetourModKit::detail
 
 #endif // DETOURMODKIT_WIN_FILE_STREAM_HPP

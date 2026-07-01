@@ -215,7 +215,7 @@ namespace DetourModKit
         std::string backend_error_string(const safetyhook::InlineHook::Error &err)
         {
             const int type_int = static_cast<int>(err.type);
-            const auto ip_str = Format::format_address(reinterpret_cast<std::uintptr_t>(err.ip));
+            const auto ip_str = format::format_address(reinterpret_cast<std::uintptr_t>(err.ip));
             switch (err.type)
             {
             case safetyhook::InlineHook::Error::BAD_ALLOCATION:
@@ -388,12 +388,12 @@ namespace DetourModKit
         }
 
         /// Emits a hook lifecycle event, swallowing any sink failure so a noexcept path stays no-throw.
-        void emit_lifecycle(std::string_view name, std::uint64_t ledger_id, Diagnostics::HookKind kind,
-                            Diagnostics::HookTransition transition) noexcept
+        void emit_lifecycle(std::string_view name, std::uint64_t ledger_id, diagnostics::HookKind kind,
+                            diagnostics::HookTransition transition) noexcept
         {
             try
             {
-                Diagnostics::hook_lifecycle().emit_safe(Diagnostics::HookLifecycleEvent{
+                diagnostics::hook_lifecycle().emit_safe(diagnostics::HookLifecycleEvent{
                     .name = name, .ledger_id = ledger_id, .kind = kind, .transition = transition});
             }
             catch (...)
@@ -434,7 +434,7 @@ namespace DetourModKit
                 (void)log().try_log(
                     LogLevel::Warning,
                     "hook: '{}' layers on a hook this kit already placed at {}; destroy layered hooks newest-first.",
-                    name, Format::format_address(address));
+                    name, format::format_address(address));
             }
             else
             {
@@ -448,7 +448,7 @@ namespace DetourModKit
                     (void)log().try_log(
                         LogLevel::Warning,
                         "hook: '{}' target {} is already inline-hooked by another module (JMP -> {}); layering on top.",
-                        name, Format::format_address(address), Format::format_address(prehook.jmp_destination));
+                        name, format::format_address(address), format::format_address(prehook.jmp_destination));
                 }
             }
 
@@ -464,7 +464,7 @@ namespace DetourModKit
                 (void)log().try_log(
                     LogLevel::Warning,
                     "hook: '{}' target {} begins with {}; installed anyway under the Relocate prologue policy.", name,
-                    Format::format_address(address), prologue_risk_description(risk));
+                    format::format_address(address), prologue_risk_description(risk));
             }
             return address;
         }
@@ -600,15 +600,15 @@ namespace DetourModKit
             if (DetourModKit::detail::is_loader_lock_held())
             {
                 DetourModKit::detail::pin_current_module();
-                Diagnostics::record_intentional_leak(Diagnostics::LeakSubsystem::HookManager);
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 return;
             }
 
             const std::uintptr_t target = m_impl->target;
             const std::uint64_t ledger_id = m_impl->ledger_id;
-            const Diagnostics::HookKind kind =
-                m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
+            const diagnostics::HookKind kind =
+                m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
             // Copy the name out before the backend is restored below: the post-restore warning and lifecycle event read
             // it, but m_impl (which owns the name storage) is gone once reset() runs, so a view would dangle. A
             // std::string copy allocates for a non-SSO name and can throw under OOM, which a noexcept destructor must
@@ -650,9 +650,9 @@ namespace DetourModKit
                     LogLevel::Warning,
                     "hook: '{}' at {} destroyed while {} newer hook(s) remain layered on the same target; destroy "
                     "layered hooks newest-first to avoid a trampoline use-after-free.",
-                    name, Format::format_address(target), newer);
+                    name, format::format_address(target), newer);
             }
-            emit_lifecycle(name, ledger_id, kind, Diagnostics::HookTransition::Removed);
+            emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Removed);
         }
 
         Hook::operator bool() const noexcept
@@ -728,8 +728,8 @@ namespace DetourModKit
             if (std::visit([](auto &backend) { return backend.enable().has_value(); }, m_impl->backend))
             {
                 m_impl->status.store(HookState::Active, std::memory_order_release);
-                const Diagnostics::HookKind kind =
-                    m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
+                const diagnostics::HookKind kind =
+                    m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
                 const std::string_view name = m_impl->name;
                 const std::uint64_t ledger_id = m_impl->ledger_id;
                 // Release the call guard before dispatching the lifecycle event: emit_lifecycle runs arbitrary
@@ -737,7 +737,7 @@ namespace DetourModKit
                 // unknown code under a lock). enable() does not reset m_impl, so the captured name view and ledger id
                 // stay valid.
                 guard.unlock();
-                emit_lifecycle(name, ledger_id, kind, Diagnostics::HookTransition::Enabled);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Enabled);
                 return {};
             }
             m_impl->status.store(HookState::Disabled, std::memory_order_release);
@@ -768,14 +768,14 @@ namespace DetourModKit
             if (std::visit([](auto &backend) { return backend.disable().has_value(); }, m_impl->backend))
             {
                 m_impl->status.store(HookState::Disabled, std::memory_order_release);
-                const Diagnostics::HookKind kind =
-                    m_impl->is_inline ? Diagnostics::HookKind::Inline : Diagnostics::HookKind::Mid;
+                const diagnostics::HookKind kind =
+                    m_impl->is_inline ? diagnostics::HookKind::Inline : diagnostics::HookKind::Mid;
                 const std::string_view name = m_impl->name;
                 const std::uint64_t ledger_id = m_impl->ledger_id;
                 // Release the call guard before dispatching the lifecycle event (CP.22, see enable()); disable() does
                 // not reset m_impl, so the captured name view and ledger id stay valid past the unlock.
                 guard.unlock();
-                emit_lifecycle(name, ledger_id, kind, Diagnostics::HookTransition::Disabled);
+                emit_lifecycle(name, ledger_id, kind, diagnostics::HookTransition::Disabled);
                 return {};
             }
             m_impl->status.store(HookState::Active, std::memory_order_release);
@@ -828,7 +828,7 @@ namespace DetourModKit
                     if (!created)
                     {
                         log().error("hook::inline_at: backend create failed for '{}' at {}: {}", request.name,
-                                    Format::format_address(target), backend_error_string(created.error()));
+                                    format::format_address(target), backend_error_string(created.error()));
                         return std::unexpected(Error{ErrorCode::BackendFailed, "hook::inline_at", target});
                     }
                     auto backend_hook = std::move(created.value());
@@ -841,10 +841,10 @@ namespace DetourModKit
                                                              0, state);
                     const std::string_view created_name = impl->name;
                     log().info("hook::inline_at: created inline hook '{}' at {}.", created_name,
-                               Format::format_address(target));
+                               format::format_address(target));
                     impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_hook(target);
-                    emit_lifecycle(created_name, impl->ledger_id, Diagnostics::HookKind::Inline,
-                                   Diagnostics::HookTransition::Created);
+                    emit_lifecycle(created_name, impl->ledger_id, diagnostics::HookKind::Inline,
+                                   diagnostics::HookTransition::Created);
                     return Hook(std::move(impl));
                 }
                 catch (const std::bad_alloc &)
@@ -888,7 +888,7 @@ namespace DetourModKit
                 if (!created)
                 {
                     log().error("hook::mid_at: backend create failed for '{}' at {}: {}", request.name,
-                                Format::format_address(target), backend_error_string(created.error()));
+                                format::format_address(target), backend_error_string(created.error()));
                     return std::unexpected(Error{ErrorCode::BackendFailed, "hook::mid_at", target});
                 }
                 auto backend_hook = std::move(created.value());
@@ -899,10 +899,10 @@ namespace DetourModKit
                 auto impl =
                     std::make_unique<Hook::Impl>(std::move(backend_hook), std::move(request.name), target, 0, state);
                 const std::string_view created_name = impl->name;
-                log().info("hook::mid_at: created mid hook '{}' at {}.", created_name, Format::format_address(target));
+                log().info("hook::mid_at: created mid hook '{}' at {}.", created_name, format::format_address(target));
                 impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_hook(target);
-                emit_lifecycle(created_name, impl->ledger_id, Diagnostics::HookKind::Mid,
-                               Diagnostics::HookTransition::Created);
+                emit_lifecycle(created_name, impl->ledger_id, diagnostics::HookKind::Mid,
+                               diagnostics::HookTransition::Created);
                 return Hook(std::move(impl));
             }
             catch (const std::bad_alloc &)
@@ -986,7 +986,7 @@ namespace DetourModKit
             if (DetourModKit::detail::is_loader_lock_held())
             {
                 DetourModKit::detail::pin_current_module();
-                Diagnostics::record_intentional_leak(Diagnostics::LeakSubsystem::HookManager);
+                diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 return;
             }
@@ -1007,7 +1007,7 @@ namespace DetourModKit
             // seeing the clone base as live until its restore completes instead of racing a half-removed clone.
             m_impl.reset();
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
-            emit_lifecycle(name, ledger_id, Diagnostics::HookKind::Vmt, Diagnostics::HookTransition::Removed);
+            emit_lifecycle(name, ledger_id, diagnostics::HookKind::Vmt, diagnostics::HookTransition::Removed);
         }
 
         VmtHook::operator bool() const noexcept
@@ -1303,10 +1303,10 @@ namespace DetourModKit
                     std::make_unique<VmtHook::Impl>(std::move(backend_hook), std::move(name), *base, *method_count, 0);
                 const std::string_view created_name = impl->name;
                 log().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
-                           Format::format_address(reinterpret_cast<std::uintptr_t>(object)));
+                           format::format_address(reinterpret_cast<std::uintptr_t>(object)));
                 impl->ledger_id = DetourModKit::detail::HookLedger::instance().record_vmt(*base);
-                emit_lifecycle(created_name, impl->ledger_id, Diagnostics::HookKind::Vmt,
-                               Diagnostics::HookTransition::Created);
+                emit_lifecycle(created_name, impl->ledger_id, diagnostics::HookKind::Vmt,
+                               diagnostics::HookTransition::Created);
                 return VmtHook(std::move(impl));
             }
             catch (const std::bad_alloc &)

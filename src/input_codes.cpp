@@ -401,9 +401,9 @@ namespace DetourModKit
         // which would silently turn an off-table Mouse/Gamepad code into a keyboard key on a config round-trip.
         if (code.source == InputSource::Keyboard)
         {
-            return Format::format_hex(code.code, 2);
+            return format::format_hex(code.code, 2);
         }
-        return std::string(input_source_to_string(code.source)) + ':' + Format::format_hex(code.code, 2);
+        return std::string(input_source_to_string(code.source)) + ':' + format::format_hex(code.code, 2);
     }
 
 } // namespace DetourModKit

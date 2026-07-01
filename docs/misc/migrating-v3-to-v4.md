@@ -29,7 +29,7 @@ The `HookManager` singleton and its aggregate operations are removed:
 - `enable_all_hooks` / `disable_all_hooks` -- gone. Each hook is owned by its own `Hook` handle; enable or
   disable it directly (`h.enable()` / `h.disable()`), or store the handles and iterate your own container.
 - `get_hook_counts` / `get_hook_ids` -- gone. Aggregate population figures are now read-only via
-  `Diagnostics::collect().hooks_total` / `hooks_active` / `hooks_disabled`. That tally is keyed on each
+  `diagnostics::collect().hooks_total` / `hooks_active` / `hooks_disabled`. That tally is keyed on each
   hook's process-unique ledger id, so two hooks that share a name (on distinct targets) each count.
 - Install a hook with `hook::inline_at` / `hook::mid_at` / `hook::vmt_for`; drop the returned handle to
   unhook. The declarative `hook::install_all(span<HookSpec>) -> Result<vector<InstallOutcome>>` table folds

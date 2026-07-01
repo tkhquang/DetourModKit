@@ -16,7 +16,7 @@
 
 namespace DetourModKit
 {
-    namespace Diagnostics
+    namespace diagnostics
     {
         namespace
         {
@@ -203,5 +203,5 @@ namespace DetourModKit
 
             return snapshot;
         }
-    } // namespace Diagnostics
+    } // namespace diagnostics
 } // namespace DetourModKit
