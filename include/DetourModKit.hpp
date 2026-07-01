@@ -115,7 +115,7 @@ inline void DMK_Shutdown() noexcept
     DetourModKit::config::clear();
 
     // 5. Logger last (no more logging after this)
-    DetourModKit::Logger::get_instance().shutdown();
+    DetourModKit::log().shutdown();
 }
 
 #endif // DETOURMODKIT_HPP

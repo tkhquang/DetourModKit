@@ -114,7 +114,7 @@ namespace DetourModKit::Bootstrap
 
         DWORD WINAPI lifecycle_thread(LPVOID) noexcept
         {
-            Logger &logger = Logger::get_instance();
+            Logger &logger = log();
 
             bool init_ok = false;
             if (s_init_fn)
@@ -229,7 +229,7 @@ namespace DetourModKit::Bootstrap
             }
 
             Logger::configure(info.prefix, info.log_file);
-            Logger::get_instance().enable_async_mode(info.async_cfg);
+            log().enable_async_mode(info.async_cfg);
 
             s_init_fn = std::move(init_fn);
             s_shutdown_fn = std::move(shutdown_fn);
@@ -307,7 +307,7 @@ namespace DetourModKit::Bootstrap
                 {
                     try
                     {
-                        Logger::get_instance().error("Bootstrap: shutdown_fn threw: {}", e.what());
+                        log().error("Bootstrap: shutdown_fn threw: {}", e.what());
                     }
                     catch (...)
                     {
@@ -317,7 +317,7 @@ namespace DetourModKit::Bootstrap
                 {
                     try
                     {
-                        Logger::get_instance().error("Bootstrap: shutdown_fn threw unknown exception.");
+                        log().error("Bootstrap: shutdown_fn threw unknown exception.");
                     }
                     catch (...)
                     {
@@ -359,7 +359,7 @@ namespace DetourModKit::Bootstrap
     void on_logic_dll_unload(std::span<const std::string_view> hook_names,
                              std::span<const std::string_view> binding_names) noexcept
     {
-        Logger &logger = Logger::get_instance();
+        Logger &logger = log();
         size_t bindings_removed = 0;
 
         // Hook teardown is caller-owned: each hook lives in a Hook handle the Logic DLL holds, and dropping that
@@ -418,7 +418,7 @@ namespace DetourModKit::Bootstrap
 
     void on_logic_dll_unload_all() noexcept
     {
-        Logger &logger = Logger::get_instance();
+        Logger &logger = log();
 
         // Hook teardown is caller-owned: there is no central registry to clear here, so the Logic DLL drops its Hook
         // handles to unhook (each destructor honours the loader-lock leaf discipline).

@@ -23,7 +23,7 @@ namespace DetourModKit
          * @details Called exactly once; the result is cached by the caller. Returns a wide string to preserve full
          *          Unicode fidelity on Windows. Diagnostics are written to stderr rather than Logger because this
          *          function executes during Logger construction (via generate_log_file_path), and calling
-         *          Logger::get_instance() here would deadlock on the magic-static guard that is already held by the
+         *          log() here would deadlock on the magic-static guard that is already held by the
          *          in-progress Logger singleton init.
          */
         std::wstring resolve_module_directory()

@@ -418,10 +418,12 @@ namespace DetourModKit
 
         /**
          * @brief Best-effort report that the reentrancy guard rejected a mutation from within a handler.
-         * @details Emits a Debug log via Logger::try_log so the otherwise-silent per-instantiation rejection surfaces
-         *          during development. The whole path is wrapped because Logger::get_instance() may construct the
-         *          singleton if logging was not initialized yet; any failure is swallowed so this best-effort
-         *          diagnostic never turns a rejected mutation into host termination. Deliberately does NOT assert: an
+         * @details Emits a Debug log via log().try_log so the otherwise-silent per-instantiation rejection surfaces
+         *          during development. The try/catch swallows try_log's own formatting and sink failures once the
+         *          logger is available, so a routine logging hiccup never turns a rejected mutation into host
+         *          termination. It cannot catch a first-use logger-construction failure: log() is noexcept, so an
+         *          out-of-memory there terminates before try_log runs, an unrecoverable condition rather than this
+         *          best-effort path's concern. Deliberately does NOT assert: an
          *          unsubscribe rejected mid-emit is a legitimate RAII path -- a Subscription reset or destroyed inside
          *          a handler calls unsubscribe(), which is refused here and retried after the emit stack unwinds -- so
          *          aborting on it would be wrong. Zero-cost on the success path because it is only reached after the
@@ -431,7 +433,7 @@ namespace DetourModKit
         {
             try
             {
-                (void)Logger::get_instance().try_log(
+                (void)log().try_log(
                     LogLevel::Debug,
                     "EventDispatcher: {} rejected -- called from within a handler on a same-type dispatcher "
                     "(per-instantiation reentrancy guard). Defer the mutation until the emit returns.",
