@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -14,6 +15,12 @@
 #include "internal/scan_batch.hpp"
 #include "internal/scan_engine.hpp"
 #include "internal/scan_pages.hpp"
+
+// White-box include of the generic fork-join driver and the test binary's allocation-failure injector: the noexcept
+// degradation tests below drive the shared batch primitive under injected OOM to prove the never-terminate contract.
+// fork_join.hpp lives in src/, which is on the test target's private include path.
+#include "fork_join.hpp"
+#include "test_alloc_probe.hpp"
 
 #include <windows.h>
 
@@ -503,8 +510,10 @@ TEST(ScannerBatchTest, ResolveBatchWorkerCountYieldsIdenticalResults)
 
 // A string-xref Candidate resolves identically through the fork-join batch path and the serial resolver, confirming
 // resolve_batch uses the same variant dispatch as the serial path. StringXref is the representative tier:
-// find_string_xref is the non-noexcept backend, so this also exercises that the throwing dispatch runs safely on a
-// worker thread. The fixture is an RWX page holding one literal and one RIP-relative lea reference to it.
+// find_string_xref is the non-noexcept backend, so the request is replicated into a batch larger than one worker to
+// exercise that throwing dispatch running on a spawned worker thread (not just the calling thread). Every copy aliases
+// the same immutable RWX fixture -- one literal plus one RIP-relative lea reference -- so each concurrent resolve must
+// agree with the serial result; disagreement would signal a data race in the shared read-only scan path.
 TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
 {
     // No memory::init_cache() by design: find_string_xref installs its fault guard lazily (MinGW) or uses SEH (MSVC),
@@ -534,14 +543,139 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
     const scan::Candidate cands[] = {scan::Candidate::string_xref("string-tier", "BatchStringXrefAnchorLiteral")};
     const scan::ScanRequest request{.ladder = cands, .label = "string-tier", .scope = range};
 
-    const std::vector<scan::ScanRequest> requests{request};
-    const auto results = scan::resolve_batch(requests, 2);
-    ASSERT_EQ(results.size(), 1u);
+    // Replicate the request so the batch has more items than a single worker: worker_count = min(4, 4) = 4 takes the
+    // fork-join driver's multi-worker path (three jthreads plus the calling thread), so find_string_xref dispatches
+    // off the calling thread. The copies alias one immutable candidate and scope, so agreement is the race check.
+    constexpr std::size_t REQUEST_COUNT = 4;
+    const std::vector<scan::ScanRequest> requests(REQUEST_COUNT, request);
+    const auto results = scan::resolve_batch(requests, REQUEST_COUNT);
+    ASSERT_EQ(results.size(), REQUEST_COUNT);
 
     const auto serial = scan::resolve(request);
     ASSERT_TRUE(serial.has_value());
-    ASSERT_TRUE(results[0].has_value());
-    EXPECT_EQ(results[0]->address, serial->address);
-    EXPECT_EQ(results[0]->winning_name, serial->winning_name);
-    EXPECT_EQ(results[0]->address.raw(), base + LEA_OFF);
+    for (std::size_t i = 0; i < results.size(); ++i)
+    {
+        ASSERT_TRUE(results[i].has_value()) << "item=" << i;
+        EXPECT_EQ(results[i]->address, serial->address) << "item=" << i;
+        EXPECT_EQ(results[i]->winning_name, serial->winning_name) << "item=" << i;
+        EXPECT_EQ(results[i]->address.raw(), base + LEA_OFF) << "item=" << i;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// noexcept-batch degradation under injected out-of-memory.
+//
+// resolve_batch is noexcept: injected into a running host, it must degrade rather than terminate under true OOM. The
+// contract has two arms, both driven here through the thread-local allocation-failure injector on a SERIAL batch
+// (max_workers == 1) so every allocation lands on the test thread deterministically:
+//   1. If the N-entry result container itself cannot be allocated, the whole batch fails: resolve_batch catches the
+//      bad_alloc at the noexcept boundary and returns an EMPTY vector, so size() != requests.size() is the signal.
+//   2. If the container is built but a per-request resolve throws bad_alloc, only that slot degrades to
+//      Error{OutOfMemory}; the batch still returns one result per request.
+// The fork-join driver's own two-tier catch (a non-bad_alloc throw keeps the fail-closed seed) is proven directly by
+// the last test, which needs no injection.
+// ----------------------------------------------------------------------------
+
+// The batch entry point must be noexcept for the never-terminate contract to hold at all; pin it at compile time so a
+// future signature change that drops noexcept fails the build rather than silently regressing the guarantee.
+static_assert(noexcept(scan::resolve_batch(std::span<const scan::ScanRequest>{}, std::size_t{1})),
+              "scan::resolve_batch must be noexcept: it is the never-terminate batch boundary.");
+
+TEST(ScannerBatchTest, ResolveBatchContainerAllocFailureReturnsEmptyWholeBatchSignal)
+{
+    CommittedPage code_page(64 * 1024, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(code_page.base, nullptr);
+    std::memset(code_page.bytes(), 0xCC, code_page.size);
+
+    const auto sig = make_unique_sig(7100);
+    std::memcpy(code_page.bytes() + 512, sig.data(), sig.size());
+    const Region range{Address{reinterpret_cast<std::uintptr_t>(code_page.base)}, code_page.size};
+    const scan::Candidate cands[] = {scan::Candidate::direct("oom-container", aob(sig_to_aob(sig)))};
+    const scan::ScanRequest request{.ladder = cands, .label = "oom-container", .scope = range};
+    const std::vector<scan::ScanRequest> requests{request, request, request};
+    const std::span<const scan::ScanRequest> view{requests};
+
+    std::vector<Result<scan::Hit>> results;
+    {
+        // Budget 0: the very first allocation (the result container inside run_fork_join) fails. resolve_batch must
+        // swallow the bad_alloc at its noexcept boundary and hand back an empty vector.
+        dmk_test::AllocFailScope fail(0);
+        results = scan::resolve_batch(view, 1);
+    }
+
+    // Whole-batch out-of-memory signal: the returned size no longer matches the request count. Compare sizes rather
+    // than calling vector::empty(), whose begin() == end() drags std::expected's operator== into overload resolution
+    // and trips a libstdc++ constraint-recursion diagnostic on this element type.
+    EXPECT_EQ(results.size(), 0u);
+    EXPECT_NE(results.size(), requests.size());
+}
+
+TEST(ScannerBatchTest, ResolveBatchPerRequestAllocFailureDegradesToOutOfMemory)
+{
+    CommittedPage code_page(64 * 1024, PAGE_EXECUTE_READWRITE);
+    ASSERT_NE(code_page.base, nullptr);
+    std::memset(code_page.bytes(), 0xCC, code_page.size);
+
+    constexpr std::size_t REQUEST_COUNT = 4;
+    const Region range{Address{reinterpret_cast<std::uintptr_t>(code_page.base)}, code_page.size};
+
+    // Caller-owned storage the spans alias; sized up front so it never reallocates and the request views stay valid.
+    std::vector<std::string> labels(REQUEST_COUNT);
+    std::vector<scan::Candidate> candidates;
+    candidates.reserve(REQUEST_COUNT);
+    std::vector<scan::ScanRequest> requests(REQUEST_COUNT);
+    for (std::size_t i = 0; i < REQUEST_COUNT; ++i)
+    {
+        const auto sig = make_unique_sig(static_cast<std::uint32_t>(7200 + i));
+        std::memcpy(code_page.bytes() + 512 + i * 1024, sig.data(), sig.size());
+        labels[i] = "oom_item_" + std::to_string(i);
+        candidates.push_back(scan::Candidate::direct(labels[i], aob(sig_to_aob(sig))));
+        requests[i].ladder = std::span<const scan::Candidate>(&candidates[i], 1);
+        requests[i].label = labels[i];
+        requests[i].scope = range;
+    }
+    const std::span<const scan::ScanRequest> view{requests};
+
+    std::vector<Result<scan::Hit>> results;
+    {
+        // Budget 1: the result container (one allocation) is built and fail-closed-seeded, then every per-request
+        // resolve throws bad_alloc on its first internal allocation. Each throw is caught inside resolve_batch's
+        // per-request wrapper and mapped to Error{OutOfMemory}, so the batch still returns one result per request.
+        dmk_test::AllocFailScope fail(1);
+        results = scan::resolve_batch(view, 1);
+    }
+
+    // The container survived, so this is per-request degradation, not the whole-batch signal.
+    ASSERT_EQ(results.size(), requests.size());
+    for (std::size_t i = 0; i < results.size(); ++i)
+    {
+        ASSERT_FALSE(results[i].has_value()) << "item=" << i;
+        EXPECT_EQ(results[i].error().code, ErrorCode::OutOfMemory) << "item=" << i;
+    }
+}
+
+TEST(ForkJoinTest, PerItemThrowKeepsFailClosedSeedAndIsolatesNeighbours)
+{
+    // The generic driver's inner degradation arm: a resolve_one that throws (anything, here a non-bad_alloc) fails
+    // only its own item closed -- that slot keeps the fail_one seed -- while every neighbour resolves normally. This
+    // is the path that maps "any other per-request throw" to the seeded value, complementing the bad_alloc arm above.
+    const std::array<int, 5> items{0, 1, 2, 3, 4};
+    const auto results = detail::run_fork_join<int, int>(
+        std::span<const int>(items), 1,
+        [](const int &value) -> int
+        {
+            if (value == 2)
+            {
+                throw std::runtime_error("injected per-item failure");
+            }
+            return value * 10;
+        },
+        [](const int &) noexcept -> int { return -1; });
+
+    ASSERT_EQ(results.size(), items.size());
+    EXPECT_EQ(results[0], 0);
+    EXPECT_EQ(results[1], 10);
+    EXPECT_EQ(results[2], -1); // threw: kept the fail-closed seed
+    EXPECT_EQ(results[3], 30);
+    EXPECT_EQ(results[4], 40);
 }

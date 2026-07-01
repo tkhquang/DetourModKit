@@ -106,7 +106,7 @@ The fixture DLL exports `extern "C"` functions with volatile magic constants for
 
 The hook surface is exercised by four test files:
 
-- `tests/test_hook.cpp` -- the free-function / RAII surface (`hook::inline_at`, `hook::mid_at`, `hook::vmt_for`, `hook::install_all`): inline / mid / vmt installs, `Hook` lifecycle (enable / disable / release / destructor unhook), duplicate detection, prologue policy, `Hook::call`, and `install_all` batch outcomes. This file replaces the former `tests/test_hook_manager.cpp`.
+- `tests/test_hook.cpp` -- the free-function / RAII surface (`hook::inline_at`, `hook::mid_at`, `hook::vmt_for`, `hook::install_all`): inline / mid / vmt installs, `Hook` lifecycle (enable / disable / release / destructor unhook), duplicate detection, prologue policy, `Hook::call`, `install_all` batch outcomes, and `install_all`'s `noexcept` out-of-memory degradation (via the `dmk_test::AllocFailScope` injector). This file replaces the former `tests/test_hook_manager.cpp`.
 - `tests/test_mid_hook_context.cpp` -- `hook::MidContext` accessors (`gpr` / `stack_pointer` / `resume_stack_pointer` / `instruction_pointer` / `flags` / `xmm`).
 - `tests/test_hook_integration.cpp` -- real-DLL cross-module hooking against the `hook_target_lib.dll` fixture.
 - `tests/test_diagnostics.cpp` -- covers hook-lifecycle diagnostic events (install / enable / disable / teardown) emitted through the diagnostics surface.
@@ -181,6 +181,7 @@ EXPECT_EQ(found->value(), reinterpret_cast<uintptr_t>(fn));
 - **Hook lifecycle**: Install, enable, disable, release, RAII destructor unhook, re-enable
 - **Original invocation**: `Hook::original<Fn>()` (typed trampoline) and `Hook::call<Ret>(Args...)` (guarded by the per-hook mutex)
 - **Batch install**: `hook::install_all` Mandatory / BestEffort severities and per-row `InstallOutcome`
+- **noexcept-batch degradation**: `scan::resolve_batch` and `hook::install_all` degrade rather than terminate under injected out-of-memory (the thread-local `dmk_test::AllocFailScope` injector): a container-allocation failure is signalled (empty batch / `Error{OutOfMemory}`) and a per-request `bad_alloc` degrades only that slot, with no throw escaping the `noexcept` boundary
 - **Concurrent access**: Multi-threaded hook creation stress tests
 - **Cross-module hooking**: DLL exports hooked and verified via integration tests
 - **AOB scan pipeline**: `scan::scan` / `scan::resolve` finds patterns in loaded DLLs, hooks the result via `hook::inline_at(InlineRequest{.target = scan::OwnedScanRequest{...}})`
