@@ -583,12 +583,18 @@ namespace DetourModKit
          *          enable/disable (a backend VmtHook limitation), so it is a dedicated owning type rather than a flat
          *          @ref Hook. @ref vmt_for clones the seed object's vtable; @ref apply_to swaps the clone onto another
          *          object of the same class; the destructor restores every patched vptr (newest-first across applied
-         *          objects). A per-method typed hook surface (`hook_method<Fn>` / `original<T>(index)`) and a
-         *          lock-free apply_to reader are deferred to a later release; this handle provides the object-level
-         *          clone lifecycle with the documented thread-safety limitations below.
+         *          objects). Individual virtual methods are redirected with @ref hook_method (by vtable index), the
+         *          pre-hook slot is recovered typed with @ref original, and a single method hook is lifted with
+         *          @ref remove_method. Because the redirect lives in the one cloned vtable, a @ref hook_method takes
+         *          effect on every object the clone is currently applied to, and a later @ref apply_to inherits it.
          * @warning Restoring a vptr is a bare pointer write with no thread protection: the caller must guarantee no
          *          thread is dispatching through a cloned slot across create/apply/remove, that each applied object
          *          outlives the hook, and that the object's vptr was not re-layered since the clone went on.
+         * @note Concurrency: @ref original copies the pre-hook slot pointer out under a shared-read lock and returns
+         *       it, so a lock-free call through that pointer is serialised against a concurrent @ref apply_to /
+         *       @ref hook_method / @ref remove_method (each takes the matching exclusive write). The lock guards the
+         *       snapshot, not the call: the caller still owns the hook-outlives-the-call guarantee, exactly as with
+         *       @ref Hook::original.
          */
         class VmtHook
         {
@@ -628,12 +634,79 @@ namespace DetourModKit
              */
             [[nodiscard]] Result<void> remove_from(void *object);
 
+            /**
+             * @brief Redirects the virtual method at vtable @p index to @p detour in this handle's cloned vtable.
+             * @tparam Fn The detour's function-pointer type; the function-to-void* cast happens here, once, behind a
+             * word-size static_assert, so the call site never writes a reinterpret_cast.
+             * @param index The zero-based vtable index of the method to hook. Count only virtual functions: the
+             * ABI-specific vtable header (the Itanium offset-to-top + RTTI pointers, or the MSVC RTTI locator) is not
+             * part of the index -- index 0 is the first virtual method as declared.
+             * @param detour The replacement function. It is installed straight into a vtable slot, so its ABI must
+             * match the original virtual method's true signature: the object pointer arrives as the first integer
+             * argument (`this` in rcx under the Win64 ABI) followed by the declared parameters, so a free function
+             * taking the object pointer first is the correct shape. hook_method cannot validate that signature; a
+             * mismatch is silent ABI corruption, the same caller caveat @ref Hook::call carries.
+             * @return Success, or an Error: InvalidHookState (disengaged handle), InvalidArg (null @p detour or an
+             * out-of-range @p index), MethodAlreadyHooked (@p index is already hooked on this handle), BackendFailed
+             * or OutOfMemory.
+             * @note Setup/control-plane only: mutates the cloned vtable and the per-index hook table under the
+             * exclusive write lock. Do not call it from a hooked method's detour while another thread reads the same
+             * handle; install all method hooks during setup.
+             */
+            template <detail::FunctionPointer Fn> [[nodiscard]] Result<void> hook_method(std::size_t index, Fn detour)
+            {
+                static_assert(sizeof(Fn) == sizeof(void *), "function pointer must be word-sized");
+                return hook_method_raw(index, reinterpret_cast<void *>(detour));
+            }
+
+            /**
+             * @brief Returns the pre-hook function pointer for the method at vtable @p index, typed as Fn.
+             * @tparam Fn The full function-pointer type of the original method, including the leading object pointer
+             * as the first parameter (the Win64 ABI passes it in rcx).
+             * @param index The zero-based vtable index used at @ref hook_method time.
+             * @return A function pointer of type Fn to the original method's slot, or nullptr for an unhooked @p index
+             * or a disengaged handle.
+             * @details The per-method analogue of @ref Hook::original: the pre-hook slot value is copied out (an
+             * immutable snapshot the backend recorded when @ref hook_method cloned the slot) under a shared-read lock,
+             * then returned so the detour can invoke the original lock-free through the returned pointer. It never
+             * needs a guarded @ref Hook::call twin because the slot pointer is fixed for the hook's lifetime; the
+             * caller only has to keep the hook alive across the call.
+             * @note Callback-safe on the read side (a shared-lock snapshot copy, no allocation or I/O); the returned
+             * pointer's invocation is the caller's responsibility.
+             */
+            template <detail::FunctionPointer Fn> [[nodiscard]] Fn original(std::size_t index) const noexcept
+            {
+                return reinterpret_cast<Fn>(method_original_address(index));
+            }
+
+            /**
+             * @brief Lifts the method hook at vtable @p index, restoring the cloned vtable slot to the original.
+             * @param index The zero-based vtable index previously passed to @ref hook_method.
+             * @return Success, or an Error: InvalidHookState (disengaged handle) / MethodNotFound (@p index is not
+             *         hooked on this handle).
+             * @note Setup/control-plane only: rewrites the cloned vtable slot back to the original function pointer
+             *       under the exclusive write lock. Like every VMT restore this is a bare pointer write with no thread
+             *       protection against an in-flight dispatch through the slot; quiesce the method before lifting it.
+             */
+            [[nodiscard]] Result<void> remove_method(std::size_t index);
+
             /// Detaches the cloned vtable for the process lifetime (no vptr is restored; handle becomes disengaged).
             void release() noexcept;
 
         private:
             struct Impl;
             explicit VmtHook(std::unique_ptr<Impl> impl) noexcept;
+
+            /// The non-template method-install primitive behind @ref hook_method; defined in src/hook.cpp.
+            [[nodiscard]] Result<void> hook_method_raw(std::size_t index, void *detour);
+
+            /**
+             * @brief Snapshots the original slot pointer for @p index under the shared-read lock; the backend touch
+             *        behind @ref original. Returns nullptr for an unhooked index or a disengaged handle. Defined in
+             *        src/hook.cpp.
+             */
+            [[nodiscard]] void *method_original_address(std::size_t index) const noexcept;
+
             std::unique_ptr<Impl> m_impl;
 
             friend Result<VmtHook> vmt_for(std::string name, void *object, VmtOptions options);

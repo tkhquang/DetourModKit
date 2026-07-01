@@ -18,13 +18,17 @@
 
 #include "DetourModKit/hook.hpp"
 
+#include "internal/srw_shared_mutex.hpp"
+
 #include "safetyhook.hpp"
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 
@@ -83,18 +87,39 @@ namespace DetourModKit
         /**
          * @brief The complete backend state behind a @ref VmtHook handle.
          * @details Owns the backend VMT hook (the cloned vtable), the registered name, the cloned-vptr base recorded
-         *          at create (so an apply can tell "already on my clone" from "on another hook's clone"), and the
-         *          ledger id.
+         *          at create (so an apply can tell "already on my clone" from "on another hook's clone"), the number
+         *          of callable slots in the clone, the ledger id, and the per-index method-hook table.
+         *
+         *          Per-method hooks are backend VmHooks keyed by vtable index. Each VmHook, on destruction, rewrites
+         *          its cloned-vtable slot back to the original function pointer, so erasing an entry (@ref
+         *          VmtHook::remove_method) or destroying the map (handle teardown) restores that method. The map is
+         *          declared last so it is destroyed first: method slots in the clone are restored before `backend`
+         *          restores each applied object's vptr off the clone entirely -- the intuitive unhook-methods-then-
+         *          unapply-objects order (either order is memory-safe because the clone allocation is a shared_ptr
+         *          kept alive by both the VmtHook and every VmHook).
+         *
+         *          method_mutex is the reader/writer guard for per-method state: @ref VmtHook::original snapshots a
+         *          slot's original pointer under a shared read, while @ref VmtHook::hook_method,
+         *          @ref VmtHook::remove_method, @ref VmtHook::apply_to, and @ref VmtHook::remove_from mutate under the
+         *          exclusive write, so a snapshot reader never traverses the map (or observes an apply)
+         *          mid-mutation. It is an SRWLOCK wrapper rather than std::shared_mutex because winpthreads' rwlock
+         *          corrupts under reader contention; all of its operations are noexcept, which is what lets
+         *          @ref VmtHook::original stay noexcept.
          */
         struct VmtHook::Impl
         {
             safetyhook::VmtHook backend;
             std::string name;
             std::uintptr_t cloned_vptr_base{0};
+            std::size_t method_count{0};
             std::uint64_t ledger_id{0};
+            mutable DetourModKit::detail::SrwSharedMutex method_mutex;
+            std::unordered_map<std::size_t, safetyhook::VmHook> method_hooks;
 
-            Impl(safetyhook::VmtHook hook, std::string hook_name, std::uintptr_t base, std::uint64_t ledger)
-                : backend(std::move(hook)), name(std::move(hook_name)), cloned_vptr_base(base), ledger_id(ledger)
+            Impl(safetyhook::VmtHook hook, std::string hook_name, std::uintptr_t base, std::size_t methods,
+                 std::uint64_t ledger)
+                : backend(std::move(hook)), name(std::move(hook_name)), cloned_vptr_base(base), method_count(methods),
+                  ledger_id(ledger)
             {
             }
         };
