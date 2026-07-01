@@ -230,7 +230,7 @@ static void setup_input()
 ```
 
 > [!TIP]
-> Any background threads spawned from `Init()` (deferred scanning, periodic polling, async I/O, etc.) must be joined before the `Session` teardown runs -- otherwise `FreeLibrary` will unload code pages that the thread is still executing from. The easiest way to get this right is to wrap them in [`DMK::StoppableWorker`](../../include/DetourModKit/detail/worker.hpp) and reset the owning pointer at the top of `Shutdown()`, before destroying the `Session`. See [Section 9](#9-background-thread-lifecycle) below.
+> Any background threads spawned from `Init()` (deferred scanning, periodic polling, async I/O, etc.) must be joined before the `Session` teardown runs -- otherwise `FreeLibrary` will unload code pages that the thread is still executing from. The easiest way to get this right is to wrap them in [`DMK::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) and reset the owning pointer at the top of `Shutdown()`, before destroying the `Session`. See [Section 9](#9-background-thread-lifecycle) below.
 
 ### Step 3: Implement the Loader ASI
 
@@ -874,7 +874,7 @@ When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
 If your logic DLL spawns background threads (e.g., for deferred scanning, periodic polling, or async I/O), you **must** join them in `Shutdown()` before destroying the `Session`. A thread that outlives `FreeLibrary` will execute unmapped code and crash.
 
-**Recommended:** use [`DMK::StoppableWorker`](../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`, requests stop on destruction, and falls back to `detach()` when it detects the Windows loader lock (pinning the module so code pages stay mapped). This encapsulates the bounded-join pattern shown below and makes it a one-liner:
+**Recommended:** use [`DMK::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`, requests stop on destruction, and falls back to `detach()` when it detects the Windows loader lock (pinning the module so code pages stay mapped). This encapsulates the bounded-join pattern shown below and makes it a one-liner:
 
 ```cpp
 // At file scope in the logic DLL
@@ -1338,7 +1338,7 @@ The `NONE` sentinel is whole-string only by design: a `NONE` token nested inside
 
 ## Related Documentation
 
-- [Project README](../../README.md) - Overview, build instructions, and API reference
-- [Test Coverage Guide](../tests/README.md) - Testing strategy, coverage analysis, and test architecture
-- [`DetourModKit.hpp`](../../include/DetourModKit.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
-- [`worker.hpp`](../../include/DetourModKit/detail/worker.hpp) - `DMK::StoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`
+- [Project README](../../../README.md) - Overview, build instructions, and API reference
+- [Test Coverage Guide](../../tests/README.md) - Testing strategy, coverage analysis, and test architecture
+- [`DetourModKit.hpp`](../../../include/DetourModKit.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
+- [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) - `DMK::StoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`

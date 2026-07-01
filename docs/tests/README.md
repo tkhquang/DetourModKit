@@ -291,80 +291,14 @@ This is expected when casting `FARPROC` from `GetProcAddress` to a typed functio
 | 90% | Hard | Integration tests, edge cases in threading |
 | 95%+ | Very Hard | Requires mocking Windows API or refactoring |
 
-## Event Dispatcher Tests
+## Testing Internal and Hard-to-Reach Code
 
-`tests/test_event_dispatcher.cpp` exercises the no-user-visible-mutex copy-on-write dispatcher. Beyond the basic subscribe/emit/RAII coverage, three tests target the optimized hot path specifically:
+Most suites are ordinary black-box unit tests over a public header. A few need techniques worth documenting; the individual cases live in the named files.
 
-| Test | What it proves |
-| ---- | -------------- |
-| `EmptyFastPath_SkipsLock` | With zero subscribers, `emit()` / `emit_safe()` return via the atomic handler-count check without touching the snapshot `shared_ptr`. Asserted by `debug_snapshot_use_count()` remaining at 1 (dispatcher-only) after 1000 emits. |
-| `SnapshotStability_DuringEmit` | An in-flight emit holds its own snapshot reference. A concurrent `subscribe()` publishes a new snapshot via CAS; the emitter's iteration continues over the old snapshot and the newly subscribed handler is not invoked. Next emit sees both. Exercises the COW publish invariant. |
-| `SnapshotReclamation_NoLeak` | After 10,000 subscribe/unsubscribe churn iterations with interleaved emits, `debug_snapshot_use_count()` returns to 1, proving no leaked `shared_ptr` references to stale snapshots. |
-
-These tests enable the test-only `debug_snapshot_use_count()` accessor via `#define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1` at the top of the translation unit. The macro is not part of the public API and must not be defined in consumer code.
-
-## x86 Control-Flow Decoder Tests
-
-`tests/test_x86_decode.cpp` exercises the internal header `src/x86_decode.hpp`, which is consumed by the scan engine for RIP-relative jump/call resolution. The decoders are small and pure, so each branch is driven by crafting a byte buffer and calling the decoder directly:
-
-| Test | What it proves |
-| ---- | -------------- |
-| `DecodeE9Rel32_WrongOpcodeRejected` / `DecodeEbRel8_WrongOpcodeRejected` | Opcode-mismatch short-circuit returns `std::nullopt` without reading the displacement. |
-| `DecodeE9Rel32_ValidForwardDisplacement` / `DecodeE9Rel32_ValidBackwardDisplacement` | `base + 5 + disp32` is computed for both positive and negative displacements. |
-| `DecodeEbRel8_NegativeDisplacementSignExtended` | `0xFE` on the displacement byte decodes as `-2`, proving the `std::int8_t` cast sign-extends correctly. |
-| `DecodeFf25Indirect_WrongFirstByteRejected` / `DecodeFf25Indirect_WrongSecondByteRejected` | Both halves of the compound `FF 25` opcode predicate are rejected independently. |
-| `DecodeFf25Indirect_UnreadableSlotRejected` | A displacement that places the indirect slot outside the user address range returns `std::nullopt`. |
-| `DecodeFf25Indirect_SlotProducesDestination` | Happy path: the slot pointer is materialised and returned verbatim. An aligned struct lays out the instruction and slot so the RIP-relative displacement is independent of padding. |
-
-The decoder header lives under `src/` (not the public include tree), so the test file adds `src/` to its include path and uses `DetourModKit::detail::` directly.
-
-## Input Tests
-
-`tests/test_input.cpp` covers public input-code parsing/formatting plus `InputPoller` / `Input` lifecycle and live binding reshapes. The poll-loop hot-path helpers are covered with focused tests because the real loop reads process input state:
-
-| Test | What it proves |
-| ---- | -------------- |
-| `KeyStateCacheTest.ProbesEachDistinctVkOncePerCycle` | The per-cycle VK cache invokes the injected probe once for repeated reads of one VK, while distinct VKs get distinct samples. |
-| `KeyStateCacheTest.ResetReArmsForNextCycle` | `reset()` clears the cycle snapshot so the next poll cycle samples the VK again. |
-| `KeyStateCacheTest.CachesUpStateWithoutReProbing` | A released key is cached as a real sampled state, not confused with "not yet probed". |
-| `KeyStateCacheTest.OutOfRangeVkReadsAsNotPressedWithoutProbing` | Invalid VK codes fail closed and never call the probe. |
-| `InputPollerPollLoopSafety.BindingGrowthPastStartupReserveKeepsPollThreadAlive` | Live binding growth past the startup callback-staging reserve does not stop the poll thread. |
-| `InputTest.BindingTokenStaleAfterConsumeToggle` | Toggling `consume` on a running binding routes through the reshape generation, so an old `BindingToken` fails closed and a freshly acquired token is current. |
-
-## Input Interception Tests
-
-`tests/test_input_intercept.cpp` exercises the internal header `src/input_intercept.hpp`, the opt-in active-input layer that backs mouse-wheel capture and gamepad passthrough suppression for `InputPoller`. It uses the same `src/`-on-include-path pattern as the decoder tests. The unit tests target the two pure state machines that carry no Win32 dependency, so each is driven by direct calls with hand-supplied state:
-
-| Test | What it proves |
-| ---- | -------------- |
-| `WheelPulseTest.IdleProducesNoPulse` | A wheel with no pending notches emits an all-zero mask every cycle. |
-| `WheelPulseTest.SingleNotchPulsesThenGoesLow` | One queued notch reads pressed for exactly one cycle, then is forced low so the edge detector re-arms. |
-| `WheelPulseTest.TwoNotchesProduceTwoSeparatedPulses` | Two queued notches fire as two distinct Press edges separated by a forced low cycle, never one fused press. |
-| `WheelPulseTest.DirectionsAreIndependent` | Pending notches in different directions pulse on the same cycle without interfering. |
-| `WheelPulseTest.AddWheelNotchesAccumulatesBelowCap` | Freshly drained notches add to the pending backlog while it stays under the cap. |
-| `WheelPulseTest.AddWheelNotchesClampsRunawayBacklog` | A single huge burst and repeated bursts both saturate at `MAX_WHEEL_PENDING`, so a sustained fast scroll cannot queue notches without bound. |
-| `WheelPulseTest.AddWheelNotchesIgnoresNegativeCounts` | A corrupt negative count is ignored rather than driving the pending counter negative. |
-| `WheelPulseTest.CappedBacklogStillDrainsOnePulsePerNotch` | After the backlog saturates, each retained notch still drains as exactly one Press edge. |
-| `GamepadSuppressTest.BarePressIsNotSuppressed` | A trigger physically down with no active chord (`owned_now == 0`) is left untouched so the game still sees it. |
-| `GamepadSuppressTest.ActiveChordSuppressesTrigger` | A trigger claimed by an active chord is added to the clear mask. |
-| `GamepadSuppressTest.ModifierReleasedBeforeTriggerKeepsSuppressing` | Releasing the modifier a frame before the trigger does not leak a bare trigger: suppression latches to the trigger button's own lifetime. |
-| `GamepadSuppressTest.TriggerReleaseSuppressesThroughGraceThenStops` | After the trigger is released the latch keeps masking through the grace window, then disarms and returns the button to the game. |
-| `GamepadSuppressTest.RepressDuringGraceReHolds` | A re-press during the release grace re-holds the suppression and restarts the grace on the next release. |
-| `InterceptControlTest.AccessorsAndSettersWithNothingInstalled` | With no hook installed (the unit-test process), the accessors report "off" and the setters / `uninstall()` are safe no-ops over atomics. |
-
-The window-procedure subclass and the `XInputGetState` inline hook are exercised by integration tests that stand up a throwaway top-level window owned by the test process (and load an `xinput` runtime). Each skips itself when the host has no window station or no XInput runtime, so a headless runner stays green:
-
-| Test | What it proves |
-| ---- | -------------- |
-| `InterceptWndProcTest.InstallCapturesWheelNotchesPerDirection` | After the subclass installs, `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` notches accumulate into the correct per-direction counters (Up/Down vertical, Left/Right horizontal) by wheel-delta sign. |
-| `InterceptWndProcTest.ConsumeSwallowsOwnedWheelMessages` | With consume off the notch is latched and forwarded to the game's predecessor procedure; with consume on it is still latched but swallowed so the game never sees it. |
-| `InterceptWndProcTest.WmNcDestroySelfHealsAndAllowsResubclass` | Destroying the subclassed window marks the subclass uninstalled via `WM_NCDESTROY`, so a recreated window (the fullscreen-toggle case) can be re-subclassed. |
-| `InterceptWndProcTest.UninstallRestoresPredecessorAtTopOfChain` | When the detour is still the top of the window-procedure chain, `uninstall()` restores the exact saved predecessor. |
-| `InterceptWndProcTest.PollerDropsCallbackStagingCopyFailureAndContinues` | A wheel edge drives the poll-loop `PendingCallback` staging path with a callback whose copy throws; the failed callback batch is dropped, the poll thread stays alive, and a later edge dispatches normally. |
-| `InterceptXInputTest.InstallHooksExportAndTrampolineRoundTrips` | Installing hooks the real `XInputGetState` export, publishes a non-null trampoline, is idempotent, routes a call through the detour into the trampoline, and restores the prologue on `uninstall()`. |
-| `InterceptDisarmTest.PollerDisarmsWheelConsumeAfterClearBindings` | A standalone `InputPoller` with a consume wheel binding arms the swallow flag; `clear_bindings(false)` (the loader-lock-safe hot-reload reset) lets the poll loop disarm it on a later cycle so the game regains its wheel. |
-
-The one path still validated manually is the gamepad button masking itself: clearing `wButtons` from a live controller's state requires a physically connected controller, so `apply_suppress` is covered indirectly by the `GamepadSuppressTest` state-machine suite plus manual play-testing.
+- **Lock-free structures, verified through a test-only accessor.** `test_event_dispatcher.cpp` proves the copy-on-write dispatcher's snapshot invariants (the zero-subscriber fast path never loads the snapshot, an in-flight `emit()` iterates its own snapshot while a concurrent `subscribe()` publishes a new one via CAS, and subscribe/unsubscribe churn leaks no snapshot references) through `debug_snapshot_use_count()`, gated behind `#define DMK_EVENT_DISPATCHER_INTERNAL_TESTING 1`. That accessor is not public API and must not be defined in consumer code.
+- **Non-installed internal headers, driven white-box.** `test_x86_decode.cpp` (`src/x86_decode.hpp`, the RIP-relative jump/call decoders the scan engine uses) and `test_input_intercept.cpp` (`src/internal/input_intercept.hpp`, the active-input layer) add `src/` to their include path and call `DetourModKit::detail::` directly. The decoders and the two interception state machines (the wheel-pulse stepper and the gamepad consume-until-release latch) are pure, so each branch is driven by a hand-crafted byte buffer or hand-supplied state rather than real input.
+- **Poll-loop hot-path helpers, tested in isolation.** `test_input.cpp` covers the pieces the live poll loop would otherwise hide behind real process input state: the per-cycle `KeyStateCache` (one probe per distinct VK per cycle, re-armed on `reset()`, failing closed on an out-of-range VK) and the reshape-generation `BindingToken` (a stale token fails closed after a `consume` toggle).
+- **Live OS hooks, exercised against a throwaway window and skipped when headless.** The window-procedure subclass and the `XInputGetState` inline hook in `test_input_intercept.cpp` stand up a top-level window the test process owns and load an `xinput` runtime; each case skips itself when the host has no window station or XInput runtime, so a headless CI runner stays green. The one path with no automated coverage is clearing a live controller's `wButtons` (it needs a physically connected pad), covered indirectly by the `GamepadSuppressTest` state-machine cases plus manual play-testing.
 
 ## Benchmark Harness
 
@@ -390,7 +324,7 @@ cmake --build build/mingw-release --parallel
 - `emit_concurrent_4_threads` (contention stress on the copy-on-write read path).
 - `reentrancy_rejection` (cost of the guard's reject-during-handler path).
 
-`DetourModKit_bench_memory` is documented in [../misc/hot-path-memory.md](../misc/hot-path-memory.md); read the `probe_gated_over_direct` TSV row for the gated-vs-direct multiplier on your machine.
+`DetourModKit_bench_memory` is documented in [../guides/memory/hot-path-memory.md](../guides/memory/hot-path-memory.md); read the `probe_gated_over_direct` TSV row for the gated-vs-direct multiplier on your machine.
 
 ## Installed Package Smoke Test
 
@@ -409,48 +343,22 @@ The release workflow runs this smoke project for both MinGW and MSVC after insta
 
 ## Project Structure
 
-```text
-tests/
-├── CMakeLists.txt              # Test discovery, fixture DLL build, bench wiring
-├── main.cpp                    # GoogleTest entry point
-├── bench_event_dispatcher.cpp  # EventDispatcher emit/subscribe microbench (DMK_BUILD_BENCHMARKS)
-├── bench_memory.cpp            # Hot-path memory bench: validation predicate vs SEH-guarded read / chain primitives (DMK_BUILD_BENCHMARKS)
-├── bench_scanner.cpp           # Scanner find_pattern and resolver-batch bench (DMK_BUILD_BENCHMARKS)
-├── fixtures/
-│   └── hook_target_lib.cpp     # Fixture DLL (exported functions for integration tests)
-├── package_smoke/
-│   ├── CMakeLists.txt          # Minimal installed-package consumer project
-│   └── main.cpp                # Smoke executable that forces a DetourModKit link
-├── test_async_logger.cpp       # Async logger tests
-├── test_config.cpp             # Configuration tests
-├── test_config_watcher.cpp     # INI hot-reload watcher tests
-├── test_event_dispatcher.cpp   # Event dispatcher tests (incl. fast-path and snapshot stability)
-├── test_filesystem.cpp         # Filesystem tests
-├── test_format.cpp             # Format utilities tests
-├── test_hook.cpp               # Hook free-function / RAII surface unit tests (inline/mid/vmt/lifecycle/call/install_all)
-├── test_hook_integration.cpp   # Cross-module hook integration tests
-├── test_mid_hook_context.cpp   # hook::MidContext accessor tests
-├── test_input.cpp              # Input system and input code tests
-├── test_input_intercept.cpp    # Active-input layer state machines (internal)
-├── test_logger.cpp             # Logger tests
-├── test_math.cpp               # Math utilities tests
-├── test_memory.cpp             # Memory utilities tests (cache, read/write, guarded reads, module range)
-├── test_memory_chain.cpp       # Pointer-chain / plausibility primitives (memory::walk, is_plausible_ptr)
-├── test_platform.cpp           # Platform detection and version macro tests
-├── test_profiler.cpp           # Profiler tests
-├── test_scan_resolve.cpp       # AOB scanner and resolver tests (scan::Pattern, scan::resolve)
-├── test_session.cpp            # Session lifecycle, bootstrap worker, and ordered ~Session teardown tests
-├── test_string.cpp             # string::trim cases (shares format.hpp with test_format.cpp -- surface split)
-├── test_win_file_stream.cpp    # Win32 file stream tests
-├── test_worker.cpp             # StoppableWorker jthread RAII tests
-└── test_x86_decode.cpp         # x86 control-flow instruction decoders (internal)
+Test files are named by the surface they verify and live under `tests/`; that directory is the authoritative list. Most modules have one `test_<module>.cpp`, while large modules split by API surface, fault-frame state, or integration boundary. The files worth calling out, because their role is not obvious from the name:
 
+- **Deliberate same-module splits** -- `test_memory_chain.cpp` (pointer-chain and plausibility primitives) is split from `test_memory.cpp`, and `test_string.cpp` (the `string::trim` cases) shares `format.hpp` with `test_format.cpp`; scanner and RTTI have several focused suites for resolver tiers, string xrefs, parallel scanning, reverse dissection, and heal scheduling.
+- **Internal white-box tests** -- `test_input_intercept.cpp` and `test_x86_decode.cpp` add `src/` to their include path to drive non-installed `src/internal/` headers directly.
+- **Integration and lifecycle** -- `test_hook_integration.cpp` (cross-module hooking against the fixture DLL), `test_session.cpp` (`Session` / bootstrap / ordered `~Session` teardown), and `test_mid_hook_context.cpp` (`hook::MidContext` accessors).
+- **Non-`test_*` support** -- `main.cpp` (GoogleTest entry point), `CMakeLists.txt` (test discovery, fixture DLL build, bench wiring), `fixtures/hook_target_lib.cpp` (the exported-function fixture DLL), `package_smoke/` (the installed-package consumer), and the `bench_*.cpp` microbenches (built under `DMK_BUILD_BENCHMARKS`).
+
+The `docs/tests/` directory holds this guide plus the coverage tooling:
+
+```text
 docs/tests/
-├── README.md                   # This guide
-├── parse_coverage.py           # Coverage JSON parser script
-├── test_compile.cpp            # Minimal toolchain verification stub
-└── coverage/                   # Generated HTML reports (gitignored)
-    └── index.html              # Entry point for HTML coverage report
+├── README.md          # This guide
+├── parse_coverage.py  # Coverage JSON parser script
+├── test_compile.cpp   # Minimal toolchain verification stub
+└── coverage/          # Generated HTML reports (gitignored)
+    └── index.html     # Entry point for HTML coverage report
 ```
 
 ## Helper Scripts
