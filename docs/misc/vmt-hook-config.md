@@ -105,7 +105,7 @@ Result<void>                                VmtHook::remove_method(std::size_t i
 - **`original<Fn>(index)`** returns the typed pre-hook function pointer for the slot, so the detour can call the original. It returns `nullptr` for an unhooked index or a disengaged handle.
 - **`remove_method(index)`** rewrites the clone slot back to the original, lifting one method hook while the clone stays applied. Errors: `InvalidHookState` (disengaged handle), `MethodNotFound` (the slot is not hooked).
 
-**Index counting.** `index` is the zero-based position among *virtual functions*, and the leading destructor slots are counted: the Itanium ABI (GCC / MinGW) emits two destructor entries ahead of the first declared method, MSVC emits one, so the first non-destructor method sits at index 2 under Itanium and index 1 under MSVC. The ABI vtable header (Itanium offset-to-top + RTTI pointers, or the MSVC RTTI locator) is not part of the index; DetourModKit skips it internally.
+**Index counting.** `index` is the zero-based position among *virtual functions*. The ABI vtable header (Itanium offset-to-top + RTTI pointers, or the MSVC RTTI locator) is not part of the index; DetourModKit skips it internally. The vtable order otherwise follows the source, so the index depends on the class shape. In particular, destructor slots count only when the class has a *virtual destructor*: with one, the Itanium ABI (GCC / MinGW) places two destructor entries (complete + deleting) ahead of the first declared method and MSVC places one, so a class whose first declared member after the destructor is `foo()` reaches it at index 2 under Itanium and index 1 under MSVC. A class with *no* virtual destructor has no such prefix and its first declared virtual method is index 0 on both ABIs. When the layout is not obvious, confirm the index against the target's real vtable rather than assuming the destructor offset.
 
 **Detour ABI.** The detour is installed straight into a vtable slot, so its signature must match the virtual method's real ABI: the object pointer arrives as the first integer argument (`this` in `rcx` under the Win64 ABI) followed by the declared parameters. Win64 has a single calling convention, so a free function `Ret (*)(void* self, ...)` is the correct detour shape for both MSVC and MinGW; no `__thiscall` decoration is needed. `hook_method` cannot validate that signature -- a mismatch is silent ABI corruption, the same caveat `Hook::call` carries.
 
@@ -123,10 +123,15 @@ int detour_compute(void *self, int a, int b)
 auto r = DetourModKit::hook::vmt_for("MyVmt", object);
 if (!r) { return r.error(); }
 DetourModKit::hook::VmtHook vh = std::move(*r);
-g_vmt = &vh;                                        // published for the detour to reach original()
 if (auto h = vh.hook_method(kComputeIndex, &detour_compute); !h) { return h.error(); }
+g_vmt = &vh;                                        // publish AFTER the hook installs, for the detour to reach original()
 // ... object->compute(...) now routes through detour_compute ...
-// vh.remove_method(kComputeIndex);                // lift just this method, or drop vh to restore everything
+
+// Teardown: g_vmt and vh must share a lifetime. Clear the published pointer BEFORE vh is destroyed so a late
+// dispatch can never read a dangling handle. Keep both for the process, or drop them together; a scoped guard that
+// nulls g_vmt on exit (like the tests' MethodVmtScope) makes this exception-safe.
+g_vmt = nullptr;
+// vh.remove_method(kComputeIndex);                // (optional) lift just this method; dropping vh restores everything
 ```
 
 ## 8. Worked examples

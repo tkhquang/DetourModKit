@@ -39,9 +39,9 @@ The `HookManager` singleton and its aggregate operations are removed:
   `hook_vmt_method(name, index, detour)` -> `vh.hook_method<Fn>(index, detour)`; the `with_vmt_method(name,
   index, cb)` accessor -> `vh.original<Fn>(index)` (a typed pre-hook function pointer the detour calls directly,
   so the reader-lock callback is no longer needed); `remove_vmt_method(name, index)` -> `vh.remove_method(index)`.
-  The v3 `VmHook::thiscall`/`ccall`/`stdcall`/`fastcall` original-call helpers collapse into the single
-  `original<Fn>(index)` because Win64 has one calling convention; encode the convention in `Fn` if you ever
-  target x86.
+  The v3 per-method original-call helpers (`thiscall` / `ccall` / `stdcall` / `fastcall`, reached through the
+  `with_vmt_method` callback) collapse into the single `VmtHook::original<Fn>(index)` because Win64 has one
+  calling convention; encode the convention in `Fn` if you ever target x86.
 
 ## Scanning: one resolver surface
 

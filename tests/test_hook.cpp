@@ -894,6 +894,21 @@ int vmt_detour_transform(void *self, int x)
     return original(self, x) + 500;
 }
 
+// Dispatch the hook-sensitive checks through the VmtTestInterface base at a DMK_TEST_NOINLINE boundary. A VMT hook
+// only takes effect through the object's (swapped) vtable, so a call the optimizer can devirtualize to the concrete
+// VmtTestTarget would bypass the clone and silently stop testing the hook. Passing a base-class pointer into a
+// noinline function that only sees VmtTestInterface forces the real runtime vtable dispatch, exactly as a game
+// engine's polymorphic call would, on both the debug and any optimized test build.
+DMK_TEST_NOINLINE int dispatch_compute(VmtTestInterface *object, int a, int b)
+{
+    return object->compute(a, b);
+}
+
+DMK_TEST_NOINLINE int dispatch_transform(VmtTestInterface *object, int x)
+{
+    return object->transform(x);
+}
+
 TEST(HookVmt, CreateSuccess)
 {
     auto target = std::make_unique<VmtTestTarget>();
@@ -1167,7 +1182,7 @@ TEST(HookVmt, ReleaseLeavesCloneInstalled)
 TEST(HookVmtMethod, HookMethodRedirectsSlotAndOriginalReachesPreHook)
 {
     auto target = std::make_unique<VmtTestTarget>();
-    EXPECT_EQ(target->compute(3, 4), 7);
+    EXPECT_EQ(dispatch_compute(target.get(), 3, 4), 7);
 
     Result<VmtHook> r = vmt_for("MethodVmt", target.get());
     ASSERT_TRUE(r.has_value()) << r.error().message();
@@ -1177,7 +1192,7 @@ TEST(HookVmtMethod, HookMethodRedirectsSlotAndOriginalReachesPreHook)
     ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
 
     // Dispatch through the object now routes to the detour: original(3, 4) + 1000.
-    EXPECT_EQ(target->compute(3, 4), 1007);
+    EXPECT_EQ(dispatch_compute(target.get(), 3, 4), 1007);
 
     // The typed snapshot reaches the original body directly, so it yields the unmodified 7.
     auto *orig = vh.original<VmtComputeFn>(VMT_COMPUTE_INDEX);
@@ -1189,8 +1204,8 @@ TEST(HookVmtMethod, HookMethodRedirectsSlotAndOriginalReachesPreHook)
 TEST(HookVmtMethod, MultipleSlotsHookIndependently)
 {
     auto target = std::make_unique<VmtTestTarget>();
-    EXPECT_EQ(target->compute(2, 3), 5);
-    EXPECT_EQ(target->transform(6), 12);
+    EXPECT_EQ(dispatch_compute(target.get(), 2, 3), 5);
+    EXPECT_EQ(dispatch_transform(target.get(), 6), 12);
 
     Result<VmtHook> r = vmt_for("MultiSlotVmt", target.get());
     ASSERT_TRUE(r.has_value()) << r.error().message();
@@ -1200,8 +1215,8 @@ TEST(HookVmtMethod, MultipleSlotsHookIndependently)
     ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
     ASSERT_TRUE(vh.hook_method(VMT_TRANSFORM_INDEX, &vmt_detour_transform).has_value());
 
-    EXPECT_EQ(target->compute(2, 3), 1005);
-    EXPECT_EQ(target->transform(6), 512);
+    EXPECT_EQ(dispatch_compute(target.get(), 2, 3), 1005);
+    EXPECT_EQ(dispatch_transform(target.get(), 6), 512);
 }
 
 // Hooking the same slot twice is refused: a second install would read the first detour as the "original".
@@ -1248,7 +1263,7 @@ TEST(HookVmtMethod, OutOfRangeIndexRejected)
     Result<void> hooked = vh.hook_method(INVALID_INDEX, &vmt_detour_compute);
     ASSERT_FALSE(hooked.has_value());
     EXPECT_EQ(hooked.error().code, ErrorCode::InvalidArg);
-    EXPECT_EQ(target->compute(4, 5), 9);
+    EXPECT_EQ(dispatch_compute(target.get(), 4, 5), 9);
     EXPECT_EQ(vh.original<VmtComputeFn>(INVALID_INDEX), nullptr);
 }
 
@@ -1263,10 +1278,10 @@ TEST(HookVmtMethod, RemoveMethodRestoresSlot)
     MethodVmtScope method_scope(vh);
 
     ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
-    EXPECT_EQ(target->compute(5, 5), 1010);
+    EXPECT_EQ(dispatch_compute(target.get(), 5, 5), 1010);
 
     ASSERT_TRUE(vh.remove_method(VMT_COMPUTE_INDEX).has_value());
-    EXPECT_EQ(target->compute(5, 5), 10);
+    EXPECT_EQ(dispatch_compute(target.get(), 5, 5), 10);
     EXPECT_EQ(vh.original<VmtComputeFn>(VMT_COMPUTE_INDEX), nullptr);
 
     Result<void> re_remove = vh.remove_method(VMT_COMPUTE_INDEX);
@@ -1278,7 +1293,7 @@ TEST(HookVmtMethod, RemoveMethodRestoresSlot)
 TEST(HookVmtMethod, DroppingHandleRestoresMethod)
 {
     auto target = std::make_unique<VmtTestTarget>();
-    EXPECT_EQ(target->compute(1, 2), 3);
+    EXPECT_EQ(dispatch_compute(target.get(), 1, 2), 3);
 
     {
         Result<VmtHook> r = vmt_for("DropMethodVmt", target.get());
@@ -1287,11 +1302,11 @@ TEST(HookVmtMethod, DroppingHandleRestoresMethod)
         MethodVmtScope method_scope(vh);
 
         ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
-        EXPECT_EQ(target->compute(1, 2), 1003);
+        EXPECT_EQ(dispatch_compute(target.get(), 1, 2), 1003);
     }
 
     // The handle's destructor restored the original vptr, so the method hook is gone with it.
-    EXPECT_EQ(target->compute(1, 2), 3);
+    EXPECT_EQ(dispatch_compute(target.get(), 1, 2), 3);
 }
 
 // A method hook lives in one clone, so an object added later via apply_to inherits it; remove_from restores that
@@ -1307,15 +1322,15 @@ TEST(HookVmtMethod, MethodHookAppliesToAdditionalObjects)
     MethodVmtScope method_scope(vh);
 
     ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
-    EXPECT_EQ(target1->compute(1, 1), 1002);
-    EXPECT_EQ(target2->compute(1, 1), 2);
+    EXPECT_EQ(dispatch_compute(target1.get(), 1, 1), 1002);
+    EXPECT_EQ(dispatch_compute(target2.get(), 1, 1), 2);
 
     ASSERT_TRUE(vh.apply_to(target2.get()).has_value());
-    EXPECT_EQ(target2->compute(1, 1), 1002);
+    EXPECT_EQ(dispatch_compute(target2.get(), 1, 1), 1002);
 
     ASSERT_TRUE(vh.remove_from(target2.get()).has_value());
-    EXPECT_EQ(target2->compute(1, 1), 2);
-    EXPECT_EQ(target1->compute(1, 1), 1002);
+    EXPECT_EQ(dispatch_compute(target2.get(), 1, 1), 2);
+    EXPECT_EQ(dispatch_compute(target1.get(), 1, 1), 1002);
 }
 
 // original<Fn>(index) is a null snapshot for a slot that was never hooked.
