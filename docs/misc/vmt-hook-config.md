@@ -1,8 +1,6 @@
 # VMT Hook Configuration Guide
 
-Reference for `DetourModKit::hook::VmtOptions` and the object-level VMT hook surface (`hook::vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`) declared in [`hook.hpp`](../../include/DetourModKit/hook.hpp). Covers the operational policy knobs that mirror the inline path's `hook::Options`.
-
-> **v4.0.0 note:** Per-method VMT hooking (a `hook_method<Fn>` layer) is deferred to a later VMT release. The object-level clone / apply / remove API and the `VmtOptions` knobs documented here ship in 4.0.0.
+Reference for `DetourModKit::hook::VmtOptions`, the object-level VMT hook surface (`hook::vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`), and the per-method typed surface (`VmtHook::hook_method`, `VmtHook::original`, `VmtHook::remove_method`) declared in [`hook.hpp`](../../include/DetourModKit/hook.hpp). Covers the operational policy knobs that mirror the inline path's `hook::Options`.
 
 ## Contents
 
@@ -12,8 +10,9 @@ Reference for `DetourModKit::hook::VmtOptions` and the object-level VMT hook sur
 4. [`fail_on_non_function_pointer` semantics](#4-fail_on_non_function_pointer-semantics)
 5. [Removal: dropping the handle vs `remove_from`](#5-removal-dropping-the-handle-vs-remove_from)
 6. [Interaction with `apply_to`](#6-interaction-with-apply_to)
-7. [Worked examples](#7-worked-examples)
-8. [Further reading](#8-further-reading)
+7. [Per-method typed hooking](#7-per-method-typed-hooking)
+8. [Worked examples](#8-worked-examples)
+9. [Further reading](#9-further-reading)
 
 ---
 
@@ -92,7 +91,50 @@ The pre-flight is intentionally conservative: a real function whose first byte i
 
 `apply_to`'s "no-op when already applied" is a deliberate difference from `vmt_for`'s "refuse with HookAlreadyExists". `vmt_for` is the path that establishes a clone; re-creating on the same vptr is always wrong. `apply_to` is the path that installs an existing clone on additional objects; calling it twice on the same object is a no-op the caller may legitimately want to express.
 
-## 7. Worked examples
+## 7. Per-method typed hooking
+
+`vmt_for` gives you the cloned vtable; three handle methods redirect the individual virtual slots inside it:
+
+```cpp
+template <detail::FunctionPointer Fn> Result<void> VmtHook::hook_method(std::size_t index, Fn detour);
+template <detail::FunctionPointer Fn> Fn           VmtHook::original(std::size_t index) const noexcept;
+Result<void>                                VmtHook::remove_method(std::size_t index);
+```
+
+- **`hook_method<Fn>(index, detour)`** patches the vtable slot at `index` in the clone to `detour`. Because the redirect lives in the one clone, it fires on every object the clone is applied to (including objects added later with `apply_to`). The function-to-`void*` cast happens once inside the template behind a word-size `static_assert`, so the call site never writes a `reinterpret_cast`. Errors: `InvalidHookState` (disengaged handle), `InvalidArg` (null detour or an out-of-range index), `MethodAlreadyHooked` (the slot is already hooked on this handle), `BackendFailed` / `OutOfMemory`.
+- **`original<Fn>(index)`** returns the typed pre-hook function pointer for the slot, so the detour can call the original. It returns `nullptr` for an unhooked index or a disengaged handle.
+- **`remove_method(index)`** rewrites the clone slot back to the original, lifting one method hook while the clone stays applied. Errors: `InvalidHookState` (disengaged handle), `MethodNotFound` (the slot is not hooked).
+
+**Index counting.** `index` is the zero-based position among *virtual functions*. The ABI vtable header (Itanium offset-to-top + RTTI pointers, or the MSVC RTTI locator) is not part of the index; DetourModKit skips it internally. The vtable order otherwise follows the source, so the index depends on the class shape. In particular, destructor slots count only when the class has a *virtual destructor*: with one, the Itanium ABI (GCC / MinGW) places two destructor entries (complete + deleting) ahead of the first declared method and MSVC places one, so a class whose first declared member after the destructor is `foo()` reaches it at index 2 under Itanium and index 1 under MSVC. A class with *no* virtual destructor has no such prefix and its first declared virtual method is index 0 on both ABIs. When the layout is not obvious, confirm the index against the target's real vtable rather than assuming the destructor offset.
+
+**Detour ABI.** The detour is installed straight into a vtable slot, so its signature must match the virtual method's real ABI: the object pointer arrives as the first integer argument (`this` in `rcx` under the Win64 ABI) followed by the declared parameters. Win64 has a single calling convention, so a free function `Ret (*)(void* self, ...)` is the correct detour shape for both MSVC and MinGW; no `__thiscall` decoration is needed. `hook_method` cannot validate that signature -- a mismatch is silent ABI corruption, the same caveat `Hook::call` carries.
+
+**Concurrency.** `original` copies the pre-hook slot pointer out under a shared-read lock and returns it; the detour then invokes that pointer lock-free. `hook_method`, `remove_method`, `apply_to`, and `remove_from` take the matching exclusive write, so a snapshot never observes a torn mutation. The lock guards the snapshot, not the call: the caller still owns the hook-outlives-the-call guarantee, exactly as with `Hook::original`. Install and remove method hooks during setup, not from inside a hooked method's detour.
+
+```cpp
+using ComputeFn = int (*)(void *self, int a, int b);
+
+int detour_compute(void *self, int a, int b)
+{
+    // Reach the original through the handle, then adjust the result.
+    return g_vmt->original<ComputeFn>(kComputeIndex)(self, a, b) + 1000;
+}
+
+auto r = DetourModKit::hook::vmt_for("MyVmt", object);
+if (!r) { return r.error(); }
+DetourModKit::hook::VmtHook vh = std::move(*r);
+if (auto h = vh.hook_method(kComputeIndex, &detour_compute); !h) { return h.error(); }
+g_vmt = &vh;                                        // publish AFTER the hook installs, for the detour to reach original()
+// ... object->compute(...) now routes through detour_compute ...
+
+// Teardown: g_vmt and vh must share a lifetime. Clear the published pointer BEFORE vh is destroyed so a late
+// dispatch can never read a dangling handle. Keep both for the process, or drop them together; a scoped guard that
+// nulls g_vmt on exit (like the tests' MethodVmtScope) makes this exception-safe.
+g_vmt = nullptr;
+// vh.remove_method(kComputeIndex);                // (optional) lift just this method; dropping vh restores everything
+```
+
+## 8. Worked examples
 
 ### Default policy
 
@@ -111,8 +153,8 @@ auto r = DetourModKit::hook::vmt_for("MyVmt", object, opts);
 if (r)
 {
     DetourModKit::hook::VmtHook vh = std::move(*r);
-    // Per-method VMT hooking is deferred (see the note at the top of this file);
-    // the object-level clone is live as soon as vmt_for succeeds.
+    // The clone is live as soon as vmt_for succeeds; redirect individual slots with
+    // vh.hook_method<Fn>(index, detour) (see section 7).
 }
 ```
 
@@ -138,7 +180,7 @@ for (auto *obj : candidate_objects)
 }
 ```
 
-## 8. Further reading
+## 9. Further reading
 
-- [`hook.hpp`](../../include/DetourModKit/hook.hpp): `VmtOptions`, `vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`, and `Options` for the inline-side equivalent.
-- `tests/test_hook.cpp`: the VMT tests pin the default-off behavior, the double-create guard, the pre-flight on `int3` slots, and the apply no-op.
+- [`hook.hpp`](../../include/DetourModKit/hook.hpp): `VmtOptions`, `vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`, `VmtHook::hook_method`, `VmtHook::original`, `VmtHook::remove_method`, and `Options` for the inline-side equivalent.
+- `tests/test_hook.cpp`: the `HookVmt` tests pin the default-off behavior, the double-create guard, the pre-flight on `int3` slots, and the apply no-op; the `HookVmtMethod` tests pin per-method redirect + `original`, duplicate-slot refusal, single-method removal, drop-restores-method, and the apply-inherits-the-method-hook case.

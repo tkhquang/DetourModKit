@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -813,29 +814,100 @@ public:
     int transform(int x) override { return x * 2; }
 };
 
-// VMT METHOD-HOOK TEST FIXTURES are deferred along with the per-method API they exercise (the typed per-method VMT
-// surface). The vtable-index constants, the captured VmHook pointer, and the method-detour subclass all name the
-// SafetyHook backend (safetyhook::VmHook) or feed only the deferred per-method API, so they are guarded out until that
-// API is reintroduced. The object-level VMT tests below stay live.
-#if 0
-// Vtable layout differs between MSVC (single destructor slot) and
-// Itanium ABI (two destructor slots used by GCC/MinGW).
+// VMT method-hook test fixtures. The per-method surface installs a detour straight into a cloned vtable slot, so a
+// detour models the virtual method's real ABI: the object arrives as the leading integer argument (`this` in rcx under
+// the Win64 ABI) with no calling-convention decoration, because x64 has a single convention. The detour reaches the
+// original through the handle's typed original<Fn>(index) snapshot, so nothing here names the SafetyHook backend.
+//
+// The vtable index counts virtual functions only and excludes the ABI header, but the leading destructor slots are
+// counted: the Itanium ABI (GCC/MinGW) emits two destructor entries (complete + deleting) ahead of the first declared
+// method, while MSVC emits one, so compute/transform sit one slot higher under Itanium.
 #if defined(_MSC_VER)
-static constexpr size_t VMT_COMPUTE_INDEX = 1;
-static constexpr size_t VMT_TRANSFORM_INDEX = 2;
+static constexpr std::size_t VMT_COMPUTE_INDEX = 1;
+static constexpr std::size_t VMT_TRANSFORM_INDEX = 2;
 #else
-static constexpr size_t VMT_COMPUTE_INDEX = 2;
-static constexpr size_t VMT_TRANSFORM_INDEX = 3;
+static constexpr std::size_t VMT_COMPUTE_INDEX = 2;
+static constexpr std::size_t VMT_TRANSFORM_INDEX = 3;
 #endif
 
-static safetyhook::VmHook *s_compute_vm_hook = nullptr;
+using VmtComputeFn = int (*)(void *self, int a, int b);
+using VmtTransformFn = int (*)(void *self, int x);
 
-class VmtTestHook : public VmtTestTarget
+// The detours reach the original virtual method through the handle, so the fixtures publish the live VmtHook* the way
+// the inline-hook detours publish their Hook*. A null handle means "unhooked", so the detour falls back to a plain
+// marker rather than dereferencing a stale pointer.
+static VmtHook *s_method_vmt = nullptr;
+
+class MethodVmtScope
 {
 public:
-    int hooked_compute(int a, int b) { return s_compute_vm_hook->thiscall<int>(this, a, b) + 1000; }
+    explicit MethodVmtScope(VmtHook &hook) noexcept;
+
+    ~MethodVmtScope() noexcept;
+
+    MethodVmtScope(const MethodVmtScope &) = delete;
+    MethodVmtScope &operator=(const MethodVmtScope &) = delete;
+    MethodVmtScope(MethodVmtScope &&) = delete;
+    MethodVmtScope &operator=(MethodVmtScope &&) = delete;
+
+private:
+    VmtHook *m_previous;
 };
-#endif // VMT method-hook fixtures deferred until the per-method VMT API is reintroduced
+
+MethodVmtScope::MethodVmtScope(VmtHook &hook) noexcept : m_previous(s_method_vmt)
+{
+    s_method_vmt = &hook;
+}
+
+MethodVmtScope::~MethodVmtScope() noexcept
+{
+    s_method_vmt = m_previous;
+}
+
+// Hooked compute: original(this, a, b) + 1000.
+int vmt_detour_compute(void *self, int a, int b)
+{
+    if (s_method_vmt == nullptr)
+    {
+        return -1;
+    }
+    const VmtComputeFn original = s_method_vmt->original<VmtComputeFn>(VMT_COMPUTE_INDEX);
+    if (original == nullptr)
+    {
+        return -1;
+    }
+    return original(self, a, b) + 1000;
+}
+
+// Hooked transform: original(this, x) + 500, used to prove two independent slots hook without cross-talk.
+int vmt_detour_transform(void *self, int x)
+{
+    if (s_method_vmt == nullptr)
+    {
+        return -1;
+    }
+    const VmtTransformFn original = s_method_vmt->original<VmtTransformFn>(VMT_TRANSFORM_INDEX);
+    if (original == nullptr)
+    {
+        return -1;
+    }
+    return original(self, x) + 500;
+}
+
+// Dispatch the hook-sensitive checks through the VmtTestInterface base at a DMK_TEST_NOINLINE boundary. A VMT hook
+// only takes effect through the object's (swapped) vtable, so a call the optimizer can devirtualize to the concrete
+// VmtTestTarget would bypass the clone and silently stop testing the hook. Passing a base-class pointer into a
+// noinline function that only sees VmtTestInterface forces the real runtime vtable dispatch, exactly as a game
+// engine's polymorphic call would, on both the debug and any optimized test build.
+DMK_TEST_NOINLINE int dispatch_compute(VmtTestInterface *object, int a, int b)
+{
+    return object->compute(a, b);
+}
+
+DMK_TEST_NOINLINE int dispatch_transform(VmtTestInterface *object, int x)
+{
+    return object->transform(x);
+}
 
 TEST(HookVmt, CreateSuccess)
 {
@@ -1099,6 +1171,201 @@ TEST(HookVmt, ReleaseLeavesCloneInstalled)
     EXPECT_NE(*reinterpret_cast<std::uintptr_t *>(target.get()), original_vptr);
     // Manually restore so the stack object does not dispatch through a leaked clone after this scope.
     *reinterpret_cast<std::uintptr_t *>(target.get()) = original_vptr;
+}
+
+// ----------------------------------------------------------------------------
+// VMT per-method hooking (hook_method / original<Fn>(index) / remove_method)
+// ----------------------------------------------------------------------------
+
+// A method hook redirects one vtable slot in the clone, and original<Fn>(index) reaches the pre-hook method: a hooked
+// compute returns original + 1000, and the typed snapshot yields the unmodified sum.
+TEST(HookVmtMethod, HookMethodRedirectsSlotAndOriginalReachesPreHook)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    EXPECT_EQ(dispatch_compute(target.get(), 3, 4), 7);
+
+    Result<VmtHook> r = vmt_for("MethodVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+    MethodVmtScope method_scope(vh);
+
+    ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+
+    // Dispatch through the object now routes to the detour: original(3, 4) + 1000.
+    EXPECT_EQ(dispatch_compute(target.get(), 3, 4), 1007);
+
+    // The typed snapshot reaches the original body directly, so it yields the unmodified 7.
+    auto *orig = vh.original<VmtComputeFn>(VMT_COMPUTE_INDEX);
+    ASSERT_NE(orig, nullptr);
+    EXPECT_EQ(orig(target.get(), 3, 4), 7);
+}
+
+// Two independent slots hook without cross-talk, and each original<Fn>(index) resolves to its own method.
+TEST(HookVmtMethod, MultipleSlotsHookIndependently)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    EXPECT_EQ(dispatch_compute(target.get(), 2, 3), 5);
+    EXPECT_EQ(dispatch_transform(target.get(), 6), 12);
+
+    Result<VmtHook> r = vmt_for("MultiSlotVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+    MethodVmtScope method_scope(vh);
+
+    ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+    ASSERT_TRUE(vh.hook_method(VMT_TRANSFORM_INDEX, &vmt_detour_transform).has_value());
+
+    EXPECT_EQ(dispatch_compute(target.get(), 2, 3), 1005);
+    EXPECT_EQ(dispatch_transform(target.get(), 6), 512);
+}
+
+// Hooking the same slot twice is refused: a second install would read the first detour as the "original".
+TEST(HookVmtMethod, DuplicateMethodHookFails)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    Result<VmtHook> r = vmt_for("DupMethodVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+
+    ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+
+    Result<void> second = vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute);
+    ASSERT_FALSE(second.has_value());
+    EXPECT_EQ(second.error().code, ErrorCode::MethodAlreadyHooked);
+}
+
+// A null detour is rejected before it can be stored into a vtable slot.
+TEST(HookVmtMethod, NullDetourRejected)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    Result<VmtHook> r = vmt_for("NullDetourVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+
+    VmtComputeFn null_detour = nullptr;
+    Result<void> hooked = vh.hook_method(VMT_COMPUTE_INDEX, null_detour);
+    ASSERT_FALSE(hooked.has_value());
+    EXPECT_EQ(hooked.error().code, ErrorCode::InvalidArg);
+}
+
+// An out-of-range index is rejected before the backend can index through the cloned vtable.
+TEST(HookVmtMethod, OutOfRangeIndexRejected)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    Result<VmtHook> r = vmt_for("OutOfRangeMethodVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+
+    constexpr std::size_t INVALID_INDEX = VMT_TRANSFORM_INDEX + 1;
+    Result<void> hooked = vh.hook_method(INVALID_INDEX, &vmt_detour_compute);
+    ASSERT_FALSE(hooked.has_value());
+    EXPECT_EQ(hooked.error().code, ErrorCode::InvalidArg);
+    EXPECT_EQ(dispatch_compute(target.get(), 4, 5), 9);
+    EXPECT_EQ(vh.original<VmtComputeFn>(INVALID_INDEX), nullptr);
+}
+
+// remove_method restores the cloned slot; a second removal reports MethodNotFound.
+TEST(HookVmtMethod, RemoveMethodRestoresSlot)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    Result<VmtHook> r = vmt_for("RemMethodVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+    MethodVmtScope method_scope(vh);
+
+    ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+    EXPECT_EQ(dispatch_compute(target.get(), 5, 5), 1010);
+
+    ASSERT_TRUE(vh.remove_method(VMT_COMPUTE_INDEX).has_value());
+    EXPECT_EQ(dispatch_compute(target.get(), 5, 5), 10);
+    EXPECT_EQ(vh.original<VmtComputeFn>(VMT_COMPUTE_INDEX), nullptr);
+
+    Result<void> re_remove = vh.remove_method(VMT_COMPUTE_INDEX);
+    ASSERT_FALSE(re_remove.has_value());
+    EXPECT_EQ(re_remove.error().code, ErrorCode::MethodNotFound);
+}
+
+// Dropping the whole handle restores the original method (the remove-entire-hook path for method hooks).
+TEST(HookVmtMethod, DroppingHandleRestoresMethod)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    EXPECT_EQ(dispatch_compute(target.get(), 1, 2), 3);
+
+    {
+        Result<VmtHook> r = vmt_for("DropMethodVmt", target.get());
+        ASSERT_TRUE(r.has_value()) << r.error().message();
+        VmtHook vh = std::move(*r);
+        MethodVmtScope method_scope(vh);
+
+        ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+        EXPECT_EQ(dispatch_compute(target.get(), 1, 2), 1003);
+    }
+
+    // The handle's destructor restored the original vptr, so the method hook is gone with it.
+    EXPECT_EQ(dispatch_compute(target.get(), 1, 2), 3);
+}
+
+// A method hook lives in one clone, so an object added later via apply_to inherits it; remove_from restores that
+// object without disturbing the seed.
+TEST(HookVmtMethod, MethodHookAppliesToAdditionalObjects)
+{
+    auto target1 = std::make_unique<VmtTestTarget>();
+    auto target2 = std::make_unique<VmtTestTarget>();
+
+    Result<VmtHook> r = vmt_for("MultiObjMethodVmt", target1.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+    MethodVmtScope method_scope(vh);
+
+    ASSERT_TRUE(vh.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute).has_value());
+    EXPECT_EQ(dispatch_compute(target1.get(), 1, 1), 1002);
+    EXPECT_EQ(dispatch_compute(target2.get(), 1, 1), 2);
+
+    ASSERT_TRUE(vh.apply_to(target2.get()).has_value());
+    EXPECT_EQ(dispatch_compute(target2.get(), 1, 1), 1002);
+
+    ASSERT_TRUE(vh.remove_from(target2.get()).has_value());
+    EXPECT_EQ(dispatch_compute(target2.get(), 1, 1), 2);
+    EXPECT_EQ(dispatch_compute(target1.get(), 1, 1), 1002);
+}
+
+// original<Fn>(index) is a null snapshot for a slot that was never hooked.
+TEST(HookVmtMethod, OriginalForUnhookedSlotIsNull)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    Result<VmtHook> r = vmt_for("UnhookedSlotVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook vh = std::move(*r);
+
+    EXPECT_EQ(vh.original<VmtComputeFn>(VMT_COMPUTE_INDEX), nullptr);
+}
+
+// A disengaged (moved-from) handle fails every per-method entry point closed: InvalidHookState for the mutators and a
+// null snapshot for the reader, mirroring the flat Hook's moved-from contract.
+TEST(HookVmtMethod, DisengagedHandleFailsClosed)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+
+    Result<VmtHook> r = vmt_for("DisengagedMethodVmt", target.get());
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    VmtHook a = std::move(*r);
+    VmtHook b = std::move(a);
+    EXPECT_TRUE(static_cast<bool>(b));
+
+    Result<void> hooked = a.hook_method(VMT_COMPUTE_INDEX, &vmt_detour_compute);
+    ASSERT_FALSE(hooked.has_value());
+    EXPECT_EQ(hooked.error().code, ErrorCode::InvalidHookState);
+
+    Result<void> removed = a.remove_method(VMT_COMPUTE_INDEX);
+    ASSERT_FALSE(removed.has_value());
+    EXPECT_EQ(removed.error().code, ErrorCode::InvalidHookState);
+
+    EXPECT_EQ(a.original<VmtComputeFn>(VMT_COMPUTE_INDEX), nullptr);
 }
 
 // ----------------------------------------------------------------------------

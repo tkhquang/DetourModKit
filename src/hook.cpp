@@ -5,7 +5,7 @@
  *          It hosts: the opaque MidContext <-> backend-context reinterpret_cast accessors; the process-wide
  *          allocator; the inline/mid create paths (target resolution, duplicate detection, prologue pre-flight,
  *          backend create, ledger bookkeeping); the RAII Hook and VmtHook handle bodies (including the loader-lock
- *          leaf teardown discipline); the declarative install_all; and the VMT object-clone lifecycle.
+ *          leaf teardown discipline); the declarative install_all; and the VMT object-clone plus per-method lifecycle.
  */
 
 #include "DetourModKit/hook.hpp"
@@ -24,11 +24,15 @@
 #include <windows.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <optional>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -313,8 +317,45 @@ namespace DetourModKit
         }
 
         /**
+         * @brief Counts callable slots from the object's current vptr.
+         * @details Uses the same executable-address sentinel the backend uses before cloning. Every vtable slot read
+         * is guarded so a malformed object fails closed before the backend can index through it.
+         */
+        [[nodiscard]] std::optional<std::size_t> count_vmt_method_slots(void *object) noexcept
+        {
+            const std::optional<std::uintptr_t> vptr =
+                detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+            if (!vptr)
+            {
+                return std::nullopt;
+            }
+
+            std::size_t count = 0;
+            for (;;)
+            {
+                if (count > (std::numeric_limits<std::uintptr_t>::max() - *vptr) / sizeof(std::uintptr_t))
+                {
+                    return std::nullopt;
+                }
+
+                const std::uintptr_t slot_address = *vptr + (count * sizeof(std::uintptr_t));
+                const std::optional<std::uintptr_t> slot = detail::guarded_read<std::uintptr_t>(slot_address);
+                if (!slot)
+                {
+                    return std::nullopt;
+                }
+                if (!safetyhook::is_executable(reinterpret_cast<std::uint8_t *>(*slot)))
+                {
+                    return count;
+                }
+                ++count;
+            }
+        }
+
+        /**
          * @brief Resolves a hook Target to an absolute address.
-         * @details An absolute Address passes straight through; a deferred OwnedScanRequest is resolved through
+         * @details An absolute Address
+         * passes straight through; a deferred OwnedScanRequest is resolved through
          *          scan::resolve and its winning address returned (or its Error).
          */
         Result<std::uintptr_t> resolve_target(const hook::Target &target) noexcept
@@ -989,6 +1030,10 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_apply"});
             }
+            // Exclusive write across the whole apply: the pre-flight decision (already-on-my-clone / foreign-clone) and
+            // the backend swap are one atomic step, and an original() snapshot reader dispatching through this handle
+            // observes the object either fully on the clone or not yet.
+            std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
             if (options.fail_if_already_hooked || options.fail_on_non_function_pointer)
             {
                 const std::optional<std::uintptr_t> current_vptr =
@@ -1053,9 +1098,126 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_remove"});
             }
+            // Take the exclusive write so an un-apply cannot race a concurrent original() snapshot reader:
+            // the reader sees the clone either fully applied to @p object or fully removed, never a torn transition.
+            std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
             // Best-effort restore: the backend restores the original vptr on @p object, and removing an object that is
             // not on this clone is a harmless no-op.
             m_impl->backend.remove(object);
+            return {};
+        }
+
+        Result<void> VmtHook::hook_method_raw(std::size_t index, void *detour)
+        {
+            if (!m_impl)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::vmt_hook_method"});
+            }
+            if (detour == nullptr)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "hook::vmt_hook_method"});
+            }
+            {
+                // Exclusive write: the map insert and the backend slot patch must be atomic against a concurrent
+                // original() snapshot reader, which traverses this same map under the shared read.
+                std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
+                if (index >= m_impl->method_count)
+                {
+                    return std::unexpected(Error{ErrorCode::InvalidArg, "hook::vmt_hook_method", index});
+                }
+                if (m_impl->method_hooks.contains(index))
+                {
+                    // One method hook per slot: a second hook_method on the same index would read the first detour as
+                    // the "original", silently chaining the mods. Refuse instead, matching the object-clone double-hook
+                    // guard.
+                    return std::unexpected(Error{ErrorCode::MethodAlreadyHooked, "hook::vmt_hook_method", index});
+                }
+                try
+                {
+                    // hook_method<T> stores the raw pointer bytes into the cloned slot, so a void* detour installs the
+                    // same 8 bytes a typed function pointer would; the public hook_method<Fn> already vetted the ABI.
+                    auto created = m_impl->backend.hook_method(index, detour);
+                    if (!created)
+                    {
+                        return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_hook_method", index});
+                    }
+                    // The returned VmHook captured the pre-hook slot value (its original()) and already wrote the
+                    // detour into the clone; storing it here keeps that snapshot for original() and defers the slot
+                    // restore to remove_method / teardown (the VmHook destructor rewrites the slot). emplace is the
+                    // last fallible step and the commit point: a bad_alloc here unwinds the just-created VmHook and
+                    // rolls the slot back, so nothing is half-registered.
+                    m_impl->method_hooks.emplace(index, std::move(created.value()));
+                }
+                catch (const std::bad_alloc &)
+                {
+                    return std::unexpected(Error{ErrorCode::OutOfMemory, "hook::vmt_hook_method", index});
+                }
+                catch (...)
+                {
+                    return std::unexpected(Error{ErrorCode::BackendFailed, "hook::vmt_hook_method", index});
+                }
+            }
+            // The method hook is committed. Logging is best-effort observability that must run after the commit yet
+            // must not flip a committed install into a failure: log().info formats into a std::string and can throw
+            // bad_alloc, so contain it and degrade to no log line (the same guard ~VmtHook uses for its name copy).
+            // Emitting the log before the commit would instead risk a success line for a slot that emplace rolled back.
+            try
+            {
+                log().info("hook::hook_method: hooked method index {} on VMT hook '{}'.", index,
+                           std::string_view{m_impl->name});
+            }
+            catch (...)
+            {
+            }
+            return {};
+        }
+
+        void *VmtHook::method_original_address(std::size_t index) const noexcept
+        {
+            if (!m_impl)
+            {
+                return nullptr;
+            }
+            // Shared read: copy the immutable pre-hook slot pointer out and return it. The lock serialises this
+            // snapshot against a concurrent hook_method / remove_method / apply_to / remove_from exclusive write so the
+            // map traversal is never torn; the copied pointer is then called lock-free by contract (see original()).
+            std::shared_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
+            const auto it = m_impl->method_hooks.find(index);
+            if (it == m_impl->method_hooks.end())
+            {
+                return nullptr;
+            }
+            return it->second.original<void *>();
+        }
+
+        Result<void> VmtHook::remove_method(std::size_t index)
+        {
+            if (!m_impl)
+            {
+                return std::unexpected(Error{ErrorCode::InvalidHookState, "hook::vmt_remove_method"});
+            }
+            {
+                // Exclusive write: erasing the entry runs the VmHook destructor, which rewrites the cloned slot back to
+                // the original pointer; that restore must not race an original() snapshot reader on the same slot.
+                std::unique_lock<DetourModKit::detail::SrwSharedMutex> gate(m_impl->method_mutex);
+                const auto it = m_impl->method_hooks.find(index);
+                if (it == m_impl->method_hooks.end())
+                {
+                    return std::unexpected(Error{ErrorCode::MethodNotFound, "hook::vmt_remove_method", index});
+                }
+                m_impl->method_hooks.erase(it);
+            }
+            // The removal is committed (the VmHook destructor already restored the slot). Contain the best-effort log
+            // so a formatting bad_alloc degrades to no log line rather than escaping this Result-returning function as
+            // an exception.
+            try
+            {
+                log().info("hook::remove_method: removed method index {} from VMT hook '{}'.", index,
+                           std::string_view{m_impl->name});
+            }
+            catch (...)
+            {
+            }
             return {};
         }
 
@@ -1108,6 +1270,12 @@ namespace DetourModKit
                     }
                 }
             }
+            const std::optional<std::size_t> method_count = count_vmt_method_slots(object);
+            if (!method_count)
+            {
+                return std::unexpected(
+                    Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
+            }
             try
             {
                 auto created = safetyhook::VmtHook::create(object);
@@ -1118,8 +1286,8 @@ namespace DetourModKit
                 }
                 auto backend_hook = std::move(created.value());
 
-                // Capture the vptr the backend just installed (*object == &clone[1]); future apply/fail-if-hooked
-                // checks compare against it. The read is fault-guarded; on a fault, returning before recording lets
+                // Capture the clone address point the backend just installed; future apply/fail-if-hooked checks
+                // compare against it. The read is fault-guarded; on a fault, returning before recording lets
                 // backend_hook's destructor roll the original vptr back rather than dereferencing a bad pointer.
                 const std::optional<std::uintptr_t> base =
                     DetourModKit::detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
@@ -1131,7 +1299,8 @@ namespace DetourModKit
                 // Record in the ledger as the final committed step (see inline_at_raw): make_unique and the info log,
                 // the only steps that can throw under OOM, run before record_vmt so a throw unwinds `impl` without
                 // leaving a phantom ledger entry. record_vmt is noexcept and nothing fallible runs after it.
-                auto impl = std::make_unique<VmtHook::Impl>(std::move(backend_hook), std::move(name), *base, 0);
+                auto impl =
+                    std::make_unique<VmtHook::Impl>(std::move(backend_hook), std::move(name), *base, *method_count, 0);
                 const std::string_view created_name = impl->name;
                 log().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
                            Format::format_address(reinterpret_cast<std::uintptr_t>(object)));
