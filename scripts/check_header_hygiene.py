@@ -60,7 +60,19 @@ LEGACY_HEADERS = (
     "include/DetourModKit/config_watcher.hpp",
     "include/DetourModKit/bootstrap.hpp",
     "include/DetourModKit.hpp",
+    "include/DetourModKit/diagnostics_dump.hpp",
 )
+# Public headers DEMOTED (moved, not deleted): each keeps its capability but leaves
+# the top-level public include set for its new home. It must not reappear at the OLD public path -- that would
+# re-expand the first-class public surface the demotion trimmed. A detail/ home keeps the header installed (a public
+# header or the umbrella still includes it); a src/internal/ home makes it truly private (no public includer).
+DEMOTED_HEADERS = {
+    "include/DetourModKit/worker.hpp": "include/DetourModKit/detail/worker.hpp",
+    "include/DetourModKit/win_file_stream.hpp": "include/DetourModKit/detail/win_file_stream.hpp",
+    "include/DetourModKit/event_dispatcher.hpp": "include/DetourModKit/detail/event_dispatcher.hpp",
+    "include/DetourModKit/drift_manifest.hpp": "include/DetourModKit/detail/drift_manifest.hpp",
+    "include/DetourModKit/srw_shared_mutex.hpp": "src/internal/srw_shared_mutex.hpp",
+}
 # Legacy scan symbols the v4 surface replaced. None may appear in this repo's own sources: the engine is
 # DetourModKit::detail::EnginePattern / find_pattern, the resolver is scan::resolve / scan::Candidate, and
 # the three per-domain scan error enums folded into the unified ErrorCode. Matched after comment stripping,
@@ -149,13 +161,27 @@ LEGACY_LIFECYCLE_TOKEN = re.compile(
 LEGACY_RTTI_TOKEN = re.compile(
     r'(\bRtti::|\bIdentifyError\b|\bHealError\b'
     r'|\bidentify_error_to_string\b|\bheal_error_to_string\b|\bheal_offset\b)')
+# --- v4 manifest clean-break gate ---
+# The drift-manifest file-level ManifestError enum and its manifest_error_to_string mapper folded into the unified
+# ErrorCode's ErrorCategory::Manifest block (MissingHeader / MalformedLine / FileOpenFailed) and the Result idiom.
+# Neither spelling may reappear in this repo's own sources. ErrorCategory::Manifest and the "manifest" category label
+# are legitimate v4 names (Manifest FOLLOWS '::' or is the bare category word), so only the deleted enum name and its
+# mapper are gated. Matched after comment stripping, so v3-migration prose does not trip the gate.
+LEGACY_MANIFEST_TOKEN = re.compile(r'(\bManifestError\b|\bmanifest_error_to_string\b)')
 # A public header must never reach into the non-installed private engine under src/internal/.
 INTERNAL_INCLUDE = re.compile(r'#\s*include\s*[<"]\s*internal/')
-# include/DetourModKit/detail/ is allowlisted: only tiny must-ship compile-visible support headers belong
-# there (templates / constexpr / public object layout, backend-/Win32-/logger-/heap-free). A new detail
-# header must be justified and added here, not slipped in silently.
+# include/DetourModKit/detail/ is allowlisted. A detail/ header is installed (it ships with the package), so it
+# is reserved for compile-visible support a PUBLIC header still needs across the include boundary: either tiny
+# must-ship layout/parser support (pattern_core), or a header a public header / the dmk.hpp umbrella still includes
+# to keep a v3 capability reachable in clean v4 idiom. True-private implementation with no public includer belongs
+# in src/internal/ (never installed), not here. A new detail header must be justified and added below, not slipped
+# in silently.
 ALLOWED_DETAIL_HEADERS = {
-    "pattern_core.hpp",  # by-value inline storage + constexpr parser of public scan::Pattern
+    "pattern_core.hpp",      # by-value inline storage + constexpr parser of public scan::Pattern
+    "event_dispatcher.hpp",  # EventDispatcher<T> template returned by-reference from public diagnostics.hpp
+    "win_file_stream.hpp",   # WinFileStream held by shared_ptr in public logger.hpp / async_logger.hpp
+    "worker.hpp",            # StoppableWorker utility kept reachable via the dmk.hpp umbrella (DMKStoppableWorker)
+    "drift_manifest.hpp",    # drift-report persistence kept reachable via the dmk.hpp umbrella
 }
 
 
@@ -237,6 +263,11 @@ def main():
     for legacy in LEGACY_HEADERS:
         if (REPO / legacy).is_file():
             violations.append(f"{legacy}: legacy public header still present; it was replaced by the v4 surface")
+
+    # v4 gate A': demoted public headers must not reappear at their old top-level path (they moved, not deleted).
+    for old_path, new_home in DEMOTED_HEADERS.items():
+        if (REPO / old_path).is_file():
+            violations.append(f"{old_path}: demoted header back at the old public path; it now lives at {new_home}")
 
     # v4 memory gate A: the relocated private fault header must not reappear at its old path.
     if (REPO / "src" / "memory_internal.hpp").is_file():
@@ -347,6 +378,13 @@ def main():
             if rm:
                 violations.append(
                     f"{rel}:{n}: legacy rtti symbol '{rm.group(1).strip()}' (replaced by the v4 rtti surface)")
+
+        # v4 manifest gate D: no legacy drift-manifest error symbol survives in this repo's own sources.
+        for n, line in enumerate(lines, 1):
+            fm = LEGACY_MANIFEST_TOKEN.search(line)
+            if fm:
+                violations.append(
+                    f"{rel}:{n}: legacy manifest symbol '{fm.group(1).strip()}' (folded into ErrorCode::Manifest)")
 
     if violations:
         print("Header-hygiene gate FAILED:\n")

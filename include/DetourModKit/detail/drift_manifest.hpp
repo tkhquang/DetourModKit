@@ -9,11 +9,10 @@
  *          run.
  */
 
+#include "DetourModKit/error.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 
 #include <cstddef>
-#include <cstdint>
-#include <expected>
 #include <span>
 #include <string>
 #include <string_view>
@@ -46,39 +45,6 @@ namespace DetourModKit
         };
 
         /**
-         * @enum ManifestError
-         * @brief Why reading or parsing a drift manifest failed. Fails closed: no partial result.
-         */
-        enum class ManifestError : std::uint8_t
-        {
-            /// The first non-blank line was not the manifest header (file present but corrupt).
-            MissingHeader,
-            /// A record line had the wrong field count or an unparseable field (file present but corrupt).
-            MalformedLine,
-            /// The file could not be opened (missing, locked, permission denied, or not a regular file).
-            FileOpenFailed
-        };
-
-        /**
-         * @brief Human-readable mapping for @ref ManifestError.
-         * @param error The error code.
-         * @return A string view describing the error.
-         */
-        [[nodiscard]] constexpr std::string_view manifest_error_to_string(ManifestError error) noexcept
-        {
-            switch (error)
-            {
-            case ManifestError::MissingHeader:
-                return "Manifest header line is missing or wrong";
-            case ManifestError::MalformedLine:
-                return "A manifest record line is malformed";
-            case ManifestError::FileOpenFailed:
-                return "Manifest file could not be opened";
-            }
-            return "Unknown manifest error";
-        }
-
-        /**
          * @brief Serializes a drift report to a durable, line-oriented manifest.
          * @details Emits a versioned header line followed by one tab-separated line per entry (name, nominal_offset,
          *          healed_offset, delta, ok, error). The error is written as a stable token, not the human-readable
@@ -94,9 +60,10 @@ namespace DetourModKit
          * @details Tolerates blank lines and trailing carriage returns (CRLF input). Fails closed on a missing header
          *          or any malformed record line.
          * @param text The manifest text.
-         * @return The parsed records, or a @ref ManifestError.
+         * @return The parsed records, or an Error carrying ErrorCode::MissingHeader (no header line) or
+         *         ErrorCode::MalformedLine (a bad record line).
          */
-        [[nodiscard]] std::expected<std::vector<DriftRecord>, ManifestError> parse_drift_report(std::string_view text);
+        [[nodiscard]] Result<std::vector<DriftRecord>> parse_drift_report(std::string_view text);
 
         /**
          * @brief Writes a drift report to a file via @ref serialize_drift_report.
@@ -114,13 +81,11 @@ namespace DetourModKit
         /**
          * @brief Reads and parses a drift manifest file.
          * @param path Source file path (UTF-8).
-         * @return The parsed records, or a @ref ManifestError: @ref ManifestError::FileOpenFailed when the file cannot
-         *         be opened, or a parse error (@ref ManifestError::MissingHeader / @ref ManifestError::MalformedLine)
-         *         when the file is present but its contents are corrupt. An opened-but-empty file reports
-         *         MissingHeader.
+         * @return The parsed records, or an Error: ErrorCode::FileOpenFailed when the file cannot be opened, or a parse
+         *         error (ErrorCode::MissingHeader / ErrorCode::MalformedLine) when the file is present but its contents
+         *         are corrupt. An opened-but-empty file reports MissingHeader.
          */
-        [[nodiscard]] std::expected<std::vector<DriftRecord>, ManifestError>
-        read_drift_report_from_file(const std::string &path);
+        [[nodiscard]] Result<std::vector<DriftRecord>> read_drift_report_from_file(const std::string &path);
     } // namespace rtti
 } // namespace DetourModKit
 

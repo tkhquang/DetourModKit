@@ -14,7 +14,7 @@
  * the user wants (release, release+PGO, etc.) without dragging in the gtest runtime.
  */
 
-#include "DetourModKit/event_dispatcher.hpp"
+#include "DetourModKit/detail/event_dispatcher.hpp"
 
 #include <algorithm>
 #include <atomic>

@@ -1,4 +1,4 @@
-#include "DetourModKit/worker.hpp"
+#include "DetourModKit/detail/worker.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 #include "platform.hpp"

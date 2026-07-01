@@ -6,4 +6,4 @@
  * as part of the library build and to anchor any future non-template members.
  */
 
-#include "DetourModKit/event_dispatcher.hpp"
+#include "DetourModKit/detail/event_dispatcher.hpp"
