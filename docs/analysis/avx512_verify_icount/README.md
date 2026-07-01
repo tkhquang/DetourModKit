@@ -1,5 +1,7 @@
 # AVX-512 verify tier: instruction-count proxy
 
+> Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
+
 This directory captures a no-hardware bench signal for the opt-in AVX-512 scanner verify tier (`DMK_ENABLE_AVX512`). It records *instruction counts*, not wall-clock time, because AVX-512 wall-clock can only be measured on real AVX-512 hardware; Intel SDE, which is what makes this measurable without that hardware, emulates the ISA and its timing is not representative of real silicon. What SDE *can* measure deterministically on any host is how many guest instructions each verify tier executes for the same work.
 
 The trick is that one `DMK_ENABLE_AVX512=ON` binary selects its verify body at runtime from the CPU it sees, so running it under two emulated CPUs exercises two tiers from the same build:

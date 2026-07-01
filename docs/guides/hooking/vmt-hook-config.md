@@ -1,6 +1,6 @@
 # VMT Hook Configuration Guide
 
-Reference for `DetourModKit::hook::VmtOptions`, the object-level VMT hook surface (`hook::vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`), and the per-method typed surface (`VmtHook::hook_method`, `VmtHook::original`, `VmtHook::remove_method`) declared in [`hook.hpp`](../../include/DetourModKit/hook.hpp). Covers the operational policy knobs that mirror the inline path's `hook::Options`.
+Reference for `DetourModKit::hook::VmtOptions`, the object-level VMT hook surface (`hook::vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`), and the per-method typed surface (`VmtHook::hook_method`, `VmtHook::original`, `VmtHook::remove_method`) declared in [`hook.hpp`](../../../include/DetourModKit/hook.hpp). Covers the operational policy knobs that mirror the inline path's `hook::Options`.
 
 ## Contents
 
@@ -182,5 +182,5 @@ for (auto *obj : candidate_objects)
 
 ## 9. Further reading
 
-- [`hook.hpp`](../../include/DetourModKit/hook.hpp): `VmtOptions`, `vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`, `VmtHook::hook_method`, `VmtHook::original`, `VmtHook::remove_method`, and `Options` for the inline-side equivalent.
+- [`hook.hpp`](../../../include/DetourModKit/hook.hpp): `VmtOptions`, `vmt_for`, `VmtHook::apply_to`, `VmtHook::remove_from`, `VmtHook::hook_method`, `VmtHook::original`, `VmtHook::remove_method`, and `Options` for the inline-side equivalent.
 - `tests/test_hook.cpp`: the `HookVmt` tests pin the default-off behavior, the double-create guard, the pre-flight on `int3` slots, and the apply no-op; the `HookVmtMethod` tests pin per-method redirect + `original`, duplicate-slot refusal, single-method removal, drop-restores-method, and the apply-inherits-the-method-hook case.

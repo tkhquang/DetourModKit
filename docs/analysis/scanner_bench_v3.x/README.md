@@ -1,5 +1,7 @@
 # Scanner microbenchmark: rare-byte anchor, prefilter, and batch resolver
 
+> Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
+
 This directory captures the result of running `tests/bench_scanner.cpp` against the production scanner implementation. The primary table compares two anchor strategies in the same scan loop, so every other factor (memchr, SIMD verify, SSE2/AVX2 tier selection) stays constant. The only thing that changes between the two runs is the value stored in `CompiledPattern::anchor`:
 
 - **smart**: produced by `parse_aob()` and `compile_anchor()`. Walks the literal bytes, scores each against a small byte-frequency table, and stores the rarest byte's index. This is the production behaviour.

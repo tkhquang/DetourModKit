@@ -4,7 +4,7 @@ DetourModKit exposes two complementary mechanisms for reapplying INI-driven conf
 
 This document describes the API surface, the thread-safety contract, what is safe to hot-reload, and the platform-specific edge cases the watcher handles.
 
-> Note: the existing [docs/hot-reload/README.md](../hot-reload/README.md) covers a different topic (the two-DLL loader pattern for reloading mod code). This document only covers reloading config values within an already-loaded mod.
+> Note: the existing [the hot-reload development guide](README.md) covers a different topic (the two-DLL loader pattern for reloading mod code). This document only covers reloading config values within an already-loaded mod.
 
 ## API surface
 
@@ -106,7 +106,7 @@ The `on_reload` callback passed to `enable_auto_reload` receives a `bool content
 - Hook trampolines: once a hook is installed its target address is baked in. A config-driven "hook installed" toggle cannot flip a live hook on or off, because a `Hook` is a caller-owned RAII handle whose lifetime is not reachable from a Config setter. Removing a hook means dropping its `Hook` handle (its destructor unhooks under the loader-lock leaf discipline), which must not be driven from the watcher thread while callers may still be in flight. Change the "hook installed" bit only through a proper shutdown cycle.
 - Thread pool sizes and `poll_interval` for `input::Input::start()`: these are fixed at start time.
 - Log file handle and log prefix: `Logger::configure` rotates the file, which requires coordinating with in-flight async writes. Prefer reconfiguring via a full shutdown/start cycle.
-- The reload hotkey combo itself can be changed at runtime; the cardinality of the new combo list does not need to match the default and the binding's combo set is rebuilt on the fly. To opt the hotkey out at runtime, set the INI value to either an empty string or the literal `NONE` (case-insensitive, whole-string only); both forms produce an unbound binding silently. A non-empty value whose every comma-separated token fails to parse is logged at WARNING level naming the binding and the offending raw string. See the [combo string syntax sub-section](../hot-reload/README.md#combo-string-syntax-opt-out-and-parse-failures) in the hot-reload guide for the complete contract (mixed-list behavior, `NONE`-in-list, and so on).
+- The reload hotkey combo itself can be changed at runtime; the cardinality of the new combo list does not need to match the default and the binding's combo set is rebuilt on the fly. To opt the hotkey out at runtime, set the INI value to either an empty string or the literal `NONE` (case-insensitive, whole-string only); both forms produce an unbound binding silently. A non-empty value whose every comma-separated token fails to parse is logged at WARNING level naming the binding and the offending raw string. See the [combo string syntax sub-section](README.md#combo-string-syntax-opt-out-and-parse-failures) in the hot-reload guide for the complete contract (mixed-list behavior, `NONE`-in-list, and so on).
 
 ## Debounce rationale
 
@@ -144,7 +144,7 @@ Mods normally own exactly one INI, so this is not a practical constraint. Multi-
 
 ## Related
 
-- [`config.hpp`](../../include/DetourModKit/config.hpp)
-- [`input.hpp`](../../include/DetourModKit/input.hpp) - the combo binding surface `press_combo` / `hold_combo` fuse onto.
-- [`worker.hpp`](../../include/DetourModKit/detail/worker.hpp) - `StoppableWorker` RAII wrapper the watcher builds on.
-- [Two-DLL hot-reload guide](../hot-reload/README.md) - reloading mod code, not config values.
+- [`config.hpp`](../../../include/DetourModKit/config.hpp)
+- [`input.hpp`](../../../include/DetourModKit/input.hpp) - the combo binding surface `press_combo` / `hold_combo` fuse onto.
+- [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) - `StoppableWorker` RAII wrapper the watcher builds on.
+- [Two-DLL hot-reload guide](README.md) - reloading mod code, not config values.
