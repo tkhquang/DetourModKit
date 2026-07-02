@@ -12,7 +12,7 @@
 
 namespace DetourModKit
 {
-    namespace Filesystem
+    namespace filesystem
     {
 
         /**
@@ -36,7 +36,7 @@ namespace DetourModKit
          * @return std::string Absolute module directory encoded in UTF-8.
          */
         [[nodiscard]] std::string get_runtime_directory_utf8();
-    } // namespace Filesystem
+    } // namespace filesystem
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_FILESYSTEM_HPP

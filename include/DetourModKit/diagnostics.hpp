@@ -3,19 +3,24 @@
 
 /**
  * @file diagnostics.hpp
- * @brief Consumer-queryable counters for DMK's intentional leak / detach paths, plus a process-wide diagnostic event
- *        bus for scanner-fault and hook-lifecycle transitions.
+ * @brief Consumer-queryable counters for DMK's intentional leak / detach paths, a process-wide diagnostic event bus
+ *        for scanner-fault and hook-lifecycle transitions, and a one-call runtime-diagnostics @ref
+ *        DetourModKit::diagnostics::Snapshot aggregator.
  */
 
-#include "DetourModKit/event_dispatcher.hpp"
+#include "DetourModKit/anchor.hpp"
+#include "DetourModKit/detail/event_dispatcher.hpp"
+#include "DetourModKit/rtti_dissect.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string_view>
 
 namespace DetourModKit
 {
-    namespace Diagnostics
+    namespace diagnostics
     {
         /**
          * @enum LeakSubsystem
@@ -107,7 +112,7 @@ namespace DetourModKit
          */
         enum class HookTransition : std::uint8_t
         {
-            /// A hook was created (installed) by a create_*_hook call.
+            /// A hook was created (installed) by an install verb (inline_at / mid_at / vmt_for).
             Created,
             /// An existing hook was enabled.
             Enabled,
@@ -119,18 +124,20 @@ namespace DetourModKit
 
         /**
          * @struct HookLifecycleEvent
-         * @brief A HookManager hook crossed an install / enable / disable / remove transition.
-         * @details Emitted by @ref DetourModKit::HookManager after the operation completes and its registry locks are
-         *          released. Failed operations and idempotent no-ops emit nothing: every event represents a completed
-         *          state transition. A handler therefore runs outside the hook registry's critical section. If a
-         *          handler performs another hook mutation, that mutation is a new operation and may emit nested
-         *          lifecycle events; avoid unbounded event recursion. @ref name aliases the hook id only for the
-         *          duration of the emit call; copy it if the handler retains it past the call.
+         * @brief A hook crossed an install / enable / disable / remove transition.
+         * @details Emitted by the hook surface after the operation completes; the emit holds no hook lock, so a handler
+         *          runs outside any hook critical section. Failed operations and idempotent no-ops emit nothing: every
+         *          event represents a completed state transition. If a handler performs another hook mutation, that
+         *          mutation is a new operation and may emit nested lifecycle events; avoid unbounded event recursion.
+         *          @ref name aliases the hook id only for the duration of the emit call; copy it if the handler retains
+         *          it past the call.
          */
         struct HookLifecycleEvent
         {
-            /// The hook id. Valid only for the duration of the emit call; copy to retain.
+            /// The hook id (the caller-supplied name). Valid only for the duration of the emit call; copy to retain.
             std::string_view name;
+            /// Process-unique lifetime identity for this hook; 0 means the hook is untracked.
+            std::uint64_t ledger_id = 0;
             /// The hook flavor.
             HookKind kind = HookKind::Inline;
             /// The transition that occurred.
@@ -149,14 +156,62 @@ namespace DetourModKit
 
         /**
          * @brief Returns the process-wide dispatcher for @ref HookLifecycleEvent.
-         * @details A single shared dispatcher every HookManager emits hook lifecycle transitions to. The returned
+         * @details A single shared dispatcher the hook surface emits hook lifecycle transitions to. The returned
          *          reference is stable for the process lifetime.
          * @return The shared @ref HookLifecycleEvent dispatcher.
          * @note Setup/control-plane only on first call: lazily constructs the dispatcher (one heap allocation). Every
          *       subsequent call only returns the existing reference.
          */
         EventDispatcher<HookLifecycleEvent> &hook_lifecycle();
-    } // namespace Diagnostics
+
+        /**
+         * @struct Snapshot
+         * @brief A point-in-time aggregate of DMK's runtime diagnostics, produced by @ref collect.
+         * @details A plain value snapshot. It re-resolves nothing: the intentional-leak counters and the live hook
+         *          population are copied from process-wide state that already holds them, and the drift / anchor
+         *          summaries are tallied from the caller-supplied reports, so reading the snapshot never touches a lock
+         *          on the hot path or re-runs the scanner.
+         */
+        struct Snapshot
+        {
+            /// Intentional leak / detach events per subsystem, indexed by @c static_cast<std::size_t>(LeakSubsystem).
+            std::array<std::size_t, static_cast<std::size_t>(LeakSubsystem::Count)> intentional_leaks{};
+            /// Total intentional leak / detach events across all subsystems.
+            std::size_t total_intentional_leaks = 0;
+
+            /// Live DMK hooks (inline + mid + VMT) across the process.
+            std::size_t hooks_total = 0;
+            /// Live hooks currently enabled (armed).
+            std::size_t hooks_active = 0;
+            /// Live hooks currently disabled. @ref hooks_active + @ref hooks_disabled == @ref hooks_total.
+            std::size_t hooks_disabled = 0;
+
+            /// Landmarks in the supplied drift report.
+            std::size_t drift_total = 0;
+            /// Landmarks that healed (@ref rtti::DriftEntry::ok).
+            std::size_t drift_healed = 0;
+            /// Landmarks that failed to heal.
+            std::size_t drift_failed = 0;
+
+            /// Robustness roll-up of the supplied anchor report (empty when no anchor report is passed).
+            anchor::AnchorQuality anchor_quality{};
+        };
+
+        /**
+         * @brief Aggregates DMK's live diagnostics into one @ref Snapshot.
+         * @details Reads the process-wide intentional-leak counters and the live hook population (derived from the
+         *          hook-lifecycle transition stream), and rolls up the two caller-owned reports: it counts healed vs
+         *          failed entries in @p drift_report (typically @ref rtti::heal_report output) and runs
+         *          @ref anchor::assess_quality over @p anchor_report (typically a resolve_all output). Pass an empty
+         *          span to skip either summary.
+         * @param drift_report A self-heal drift report, or an empty span to skip the drift summary.
+         * @param anchor_report An anchor drift report, or an empty span to skip the anchor-quality summary.
+         * @return The aggregated snapshot.
+         * @note Setup/control-plane only: not callback-safe. Call it from init / a worker / a diagnostics command.
+         */
+        [[nodiscard]] Snapshot collect(std::span<const rtti::DriftEntry> drift_report = {},
+                                       std::span<const anchor::ResolvedAnchor> anchor_report = {});
+    } // namespace diagnostics
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_DIAGNOSTICS_HPP

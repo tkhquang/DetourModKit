@@ -1,325 +1,31 @@
 #ifndef DETOURMODKIT_ASYNC_LOGGER_HPP
 #define DETOURMODKIT_ASYNC_LOGGER_HPP
 
+#include "DetourModKit/async_logger_config.hpp"
 #include "DetourModKit/logger.hpp"
 
-#include <array>
-#include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <mutex>
-#include <span>
-#include <string>
 #include <string_view>
-#include <thread>
-#include <vector>
 
 namespace DetourModKit
 {
-    /// Default capacity (slot count) of the bounded MPMC message queue.
-    inline constexpr size_t DEFAULT_QUEUE_CAPACITY = 8192;
-    /// Default number of messages the writer drains per write batch.
-    inline constexpr size_t DEFAULT_BATCH_SIZE = 64;
-    /// Default interval between periodic writer flushes.
-    inline constexpr auto DEFAULT_FLUSH_INTERVAL = std::chrono::milliseconds(100);
-    /// Maximum length, in bytes, of a single log message.
-    inline constexpr size_t MAX_MESSAGE_SIZE = 16777216;
-    /// Default spin-backoff iteration count before a producer yields/parks.
-    inline constexpr size_t DEFAULT_SPIN_BACKOFF_ITERATIONS = 32;
     /// Default timeout for a blocking flush to complete.
     inline constexpr auto DEFAULT_FLUSH_TIMEOUT = std::chrono::milliseconds(500);
-    /// Byte size of one StringPool overflow block.
-    inline constexpr size_t MEMORY_POOL_BLOCK_SIZE = 4096;
-    /// Number of overflow blocks the StringPool preallocates.
-    inline constexpr size_t MEMORY_POOL_BLOCK_COUNT = 64;
-    /// Number of allocation slots carved from each StringPool block.
-    inline constexpr size_t POOL_SLOTS_PER_BLOCK = 16;
-
-    /**
-     * @enum OverflowPolicy
-     * @brief Action taken by AsyncLogger::enqueue when the bounded queue is full.
-     * @warning Only DropNewest and DropOldest are callback-safe. Block parks the producer and SyncFallback writes
-     *          synchronously, so neither may be used by a logger that hook or input callbacks emit through; reserve
-     *          them for setup/control-plane logging where a brief stall under sink backpressure is acceptable.
-     */
-    enum class OverflowPolicy
-    {
-        /// Drop the message being enqueued when the queue is full. Non-blocking and callback-safe.
-        DropNewest,
-        /// Evict the oldest queued message to make room for the new one. Non-blocking and callback-safe.
-        DropOldest,
-        /// Park the producer until space frees or block_timeout_ms elapses. Not callback-safe (can stall the caller).
-        Block,
-        /// Write the message synchronously on the producer thread. Not callback-safe (synchronous sink I/O).
-        SyncFallback
-    };
-
-    /**
-     * @class StringPool
-     * @brief Memory pool for small string allocations to reduce heap fragmentation.
-     * @details Uses a free-list approach for O(1) allocation/deallocation. Blocks are allocated on-demand up to
-     *          MEMORY_POOL_BLOCK_COUNT. Each block is cache-line aligned to prevent false sharing.
-     *
-     * @note The singleton returned by instance() is intentionally leaked to avoid the static destruction order fiasco
-     *       with late LogMessage teardown. Neither Bootstrap::request_shutdown() nor DMK_Shutdown() reclaim it; the OS
-     *       releases the memory at process exit. The leak is bounded to MEMORY_POOL_BLOCK_COUNT blocks of
-     *       MEMORY_POOL_BLOCK_SIZE bytes.
-     */
-    class StringPool
-    {
-    public:
-        static StringPool &instance() noexcept;
-
-        [[nodiscard]] std::string *allocate(size_t size) noexcept;
-        void deallocate(std::string *ptr) noexcept;
-
-        StringPool(const StringPool &) = delete;
-        StringPool &operator=(const StringPool &) = delete;
-        StringPool(StringPool &&) = delete;
-        StringPool &operator=(StringPool &&) = delete;
-
-    private:
-        struct PoolSlot
-        {
-            std::string str;
-            PoolSlot *next_free{nullptr};
-        };
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Winvalid-offsetof"
-#endif
-        static_assert(offsetof(PoolSlot, str) == 0,
-                      "PoolSlot::str must be the first member for pointer arithmetic in deallocate()");
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
-
-        struct Block
-        {
-            alignas(64) char data[POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot)];
-            Block *next{nullptr};
-            PoolSlot *free_list{nullptr};
-            uint32_t constructed_mask{0};
-        };
-
-        StringPool() noexcept;
-        ~StringPool() noexcept;
-
-        /**
-         * @brief Appends one block to the pool. Must be called with m_pool_mutex held.
-         * @details No-throw: an allocation failure leaves the pool unchanged so
-         *          callers can fall back to a nothrow heap string instead of throwing out of the logging path.
-         */
-        void grow_pool_locked() noexcept;
-        PoolSlot *claim_free_slot() noexcept;
-        void return_slot_locked(PoolSlot *slot, Block *block) noexcept;
-
-        std::atomic<Block *> m_head{nullptr};
-        std::atomic<size_t> m_heap_fallback_count{0};
-        std::mutex m_pool_mutex;
-    };
-
-    /**
-     * @struct LogMessage
-     * @brief A log entry with inline buffer optimization and overflow handling.
-     * @details Messages <= 512 bytes are stored inline. Larger messages use heap allocation via StringPool. This is a
-     *          move-only transport/value type (copy deleted, move defined) carried by value through the queue; it
-     *          keeps plain field names rather than the m_ member prefix, per the POD-struct naming convention, even
-     *          though @ref overflow is an owned heap pointer -- its lifetime is self-contained, released by reset()
-     *          and the destructor, so no class invariant rides on member encapsulation.
-     */
-    struct LogMessage
-    {
-        LogLevel level{LogLevel::Info};
-        std::chrono::system_clock::time_point timestamp;
-        std::thread::id thread_id;
-
-        static constexpr size_t MAX_INLINE_SIZE = LOG_INLINE_MESSAGE_SIZE;
-        static constexpr size_t MAX_VALID_LENGTH = MAX_MESSAGE_SIZE;
-        // Left uninitialized (raw storage): only [0, length) is ever read, and every constructor/move writes exactly
-        // length bytes before any read. Zero-filling the whole inline buffer would memset MAX_INLINE_SIZE bytes on each
-        // construction/enqueue for no observable effect.
-        std::array<char, MAX_INLINE_SIZE> buffer;
-        size_t length{0};
-
-        // Owned: allocated by StringPool, freed by reset().
-        std::string *overflow{nullptr};
-
-        LogMessage(LogLevel lvl, std::string_view msg) noexcept;
-        LogMessage() noexcept = default;
-
-        ~LogMessage() noexcept;
-
-        LogMessage(LogMessage &&other) noexcept;
-        LogMessage &operator=(LogMessage &&other) noexcept;
-
-        LogMessage(const LogMessage &) = delete;
-        LogMessage &operator=(const LogMessage &) = delete;
-
-        [[nodiscard]] std::string_view message() const noexcept;
-        [[nodiscard]] bool is_valid() const noexcept;
-        void reset() noexcept;
-    };
-
-    /**
-     * @class DynamicMPMCQueue
-     * @brief A dynamically-sized, bounded Multi-Producer Multi-Consumer queue.
-     * @details Uses a ring buffer with atomic sequence numbers for lock-free synchronization. Capacity is determined at
-     *          construction time.
-     * @note This queue is designed to be constructed once and never resized. Moving slots after construction is not
-     *       supported and will cause data corruption.
-     */
-#ifdef _MSC_VER
-#pragma warning(push)
-// structure was padded due to alignment specifier
-#pragma warning(disable : 4324)
-#endif
-
-    class DynamicMPMCQueue
-    {
-    public:
-        /**
-         * @brief Constructs a queue with the specified capacity.
-         * @param capacity The maximum number of elements (must be power of 2 and >= 2).
-         */
-        explicit DynamicMPMCQueue(size_t capacity);
-
-        ~DynamicMPMCQueue() noexcept = default;
-
-        DynamicMPMCQueue(const DynamicMPMCQueue &) = delete;
-        DynamicMPMCQueue &operator=(const DynamicMPMCQueue &) = delete;
-        DynamicMPMCQueue(DynamicMPMCQueue &&) = delete;
-        DynamicMPMCQueue &operator=(DynamicMPMCQueue &&) = delete;
-
-        /**
-         * @brief Attempts to push an item into the queue.
-         * @param item The item to push. Moved into the queue on success only;
-         *             left unchanged on failure so the caller can retry or handle overflow.
-         * @return true if successful, false if queue is full.
-         */
-        [[nodiscard]] bool try_push(LogMessage &item);
-
-        /**
-         * @brief Attempts to pop an item from the queue.
-         * @param item Reference to store the popped item.
-         * @return true if successful, false if queue is empty.
-         */
-        [[nodiscard]] bool try_pop(LogMessage &item);
-
-        /**
-         * @brief Attempts to pop multiple items up to a maximum count.
-         * @param items Reference to a vector to store popped items.
-         * @param max_count Maximum number of items to pop.
-         * @return size_t Number of items actually popped.
-         */
-        [[nodiscard]] size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count);
-
-        /// Returns the approximate number of items in the queue.
-        [[nodiscard]] size_t size() const noexcept;
-
-        /// Checks if the queue is approximately empty.
-        [[nodiscard]] bool empty() const noexcept;
-
-        /**
-         * @brief Returns the capacity of the queue.
-         * @return size_t The maximum number of elements.
-         */
-        [[nodiscard]] size_t capacity() const noexcept { return m_capacity; }
-
-    private:
-        struct Slot
-        {
-            std::atomic<size_t> sequence;
-            LogMessage data;
-
-            Slot() noexcept : sequence(0) {}
-
-            Slot(const Slot &) = delete;
-            Slot &operator=(const Slot &) = delete;
-            Slot(Slot &&) = delete;
-            Slot &operator=(Slot &&) = delete;
-        };
-
-        /**
-         * @brief Validates capacity before member initialization to prevent allocation of an invalid-sized buffer in
-         *        the initializer list.
-         */
-        static size_t validated_capacity(size_t capacity);
-
-        // Immutable after construction -- never resized.
-        const size_t m_capacity;
-        const size_t m_mask;
-
-        // Allocated once in the constructor; the unique_ptr ensures immutability (no accidental resize) while
-        // maintaining contiguous cache-friendly layout.
-        std::unique_ptr<Slot[]> m_buffer;
-
-        // Cache-line aligned to prevent false sharing between producers and consumers.
-        alignas(64) std::atomic<size_t> m_enqueue_pos{0};
-        alignas(64) std::atomic<size_t> m_dequeue_pos{0};
-    };
-
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
-
-    /**
-     * @struct AsyncLoggerConfig
-     * @brief Configuration for the async logger.
-     * @details The default queue holds DEFAULT_QUEUE_CAPACITY (8192) slots; each slot embeds a LogMessage with a
-     *          LOG_INLINE_MESSAGE_SIZE (512) byte inline buffer, so the ring buffer's resident footprint is on the
-     *          order of a few MiB at the default capacity (queue_capacity must stay a power of two). The StringPool
-     *          used for overflow (> 512 byte) messages is a separate, lazily grown allocation bounded to
-     *          MEMORY_POOL_BLOCK_COUNT * MEMORY_POOL_BLOCK_SIZE (256 KiB); see StringPool. Shrink queue_capacity for
-     *          memory-constrained hosts.
-     */
-    struct AsyncLoggerConfig
-    {
-        size_t queue_capacity = DEFAULT_QUEUE_CAPACITY;
-        size_t batch_size = DEFAULT_BATCH_SIZE;
-        std::chrono::milliseconds flush_interval = DEFAULT_FLUSH_INTERVAL;
-        OverflowPolicy overflow_policy = OverflowPolicy::DropOldest;
-        size_t spin_backoff_iterations = DEFAULT_SPIN_BACKOFF_ITERATIONS;
-        std::chrono::milliseconds block_timeout_ms{16};
-        size_t block_max_spin_iterations{1000};
-        /**
-         * @brief strftime-style date/time format for the async sink.
-         * @details Kept in sync with the synchronous Logger by Logger::enable_async_mode so both sinks emit identical
-         *          timestamps; the trailing ".<ms>" is appended by the writer, not this format.
-         */
-        std::string timestamp_format{"%Y-%m-%d %H:%M:%S"};
-
-        [[nodiscard]] constexpr bool validate() const noexcept
-        {
-            if (queue_capacity < 2 || (queue_capacity & (queue_capacity - 1)) != 0)
-                return false;
-            if (batch_size == 0)
-                return false;
-            if (flush_interval.count() <= 0)
-                return false;
-            if (spin_backoff_iterations == 0)
-                return false;
-            if (block_timeout_ms.count() <= 0)
-                return false;
-            if (block_max_spin_iterations == 0)
-                return false;
-            return true;
-        }
-    };
-
-    // Compile-time validation: Default queue capacity must be a power of 2 and >= 2
-    static_assert(DEFAULT_QUEUE_CAPACITY >= 2 && (DEFAULT_QUEUE_CAPACITY & (DEFAULT_QUEUE_CAPACITY - 1)) == 0,
-                  "DEFAULT_QUEUE_CAPACITY must be a power of 2 and at least 2");
 
     /**
      * @class AsyncLogger
      * @brief Asynchronous logger that decouples log production from file I/O.
      * @details Uses a lock-free queue to accept log messages from multiple threads and a dedicated writer thread to
-     *          perform batched file writes. This significantly reduces latency on the producer side.
-     * @note Uses shared_ptr<WinFileStream> to safely handle Logger reconfiguration during runtime.
+     *          perform batched file writes. This significantly reduces latency on the producer side. The configuration
+     *          type (AsyncLoggerConfig) lives in async_logger_config.hpp. All implementation state -- the MPMC queue,
+     *          the overflow string pool, the per-message record, the writer thread, and the flush synchronization --
+     *          lives behind a pimpl (Impl, defined in src/async_logger.cpp over the non-installed
+     *          src/internal/async_logger_queue.hpp), so this public header names none of it and a consumer compiles
+     *          with the queue / pool / threading internals off its include path.
+     * @note Uses shared_ptr<detail::WinFileStream> to safely handle Logger reconfiguration during runtime.
      */
     class AsyncLogger
     {
@@ -330,7 +36,7 @@ namespace DetourModKit
          * @param file_stream Shared pointer to the output file stream (allows safe reconfigure).
          * @param log_mutex Shared pointer to the mutex protecting the file stream.
          */
-        explicit AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
+        explicit AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex);
 
         ~AsyncLogger() noexcept;
@@ -370,11 +76,11 @@ namespace DetourModKit
 
         /**
          * @brief Stops the writer thread and drains remaining queued messages.
-         * @details Sets m_shutdown_requested, joins the writer thread, then drains any messages that arrived between
-         *          the stop signal and thread exit.
-         * @note A producer that already passed the m_shutdown_requested check but has not yet completed try_push() can
-         *       enqueue at most one message after the final drain. This is an accepted trade-off to avoid adding atomic
-         *       overhead (producers_in_flight counter) to every enqueue() call.
+         * @details Signals shutdown, joins the writer thread, then drains any messages that arrived between the stop
+         *          signal and thread exit.
+         * @note A producer that already passed the shutdown check but has not yet completed try_push() can enqueue at
+         *       most one message after the final drain. This is an accepted trade-off to avoid adding atomic overhead
+         *       (producers_in_flight counter) to every enqueue() call.
          */
         void shutdown() noexcept;
 
@@ -403,55 +109,11 @@ namespace DetourModKit
         void reset_dropped_count() noexcept;
 
     private:
-        void writer_thread_func() noexcept;
-
-        /**
-         * @brief Drains any messages remaining in the queue after the writer thread exits.
-         * @details Called during shutdown to flush late-enqueued messages that arrived between m_running=false and the
-         *          writer thread observing an empty queue. No external lock is required; the writer thread has already
-         *          been joined.
-         */
-        void drain_remaining() noexcept;
-
-        void write_batch(std::span<LogMessage> messages) noexcept;
-
-        bool handle_overflow(LogMessage &&message) noexcept;
-
-        /**
-         * @brief Wakes the writer thread if it is parked on m_flush_cv after a successful push.
-         * @details A successful producer has already made m_pending_messages non-zero before publishing
-         *          a new queue slot, or preserved it while replacing an old slot. The writer publishes
-         *          m_writer_waiting before checking that same pending count and blocking. Those seq_cst
-         *          operations form a store/load handshake: if the writer misses the pending state, the
-         *          producer observes m_writer_waiting and notifies under m_flush_mutex; if the producer
-         *          observes false, the writer's pending-count predicate sees the work and does not block.
-         *          notify_all (not notify_one) is used so a flusher waiting on the same condition variable
-         *          cannot absorb the notification and leave the writer asleep. When the writer is
-         *          draining, this is a seq_cst flag load with no mutex or syscall.
-         */
-        void notify_writer() noexcept;
-
-        DynamicMPMCQueue m_queue;
-        AsyncLoggerConfig m_config;
-
-        std::shared_ptr<WinFileStream> m_file_stream;
-        std::shared_ptr<std::mutex> m_log_mutex;
-
-        std::jthread m_writer_thread;
-        std::atomic<bool> m_running{false};
-        std::atomic<bool> m_shutdown_requested{false};
-
-        std::mutex m_flush_mutex;
-        std::condition_variable m_flush_cv;
-
-        // Set true by the writer immediately before it parks on m_flush_cv and cleared when it wakes.
-        // Producers read it outside m_flush_mutex after a successful queue push; the seq_cst order shared
-        // with m_pending_messages makes a racing push either visible to the writer's wait predicate or
-        // visible here as a parked-writer wake.
-        std::atomic<bool> m_writer_waiting{false};
-
-        std::atomic<size_t> m_pending_messages{0};
-        std::atomic<size_t> m_dropped_messages{0};
+        // All implementation state and behaviour live behind this pimpl so the queue, string pool, per-message record,
+        // writer thread, and flush synchronization stay off the public include path (their definitions live in the
+        // non-installed src/internal/async_logger_queue.hpp, reached only by src/async_logger.cpp).
+        struct Impl;
+        std::unique_ptr<Impl> m_impl;
     };
 
 } // namespace DetourModKit

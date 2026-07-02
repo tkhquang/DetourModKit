@@ -12,8 +12,8 @@ namespace
         // The one deliberately literal version assertion: it documents the current release and is the single place a
         // version bump must touch in this file. Every other case below is relational so it tracks the macros
         // automatically. The release workflow separately guards that CMakeLists.txt project(VERSION) matches the tag.
-        EXPECT_EQ(DMK_VERSION_MAJOR, 3);
-        EXPECT_EQ(DMK_VERSION_MINOR, 9);
+        EXPECT_EQ(DMK_VERSION_MAJOR, 4);
+        EXPECT_EQ(DMK_VERSION_MINOR, 0);
         EXPECT_EQ(DMK_VERSION_PATCH, 0);
     }
 
@@ -41,6 +41,13 @@ namespace
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 2, 0));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(3, 1, 0));
         EXPECT_TRUE(DMK_VERSION_AT_LEAST(2, 0, 0));
+
+        // Current-major boundary, pinned as literals (not derived from the macros) so a regression that silently
+        // dropped the version back below 4.0.0 is caught here even if the macros themselves were edited in lockstep.
+        // The 4.0.0 floor is satisfied; the next patch and the next minor on this major are not yet reached.
+        EXPECT_TRUE(DMK_VERSION_AT_LEAST(4, 0, 0));
+        EXPECT_FALSE(DMK_VERSION_AT_LEAST(4, 0, 1));
+        EXPECT_FALSE(DMK_VERSION_AT_LEAST(4, 1, 0));
 
         // Relational invariants derived from the current macros instead of literal future versions: the current
         // version satisfies its own triple, but not the next patch or the next major. These never need editing on a

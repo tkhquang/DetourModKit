@@ -3,15 +3,15 @@
  * @brief Standalone microbenchmark for the Memory validation and access paths.
  *
  * Quantifies the per-call cost of each way to read game memory from a hot path so callers can choose between a
- * validation predicate and a direct SEH-guarded read with data rather than intuition. Measured on the shipping
- * toolchain (MSVC, where the seh_* primitives use real __try/__except):
+ * validation predicate and a direct fault-guarded read with data rather than intuition. Measured on the shipping
+ * toolchain (MSVC, where the guarded reads use real __try/__except):
  *
  *   - is_readable / is_writable  WARM HIT   (cache on, entry fresh)
  *   - is_readable / is_writable  COLD MISS  (cache off -> direct VirtualQuery)
  *   - raw VirtualQuery                       (the syscall a cache miss pays)
- *   - read_ptr_unchecked                     (inline guarded read, no syscall)
- *   - seh_read<uint64_t>                     (SEH-guarded read)
- *   - seh_resolve_chain / seh_read_chain     (one fault guard for a whole chain)
+ *   - unchecked::read<uint64_t>              (raw inline read, no guard, no syscall)
+ *   - read<uint64_t> (guarded)               (fault-guarded read)
+ *   - walk / walk + read<uint64_t>           (one fault guard for a whole chain)
  *   - direct volatile load / store           (floor)
  *   - write_bytes (8 bytes)                  (VirtualProtect x2 + Flush + invalidate)
  *
@@ -29,13 +29,15 @@
  *       volatile reads, no predicate or guard), then a per-frame budget vs probes-per-frame. The gate cost scales with
  *       the read count and the miss rate, which a single average-per-call number does not capture.
  *   (G) [Phase 8] Pointer-chain primitives: a GATED per-link walk (is_readable
- *       before each dereference) vs seh_resolve_chain / seh_read_chain (one fault guard for the whole walk).
+ *       before each dereference) vs walk / walk + read<uint64_t> (one fault guard for the whole walk).
  *
  * Build with -DDMK_BUILD_BENCHMARKS=ON. Executable: DetourModKit_bench_memory
  * Output: human-readable tables plus a TSV block on stdout.
  */
 
+#include "DetourModKit/address.hpp"
 #include "DetourModKit/memory.hpp"
+#include "DetourModKit/region.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include <windows.h>
@@ -56,7 +58,23 @@
 namespace
 {
     using Clock = std::chrono::steady_clock;
-    namespace Mem = DetourModKit::Memory;
+    namespace Mem = DetourModKit::memory;
+    using DetourModKit::Address;
+    using DetourModKit::Region;
+
+    // The readability predicates take a Region; the bench works in (pointer, size). Wrap once here so the call sites
+    // below stay readable.
+    // ANTI-PATTERN: these wrappers resurrect the removed (pointer, size) call shape so the bench bodies did not have to
+    // change. Treat them as a temporary scaffold: rewrite the call sites to build a Region directly and remove these.
+    // (The same scaffold exists in test_memory.cpp.)
+    inline bool is_readable(const void *p, std::size_t n) noexcept
+    {
+        return Mem::is_readable(Region{Address{p}, n});
+    }
+    inline bool is_writable(const void *p, std::size_t n) noexcept
+    {
+        return Mem::is_writable(Region{Address{p}, n});
+    }
 
     // Anti-dead-code sink: every measured op feeds this so the optimizer cannot observe an unused result and delete the
     // work being timed.
@@ -104,7 +122,7 @@ namespace
     }
 
     // Allocate a single committed, readable+writable page to stand in for a "stable" game pose buffer. Seed it with a
-    // non-zero qword so the value-returning reads (read_ptr_unchecked) don't trip their low-address guard.
+    // non-zero qword so the value-returning reads (unchecked::read) load a real value rather than zero.
     std::uint64_t *make_stable_page()
     {
         void *p = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -209,7 +227,7 @@ namespace
                         if (idx >= pool.size())
                             idx -= pool.size();
                         const auto s = Clock::now();
-                        const bool r = Mem::is_readable(addr, 8);
+                        const bool r = is_readable(addr, 8);
                         const auto e = Clock::now();
                         sink(r ? 1u : 0u);
                         lat.push_back(
@@ -254,7 +272,7 @@ namespace
                     }
                     for (std::size_t i = 0; i < ops_per_thread; ++i)
                     {
-                        local += Mem::is_readable(pool[idx], 8) ? 1u : 0u;
+                        local += is_readable(pool[idx], 8) ? 1u : 0u;
                         ++idx;
                         if (idx >= pool.size())
                             idx = 0;
@@ -287,8 +305,8 @@ namespace
     // GATED puts is_readable(addr, size) in front of every read. On a hot path that touches many distinct objects,
     // those addresses are mostly cache misses (one new page per object thrashes the fixed-size cache), so each gated
     // read pays a VirtualQuery plus a shard lock. DIRECT drops the predicate and does a raw volatile dereference per
-    // read (no seh_* call, no
-    // __try frame), which isolates the predicate cost. On MSVC a guarded direct read (seh_read) costs about the same,
+    // read (no guarded-read call, no
+    // __try frame), which isolates the predicate cost. On MSVC a guarded direct read (read<T>) costs about the same,
     // since the SEH frame is table-driven and free on the no-fault path (Phase 3). This measures both, per-probe,
     // including the tail.
     //
@@ -327,7 +345,7 @@ namespace
                 ++within;
                 if (gated)
                 {
-                    if (Mem::is_readable(reinterpret_cast<void *>(a), 8))
+                    if (is_readable(reinterpret_cast<void *>(a), 8))
                         acc += *reinterpret_cast<volatile std::uint64_t *>(a);
                 }
                 else
@@ -356,7 +374,7 @@ int main()
 {
     // Silence write_bytes' success/debug logging so we time the memory work, not the log path. The level gate is an
     // atomic check before any string formatting, so Error-level leaves the hot ops uninstrumented.
-    DetourModKit::Logger::get_instance().set_log_level(DetourModKit::LogLevel::Error);
+    DetourModKit::log().set_log_level(DetourModKit::LogLevel::Error);
 
     constexpr std::size_t ITERS = 200000;
     constexpr std::size_t SAMPLES = 15;
@@ -374,7 +392,7 @@ int main()
                 "non-MSVC (seh_* use the vectored-handler fault guard)"
 #endif
     );
-    std::printf("DEFAULT_CACHE_EXPIRY_MS = %u\n\n", static_cast<unsigned>(DetourModKit::DEFAULT_CACHE_EXPIRY_MS));
+    std::printf("DEFAULT_CACHE_EXPIRY_MS = %u\n\n", static_cast<unsigned>(Mem::DEFAULT_CACHE_EXPIRY_MS));
 
     // --- Phase 1: cache OFF -> validators take the direct-VirtualQuery branch.
     Mem::shutdown_cache(); // ensure uninitialized
@@ -386,9 +404,9 @@ int main()
                                                  sink(VirtualQuery(page, &mbi, sizeof(mbi)));
                                              });
     report("raw VirtualQuery", ns_qry);
-    const double ns_isr_miss = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(Mem::is_readable(page, 8) ? 1u : 0u); });
+    const double ns_isr_miss = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_readable(page, 8) ? 1u : 0u); });
     report("is_readable MISS", ns_isr_miss);
-    const double ns_isw_miss = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(Mem::is_writable(page, 8) ? 1u : 0u); });
+    const double ns_isw_miss = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_writable(page, 8) ? 1u : 0u); });
     report("is_writable MISS", ns_isw_miss);
 
     // --- Phase 2: cache ON, warm -> validators hit the fresh entry.
@@ -397,12 +415,12 @@ int main()
         std::fprintf(stderr, "[bench] init_cache failed\n");
         return 1;
     }
-    sink(Mem::is_readable(page, 8) ? 1u : 0u); // warm the entry
-    sink(Mem::is_writable(page, 8) ? 1u : 0u);
+    sink(is_readable(page, 8) ? 1u : 0u); // warm the entry
+    sink(is_writable(page, 8) ? 1u : 0u);
     std::printf("\n[2] Validation WARM HIT (cache on, entry fresh within TTL)\n");
-    const double ns_isr_hit = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(Mem::is_readable(page, 8) ? 1u : 0u); });
+    const double ns_isr_hit = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_readable(page, 8) ? 1u : 0u); });
     report("is_readable HIT", ns_isr_hit);
-    const double ns_isw_hit = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(Mem::is_writable(page, 8) ? 1u : 0u); });
+    const double ns_isw_hit = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_writable(page, 8) ? 1u : 0u); });
     report("is_writable HIT", ns_isw_hit);
 
     // --- Phase 3: direct access primitives (no cache dependence).
@@ -410,21 +428,22 @@ int main()
     const double ns_dread =
         median_ns_per_call(ITERS, SAMPLES, [&]() { sink(*reinterpret_cast<volatile std::uint64_t *>(page)); });
     report("direct volatile load", ns_dread);
-    const double ns_unchecked = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(Mem::read_ptr_unchecked(addr, 0)); });
-    report("read_ptr_unchecked", ns_unchecked);
+    const double ns_unchecked =
+        median_ns_per_call(ITERS, SAMPLES, [&]() { sink(Mem::unchecked::read<std::uint64_t>(Address{addr})); });
+    report("unchecked::read<u64>", ns_unchecked);
     const double ns_sehread = median_ns_per_call(ITERS, SAMPLES,
                                                  [&]()
                                                  {
-                                                     auto v = Mem::seh_read<std::uint64_t>(addr);
+                                                     auto v = Mem::read<std::uint64_t>(Address{addr});
                                                      sink(v ? *v : 0u);
                                                  });
-    report("seh_read<u64>", ns_sehread);
+    report("read<u64> (guarded)", ns_sehread);
     const double ns_dstore = median_ns_per_call(
         ITERS, SAMPLES,
         [&]() { *reinterpret_cast<volatile std::uint64_t *>(page) = s_sink.load(std::memory_order_relaxed); });
     report("direct volatile store", ns_dstore);
     const double ns_wbytes = median_ns_per_call(
-        WRITE_ITERS, SAMPLES, [&]() { (void)Mem::write_bytes(reinterpret_cast<std::byte *>(page), src, 8); });
+        WRITE_ITERS, SAMPLES, [&]() { (void)Mem::write_bytes(Address{page}, std::span<const std::byte>{src, 8}); });
     report("write_bytes(8)", ns_wbytes);
 
     std::printf("\n  cache stats: %s\n", Mem::get_cache_stats().c_str());
@@ -502,9 +521,9 @@ int main()
     std::printf("  contrast (2 warm validations/frame): %.4f ms/frame\n", (ns_isr_hit + ns_isw_hit) / 1.0e6);
 
     // --- Phase 8: pointer-chain primitives. Walk a stable in-process chain (warm cache, the favorable case for the
-    // gated walk) three ways: a GATED per-link walk that calls is_readable before each dereference, vs
-    // seh_resolve_chain and seh_read_chain which guard the whole walk with one fault frame. Shows the per-link
-    // predicate cost stacking up even when every address is cached.
+    // gated walk) three ways: a GATED per-link walk that calls is_readable before each dereference, vs walk (resolve
+    // the leaf address) and walk + read<u64> (resolve then load) which guard the whole walk with one fault frame.
+    // Shows the per-link predicate cost stacking up even when every address is cached.
     constexpr std::size_t CHAIN_CELLS = 6;
     std::vector<std::uintptr_t> nodes(CHAIN_CELLS, 0);
     nodes[CHAIN_CELLS - 1] = 0xABCDEF0123456789ull;
@@ -523,7 +542,7 @@ int main()
                                bool ok = true;
                                for (std::size_t i = 0; i + 1 < CHAIN_CELLS; ++i)
                                {
-                                   if (!Mem::is_readable(reinterpret_cast<void *>(cur), sizeof(std::uintptr_t)))
+                                   if (!is_readable(reinterpret_cast<void *>(cur), sizeof(std::uintptr_t)))
                                    {
                                        ok = false;
                                        break;
@@ -531,7 +550,7 @@ int main()
                                    cur = *reinterpret_cast<volatile std::uintptr_t *>(cur);
                                }
                                std::uint64_t v = 0;
-                               if (ok && Mem::is_readable(reinterpret_cast<void *>(cur), sizeof(std::uint64_t)))
+                               if (ok && is_readable(reinterpret_cast<void *>(cur), sizeof(std::uint64_t)))
                                    v = *reinterpret_cast<volatile std::uint64_t *>(cur);
                                sink(v);
                            });
@@ -539,20 +558,27 @@ int main()
     const double ns_resolve_chain = median_ns_per_call(ITERS, SAMPLES,
                                                        [&]()
                                                        {
-                                                           const auto a =
-                                                               Mem::seh_resolve_chain(chain_base, chain_span);
-                                                           sink(a ? *a : 0u);
+                                                           const auto a = Mem::walk(Address{chain_base}, chain_span);
+                                                           sink(a ? a->raw() : 0u);
                                                        });
-    report("seh_resolve_chain", ns_resolve_chain);
+    report("walk (resolve chain)", ns_resolve_chain);
     const double ns_read_chain = median_ns_per_call(ITERS, SAMPLES,
                                                     [&]()
                                                     {
-                                                        const auto v =
-                                                            Mem::seh_read_chain<std::uint64_t>(chain_base, chain_span);
-                                                        sink(v ? *v : 0u);
+                                                        // walk resolves the leaf address under one fault guard; the
+                                                        // guarded read then loads the value. Together they are the v4
+                                                        // equivalent of the old single read-chain primitive.
+                                                        const auto a = Mem::walk(Address{chain_base}, chain_span);
+                                                        std::uint64_t v = 0;
+                                                        if (a)
+                                                        {
+                                                            const auto leaf = Mem::read<std::uint64_t>(*a);
+                                                            v = leaf ? *leaf : 0u;
+                                                        }
+                                                        sink(v);
                                                     });
-    report("seh_read_chain<u64>", ns_read_chain);
-    std::printf("  gated/seh_read_chain ratio: %.1fx\n", ns_read_chain > 0 ? ns_gated_walk / ns_read_chain : 0.0);
+    report("walk + read<u64>", ns_read_chain);
+    std::printf("  gated/(walk+read) ratio: %.1fx\n", ns_read_chain > 0 ? ns_gated_walk / ns_read_chain : 0.0);
 
     // --- Phase 9: warm-HIT is_readable throughput under contention. The cache stays on and a small pre-warmed pool
     // keeps almost every lookup a hit, so this isolates the cross-thread cost of the reader-tracking counter and the
@@ -564,7 +590,7 @@ int main()
         constexpr std::size_t WARM_OPS = 1u << 20; // is_readable calls per thread
         auto warm_pool = make_churn_pool(WARM_POOL);
         for (void *p : warm_pool)
-            sink(Mem::is_readable(p, 8) ? 1u : 0u); // pre-warm every entry into the cache
+            sink(is_readable(p, 8) ? 1u : 0u); // pre-warm every entry into the cache
 
         std::printf("\n[9] is_readable warm-HIT throughput under contention (Mops/s, higher is better)\n");
         for (const unsigned threads : {1u, 2u, 4u, 8u})

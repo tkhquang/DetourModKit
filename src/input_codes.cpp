@@ -21,12 +21,12 @@ namespace DetourModKit
     {
         struct NameEntry
         {
-            const char *name;
+            const char *name = nullptr;
             InputCode code;
         };
 
         // clang-format off
-        constexpr NameEntry name_table[] = {
+        constexpr NameEntry NAME_TABLE[] = {
             // --- Keyboard: Modifiers ---
             {"Ctrl",        {InputSource::Keyboard, 0x11}},
             {"LCtrl",       {InputSource::Keyboard, 0xA2}},
@@ -212,7 +212,7 @@ namespace DetourModKit
         };
         // clang-format on
 
-        constexpr size_t name_table_size = sizeof(name_table) / sizeof(name_table[0]);
+        constexpr size_t NAME_TABLE_SIZE = sizeof(NAME_TABLE) / sizeof(NAME_TABLE[0]);
 
         int icompare(std::string_view a, std::string_view b) noexcept
         {
@@ -299,17 +299,17 @@ namespace DetourModKit
 
         struct SortedNameIndex
         {
-            size_t indices[name_table_size]{};
-            size_t count = name_table_size;
+            size_t indices[NAME_TABLE_SIZE]{};
+            size_t count = NAME_TABLE_SIZE;
 
             SortedNameIndex()
             {
-                for (size_t i = 0; i < name_table_size; ++i)
+                for (size_t i = 0; i < NAME_TABLE_SIZE; ++i)
                 {
                     indices[i] = i;
                 }
                 std::sort(indices, indices + count,
-                          [](size_t a, size_t b) { return icompare(name_table[a].name, name_table[b].name) < 0; });
+                          [](size_t a, size_t b) { return icompare(NAME_TABLE[a].name, NAME_TABLE[b].name) < 0; });
             }
         };
 
@@ -325,10 +325,10 @@ namespace DetourModKit
 
             CodeNameMap()
             {
-                map.reserve(name_table_size);
-                for (size_t i = 0; i < name_table_size; ++i)
+                map.reserve(NAME_TABLE_SIZE);
+                for (size_t i = 0; i < NAME_TABLE_SIZE; ++i)
                 {
-                    map.emplace(name_table[i].code, name_table[i].name);
+                    map.emplace(NAME_TABLE[i].code, NAME_TABLE[i].name);
                 }
             }
         };
@@ -360,7 +360,7 @@ namespace DetourModKit
         while (lo < hi)
         {
             const size_t mid = lo + (hi - lo) / 2;
-            const int cmp = icompare(name_table[idx.indices[mid]].name, name);
+            const int cmp = icompare(NAME_TABLE[idx.indices[mid]].name, name);
             if (cmp < 0)
             {
                 lo = mid + 1;
@@ -371,7 +371,7 @@ namespace DetourModKit
             }
             else
             {
-                return name_table[idx.indices[mid]].code;
+                return NAME_TABLE[idx.indices[mid]].code;
             }
         }
         return std::nullopt;
@@ -401,9 +401,9 @@ namespace DetourModKit
         // which would silently turn an off-table Mouse/Gamepad code into a keyboard key on a config round-trip.
         if (code.source == InputSource::Keyboard)
         {
-            return Format::format_hex(code.code, 2);
+            return format::format_hex(code.code, 2);
         }
-        return std::string(input_source_to_string(code.source)) + ':' + Format::format_hex(code.code, 2);
+        return std::string(input_source_to_string(code.source)) + ':' + format::format_hex(code.code, 2);
     }
 
 } // namespace DetourModKit

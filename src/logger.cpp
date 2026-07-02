@@ -1,15 +1,16 @@
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/filesystem.hpp"
-#include "DetourModKit/format.hpp"
 #include "platform.hpp"
+#include "internal/win_file_stream.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
-#include <chrono>
 #include <iomanip>
 #include <iostream>
 #include <new>
@@ -25,7 +26,7 @@ namespace DetourModKit
 
         struct AsyncLoggerLeakSlot
         {
-            alignas(std::shared_ptr<AsyncLogger>) unsigned char storage[sizeof(std::shared_ptr<AsyncLogger>)];
+            alignas(std::shared_ptr<AsyncLogger>) unsigned char storage[sizeof(std::shared_ptr<AsyncLogger>)]{};
             std::atomic<bool> occupied{false};
         };
 
@@ -53,7 +54,7 @@ namespace DetourModKit
             if (leaked != nullptr)
             {
                 (void)leaked;
-                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
                 return;
             }
 
@@ -62,7 +63,7 @@ namespace DetourModKit
             if (virtual_cell != nullptr)
             {
                 new (virtual_cell) std::shared_ptr<AsyncLogger>(std::move(logger));
-                DetourModKit::Diagnostics::record_intentional_leak(DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Logger);
                 return;
             }
 
@@ -73,8 +74,8 @@ namespace DetourModKit
                 if (slot.occupied.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
                 {
                     new (static_cast<void *>(slot.storage)) std::shared_ptr<AsyncLogger>(std::move(logger));
-                    DetourModKit::Diagnostics::record_intentional_leak(
-                        DetourModKit::Diagnostics::LeakSubsystem::Logger);
+                    DetourModKit::diagnostics::record_intentional_leak(
+                        DetourModKit::diagnostics::LeakSubsystem::Logger);
                     return;
                 }
             }
@@ -93,7 +94,7 @@ namespace DetourModKit
         static_config_atom().store(std::move(config), std::memory_order_release);
     }
 
-    LogLevel Logger::string_to_log_level(std::string_view level_str)
+    LogLevel string_to_log_level(std::string_view level_str)
     {
         std::string upper_level_str(level_str);
         std::transform(upper_level_str.begin(), upper_level_str.end(), upper_level_str.begin(),
@@ -120,7 +121,9 @@ namespace DetourModKit
         set_static_config(std::make_shared<const StaticConfig>(std::string(prefix), std::string(file_name),
                                                                std::string(timestamp_fmt)));
 
-        Logger &instance = get_instance();
+        // Qualify the free accessor: inside this static member an unqualified log() would bind to the member log()
+        // overload set (which all take arguments), hiding the namespace-scope process-default accessor.
+        Logger &instance = DetourModKit::log();
 
         // configure() is the authoritative reset path -- allow reconfiguration even after shutdown to support reuse
         // (e.g., test fixtures).
@@ -139,7 +142,7 @@ namespace DetourModKit
         }
 
         // Acquire both m_async_mutex and m_log_mutex_ptr to prevent concurrent log() calls from reading
-        // partially-updated string members during reconfiguration
+        // partially-updated string members during reconfiguration.
         std::scoped_lock lock(m_async_mutex, *m_log_mutex_ptr);
 
         // Skip reconfiguration only when all parameters match AND the stream is usable. After shutdown or a prior open
@@ -163,33 +166,33 @@ namespace DetourModKit
         m_log_file_name = file_name;
         m_timestamp_format = timestamp_fmt;
 
-        std::wstring log_file_full_path = generate_log_file_path();
-        m_log_file_stream_ptr->open(log_file_full_path, std::ios::out | std::ios::trunc);
-
-        if (!m_log_file_stream_ptr->is_open())
-        {
-            std::cerr << "[" << m_log_prefix << " Logger CRITICAL ERROR] "
-                      << "Failed to open log file: " << std::filesystem::path(log_file_full_path).string()
-                      << ". Subsequent logs to file will fail." << '\n';
-        }
-        else
-        {
-            *m_log_file_stream_ptr << "[" << get_timestamp() << "] "
-                                   << "[" << std::setw(7) << std::left << "INFO" << "] :: "
-                                   << "Logger reconfigured. Now logging to: " << file_name << '\n';
-        }
+        open_sink(true);
     }
 
     Logger::Logger()
-        : m_log_file_stream_ptr(std::make_shared<WinFileStream>()), m_log_mutex_ptr(std::make_shared<std::mutex>())
+        : m_log_file_stream_ptr(std::make_shared<detail::WinFileStream>()),
+          m_log_mutex_ptr(std::make_shared<std::mutex>())
     {
-        {
-            auto config = get_static_config();
-            m_log_prefix = config->log_prefix;
-            m_log_file_name = config->log_file_name;
-            m_timestamp_format = config->timestamp_format;
-        }
+        const auto config = get_static_config();
+        m_log_prefix = config->log_prefix;
+        m_log_file_name = config->log_file_name;
+        m_timestamp_format = config->timestamp_format;
 
+        open_sink(false);
+    }
+
+    Logger::Logger(std::string_view prefix, std::string_view file_name, std::string_view timestamp_fmt)
+        : m_log_prefix(prefix), m_log_file_name(file_name), m_timestamp_format(timestamp_fmt),
+          m_log_file_stream_ptr(std::make_shared<detail::WinFileStream>()),
+          m_log_mutex_ptr(std::make_shared<std::mutex>())
+    {
+        open_sink(false);
+    }
+
+    void Logger::open_sink(bool reconfiguring)
+    {
+        // The caller owns the synchronization: a constructor runs single-threaded before the logger is reachable, and
+        // reconfigure() holds both lifecycle and file mutexes. open_sink never locks, so it composes with either.
         const std::wstring log_file_full_path = generate_log_file_path();
         m_log_file_stream_ptr->open(log_file_full_path, std::ios::out | std::ios::trunc);
 
@@ -198,12 +201,13 @@ namespace DetourModKit
             std::cerr << "[" << m_log_prefix << " Logger CRITICAL ERROR] "
                       << "Failed to open log file: " << std::filesystem::path(log_file_full_path).string()
                       << ". Subsequent logs to file will fail." << '\n';
+            return;
         }
-        else
-        {
-            *m_log_file_stream_ptr << "[" << get_timestamp() << "] [" << std::setw(7) << std::left << "INFO"
-                                   << "] :: Logger initialized. Logging to: " << m_log_file_name << '\n';
-        }
+
+        *m_log_file_stream_ptr << "[" << get_timestamp() << "] [" << std::setw(7) << std::left << "INFO" << "] :: "
+                               << "Logger "
+                               << (reconfiguring ? "reconfigured. Now logging to: " : "initialized. Logging to: ")
+                               << m_log_file_name << '\n';
     }
 
     Logger::~Logger() noexcept
@@ -292,8 +296,7 @@ namespace DetourModKit
 
         m_current_log_level.store(level, std::memory_order_release);
 
-        log(LogLevel::Info, "Log level changed from {} to {}", log_level_to_string(old_level),
-            log_level_to_string(level));
+        log(LogLevel::Info, "Log level changed from {} to {}", to_string(old_level), to_string(level));
     }
 
     bool Logger::log(LogLevel level, std::string_view message)
@@ -315,7 +318,7 @@ namespace DetourModKit
             }
         }
 
-        const auto level_str = log_level_to_string(level);
+        const auto level_str = to_string(level);
         std::lock_guard<std::mutex> lock(*m_log_mutex_ptr);
 
         if (m_log_file_stream_ptr->is_open() && m_log_file_stream_ptr->good())
@@ -417,7 +420,7 @@ namespace DetourModKit
 
         try
         {
-            std::wstring module_dir = Filesystem::get_runtime_directory();
+            std::wstring module_dir = filesystem::get_runtime_directory();
             if (module_dir.empty() || module_dir == L".")
             {
                 std::cerr << "[" << m_log_prefix << " Logger PATH_WARNING] "
@@ -579,6 +582,22 @@ namespace DetourModKit
         {
             m_log_file_stream_ptr->flush();
         }
+    }
+
+    // NOLINTNEXTLINE(bugprone-exception-escape): OOM constructing the logger deliberately terminates (see below)
+    Logger &log() noexcept
+    {
+        // The process-default logger, allocated once and INTENTIONALLY never destroyed. A plain function-local static
+        // Logger would be reclaimed during CRT atexit teardown, so a later static destructor or a detached thread that
+        // logs after that point would touch freed storage. Holding the object behind a leaked pointer keeps it alive
+        // for the whole process; the pointer itself is a reachable static, so a leak sanitizer sees the allocation as
+        // still-reachable rather than leaked. shutdown() (invoked by the Session teardown) flushes and closes the sink
+        // explicitly, so the deliberate leak costs only the object's storage, never a lost flush. Constructing it
+        // can allocate; under true out-of-memory at first use the noexcept boundary turns that throw into termination,
+        // the only sane outcome when the logger itself cannot start.
+        // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new): first-use OOM deliberately terminates (see above)
+        static Logger *const instance = new Logger();
+        return *instance;
     }
 
 } // namespace DetourModKit

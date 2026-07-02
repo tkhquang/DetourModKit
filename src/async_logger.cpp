@@ -1,143 +1,180 @@
 #include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/diagnostics.hpp"
+
+#include "internal/async_logger_queue.hpp"
 #include "platform.hpp"
+#include "internal/win_file_stream.hpp"
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <new>
+#include <span>
 #include <type_traits>
 
 namespace DetourModKit
 {
     using detail::is_loader_lock_held;
+    using detail::LogMessage;
     using detail::pin_current_module;
 
-    StringPool::StringPool() noexcept
+    // The string pool, per-message record, and MPMC queue are implementation-only types that live in
+    // DetourModKit::detail (see internal/async_logger_queue.hpp). Their out-of-line definitions are grouped in the
+    // namespace block below; the AsyncLogger pimpl definitions that follow reach them through the using-declarations
+    // above.
+    namespace detail
     {
-        std::lock_guard<std::mutex> lock(m_pool_mutex);
-        grow_pool_locked();
-    }
-
-    StringPool::~StringPool() noexcept
-    {
-        size_t leaked = 0;
-
+        StringPool::StringPool() noexcept
         {
-            // Acquire the mutex to synchronize with any in-flight deallocate() calls
             std::lock_guard<std::mutex> lock(m_pool_mutex);
-            leaked = m_heap_fallback_count.load(std::memory_order_relaxed);
+            grow_pool_locked();
         }
 
-        if (leaked > 0)
+        StringPool::~StringPool() noexcept
         {
-            std::cerr << "[StringPool] " << leaked << " heap-fallback string(s) were not returned before destruction\n";
-        }
+            size_t leaked = 0;
 
-        Block *current = m_head.load(std::memory_order_relaxed);
-        while (current)
-        {
-            Block *next = current->next;
-
-            PoolSlot *slots = reinterpret_cast<PoolSlot *>(current->data);
-            for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
             {
-                if (current->constructed_mask & (1u << i))
+                // Acquire the mutex to synchronize with any in-flight deallocate() calls
+                std::lock_guard<std::mutex> lock(m_pool_mutex);
+                leaked = m_heap_fallback_count.load(std::memory_order_relaxed);
+            }
+
+            if (leaked > 0)
+            {
+                std::cerr << "[StringPool] " << leaked
+                          << " heap-fallback string(s) were not returned before destruction\n";
+            }
+
+            Block *current = m_head.load(std::memory_order_relaxed);
+            while (current)
+            {
+                Block *next = current->next;
+
+                PoolSlot *slots = reinterpret_cast<PoolSlot *>(current->data);
+                for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
                 {
-                    slots[i].~PoolSlot();
+                    if (current->constructed_mask & (1u << i))
+                    {
+                        slots[i].~PoolSlot();
+                    }
+                }
+
+                // Block is over-aligned (alignas(64)); it must be released through the aligned operator delete that
+                // matches its aligned allocation in grow_pool_locked().
+                ::operator delete(current, std::align_val_t{alignof(Block)});
+                current = next;
+            }
+            m_head.store(nullptr, std::memory_order_relaxed);
+        }
+
+        void StringPool::grow_pool_locked() noexcept
+        {
+            Block *existing = m_head.load(std::memory_order_relaxed);
+            size_t count = 0;
+            for (Block *b = existing; b; b = b->next)
+            {
+                if (++count >= MEMORY_POOL_BLOCK_COUNT)
+                {
+                    return;
                 }
             }
 
-            // Block is over-aligned (alignas(64)); it must be released through the aligned operator delete that matches
-            // its aligned allocation in grow_pool_locked().
-            ::operator delete(current, std::align_val_t{alignof(Block)});
-            current = next;
-        }
-        m_head.store(nullptr, std::memory_order_relaxed);
-    }
-
-    void StringPool::grow_pool_locked() noexcept
-    {
-        Block *existing = m_head.load(std::memory_order_relaxed);
-        size_t count = 0;
-        for (Block *b = existing; b; b = b->next)
-        {
-            if (++count >= MEMORY_POOL_BLOCK_COUNT)
+            // Block is over-aligned via its alignas(64) data member, so it must be allocated through the aligned
+            // operator new; the plain overload is not required to honour an alignment stricter than
+            // __STDCPP_DEFAULT_NEW_ALIGNMENT__ (typically 16 on x64), which would be alignment UB. The allocation is
+            // also nothrow: this runs underneath the noexcept logging path, so on out-of-memory it must leave the pool
+            // unchanged and let the caller fall back to a nothrow heap string (or drop the message) rather than let
+            // std::bad_alloc escape and terminate.
+            void *raw = ::operator new(sizeof(Block), std::align_val_t{alignof(Block)}, std::nothrow);
+            if (!raw)
             {
                 return;
             }
-        }
+            Block *new_block = new (raw) Block();
 
-        // Block is over-aligned via its alignas(64) data member, so it must be allocated through the aligned operator
-        // new; the plain overload is not required to honour an alignment stricter than
-        // __STDCPP_DEFAULT_NEW_ALIGNMENT__ (typically 16 on x64), which would be alignment UB. The allocation is also
-        // nothrow: this runs underneath the noexcept logging path, so on out-of-memory it must leave the pool unchanged
-        // and let the caller fall back to a nothrow heap string (or drop the message) rather than let std::bad_alloc
-        // escape and terminate.
-        void *raw = ::operator new(sizeof(Block), std::align_val_t{alignof(Block)}, std::nothrow);
-        if (!raw)
-        {
-            return;
-        }
-        Block *new_block = new (raw) Block();
+            new_block->next = existing;
+            new_block->free_list = nullptr;
 
-        new_block->next = existing;
-        new_block->free_list = nullptr;
-
-        PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
-        static_assert(POOL_SLOTS_PER_BLOCK <= 32,
-                      "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
-        // Slot construction must not throw, otherwise a partially built block could leak with no unwinding under this
-        // noexcept function. std::string's default constructor is noexcept, so the loop below is provably no-throw.
-        static_assert(std::is_nothrow_default_constructible_v<PoolSlot>,
-                      "PoolSlot must be nothrow-default-constructible so grow_pool_locked stays no-throw");
-        uint32_t constructed = 0;
-        for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
-        {
-            new (&slots[i]) PoolSlot();
-            constructed |= (1u << i);
-            slots[i].next_free = (i + 1 < POOL_SLOTS_PER_BLOCK) ? &slots[i + 1] : nullptr;
-        }
-        new_block->constructed_mask = constructed;
-        new_block->free_list = &slots[0];
-
-        m_head.store(new_block, std::memory_order_release);
-    }
-
-    StringPool &StringPool::instance() noexcept
-    {
-        // Constructed once into function-local static storage and never destroyed. A Meyers singleton would be
-        // destroyed at static teardown and race late LogMessage destructors that call into deallocate() (use-after-free
-        // under DLL unload and loader-lock teardown). A heap-allocated singleton (`*new StringPool()`) would instead
-        // require a throwing operator new whose std::bad_alloc would escape this noexcept accessor and terminate the
-        // host. Placement-new into static storage avoids both: the object lives for the whole process, its destructor
-        // never runs, and construction performs no throwing allocation because grow_pool_locked() is nothrow. The
-        // bounded block leak (at most MEMORY_POOL_BLOCK_COUNT blocks of
-        // MEMORY_POOL_BLOCK_SIZE bytes) is released by the OS at process exit.
-        alignas(StringPool) static unsigned char storage[sizeof(StringPool)];
-        static StringPool *const pool = ::new (static_cast<void *>(storage)) StringPool();
-        return *pool;
-    }
-
-    StringPool::PoolSlot *StringPool::claim_free_slot() noexcept
-    {
-        for (Block *b = m_head.load(std::memory_order_relaxed); b; b = b->next)
-        {
-            if (b->free_list)
+            PoolSlot *slots = reinterpret_cast<PoolSlot *>(new_block->data);
+            static_assert(POOL_SLOTS_PER_BLOCK <= 32,
+                          "constructed_mask is uint32_t; increase its width if POOL_SLOTS_PER_BLOCK > 32");
+            // Slot construction must not throw, otherwise a partially built block could leak with no unwinding under
+            // this noexcept function. std::string's default constructor is noexcept, so the loop below is provably
+            // no-throw.
+            static_assert(std::is_nothrow_default_constructible_v<PoolSlot>,
+                          "PoolSlot must be nothrow-default-constructible so grow_pool_locked stays no-throw");
+            uint32_t constructed = 0;
+            for (size_t i = 0; i < POOL_SLOTS_PER_BLOCK; ++i)
             {
-                PoolSlot *slot = b->free_list;
-                b->free_list = slot->next_free;
-                return slot;
+                new (&slots[i]) PoolSlot();
+                constructed |= (1u << i);
+                slots[i].next_free = (i + 1 < POOL_SLOTS_PER_BLOCK) ? &slots[i + 1] : nullptr;
             }
-        }
-        return nullptr;
-    }
+            new_block->constructed_mask = constructed;
+            new_block->free_list = &slots[0];
 
-    std::string *StringPool::allocate(size_t size) noexcept
-    {
-        if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
+            m_head.store(new_block, std::memory_order_release);
+        }
+
+        StringPool &StringPool::instance() noexcept
         {
+            // Constructed once into function-local static storage and never destroyed. A Meyers singleton would be
+            // destroyed at static teardown and race late LogMessage destructors that call into deallocate()
+            // (use-after-free under DLL unload and loader-lock teardown). A heap-allocated singleton (`*new
+            // StringPool()`) would instead require a throwing operator new whose std::bad_alloc would escape this
+            // noexcept accessor and terminate the host. Placement-new into static storage avoids both: the object lives
+            // for the whole process, its destructor never runs, and construction performs no throwing allocation
+            // because grow_pool_locked() is nothrow. The bounded block leak (at most MEMORY_POOL_BLOCK_COUNT blocks of
+            // MEMORY_POOL_BLOCK_SIZE bytes) is released by the OS at process exit.
+            alignas(StringPool) static unsigned char storage[sizeof(StringPool)];
+            static StringPool *const pool = ::new (static_cast<void *>(storage)) StringPool();
+            return *pool;
+        }
+
+        StringPool::PoolSlot *StringPool::claim_free_slot() noexcept
+        {
+            for (Block *b = m_head.load(std::memory_order_relaxed); b; b = b->next)
+            {
+                if (b->free_list)
+                {
+                    PoolSlot *slot = b->free_list;
+                    b->free_list = slot->next_free;
+                    return slot;
+                }
+            }
+            return nullptr;
+        }
+
+        std::string *StringPool::allocate(size_t size) noexcept
+        {
+            if (size > MEMORY_POOL_BLOCK_SIZE - sizeof(PoolSlot) - 16)
+            {
+                auto *ptr = new (std::nothrow) std::string();
+                if (ptr)
+                {
+                    m_heap_fallback_count.fetch_add(1, std::memory_order_relaxed);
+                }
+                return ptr;
+            }
+
+            std::lock_guard<std::mutex> lock(m_pool_mutex);
+
+            PoolSlot *slot = claim_free_slot();
+            if (!slot)
+            {
+                grow_pool_locked();
+                slot = claim_free_slot();
+            }
+
+            if (slot)
+            {
+                slot->str.clear();
+                return &slot->str;
+            }
+
             auto *ptr = new (std::nothrow) std::string();
             if (ptr)
             {
@@ -146,137 +183,99 @@ namespace DetourModKit
             return ptr;
         }
 
-        std::lock_guard<std::mutex> lock(m_pool_mutex);
-
-        PoolSlot *slot = claim_free_slot();
-        if (!slot)
+        void StringPool::deallocate(std::string *ptr) noexcept
         {
-            grow_pool_locked();
-            slot = claim_free_slot();
-        }
-
-        if (slot)
-        {
-            slot->str.clear();
-            return &slot->str;
-        }
-
-        auto *ptr = new (std::nothrow) std::string();
-        if (ptr)
-        {
-            m_heap_fallback_count.fetch_add(1, std::memory_order_relaxed);
-        }
-        return ptr;
-    }
-
-    void StringPool::deallocate(std::string *ptr) noexcept
-    {
-        if (!ptr)
-            return;
-
-        std::lock_guard<std::mutex> lock(m_pool_mutex);
-
-        for (Block *b = m_head.load(std::memory_order_relaxed); b; b = b->next)
-        {
-            const auto *block_begin = reinterpret_cast<const char *>(b->data);
-            const auto *block_end = block_begin + POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot);
-            const auto *raw_ptr = reinterpret_cast<const char *>(ptr);
-
-            if (raw_ptr >= block_begin && raw_ptr < block_end)
-            {
-                auto offset = static_cast<size_t>(raw_ptr - block_begin);
-                PoolSlot *slot = reinterpret_cast<PoolSlot *>(b->data) + (offset / sizeof(PoolSlot));
-                slot->str.clear();
-                return_slot_locked(slot, b);
+            if (!ptr)
                 return;
+
+            std::lock_guard<std::mutex> lock(m_pool_mutex);
+
+            for (Block *b = m_head.load(std::memory_order_relaxed); b; b = b->next)
+            {
+                const auto *block_begin = reinterpret_cast<const char *>(b->data);
+                const auto *block_end = block_begin + POOL_SLOTS_PER_BLOCK * sizeof(PoolSlot);
+                const auto *raw_ptr = reinterpret_cast<const char *>(ptr);
+
+                if (raw_ptr >= block_begin && raw_ptr < block_end)
+                {
+                    auto offset = static_cast<size_t>(raw_ptr - block_begin);
+                    PoolSlot *slot = reinterpret_cast<PoolSlot *>(b->data) + (offset / sizeof(PoolSlot));
+                    slot->str.clear();
+                    return_slot_locked(slot, b);
+                    return;
+                }
+            }
+
+            // Not a pool allocation -- heap fallback. The delete is performed under m_pool_mutex to serialize with
+            // concurrent deallocate() calls that walk the block list above. Without the lock, a concurrent deallocate
+            // could see a partially updated free list. The lock does not prevent double-free of heap pointers (those
+            // are not tracked); callers must ensure each pointer is deallocated exactly once. The cost is a single
+            // free() call (or no-op for SSO-sized strings).
+            delete ptr;
+            if (m_heap_fallback_count.load(std::memory_order_relaxed) > 0)
+            {
+                m_heap_fallback_count.fetch_sub(1, std::memory_order_relaxed);
             }
         }
 
-        // Not a pool allocation -- heap fallback. The delete is performed under m_pool_mutex to serialize with
-        // concurrent deallocate() calls that walk the block list above. Without the lock, a concurrent deallocate could
-        // see a partially updated free list. The lock does
-        // not prevent double-free of heap pointers (those are not tracked);
-        // callers must ensure each pointer is deallocated exactly once. The cost is a single free() call (or no-op for
-        // SSO-sized strings).
-        delete ptr;
-        if (m_heap_fallback_count.load(std::memory_order_relaxed) > 0)
+        void StringPool::return_slot_locked(PoolSlot *slot, Block *block) noexcept
         {
-            m_heap_fallback_count.fetch_sub(1, std::memory_order_relaxed);
+            slot->next_free = block->free_list;
+            block->free_list = slot;
         }
-    }
 
-    void StringPool::return_slot_locked(PoolSlot *slot, Block *block) noexcept
-    {
-        slot->next_free = block->free_list;
-        block->free_list = slot;
-    }
-
-    LogMessage::LogMessage(LogLevel lvl, std::string_view msg) noexcept
-        : level(lvl), timestamp(std::chrono::system_clock::now()), thread_id(std::this_thread::get_id())
-    {
-        const size_t msg_size = std::min(msg.size(), MAX_VALID_LENGTH);
-
-        if (msg_size <= MAX_INLINE_SIZE)
+        // buffer is intentionally left uninitialized on this hot path (see async_logger_queue.hpp): only [0, length)
+        // is written before any read, so zero-filling it every message would be wasted work.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
+        LogMessage::LogMessage(LogLevel lvl, std::string_view msg) noexcept
+            : level(lvl), timestamp(std::chrono::system_clock::now()), thread_id(std::this_thread::get_id())
         {
-            std::memcpy(buffer.data(), msg.data(), msg_size);
-            length = msg_size;
-        }
-        else
-        {
-            overflow = StringPool::instance().allocate(msg_size);
-            if (overflow)
+            const size_t msg_size = std::min(msg.size(), MAX_VALID_LENGTH);
+
+            if (msg_size <= MAX_INLINE_SIZE)
             {
-                try
-                {
-                    overflow->assign(msg.data(), msg_size);
-                    length = overflow->size();
-                }
-                catch (...)
-                {
-                    StringPool::instance().deallocate(overflow);
-                    overflow = nullptr;
-                    length = 0;
-                }
+                std::memcpy(buffer.data(), msg.data(), msg_size);
+                length = msg_size;
             }
             else
             {
-                // Allocation failed (OOM) -- message is silently dropped
-                length = 0;
+                overflow = StringPool::instance().allocate(msg_size);
+                if (overflow)
+                {
+                    try
+                    {
+                        overflow->assign(msg.substr(0, msg_size));
+                        length = overflow->size();
+                    }
+                    catch (...)
+                    {
+                        StringPool::instance().deallocate(overflow);
+                        overflow = nullptr;
+                        length = 0;
+                    }
+                }
+                else
+                {
+                    // Allocation failed (OOM) -- message is silently dropped
+                    length = 0;
+                }
             }
         }
-    }
 
-    LogMessage::~LogMessage() noexcept
-    {
-        reset();
-    }
-
-    // Move transfers ownership of the overflow pointer without touching the
-    // StringPool or m_heap_fallback_count. The allocation/deallocation balance is maintained because exactly one
-    // LogMessage owns the pointer at any time, and only reset() (called by the eventual owner's destructor) returns it
-    // to the pool.
-    LogMessage::LogMessage(LogMessage &&other) noexcept
-        : level(other.level), timestamp(other.timestamp), thread_id(other.thread_id), length(other.length),
-          overflow(other.overflow)
-    {
-        if (length > 0 && !overflow)
-        {
-            std::memcpy(buffer.data(), other.buffer.data(), length);
-        }
-        other.overflow = nullptr;
-        other.length = 0;
-    }
-
-    LogMessage &LogMessage::operator=(LogMessage &&other) noexcept
-    {
-        if (this != &other)
+        LogMessage::~LogMessage() noexcept
         {
             reset();
-            level = other.level;
-            timestamp = other.timestamp;
-            thread_id = other.thread_id;
-            length = other.length;
-            overflow = other.overflow;
+        }
+
+        // Move transfers ownership of the overflow pointer without touching the
+        // StringPool or m_heap_fallback_count. The allocation/deallocation balance is maintained because exactly one
+        // LogMessage owns the pointer at any time, and only reset() (called by the eventual owner's destructor) returns
+        // it to the pool.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) buffer is filled by the length-guarded memcpy below
+        LogMessage::LogMessage(LogMessage &&other) noexcept
+            : level(other.level), timestamp(other.timestamp), thread_id(other.thread_id), length(other.length),
+              overflow(other.overflow)
+        {
             if (length > 0 && !overflow)
             {
                 std::memcpy(buffer.data(), other.buffer.data(), length);
@@ -284,151 +283,230 @@ namespace DetourModKit
             other.overflow = nullptr;
             other.length = 0;
         }
-        return *this;
-    }
 
-    std::string_view LogMessage::message() const noexcept
-    {
-        if (overflow)
+        LogMessage &LogMessage::operator=(LogMessage &&other) noexcept
         {
-            return *overflow;
-        }
-        return std::string_view(buffer.data(), length);
-    }
-
-    bool LogMessage::is_valid() const noexcept
-    {
-        if (overflow)
-        {
-            return length == overflow->size();
-        }
-        return length <= MAX_INLINE_SIZE;
-    }
-
-    void LogMessage::reset() noexcept
-    {
-        if (overflow)
-        {
-            StringPool::instance().deallocate(overflow);
-            overflow = nullptr;
-        }
-        length = 0;
-    }
-
-    size_t DynamicMPMCQueue::validated_capacity(size_t capacity)
-    {
-        if ((capacity & (capacity - 1)) != 0 || capacity < 2)
-        {
-            throw std::invalid_argument("DynamicMPMCQueue capacity must be a power of 2 and at least 2");
-        }
-        return capacity;
-    }
-
-    DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
-        : m_capacity(validated_capacity(capacity)), m_mask(m_capacity - 1),
-          m_buffer(std::make_unique<Slot[]>(m_capacity))
-    {
-        for (size_t i = 0; i < m_capacity; ++i)
-        {
-            m_buffer[i].sequence.store(i, std::memory_order_relaxed);
-        }
-    }
-
-    bool DynamicMPMCQueue::try_push(LogMessage &item)
-    {
-        size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
-
-        for (;;)
-        {
-            Slot &slot = m_buffer[pos & m_mask];
-            size_t seq = slot.sequence.load(std::memory_order_acquire);
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
-
-            if (diff == 0)
+            if (this != &other)
             {
-                if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+                reset();
+                level = other.level;
+                timestamp = other.timestamp;
+                thread_id = other.thread_id;
+                length = other.length;
+                overflow = other.overflow;
+                if (length > 0 && !overflow)
                 {
-                    slot.data = std::move(item);
-                    slot.sequence.store(pos + 1, std::memory_order_release);
-                    return true;
+                    std::memcpy(buffer.data(), other.buffer.data(), length);
+                }
+                other.overflow = nullptr;
+                other.length = 0;
+            }
+            return *this;
+        }
+
+        std::string_view LogMessage::message() const noexcept
+        {
+            if (overflow)
+            {
+                return *overflow;
+            }
+            return std::string_view(buffer.data(), length);
+        }
+
+        bool LogMessage::is_valid() const noexcept
+        {
+            if (overflow)
+            {
+                return length == overflow->size();
+            }
+            return length <= MAX_INLINE_SIZE;
+        }
+
+        void LogMessage::reset() noexcept
+        {
+            if (overflow)
+            {
+                StringPool::instance().deallocate(overflow);
+                overflow = nullptr;
+            }
+            length = 0;
+        }
+
+        size_t DynamicMPMCQueue::validated_capacity(size_t capacity)
+        {
+            if ((capacity & (capacity - 1)) != 0 || capacity < 2)
+            {
+                throw std::invalid_argument("DynamicMPMCQueue capacity must be a power of 2 and at least 2");
+            }
+            return capacity;
+        }
+
+        DynamicMPMCQueue::DynamicMPMCQueue(size_t capacity)
+            : m_capacity(validated_capacity(capacity)), m_mask(m_capacity - 1),
+              m_buffer(std::make_unique<Slot[]>(m_capacity))
+        {
+            for (size_t i = 0; i < m_capacity; ++i)
+            {
+                m_buffer[i].sequence.store(i, std::memory_order_relaxed);
+            }
+        }
+
+        bool DynamicMPMCQueue::try_push(LogMessage &item)
+        {
+            size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
+
+            for (;;)
+            {
+                Slot &slot = m_buffer[pos & m_mask];
+                size_t seq = slot.sequence.load(std::memory_order_acquire);
+                intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos);
+
+                if (diff == 0)
+                {
+                    if (m_enqueue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+                    {
+                        slot.data = std::move(item);
+                        slot.sequence.store(pos + 1, std::memory_order_release);
+                        return true;
+                    }
+                }
+                else if (diff < 0)
+                {
+                    return false;
+                }
+                else
+                {
+                    pos = m_enqueue_pos.load(std::memory_order_relaxed);
                 }
             }
-            else if (diff < 0)
-            {
-                return false;
-            }
-            else
-            {
-                pos = m_enqueue_pos.load(std::memory_order_relaxed);
-            }
         }
-    }
 
-    bool DynamicMPMCQueue::try_pop(LogMessage &item)
-    {
-        size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
-
-        for (;;)
+        bool DynamicMPMCQueue::try_pop(LogMessage &item)
         {
-            Slot &slot = m_buffer[pos & m_mask];
-            size_t seq = slot.sequence.load(std::memory_order_acquire);
-            intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+            size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
 
-            if (diff == 0)
+            for (;;)
             {
-                if (m_dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+                Slot &slot = m_buffer[pos & m_mask];
+                size_t seq = slot.sequence.load(std::memory_order_acquire);
+                intptr_t diff = static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1);
+
+                if (diff == 0)
                 {
-                    item = std::move(slot.data);
-                    slot.sequence.store(pos + m_capacity, std::memory_order_release);
-                    return true;
+                    if (m_dequeue_pos.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed))
+                    {
+                        item = std::move(slot.data);
+                        slot.sequence.store(pos + m_capacity, std::memory_order_release);
+                        return true;
+                    }
+                }
+                else if (diff < 0)
+                {
+                    return false;
+                }
+                else
+                {
+                    pos = m_dequeue_pos.load(std::memory_order_relaxed);
                 }
             }
-            else if (diff < 0)
-            {
-                return false;
-            }
-            else
-            {
-                pos = m_dequeue_pos.load(std::memory_order_relaxed);
-            }
         }
-    }
 
-    size_t DynamicMPMCQueue::try_pop_batch(std::vector<LogMessage> &items, size_t max_count)
-    {
-        if (max_count == 0)
+        size_t DynamicMPMCQueue::try_pop_batch(std::vector<LogMessage> &items, size_t max_count)
         {
-            return 0;
+            if (max_count == 0)
+            {
+                return 0;
+            }
+
+            items.reserve(items.size() + max_count);
+
+            size_t count = 0;
+            LogMessage msg;
+
+            while (count < max_count && try_pop(msg))
+            {
+                items.push_back(std::move(msg));
+                ++count;
+            }
+
+            return count;
         }
 
-        items.reserve(items.size() + max_count);
-
-        size_t count = 0;
-        LogMessage msg;
-
-        while (count < max_count && try_pop(msg))
+        size_t DynamicMPMCQueue::size() const noexcept
         {
-            items.push_back(std::move(msg));
-            ++count;
+            size_t enq = m_enqueue_pos.load(std::memory_order_relaxed);
+            size_t deq = m_dequeue_pos.load(std::memory_order_relaxed);
+            return (enq >= deq) ? (enq - deq) : 0;
         }
 
-        return count;
-    }
+        bool DynamicMPMCQueue::empty() const noexcept
+        {
+            return size() == 0;
+        }
+    } // namespace detail
 
-    size_t DynamicMPMCQueue::size() const noexcept
+    // The AsyncLogger pimpl: every member and method that touches the queue, string pool, writer thread, or flush
+    // synchronization lives here, so the public header (async_logger.hpp) names none of it. AsyncLogger forwards each
+    // public call to the matching Impl method.
+    struct AsyncLogger::Impl
     {
-        size_t enq = m_enqueue_pos.load(std::memory_order_relaxed);
-        size_t deq = m_dequeue_pos.load(std::memory_order_relaxed);
-        return (enq >= deq) ? (enq - deq) : 0;
-    }
+        Impl(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
+             std::shared_ptr<std::mutex> log_mutex);
+        ~Impl() noexcept;
 
-    bool DynamicMPMCQueue::empty() const noexcept
-    {
-        return size() == 0;
-    }
+        Impl(const Impl &) = delete;
+        Impl &operator=(const Impl &) = delete;
+        Impl(Impl &&) = delete;
+        Impl &operator=(Impl &&) = delete;
 
-    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<WinFileStream> file_stream,
-                             std::shared_ptr<std::mutex> log_mutex)
+        [[nodiscard]] bool enqueue(LogLevel level, std::string_view message) noexcept;
+        [[nodiscard]] bool flush_with_timeout(std::chrono::milliseconds timeout) noexcept;
+        void flush() noexcept;
+        void shutdown() noexcept;
+        [[nodiscard]] bool is_running() const noexcept;
+        [[nodiscard]] bool is_writer_waiting() const noexcept;
+        [[nodiscard]] size_t queue_size() const noexcept;
+        [[nodiscard]] size_t dropped_count() const noexcept;
+        void reset_dropped_count() noexcept;
+
+        void writer_thread_func() noexcept;
+        // Drains any messages remaining in the queue after the writer thread exits (called during shutdown to flush
+        // late-enqueued messages that arrived between m_running=false and the writer observing an empty queue).
+        void drain_remaining() noexcept;
+        void write_batch(std::span<detail::LogMessage> messages) noexcept;
+        bool handle_overflow(detail::LogMessage &&message) noexcept;
+        // Wakes the writer thread if it is parked on m_flush_cv after a successful push. The producer increments
+        // m_pending_messages and publishes the slot before this load; the writer publishes m_writer_waiting before
+        // checking the same count and parking. Those seq_cst operations form a store/load handshake that closes the
+        // lost-wakeup window without taking m_flush_mutex while the writer is actively draining. notify_all (not
+        // notify_one) keeps a flusher waiting on the same condition variable from absorbing the wake and leaving the
+        // writer asleep.
+        void notify_writer() noexcept;
+
+        detail::DynamicMPMCQueue m_queue;
+        AsyncLoggerConfig m_config;
+
+        std::shared_ptr<detail::WinFileStream> m_file_stream;
+        std::shared_ptr<std::mutex> m_log_mutex;
+
+        std::jthread m_writer_thread;
+        std::atomic<bool> m_running{false};
+        std::atomic<bool> m_shutdown_requested{false};
+
+        std::mutex m_flush_mutex;
+        std::condition_variable m_flush_cv;
+
+        // Set true by the writer immediately before it parks on m_flush_cv and cleared when it wakes. Producers read it
+        // outside m_flush_mutex after a successful queue push; the seq_cst order shared with m_pending_messages makes a
+        // racing push either visible to the writer's wait predicate or visible here as a parked-writer wake.
+        std::atomic<bool> m_writer_waiting{false};
+
+        std::atomic<size_t> m_pending_messages{0};
+        std::atomic<size_t> m_dropped_messages{0};
+    };
+
+    AsyncLogger::Impl::Impl(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
+                            std::shared_ptr<std::mutex> log_mutex)
         : m_queue(config.queue_capacity), m_config(config), m_file_stream(std::move(file_stream)),
           m_log_mutex(std::move(log_mutex))
     {
@@ -448,15 +526,15 @@ namespace DetourModKit
         }
 
         m_running.store(true, std::memory_order_release);
-        m_writer_thread = std::jthread(&AsyncLogger::writer_thread_func, this);
+        m_writer_thread = std::jthread(&AsyncLogger::Impl::writer_thread_func, this);
     }
 
-    AsyncLogger::~AsyncLogger() noexcept
+    AsyncLogger::Impl::~Impl() noexcept
     {
         shutdown();
     }
 
-    bool AsyncLogger::enqueue(LogLevel level, std::string_view message) noexcept
+    bool AsyncLogger::Impl::enqueue(LogLevel level, std::string_view message) noexcept
     {
         if (m_shutdown_requested.load(std::memory_order_acquire))
         {
@@ -481,8 +559,7 @@ namespace DetourModKit
             const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
             *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
                            << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(level) << "] :: " << message
-                           << '\n';
+                           << "[" << std::setw(7) << std::left << to_string(level) << "] :: " << message << '\n';
             m_file_stream->flush();
 
             // Surface a write/flush failure through the no-throw delivery bool.
@@ -504,7 +581,7 @@ namespace DetourModKit
         return handle_overflow(std::move(msg));
     }
 
-    bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
+    bool AsyncLogger::Impl::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
     {
         if (!m_running.load(std::memory_order_acquire))
         {
@@ -519,12 +596,12 @@ namespace DetourModKit
         return flushed;
     }
 
-    void AsyncLogger::flush() noexcept
+    void AsyncLogger::Impl::flush() noexcept
     {
         (void)flush_with_timeout(DEFAULT_FLUSH_TIMEOUT);
     }
 
-    void AsyncLogger::shutdown() noexcept
+    void AsyncLogger::Impl::shutdown() noexcept
     {
         bool expected = false;
         if (!m_shutdown_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
@@ -548,8 +625,8 @@ namespace DetourModKit
             {
                 pin_current_module();
                 m_writer_thread.detach();
-                DetourModKit::Diagnostics::record_intentional_leak(
-                    DetourModKit::Diagnostics::LeakSubsystem::AsyncLogger);
+                DetourModKit::diagnostics::record_intentional_leak(
+                    DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
             }
             else
             {
@@ -574,32 +651,32 @@ namespace DetourModKit
         }
     }
 
-    bool AsyncLogger::is_running() const noexcept
+    bool AsyncLogger::Impl::is_running() const noexcept
     {
         return m_running.load(std::memory_order_acquire);
     }
 
-    bool AsyncLogger::is_writer_waiting() const noexcept
+    bool AsyncLogger::Impl::is_writer_waiting() const noexcept
     {
         return m_writer_waiting.load(std::memory_order_acquire);
     }
 
-    size_t AsyncLogger::queue_size() const noexcept
+    size_t AsyncLogger::Impl::queue_size() const noexcept
     {
         return m_queue.size();
     }
 
-    size_t AsyncLogger::dropped_count() const noexcept
+    size_t AsyncLogger::Impl::dropped_count() const noexcept
     {
         return m_dropped_messages.load(std::memory_order_relaxed);
     }
 
-    void AsyncLogger::reset_dropped_count() noexcept
+    void AsyncLogger::Impl::reset_dropped_count() noexcept
     {
         m_dropped_messages.store(0, std::memory_order_release);
     }
 
-    void AsyncLogger::notify_writer() noexcept
+    void AsyncLogger::Impl::notify_writer() noexcept
     {
         // The caller has already incremented m_pending_messages and published the queue slot. In the
         // seq_cst order, either the writer's pending-count predicate sees that increment before it parks,
@@ -615,7 +692,7 @@ namespace DetourModKit
         }
     }
 
-    void AsyncLogger::writer_thread_func() noexcept
+    void AsyncLogger::Impl::writer_thread_func() noexcept
     {
         // Per-idle-cycle cap on the cooperative yields the writer spins through when the pending count
         // shows an in-flight push whose queue slot has not landed yet. Small and fixed so a producer
@@ -706,7 +783,7 @@ namespace DetourModKit
         }
     }
 
-    void AsyncLogger::drain_remaining() noexcept
+    void AsyncLogger::Impl::drain_remaining() noexcept
     {
         std::vector<LogMessage> remaining;
         remaining.reserve(m_config.batch_size);
@@ -717,7 +794,7 @@ namespace DetourModKit
         }
     }
 
-    void AsyncLogger::write_batch(std::span<LogMessage> messages) noexcept
+    void AsyncLogger::Impl::write_batch(std::span<LogMessage> messages) noexcept
     {
         std::lock_guard<std::mutex> lock(*m_log_mutex);
 
@@ -750,14 +827,14 @@ namespace DetourModKit
 
             *m_file_stream << "[" << std::put_time(&cached_tm, m_config.timestamp_format.c_str()) << "."
                            << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(msg.level)
-                           << "] :: " << msg.message() << '\n';
+                           << "[" << std::setw(7) << std::left << to_string(msg.level) << "] :: " << msg.message()
+                           << '\n';
         }
 
         m_file_stream->flush();
     }
 
-    bool AsyncLogger::handle_overflow(LogMessage &&message) noexcept
+    bool AsyncLogger::Impl::handle_overflow(LogMessage &&message) noexcept
     {
         switch (m_config.overflow_policy)
         {
@@ -844,7 +921,7 @@ namespace DetourModKit
                 std::chrono::duration_cast<std::chrono::milliseconds>(message.timestamp.time_since_epoch()) % 1000;
             *m_file_stream << "[" << std::put_time(&tm_buf, m_config.timestamp_format.c_str()) << "."
                            << std::setfill('0') << std::setw(3) << ms.count() << std::setfill(' ') << "] "
-                           << "[" << std::setw(7) << std::left << log_level_to_string(message.level)
+                           << "[" << std::setw(7) << std::left << to_string(message.level)
                            << "] :: " << message.message() << '\n';
             m_file_stream->flush();
 
@@ -859,6 +936,62 @@ namespace DetourModKit
             m_dropped_messages.fetch_add(1, std::memory_order_relaxed);
             return false;
         }
+    }
+
+    // AsyncLogger is a thin facade: construction builds the Impl (which validates the config and starts the writer
+    // thread), and every public method forwards to it. The out-of-line destructor sees the complete Impl so the
+    // unique_ptr can delete it (Impl::~Impl drains and joins the writer).
+    AsyncLogger::AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
+                             std::shared_ptr<std::mutex> log_mutex)
+        : m_impl(std::make_unique<Impl>(config, std::move(file_stream), std::move(log_mutex)))
+    {
+    }
+
+    AsyncLogger::~AsyncLogger() noexcept = default;
+
+    bool AsyncLogger::enqueue(LogLevel level, std::string_view message) noexcept
+    {
+        return m_impl->enqueue(level, message);
+    }
+
+    bool AsyncLogger::flush_with_timeout(std::chrono::milliseconds timeout) noexcept
+    {
+        return m_impl->flush_with_timeout(timeout);
+    }
+
+    void AsyncLogger::flush() noexcept
+    {
+        m_impl->flush();
+    }
+
+    void AsyncLogger::shutdown() noexcept
+    {
+        m_impl->shutdown();
+    }
+
+    bool AsyncLogger::is_running() const noexcept
+    {
+        return m_impl->is_running();
+    }
+
+    bool AsyncLogger::is_writer_waiting() const noexcept
+    {
+        return m_impl->is_writer_waiting();
+    }
+
+    size_t AsyncLogger::queue_size() const noexcept
+    {
+        return m_impl->queue_size();
+    }
+
+    size_t AsyncLogger::dropped_count() const noexcept
+    {
+        return m_impl->dropped_count();
+    }
+
+    void AsyncLogger::reset_dropped_count() noexcept
+    {
+        m_impl->reset_dropped_count();
     }
 
 } // namespace DetourModKit

@@ -26,7 +26,7 @@
  *          }
  *
  *          // Export after a profiling session
- *          DMKProfiler::get_instance().export_to_file("profile.json");
+ *          DetourModKit::Profiler::get_instance().export_to_file("profile.json");
  *          @endcode
  */
 

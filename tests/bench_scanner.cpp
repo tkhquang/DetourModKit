@@ -1,6 +1,6 @@
 /**
  * @file bench_scanner.cpp
- * @brief Standalone microbenchmark harness for Scanner::find_pattern.
+ * @brief Standalone microbenchmark harness for detail::find_pattern.
  *
  * Measures find_pattern throughput across realistic and adversarial pattern shapes, and contrasts the rare-byte anchor
  * heuristic against a "first literal byte" anchor that mimics the simpler scanner described in
@@ -20,7 +20,9 @@
  *   scenario, anchor, iterations, median_us_per_scan, scans_per_second, speedup_vs_naive
  */
 
-#include "DetourModKit/scanner.hpp"
+#include "DetourModKit/scan.hpp"
+#include "internal/memory_guarded.hpp"
+#include "internal/scan_engine.hpp"
 
 #include <algorithm>
 #include <array>
@@ -40,10 +42,12 @@
 #endif
 #include <windows.h>
 
+#include "DetourModKit/memory.hpp"
+
 namespace
 {
     using Clock = std::chrono::steady_clock;
-    using DetourModKit::Scanner::CompiledPattern;
+    using DetourModKit::detail::EnginePattern;
 
     // Sink so the optimizer can't observe that the return value of find_pattern is unused and delete the work.
     std::atomic<std::uintptr_t> s_sink{0};
@@ -80,33 +84,26 @@ namespace
             hot_total += h.weight;
         }
 
-        std::mt19937_64 rng{seed};
-        std::uniform_real_distribution<double> dist{0.0, 1.0};
-        std::uniform_int_distribution<int> uniform_byte{0, 255};
+        std::mt19937_64 rng(seed);
+        std::uniform_real_distribution<double> prob(0.0, 1.0);
+        std::uniform_int_distribution<int> uniform_byte(0, 255);
 
         std::vector<std::byte> out(size_bytes);
         for (std::size_t i = 0; i < size_bytes; ++i)
         {
-            const double r = dist(rng);
-            if (r < hot_total)
+            const double p = prob(rng);
+            double accum = 0.0;
+            std::uint8_t chosen = static_cast<std::uint8_t>(uniform_byte(rng));
+            for (const auto &h : hot_bytes)
             {
-                double accum = 0.0;
-                std::uint8_t chosen = 0;
-                for (const auto &h : hot_bytes)
+                accum += h.weight;
+                if (p < accum / hot_total)
                 {
-                    accum += h.weight;
-                    if (r < accum)
-                    {
-                        chosen = h.value;
-                        break;
-                    }
+                    chosen = h.value;
+                    break;
                 }
-                out[i] = std::byte{chosen};
             }
-            else
-            {
-                out[i] = std::byte{static_cast<std::uint8_t>(uniform_byte(rng))};
-            }
+            out[i] = std::byte{chosen};
         }
 
         return out;
@@ -180,10 +177,10 @@ namespace
 
         [[nodiscard]] std::size_t size() const noexcept { return m_size; }
 
-        [[nodiscard]] DetourModKit::Memory::ModuleRange range() const noexcept
+        [[nodiscard]] DetourModKit::detail::ModuleSpan range() const noexcept
         {
             const auto base = reinterpret_cast<std::uintptr_t>(m_base);
-            return DetourModKit::Memory::ModuleRange{base, base + m_size};
+            return DetourModKit::detail::ModuleSpan{base, base + m_size};
         }
 
     private:
@@ -191,11 +188,11 @@ namespace
         std::size_t m_size = 0;
     };
 
-    // Build a CompiledPattern whose anchor is forced to the first literal byte. This emulates the simpler scanner: it
+    // Build an EnginePattern whose anchor is forced to the first literal byte. This emulates the simpler scanner: it
     // always anchors on the start of the pattern (after skipping leading wildcards), rather than on the rarest literal.
-    CompiledPattern make_naive_pattern(const CompiledPattern &smart)
+    EnginePattern make_naive_pattern(const EnginePattern &smart)
     {
-        CompiledPattern copy = smart;
+        EnginePattern copy = smart;
         std::size_t anchor = smart.size();
         for (std::size_t i = 0; i < smart.size(); ++i)
         {
@@ -246,18 +243,18 @@ namespace
     void run_scenario(const Scenario &scenario, std::span<const std::byte> buffer, std::size_t iterations,
                       std::size_t samples)
     {
-        auto parsed = DetourModKit::Scanner::parse_aob(scenario.aob);
+        auto parsed = DetourModKit::detail::parse_aob(scenario.aob);
         if (!parsed.has_value())
         {
             std::fprintf(stderr, "[bench] failed to parse AOB: %s\n", scenario.aob);
             return;
         }
-        const CompiledPattern smart = std::move(*parsed);
-        const CompiledPattern naive = make_naive_pattern(smart);
+        const EnginePattern smart = std::move(*parsed);
+        const EnginePattern naive = make_naive_pattern(smart);
 
         // Sanity check: warm up + assert both anchors point at literal bytes.
-        const auto *warm_smart = DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), smart);
-        const auto *warm_naive = DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), naive);
+        const auto *warm_smart = DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), smart);
+        const auto *warm_naive = DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), naive);
         // Both must agree on the result (either both nullptr or both same address).
         if (warm_smart != warm_naive)
         {
@@ -272,7 +269,7 @@ namespace
                                [&]()
                                {
                                    const auto *m =
-                                       DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), smart);
+                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), smart);
                                    s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
                                });
 
@@ -281,7 +278,7 @@ namespace
                                [&]()
                                {
                                    const auto *m =
-                                       DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), naive);
+                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), naive);
                                    s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
                                });
 
@@ -320,15 +317,15 @@ namespace
         const std::size_t plant_offset = buffer_size - 4096u;
         plant_signature(buffer, plant_offset, {SENTINEL, 0xDE, 0xAD, 0xBE, 0xEF, 0xC0, 0x1D, 0xF0});
 
-        auto parsed = DetourModKit::Scanner::parse_aob("37 DE AD BE EF C0 1D F0");
+        auto parsed = DetourModKit::detail::parse_aob("37 DE AD BE EF C0 1D F0");
         if (!parsed.has_value())
         {
             std::fprintf(stderr, "[bench] prefilter AOB parse failed\n");
             return;
         }
-        const CompiledPattern pattern = std::move(*parsed);
+        const EnginePattern pattern = std::move(*parsed);
 
-        const auto *warm = DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), pattern);
+        const auto *warm = DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern);
         if (warm == nullptr)
         {
             std::fprintf(stderr, "[bench] prefilter signature not found\n");
@@ -341,7 +338,7 @@ namespace
                                [&]()
                                {
                                    const auto *m =
-                                       DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), pattern);
+                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern);
                                    s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
                                });
 
@@ -368,15 +365,15 @@ namespace
     /// Returns the human-readable name of the SIMD verify tier find_pattern selects at runtime.
     const char *active_simd_tier_name()
     {
-        switch (DetourModKit::Scanner::active_simd_level())
+        switch (DetourModKit::detail::active_simd_level())
         {
-        case DetourModKit::Scanner::SimdLevel::Avx512:
+        case DetourModKit::scan::SimdLevel::Avx512:
             return "AVX-512";
-        case DetourModKit::Scanner::SimdLevel::Avx2:
+        case DetourModKit::scan::SimdLevel::Avx2:
             return "AVX2";
-        case DetourModKit::Scanner::SimdLevel::Sse2:
+        case DetourModKit::scan::SimdLevel::Sse2:
             return "SSE2";
-        case DetourModKit::Scanner::SimdLevel::Scalar:
+        case DetourModKit::scan::SimdLevel::Scalar:
             return "Scalar";
         }
         return "?";
@@ -408,20 +405,20 @@ namespace
         {
             aob += "AA ";
         }
-        auto parsed = DetourModKit::Scanner::parse_aob(aob);
+        auto parsed = DetourModKit::detail::parse_aob(aob);
         if (!parsed.has_value())
         {
             std::fprintf(stderr, "[bench] verify AOB parse failed\n");
             return;
         }
-        const CompiledPattern pattern = std::move(*parsed);
+        const EnginePattern pattern = std::move(*parsed);
 
         const double us =
             median_us_per_iter(iterations, samples,
                                [&]()
                                {
                                    const auto *m =
-                                       DetourModKit::Scanner::find_pattern(buffer.data(), buffer.size(), pattern);
+                                       DetourModKit::detail::find_pattern(buffer.data(), buffer.size(), pattern);
                                    s_sink.fetch_add(reinterpret_cast<std::uintptr_t>(m), std::memory_order_relaxed);
                                });
 
@@ -439,6 +436,8 @@ namespace
     void run_resolver_batch_bench(std::size_t module_size, std::size_t target_count, std::size_t iterations,
                                   std::size_t samples, std::size_t max_workers)
     {
+        using namespace DetourModKit;
+
         BenchPage page(module_size);
         if (!page.ok())
         {
@@ -447,12 +446,12 @@ namespace
         }
         std::memset(page.bytes(), 0xCC, page.size());
 
-        std::vector<std::string> labels(target_count);
-        std::vector<std::string> aobs(target_count);
-        std::vector<DetourModKit::Scanner::AddrCandidate> candidates(target_count);
-        std::vector<DetourModKit::Scanner::CascadeRequest> requests(target_count);
+        // OwnedScanRequest owns ladder + label, so the spans stay valid for the lifetime of the bench.
+        std::vector<scan::OwnedScanRequest> owned(target_count);
         std::vector<std::uintptr_t> expected(target_count, 0);
 
+        const detail::ModuleSpan mod_range = page.range();
+        const Region mod_region{Address{mod_range.base}, mod_range.end - mod_range.base};
         const std::size_t spacing = (module_size - 8192u) / target_count;
         for (std::size_t i = 0; i < target_count; ++i)
         {
@@ -460,40 +459,51 @@ namespace
             const std::size_t offset = 4096u + i * spacing;
             std::memcpy(page.bytes() + offset, sig.data(), sig.size());
             expected[i] = reinterpret_cast<std::uintptr_t>(page.bytes() + offset);
-            labels[i] = "resolver_" + std::to_string(i);
-            aobs[i] = bytes_to_aob(sig);
-            candidates[i] = DetourModKit::Scanner::AddrCandidate{labels[i], aobs[i],
-                                                                 DetourModKit::Scanner::ResolveMode::Direct, 0, 0};
-            requests[i].candidates = std::span<const DetourModKit::Scanner::AddrCandidate>(&candidates[i], 1);
-            requests[i].label = labels[i];
-            requests[i].range = page.range();
+            const std::string aob = bytes_to_aob(sig);
+            auto pat = scan::Pattern::compile(aob);
+            if (!pat.has_value())
+            {
+                std::fprintf(stderr, "[bench] failed to compile pattern for resolver_%zu\n", i);
+                return;
+            }
+            owned[i].label = "resolver_" + std::to_string(i);
+            owned[i].ladder.push_back(scan::Candidate::direct(owned[i].label, std::move(*pat)));
+            owned[i].scope = mod_region;
+        }
+
+        // Build a vector of borrowed ScanRequests for resolve_batch.
+        std::vector<scan::ScanRequest> requests;
+        requests.reserve(target_count);
+        for (auto &o : owned)
+        {
+            requests.push_back(o.view());
         }
 
         for (std::size_t i = 0; i < target_count; ++i)
         {
-            const auto serial = DetourModKit::Scanner::resolve_cascade_in_module(requests[i].candidates,
-                                                                                 requests[i].label, *requests[i].range);
-            if (!serial || serial->address != expected[i])
+            const auto serial = scan::resolve(requests[i]);
+            if (!serial || serial->address.raw() != expected[i])
             {
                 std::fprintf(stderr, "[bench] resolver serial sanity failed at item %zu\n", i);
                 return;
             }
         }
 
-        const auto warm_batch = DetourModKit::Scanner::resolve_cascade_batch(requests, max_workers);
-        if (warm_batch.size() != target_count)
+        const auto warm_result = scan::resolve_batch(std::span{requests}, max_workers);
+        if (!warm_result || warm_result->size() != target_count)
         {
             std::fprintf(stderr, "[bench] resolver batch sanity returned wrong size\n");
             return;
         }
+        const auto &warm_batch = *warm_result;
         for (std::size_t i = 0; i < target_count; ++i)
         {
-            if (!warm_batch[i] || warm_batch[i]->address != expected[i])
+            if (!warm_batch[i] || warm_batch[i]->address.raw() != expected[i])
             {
                 std::fprintf(stderr, "[bench] resolver batch sanity failed at item %zu\n", i);
                 return;
             }
-            s_sink.fetch_add(warm_batch[i]->address, std::memory_order_relaxed);
+            s_sink.fetch_add(warm_batch[i]->address.raw(), std::memory_order_relaxed);
         }
 
         const double us_serial =
@@ -502,9 +512,8 @@ namespace
                                {
                                    for (const auto &request : requests)
                                    {
-                                       const auto hit = DetourModKit::Scanner::resolve_cascade_in_module(
-                                           request.candidates, request.label, *request.range);
-                                       s_sink.fetch_add(hit ? hit->address : 0, std::memory_order_relaxed);
+                                       const auto hit = scan::resolve(request);
+                                       s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
                                    }
                                });
 
@@ -512,12 +521,18 @@ namespace
             median_us_per_iter(iterations, samples,
                                [&]()
                                {
-                                   const auto results =
-                                       DetourModKit::Scanner::resolve_cascade_batch(requests, max_workers);
-                                   for (std::size_t i = 0; i < results.size(); ++i)
+                                   const auto batch = scan::resolve_batch(std::span{requests}, max_workers);
+                                   if (batch)
                                    {
-                                       const auto &hit = results[i];
-                                       s_sink.fetch_add(hit ? hit->address : 0, std::memory_order_relaxed);
+                                       // Index the inner vector rather than range-for over it: a range-for forces the
+                                       // GCC 15 libstdc++ <expected> equality-constraint to be evaluated for the bare
+                                       // expected element type, which self-recurses and fails to compile. Indexed
+                                       // access never drags operator== into overload resolution.
+                                       for (std::size_t ri = 0; ri < batch->size(); ++ri)
+                                       {
+                                           const auto &hit = (*batch)[ri];
+                                           s_sink.fetch_add(hit ? hit->address.raw() : 0, std::memory_order_relaxed);
+                                       }
                                    }
                                });
 
@@ -558,18 +573,18 @@ int main(int argc, char **argv)
     std::printf("Buffer: %zu bytes (code-like byte distribution, seed 0x%llx)\n", BUFFER_SIZE,
                 static_cast<unsigned long long>(SEED));
     std::printf("SIMD tier: ");
-    switch (DetourModKit::Scanner::active_simd_level())
+    switch (DetourModKit::detail::active_simd_level())
     {
-    case DetourModKit::Scanner::SimdLevel::Avx512:
+    case DetourModKit::scan::SimdLevel::Avx512:
         std::printf("AVX-512\n");
         break;
-    case DetourModKit::Scanner::SimdLevel::Avx2:
+    case DetourModKit::scan::SimdLevel::Avx2:
         std::printf("AVX2\n");
         break;
-    case DetourModKit::Scanner::SimdLevel::Sse2:
+    case DetourModKit::scan::SimdLevel::Sse2:
         std::printf("SSE2\n");
         break;
-    case DetourModKit::Scanner::SimdLevel::Scalar:
+    case DetourModKit::scan::SimdLevel::Scalar:
         std::printf("Scalar\n");
         break;
     }
@@ -624,8 +639,8 @@ int main(int argc, char **argv)
     constexpr std::size_t VERIFY_ITERS = 10;
     run_verify_bench(VERIFY_BUFFER, VERIFY_PATTERN_LEN, VERIFY_STRIDE, VERIFY_ITERS, SAMPLES);
 
-    // Startup-resolution layer benchmark. This times the consumer-facing cascade resolver instead of the raw
-    // CompiledPattern batch, preserving per-target candidate order and uniqueness checks.
+    // Startup-resolution layer benchmark. This times the consumer-facing ladder resolver instead of the raw
+    // EnginePattern batch, preserving per-target candidate order and uniqueness checks.
     constexpr std::size_t RESOLVER_MODULE = 8u * 1024u * 1024u;
     constexpr std::size_t RESOLVER_TARGETS = 16;
     constexpr std::size_t RESOLVER_ITERS = 5;

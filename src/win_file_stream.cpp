@@ -1,4 +1,4 @@
-#include "DetourModKit/win_file_stream.hpp"
+#include "internal/win_file_stream.hpp"
 
 #include <windows.h>
 #include <algorithm>
@@ -6,11 +6,11 @@
 #include <climits>
 #include <cstring>
 
-namespace DetourModKit
+namespace DetourModKit::detail
 {
     // --- WinFileStreamBuf ---
 
-    WinFileStreamBuf::WinFileStreamBuf() noexcept : m_handle(INVALID_HANDLE_VALUE)
+    WinFileStreamBuf::WinFileStreamBuf() noexcept : m_handle(INVALID_HANDLE_VALUE), m_buffer{}
     {
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
     }
@@ -228,4 +228,4 @@ namespace DetourModKit
         m_buf.close();
     }
 
-} // namespace DetourModKit
+} // namespace DetourModKit::detail

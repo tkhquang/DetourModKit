@@ -3,7 +3,7 @@
  * @brief Durable serialization of self-heal drift reports.
  */
 
-#include "DetourModKit/drift_manifest.hpp"
+#include "DetourModKit/detail/drift_manifest.hpp"
 
 #include <charconv>
 #include <fstream>
@@ -12,45 +12,58 @@
 
 namespace DetourModKit
 {
-    namespace Rtti
+    namespace rtti
     {
         namespace
         {
             constexpr std::string_view MANIFEST_HEADER = "# DetourModKit drift manifest v1";
             constexpr char FIELD_SEP = '\t';
 
-            // Stable round-trip tokens for HealError, deliberately distinct from the verbose human-readable
-            // heal_error_to_string text (which is for logs):
-            // a manifest must parse back even if the log wording is reworded.
-            [[nodiscard]] std::string_view heal_error_token(HealError error) noexcept
+            // Stable round-trip tokens for the Rtti-block heal ErrorCodes, deliberately distinct from the verbose
+            // human-readable Error::message() text (which is for logs): a manifest must parse back even if the log
+            // wording is reworded, so the token strings are frozen independently of the enumerator spellings.
+            // A drift entry's error is meaningful only when ok == false, and heal_report only ever writes Ok (the
+            // healed default) or one of the three Rtti-block heal codes. Give each a distinct token -- including Ok --
+            // so the ErrorCode round-trips exactly rather than a successful entry's Ok collapsing to a failure token.
+            // The default arm still maps any unexpected code to BadDescriptor so a malformed producer never emits an
+            // untokenizable field.
+            [[nodiscard]] std::string_view heal_error_token(ErrorCode error) noexcept
             {
                 switch (error)
                 {
-                case HealError::BadDescriptor:
+                case ErrorCode::Ok:
+                    return "Ok";
+                case ErrorCode::BadDescriptor:
                     return "BadDescriptor";
-                case HealError::NoMatch:
+                case ErrorCode::HealNoMatch:
                     return "NoMatch";
-                case HealError::Ambiguous:
+                case ErrorCode::HealAmbiguous:
                     return "Ambiguous";
+                default:
+                    return "BadDescriptor";
                 }
-                return "BadDescriptor";
             }
 
-            [[nodiscard]] bool parse_heal_error(std::string_view token, HealError &out) noexcept
+            [[nodiscard]] bool parse_heal_error(std::string_view token, ErrorCode &out) noexcept
             {
+                if (token == "Ok")
+                {
+                    out = ErrorCode::Ok;
+                    return true;
+                }
                 if (token == "BadDescriptor")
                 {
-                    out = HealError::BadDescriptor;
+                    out = ErrorCode::BadDescriptor;
                     return true;
                 }
                 if (token == "NoMatch")
                 {
-                    out = HealError::NoMatch;
+                    out = ErrorCode::HealNoMatch;
                     return true;
                 }
                 if (token == "Ambiguous")
                 {
-                    out = HealError::Ambiguous;
+                    out = ErrorCode::HealAmbiguous;
                     return true;
                 }
                 return false;
@@ -67,6 +80,13 @@ namespace DetourModKit
                 const char *const end = field.data() + field.size();
                 const auto result = std::from_chars(begin, end, out);
                 return result.ec == std::errc{} && result.ptr == end;
+            }
+
+            // Fail-closed manifest error: a code from the unified ErrorCategory::Manifest block, tagged with the
+            // module label. Error construction never allocates, so this is safe on any path.
+            [[nodiscard]] std::unexpected<Error> manifest_error(ErrorCode code) noexcept
+            {
+                return std::unexpected(Error{code, "rtti::drift_manifest"});
             }
         } // anonymous namespace
 
@@ -94,7 +114,7 @@ namespace DetourModKit
             return out;
         }
 
-        std::expected<std::vector<DriftRecord>, ManifestError> parse_drift_report(std::string_view text)
+        Result<std::vector<DriftRecord>> parse_drift_report(std::string_view text)
         {
             std::vector<DriftRecord> records;
             bool header_seen = false;
@@ -120,7 +140,7 @@ namespace DetourModKit
                 {
                     if (line != MANIFEST_HEADER)
                     {
-                        return std::unexpected(ManifestError::MissingHeader);
+                        return manifest_error(ErrorCode::MissingHeader);
                     }
                     header_seen = true;
                     continue;
@@ -151,7 +171,7 @@ namespace DetourModKit
                 }
                 if (too_many || field_count != 6)
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
 
                 DriftRecord record;
@@ -159,7 +179,7 @@ namespace DetourModKit
                 if (!parse_offset(fields[1], record.nominal_offset) || !parse_offset(fields[2], record.healed_offset) ||
                     !parse_offset(fields[3], record.delta))
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
                 if (fields[4] == "1")
                 {
@@ -171,18 +191,18 @@ namespace DetourModKit
                 }
                 else
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
                 if (!parse_heal_error(fields[5], record.error))
                 {
-                    return std::unexpected(ManifestError::MalformedLine);
+                    return manifest_error(ErrorCode::MalformedLine);
                 }
                 records.push_back(std::move(record));
             }
 
             if (!header_seen)
             {
-                return std::unexpected(ManifestError::MissingHeader);
+                return manifest_error(ErrorCode::MissingHeader);
             }
             return records;
         }
@@ -201,7 +221,7 @@ namespace DetourModKit
             return static_cast<bool>(file);
         }
 
-        std::expected<std::vector<DriftRecord>, ManifestError> read_drift_report_from_file(const std::string &path)
+        Result<std::vector<DriftRecord>> read_drift_report_from_file(const std::string &path)
         {
             std::ifstream file(path, std::ios::binary);
             if (!file)
@@ -209,10 +229,10 @@ namespace DetourModKit
                 // An open failure (missing file, lock, permission, or a directory) is distinct from a
                 // present-but-corrupt manifest: the latter flows through parse_drift_report and reports MissingHeader /
                 // MalformedLine.
-                return std::unexpected(ManifestError::FileOpenFailed);
+                return manifest_error(ErrorCode::FileOpenFailed);
             }
             const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
             return parse_drift_report(text);
         }
-    } // namespace Rtti
+    } // namespace rtti
 } // namespace DetourModKit

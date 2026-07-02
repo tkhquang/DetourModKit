@@ -1,742 +1,498 @@
 #ifndef DETOURMODKIT_INPUT_HPP
 #define DETOURMODKIT_INPUT_HPP
 
-#include "DetourModKit/input_codes.hpp"
-#include "DetourModKit/config.hpp"
-#include "DetourModKit/srw_shared_mutex.hpp"
+/**
+ * @file input.hpp
+ * @brief Hotkey and gamepad input surface: combo bindings, edge detection, and opt-in passthrough suppression.
+ * @details Speaks the foundation value vocabulary (Result, ErrorCode) and the per-token InputCode types from
+ *          input_codes.hpp. A binding is registered once as a ComboBinding and is owned by a move-only BindingGuard;
+ *          a Scope batches guards and releases them in reverse insertion order. The Input facade owns a single
+ *          background poll thread and the process-global interception layer (one XInput hook plus one
+ *          window-procedure subclass), merging a singleton manager facade and a separate polling engine into one
+ *          entry point.
+ *
+ *          The installed header carries no Win32 type and no hooking-backend type: the poll thread, the device
+ *          snapshots, and the detour state live in the non-installed engine under src/internal/ and are reached only
+ *          through this facade. Key-name parsing and formatting stay in input_codes.hpp.
+ *
+ *          Combo vocabulary (KeyCombo / KeyComboList) lives here, not in config: a combo is a pure input concept (a
+ *          set of trigger codes plus modifier codes), and the input API consumes it directly. The config module
+ *          depends on input to fuse an INI key to a live combo binding, never the reverse.
+ */
 
-#include <atomic>
+#include "DetourModKit/error.hpp"
+#include "DetourModKit/input_codes.hpp"
+
 #include <chrono>
-#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <string_view>
-#include <thread>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace DetourModKit
 {
-    /**
-     * @enum InputMode
-     * @brief Defines how a registered key binding is triggered.
-     */
-    enum class InputMode
+    namespace detail
     {
-        Press,
-        Hold
-    };
+        // The poll/edge-detection engine. Defined in the non-installed src/internal/input_poller.hpp; named here only
+        // so BindingToken can grant it friendship (the engine mints and validates tokens against its binding set).
+        class InputPoller;
+    } // namespace detail
 
-    /**
-     * @brief Converts an InputMode enum to its string representation.
-     * @param mode The InputMode enum value.
-     * @return std::string_view String representation of the mode.
-     */
-    [[nodiscard]] constexpr std::string_view input_mode_to_string(InputMode mode) noexcept
+    namespace input
     {
-        switch (mode)
+        /**
+         * @struct KeyCombo
+         * @brief One alternative key combination: OR across keys, AND across modifiers.
+         * @details The keys vector is OR logic (any single trigger fires the combo); the modifiers vector is AND logic
+         *          (all listed modifiers must be held). Each InputCode tags both the device source and the button/key
+         *          code. All codes in one combo should be from the same device group (keyboard/mouse or gamepad);
+         *          mouse-wheel codes are a standalone, trigger-only source.
+         */
+        struct KeyCombo
         {
-        case InputMode::Press:
-            return "Press";
-        case InputMode::Hold:
-            return "Hold";
-        }
-        return "Unknown";
-    }
-
-    // Input system configuration defaults
-    inline constexpr std::chrono::milliseconds DEFAULT_POLL_INTERVAL{16};
-    inline constexpr std::chrono::milliseconds MIN_POLL_INTERVAL{1};
-    inline constexpr std::chrono::milliseconds MAX_POLL_INTERVAL{1000};
-
-    /**
-     * @struct InputBinding
-     * @brief Describes a single input-to-action binding.
-     * @details Holds the action name, input codes, modifier codes, input mode, and callbacks. For Press mode, the press
-     *          callback fires on key-down edge. For Hold mode, the state callback fires with true on press and false on
-     *          release (including during shutdown for active holds).
-     *
-     *          The keys vector uses OR logic: any single input triggers the binding. The modifiers vector uses AND
-     *          logic: all modifiers must be held simultaneously for the binding to activate. Modifier matching is
-     *          strict: any key that appears as a modifier in *any* registered
-     *          binding will block bindings that do not list it as a required modifier. This prevents "V" from firing
-     *          when "Shift+V" is pressed.
-     *
-     *          Each InputCode identifies both the device source (keyboard, mouse, gamepad, mouse wheel) and the
-     *          button/key code. All codes within a binding should be from the same device group (keyboard/mouse or
-     *          gamepad); mouse-wheel codes are a standalone source and should not be mixed with other devices in one
-     *          binding. Mouse-wheel codes are trigger-only and Press-mode: the wheel has no held state, so a single
-     *          notch reads as one Press edge.
-     *
-     *          When @c consume is set, the binding's trigger is additionally hidden from the game (see the @c consume
-     *          field).
-     *
-     * @warning Callbacks are invoked on the polling thread. They must not capture references or pointers to objects
-     *          whose lifetime may end before shutdown() completes. Callbacks should execute quickly to avoid degrading
-     *          the effective poll rate.
-     */
-    struct InputBinding
-    {
-        std::string name;
-        std::vector<InputCode> keys;
-        std::vector<InputCode> modifiers;
-        InputMode mode = InputMode::Press;
-
-        /**
-         * Opt-in input suppression. When true, the binding's trigger input is hidden from the game so it does not also
-         * act on it (for example an "LB + D-pad" zoom that must not open the map when released). Honored for digital
-         * gamepad buttons (D-pad, face buttons, bumpers, stick clicks) via an XInputGetState hook, and for the mouse
-         * wheel via the window-procedure hook. Analog triggers and stick directions cannot be masked (the detour clears
-         * only the digital button bitmask), and keyboard/mouse-button suppression is not provided. Default off keeps
-         * the input system purely observational.
-         */
-        bool consume = false;
-
-        std::function<void()> on_press;
-        std::function<void(bool)> on_state_change;
-    };
-
-    /**
-     * @class BindingToken
-     * @brief Generation-checked handle to a named binding's resolved entry set.
-     * @details A high-frequency consumer (a render thread polling a hotkey every frame) can resolve a binding name to a
-     *          token once with InputManager::acquire_binding_token / InputPoller::acquire_binding_token, then query it
-     *          every frame with the BindingToken overload of is_binding_active. The token caches the name's resolved
-     *          entry indices, so a query skips the per-call name hash lookup the string_view overload performs.
-     *
-     *          The token is stamped with the binding generation it was minted at. Any reshape of the binding set
-     *          (register / remove / clear / combo update / consume change) advances the generation, so a query through
-     *          a stale token fails closed -- it returns false without dereferencing the now-meaningless cached indices,
-     *          rather than reading a different binding's state. The generation is drawn from a process-wide monotonic
-     *          counter, so a token minted by one poller can never alias a different poller (for example after an
-     *          InputManager::shutdown / start cycle replaces the underlying poller): its generation simply never
-     *          matches again.
-     *
-     *          A consumer detects staleness with binding_token_current() (or by re-acquiring after a known reshape such
-     *          as an INI hot-reload) and re-acquires to recover. A default-constructed token, a token for an unknown
-     *          name, and a token whose resolution ran out of memory are all invalid (valid() == false) and always read
-     *          inactive.
-     * @note The token is only meaningful to the poller (or the InputManager wrapping it) that minted it.
-     */
-    class BindingToken
-    {
-    public:
-        BindingToken() = default;
-
-        /**
-         * @brief Reports whether the token resolved a name at acquisition time.
-         * @details true only when acquire_binding_token found the name and resolved its entries. It does NOT imply the
-         *          token is still current: a valid token can be stale after a reshape. Use binding_token_current(), or
-         *          is_binding_active which fails closed, to test currency.
-         * @return true when the token names a resolved binding set; false for a default, unknown-name, or
-         *         allocation-failed token.
-         */
-        [[nodiscard]] bool valid() const noexcept { return m_generation != 0; }
-
-    private:
-        friend class InputPoller;
-
-        // Binding generation this token was minted at; 0 marks an unresolved (invalid) token. A live generation is
-        // always >= 1 (drawn from the process-wide counter that starts at 1), so 0 can never collide with a real one.
-        std::uint64_t m_generation{0};
-
-        // The name's resolved entry indices into the poller's binding array, captured at acquire time. Read only while
-        // m_generation still matches the poller's live generation, which guarantees these indices remain in bounds and
-        // address the same bindings.
-        std::vector<std::size_t> m_indices;
-    };
-
-    /**
-     * @class InputPoller
-     * @brief RAII input polling engine that monitors key states on a background thread.
-     * @details Manages a dedicated polling thread that checks virtual key states via
-     *          GetAsyncKeyState. Supports both press (edge-triggered) and hold (level-triggered) input modes with
-     *          optional modifier key combinations. When require_focus is enabled (default), key events are only
-     *          processed when the current process owns the foreground window.
-     *
-     *          On shutdown, active hold bindings receive an on_state_change(false) callback to ensure consumers are
-     *          notified of the release.
-     *
-     * @note Non-copyable, non-movable. Callbacks are invoked on the polling thread.
-     * @note This class is the building block for the InputManager singleton.
-     *
-     * @warning When used inside a DLL, shutdown() must be called before DLL_PROCESS_DETACH. Calling join() on a thread
-     *          during DllMain can deadlock due to the loader lock. Use DMK_Shutdown() to ensure proper teardown
-     *          ordering.
-     * @warning The opt-in interception layer (mouse-wheel capture and gamepad passthrough suppression) is backed by
-     *          process-global state and a single set of hooks: one XInput hook bound to a single gamepad index, one
-     *          window-procedure subclass, and one suppression mask. At most one
-     *          InputPoller may therefore use those features at a time; running two pollers that both register consume
-     *          or mouse-wheel bindings is unsupported and would have them fight over the shared mask and hooks. The
-     *          InputManager singleton is the intended single-instance owner. Purely observational pollers (no consume,
-     *          no wheel bindings) install nothing and are unaffected.
-     */
-    class InputPoller
-    {
-    public:
-        /**
-         * @brief Constructs an InputPoller with the given bindings and poll interval.
-         * @param bindings Vector of input bindings to monitor.
-         * @param poll_interval Time between polling cycles.
-         * @param require_focus When true, key events are ignored unless the current process owns the foreground window.
-         * @param gamepad_index XInput controller index (0-3) to poll for gamepad bindings.
-         * @param trigger_threshold Analog trigger deadzone threshold (0-255). Trigger values above this threshold are
-         *                          considered "pressed".
-         * @param stick_threshold Thumbstick deadzone threshold (0-32767). Axis values exceeding this threshold in any
-         *                        direction are "pressed".
-         * @note The polling thread does not start until start() is called.
-         */
-        explicit InputPoller(std::vector<InputBinding> bindings,
-                             std::chrono::milliseconds poll_interval = DEFAULT_POLL_INTERVAL, bool require_focus = true,
-                             int gamepad_index = 0, int trigger_threshold = GamepadCode::TriggerThreshold,
-                             int stick_threshold = GamepadCode::StickThreshold);
-
-        ~InputPoller() noexcept;
-
-        InputPoller(const InputPoller &) = delete;
-        InputPoller &operator=(const InputPoller &) = delete;
-        InputPoller(InputPoller &&) = delete;
-        InputPoller &operator=(InputPoller &&) = delete;
-
-        /**
-         * @brief Starts the polling thread.
-         * @details Safe to call only once. Subsequent calls are ignored with a warning.
-         * @note Not thread-safe. Must be called from a single thread. Use
-         *       InputManager::start() for a thread-safe wrapper.
-         */
-        void start();
-
-        /**
-         * @brief Checks if the polling thread is currently running.
-         * @return true if the poller is active and monitoring keys.
-         */
-        [[nodiscard]] bool is_running() const noexcept;
-
-        /**
-         * @brief Returns the number of registered bindings under the binding reader lock.
-         *
-         * @return size_t Number of bindings.
-         */
-        [[nodiscard]] size_t binding_count() const noexcept;
-
-        /**
-         * @brief Returns the configured poll interval.
-         * @return std::chrono::milliseconds The poll interval.
-         */
-        [[nodiscard]] std::chrono::milliseconds poll_interval() const noexcept;
-
-        /**
-         * @brief Returns the configured gamepad controller index.
-         * @return int The XInput controller index (0-3).
-         */
-        [[nodiscard]] int gamepad_index() const noexcept;
-
-        /**
-         * @brief Queries whether a binding is currently active by index.
-         * @param index Zero-based index into the bindings vector.
-         * @return true if the binding's key(s) are currently pressed. Returns false for out-of-range indices.
-         * @note Thread-safe. Acquires m_bindings_rw_mutex as a reader so the index/array pair stays consistent across
-         *       reshape calls (add_binding, remove_bindings_by_name, update_combos). The fast path is the cheap
-         *       shared_lock acquire when no writer is in flight.
-         */
-        [[nodiscard]] bool is_binding_active(size_t index) const noexcept;
-
-        /**
-         * @brief Queries whether a binding is currently active by name.
-         * @param name The binding name to look up.
-         * @return true if the named binding's key(s) are currently pressed. Returns false if no binding with the given
-         *         name exists.
-         * @note Thread-safe. Can be called from any thread.
-         */
-        [[nodiscard]] bool is_binding_active(std::string_view name) const noexcept;
-
-        /**
-         * @brief Resolves a binding name to a generation-checked token for repeated low-overhead queries.
-         * @details Looks the name up once under the binding reader lock and captures its resolved entry indices plus
-         *          the current binding generation. A high-frequency consumer holds the returned token and queries it
-         *          with is_binding_active(const BindingToken &), skipping the name hash lookup the string_view overload
-         *          repeats per call. The token fails closed after any reshape (see BindingToken).
-         * @param name The binding name to resolve.
-         * @return A valid token when the name is registered; an invalid token (BindingToken::valid() == false) when the
-         *         name is unknown or resolution runs out of memory.
-         * @note Thread-safe. Setup/control-plane: resolving a token copies the name's index set and may allocate. Mint
-         *       the token once (or after a reshape), not every frame; the per-frame query path is the BindingToken
-         *       overload of is_binding_active.
-         */
-        [[nodiscard]] BindingToken acquire_binding_token(std::string_view name) const noexcept;
-
-        /**
-         * @brief Queries whether a binding is currently active through a previously acquired token.
-         * @details Callback-safe hot-path query: acquires the binding reader lock, verifies the token's generation
-         *          still matches the live binding generation, and ORs the cached entry indices against the active-state
-         *          array. A stale token (any reshape since acquisition) or an invalid token returns false without
-         *          dereferencing its indices.
-         * @param token A token from acquire_binding_token().
-         * @return true if any entry of the token's binding is currently pressed; false if inactive, stale, or invalid.
-         * @note Thread-safe. Callback-safe: a shared_lock acquire plus a relaxed atomic load per cached entry, no name
-         *       hash and no allocation.
-         */
-        [[nodiscard]] bool is_binding_active(const BindingToken &token) const noexcept;
-
-        /**
-         * @brief Reports whether a token still matches the live binding generation.
-         * @details Lets a consumer detect a reshape and re-acquire instead of silently reading inactive. Equivalent to
-         *          asking whether is_binding_active(token) would evaluate the cached indices rather than fail closed.
-         * @param token A token from acquire_binding_token().
-         * @return true when the token is valid and its generation matches the current binding set; false otherwise.
-         * @note Thread-safe. Callback-safe: a shared_lock acquire and a single integer comparison.
-         */
-        [[nodiscard]] bool binding_token_current(const BindingToken &token) const noexcept;
-
-        /**
-         * @brief Sets whether the poller requires the current process to own the foreground window before processing
-         *        key events.
-         * @param require_focus true to enable focus checking (default), false to disable.
-         * @note Thread-safe. Can be called while the poller is running.
-         */
-        void set_require_focus(bool require_focus) noexcept;
-
-        /**
-         * @brief Sets the input-suppression flag on every binding sharing @p name.
-         * @details Updates the @c consume flag on all matching bindings and refreshes the interception gates so the
-         *          XInput / window-procedure hooks are installed (or left uninstalled) on the next poll cycle. A no-op
-         *          if the name was never registered. Thread-safe; may be called while the poller is running.
-         * @param name Binding name previously registered.
-         * @param consume true to hide the binding's trigger from the game.
-         */
-        void set_consume(std::string_view name, bool consume) noexcept;
-
-        /**
-         * @brief Stops the polling thread.
-         * @details Signals the thread to stop and waits for it to join. After the thread has joined, fires
-         *          on_state_change(false) for any hold bindings that were active at the time of shutdown. Safe to call
-         *          multiple times.
-         */
-        void shutdown() noexcept;
-
-        /**
-         * @brief Replaces the trigger combos of all bindings sharing @p name.
-         * @details The poller maps each combo passed to register_press/register_hold to an independent binding entry
-         *          with a shared name. When the replacement count matches the existing entry count, keys and modifiers
-         *          are overwritten in place. When the count differs, the existing entries are erased and one entry per
-         *          replacement combo is appended; callbacks, binding mode, and binding name inherit from the first
-         *          existing entry.
-         *
-         *          An empty replacement list is a valid binding state meaning "no keys bound": the existing entries are
-         *          erased and a single inert sentinel entry takes their place so the binding name remains addressable
-         *          for a later non-empty update. Held bindings receive an on_state_change(false) callback before the
-         *          swap completes. Safe to call while the poll thread is running.
-         * @param name Binding name previously registered.
-         * @param combos Replacement combos. May be empty to unbind.
-         * @return true on successful swap (including the unbind case), false only if the name was never registered.
-         */
-        [[nodiscard]] bool update_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
-
-        /**
-         * @brief Appends a binding to the running poller.
-         * @details Thread-safe. Takes the bindings rw mutex exclusively, so a concurrent poll cycle blocks for at most
-         *          the duration of its current tick. The m_active_states array is rebuilt to match the new binding
-         *          count, with the previous atomic value carried forward for every existing entry so a held binding
-         *          does not flicker through one inactive tick.
-         * @param binding Binding to append.
-         */
-        void add_binding(InputBinding binding) noexcept;
-
-        /**
-         * @brief Removes every binding whose name matches @p name.
-         * @details Thread-safe. Active hold bindings receive an on_state_change(false) callback before erasure. The
-         *          m_active_states array is rebuilt to match the new binding count, with the previous atomic value
-         *          carried forward for every surviving entry.
-         * @param name Binding name to remove.
-         * @return Number of bindings removed (zero if the name was not registered).
-         */
-        size_t remove_bindings_by_name(std::string_view name) noexcept { return remove_bindings_by_name(name, true); }
-
-        /**
-         * @brief Drops every binding without stopping the poll thread.
-         * @details Active hold bindings receive an on_state_change(false) callback before erasure. After the call the
-         *          poller has zero bindings and the poll thread keeps running idle. Thread-safe.
-         */
-        void clear_bindings() noexcept { clear_bindings(true); }
-
-        /**
-         * @brief Variant of remove_bindings_by_name that suppresses the on_state_change(false) release callbacks for
-         *        active holds.
-         * @details Used by the loader-lock-safe Bootstrap unload path: user callbacks live in a Logic DLL whose code
-         *          pages may be about to be unmapped, so invoking them under the loader lock would risk a deadlock or a
-         *          use-after-unload.
-         * @param name Binding name to remove.
-         * @param invoke_callbacks When true (default for the public API), active hold bindings receive
-         *                         on_state_change(false) before erasure. When false, the release callbacks are dropped
-         *                         on the floor.
-         * @return Number of bindings removed.
-         */
-        size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept;
-
-        /**
-         * @brief Variant of clear_bindings that suppresses the on_state_change(false) release callbacks for active
-         *        holds.
-         * @details See the single-argument overload of remove_bindings_by_name for the rationale; both overloads serve
-         *          the same loader-lock-safe teardown path.
-         * @param invoke_callbacks When true (default for the public API), active hold bindings receive
-         *                         on_state_change(false) before erasure. When false, the release callbacks are dropped.
-         */
-        void clear_bindings(bool invoke_callbacks) noexcept;
-
-    private:
-        void poll_loop(std::stop_token stop_token);
-        void release_active_holds() noexcept;
-        [[nodiscard]] bool is_process_foreground() const noexcept;
-        void recompute_modifier_caches_locked() noexcept;
-
-        /// Transparent hasher enabling std::string_view lookup without allocation.
-        struct StringHash
-        {
-            using is_transparent = void;
-            size_t operator()(std::string_view sv) const noexcept { return std::hash<std::string_view>{}(sv); }
+            std::vector<InputCode> keys;
+            std::vector<InputCode> modifiers;
         };
 
-        // m_bindings_rw_mutex protects m_bindings, m_name_index, m_known_modifiers, m_binding_generation, and
-        // m_has_gamepad_bindings when a live update is in flight. The poll loop holds a shared lock across the
-        // binding-evaluation pass of each cycle and releases it before dispatching user callbacks, so callbacks may
-        // call binding_count(), is_binding_active(), or update_binding_combos() without re-acquiring the non-recursive
-        // lock; update_combos() holds an exclusive lock across the swap. m_active_states entries are always accessed
-        // via atomic ops and need no further guard.
-        mutable detail::SrwSharedMutex m_bindings_rw_mutex;
-        std::vector<InputBinding> m_bindings;
-        std::unordered_map<std::string, std::vector<size_t>, StringHash, std::equal_to<>> m_name_index;
-        std::vector<InputCode> m_known_modifiers;
-        // Advances on every binding-set reshape (each rebuild of m_name_index, plus clear_bindings). A BindingToken
-        // captures this value at acquire time; a query whose token generation no longer matches fails closed. Guarded
-        // by m_bindings_rw_mutex, like the binding array it tracks.
-        std::uint64_t m_binding_generation{0};
-        std::chrono::milliseconds m_poll_interval;
-        std::atomic<bool> m_require_focus;
-        std::atomic<bool> m_running{false};
-        std::jthread m_poll_thread;
-        std::mutex m_cv_mutex;
-        std::condition_variable_any m_cv;
+        /// A list of alternative key combinations (OR logic between combos). An empty list means "no keys bound".
+        using KeyComboList = std::vector<KeyCombo>;
 
-        // Per-binding active state, indexed parallel to m_bindings. Atomic for cross-thread reads via
-        // is_binding_active().
-        std::unique_ptr<std::atomic<uint8_t>[]> m_active_states;
-
-        int m_gamepad_index;
-        int m_trigger_threshold;
-        int m_stick_threshold;
-        std::atomic<bool> m_has_gamepad_bindings{false};
-
-        // Interception gates, recomputed alongside the modifier caches. Each decides whether an active-input hook is
-        // installed lazily by the poll loop, so a mod that never opts in pays no interception cost.
-        // any MouseWheel trigger -> WndProc hook
-        std::atomic<bool> m_has_wheel_bindings{false};
-        // any consume gamepad binding -> XInput hook
-        std::atomic<bool> m_has_consume_gamepad_bindings{false};
-        // any consume wheel binding -> swallow wheel messages
-        std::atomic<bool> m_has_wheel_consume_bindings{false};
-    };
-
-    /**
-     * @class InputManager
-     * @brief Singleton that provides a convenient interface for registering and monitoring hotkey bindings.
-     * @details Wraps an InputPoller internally. Bindings are registered before calling start(), which constructs and
-     *          starts the poller. Integrates with DMK_Shutdown() for automatic cleanup.
-     *
-     * @note Thread-safe. For advanced use cases requiring multiple independent pollers or custom lifetime management,
-     *       use InputPoller directly.
-     *
-     * @warning When used inside a DLL, shutdown() must be called before DLL_PROCESS_DETACH. Calling join() on a thread
-     *          during DllMain can deadlock due to the loader lock.
-     */
-    class InputManager
-    {
-    public:
         /**
-         * @brief Retrieves the singleton instance of the InputManager.
-         * @return InputManager& Reference to the single InputManager instance.
+         * @enum Trigger
+         * @brief Edge model for a binding.
          */
-        static InputManager &get_instance()
+        enum class Trigger
         {
-            static InputManager instance;
-            return instance;
+            /// Fires the on_press callback once per key-down edge.
+            Press,
+            /**
+             * Fires on_state_change(true) on the press edge and on_state_change(false) on the release edge. The release
+             * edge is synthesized exactly once on teardown for a binding still held at shutdown.
+             */
+            Hold
+        };
+
+        /**
+         * @brief Converts a Trigger to its string representation.
+         * @param trigger The trigger mode.
+         * @return String form ("Press" / "Hold"), or "Unknown" for an out-of-range value.
+         */
+        [[nodiscard]] constexpr std::string_view to_string(Trigger trigger) noexcept
+        {
+            switch (trigger)
+            {
+            case Trigger::Press:
+                return "Press";
+            case Trigger::Hold:
+                return "Hold";
+            }
+            return "Unknown";
         }
 
-        /**
-         * @brief Registers a press-mode binding.
-         * @details The callback fires once per key-down edge for any key in the list. Can be called either before or
-         *          after start(); a binding registered while the poller is running is appended to the live binding set
-         *          and starts firing on the next poll cycle.
-         * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of input codes (any triggers the action).
-         * @param callback Function to invoke on key press.
-         */
-        void register_press(std::string_view name, const std::vector<InputCode> &keys, std::function<void()> callback);
+        /// Default poll cadence: 16 ms (~60 Hz), matching a typical frame budget.
+        inline constexpr std::chrono::milliseconds DEFAULT_POLL_INTERVAL{16};
+        /// Lower clamp for the poll interval.
+        inline constexpr std::chrono::milliseconds MIN_POLL_INTERVAL{1};
+        /// Upper clamp for the poll interval.
+        inline constexpr std::chrono::milliseconds MAX_POLL_INTERVAL{1000};
 
         /**
-         * @brief Registers a press-mode binding with modifier keys.
-         * @details The callback fires once per key-down edge for any key in the list, but only when all modifier inputs
-         *          are simultaneously held. Live registration is supported (see the no-modifier overload).
-         * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of input codes (any triggers the action).
-         * @param modifiers Vector of modifier input codes (all must be held).
-         * @param callback Function to invoke on key press.
-         */
-        void register_press(std::string_view name, const std::vector<InputCode> &keys,
-                            const std::vector<InputCode> &modifiers, std::function<void()> callback);
-
-        /**
-         * @brief Registers press-mode bindings from a KeyComboList.
-         * @details Registers one binding per combo in the list. All bindings share the same name, enabling OR-logic via
-         *          is_binding_active(). When @p combos is empty, a single sentinel binding with no keys is registered
-         *          so the name is reachable by update_binding_combos(). Live registration is supported.
-         * @param name Shared binding name for all combos.
-         * @param combos List of key combinations (each combo is registered independently).
-         * @param callback Function to invoke on key press.
-         */
-        void register_press(std::string_view name, const Config::KeyComboList &combos, std::function<void()> callback);
-
-        /**
-         * @brief Registers a hold-mode binding.
-         * @details The callback fires with true when any input in the list is pressed, and false when all are released.
-         *          Live registration is supported (see register_press for semantics).
-         * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of input codes (any activates the hold).
-         * @param callback Function invoked with the hold state (true = held, false = released).
-         */
-        void register_hold(std::string_view name, const std::vector<InputCode> &keys,
-                           std::function<void(bool)> callback);
-
-        /**
-         * @brief Registers a hold-mode binding with modifier keys.
-         * @details The callback fires with true when any input in the list is pressed and all modifier inputs are
-         *          simultaneously held, and false when the condition is no longer met. Live registration is supported.
-         * @param name Unique, descriptive name for the binding.
-         * @param keys Vector of input codes (any activates the hold).
-         * @param modifiers Vector of modifier input codes (all must be held).
-         * @param callback Function invoked with the hold state (true = held, false = released).
-         */
-        void register_hold(std::string_view name, const std::vector<InputCode> &keys,
-                           const std::vector<InputCode> &modifiers, std::function<void(bool)> callback);
-
-        /**
-         * @brief Registers hold-mode bindings from a KeyComboList.
-         * @details Registers one binding per combo in the list. All bindings share the same name, enabling OR-logic via
-         *          is_binding_active(). When @p combos is empty, a single sentinel binding with no keys is registered
-         *          so the name is reachable by update_binding_combos(). Live registration is supported.
-         * @param name Shared binding name for all combos.
-         * @param combos List of key combinations (each combo is registered independently).
-         * @param callback Function invoked with the hold state (true = held, false = released).
-         */
-        void register_hold(std::string_view name, const Config::KeyComboList &combos,
-                           std::function<void(bool)> callback);
-
-        /**
-         * @brief Sets whether the poller requires the current process to own the foreground window before processing
-         *        key events.
-         * @param require_focus true to enable focus checking (default), false to disable.
-         * @note Can be called before or after start(). Changes take effect immediately.
-         */
-        void set_require_focus(bool require_focus);
-
-        /**
-         * @brief Enables or disables input suppression for a named binding.
-         * @details Sets the @c consume flag on every binding sharing @p name, forwarding to the active poller when
-         *          running or updating pending bindings before start(). When enabled, the binding's trigger is hidden
-         *          from the game: digital gamepad buttons via an XInputGetState hook (analog triggers and stick
-         *          directions cannot be masked) and the mouse wheel via the window-procedure hook (keyboard and
-         *          mouse-button suppression are not provided). A no-op if the name is unknown. Thread-safe.
-         * @param name Binding name previously registered.
-         * @param consume true to hide the binding's trigger from the game.
-         */
-        void set_consume(std::string_view name, bool consume) noexcept;
-
-        /**
-         * @brief Sets the XInput controller index to poll for gamepad bindings.
-         * @param index Controller index (0-3). Clamped to valid range.
-         * @note Must be called before start(). Has no effect while the poller is running.
-         */
-        void set_gamepad_index(int index);
-
-        /**
-         * @brief Sets the analog trigger deadzone threshold for gamepad bindings.
-         * @param threshold Trigger values above this threshold (0-255) are "pressed".
-         * @note Must be called before start(). Has no effect while the poller is running.
-         */
-        void set_trigger_threshold(int threshold);
-
-        /**
-         * @brief Sets the thumbstick deadzone threshold for gamepad bindings.
-         * @param threshold Axis values exceeding this threshold (0-32767) are "pressed".
-         * @note Must be called before start(). Has no effect while the poller is running.
-         */
-        void set_stick_threshold(int threshold);
-
-        /**
-         * @brief Starts the input polling thread with all registered bindings.
-         * @details Constructs an internal InputPoller with the current bindings and begins monitoring. Registrations
-         *          made after start() are forwarded live to the active poller and take effect on the next poll cycle;
-         *          no stop or restart is required.
-         * @param poll_interval Time between polling cycles.
-         */
-        void start(std::chrono::milliseconds poll_interval = DEFAULT_POLL_INTERVAL);
-
-        /**
-         * @brief Checks if the input polling thread is currently running.
-         * @return true if the poller is active.
-         */
-        [[nodiscard]] bool is_running() const noexcept;
-
-        /**
-         * @brief Returns the number of registered bindings.
-         * @return size_t Number of bindings (pending or active).
-         */
-        [[nodiscard]] size_t binding_count() const noexcept;
-
-        /**
-         * @brief Queries whether a named binding is currently active.
-         * @param name The binding name to look up.
-         * @return true if the named binding's key(s) are currently pressed. Returns false if the poller is not running
-         *         or the name is unknown.
-         * @note Thread-safe. Can be called from any thread (e.g., render thread).
-         */
-        [[nodiscard]] bool is_binding_active(std::string_view name) const noexcept;
-
-        /**
-         * @brief Resolves a binding name to a generation-checked token against the running poller.
-         * @details Forwards to InputPoller::acquire_binding_token() on the active poller. Returns an invalid token when
-         *          the poller is not running or the name is unknown, so a token acquired before start() (or after
-         *          shutdown()) is simply invalid.
-         * @param name The binding name to resolve.
-         * @return A valid token when running and the name is registered; an invalid token otherwise.
-         * @note Thread-safe. Setup/control-plane: acquire once, then query with the BindingToken overload of
-         *       is_binding_active. See BindingToken for the staleness contract.
-         */
-        [[nodiscard]] BindingToken acquire_binding_token(std::string_view name) const noexcept;
-
-        /**
-         * @brief Queries whether a binding is currently active through a previously acquired token.
-         * @details Forwards to InputPoller::is_binding_active(const BindingToken &) on the active poller. Returns false
-         *          when the poller is not running, or when the token is stale or invalid.
-         * @param token A token from acquire_binding_token().
-         * @return true if the token's binding is currently pressed; false if inactive, stale, invalid, or not running.
-         * @note Thread-safe. Callback-safe: no name hash and no allocation on the query path.
-         */
-        [[nodiscard]] bool is_binding_active(const BindingToken &token) const noexcept;
-
-        /**
-         * @brief Reports whether a token still matches the running poller's binding generation.
-         * @details Forwards to InputPoller::binding_token_current(). Returns false when the poller is not running.
-         * @param token A token from acquire_binding_token().
-         * @return true when the token is valid and current against the active poller; false otherwise.
-         * @note Thread-safe. Lets a consumer re-acquire only when a reshape has invalidated its token.
-         */
-        [[nodiscard]] bool binding_token_current(const BindingToken &token) const noexcept;
-
-        /**
-         * @brief Replaces the trigger combos of all bindings sharing @p name.
-         * @details Forwards to the active InputPoller when running, or updates pending bindings before start(). The
-         *          binding's name, callback, and mode are preserved; only keys and modifiers are swapped. Any
-         *          cardinality is accepted: matching counts rewrite in place, differing counts rebuild the entry set
-         *          carrying callback identity forward.
+         * @struct ComboBinding
+         * @brief Declarative description of one named input binding, registered via register_combo.
+         * @details A ComboBinding is a designated-init aggregate. It carries every combo alternative under a single
+         *          name (OR logic between combos), the trigger mode, the suppression opt-in, and the callbacks. One
+         *          register_combo call materializes one binding entry per combo, all sharing the name, so a name-based
+         *          query is true when any of its combos is pressed.
          *
-         *          An empty replacement list unbinds the named binding while keeping a single inert sentinel entry so a
-         *          subsequent non-empty update can rebind it. Held bindings receive an on_state_change(false) callback
-         *          before the swap completes. If the name is unknown the call is a no-op logged at
-         *          Debug level. Thread-safe.
-         * @param name Binding name previously registered.
-         * @param combos Replacement combos. May be empty to unbind.
+         *          Modifier matching is strict across the whole binding set: any key that appears as a modifier in any
+         *          registered binding blocks bindings that do not list it. This prevents "V" from firing when
+         *          "Shift+V" is pressed.
+         *
+         *          For Trigger::Press, on_press fires on each key-down edge; on_state_change is ignored. For
+         *          Trigger::Hold, on_state_change fires with true on the press edge and false on the release edge;
+         *          on_press is ignored.
+         *
+         * @warning Callbacks run on the poll thread. They must execute quickly and must not capture references to
+         *          objects whose lifetime ends before the owning BindingGuard is released or the Input facade is shut
+         *          down.
          */
-        void update_binding_combos(std::string_view name, const Config::KeyComboList &combos) noexcept;
-
-        /**
-         * @brief Removes every binding whose name matches @p name.
-         * @details Forwards to the active InputPoller when running, or erases matching entries from pending bindings
-         *          before start(). Thread-safe.
-         * @param name Binding name to remove.
-         * @return Number of bindings removed.
-         */
-        size_t remove_binding_by_name(std::string_view name) noexcept { return remove_binding_by_name(name, true); }
-
-        /**
-         * @brief Plural alias for remove_binding_by_name(name); removes every binding sharing @p name.
-         * @details Naming parity with InputPoller::remove_bindings_by_name. Delegates to the singular overload with
-         *          identical behavior. Prefer this spelling: one name maps to many combos, so the call removes all
-         *          bindings registered under the shared name.
-         * @param name Binding name to remove.
-         * @return Number of bindings removed.
-         */
-        size_t remove_bindings_by_name(std::string_view name) noexcept { return remove_binding_by_name(name, true); }
-
-        /**
-         * @brief Drops every registered binding without stopping the poller.
-         * @details Forwards to the active InputPoller when running and clears pending bindings. Active hold bindings
-         *          receive an on_state_change(false) callback before erasure. The poll thread keeps running and can be
-         *          reseeded via subsequent register_press / register_hold calls. Thread-safe.
-         */
-        void clear_bindings() noexcept { clear_bindings(true); }
-
-        /**
-         * @brief Variant of remove_binding_by_name that suppresses the on_state_change(false) release callbacks for
-         *        active holds.
-         * @details Forwarded straight to the underlying InputPoller. Loader-lock callers use this overload because user
-         *          callbacks live in a
-         *          Logic DLL whose code pages may be about to be unmapped.
-         * @param name Binding name to remove.
-         * @param invoke_callbacks When true, behaves identically to the public single-argument overload. When false,
-         *                         drops release callbacks.
-         * @return Number of bindings removed.
-         */
-        size_t remove_binding_by_name(std::string_view name, bool invoke_callbacks) noexcept;
-
-        /**
-         * @brief Plural alias for remove_binding_by_name(name, invoke_callbacks).
-         * @param name Binding name to remove.
-         * @param invoke_callbacks When false, drops the on_state_change(false) release callbacks (loader-lock path).
-         * @return Number of bindings removed.
-         */
-        size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks) noexcept
+        struct ComboBinding
         {
-            return remove_binding_by_name(name, invoke_callbacks);
-        }
+            /**
+             * Binding name. A shared name groups multiple combos under OR logic and is the key for is_active / rebind.
+             * An empty name registers a binding addressable only through its guard, not by name.
+             */
+            std::string name = {};
+
+            /// Press or Hold edge model.
+            Trigger trigger = Trigger::Press;
+
+            /**
+             * The combo alternatives (OR between combos). Empty registers an inert, addressable binding that a later
+             * rebind can populate.
+             */
+            KeyComboList combos = {};
+
+            /**
+             * Opt-in passthrough suppression. When true, the binding's trigger is additionally hidden from the game so
+             * it does not also act on it (for example an "LB + D-pad" zoom that must not move the menu cursor). Honored
+             * only for digital gamepad buttons (via an XInputGetState hook) and the mouse wheel (via the
+             * window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons cannot be
+             * masked. Default off keeps the binding purely observational.
+             */
+            bool consume = false;
+
+            /// Invoked on the key-down edge when trigger == Press. Empty for a Hold binding.
+            std::function<void()> on_press = {};
+
+            /**
+             * Invoked with the hold state (true held / false released) when trigger == Hold. Empty for a Press
+             * binding.
+             */
+            std::function<void(bool)> on_state_change = {};
+        };
 
         /**
-         * @brief Variant of clear_bindings that suppresses the on_state_change(false) release callbacks for active
-         *        holds.
-         * @param invoke_callbacks When true, behaves identically to the public zero-argument overload. When false,
-         *                         drops release callbacks.
+         * @class BindingToken
+         * @brief Generation-checked handle to a named binding's resolved entry set for low-overhead repeated queries.
+         * @details A high-frequency consumer (a render-thread hotkey polled every frame) resolves a name once with
+         *          Input::acquire_token, then queries the token every frame with Input::is_active(const BindingToken&),
+         *          skipping the per-call name hash. The token caches the name's resolved entry indices.
+         *
+         *          The token is stamped with the binding generation it was minted at. Any reshape of the binding set
+         *          (register / release / clear / rebind / consume change) advances the generation, so a query through a
+         *          stale token fails closed: it returns false without dereferencing the now-meaningless cached indices.
+         *          The generation comes from a process-wide monotonic counter, so a token minted by one poll engine can
+         *          never alias a different engine after a shutdown / start cycle. A default token, an unknown-name
+         *          token, and an allocation-failed token are all invalid and always read inactive.
          */
-        void clear_bindings(bool invoke_callbacks) noexcept;
+        class BindingToken
+        {
+        public:
+            BindingToken() = default;
+
+            /**
+             * @brief Reports whether the token resolved a name at acquisition time.
+             * @details true only means acquire_token found the name and resolved its entries; it does NOT imply the
+             *          token is still current. Use Input::token_current, or the fail-closed is_active(token), to test
+             *          currency after a possible reshape.
+             * @return true for a resolved token; false for a default, unknown-name, or allocation-failed token.
+             */
+            [[nodiscard]] bool valid() const noexcept { return m_generation != 0; }
+
+        private:
+            friend class DetourModKit::detail::InputPoller;
+
+            // Binding generation this token was minted at; 0 marks an unresolved (invalid) token. A live generation is
+            // always >= 1 (drawn from the process-wide counter that starts at 1), so 0 can never collide with a real
+            // one.
+            std::uint64_t m_generation{0};
+
+            // The name's resolved entry indices into the engine's binding array, captured at acquire time. Read only
+            // while m_generation still matches the engine's live generation, which guarantees the indices stay in
+            // bounds and address the same bindings.
+            std::vector<std::size_t> m_indices;
+        };
 
         /**
-         * @brief Stops the polling thread and clears all registered bindings.
-         * @details Safe to call multiple times. After shutdown, new bindings can be registered and start() called
-         *          again.
+         * @class BindingGuard
+         * @brief Move-only RAII cancellation token for a binding from register_combo or config::press_combo /
+         * hold_combo.
+         * @details The guard owns a shared atomic flag that gates the user callback. On release (or destruction) the
+         *          flag is cleared and subsequent input events for the binding become no-ops. The underlying binding
+         *          remains registered in the engine; per-binding removal is not offered post-start, so the gating flag
+         *          is how a callback is retired.
+         *
+         *          A Hold guard additionally carries a one-shot release action. A hold callback has lingering state
+         *          (the consumer is told "held" until told "released"), so simply gating the callback off mid-hold
+         *          would strand the consumer in the held state. The release action synthesizes a single balancing
+         *          on_state_change(false) if a true edge was the last one forwarded, and never re-enters the callback
+         *          while it is on the stack. A Press guard carries no such action.
+         *
+         *          Moving transfers ownership of the cancellation flag and the release action; the moved-from guard
+         *          becomes inert.
+         * @note Setup/control-plane only for Hold guards: release (and therefore the destructor) may invoke the hold
+         *       release callback, so destroy a Hold guard from init / shutdown / a worker thread, never from inside an
+         *       input callback running on a game thread.
          */
-        void shutdown() noexcept;
+        class BindingGuard
+        {
+        public:
+            // Defined out-of-line in input.cpp: an inline-defaulted ctor would instantiate ~unique_ptr<Impl> against
+            // the still-incomplete Impl.
+            BindingGuard() noexcept;
+            ~BindingGuard() noexcept;
 
-    private:
-        InputManager() = default;
-        ~InputManager() noexcept = default;
+            BindingGuard(BindingGuard &&other) noexcept;
+            BindingGuard &operator=(BindingGuard &&other) noexcept;
+            BindingGuard(const BindingGuard &) = delete;
+            BindingGuard &operator=(const BindingGuard &) = delete;
 
-        InputManager(const InputManager &) = delete;
-        InputManager &operator=(const InputManager &) = delete;
-        InputManager(InputManager &&) = delete;
-        InputManager &operator=(InputManager &&) = delete;
+            /**
+             * @brief Disables the binding's callback, then runs the Hold release action once if present. Idempotent.
+             */
+            void release() noexcept;
 
-        mutable std::mutex m_mutex;
-        std::vector<InputBinding> m_pending_bindings;
-        std::shared_ptr<InputPoller> m_poller;
-        std::atomic<std::shared_ptr<InputPoller>> m_active_poller{};
-        std::atomic<bool> m_running{false};
-        bool m_require_focus{true};
-        int m_gamepad_index{0};
-        int m_trigger_threshold{GamepadCode::TriggerThreshold};
-        int m_stick_threshold{GamepadCode::StickThreshold};
-    };
+            /**
+             * @brief Returns true while the binding's callback is still live (the guard has not been released or moved
+             *        from).
+             */
+            [[nodiscard]] bool is_active() const noexcept;
+
+            /**
+             * @brief Returns the binding name this guard gates, or an empty view for an inert/moved-from guard.
+             */
+            [[nodiscard]] std::string_view name() const noexcept;
+
+        private:
+            friend class Input;
+
+            // pimpl: the shared cancellation flag, the binding name, and the optional Hold release hookup. Defined in
+            // src/input.cpp so the OS-free header carries no engine type.
+            struct Impl;
+            explicit BindingGuard(std::unique_ptr<Impl> impl) noexcept;
+            std::unique_ptr<Impl> m_impl;
+        };
+
+        /**
+         * @class Scope
+         * @brief Owns a batch of BindingGuards and releases them in reverse insertion order on clear / destruction.
+         * @details Replaces the consumer idiom of a hand-rolled std::vector<guard> plus a push wrapper. Guards are
+         *          released last-registered-first (LIFO), mirroring stack-like teardown so a later binding that may
+         *          depend on an earlier one unwinds first. Because a Hold guard can synthesize a balancing
+         *          on_state_change(false) on release, the reverse order is a behavioral contract, not just member
+         *          cleanup.
+         * @note Move-only. Destroy a Scope holding Hold guards from setup/control-plane code (see BindingGuard).
+         */
+        class Scope
+        {
+        public:
+            Scope() = default;
+            ~Scope() noexcept { clear(); }
+
+            Scope(Scope &&) noexcept = default;
+            Scope &operator=(Scope &&) noexcept;
+            Scope(const Scope &) = delete;
+            Scope &operator=(const Scope &) = delete;
+
+            /**
+             * @brief Takes ownership of a guard, keeping its callback live until the Scope is cleared or destroyed.
+             * @param guard A guard from register_combo (unwrapped) or config::press_combo / hold_combo. An inert guard
+             *              is stored harmlessly.
+             */
+            void add(BindingGuard guard);
+
+            /**
+             * @brief Releases every owned guard in reverse insertion order, then drops them. Idempotent.
+             */
+            void clear() noexcept;
+
+            /// Number of guards currently owned.
+            [[nodiscard]] std::size_t size() const noexcept { return m_guards.size(); }
+
+        private:
+            // Guards in registration order; clear() walks this back-to-front so the release edges fire LIFO.
+            std::vector<BindingGuard> m_guards;
+        };
+
+        /**
+         * @class Input
+         * @brief Process singleton that owns the poll thread, the binding set, and the interception layer.
+         * @details Unifies the binding-management facade and the polling engine behind one entry point. Bindings may be
+         *          registered before or after start(); a post-start registration is appended to the live set and fires
+         *          on the next poll cycle. The interception layer (mouse-wheel capture and gamepad passthrough
+         *          suppression) is process-global and single-owner, which is why a single Input instance owns it.
+         *
+         * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. Joining the poll thread under the
+         *          Windows loader lock would deadlock; shutdown() detects the loader lock and detaches against a pinned
+         *          module instead of joining. Route teardown through the bootstrap shutdown ordering.
+         */
+        class Input
+        {
+        public:
+            /**
+             * @struct Settings
+             * @brief Poll-thread and gamepad tuning applied when start() builds the engine.
+             * @details poll_interval is clamped to [MIN_POLL_INTERVAL, MAX_POLL_INTERVAL]. The gamepad knobs take
+             *          effect only at start(); change require_focus live with set_require_focus.
+             */
+            struct Settings
+            {
+                /// Time between poll cycles. Clamped to the MIN/MAX poll-interval bounds.
+                std::chrono::milliseconds poll_interval = DEFAULT_POLL_INTERVAL;
+                /// When true (default), key events are ignored unless this process owns the foreground window.
+                bool require_focus = true;
+                /// XInput controller index (0-3) polled for gamepad bindings. Clamped to range.
+                int gamepad_index = 0;
+                /// Analog trigger deadzone (0-255). A trigger above this reads as pressed.
+                int trigger_threshold = GamepadCode::TriggerThreshold;
+                /// Thumbstick deadzone (0-32767). An axis exceeding this in any direction reads as pressed.
+                int stick_threshold = GamepadCode::StickThreshold;
+            };
+
+            /**
+             * @brief Returns the process-wide Input singleton.
+             */
+            [[nodiscard]] static Input &instance() noexcept;
+
+            /**
+             * @brief Registers one binding from a ComboBinding and returns a guard that owns its callback's lifetime.
+             * @details Materializes one engine entry per combo, all sharing binding.name (OR logic). Works before or
+             *          after start(); a post-start registration fires on the next cycle. An empty combos list registers
+             *          an inert but addressable binding (rebind can populate it later) and still returns a valid guard.
+             * @param binding The binding description (moved).
+             * @return A BindingGuard on success, or ErrorCode::OutOfMemory if registration could not allocate. A null
+             *         callback is accepted: the binding becomes inert but stays name-addressable (a common pattern for
+             *         a state-polling binding queried only through is_active).
+             * @note Setup/control-plane: registration may allocate and reshapes the binding set.
+             */
+            [[nodiscard]] Result<BindingGuard> register_combo(ComboBinding binding) noexcept;
+
+            /**
+             * @brief Builds the poll engine with the given settings and starts the poll thread.
+             * @details Bindings registered before start() seed the engine; later registrations are forwarded live.
+             *          Calling start() while already running is a no-op success.
+             * @param settings Poll cadence, focus gate, and gamepad tuning.
+             * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed.
+             */
+            [[nodiscard]] Result<void> start(Settings settings) noexcept;
+
+            /// Starts the engine with default settings. See start(Settings).
+            [[nodiscard]] Result<void> start() noexcept { return start(Settings{}); }
+
+            /**
+             * @brief Stops the poll thread and clears all bindings. Idempotent; the facade can be started again.
+             * @details Under the loader lock the poll thread is detached against a pinned module instead of joined, and
+             *          the still-installed detours are left in place; otherwise the thread is joined, the detours are
+             *          removed, and active holds receive a final on_state_change(false).
+             */
+            void shutdown() noexcept;
+
+            /// Returns true while the poll thread is running.
+            [[nodiscard]] bool is_running() const noexcept;
+
+            /// Returns the number of registered binding entries (pending before start, or live after).
+            [[nodiscard]] std::size_t binding_count() const noexcept;
+
+            /**
+             * @brief Queries whether any combo of a named binding is currently pressed.
+             * @param name The binding name.
+             * @return true if active; false if the engine is not running or the name is unknown.
+             * @note Thread-safe and callback-safe.
+             */
+            [[nodiscard]] bool is_active(std::string_view name) const noexcept;
+
+            /**
+             * @brief Resolves a binding name to a generation-checked token for repeated low-overhead queries.
+             * @param name The binding name.
+             * @return A valid token when running and the name is registered; an invalid token otherwise.
+             * @note Setup/control-plane: acquire once (or after a reshape), then query with is_active(token).
+             */
+            [[nodiscard]] BindingToken acquire_token(std::string_view name) const noexcept;
+
+            /**
+             * @brief Queries a binding through a previously acquired token (the per-frame hot path).
+             * @param token A token from acquire_token.
+             * @return true if the token's binding is currently pressed; false if inactive, stale, invalid, or not
+             *         running.
+             * @note Callback-safe: a shared-lock acquire plus a relaxed atomic load per cached entry, no name hash and
+             *       no allocation.
+             */
+            [[nodiscard]] bool is_active(const BindingToken &token) const noexcept;
+
+            /**
+             * @brief Reports whether a token still matches the live binding generation.
+             * @param token A token from acquire_token.
+             * @return true when the token is valid and current; false otherwise (re-acquire to recover).
+             */
+            [[nodiscard]] bool token_current(const BindingToken &token) const noexcept;
+
+            /**
+             * @brief Replaces the trigger combos of every binding sharing @p name (the INI hot-reload rebind path).
+             * @details Matching combo counts rewrite in place; differing counts rebuild the entry set carrying callback
+             *          identity, mode, and name forward. An empty list unbinds while keeping a single inert sentinel so
+             *          the name stays addressable. Held bindings receive on_state_change(false) before the swap.
+             * @param name Binding name previously registered.
+             * @param combos Replacement combos (may be empty to unbind).
+             * @return Result<void>; ErrorCode::InvalidArg if the name was never registered (the call is otherwise a
+             *         success, including the unbind case).
+             * @note Thread-safe; safe to call while the poll thread is running.
+             */
+            [[nodiscard]] Result<void> rebind(std::string_view name, KeyComboList combos) noexcept;
+
+            /**
+             * @brief Enables or disables passthrough suppression for every binding sharing @p name.
+             * @details Forwards to the live engine or updates pending bindings before start(). A no-op if the name is
+             *          unknown. See ComboBinding::consume for which inputs can actually be masked.
+             * @param name Binding name previously registered.
+             * @param consume true to hide the binding's trigger from the game.
+             */
+            void set_consume(std::string_view name, bool consume) noexcept;
+
+            /**
+             * @brief Sets whether the engine requires foreground focus before processing key events.
+             * @param require_focus true to gate on foreground (default), false to process regardless of focus.
+             * @note Thread-safe; takes effect immediately, before or after start().
+             */
+            void set_require_focus(bool require_focus) noexcept;
+
+            /**
+             * @brief Removes every binding sharing @p name (a name maps to many combos).
+             * @details Forwards to the live engine, or erases matching entries from the pending set before start().
+             *          Thread-safe.
+             * @param name Binding name to remove.
+             * @param invoke_callbacks When true (default) an active hold receives on_state_change(false) before
+             *                         erasure. The loader-lock-safe Logic-DLL unload path passes false because the
+             *                         hosting DLL's callback pages may be unmapping.
+             * @return Number of bindings removed.
+             */
+            std::size_t remove_bindings_by_name(std::string_view name, bool invoke_callbacks = true) noexcept;
+
+            /**
+             * @brief Drops every binding without stopping the poll thread.
+             * @details Forwards to the live engine and clears the pending set. The poll thread keeps running and can be
+             *          reseeded. Thread-safe.
+             * @param invoke_callbacks When true (default) active holds receive on_state_change(false) before erasure;
+             *                         the loader-lock-safe unload path passes false.
+             */
+            void clear_bindings(bool invoke_callbacks = true) noexcept;
+
+        private:
+            Input();
+            ~Input() noexcept;
+
+            Input(const Input &) = delete;
+            Input &operator=(const Input &) = delete;
+            Input(Input &&) = delete;
+            Input &operator=(Input &&) = delete;
+
+            // pimpl: owns the engine (src/internal/input_poller.hpp) and the pending-binding staging. Defined in
+            // src/input.cpp so this header names no engine type.
+            struct Impl;
+            std::unique_ptr<Impl> m_impl;
+        };
+
+        /**
+         * @brief Free-function form of Input::instance().register_combo, so a consumer writes input::register_combo.
+         * @param binding The binding description (moved).
+         * @return A BindingGuard on success, or an ErrorCode-bearing failure (see Input::register_combo).
+         */
+        [[nodiscard]] Result<BindingGuard> register_combo(ComboBinding binding) noexcept;
+
+        /**
+         * @brief Returns the process-default Scope, so a consumer can write input::scope().add(...).
+         * @details The default Scope is a convenience for mods that register a fixed set of bindings for the process
+         *          lifetime and tear them down together. Its guards release in reverse insertion order when the Scope
+         *          is cleared or at process teardown.
+         * @note The default Scope is destroyed at static-destruction time, so a still-held Hold guard parked in it runs
+         *       its on_state_change(false) on the teardown thread (see the BindingGuard Hold-guard control-plane note).
+         *       A consumer needing deterministic teardown timing should own its own Scope.
+         */
+        [[nodiscard]] Scope &scope() noexcept;
+    } // namespace input
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_INPUT_HPP

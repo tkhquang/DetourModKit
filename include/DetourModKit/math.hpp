@@ -9,7 +9,7 @@
 
 namespace DetourModKit
 {
-    namespace Math
+    namespace math
     {
         /// Converts an angle from degrees to radians.
         [[nodiscard]] constexpr float degrees_to_radians(float degrees) noexcept
@@ -23,7 +23,7 @@ namespace DetourModKit
             return radians * (180.0f / std::numbers::pi_v<float>);
         }
 
-    } // namespace Math
+    } // namespace math
 } // namespace DetourModKit
 
 #endif // DETOURMODKIT_MATH_HPP

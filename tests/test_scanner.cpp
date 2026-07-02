@@ -11,10 +11,13 @@
 #include <thread>
 #include <vector>
 
-#include "DetourModKit/scanner.hpp"
+#include "DetourModKit/scan.hpp"
+
+// White-box engine tests: the raw matcher, page walks, and batch live in the private engine.
+#include "internal/scan_engine.hpp"
+#include "internal/scan_pages.hpp"
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/diagnostics.hpp"
-#include "scanner_internal.hpp"
 
 // windows.h included after project headers to avoid macro conflicts (e.g., 'small')
 #include <windows.h>
@@ -24,9 +27,44 @@
 
 using namespace DetourModKit;
 
+namespace
+{
+    // Thin shape adapters so the engine white-box tests below drive one fixed call shape: the page-gated whole-process
+    // scans return a MatchResult (the .match pointer plus an incomplete-scan flag), and the prologue gate takes an
+    // Address. Pure shape adapters with no behaviour of their own.
+    [[nodiscard]] inline const std::byte *scan_exec(const detail::EnginePattern &pattern,
+                                                    std::size_t occurrence = 1) noexcept
+    {
+        return detail::scan_executable_regions(pattern, occurrence).match;
+    }
+    [[nodiscard]] inline const std::byte *scan_read(const detail::EnginePattern &pattern,
+                                                    std::size_t occurrence = 1) noexcept
+    {
+        return detail::scan_readable_regions(pattern, occurrence).match;
+    }
+    [[nodiscard]] inline bool is_likely_prologue(std::uintptr_t address) noexcept
+    {
+        return scan::is_likely_function_prologue(Address{address});
+    }
+    // resolve_rip_relative / find_and_resolve_rip_relative take an Address / Region; these adapters let the tests drive
+    // them from a raw pointer (+ length) by building the Address / Region scope types in one place.
+    [[nodiscard]] inline Result<Address> resolve_rip(const std::byte *instruction, std::size_t displacement_offset,
+                                                     std::size_t instruction_length) noexcept
+    {
+        return scan::resolve_rip_relative(Address{instruction}, displacement_offset, instruction_length);
+    }
+    [[nodiscard]] inline Result<Address> find_and_resolve_rip(const std::byte *search_start, std::size_t search_length,
+                                                              std::span<const std::byte> opcode_prefix,
+                                                              std::size_t instruction_length) noexcept
+    {
+        return scan::find_and_resolve_rip_relative(Region{Address{search_start}, search_length}, opcode_prefix,
+                                                   instruction_length);
+    }
+} // namespace
+
 TEST(ScannerTest, parse_aob_valid)
 {
-    auto result = Scanner::parse_aob("48 8B 05 ?? ?? ?? ??");
+    auto result = detail::parse_aob("48 8B 05 ?? ?? ?? ??");
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 7);
@@ -34,7 +72,7 @@ TEST(ScannerTest, parse_aob_valid)
 
 TEST(ScannerTest, parse_aob_all_wildcards)
 {
-    auto result = Scanner::parse_aob("?? ?? ??");
+    auto result = detail::parse_aob("?? ?? ??");
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 3);
@@ -42,7 +80,7 @@ TEST(ScannerTest, parse_aob_all_wildcards)
 
 TEST(ScannerTest, parse_aob_empty)
 {
-    auto result = Scanner::parse_aob("");
+    auto result = detail::parse_aob("");
 
     ASSERT_FALSE(result.has_value());
 }
@@ -55,10 +93,10 @@ TEST(ScannerTest, find_pattern_found)
     data[101] = std::byte{0x8B};
     data[102] = std::byte{0x05};
 
-    auto pattern = Scanner::parse_aob("48 8B 05");
+    auto pattern = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 100);
@@ -75,27 +113,27 @@ TEST(ScannerTest, find_pattern_span_overload)
     data[91] = std::byte{0xBB};
     data[92] = std::byte{0xCC};
 
-    auto pattern = Scanner::parse_aob("AA BB CC");
+    auto pattern = detail::parse_aob("AA BB CC");
     ASSERT_TRUE(pattern.has_value());
 
     const std::span<const std::byte> region{data};
 
     // The span overload must return the identical pointer as the pointer+size form.
-    const std::byte *via_span = Scanner::find_pattern(region, *pattern);
-    const std::byte *via_ptr = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const std::byte *via_span = detail::find_pattern(region, *pattern);
+    const std::byte *via_ptr = detail::find_pattern(data.data(), data.size(), *pattern);
     EXPECT_EQ(via_span, via_ptr);
     ASSERT_NE(via_span, nullptr);
     EXPECT_EQ(via_span - data.data(), 40);
 
     // The Nth-occurrence span overload mirrors the pointer+size form too.
-    const std::byte *second_span = Scanner::find_pattern(region, *pattern, 2);
-    const std::byte *second_ptr = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    const std::byte *second_span = detail::find_pattern(region, *pattern, 2);
+    const std::byte *second_ptr = detail::find_pattern(data.data(), data.size(), *pattern, 2);
     EXPECT_EQ(second_span, second_ptr);
     ASSERT_NE(second_span, nullptr);
     EXPECT_EQ(second_span - data.data(), 90);
 
     // An empty span yields nullptr.
-    EXPECT_EQ(Scanner::find_pattern(std::span<const std::byte>{}, *pattern), nullptr);
+    EXPECT_EQ(detail::find_pattern(std::span<const std::byte>{}, *pattern), nullptr);
 }
 
 // The AOB prefilter routes through a self-provided dmk_memchr that is ASan-safe in every build. The observable
@@ -104,7 +142,7 @@ TEST(ScannerTest, find_pattern_span_overload)
 // path compiles only under MSVC; other toolchains run the scalar loop against the same assertions.
 TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
 {
-    auto pattern = Scanner::parse_aob("CC");
+    auto pattern = detail::parse_aob("CC");
     ASSERT_TRUE(pattern.has_value());
 
     // The prefilter (dmk_memchr) is tiered: an AVX2 32-byte body, an SSE2 16-byte body, and a scalar byte tail.
@@ -122,14 +160,14 @@ TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
         std::vector<std::byte> data(64, std::byte{0xAB});
         data[pos] = std::byte{0xCC};
 
-        auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+        auto result = detail::find_pattern(data.data(), data.size(), *pattern);
         ASSERT_NE(result, nullptr);
         EXPECT_EQ(static_cast<std::size_t>(result - data.data()), pos);
 
         // Scanning from a misaligned base proves the unaligned vector loads (loadu) find the match at any alignment.
         if (pos >= 1)
         {
-            auto misaligned = Scanner::find_pattern(data.data() + 1, data.size() - 1, *pattern);
+            auto misaligned = detail::find_pattern(data.data() + 1, data.size() - 1, *pattern);
             ASSERT_NE(misaligned, nullptr);
             EXPECT_EQ(static_cast<std::size_t>(misaligned - (data.data() + 1)), pos - 1);
         }
@@ -143,22 +181,22 @@ TEST(ScannerTest, PrefilterReturnsFirstMatchAcrossBoundaries)
         std::vector<std::byte> data(24, std::byte{0xAB});
         data[pos] = std::byte{0xCC};
 
-        auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+        auto result = detail::find_pattern(data.data(), data.size(), *pattern);
         ASSERT_NE(result, nullptr);
         EXPECT_EQ(static_cast<std::size_t>(result - data.data()), pos);
     }
 
     // No-match case: a buffer with no occurrence.
     std::vector<std::byte> empty(64, std::byte{0xAB});
-    auto miss = Scanner::find_pattern(empty.data(), empty.size(), *pattern);
+    auto miss = detail::find_pattern(empty.data(), empty.size(), *pattern);
     EXPECT_EQ(miss, nullptr);
 
     // n == 0: a zero-size region cannot contain the pattern and must report no match without reading any byte.
-    EXPECT_EQ(Scanner::find_pattern(empty.data(), 0, *pattern), nullptr);
+    EXPECT_EQ(detail::find_pattern(empty.data(), 0, *pattern), nullptr);
 
     // A sub-16 buffer skips both vector bodies and runs only the scalar byte tail.
     std::vector<std::byte> tiny{std::byte{0xAB}, std::byte{0xAB}, std::byte{0xCC}, std::byte{0xAB}};
-    auto tiny_result = Scanner::find_pattern(tiny.data(), tiny.size(), *pattern);
+    auto tiny_result = detail::find_pattern(tiny.data(), tiny.size(), *pattern);
     ASSERT_NE(tiny_result, nullptr);
     EXPECT_EQ(tiny_result - tiny.data(), 2);
 }
@@ -167,10 +205,10 @@ TEST(ScannerTest, find_pattern_not_found)
 {
     std::vector<std::byte> data(256, std::byte{0x00});
 
-    auto pattern = Scanner::parse_aob("AA BB CC DD");
+    auto pattern = detail::parse_aob("AA BB CC DD");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     EXPECT_EQ(result, nullptr);
 }
@@ -183,10 +221,10 @@ TEST(ScannerTest, find_pattern_with_wildcard)
     data[51] = std::byte{0x8B};
     data[52] = std::byte{0x12};
 
-    auto pattern = Scanner::parse_aob("48 8B ??");
+    auto pattern = detail::parse_aob("48 8B ??");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 50);
@@ -194,43 +232,43 @@ TEST(ScannerTest, find_pattern_with_wildcard)
 
 TEST(ScannerTest, parse_aob_invalid_hex)
 {
-    auto result = Scanner::parse_aob("GG HH II");
+    auto result = detail::parse_aob("GG HH II");
 
     ASSERT_FALSE(result.has_value());
 }
 
 TEST(ScannerTest, parse_aob_mixed_invalid)
 {
-    auto result = Scanner::parse_aob("48 GG 05");
+    auto result = detail::parse_aob("48 GG 05");
 
     ASSERT_FALSE(result.has_value());
 }
 
 TEST(ScannerTest, parse_aob_single_digit)
 {
-    auto result = Scanner::parse_aob("4 8 B");
+    auto result = detail::parse_aob("4 8 B");
 
     ASSERT_FALSE(result.has_value());
 }
 
 TEST(ScannerTest, parse_aob_various_formats)
 {
-    auto result1 = Scanner::parse_aob("48 8B 05");
+    auto result1 = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(result1.has_value());
     EXPECT_EQ(result1->size(), 3);
 
-    auto result2 = Scanner::parse_aob("48   8B   05");
+    auto result2 = detail::parse_aob("48   8B   05");
     ASSERT_TRUE(result2.has_value());
     EXPECT_EQ(result2->size(), 3);
 
-    auto result3 = Scanner::parse_aob("48\t8B\t05");
+    auto result3 = detail::parse_aob("48\t8B\t05");
     ASSERT_TRUE(result3.has_value());
     EXPECT_EQ(result3->size(), 3);
 }
 
 TEST(ScannerTest, parse_aob_lowercase)
 {
-    auto result = Scanner::parse_aob("48 8b 05 ff");
+    auto result = detail::parse_aob("48 8b 05 ff");
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 4);
@@ -238,7 +276,7 @@ TEST(ScannerTest, parse_aob_lowercase)
 
 TEST(ScannerTest, parse_aob_uppercase)
 {
-    auto result = Scanner::parse_aob("48 8B 05 FF");
+    auto result = detail::parse_aob("48 8B 05 FF");
 
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 4);
@@ -246,10 +284,10 @@ TEST(ScannerTest, parse_aob_uppercase)
 
 TEST(ScannerTest, parse_aob_only_wildcards)
 {
-    auto result1 = Scanner::parse_aob("?");
+    auto result1 = detail::parse_aob("?");
     EXPECT_TRUE(result1.has_value());
 
-    auto result2 = Scanner::parse_aob("??");
+    auto result2 = detail::parse_aob("??");
     EXPECT_TRUE(result2.has_value());
 }
 
@@ -257,10 +295,10 @@ TEST(ScannerTest, find_pattern_at_start)
 {
     std::vector<std::byte> data = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x00}, std::byte{0x00}};
 
-    auto pattern = Scanner::parse_aob("48 8B 05");
+    auto pattern = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 0);
@@ -270,10 +308,10 @@ TEST(ScannerTest, find_pattern_at_end)
 {
     std::vector<std::byte> data = {std::byte{0x00}, std::byte{0x00}, std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
 
-    auto pattern = Scanner::parse_aob("48 8B 05");
+    auto pattern = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 2);
@@ -283,10 +321,10 @@ TEST(ScannerTest, find_pattern_pattern_too_large)
 {
     std::vector<std::byte> data = {std::byte{0x48}, std::byte{0x8B}};
 
-    auto pattern = Scanner::parse_aob("48 8B 05 00 00 00 00");
+    auto pattern = detail::parse_aob("48 8B 05 00 00 00 00");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     EXPECT_EQ(result, nullptr);
 }
@@ -295,10 +333,10 @@ TEST(ScannerTest, find_pattern_empty_data)
 {
     std::vector<std::byte> data;
 
-    auto pattern = Scanner::parse_aob("48 8B 05");
+    auto pattern = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), 0, *pattern);
+    auto result = detail::find_pattern(data.data(), 0, *pattern);
 
     EXPECT_EQ(result, nullptr);
 }
@@ -308,10 +346,10 @@ TEST(ScannerTest, find_pattern_single_byte)
     std::vector<std::byte> data(256, std::byte{0x00});
     data[100] = std::byte{0xCC};
 
-    auto pattern = Scanner::parse_aob("CC");
+    auto pattern = detail::parse_aob("CC");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 100);
@@ -328,10 +366,10 @@ TEST(ScannerTest, find_pattern_multiple_matches)
     data[200] = std::byte{0x90};
     data[201] = std::byte{0x90};
 
-    auto pattern = Scanner::parse_aob("90 90");
+    auto pattern = detail::parse_aob("90 90");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 50);
@@ -341,10 +379,10 @@ TEST(ScannerTest, find_pattern_all_wildcard)
 {
     std::vector<std::byte> data(256, std::byte{0x00});
 
-    auto pattern = Scanner::parse_aob("?? ?? ??");
+    auto pattern = detail::parse_aob("?? ?? ??");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 0);
@@ -358,10 +396,10 @@ TEST(ScannerTest, find_pattern_wildcard_at_end)
     data[76] = std::byte{0x8B};
     data[77] = std::byte{0x99};
 
-    auto pattern = Scanner::parse_aob("48 8B ??");
+    auto pattern = detail::parse_aob("48 8B ??");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 75);
@@ -375,10 +413,10 @@ TEST(ScannerTest, find_pattern_wildcard_at_start)
     data[76] = std::byte{0x48};
     data[77] = std::byte{0x8B};
 
-    auto pattern = Scanner::parse_aob("?? 48 8B");
+    auto pattern = detail::parse_aob("?? 48 8B");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 75);
@@ -393,10 +431,10 @@ TEST(ScannerTest, find_pattern_large_pattern)
         data[500 + i] = std::byte{static_cast<uint8_t>(i)};
     }
 
-    auto pattern = Scanner::parse_aob("00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F");
+    auto pattern = detail::parse_aob("00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 500);
@@ -404,44 +442,44 @@ TEST(ScannerTest, find_pattern_large_pattern)
 
 TEST(ScannerTest, parse_aob_whitespace_only)
 {
-    auto result1 = Scanner::parse_aob("   ");
+    auto result1 = detail::parse_aob("   ");
     EXPECT_FALSE(result1.has_value());
 
-    auto result2 = Scanner::parse_aob("\t\t\t");
+    auto result2 = detail::parse_aob("\t\t\t");
     EXPECT_FALSE(result2.has_value());
 
-    auto result3 = Scanner::parse_aob(" \t \n ");
+    auto result3 = detail::parse_aob(" \t \n ");
     EXPECT_FALSE(result3.has_value());
 }
 
 TEST(ScannerTest, find_pattern_null_address)
 {
-    auto pattern = Scanner::parse_aob("48 8B 05");
+    auto pattern = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(static_cast<const std::byte *>(nullptr), 100, *pattern);
+    auto result = detail::find_pattern(static_cast<const std::byte *>(nullptr), 100, *pattern);
     EXPECT_EQ(result, nullptr);
 }
 
 TEST(ScannerTest, find_pattern_empty_pattern)
 {
-    Scanner::CompiledPattern empty_pattern;
+    detail::EnginePattern empty_pattern;
     std::vector<std::byte> data(256, std::byte{0x00});
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), empty_pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), empty_pattern);
     EXPECT_EQ(result, nullptr);
 }
 
 TEST(ScannerTest, parse_aob_with_whitespace_padding)
 {
-    auto result = Scanner::parse_aob("  48 8B 05  ");
+    auto result = detail::parse_aob("  48 8B 05  ");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 3u);
 }
 
 TEST(ScannerTest, parse_aob_byte_values)
 {
-    auto result = Scanner::parse_aob("00 FF 80 7F");
+    auto result = detail::parse_aob("00 FF 80 7F");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 4u);
 
@@ -458,7 +496,7 @@ TEST(ScannerTest, parse_aob_byte_values)
 
 TEST(ScannerTest, parse_aob_wildcard_mask)
 {
-    auto result = Scanner::parse_aob("48 ?? 05 ?");
+    auto result = detail::parse_aob("48 ?? 05 ?");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 4u);
 
@@ -475,7 +513,7 @@ TEST(ScannerTest, parse_aob_wildcard_mask)
 // (0xA0) with the unknown nibble zeroed, and the mask is 0xF0 so the masked compare checks only the high nibble.
 TEST(ScannerTest, parse_aob_nibble_high)
 {
-    auto result = Scanner::parse_aob("A?");
+    auto result = detail::parse_aob("A?");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 1u);
 
@@ -486,7 +524,7 @@ TEST(ScannerTest, parse_aob_nibble_high)
 // A low-nibble token ("?A") fixes the low nibble: the byte holds 0x0A (high nibble zeroed) with a 0x0F mask.
 TEST(ScannerTest, parse_aob_nibble_low)
 {
-    auto result = Scanner::parse_aob("?A");
+    auto result = detail::parse_aob("?A");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 1u);
 
@@ -498,7 +536,7 @@ TEST(ScannerTest, parse_aob_nibble_low)
 // bytes and mask sized identically.
 TEST(ScannerTest, parse_aob_nibble_mixed)
 {
-    auto result = Scanner::parse_aob("4? ?B 8B");
+    auto result = detail::parse_aob("4? ?B 8B");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 3u);
     EXPECT_EQ(result->bytes.size(), result->mask.size());
@@ -519,17 +557,17 @@ TEST(ScannerTest, find_pattern_nibble_high_matches)
     std::vector<std::byte> data(256, std::byte{0x00});
     data[100] = std::byte{0xA3};
 
-    auto pattern = Scanner::parse_aob("A?");
+    auto pattern = detail::parse_aob("A?");
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *hit = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(hit, nullptr);
     EXPECT_EQ(hit - data.data(), 100);
 
     // A byte whose high nibble differs must not match.
     std::vector<std::byte> miss_data(256, std::byte{0x00});
     miss_data[100] = std::byte{0xB3};
-    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    const auto *miss = detail::find_pattern(miss_data.data(), miss_data.size(), *pattern);
     EXPECT_EQ(miss, nullptr);
 }
 
@@ -539,16 +577,16 @@ TEST(ScannerTest, find_pattern_nibble_low_matches)
     std::vector<std::byte> data(256, std::byte{0x00});
     data[100] = std::byte{0x53};
 
-    auto pattern = Scanner::parse_aob("?3");
+    auto pattern = detail::parse_aob("?3");
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *hit = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(hit, nullptr);
     EXPECT_EQ(hit - data.data(), 100);
 
     std::vector<std::byte> miss_data(256, std::byte{0x00});
     miss_data[100] = std::byte{0x54};
-    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    const auto *miss = detail::find_pattern(miss_data.data(), miss_data.size(), *pattern);
     EXPECT_EQ(miss, nullptr);
 }
 
@@ -558,7 +596,7 @@ TEST(ScannerTest, find_pattern_nibble_low_matches)
 // agrees and rejects one whose known nibble differs.
 TEST(ScannerTest, find_pattern_nibble_anchor_skips_partial)
 {
-    auto pattern = Scanner::parse_aob("A? 37 ?? 5C");
+    auto pattern = detail::parse_aob("A? 37 ?? 5C");
     ASSERT_TRUE(pattern.has_value());
 
     ASSERT_LT(pattern->anchor, pattern->size());
@@ -571,7 +609,7 @@ TEST(ScannerTest, find_pattern_nibble_anchor_skips_partial)
     data[102] = std::byte{0x99}; // wildcard
     data[103] = std::byte{0x5C};
 
-    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *hit = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(hit, nullptr);
     EXPECT_EQ(hit - data.data(), 100);
 
@@ -581,7 +619,7 @@ TEST(ScannerTest, find_pattern_nibble_anchor_skips_partial)
     miss_data[101] = std::byte{0x37};
     miss_data[102] = std::byte{0x99};
     miss_data[103] = std::byte{0x5C};
-    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    const auto *miss = detail::find_pattern(miss_data.data(), miss_data.size(), *pattern);
     EXPECT_EQ(miss, nullptr);
 }
 
@@ -590,7 +628,7 @@ TEST(ScannerTest, find_pattern_nibble_anchor_skips_partial)
 // the region start. Here the only candidate that satisfies "?A" is at offset 100.
 TEST(ScannerTest, find_pattern_nibble_only_brute_force_scan)
 {
-    auto pattern = Scanner::parse_aob("?A");
+    auto pattern = detail::parse_aob("?A");
     ASSERT_TRUE(pattern.has_value());
     // No fully-known byte, so there is no anchor.
     EXPECT_EQ(pattern->anchor, pattern->size());
@@ -598,7 +636,7 @@ TEST(ScannerTest, find_pattern_nibble_only_brute_force_scan)
     std::vector<std::byte> data(256, std::byte{0x00}); // low nibble 0 everywhere except the plant
     data[100] = std::byte{0x7A};                       // low nibble A
 
-    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *hit = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(hit, nullptr);
     EXPECT_EQ(hit - data.data(), 100);
 }
@@ -608,7 +646,7 @@ TEST(ScannerTest, find_pattern_nibble_only_brute_force_scan)
 // nibble differs, proving the masked verify runs around the literal anchor.
 TEST(ScannerTest, find_pattern_nibble_neighbours_anchor_on_rare_literal)
 {
-    auto pattern = Scanner::parse_aob("4? 37 ?5");
+    auto pattern = detail::parse_aob("4? 37 ?5");
     ASSERT_TRUE(pattern.has_value());
 
     ASSERT_LT(pattern->anchor, pattern->size());
@@ -619,7 +657,7 @@ TEST(ScannerTest, find_pattern_nibble_neighbours_anchor_on_rare_literal)
     data[101] = std::byte{0x37};
     data[102] = std::byte{0xC5}; // low nibble 5
 
-    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *hit = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(hit, nullptr);
     EXPECT_EQ(hit - data.data(), 100);
 
@@ -628,7 +666,7 @@ TEST(ScannerTest, find_pattern_nibble_neighbours_anchor_on_rare_literal)
     miss_data[100] = std::byte{0x41};
     miss_data[101] = std::byte{0x37};
     miss_data[102] = std::byte{0xC6};
-    const auto *miss = Scanner::find_pattern(miss_data.data(), miss_data.size(), *pattern);
+    const auto *miss = detail::find_pattern(miss_data.data(), miss_data.size(), *pattern);
     EXPECT_EQ(miss, nullptr);
 }
 
@@ -648,17 +686,17 @@ TEST(ScannerTest, find_pattern_nibble_scalar_tail)
 
     // Last token "9?" fixes only the high nibble of the final byte, landing it in the post-SIMD scalar tail of a
     // 20-byte verify.
-    auto pattern = Scanner::parse_aob("11 22 33 44 55 66 77 88 99 AA BB CC DD EE 10 20 30 40 50 9?");
+    auto pattern = detail::parse_aob("11 22 33 44 55 66 77 88 99 AA BB CC DD EE 10 20 30 40 50 9?");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->size(), 20u);
 
-    const auto *hit = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *hit = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(hit, nullptr);
     EXPECT_EQ(hit - data.data(), 64);
 
     // Flip the final byte's high nibble (0x9C -> 0xAC) so the scalar-tail masked compare must reject it.
     data[64 + 19] = std::byte{0xAC};
-    const auto *miss = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *miss = detail::find_pattern(data.data(), data.size(), *pattern);
     EXPECT_EQ(miss, nullptr);
 }
 
@@ -667,31 +705,31 @@ TEST(ScannerTest, find_pattern_wildcard_before_start)
     std::vector<std::byte> data = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x00},
                                    std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
 
-    auto pattern = Scanner::parse_aob("?? 48 8B");
+    auto pattern = detail::parse_aob("?? 48 8B");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 3);
 }
 
 TEST(ScannerTest, parse_aob_out_of_range)
 {
-    auto result = Scanner::parse_aob("1FF");
+    auto result = detail::parse_aob("1FF");
 
     ASSERT_FALSE(result.has_value());
 }
 
 TEST(ScannerTest, parse_aob_invalid_argument)
 {
-    auto result = Scanner::parse_aob("?? GG ??");
+    auto result = detail::parse_aob("?? GG ??");
 
     ASSERT_FALSE(result.has_value());
 }
 
 TEST(ScannerTest, aob_pattern_empty)
 {
-    auto result = Scanner::parse_aob("48 8B 05");
+    auto result = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(result.has_value());
     EXPECT_FALSE(result->empty());
     EXPECT_EQ(result->size(), 3u);
@@ -701,10 +739,10 @@ TEST(ScannerTest, find_pattern_overlapping_matches)
 {
     std::vector<std::byte> data = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
 
-    auto pattern = Scanner::parse_aob("90 90");
+    auto pattern = detail::parse_aob("90 90");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 0);
@@ -715,10 +753,10 @@ TEST(ScannerTest, find_pattern_wildcard_middle_multiple_candidates)
     std::vector<std::byte> data = {std::byte{0x48}, std::byte{0xAA}, std::byte{0x05}, std::byte{0x00},
                                    std::byte{0x48}, std::byte{0xBB}, std::byte{0x05}};
 
-    auto pattern = Scanner::parse_aob("48 ?? 05");
+    auto pattern = detail::parse_aob("48 ?? 05");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 0);
@@ -729,10 +767,10 @@ TEST(ScannerTest, find_pattern_memchr_boundary)
     std::vector<std::byte> data(64, std::byte{0x00});
     data[63] = std::byte{0xCC};
 
-    auto pattern = Scanner::parse_aob("CC");
+    auto pattern = detail::parse_aob("CC");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 63);
@@ -743,17 +781,17 @@ TEST(ScannerTest, find_pattern_long_wildcard_prefix)
     std::vector<std::byte> data = {std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}, std::byte{0x55},
                                    std::byte{0x48}, std::byte{0x8B}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto pattern = Scanner::parse_aob("?? ?? ?? ?? ?? 48 8B");
+    auto pattern = detail::parse_aob("?? ?? ?? ?? ?? 48 8B");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 0);
 
     std::vector<std::byte> small = {std::byte{0x00}, std::byte{0x00}, std::byte{0x48}};
 
-    auto result2 = Scanner::find_pattern(small.data(), small.size(), *pattern);
+    auto result2 = detail::find_pattern(small.data(), small.size(), *pattern);
     EXPECT_EQ(result2, nullptr);
 }
 
@@ -768,10 +806,10 @@ TEST(ScannerTest, find_pattern_anchor_selection)
     data[201] = std::byte{0x37};
     data[202] = std::byte{0x00};
 
-    auto pattern = Scanner::parse_aob("00 37 00");
+    auto pattern = detail::parse_aob("00 37 00");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 200);
@@ -785,7 +823,7 @@ TEST(ScannerTest, parse_aob_caches_anchor_index)
     // Every literal byte in the pattern below appears in the common-byte frequency table EXCEPT 0x37, so 0x37 is the
     // unambiguous winner. Using a clean tie-free pattern keeps the test stable against future tweaks to the frequency
     // table or tie-break order.
-    const auto pattern = Scanner::parse_aob("48 8B 89 37 0F E8 90 CC");
+    const auto pattern = detail::parse_aob("48 8B 89 37 0F E8 90 CC");
     ASSERT_TRUE(pattern.has_value());
 
     ASSERT_LT(pattern->anchor, pattern->size());
@@ -797,7 +835,7 @@ TEST(ScannerTest, parse_aob_caches_anchor_index)
 // short-circuiting find_pattern to its degenerate path without re-scanning the mask on every call.
 TEST(ScannerTest, parse_aob_all_wildcards_anchor_equals_size)
 {
-    const auto pattern = Scanner::parse_aob("?? ?? ??");
+    const auto pattern = detail::parse_aob("?? ?? ??");
     ASSERT_TRUE(pattern.has_value());
 
     EXPECT_EQ(pattern->anchor, pattern->size());
@@ -807,7 +845,7 @@ TEST(ScannerTest, parse_aob_all_wildcards_anchor_equals_size)
 // drifting (idempotent).
 TEST(ScannerTest, compile_anchor_is_idempotent_for_manual_patterns)
 {
-    Scanner::CompiledPattern manual;
+    detail::EnginePattern manual;
     manual.bytes = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x37}, std::byte{0xFF}};
     manual.mask = {std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
 
@@ -824,7 +862,7 @@ TEST(ScannerTest, compile_anchor_is_idempotent_for_manual_patterns)
 // on patterns built field-by-field by consumers that never call compile_anchor().
 TEST(ScannerTest, find_pattern_uncompiled_manual_pattern_still_matches)
 {
-    Scanner::CompiledPattern manual;
+    detail::EnginePattern manual;
     manual.bytes = {std::byte{0x37}, std::byte{0x48}, std::byte{0x8B}};
     manual.mask = {std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
     // Anchor deliberately left at its sentinel value.
@@ -835,7 +873,7 @@ TEST(ScannerTest, find_pattern_uncompiled_manual_pattern_still_matches)
     data[101] = std::byte{0x48};
     data[102] = std::byte{0x8B};
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), manual);
+    const auto *result = detail::find_pattern(data.data(), data.size(), manual);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 100);
 }
@@ -846,18 +884,18 @@ TEST(ScannerTest, find_pattern_uncompiled_manual_pattern_still_matches)
 // boundary behaviour against accidental regressions.
 TEST(ScannerTest, compile_anchor_empty_pattern_marks_no_anchor)
 {
-    Scanner::CompiledPattern empty;
+    detail::EnginePattern empty;
     empty.compile_anchor();
     EXPECT_EQ(empty.anchor, empty.size());
 }
 
 TEST(ScannerTest, parse_aob_invariant)
 {
-    auto result = Scanner::parse_aob("48 ?? 8B 05 ?? ??");
+    auto result = detail::parse_aob("48 ?? 8B 05 ?? ??");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->bytes.size(), result->mask.size());
 
-    auto single = Scanner::parse_aob("CC");
+    auto single = detail::parse_aob("CC");
     ASSERT_TRUE(single.has_value());
     EXPECT_EQ(single->bytes.size(), single->mask.size());
 }
@@ -866,7 +904,7 @@ TEST(ScannerTest, parse_aob_invariant)
 
 TEST(ScannerTest, parse_aob_offset_marker)
 {
-    auto result = Scanner::parse_aob("48 8B 88 B8 00 00 00 | 48 89 4C 24 68");
+    auto result = detail::parse_aob("48 8B 88 B8 00 00 00 | 48 89 4C 24 68");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 12u);
     EXPECT_EQ(result->offset, 7);
@@ -876,7 +914,7 @@ TEST(ScannerTest, parse_aob_offset_marker)
 
 TEST(ScannerTest, parse_aob_offset_marker_at_start)
 {
-    auto result = Scanner::parse_aob("| 48 8B 05");
+    auto result = detail::parse_aob("| 48 8B 05");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 3u);
     EXPECT_EQ(result->offset, 0);
@@ -884,7 +922,7 @@ TEST(ScannerTest, parse_aob_offset_marker_at_start)
 
 TEST(ScannerTest, parse_aob_offset_marker_at_end)
 {
-    auto result = Scanner::parse_aob("48 8B 05 |");
+    auto result = detail::parse_aob("48 8B 05 |");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 3u);
     EXPECT_EQ(result->offset, 3);
@@ -892,20 +930,20 @@ TEST(ScannerTest, parse_aob_offset_marker_at_end)
 
 TEST(ScannerTest, parse_aob_no_offset_marker)
 {
-    auto result = Scanner::parse_aob("48 8B 05");
+    auto result = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->offset, 0);
 }
 
 TEST(ScannerTest, parse_aob_multiple_offset_markers_fails)
 {
-    auto result = Scanner::parse_aob("48 | 8B | 05");
+    auto result = detail::parse_aob("48 | 8B | 05");
     EXPECT_FALSE(result.has_value());
 }
 
 TEST(ScannerTest, parse_aob_offset_marker_with_wildcards)
 {
-    auto result = Scanner::parse_aob("?? ?? | 48 8B ??");
+    auto result = detail::parse_aob("?? ?? | 48 8B ??");
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(result->size(), 5u);
     EXPECT_EQ(result->offset, 2);
@@ -921,11 +959,11 @@ TEST(ScannerTest, FindPattern_OffsetMarker_ReturnsMarkedByte)
     data[52] = std::byte{0xCC};
     data[53] = std::byte{0xDD};
 
-    auto pattern = Scanner::parse_aob("AA BB | CC DD");
+    auto pattern = detail::parse_aob("AA BB | CC DD");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->offset, 2);
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     // Returned pointer is the marked byte (offset 2 into the match), NOT the raw match start. Adding pattern->offset
     // manually would double-apply.
@@ -942,10 +980,10 @@ TEST(ScannerTest, find_pattern_nth_occurrence_first)
     data[100] = std::byte{0x90};
     data[101] = std::byte{0x90};
 
-    auto pattern = Scanner::parse_aob("90 90");
+    auto pattern = detail::parse_aob("90 90");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 1);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern, 1);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 50);
 }
@@ -958,10 +996,10 @@ TEST(ScannerTest, find_pattern_nth_occurrence_second)
     data[100] = std::byte{0x90};
     data[101] = std::byte{0x90};
 
-    auto pattern = Scanner::parse_aob("90 90");
+    auto pattern = detail::parse_aob("90 90");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern, 2);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 100);
 }
@@ -976,10 +1014,10 @@ TEST(ScannerTest, find_pattern_nth_occurrence_third)
     data[200] = std::byte{0xAB};
     data[201] = std::byte{0xCD};
 
-    auto pattern = Scanner::parse_aob("AB CD");
+    auto pattern = detail::parse_aob("AB CD");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 3);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern, 3);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 200);
 }
@@ -990,10 +1028,10 @@ TEST(ScannerTest, find_pattern_nth_occurrence_not_enough)
     data[50] = std::byte{0x90};
     data[51] = std::byte{0x90};
 
-    auto pattern = Scanner::parse_aob("90 90");
+    auto pattern = detail::parse_aob("90 90");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern, 2);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -1002,10 +1040,10 @@ TEST(ScannerTest, find_pattern_nth_occurrence_zero)
     std::vector<std::byte> data(256, std::byte{0x00});
     data[50] = std::byte{0x90};
 
-    auto pattern = Scanner::parse_aob("90");
+    auto pattern = detail::parse_aob("90");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 0);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern, 0);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -1021,11 +1059,11 @@ TEST(ScannerTest, FindPattern_NthOccurrence_WithOffsetMarker)
     data[101] = std::byte{0xBB};
     data[102] = std::byte{0xCC};
 
-    auto pattern = Scanner::parse_aob("AA | BB CC");
+    auto pattern = detail::parse_aob("AA | BB CC");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->offset, 1);
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern, 2);
     ASSERT_NE(result, nullptr);
     // The second match starts at data[100]; the `|` sits after the first byte,
     // so find_pattern returns data[101] directly.
@@ -1036,22 +1074,22 @@ TEST(ScannerTest, find_pattern_nth_occurrence_with_overlap)
 {
     std::vector<std::byte> data = {std::byte{0xAA}, std::byte{0xAA}, std::byte{0xAA}, std::byte{0xAA}};
 
-    auto pattern = Scanner::parse_aob("AA AA");
+    auto pattern = detail::parse_aob("AA AA");
     ASSERT_TRUE(pattern.has_value());
 
-    auto r1 = Scanner::find_pattern(data.data(), data.size(), *pattern, 1);
+    auto r1 = detail::find_pattern(data.data(), data.size(), *pattern, 1);
     ASSERT_NE(r1, nullptr);
     EXPECT_EQ(r1 - data.data(), 0);
 
-    auto r2 = Scanner::find_pattern(data.data(), data.size(), *pattern, 2);
+    auto r2 = detail::find_pattern(data.data(), data.size(), *pattern, 2);
     ASSERT_NE(r2, nullptr);
     EXPECT_EQ(r2 - data.data(), 1);
 
-    auto r3 = Scanner::find_pattern(data.data(), data.size(), *pattern, 3);
+    auto r3 = detail::find_pattern(data.data(), data.size(), *pattern, 3);
     ASSERT_NE(r3, nullptr);
     EXPECT_EQ(r3 - data.data(), 2);
 
-    auto r4 = Scanner::find_pattern(data.data(), data.size(), *pattern, 4);
+    auto r4 = detail::find_pattern(data.data(), data.size(), *pattern, 4);
     EXPECT_EQ(r4, nullptr);
 }
 
@@ -1060,10 +1098,10 @@ TEST(ScannerTest, find_pattern_const_correctness)
     const std::vector<std::byte> data = {std::byte{0x00}, std::byte{0x00}, std::byte{0x48}, std::byte{0x8B},
                                          std::byte{0x05}, std::byte{0x00}, std::byte{0x00}};
 
-    auto pattern = Scanner::parse_aob("48 8B 05");
+    auto pattern = detail::parse_aob("48 8B 05");
     ASSERT_TRUE(pattern.has_value());
 
-    const std::byte *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const std::byte *result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 2);
@@ -1078,11 +1116,11 @@ TEST(ScannerTest, find_pattern_sse2_path_exact_16_bytes)
         data[200 + i] = std::byte{static_cast<uint8_t>(0x10 + i)};
     }
 
-    auto pattern = Scanner::parse_aob("10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F");
+    auto pattern = detail::parse_aob("10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->size(), 16u);
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 200);
@@ -1097,11 +1135,11 @@ TEST(ScannerTest, find_pattern_sse2_path_with_wildcards)
         data[100 + i] = std::byte{static_cast<uint8_t>(0x30 + i)};
     }
 
-    auto pattern = Scanner::parse_aob("30 31 ?? 33 34 35 ?? 37 38 39 3A 3B 3C 3D ?? 3F 40 41 42 43");
+    auto pattern = detail::parse_aob("30 31 ?? 33 34 35 ?? 37 38 39 3A 3B 3C 3D ?? 3F 40 41 42 43");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->size(), 20u);
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result - data.data(), 100);
@@ -1116,10 +1154,10 @@ TEST(ScannerTest, find_pattern_sse2_path_not_found)
         data[200 + i] = std::byte{static_cast<uint8_t>(0x10 + i)};
     }
 
-    auto pattern = Scanner::parse_aob("10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E FF");
+    auto pattern = detail::parse_aob("10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E FF");
     ASSERT_TRUE(pattern.has_value());
 
-    auto result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    auto result = detail::find_pattern(data.data(), data.size(), *pattern);
 
     EXPECT_EQ(result, nullptr);
 }
@@ -1127,9 +1165,9 @@ TEST(ScannerTest, find_pattern_sse2_path_not_found)
 class ScannerRipTest : public ::testing::Test
 {
 protected:
-    void SetUp() override { ASSERT_TRUE(Memory::init_cache()); }
+    void SetUp() override { ASSERT_TRUE(memory::init_cache()); }
 
-    void TearDown() override { Memory::shutdown_cache(); }
+    void TearDown() override { memory::shutdown_cache(); }
 };
 
 TEST_F(ScannerRipTest, resolve_rip_relative_positive_displacement)
@@ -1138,11 +1176,11 @@ TEST_F(ScannerRipTest, resolve_rip_relative_positive_displacement)
     std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x78},
                                    std::byte{0x56}, std::byte{0x34}, std::byte{0x12}};
 
-    auto result = Scanner::resolve_rip_relative(code.data(), 3, 7);
+    auto result = resolve_rip(code.data(), 3, 7);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x12345678;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST_F(ScannerRipTest, resolve_rip_relative_negative_displacement)
@@ -1151,12 +1189,12 @@ TEST_F(ScannerRipTest, resolve_rip_relative_negative_displacement)
     std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0xF0},
                                    std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
 
-    auto result = Scanner::resolve_rip_relative(code.data(), 3, 7);
+    auto result = resolve_rip(code.data(), 3, 7);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected =
         reinterpret_cast<uintptr_t>(code.data()) + 7 + static_cast<uintptr_t>(static_cast<intptr_t>(-16));
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST_F(ScannerRipTest, resolve_rip_relative_zero_displacement)
@@ -1164,10 +1202,10 @@ TEST_F(ScannerRipTest, resolve_rip_relative_zero_displacement)
     std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, std::byte{0x00},
                                    std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::resolve_rip_relative(code.data(), 3, 7);
+    auto result = resolve_rip(code.data(), 3, 7);
 
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(*result, reinterpret_cast<uintptr_t>(code.data()) + 7);
+    EXPECT_EQ(result->raw(), reinterpret_cast<uintptr_t>(code.data()) + 7);
 }
 
 TEST_F(ScannerRipTest, resolve_rip_relative_call_rel32)
@@ -1175,16 +1213,16 @@ TEST_F(ScannerRipTest, resolve_rip_relative_call_rel32)
     // CALL rel32  =>  E8 10 00 00 00
     std::vector<std::byte> code = {std::byte{0xE8}, std::byte{0x10}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::resolve_rip_relative(code.data(), 1, 5);
+    auto result = resolve_rip(code.data(), 1, 5);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 5 + 0x10;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST_F(ScannerRipTest, resolve_rip_relative_null_address)
 {
-    auto result = Scanner::resolve_rip_relative(nullptr, 3, 7);
+    auto result = resolve_rip(nullptr, 3, 7);
 
     EXPECT_FALSE(result.has_value());
 }
@@ -1223,12 +1261,12 @@ TEST_F(ScannerRipTest, resolve_rip_relative_implausible_target_rejected)
     const std::int32_t disp = -15;
     std::memcpy(bytes + 3, &disp, sizeof(disp));
 
-    const auto result = Scanner::resolve_rip_relative(reinterpret_cast<const std::byte *>(region), 3, 7);
+    const auto result = resolve_rip(reinterpret_cast<const std::byte *>(region), 3, 7);
 
     EXPECT_FALSE(result.has_value());
     if (!result)
     {
-        EXPECT_EQ(result.error(), RipResolveError::ImplausibleTarget);
+        EXPECT_EQ(result.error().code, ErrorCode::ImplausibleTarget);
     }
 
     VirtualFree(region, 0, MEM_RELEASE);
@@ -1242,11 +1280,11 @@ TEST_F(ScannerRipTest, find_and_resolve_mov_rax_rip)
                                    std::byte{0x20}, std::byte{0x00}, std::byte{0x00},
                                    std::byte{0x00}, std::byte{0x90}, std::byte{0x90}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_MOV_RAX_RIP, 7);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[3]);
-    EXPECT_EQ(*result, instr_addr + 7 + 0x20);
+    EXPECT_EQ(result->raw(), instr_addr + 7 + 0x20);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_lea_rax_rip)
@@ -1255,11 +1293,11 @@ TEST_F(ScannerRipTest, find_and_resolve_lea_rax_rip)
     std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8D}, std::byte{0x05}, std::byte{0x00},
                                    std::byte{0x01}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_LEA_RAX_RIP, 7);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_LEA_RAX_RIP, 7);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x100;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_call_rel32)
@@ -1268,22 +1306,22 @@ TEST_F(ScannerRipTest, find_and_resolve_call_rel32)
                                    std::byte{0xE8}, // CALL rel32
                                    std::byte{0xFF}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0x90}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_CALL_REL32, 5);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[1]);
-    EXPECT_EQ(*result, instr_addr + 5 + 0xFF);
+    EXPECT_EQ(result->raw(), instr_addr + 5 + 0xFF);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_jmp_rel32)
 {
     std::vector<std::byte> code = {std::byte{0xE9}, std::byte{0x05}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_JMP_REL32, 5);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_JMP_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 5 + 0x05;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_prefix_not_found)
@@ -1292,18 +1330,18 @@ TEST_F(ScannerRipTest, find_and_resolve_prefix_not_found)
     std::vector<std::byte> code = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
                                    std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_MOV_RAX_RIP, 7);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::PrefixNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::PrefixNotFound);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_null_start)
 {
-    auto result = Scanner::find_and_resolve_rip_relative(nullptr, 100, Scanner::PREFIX_MOV_RAX_RIP, 7);
+    auto result = find_and_resolve_rip(nullptr, 100, scan::PREFIX_MOV_RAX_RIP, 7);
 
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+    EXPECT_EQ(result.error().code, ErrorCode::NullInput);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_region_too_small)
@@ -1311,10 +1349,10 @@ TEST_F(ScannerRipTest, find_and_resolve_region_too_small)
     std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}};
 
     // Region is smaller than prefix + disp32
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_MOV_RAX_RIP, 7);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::RegionTooSmall);
+    EXPECT_EQ(result.error().code, ErrorCode::RegionTooSmall);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
@@ -1324,11 +1362,11 @@ TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
                                    std::byte{0x00}, std::byte{0x00}, std::byte{0x48}, std::byte{0x8B}, std::byte{0x05},
                                    std::byte{0x20}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_MOV_RAX_RIP, 7);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x10;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_partial_prefix_no_false_match)
@@ -1339,11 +1377,11 @@ TEST_F(ScannerRipTest, find_and_resolve_partial_prefix_no_false_match)
                                    std::byte{0x48}, std::byte{0x8B}, std::byte{0x05}, // MOV RAX
                                    std::byte{0x30}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_MOV_RAX_RIP, 7);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[7]);
-    EXPECT_EQ(*result, instr_addr + 7 + 0x30);
+    EXPECT_EQ(result->raw(), instr_addr + 7 + 0x30);
 }
 
 TEST_F(ScannerRipTest, resolve_rip_relative_custom_instruction_form)
@@ -1352,11 +1390,11 @@ TEST_F(ScannerRipTest, resolve_rip_relative_custom_instruction_form)
     std::vector<std::byte> code = {std::byte{0xF3}, std::byte{0x0F}, std::byte{0x10}, std::byte{0x05},
                                    std::byte{0x40}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::resolve_rip_relative(code.data(), 4, 8);
+    auto result = resolve_rip(code.data(), 4, 8);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 8 + 0x40;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_empty_prefix)
@@ -1364,40 +1402,26 @@ TEST_F(ScannerRipTest, find_and_resolve_empty_prefix)
     std::vector<std::byte> code = {std::byte{0x90}};
     std::span<const std::byte> empty;
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), empty, 5);
+    auto result = find_and_resolve_rip(code.data(), code.size(), empty, 5);
 
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+    EXPECT_EQ(result.error().code, ErrorCode::NullInput);
 }
 
 TEST_F(ScannerRipTest, resolve_rip_relative_null_input)
 {
-    auto result = Scanner::resolve_rip_relative(nullptr, 3, 7);
+    auto result = resolve_rip(nullptr, 3, 7);
 
     EXPECT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+    EXPECT_EQ(result.error().code, ErrorCode::NullInput);
 }
 
 TEST_F(ScannerRipTest, rip_resolve_error_to_string_coverage)
 {
-    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::NullInput).empty());
-    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::PrefixNotFound).empty());
-    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::RegionTooSmall).empty());
-    EXPECT_FALSE(rip_resolve_error_to_string(RipResolveError::UnreadableDisplacement).empty());
-}
-
-// Mirror of the RIP mapper coverage above for the cascade ResolveError mapper. Every enumerator must map to a non-empty
-// string, including InvalidRange, which the module-scoped resolvers return for a range whose valid() check fails.
-TEST(ScannerCascade, resolve_error_to_string_coverage)
-{
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::EmptyCandidates).empty());
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::NoMatch).empty());
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::AllPatternsInvalid).empty());
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::PrologueFallbackNotApplicable).empty());
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::InvalidRange).empty());
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::DecodeFailed).empty());
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::UnexpectedShape).empty());
-    EXPECT_FALSE(Scanner::resolve_error_to_string(Scanner::ResolveError::OperandOutOfRange).empty());
+    EXPECT_FALSE(to_string(ErrorCode::NullInput).empty());
+    EXPECT_FALSE(to_string(ErrorCode::PrefixNotFound).empty());
+    EXPECT_FALSE(to_string(ErrorCode::RegionTooSmall).empty());
+    EXPECT_FALSE(to_string(ErrorCode::UnreadableDisplacement).empty());
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
@@ -1406,11 +1430,11 @@ TEST_F(ScannerRipTest, find_and_resolve_prefix_at_boundary)
     std::vector<std::byte> code = {std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0xE8},
                                    std::byte{0x0A}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_CALL_REL32, 5);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t instr_addr = reinterpret_cast<uintptr_t>(&code[3]);
-    EXPECT_EQ(*result, instr_addr + 5 + 0x0A);
+    EXPECT_EQ(result->raw(), instr_addr + 5 + 0x0A);
 }
 
 TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
@@ -1418,11 +1442,11 @@ TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
     std::vector<std::byte> code = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x0D}, std::byte{0x50},
                                    std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
-    auto result = Scanner::find_and_resolve_rip_relative(code.data(), code.size(), Scanner::PREFIX_MOV_RCX_RIP, 7);
+    auto result = find_and_resolve_rip(code.data(), code.size(), scan::PREFIX_MOV_RCX_RIP, 7);
 
     ASSERT_TRUE(result.has_value());
     uintptr_t expected = reinterpret_cast<uintptr_t>(code.data()) + 7 + 0x50;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 // --- Tests for scan_executable_regions ---
@@ -1442,10 +1466,10 @@ TEST(ScannerExecRegionTest, FindsPatternInExecutableMemory)
                              std::byte{0x54}, std::byte{0xC6}, std::byte{0x29}, std::byte{0x70}};
     std::memcpy(&bytes[256], sig, sizeof(sig));
 
-    auto pattern = Scanner::parse_aob("7A 3F E1 9C 42 B8 05 D7 6E A3 11 8F 54 C6 29 70");
+    auto pattern = detail::parse_aob("7A 3F E1 9C 42 B8 05 D7 6E A3 11 8F 54 C6 29 70");
     ASSERT_TRUE(pattern.has_value());
 
-    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    const std::byte *result = scan_exec(*pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &bytes[256]);
 
@@ -1455,26 +1479,26 @@ TEST(ScannerExecRegionTest, FindsPatternInExecutableMemory)
 TEST(ScannerExecRegionTest, ReturnsNullForNoMatch)
 {
     // Pattern unlikely to exist in any executable page
-    auto pattern = Scanner::parse_aob("FE ED FA CE DE AD BE EF CA FE BA BE 01 02 03 04");
+    auto pattern = detail::parse_aob("FE ED FA CE DE AD BE EF CA FE BA BE 01 02 03 04");
     ASSERT_TRUE(pattern.has_value());
 
-    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    const std::byte *result = scan_exec(*pattern);
     EXPECT_EQ(result, nullptr);
 }
 
 TEST(ScannerExecRegionTest, EmptyPattern)
 {
-    Scanner::CompiledPattern empty;
-    const std::byte *result = Scanner::scan_executable_regions(empty);
+    detail::EnginePattern empty;
+    const std::byte *result = scan_exec(empty);
     EXPECT_EQ(result, nullptr);
 }
 
 TEST(ScannerExecRegionTest, ZeroOccurrence)
 {
-    auto pattern = Scanner::parse_aob("CC CC CC");
+    auto pattern = detail::parse_aob("CC CC CC");
     ASSERT_TRUE(pattern.has_value());
 
-    const std::byte *result = Scanner::scan_executable_regions(*pattern, 0);
+    const std::byte *result = scan_exec(*pattern, 0);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -1494,24 +1518,24 @@ TEST(ScannerExecRegionTest, NthOccurrence)
     std::memcpy(&bytes[100], sig, sizeof(sig));
     std::memcpy(&bytes[500], sig, sizeof(sig));
 
-    auto pattern = Scanner::parse_aob("B1 4D F8 A2 63 C9 07 E5 3A 96 1B D4 58 0E 7C 2F");
+    auto pattern = detail::parse_aob("B1 4D F8 A2 63 C9 07 E5 3A 96 1B D4 58 0E 7C 2F");
     ASSERT_TRUE(pattern.has_value());
 
     const auto *region_start = reinterpret_cast<const std::byte *>(exec_mem);
     const auto *region_end = region_start + 4096;
 
-    const std::byte *first = Scanner::scan_executable_regions(*pattern, 1);
+    const std::byte *first = scan_exec(*pattern, 1);
     ASSERT_NE(first, nullptr);
     EXPECT_GE(first, region_start);
     EXPECT_LT(first, region_end);
     EXPECT_EQ(first, &bytes[100]);
 
-    const std::byte *second = Scanner::scan_executable_regions(*pattern, 2);
+    const std::byte *second = scan_exec(*pattern, 2);
     ASSERT_NE(second, nullptr);
     EXPECT_EQ(second, &bytes[500]);
 
     // Third occurrence should not exist
-    const std::byte *third = Scanner::scan_executable_regions(*pattern, 3);
+    const std::byte *third = scan_exec(*pattern, 3);
     EXPECT_EQ(third, nullptr);
 
     VirtualFree(exec_mem, 0, MEM_RELEASE);
@@ -1531,10 +1555,10 @@ TEST(ScannerExecRegionTest, SkipsNonExecutableMemory)
                              std::byte{0x6A}, std::byte{0xEF}, std::byte{0x04}, std::byte{0x87}};
     std::memcpy(&bytes[0], sig, sizeof(sig));
 
-    auto pattern = Scanner::parse_aob("F0 0D CA FE 91 3E 7B A5 D2 48 16 C3 6A EF 04 87");
+    auto pattern = detail::parse_aob("F0 0D CA FE 91 3E 7B A5 D2 48 16 C3 6A EF 04 87");
     ASSERT_TRUE(pattern.has_value());
 
-    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    const std::byte *result = scan_exec(*pattern);
     EXPECT_EQ(result, nullptr);
 
     VirtualFree(rw_mem, 0, MEM_RELEASE);
@@ -1562,11 +1586,11 @@ TEST(ScannerExecRegionTest, RespectsPatternOffset)
     bytes[210] = std::byte{0x5E};
     bytes[211] = std::byte{0x94};
 
-    auto pattern = Scanner::parse_aob("D3 7A E9 15 | 82 F6 4B C0 37 A1 5E 94");
+    auto pattern = detail::parse_aob("D3 7A E9 15 | 82 F6 4B C0 37 A1 5E 94");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->offset, 4);
 
-    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    const std::byte *result = scan_exec(*pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &bytes[204]);
 
@@ -1590,18 +1614,18 @@ TEST(ScannerExecRegionTest, OffsetStillAppliedExactlyOnce)
                              std::byte{0x06}, std::byte{0xBF}, std::byte{0x52}, std::byte{0x18}};
     std::memcpy(&bytes[region_offset], sig, sizeof(sig));
 
-    auto pattern = Scanner::parse_aob("71 E3 9A | 4D 06 BF 52 18");
+    auto pattern = detail::parse_aob("71 E3 9A | 4D 06 BF 52 18");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->offset, 3);
 
     // scan_executable_regions path: should land on the marked byte.
-    const std::byte *exec_hit = Scanner::scan_executable_regions(*pattern);
+    const std::byte *exec_hit = scan_exec(*pattern);
     ASSERT_NE(exec_hit, nullptr);
     EXPECT_EQ(exec_hit, &bytes[region_offset + 3]);
 
     // find_pattern path over the same region: must agree exactly with the scan_executable_regions result (both apply
     // offset once).
-    const std::byte *direct_hit = Scanner::find_pattern(bytes, 4096, *pattern);
+    const std::byte *direct_hit = detail::find_pattern(bytes, 4096, *pattern);
     ASSERT_NE(direct_hit, nullptr);
     EXPECT_EQ(direct_hit, exec_hit);
 
@@ -1625,10 +1649,10 @@ TEST(ScannerExecRegionTest, SkipsGuardPages)
     DWORD old_protect;
     VirtualProtect(exec_mem, 4096, PAGE_EXECUTE_READ | PAGE_GUARD, &old_protect);
 
-    auto pattern = Scanner::parse_aob("C7 3B A0 D9 14 6F E2 85 4C 01 7D F3 A8 56 2E BB");
+    auto pattern = detail::parse_aob("C7 3B A0 D9 14 6F E2 85 4C 01 7D F3 A8 56 2E BB");
     ASSERT_TRUE(pattern.has_value());
 
-    const std::byte *result = Scanner::scan_executable_regions(*pattern);
+    const std::byte *result = scan_exec(*pattern);
     EXPECT_EQ(result, nullptr);
 
     VirtualFree(exec_mem, 0, MEM_RELEASE);
@@ -1670,13 +1694,13 @@ namespace
     // plus any transient copy the optimizer leaves on the stack while building it. (The compiled needle is excluded by
     // the scanner itself.) Tests therefore assert that the target address is among the occurrences, not that it is the
     // first one, which keeps them independent of memory layout and optimizer behaviour across toolchains.
-    std::vector<const std::byte *> collect_readable_hits(const Scanner::CompiledPattern &pattern)
+    std::vector<const std::byte *> collect_readable_hits(const detail::EnginePattern &pattern)
     {
         constexpr std::size_t scan_cap = 64;
         std::vector<const std::byte *> hits;
         for (std::size_t occ = 1; occ <= scan_cap; ++occ)
         {
-            const auto *hit = Scanner::scan_readable_regions(pattern, occ);
+            const auto *hit = scan_read(pattern, occ);
             if (hit == nullptr)
             {
                 break;
@@ -1712,7 +1736,7 @@ TEST(ScannerReadableRegionTest, FindsPatternInReadOnlyMemory)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
     const auto hits = collect_readable_hits(*pattern);
@@ -1722,7 +1746,7 @@ TEST(ScannerReadableRegionTest, FindsPatternInReadOnlyMemory)
     EXPECT_FALSE(hits_contain(hits, pattern->bytes.data()));
 
     // The executable-only sweep must not reach a PAGE_READONLY region.
-    EXPECT_EQ(Scanner::scan_executable_regions(*pattern), nullptr);
+    EXPECT_EQ(scan_exec(*pattern), nullptr);
 
     VirtualFree(ro_mem, 0, MEM_RELEASE);
 }
@@ -1737,13 +1761,13 @@ TEST(ScannerReadableRegionTest, FindsPatternInReadWriteData)
 
     const std::string aob = write_signature(&bytes[256], 16, 0x29);
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
     const auto hits = collect_readable_hits(*pattern);
     EXPECT_TRUE(hits_contain(hits, &bytes[256]));
 
-    const std::byte *exec_hit = Scanner::scan_executable_regions(*pattern);
+    const std::byte *exec_hit = scan_exec(*pattern);
     EXPECT_EQ(exec_hit, nullptr);
 
     VirtualFree(rw_mem, 0, MEM_RELEASE);
@@ -1764,7 +1788,7 @@ TEST(ScannerReadableRegionTest, SupersetIncludesExecutableReadable)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(exec_mem, 4096, PAGE_EXECUTE_READ, &old_protect));
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
     const auto hits = collect_readable_hits(*pattern);
@@ -1772,7 +1796,7 @@ TEST(ScannerReadableRegionTest, SupersetIncludesExecutableReadable)
 
     // The executable buffer is the only executable copy (the needle and any transient stack copy are not executable),
     // so it is the first exec hit.
-    const std::byte *exec_hit = Scanner::scan_executable_regions(*pattern);
+    const std::byte *exec_hit = scan_exec(*pattern);
     ASSERT_NE(exec_hit, nullptr);
     EXPECT_EQ(exec_hit, &bytes[128]);
 
@@ -1794,7 +1818,7 @@ TEST(ScannerReadableRegionTest, SkipsGuardPages)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(guard_mem, 4096, PAGE_READONLY | PAGE_GUARD, &old_protect));
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
     // The guarded region must be skipped: no occurrence may fall inside it. (Transient readable copies of the signature
@@ -1818,7 +1842,7 @@ TEST(ScannerReadableRegionTest, SkipsNoAccessPages)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(na_mem, 4096, PAGE_NOACCESS, &old_protect));
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
     const auto hits = collect_readable_hits(*pattern);
@@ -1842,7 +1866,7 @@ TEST(ScannerReadableRegionTest, NthOccurrence)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
     // Both copies must be reachable across the enumerated occurrences.
@@ -1869,7 +1893,7 @@ TEST(ScannerReadableRegionTest, RespectsPatternOffset)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->offset, 3);
 
@@ -1882,38 +1906,26 @@ TEST(ScannerReadableRegionTest, RespectsPatternOffset)
 
 TEST(ScannerReadableRegionTest, EmptyPattern)
 {
-    Scanner::CompiledPattern empty;
-    const std::byte *result = Scanner::scan_readable_regions(empty);
+    detail::EnginePattern empty;
+    const std::byte *result = scan_read(empty);
     EXPECT_EQ(result, nullptr);
 }
 
 TEST(ScannerReadableRegionTest, ZeroOccurrence)
 {
-    auto pattern = Scanner::parse_aob("5E 91 C4 2A 7F 38 D6 0B E3 4C 9A 17 62 F5 8D 30");
+    auto pattern = detail::parse_aob("5E 91 C4 2A 7F 38 D6 0B E3 4C 9A 17 62 F5 8D 30");
     ASSERT_TRUE(pattern.has_value());
 
-    const std::byte *result = Scanner::scan_readable_regions(*pattern, 0);
+    const std::byte *result = scan_read(*pattern, 0);
     EXPECT_EQ(result, nullptr);
 }
 
 TEST(ScannerStringTest, RipResolveErrorToString_IsNoexcept)
 {
-    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::NullInput)));
-    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::PrefixNotFound)));
-    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::RegionTooSmall)));
-    static_assert(noexcept(rip_resolve_error_to_string(RipResolveError::UnreadableDisplacement)));
-}
-
-TEST(ScannerStringTest, ResolveErrorToString_IsNoexcept)
-{
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::EmptyCandidates)));
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::NoMatch)));
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::AllPatternsInvalid)));
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::PrologueFallbackNotApplicable)));
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::InvalidRange)));
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::DecodeFailed)));
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::UnexpectedShape)));
-    static_assert(noexcept(Scanner::resolve_error_to_string(Scanner::ResolveError::OperandOutOfRange)));
+    static_assert(noexcept(to_string(ErrorCode::NullInput)));
+    static_assert(noexcept(to_string(ErrorCode::PrefixNotFound)));
+    static_assert(noexcept(to_string(ErrorCode::RegionTooSmall)));
+    static_assert(noexcept(to_string(ErrorCode::UnreadableDisplacement)));
 }
 
 TEST(ScannerTest, find_pattern_common_byte_anchoring)
@@ -1926,10 +1938,10 @@ TEST(ScannerTest, find_pattern_common_byte_anchoring)
                               std::byte{0x0F}, std::byte{0xE9}, std::byte{0x89}, std::byte{0x42}, std::byte{0x10}};
 
     // Search for a rare anchor byte (0x42) surrounded by common bytes
-    const auto pattern = Scanner::parse_aob("89 42 10");
+    const auto pattern = detail::parse_aob("89 42 10");
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *result = Scanner::find_pattern(data, sizeof(data), pattern.value());
+    const auto *result = detail::find_pattern(data, sizeof(data), pattern.value());
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[17]);
 }
@@ -1940,10 +1952,10 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
     const std::byte data[] = {std::byte{0x00}, std::byte{0x00}, std::byte{0xCC}, std::byte{0x90},
                               std::byte{0xFF}, std::byte{0x48}, std::byte{0x8B}, std::byte{0x00}};
 
-    const auto pattern = Scanner::parse_aob("CC 90 FF 48 8B");
+    const auto pattern = detail::parse_aob("CC 90 FF 48 8B");
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *result = Scanner::find_pattern(data, sizeof(data), pattern.value());
+    const auto *result = detail::find_pattern(data, sizeof(data), pattern.value());
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[2]);
 }
@@ -1952,23 +1964,23 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
 
 TEST(ScannerTest, active_simd_level_returns_valid_tier)
 {
-    const auto level = Scanner::active_simd_level();
+    const auto level = scan::active_simd_level();
     // Must be one of the defined tiers. Avx512 is only reachable in a DMK_ENABLE_AVX512 build on AVX-512 hardware;
     // on every other build/host the runtime gate falls back to a lower tier, which is what this also asserts.
-    EXPECT_TRUE(level == Scanner::SimdLevel::Scalar || level == Scanner::SimdLevel::Sse2 ||
-                level == Scanner::SimdLevel::Avx2 || level == Scanner::SimdLevel::Avx512);
+    EXPECT_TRUE(level == scan::SimdLevel::Scalar || level == scan::SimdLevel::Sse2 || level == scan::SimdLevel::Avx2 ||
+                level == scan::SimdLevel::Avx512);
 
     // On x86-64, SSE2 is guaranteed at minimum
 #if defined(__x86_64__) || defined(_M_X64)
-    EXPECT_GE(static_cast<int>(level), static_cast<int>(Scanner::SimdLevel::Sse2));
+    EXPECT_GE(static_cast<int>(level), static_cast<int>(scan::SimdLevel::Sse2));
 #endif
 }
 
 TEST(ScannerTest, active_simd_level_is_deterministic)
 {
     // Runtime detection is cached; repeated calls must return the same value
-    const auto a = Scanner::active_simd_level();
-    const auto b = Scanner::active_simd_level();
+    const auto a = scan::active_simd_level();
+    const auto b = scan::active_simd_level();
     EXPECT_EQ(a, b);
 }
 
@@ -1976,7 +1988,7 @@ TEST(ScannerTest, active_simd_level_print)
 {
     // Diagnostic: prints the active tier so CI logs confirm which path ran.
     // Not a correctness assertion -- purely informational.
-    const auto level = Scanner::active_simd_level();
+    const auto level = scan::active_simd_level();
     const char *names[] = {"Scalar", "SSE2", "AVX2", "AVX-512"};
     std::printf("[  DIAG   ] Scanner SIMD level: %s\n", names[static_cast<int>(level)]);
 }
@@ -2000,11 +2012,11 @@ TEST(ScannerTest, find_pattern_avx2_path_exact_32_bytes)
         aob += std::format("{:02X}", i & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 32u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[16]);
 }
@@ -2024,11 +2036,11 @@ TEST(ScannerTest, find_pattern_avx2_path_48_bytes)
         aob += std::format("{:02X}", (i * 7) & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 48u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[8]);
 }
@@ -2048,11 +2060,11 @@ TEST(ScannerTest, find_pattern_avx2_path_64_bytes)
         aob += std::format("{:02X}", i & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 64u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[32]);
 }
@@ -2078,11 +2090,11 @@ TEST(ScannerTest, find_pattern_avx512_path_96_bytes)
         aob += std::format("{:02X}", (i * 5) & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 96u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[32]);
 }
@@ -2102,11 +2114,11 @@ TEST(ScannerTest, find_pattern_avx512_path_128_bytes)
         aob += std::format("{:02X}", (i * 3) & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 128u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[64]);
 }
@@ -2131,11 +2143,11 @@ TEST(ScannerTest, find_pattern_avx512_path_wildcards_across_64_boundary)
             aob += std::format("{:02X}", (i * 9) & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 96u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[16]);
 }
@@ -2160,11 +2172,11 @@ TEST(ScannerTest, find_pattern_avx512_path_mismatch_after_first_chunk)
             aob += std::format("{:02X}", (i * 9) & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 96u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -2187,11 +2199,11 @@ TEST(ScannerTest, find_pattern_avx2_path_with_wildcards)
             aob += std::format("{:02X}", i & 0xFF);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
     ASSERT_EQ(pattern->size(), 32u);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[16]);
 }
@@ -2214,10 +2226,10 @@ TEST(ScannerTest, find_pattern_avx2_path_mismatch_in_second_chunk)
     // Corrupt byte 65 in the data so second AVX2 chunk fails
     data[65] = std::byte{0xFE};
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -2234,10 +2246,10 @@ TEST(ScannerTest, find_pattern_avx2_path_not_found)
         aob += std::format("{:02X}", i);
     }
 
-    const auto pattern = Scanner::parse_aob(aob);
+    const auto pattern = detail::parse_aob(aob);
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -2251,10 +2263,10 @@ namespace
 
 TEST(ScannerRipResolveTest, resolve_rip_relative_null_input_returns_error)
 {
-    const auto result = Scanner::resolve_rip_relative(nullptr, 1, 5);
+    const auto result = resolve_rip(nullptr, 1, 5);
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+    EXPECT_EQ(result.error().code, ErrorCode::NullInput);
 }
 
 TEST(ScannerRipResolveTest, resolve_rip_relative_positive_displacement)
@@ -2264,11 +2276,11 @@ TEST(ScannerRipResolveTest, resolve_rip_relative_positive_displacement)
     buffer[0] = std::byte{0xE8};
     write_disp32(buffer.data() + 1, 0x1000);
 
-    const auto result = Scanner::resolve_rip_relative(buffer.data(), 1, 5);
+    const auto result = resolve_rip(buffer.data(), 1, 5);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data()) + 5 + 0x1000;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST(ScannerRipResolveTest, resolve_rip_relative_negative_displacement)
@@ -2278,11 +2290,11 @@ TEST(ScannerRipResolveTest, resolve_rip_relative_negative_displacement)
     buffer[0] = std::byte{0xE9};
     write_disp32(buffer.data() + 1, -0x200);
 
-    const auto result = Scanner::resolve_rip_relative(buffer.data(), 1, 5);
+    const auto result = resolve_rip(buffer.data(), 1, 5);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data()) + 5 - 0x200;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST(ScannerRipResolveTest, resolve_rip_relative_mov_rax_rip_shape)
@@ -2294,11 +2306,11 @@ TEST(ScannerRipResolveTest, resolve_rip_relative_mov_rax_rip_shape)
     buffer[2] = std::byte{0x05};
     write_disp32(buffer.data() + 3, 0x4000);
 
-    const auto result = Scanner::resolve_rip_relative(buffer.data(), 3, 7);
+    const auto result = resolve_rip(buffer.data(), 3, 7);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data()) + 7 + 0x4000;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST(ScannerRipResolveTest, resolve_rip_relative_unreadable_displacement)
@@ -2319,12 +2331,12 @@ TEST(ScannerRipResolveTest, resolve_rip_relative_unreadable_displacement)
     auto *fake_instr = region + page_size - 1;
     *fake_instr = std::byte{0xE8};
 
-    const auto result = Scanner::resolve_rip_relative(fake_instr, 1, 5);
+    const auto result = resolve_rip(fake_instr, 1, 5);
 
     EXPECT_FALSE(result.has_value());
     if (!result.has_value())
     {
-        EXPECT_EQ(result.error(), RipResolveError::UnreadableDisplacement);
+        EXPECT_EQ(result.error().code, ErrorCode::UnreadableDisplacement);
     }
 
     ::VirtualFree(region, 0, MEM_RELEASE);
@@ -2332,32 +2344,30 @@ TEST(ScannerRipResolveTest, resolve_rip_relative_unreadable_displacement)
 
 TEST(ScannerRipResolveTest, find_and_resolve_null_input_returns_error)
 {
-    const auto result = Scanner::find_and_resolve_rip_relative(nullptr, 16, Scanner::PREFIX_CALL_REL32, 5);
+    const auto result = find_and_resolve_rip(nullptr, 16, scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::NullInput);
+    EXPECT_EQ(result.error().code, ErrorCode::NullInput);
 }
 
 TEST(ScannerRipResolveTest, find_and_resolve_region_too_small_returns_error)
 {
     std::vector<std::byte> buffer(2, std::byte{0x00});
 
-    const auto result =
-        Scanner::find_and_resolve_rip_relative(buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+    const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::RegionTooSmall);
+    EXPECT_EQ(result.error().code, ErrorCode::RegionTooSmall);
 }
 
 TEST(ScannerRipResolveTest, find_and_resolve_prefix_not_found_returns_error)
 {
     std::vector<std::byte> buffer(64, std::byte{0x90});
 
-    const auto result =
-        Scanner::find_and_resolve_rip_relative(buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+    const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), RipResolveError::PrefixNotFound);
+    EXPECT_EQ(result.error().code, ErrorCode::PrefixNotFound);
 }
 
 TEST(ScannerRipResolveTest, find_and_resolve_call_rel32_happy_path)
@@ -2368,12 +2378,11 @@ TEST(ScannerRipResolveTest, find_and_resolve_call_rel32_happy_path)
     buffer[instr_offset] = std::byte{0xE8};
     write_disp32(buffer.data() + instr_offset + 1, 0x80);
 
-    const auto result =
-        Scanner::find_and_resolve_rip_relative(buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+    const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 5 + 0x80;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST(ScannerRipResolveTest, find_and_resolve_mov_rax_rip_multi_byte_prefix)
@@ -2386,12 +2395,11 @@ TEST(ScannerRipResolveTest, find_and_resolve_mov_rax_rip_multi_byte_prefix)
     buffer[instr_offset + 2] = std::byte{0x05};
     write_disp32(buffer.data() + instr_offset + 3, 0x1234);
 
-    const auto result =
-        Scanner::find_and_resolve_rip_relative(buffer.data(), buffer.size(), Scanner::PREFIX_MOV_RAX_RIP, 7);
+    const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_MOV_RAX_RIP, 7);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 7 + 0x1234;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 TEST(ScannerRipResolveTest, find_and_resolve_returns_first_match_only)
@@ -2404,12 +2412,11 @@ TEST(ScannerRipResolveTest, find_and_resolve_returns_first_match_only)
     buffer[32] = std::byte{0xE8};
     write_disp32(buffer.data() + 33, 0x20);
 
-    const auto result =
-        Scanner::find_and_resolve_rip_relative(buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+    const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected_first = reinterpret_cast<uintptr_t>(buffer.data() + 8) + 5 + 0x10;
-    EXPECT_EQ(*result, expected_first);
+    EXPECT_EQ(result->raw(), expected_first);
 }
 
 TEST(ScannerRipResolveTest, find_and_resolve_match_at_region_boundary)
@@ -2420,41 +2427,39 @@ TEST(ScannerRipResolveTest, find_and_resolve_match_at_region_boundary)
     buffer[instr_offset] = std::byte{0xE8};
     write_disp32(buffer.data() + instr_offset + 1, 0x40);
 
-    const auto result =
-        Scanner::find_and_resolve_rip_relative(buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+    const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data() + instr_offset) + 5 + 0x40;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 // Regression guard: the PREFIX_* constants must expose std::array::size(), decay into std::span cleanly, and feed
 // through find_and_resolve_rip_relative without source changes.
 TEST(ScannerRipResolveTest, PrefixConstants_AreStdArraysAndUsableAsSpan)
 {
-    static_assert(Scanner::PREFIX_CALL_REL32.size() == 1, "PREFIX_CALL_REL32 must expose std::array::size()");
-    EXPECT_EQ(Scanner::PREFIX_CALL_REL32[0], std::byte{0xE8});
+    static_assert(scan::PREFIX_CALL_REL32.size() == 1, "PREFIX_CALL_REL32 must expose std::array::size()");
+    EXPECT_EQ(scan::PREFIX_CALL_REL32[0], std::byte{0xE8});
 
     std::vector<std::byte> buffer(5, std::byte{0x90});
     buffer[0] = std::byte{0xE8};
     write_disp32(buffer.data() + 1, 0x10);
 
-    const auto result =
-        Scanner::find_and_resolve_rip_relative(buffer.data(), buffer.size(), Scanner::PREFIX_CALL_REL32, 5);
+    const auto result = find_and_resolve_rip(buffer.data(), buffer.size(), scan::PREFIX_CALL_REL32, 5);
 
     ASSERT_TRUE(result.has_value());
     const uintptr_t expected = reinterpret_cast<uintptr_t>(buffer.data()) + 5 + 0x10;
-    EXPECT_EQ(*result, expected);
+    EXPECT_EQ(result->raw(), expected);
 }
 
 // Parser must reject obvious non-hex tokens. Guards parse_aob's rejection behaviour without inspecting the Logger
 // output (no public capture helper exists in the test suite, so message text is intentionally unchecked).
 TEST(ScannerTest, ParseAob_WildcardErrorMessage_UsesCleanQuestionMarks)
 {
-    auto result = Scanner::parse_aob("GG");
+    auto result = detail::parse_aob("GG");
     EXPECT_FALSE(result.has_value());
 
-    auto result_mixed = Scanner::parse_aob("48 GG 8B");
+    auto result_mixed = detail::parse_aob("48 GG 8B");
     EXPECT_FALSE(result_mixed.has_value());
 }
 
@@ -2462,18 +2467,18 @@ TEST(ScannerTest, ParseAob_WildcardErrorMessage_UsesCleanQuestionMarks)
 // that case (and log a warning). This guard-rails the behaviour so future refactors don't silently flip it.
 TEST(ScannerTest, FindPattern_AllWildcards_ReturnsStartWithWarning)
 {
-    Scanner::CompiledPattern all_wild;
+    detail::EnginePattern all_wild;
     all_wild.bytes = {std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
     all_wild.mask = {std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
 
     std::vector<std::byte> buffer(32, std::byte{0xAA});
 
-    const auto *first = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild);
+    const auto *first = detail::find_pattern(buffer.data(), buffer.size(), all_wild);
     ASSERT_NE(first, nullptr);
     EXPECT_EQ(first, buffer.data());
 
     // Stable across repeated calls.
-    const auto *second = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild);
+    const auto *second = detail::find_pattern(buffer.data(), buffer.size(), all_wild);
     EXPECT_EQ(second, buffer.data());
 }
 
@@ -2486,13 +2491,13 @@ TEST(ScannerTest, ResolveRipRelative_NegativeDisplacement_ComputesCorrectTarget)
     alignas(4)
         std::byte buffer[5] = {std::byte{0xE8}, std::byte{0xE0}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
 
-    ASSERT_TRUE(Memory::init_cache());
-    const auto result = Scanner::resolve_rip_relative(buffer, 1, 5);
+    ASSERT_TRUE(memory::init_cache());
+    const auto result = resolve_rip(buffer, 1, 5);
     ASSERT_TRUE(result.has_value());
 
     const auto *expected_ptr = buffer + 5 - 0x20;
-    EXPECT_EQ(*result, reinterpret_cast<uintptr_t>(expected_ptr));
-    Memory::shutdown_cache();
+    EXPECT_EQ(result->raw(), reinterpret_cast<uintptr_t>(expected_ptr));
+    memory::shutdown_cache();
 }
 
 // Exercise the full VirtualQuery walk. The test cannot portably set up a pure-execute page, but it can verify the walk
@@ -2503,10 +2508,10 @@ TEST(ScannerTest, ScanExecutableRegions_SurvivesProcessWalk_DoesNotCrash)
 {
     // A distinctive pattern unlikely to appear in the host process. If it does match something, that is still a success
     // for the "does not AV" contract.
-    auto pattern = Scanner::parse_aob("DE AD BE EF CA FE BA BE 13 37 C0 DE");
+    auto pattern = detail::parse_aob("DE AD BE EF CA FE BA BE 13 37 C0 DE");
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *hit = Scanner::scan_executable_regions(*pattern);
+    const auto *hit = scan_exec(*pattern);
     (void)hit; // Either result (match or nullptr) is acceptable; we care that we returned.
     SUCCEED();
 }
@@ -2522,11 +2527,11 @@ TEST(ScannerTest, FindPattern_OffsetAtEnd_ReturnsPastLastByte)
     data[12] = std::byte{0xBE};
     data[13] = std::byte{0xEF};
 
-    auto pattern = Scanner::parse_aob("DE AD BE EF |");
+    auto pattern = detail::parse_aob("DE AD BE EF |");
     ASSERT_TRUE(pattern.has_value());
     EXPECT_EQ(pattern->offset, 4);
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result, &data[14]);
 }
@@ -2536,21 +2541,21 @@ TEST(ScannerTest, FindPattern_OffsetAtEnd_ReturnsPastLastByte)
 // + N - 1) without log-spamming for every internal iteration.
 TEST(ScannerTest, FindPattern_AllWildcards_NthOccurrenceAdvances)
 {
-    Scanner::CompiledPattern all_wild;
+    detail::EnginePattern all_wild;
     all_wild.bytes = {std::byte{0x00}, std::byte{0x00}};
     all_wild.mask = {std::byte{0x00}, std::byte{0x00}};
 
     std::vector<std::byte> buffer(16, std::byte{0xAB});
 
-    const auto *first = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild, 1);
+    const auto *first = detail::find_pattern(buffer.data(), buffer.size(), all_wild, 1);
     ASSERT_NE(first, nullptr);
     EXPECT_EQ(first, buffer.data());
 
-    const auto *second = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild, 2);
+    const auto *second = detail::find_pattern(buffer.data(), buffer.size(), all_wild, 2);
     ASSERT_NE(second, nullptr);
     EXPECT_EQ(second, buffer.data() + 1);
 
-    const auto *third = Scanner::find_pattern(buffer.data(), buffer.size(), all_wild, 3);
+    const auto *third = detail::find_pattern(buffer.data(), buffer.size(), all_wild, 3);
     ASSERT_NE(third, nullptr);
     EXPECT_EQ(third, buffer.data() + 2);
 }
@@ -2559,11 +2564,11 @@ TEST(ScannerTest, FindPattern_AllWildcards_NthOccurrenceAdvances)
 // preserving the 1-based contract.
 TEST(ScannerTest, FindPattern_NthZeroOccurrence_ReturnsNullptr)
 {
-    auto pattern = Scanner::parse_aob("CC");
+    auto pattern = detail::parse_aob("CC");
     ASSERT_TRUE(pattern.has_value());
 
     std::vector<std::byte> data = {std::byte{0xCC}, std::byte{0xCC}};
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), *pattern, 0);
+    const auto *result = detail::find_pattern(data.data(), data.size(), *pattern, 0);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -2571,10 +2576,10 @@ TEST(ScannerTest, FindPattern_NthZeroOccurrence_ReturnsNullptr)
 // raw helper would be asked to scan with a zero-size pattern, tripping the `remaining >= 0` sentinel path.
 TEST(ScannerTest, FindPattern_NthEmptyPattern_ReturnsNullptr)
 {
-    Scanner::CompiledPattern empty_pattern;
+    detail::EnginePattern empty_pattern;
     std::vector<std::byte> data(16, std::byte{0x00});
 
-    const auto *result = Scanner::find_pattern(data.data(), data.size(), empty_pattern, 1);
+    const auto *result = detail::find_pattern(data.data(), data.size(), empty_pattern, 1);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -2582,10 +2587,10 @@ TEST(ScannerTest, FindPattern_NthEmptyPattern_ReturnsNullptr)
 // a positive region size.
 TEST(ScannerTest, FindPattern_NthNullStart_ReturnsNullptr)
 {
-    auto pattern = Scanner::parse_aob("CC");
+    auto pattern = detail::parse_aob("CC");
     ASSERT_TRUE(pattern.has_value());
 
-    const auto *result = Scanner::find_pattern(static_cast<const std::byte *>(nullptr), 32, *pattern, 1);
+    const auto *result = detail::find_pattern(static_cast<const std::byte *>(nullptr), 32, *pattern, 1);
     EXPECT_EQ(result, nullptr);
 }
 
@@ -2596,77 +2601,14 @@ TEST(ScannerTest, ResolveRipRelative_NegativeDisp32_ProducesExpectedTarget)
 {
     std::vector<std::byte> code = {std::byte{0xE8}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}, std::byte{0xFF}};
 
-    const auto result = Scanner::resolve_rip_relative(code.data(), 1, 5);
+    const auto result = resolve_rip(code.data(), 1, 5);
     ASSERT_TRUE(result.has_value());
 
     const uintptr_t base = reinterpret_cast<uintptr_t>(code.data());
     // disp = -1, instruction_length = 5 => target = base + 5 + (-1) = base + 4.
     const uintptr_t expected = base + 5 + static_cast<uintptr_t>(static_cast<int64_t>(-1));
-    EXPECT_EQ(*result, expected);
-    EXPECT_EQ(*result, base + 4);
-}
-
-TEST(ScannerCascade, EmptyCandidatesReturnsError)
-{
-    std::span<const Scanner::AddrCandidate> empty{};
-    auto result = Scanner::resolve_cascade(empty, "unit");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::ResolveError::EmptyCandidates);
-}
-
-TEST(ScannerCascade, AllInvalidPatternsReturnsError)
-{
-    Scanner::AddrCandidate cands[] = {
-        {"bad", "not_valid_aob_tokens $$$$", Scanner::ResolveMode::Direct, 0, 0},
-    };
-    auto result = Scanner::resolve_cascade(cands, "unit");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_TRUE(result.error() == Scanner::ResolveError::AllPatternsInvalid ||
-                result.error() == Scanner::ResolveError::NoMatch);
-}
-
-TEST(ScannerCascade, NoMatchReturnsError)
-{
-    Scanner::AddrCandidate cands[] = {
-        {"miss", "FF EE DD CC BB AA 99 88 77 66 55 44 33 22 11 00", Scanner::ResolveMode::Direct, 0, 0},
-    };
-    auto result = Scanner::resolve_cascade(cands, "unit");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
-}
-
-TEST(ScannerCascade, ReadableKindResolvesDataSectionMatch)
-{
-    // A Direct-mode candidate whose signature lives in PAGE_READONLY data is reachable only through
-    // ScannerKind::Readable; the executable default must miss it.
-    void *ro_mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(ro_mem, nullptr);
-
-    auto *bytes = reinterpret_cast<std::byte *>(ro_mem);
-    std::memset(bytes, 0x00, 4096);
-
-    // The AOB string backs the candidate's string_view, so it must outlive the resolve_cascade calls below.
-    const std::string aob = write_signature(&bytes[384], 16, 0xC1);
-
-    DWORD old_protect = 0;
-    ASSERT_TRUE(VirtualProtect(ro_mem, 4096, PAGE_READONLY, &old_protect));
-
-    // require_unique is left false: this is a whole-process sweep and write_signature leaves transient stack copies of
-    // the bytes, so the signature is not globally unique. The test exercises ScannerKind, not the uniqueness guard.
-    Scanner::AddrCandidate cands[] = {
-        {"data-sig", aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
-    };
-
-    // ScannerKind::Readable reaches data sections, so the cascade resolves a signature that lives in PAGE_READONLY
-    // memory; the executable default cannot see it and reports NoMatch.
-    const auto readable = Scanner::resolve_cascade(cands, "data-cascade", Scanner::ScannerKind::Readable);
-    EXPECT_TRUE(readable.has_value());
-
-    const auto executable = Scanner::resolve_cascade(cands, "data-cascade", Scanner::ScannerKind::Executable);
-    ASSERT_FALSE(executable.has_value());
-    EXPECT_EQ(executable.error(), Scanner::ResolveError::NoMatch);
-
-    VirtualFree(ro_mem, 0, MEM_RELEASE);
+    EXPECT_EQ(result->raw(), expected);
+    EXPECT_EQ(result->raw(), base + 4);
 }
 
 namespace
@@ -2695,556 +2637,6 @@ namespace
     };
 } // namespace
 
-// The whole-process Direct cascade path gates its resolved address with plausible_userspace_ptr. A Direct candidate
-// whose disp_offset underflows the match below the user-mode floor (0x10000) must not resolve: the cascade falls
-// through to the next candidate instead of committing to a near-null address the caller cannot dereference. Here P1
-// carries a pathological negative disp_offset computed to push the resolved address to 0x8000 (below the floor); P2 is
-// the same unique signature with disp_offset 0, so it resolves cleanly and wins.
-TEST(ScannerCascade, DirectImplausibleNegativeOffsetFallsThroughToCleanCandidate)
-{
-    ExecBuffer buf(0x1000);
-    ASSERT_NE(buf.base, nullptr);
-    std::memset(buf.base, 0xCC, buf.size);
-
-    // A 16-byte signature unique in the process's executable regions (the only executable copy is this buffer; the
-    // compiled needle and any transient stack copy are not executable).
-    constexpr std::size_t PLANT_OFFSET = 0x100;
-    const std::string aob = write_signature(reinterpret_cast<std::byte *>(buf.base) + PLANT_OFFSET, 16, 0xD5);
-
-    auto probe = Scanner::parse_aob(aob);
-    ASSERT_TRUE(probe.has_value());
-    const auto *match = Scanner::scan_executable_regions(*probe);
-    ASSERT_NE(match, nullptr);
-    const auto match_addr = reinterpret_cast<std::uintptr_t>(match);
-
-    // disp_offset chosen so match_addr + disp_offset == 0x8000, which is below USERSPACE_PTR_MIN (0x10000) and
-    // therefore implausible. The arithmetic wraps in uintptr_t exactly as resolve_candidate_match computes it.
-    const auto resolved_floor_target = static_cast<std::uintptr_t>(0x8000);
-    const auto bad_disp = static_cast<std::ptrdiff_t>(resolved_floor_target - match_addr);
-
-    Scanner::AddrCandidate cands[] = {
-        {"p1_implausible", aob, Scanner::ResolveMode::Direct, bad_disp, 0},
-        {"p2_clean", aob, Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade(cands, "direct-plausibility");
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->winning_name, "p2_clean");
-    EXPECT_EQ(hit->address, match_addr);
-}
-
-// When the only candidate's Direct resolution is implausible (underflows below the user-mode floor), the whole-process
-// cascade returns NoMatch rather than a near-null address.
-TEST(ScannerCascade, DirectImplausibleNegativeOffsetSoleCandidateReturnsNoMatch)
-{
-    ExecBuffer buf(0x1000);
-    ASSERT_NE(buf.base, nullptr);
-    std::memset(buf.base, 0xCC, buf.size);
-
-    constexpr std::size_t PLANT_OFFSET = 0x100;
-    const std::string aob = write_signature(reinterpret_cast<std::byte *>(buf.base) + PLANT_OFFSET, 16, 0x2E);
-
-    auto probe = Scanner::parse_aob(aob);
-    ASSERT_TRUE(probe.has_value());
-    const auto *match = Scanner::scan_executable_regions(*probe);
-    ASSERT_NE(match, nullptr);
-    const auto match_addr = reinterpret_cast<std::uintptr_t>(match);
-
-    const auto bad_disp = static_cast<std::ptrdiff_t>(static_cast<std::uintptr_t>(0x8000) - match_addr);
-
-    Scanner::AddrCandidate cands[] = {
-        {"only_implausible", aob, Scanner::ResolveMode::Direct, bad_disp, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade(cands, "direct-plausibility-sole");
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-TEST(ScannerCascade, PrologueFallbackHitFindsHookedPrologue)
-{
-    ExecBuffer buf(0x1000);
-    ASSERT_NE(buf.base, nullptr);
-
-    std::memset(buf.base, 0xCC, buf.size);
-
-    // Ten literal tail bytes satisfy PROLOGUE_FALLBACK_MIN_TAIL_LITERALS and keep the rebuilt pattern unique enough in
-    // the process's executable regions to land a single match.
-    constexpr std::uint8_t UNIQUE_TAIL[] = {0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x13, 0x37, 0x42, 0x5B, 0x6A};
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-
-    buf.base[PLANT_OFFSET + 0] = 0xE9;
-    buf.base[PLANT_OFFSET + 1] = 0x11;
-    buf.base[PLANT_OFFSET + 2] = 0x22;
-    buf.base[PLANT_OFFSET + 3] = 0x33;
-    buf.base[PLANT_OFFSET + 4] = 0x44;
-    std::memcpy(buf.base + PLANT_OFFSET + 5, UNIQUE_TAIL, sizeof(UNIQUE_TAIL));
-
-    const char *pattern = "48 89 5C 24 08 AD BE EF CA FE 13 37 42 5B 6A";
-
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", pattern, Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    auto direct = Scanner::resolve_cascade(cands, "prologue-test-direct");
-    ASSERT_FALSE(direct.has_value());
-    EXPECT_EQ(direct.error(), Scanner::ResolveError::NoMatch);
-
-    auto fallback = Scanner::resolve_cascade_with_prologue_fallback(cands, "prologue-test-fallback");
-    if (fallback.has_value())
-    {
-        EXPECT_EQ(fallback->address, reinterpret_cast<std::uintptr_t>(buf.base) + PLANT_OFFSET);
-    }
-    else
-    {
-        EXPECT_TRUE(fallback.error() == Scanner::ResolveError::NoMatch);
-    }
-}
-
-TEST(ScannerCascade, PrologueFallbackRejectsShortTail)
-{
-    Scanner::AddrCandidate cands[] = {
-        {"too-short", "48 89 5C 24 08 90 90", Scanner::ResolveMode::Direct, 0, 0},
-    };
-    auto result = Scanner::resolve_cascade_with_prologue_fallback(cands, "short-tail");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_TRUE(result.error() == Scanner::ResolveError::PrologueFallbackNotApplicable ||
-                result.error() == Scanner::ResolveError::NoMatch);
-}
-
-TEST(ScannerCascade, PrologueFallbackRejectsInsufficientTailLiterals)
-{
-    Scanner::AddrCandidate cands[] = {
-        {"wildcard-tail", "DE AD BE EF CA ?? ?? ?? ??", Scanner::ResolveMode::Direct, 0, 0},
-    };
-    auto result = Scanner::resolve_cascade_with_prologue_fallback(cands, "insufficient-tail-literals");
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::ResolveError::PrologueFallbackNotApplicable);
-}
-
-// The prologue fallback rebuilds a pattern as `E9 ?? ?? ?? ??` followed by the original pattern's tail bytes. The
-// uniqueness guard in scan_candidates_hooked_prologue rejects any rebuilt pattern that matches more than
-// PROLOGUE_FALLBACK_MAX_HITS locations across the process's executable regions, because a legitimate sibling-mod hook
-// rewrites exactly one prologue and so a unique scan target must resolve to exactly one site. This test seeds two
-// trampoline-shaped sequences with the same literal tail to force a multi-match outcome.
-TEST(ScannerCascade, PrologueFallbackRejectsAmbiguousTail)
-{
-    // ExecBuffer allocates PAGE_EXECUTE_READWRITE, so seeding and scanning both work without a mid-test VirtualProtect
-    // toggle. scan_executable_regions walks any page with the EXECUTE bit, so RX and RWX are both visible. Using RAII
-    // ensures the region is released even if a following ASSERT short-circuits the test.
-    ExecBuffer buf(0x2000);
-    ASSERT_NE(buf.base, nullptr);
-
-    std::memset(buf.base, 0xCC, buf.size);
-
-    // Tail chosen literal-heavy enough to pass PROLOGUE_FALLBACK_MIN_TAIL_LITERALS (10 non-wildcard bytes after the
-    // rewritten prologue). Bytes must NOT collide with any other test's pattern, because residue in
-    // freed-but-still-mapped memory could influence subsequent tests that run in the same process. Prefix mimics a
-    // SafetyHook-installed JMP rel32 over the original prologue -- the only shape the fallback recognises before
-    // rebuilding the AOB from the literal tail described above.
-    constexpr std::uint8_t AMBIGUOUS_TEMPLATE[] = {
-        0xE9, 0x00, 0x00, 0x00, 0x00, 0xA5, 0xB6, 0xC7, 0xD8, 0xE9, 0xFA, 0x0B, 0x1C, 0x2D, 0x3E, 0x4F,
-    };
-
-    // Seed two copies so the rebuilt fallback pattern tallies >= 2 hits in this buffer alone, which exceeds the
-    // uniqueness ceiling of 1 and forces the guard to engage.
-    for (std::size_t i = 0; i < 2; ++i)
-    {
-        std::memcpy(buf.base + i * 0x100, AMBIGUOUS_TEMPLATE, sizeof(AMBIGUOUS_TEMPLATE));
-    }
-
-    Scanner::AddrCandidate cands[] = {
-        // Original prologue is five arbitrary REX-prefixed bytes followed by the ambiguous literal tail.
-        // resolve_cascade's direct pass will not match (the buffer starts with E9 not 48 89 ...), so the
-        // prologue-fallback path is taken.
-        {"ambiguous", "48 89 5C 24 08 A5 B6 C7 D8 E9 FA 0B 1C 2D 3E 4F", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    auto result = Scanner::resolve_cascade_with_prologue_fallback(cands, "ambiguous-tail");
-
-    // The guard rejects ambiguity -> NoMatch (fallback applicable but every candidate exceeded the uniqueness ceiling).
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
-}
-
-// Boundary regression: a literal tail of exactly nine bytes must be rejected as PrologueFallbackNotApplicable. A lower
-// literal floor would let the fallback engage with this candidate and produce an unstable resolution; the ten-literal
-// floor surfaces the refusal at the API boundary instead.
-TEST(ScannerCascade, PrologueFallbackRejectsNineByteTail)
-{
-    Scanner::AddrCandidate cands[] = {
-        {"nine-byte-tail", "48 89 5C 24 08 AA BB CC DD EE 11 22 33 44", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    auto result = Scanner::resolve_cascade_with_prologue_fallback(cands, "nine-byte-tail");
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::ResolveError::PrologueFallbackNotApplicable);
-}
-
-// Boundary regression: exactly two matches of the rebuilt pattern must trip the uniqueness guard. A ceiling above one
-// would accept two hits and hook the first arbitrary site; the ceiling of one demands exact uniqueness, so any
-// duplicate must surface as NoMatch.
-TEST(ScannerCascade, PrologueFallbackRejectsExactlyTwoMatches)
-{
-    ExecBuffer buf(0x1000);
-    ASSERT_NE(buf.base, nullptr);
-
-    std::memset(buf.base, 0xCC, buf.size);
-
-    // Prefix mimics a SafetyHook-installed JMP rel32 over the original prologue (the shape the fallback rebuilds
-    // around). The 11-byte tail clears PROLOGUE_FALLBACK_MIN_TAIL_LITERALS so the test reaches the uniqueness check
-    // rather than the literal-floor refusal.
-    constexpr std::uint8_t TEMPLATE_BYTES[] = {
-        0xE9, 0x00, 0x00, 0x00, 0x00, 0x71, 0x82, 0x93, 0xA4, 0xB5, 0xC6, 0xD7, 0xE8, 0xF9, 0x0A, 0x1B,
-    };
-
-    std::memcpy(buf.base + 0x000, TEMPLATE_BYTES, sizeof(TEMPLATE_BYTES));
-    std::memcpy(buf.base + 0x200, TEMPLATE_BYTES, sizeof(TEMPLATE_BYTES));
-
-    Scanner::AddrCandidate cands[] = {
-        {"two-match", "48 89 5C 24 08 71 82 93 A4 B5 C6 D7 E8 F9 0A 1B", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    auto result = Scanner::resolve_cascade_with_prologue_fallback(cands, "two-match");
-
-    ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Scanner::ResolveError::NoMatch);
-}
-
-// --- Tests for resolve_cascade_in_module / _with_prologue_fallback ---
-
-// A module-scoped scan must reach the read-only data section of a real mapped
-// PE with a single range scan: there is no separate Readable kind to opt into. The fixture DLL exports dmk_scan_marker,
-// a fixed signature that lands in
-// .rdata; resolving it proves both the .rdata reach and the in-range result.
-TEST(ScannerModuleCascade, ScopedHitFindsMarkerInFixtureRdata)
-{
-    HMODULE dll = LoadLibraryA("hook_target_lib.dll");
-    ASSERT_NE(dll, nullptr) << "Failed to load hook_target_lib.dll. Error: " << GetLastError();
-
-    const auto *marker =
-        reinterpret_cast<const std::byte *>(reinterpret_cast<void *>(GetProcAddress(dll, "dmk_scan_marker")));
-    ASSERT_NE(marker, nullptr) << "dmk_scan_marker export not found";
-
-    const auto range = Memory::module_range_for(marker);
-    ASSERT_TRUE(range.has_value());
-    ASSERT_TRUE(range->valid());
-
-    Scanner::AddrCandidate cands[] = {
-        {"marker", "A7 3C F1 88 5E 22 D9 04 6B B0 1F 97 4A E3 7D 50", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "marker", *range);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(marker));
-    EXPECT_TRUE(Memory::contains(*range, hit->address));
-
-    FreeLibrary(dll);
-}
-
-// The same byte sequence planted in two independent "module" images: a module-scoped scan must return only the copy
-// inside the range it was given, never the identical copy in the sibling region. This is the cross-module collision a
-// first-match-wins whole-process scan cannot disambiguate.
-TEST(ScannerModuleCascade, NoCrossModuleBleedReturnsInRangeCopy)
-{
-    void *mod_a = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    void *mod_b = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mod_a, nullptr);
-    ASSERT_NE(mod_b, nullptr);
-
-    auto *bytes_a = reinterpret_cast<std::byte *>(mod_a);
-    auto *bytes_b = reinterpret_cast<std::byte *>(mod_b);
-    std::memset(bytes_a, 0xCC, 4096);
-    std::memset(bytes_b, 0xCC, 4096);
-
-    // Same seed and length => identical bytes in both regions, at different offsets so an address comparison can tell
-    // which copy resolved.
-    const std::string aob = write_signature(&bytes_a[256], 16, 0x6E);
-    (void)write_signature(&bytes_b[1024], 16, 0x6E);
-
-    const Memory::ModuleRange range_a{reinterpret_cast<std::uintptr_t>(mod_a),
-                                      reinterpret_cast<std::uintptr_t>(mod_a) + 4096};
-    const Memory::ModuleRange range_b{reinterpret_cast<std::uintptr_t>(mod_b),
-                                      reinterpret_cast<std::uintptr_t>(mod_b) + 4096};
-
-    Scanner::AddrCandidate cands[] = {
-        {"sig", aob, Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit_a = Scanner::resolve_cascade_in_module(cands, "sig-a", range_a);
-    ASSERT_TRUE(hit_a.has_value());
-    EXPECT_EQ(hit_a->address, reinterpret_cast<std::uintptr_t>(&bytes_a[256]));
-
-    const auto hit_b = Scanner::resolve_cascade_in_module(cands, "sig-b", range_b);
-    ASSERT_TRUE(hit_b.has_value());
-    EXPECT_EQ(hit_b->address, reinterpret_cast<std::uintptr_t>(&bytes_b[1024]));
-
-    VirtualFree(mod_a, 0, MEM_RELEASE);
-    VirtualFree(mod_b, 0, MEM_RELEASE);
-}
-
-// A signature that exists only outside the supplied range must not be found. A whole-process readable scan does find
-// it; the module-scoped scan must not, which is the entire point of scoping.
-TEST(ScannerModuleCascade, SignaturePresentOnlyOutsideRangeReturnsNoMatch)
-{
-    void *mod_a = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    void *mod_b = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mod_a, nullptr);
-    ASSERT_NE(mod_b, nullptr);
-    std::memset(mod_a, 0xCC, 4096);
-    std::memset(mod_b, 0xCC, 4096);
-
-    const std::string aob = write_signature(reinterpret_cast<std::byte *>(mod_b) + 128, 16, 0x33);
-
-    const auto base_a = reinterpret_cast<std::uintptr_t>(mod_a);
-    const Memory::ModuleRange range_a{base_a, base_a + 4096};
-
-    // require_unique is left false: this test exercises scope, not uniqueness, and write_signature leaves transient
-    // stack copies of the bytes that make the signature non-unique under a whole-process sweep (see
-    // collect_readable_hits). A real whole-process consumer of a non-unique pattern opts out the same way.
-    Scanner::AddrCandidate cands[] = {
-        {"elsewhere", aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
-    };
-
-    // Sanity: the readable whole-process sweep finds the copy in region B.
-    const auto whole = Scanner::resolve_cascade(cands, "whole", Scanner::ScannerKind::Readable);
-    EXPECT_TRUE(whole.has_value());
-
-    // The module-scoped scan of region A must not see region B's copy.
-    const auto scoped = Scanner::resolve_cascade_in_module(cands, "scoped", range_a);
-    ASSERT_FALSE(scoped.has_value());
-    EXPECT_EQ(scoped.error(), Scanner::ResolveError::NoMatch);
-
-    VirtualFree(mod_a, 0, MEM_RELEASE);
-    VirtualFree(mod_b, 0, MEM_RELEASE);
-}
-
-// Bounds-aware fall-through: a RipRelative P1 that matches in-module but whose disp32 resolves outside the range must
-// be skipped so the in-range Direct P2 wins. This is the fix a post-resolution caller check cannot express.
-TEST(ScannerModuleCascade, RipRelativeResolvingOutOfRangeFallsThroughToNextCandidate)
-{
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    auto *bytes = reinterpret_cast<std::byte *>(mem);
-    std::memset(bytes, 0xCC, 4096);
-
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    // P1: mov rax,[rip+disp32] whose disp resolves BELOW the module base, i.e. outside the range. Target = (base + 7) -
-    // 0x1000 < base.
-    bytes[0] = std::byte{0x48};
-    bytes[1] = std::byte{0x8B};
-    bytes[2] = std::byte{0x05};
-    const std::int32_t disp = -0x1000;
-    std::memcpy(&bytes[3], &disp, sizeof(disp));
-
-    // P2: a plain in-range Direct signature.
-    const std::string p2_aob = write_signature(&bytes[256], 16, 0x4B);
-
-    Scanner::AddrCandidate cands[] = {
-        {"p1_riprel", "48 8B 05 ?? ?? ?? ??", Scanner::ResolveMode::RipRelative, 3, 7},
-        {"p2_direct", p2_aob, Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "riprel-fallthrough", range);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->winning_name, "p2_direct");
-    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[256]));
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-// Bounds-aware fall-through for Direct mode: P1 matches in the scanned half of the image, but its disp_offset pushes
-// the resolved address into the second half, outside the supplied range. The cascade must fall through to P2.
-TEST(ScannerModuleCascade, DirectResolvingOutOfRangeFallsThroughToNextCandidate)
-{
-    void *mem = VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    auto *bytes = reinterpret_cast<std::byte *>(mem);
-    std::memset(bytes, 0xCC, 0x2000);
-
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    // The range covers only the first half; the second half is "out of module".
-    const Memory::ModuleRange range{base, base + 0x1000};
-
-    const std::string p1_aob = write_signature(&bytes[0], 16, 0x21);
-    const std::string p2_aob = write_signature(&bytes[512], 16, 0x77);
-
-    Scanner::AddrCandidate cands[] = {
-        // disp_offset 0x1800 pushes the resolved address past range.end.
-        {"p1_direct", p1_aob, Scanner::ResolveMode::Direct, 0x1800, 0},
-        {"p2_direct", p2_aob, Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "direct-fallthrough", range);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->winning_name, "p2_direct");
-    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[512]));
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-// Positive RipRelative case: a mov reg,[rip+disp32] candidate whose displacement targets data inside the same module
-// must resolve to that in-module address and win. This is the success path for a RipRelative global (e.g. a
-// context-pointer storage slot in .data): under a whole-process scan the instruction could match in a sibling module
-// and resolve out of bounds, but the module-scoped scan finds the in-module instruction and resolves it in range. A
-// decoy with the same instruction shape in a sibling region is never consulted.
-TEST(ScannerModuleCascade, RipRelativeResolvingInsideRangeResolvesInModule)
-{
-    void *mod = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    void *sibling = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mod, nullptr);
-    ASSERT_NE(sibling, nullptr);
-    auto *bytes = reinterpret_cast<std::byte *>(mod);
-    auto *sib = reinterpret_cast<std::byte *>(sibling);
-    std::memset(bytes, 0xCC, 4096);
-    std::memset(sib, 0xCC, 4096);
-
-    const auto base = reinterpret_cast<std::uintptr_t>(mod);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    // In-module instruction at offset 0: target = (base + 7) + disp = base + 0x800.
-    bytes[0] = std::byte{0x48};
-    bytes[1] = std::byte{0x8B};
-    bytes[2] = std::byte{0x05};
-    const std::int32_t disp_in = static_cast<std::int32_t>(0x800 - 7);
-    std::memcpy(&bytes[3], &disp_in, sizeof(disp_in));
-
-    // Sibling decoy with the same instruction shape; its disp is irrelevant because the module-scoped scan never
-    // inspects this region.
-    sib[0] = std::byte{0x48};
-    sib[1] = std::byte{0x8B};
-    sib[2] = std::byte{0x05};
-    const std::int32_t disp_decoy = 0;
-    std::memcpy(&sib[3], &disp_decoy, sizeof(disp_decoy));
-
-    Scanner::AddrCandidate cands[] = {
-        {"global_ptr", "48 8B 05 ?? ?? ?? ??", Scanner::ResolveMode::RipRelative, 3, 7},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "global-ptr", range);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, base + 0x800);
-    EXPECT_TRUE(Memory::contains(range, hit->address));
-
-    VirtualFree(mod, 0, MEM_RELEASE);
-    VirtualFree(sibling, 0, MEM_RELEASE);
-}
-
-// Cascade fall-through when the first candidate is absent from the image: a generic prologue P1 that does not appear in
-// this module simply does not match, so the cascade falls through to the mid-body anchor P2 that does. Under a
-// whole-process scan the same P1 false-matches inside a sibling module and wins (first-match-wins), shadowing the
-// correct target -- the exact cross-module shadowing this overload prevents. The test asserts both halves: the
-// whole-process cascade returns P1, the module-scoped cascade returns P2.
-TEST(ScannerModuleCascade, FirstCandidateAbsentInModuleFallsThroughToNextCandidate)
-{
-    void *mod = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    void *sibling = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mod, nullptr);
-    ASSERT_NE(sibling, nullptr);
-    auto *bytes = reinterpret_cast<std::byte *>(mod);
-    auto *sib = reinterpret_cast<std::byte *>(sibling);
-    std::memset(bytes, 0xCC, 4096);
-    std::memset(sib, 0xCC, 4096);
-
-    const auto base = reinterpret_cast<std::uintptr_t>(mod);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    // P1 (generic prologue) exists ONLY in the sibling module, not the target.
-    const std::string p1_aob = write_signature(&sib[128], 16, 0x55);
-    // P2 (mid-body anchor) exists in the target module.
-    const std::string p2_aob = write_signature(&bytes[640], 16, 0x9C);
-
-    // require_unique is left false to isolate scope from uniqueness: the whole-process contrast below would otherwise
-    // reject both candidates as ambiguous, since write_signature leaves transient stack copies of the bytes (see
-    // collect_readable_hits).
-    Scanner::AddrCandidate cands[] = {
-        {"p1_prologue", p1_aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
-        {"p2_anchor", p2_aob, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
-    };
-
-    // Whole-process first-match returns P1 (it matches outside this module) and shadows P2: the cross-module shadowing
-    // that produced the bug.
-    const auto whole = Scanner::resolve_cascade(cands, "anchor-whole", Scanner::ScannerKind::Readable);
-    ASSERT_TRUE(whole.has_value());
-    EXPECT_EQ(whole->winning_name, "p1_prologue");
-
-    // Module-scoped scan does not see P1 (it lives only outside this range), so it falls through to the in-module P2.
-    const auto scoped = Scanner::resolve_cascade_in_module(cands, "anchor-scoped", range);
-    ASSERT_TRUE(scoped.has_value());
-    EXPECT_EQ(scoped->winning_name, "p2_anchor");
-    EXPECT_EQ(scoped->address, reinterpret_cast<std::uintptr_t>(&bytes[640]));
-
-    VirtualFree(mod, 0, MEM_RELEASE);
-    VirtualFree(sibling, 0, MEM_RELEASE);
-}
-
-TEST(ScannerModuleCascade, FullMissReturnsNoMatch)
-{
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    std::memset(mem, 0xCC, 4096);
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    Scanner::AddrCandidate cands[] = {
-        {"absent", "DE AD BE EF 11 22 33 44 55 66 77 88 99 AA BB 12", Scanner::ResolveMode::Direct, 0, 0},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "miss", range);
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-// An invalid range must surface a distinct error and never silently fall back to a whole-process scan, which would
-// re-introduce the cross-module shadowing the overload exists to prevent.
-TEST(ScannerModuleCascade, InvalidRangeReturnsInvalidRange)
-{
-    Scanner::AddrCandidate cands[] = {
-        {"sig", "DE AD BE EF 11 22 33 44 55 66 77 88 99 AA BB 12", Scanner::ResolveMode::Direct, 0, 0},
-    };
-    const Memory::ModuleRange invalid{}; // base == end == 0 => valid() is false
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "invalid", invalid);
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::InvalidRange);
-}
-
-TEST(ScannerModuleCascade, EmptyCandidatesReturnsError)
-{
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    std::span<const Scanner::AddrCandidate> empty{};
-    const auto hit = Scanner::resolve_cascade_in_module(empty, "empty", range);
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::EmptyCandidates);
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-TEST(ScannerModuleCascade, AllInvalidPatternsReturnsError)
-{
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    Scanner::AddrCandidate cands[] = {
-        {"bad", "not_valid_aob_tokens $$$$", Scanner::ResolveMode::Direct, 0, 0},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "bad", range);
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::AllPatternsInvalid);
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
 namespace
 {
     struct VirtualFreeDeleter
@@ -3260,653 +2652,11 @@ namespace
 
     using VirtualPagePtr = std::unique_ptr<std::uint8_t, VirtualFreeDeleter>;
 
-    // Allocates an executable page within an int32 rel32 displacement of `anchor`, mirroring how inline-hook trampoline
-    // allocators place a detour close to its target so a 5-byte E9 can reach it. Returns nullptr if no free region
-    // within range is found; the caller owns a non-null result and must VirtualFree it.
-    std::uint8_t *alloc_exec_near(std::uintptr_t anchor, std::size_t size)
-    {
-        SYSTEM_INFO si{};
-        GetSystemInfo(&si);
-        const auto gran = static_cast<std::uintptr_t>(si.dwAllocationGranularity);
-        // Stay comfortably inside the +-2GB rel32 reach on either side of anchor.
-        constexpr std::uintptr_t search_radius = 0x6000'0000;
-
-        const std::uintptr_t lo = anchor > search_radius ? anchor - search_radius : gran;
-        const std::uintptr_t hi = anchor + search_radius;
-
-        std::uintptr_t probe = (lo + gran - 1) & ~(gran - 1);
-        while (probe < hi)
-        {
-            MEMORY_BASIC_INFORMATION mbi{};
-            if (VirtualQuery(reinterpret_cast<LPCVOID>(probe), &mbi, sizeof(mbi)) == 0)
-            {
-                break;
-            }
-            const auto region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
-            if (mbi.State == MEM_FREE)
-            {
-                const std::uintptr_t aligned = (region_base + gran - 1) & ~(gran - 1);
-                if (aligned + size <= region_base + mbi.RegionSize)
-                {
-                    void *p = VirtualAlloc(reinterpret_cast<LPVOID>(aligned), size, MEM_COMMIT | MEM_RESERVE,
-                                           PAGE_EXECUTE_READWRITE);
-                    if (p != nullptr)
-                    {
-                        return static_cast<std::uint8_t *>(p);
-                    }
-                }
-            }
-            probe = region_base + mbi.RegionSize;
-        }
-        return nullptr;
-    }
 } // namespace
-
-// Regression guard for the module-scoped prologue fallback: the rewritten near-JMP must be FOUND inside the module, but
-// its destination (a sibling mod's trampoline) lives OUTSIDE it. Constraining the destination to the module range would
-// reject this recovery, so the destination is validated only as a committed, execute-readable page. Here the jump
-// target is an executable address in the test image -- a different module than the scanned scratch buffer, which is
-// allocated within rel32 reach so the E9 can encode the jump.
-TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideModule)
-{
-    // An executable address in the test image stands in for an in-module detour target; the page is execute-readable,
-    // so the destination gate accepts it while it stays outside the scanned scratch buffer's range.
-    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region within rel32 of the test image";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x5A, 0xB4, 0xD1, 0xE7, 0xF9, 0x2B, 0x4D, 0x6F, 0x81, 0x93};
-
-    region.get()[PLANT_OFFSET + 0] = 0xE9;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    // The original (unhooked) prologue starts with five REX-prefixed bytes the buffer does not contain (it starts with
-    // E9), so the direct pass misses and the fallback rebuilds E9 ?? ?? ?? ?? + tail to match the planted site.
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 5A B4 D1 E7 F9 2B 4D 6F 81 93", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit =
-        Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "trampoline-out-of-module", range);
-    ASSERT_TRUE(hit.has_value()) << "module-scoped fallback rejected an out-of-module trampoline destination";
-    EXPECT_EQ(hit->address, match_site);
-}
-
-// A sibling mod's inline-hook trampoline is VirtualAlloc'd outside every loaded module -- the exact SafetyHook case the
-// fallback exists to recover. The destination gate must accept an E9 that lands on a committed, execute-readable page
-// even though it belongs to no module; an in-module requirement defeated recovery for every SafetyHook-hooked target.
-// Here the scanned scratch buffer and the jump destination are two independent VirtualAlloc'd executable pages, so
-// neither is a module and the destination must still be accepted.
-TEST(ScannerModuleCascade, PrologueFallbackAllowsTrampolineOutsideAnyModule)
-{
-    // The trampoline page is the anchor: place the scanned region within rel32 reach of it so the planted E9 can encode
-    // the jump. Fill it with RET so it reads as a plausible trampoline body.
-    VirtualPagePtr trampoline{
-        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))};
-    ASSERT_NE(trampoline.get(), nullptr);
-    std::memset(trampoline.get(), 0xC3, 0x1000);
-
-    VirtualPagePtr region{alloc_exec_near(reinterpret_cast<std::uintptr_t>(trampoline.get()), 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region within rel32 of the trampoline page";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-    const auto dest = reinterpret_cast<std::uintptr_t>(trampoline.get());
-    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x3C, 0x7E, 0x91, 0xA2, 0xB3, 0xC4, 0xD5, 0xE6, 0xF7, 0x08};
-
-    region.get()[PLANT_OFFSET + 0] = 0xE9;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 3C 7E 91 A2 B3 C4 D5 E6 F7 08", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "trampoline-no-module", range);
-    ASSERT_TRUE(hit.has_value()) << "fallback rejected a VirtualAlloc'd trampoline destination outside every module";
-    EXPECT_EQ(hit->address, match_site);
-}
-
-// The 14-byte FF 25 00000000 <abs64> absolute indirect jump (a disp32 of zero so the 8-byte target is inlined right
-// after the instruction, the far-jump shape some Detours-style detours emit) is a recognised prologue-recovery
-// shape. The fallback rebuilds `FF 25 00 00 00 00 ?? x8` + the original literal tail; decode_ff25_indirect reads the
-// inlined target at match+6, gated as a committed, execute-readable address. It is disjoint from the 6-byte FF 25 shape
-// because a 14-byte overwrite leaves a different surviving tail, so the two never alias.
-TEST(ScannerModuleCascade, PrologueFallbackRecoversFf25Abs64InlineTarget)
-{
-    VirtualPagePtr region{
-        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))};
-    ASSERT_NE(region.get(), nullptr);
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    std::uint8_t *plant = region.get() + PLANT_OFFSET;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(plant);
-    // The inlined absolute target stands in for a far trampoline: the region's own base is execute-readable, so the
-    // destination gate accepts it. The 14-byte shape wildcards these 8 bytes, so an address with low zero bytes is
-    // fine.
-    const auto dest = reinterpret_cast<std::uintptr_t>(region.get());
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x6B, 0x1C, 0x2D, 0x3E, 0x4F, 0x5A, 0x6B, 0x7C, 0x8D, 0x9E};
-
-    plant[0] = 0xFF;
-    plant[1] = 0x25;
-    std::memset(plant + 2, 0x00, 4); // disp32 == 0 -> slot is the abs64 inlined at +6
-    std::memcpy(plant + 6, &dest, sizeof(dest));
-    std::memcpy(plant + 14, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    // The original (unhooked) prologue is 14 arbitrary bytes the buffer does not contain, then the 10-byte literal tail
-    // (>= the literal-tail floor). The direct pass misses; only the 14-byte FF 25 shape's rebuild matches the plant.
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 48 89 6C 24 10 48 89 74 24 6B 1C 2D 3E 4F 5A 6B 7C 8D 9E",
-         Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-abs64", range);
-    ASSERT_TRUE(hit.has_value()) << "FF 25 abs64 inline-target prologue was not recovered";
-    EXPECT_EQ(hit->address, match_site);
-}
-
-// The 12-byte `mov rax, imm64; jmp rax` (48 B8 <imm64> FF E0) absolute jump is a recognised prologue-recovery
-// shape some libraries emit instead of FF 25 when the trampoline is beyond rel32 reach. The fallback rebuilds
-// `48 B8 ?? x8 FF E0` + the original literal tail; decode_mov_rax_imm64_jmp_rax returns the inlined imm64 directly (no
-// slot read), gated as a committed, execute-readable address.
-TEST(ScannerModuleCascade, PrologueFallbackRecoversMovRaxJmpRax)
-{
-    VirtualPagePtr region{
-        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE))};
-    ASSERT_NE(region.get(), nullptr);
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    std::uint8_t *plant = region.get() + PLANT_OFFSET;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(plant);
-    const auto dest = reinterpret_cast<std::uintptr_t>(region.get());
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81, 0x92, 0xA3};
-
-    plant[0] = 0x48; // REX.W
-    plant[1] = 0xB8; // mov rax, imm64
-    std::memcpy(plant + 2, &dest, sizeof(dest));
-    plant[10] = 0xFF;
-    plant[11] = 0xE0; // jmp rax
-    std::memcpy(plant + 12, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    // 12 arbitrary prologue bytes + the 10-byte literal tail. The direct pass misses; the 14-byte FF 25 shape is not
-    // applicable (this tail is too short for its 14-byte drop), so only the 12-byte mov rax shape's rebuild matches.
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 48 89 6C 24 10 48 89 1A 2B 3C 4D 5E 6F 70 81 92 A3", Scanner::ResolveMode::Direct, 0,
-         0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "mov-rax-jmp-rax", range);
-    ASSERT_TRUE(hit.has_value()) << "mov rax, imm64; jmp rax prologue was not recovered";
-    EXPECT_EQ(hit->address, match_site);
-}
-
-// A hooked prologue inside executable code is still rejected when its E9 lands on committed data. This pins the
-// destination half of the gate separately from the page-scope test below, whose purpose is to prove the match scan
-// stays executable-only.
-TEST(ScannerModuleCascade, PrologueFallbackRejectsDataOnlyDestination)
-{
-    VirtualPagePtr destination{
-        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))};
-    ASSERT_NE(destination.get(), nullptr);
-    std::memset(destination.get(), 0x00, 0x1000);
-
-    VirtualPagePtr region{alloc_exec_near(reinterpret_cast<std::uintptr_t>(destination.get()), 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region within rel32 of the data destination";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-    const auto dest = reinterpret_cast<std::uintptr_t>(destination.get());
-    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x4A, 0x5B, 0x6C, 0x7D, 0x8E, 0x9F, 0xA0, 0xB1, 0xC2, 0xD3};
-
-    region.get()[PLANT_OFFSET + 0] = 0xE9;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 4A 5B 6C 7D 8E 9F A0 B1 C2 D3", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "data-destination", range);
-    ASSERT_FALSE(hit.has_value()) << "fallback accepted an E9 destination on a data-only page";
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-// The fallback rebuilds the signature as `E9 ?? ?? ?? ??` + tail, which compiles with anchor offset 0 even when the
-// original carried a `|` marker. The recovered address must still honor that marker: the direct pass returns
-// (match + anchor offset), so the fallback must agree or a `|`-anchored Direct candidate resolves short by the anchor
-// offset -- a silently wrong address. This plants a hooked prologue with a `|` seven bytes in and asserts the fallback
-// lands on match_site + 7, not the bare match_site.
-TEST(ScannerModuleCascade, PrologueFallbackHonorsAnchorOffsetMarker)
-{
-    // An executable address in the test image is the jump destination, so the destination gate passes and the resolve
-    // (where the anchor offset matters) is reached.
-    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region within rel32 of the test image";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x1D, 0x2E, 0x3F, 0x40, 0x51, 0x62, 0x73, 0x84, 0x95, 0xA6};
-
-    region.get()[PLANT_OFFSET + 0] = 0xE9;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    // `|` after the five prologue bytes plus two tail bytes => anchor offset 7. The original prologue (48 89 5C 24 08)
-    // is overwritten by the E9, so the direct pass misses and the fallback engages.
-    Scanner::AddrCandidate cands[] = {
-        {"anchored", "48 89 5C 24 08 1D 2E | 3F 40 51 62 73 84 95 A6", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "anchor-offset", range);
-    ASSERT_TRUE(hit.has_value()) << "fallback failed to recover the hooked prologue";
-    // The unhooked direct pass would resolve to match + 7 (the `|` anchor); the fallback must reproduce that, not the
-    // bare match_site it would land on if the anchor offset were dropped.
-    EXPECT_EQ(hit->address, match_site + 7);
-}
-
-// The prologue fallback recovers an FF 25 disp32 (RIP-relative indirect JMP) prologue in addition to E9. A trampoline
-// allocator beyond rel32 reach overwrites the prologue with FF 25 disp32 whose disp32 points at an 8-byte slot holding
-// the absolute target. decode_ff25_indirect dereferences the slot, so the destination gate sees the final executable
-// target. This mirrors the E9 trampoline test: plant FF 25 + a disp32 pointing to an in-region slot that holds an
-// executable address, append a 10-literal tail, and assert the fallback resolves to the planted match site.
-TEST(ScannerModuleCascade, PrologueFallbackRecoversFf25Prologue)
-{
-    // An executable address in the test image stands in for the trampoline target stored in the FF25 slot.
-    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region for the FF25 fallback fixture";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-
-    // The slot lives later in the same page, clear of the 6-byte FF25 instruction and its literal tail. FF 25 is
-    // RIP-relative: disp32 is added to the address of the next instruction (match_site + 6).
-    constexpr std::size_t SLOT_OFFSET = PLANT_OFFSET + 0x80;
-    const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + SLOT_OFFSET;
-    const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x2A, 0x3B, 0x4C, 0x5D, 0x6E, 0x7F, 0x80, 0x91, 0xA2, 0xB3};
-
-    region.get()[PLANT_OFFSET + 0] = 0xFF;
-    region.get()[PLANT_OFFSET + 1] = 0x25;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 2, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
-    // The slot holds the absolute (executable) target.
-    std::memcpy(region.get() + SLOT_OFFSET, &dest, sizeof(dest));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    // The original prologue is six REX-prefixed bytes (overwritten by the FF25 instruction), followed by the literal
-    // tail. The direct pass misses (the buffer starts with FF not 48 89 ...), so the FF25 fallback shape rebuilds
-    // FF 25 ?? ?? ?? ?? + tail to match the planted site.
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 33 2A 3B 4C 5D 6E 7F 80 91 A2 B3", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-prologue", range);
-    ASSERT_TRUE(hit.has_value()) << "module-scoped fallback failed to recover an FF25-shaped hooked prologue";
-    EXPECT_EQ(hit->address, match_site);
-}
-
-// An FF25 prologue whose slot holds a non-executable data address must be rejected exactly as the E9 path rejects a
-// data destination. decode_ff25_indirect returns the slot's target, and is_executable_address fails it, so the fallback
-// reports NoMatch.
-TEST(ScannerModuleCascade, PrologueFallbackFf25RejectsDataOnlySlotTarget)
-{
-    VirtualPagePtr destination{
-        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))};
-    ASSERT_NE(destination.get(), nullptr);
-    std::memset(destination.get(), 0x00, 0x1000);
-    const auto dest = reinterpret_cast<std::uintptr_t>(destination.get());
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region for the FF25 data-slot fixture";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-
-    constexpr std::size_t SLOT_OFFSET = PLANT_OFFSET + 0x80;
-    const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + SLOT_OFFSET;
-    const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81, 0x92, 0xA3};
-
-    region.get()[PLANT_OFFSET + 0] = 0xFF;
-    region.get()[PLANT_OFFSET + 1] = 0x25;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 2, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
-    // The slot holds a PAGE_READWRITE (non-executable) address, so the destination gate must reject it.
-    std::memcpy(region.get() + SLOT_OFFSET, &dest, sizeof(dest));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 33 1A 2B 3C 4D 5E 6F 70 81 92 A3", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-data-slot", range);
-    ASSERT_FALSE(hit.has_value()) << "FF25 fallback accepted a slot target on a data-only page";
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-// An FF25-recovered prologue carrying a `|` marker must honor the original anchor offset, exactly as the E9 path does.
-// The FF25 instruction is six bytes, but the rebuilt pattern still compiles with anchor offset 0; the original offset
-// is reapplied at resolve time, so the recovered address must be match_site + 7.
-TEST(ScannerModuleCascade, PrologueFallbackFf25HonorsAnchorOffsetMarker)
-{
-    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region for the FF25 anchor-offset fixture";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-
-    constexpr std::size_t SLOT_OFFSET = PLANT_OFFSET + 0x80;
-    const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + SLOT_OFFSET;
-    const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x0C, 0x1D, 0x2E, 0x3F, 0x40, 0x51, 0x62, 0x73, 0x84, 0x95};
-
-    region.get()[PLANT_OFFSET + 0] = 0xFF;
-    region.get()[PLANT_OFFSET + 1] = 0x25;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 2, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
-    std::memcpy(region.get() + SLOT_OFFSET, &dest, sizeof(dest));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    // `|` after the six prologue bytes plus one tail byte => anchor offset 7. The original prologue is overwritten by
-    // the FF25 instruction, so the direct pass misses and the FF25 fallback engages.
-    Scanner::AddrCandidate cands[] = {
-        {"anchored", "48 89 5C 24 08 33 0C | 1D 2E 3F 40 51 62 73 84 95", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-anchor-offset", range);
-    ASSERT_TRUE(hit.has_value()) << "FF25 fallback failed to recover the hooked prologue";
-    EXPECT_EQ(hit->address, match_site + 7);
-}
-
-// Two FF25-shaped copies with the same literal tail exceed the uniqueness ceiling (1), so the FF25 fallback shape must
-// reject the ambiguity and report NoMatch, mirroring the E9 ambiguous-tail guard.
-TEST(ScannerModuleCascade, PrologueFallbackFf25RejectsAmbiguousTail)
-{
-    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region for the FF25 ambiguous-tail fixture";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x5C, 0x6D, 0x7E, 0x8F, 0x90, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5};
-
-    // Plant two identical FF25 + tail copies at distinct offsets. Each slot holds the same executable destination, but
-    // the uniqueness ceiling trips before the destination is even consulted.
-    const std::size_t plant_offsets[] = {0x100, 0x300};
-    for (const std::size_t plant : plant_offsets)
-    {
-        const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + plant;
-        const std::size_t slot_offset = plant + 0x80;
-        const auto slot_addr = reinterpret_cast<std::uintptr_t>(region.get()) + slot_offset;
-        const std::int64_t rel = static_cast<std::int64_t>(slot_addr) - static_cast<std::int64_t>(match_site + 6);
-        ASSERT_GE(rel, INT32_MIN);
-        ASSERT_LE(rel, INT32_MAX);
-
-        region.get()[plant + 0] = 0xFF;
-        region.get()[plant + 1] = 0x25;
-        const std::int32_t disp = static_cast<std::int32_t>(rel);
-        std::memcpy(region.get() + plant + 2, &disp, sizeof(disp));
-        std::memcpy(region.get() + plant + 6, TAIL_BYTES, sizeof(TAIL_BYTES));
-        std::memcpy(region.get() + slot_offset, &dest, sizeof(dest));
-    }
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    Scanner::AddrCandidate cands[] = {
-        {"ambiguous", "48 89 5C 24 08 33 5C 6D 7E 8F 90 A1 B2 C3 D4 E5", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "ff25-ambiguous", range);
-    ASSERT_FALSE(hit.has_value()) << "FF25 fallback resolved an ambiguous (multi-match) prologue";
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-// Page-scope regression guard for the module-scoped prologue fallback: a hooked near-JMP only ever overwrites a code
-// prologue, so the fallback must search the image's executable pages only -- matching the whole-process fallback, which
-// counts and scans through scan_executable_regions. Here the E9 + literal tail is planted in a READ-ONLY data page (the
-// execute bit is stripped after seeding) inside the range, with a rel32 that resolves to executable code. The
-// fallback must NOT resolve it: a hit would mean it scanned a non-code page. (A readable-page mask would resolve it to
-// the data-page address; this pins the executable-only mask.)
-TEST(ScannerModuleCascade, PrologueFallbackIgnoresNonExecutableDataPage)
-{
-    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free region within rel32 of the test image";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    // Distinct from the trampoline test's tail so freed-but-mapped residue cannot cross-contaminate; ten literals clear
-    // PROLOGUE_FALLBACK_MIN_TAIL_LITERALS.
-    constexpr std::uint8_t TAIL_BYTES[] = {0x6C, 0x5D, 0x4E, 0x3F, 0x20, 0x11, 0x02, 0xF3, 0xE4, 0xD5};
-
-    region.get()[PLANT_OFFSET + 0] = 0xE9;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    // Strip execute: the planted bytes now live in a readable, non-executable page.
-    DWORD old_protect = 0;
-    ASSERT_TRUE(VirtualProtect(region.get(), 0x1000, PAGE_READONLY, &old_protect));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    Scanner::AddrCandidate cands[] = {
-        {"hooked", "48 89 5C 24 08 6C 5D 4E 3F 20 11 02 F3 E4 D5", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "data-page-fallback", range);
-    ASSERT_FALSE(hit.has_value()) << "module fallback matched an E9 prologue in a non-executable data page";
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-// require_unique: an ambiguous primary (matches more than once in the module) is
-// skipped so the cascade falls through to the next candidate, instead of silently committing to the lowest-address
-// match. Here P2 is provably unique and wins.
-TEST(ScannerModuleCascade, RequireUniqueAmbiguousCandidateFallsThroughToUniqueNext)
-{
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    auto *bytes = reinterpret_cast<std::byte *>(mem);
-    std::memset(bytes, 0xCC, 4096);
-
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    // P1 planted twice -> ambiguous. Neither candidate sets require_unique, so both rely on the default (true): the
-    // ambiguous P1 is skipped.
-    const std::string p1 = write_signature(&bytes[128], 16, 0x40);
-    (void)write_signature(&bytes[2048], 16, 0x40);
-    // P2 planted once -> unique.
-    const std::string p2 = write_signature(&bytes[512], 16, 0x8A);
-
-    Scanner::AddrCandidate cands[] = {
-        {"p1_ambiguous", p1, Scanner::ResolveMode::Direct, 0, 0},
-        {"p2_unique", p2, Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "require-unique", range);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->winning_name, "p2_unique");
-    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[512]));
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-// require_unique is per-candidate, not a blanket per-call policy: a strict primary that is ambiguous is skipped, while
-// a deliberately broad fallback (require_unique left false) accepts its first match even though it too is non-unique.
-TEST(ScannerModuleCascade, RequireUniquePerCandidateStrictSkipsLooseAccepts)
-{
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    auto *bytes = reinterpret_cast<std::byte *>(mem);
-    std::memset(bytes, 0xCC, 4096);
-
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    // P1 (strict) ambiguous -> skipped. It relies on the default (require_unique true). P2 (loose) is also ambiguous
-    // but opts out and accepts the first (lowest-address) match.
-    const std::string p1 = write_signature(&bytes[128], 16, 0x40);
-    (void)write_signature(&bytes[1024], 16, 0x40);
-    const std::string p2 = write_signature(&bytes[256], 16, 0x77);
-    (void)write_signature(&bytes[2048], 16, 0x77);
-
-    Scanner::AddrCandidate cands[] = {
-        {"p1_strict", p1, Scanner::ResolveMode::Direct, 0, 0},
-        {"p2_loose", p2, Scanner::ResolveMode::Direct, 0, 0, /*require_unique=*/false},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "per-candidate", range);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->winning_name, "p2_loose");
-    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&bytes[256]));
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
-
-// require_unique with no unique candidate yields a clean NoMatch -- the "binary changed, update signatures" signal --
-// rather than a confident wrong hit.
-TEST(ScannerModuleCascade, RequireUniqueAllAmbiguousReturnsNoMatch)
-{
-    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    ASSERT_NE(mem, nullptr);
-    auto *bytes = reinterpret_cast<std::byte *>(mem);
-    std::memset(bytes, 0xCC, 4096);
-
-    const auto base = reinterpret_cast<std::uintptr_t>(mem);
-    const Memory::ModuleRange range{base, base + 4096};
-
-    // The single candidate relies on the default (require_unique true) and is ambiguous, so there is no provably-unique
-    // candidate to win.
-    const std::string sig = write_signature(&bytes[128], 16, 0x40);
-    (void)write_signature(&bytes[2048], 16, 0x40);
-
-    Scanner::AddrCandidate cands[] = {
-        {"ambiguous", sig, Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "all-ambiguous", range);
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-
-    VirtualFree(mem, 0, MEM_RELEASE);
-}
 
 TEST(ScannerPrologueTest, NullAddrReturnsFalse)
 {
-    EXPECT_FALSE(Scanner::is_likely_function_prologue(0));
+    EXPECT_FALSE(is_likely_prologue(0));
 }
 
 TEST(ScannerPrologueTest, ZeroByteReturnsFalse)
@@ -3915,7 +2665,7 @@ TEST(ScannerPrologueTest, ZeroByteReturnsFalse)
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0x00;
-    EXPECT_FALSE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_FALSE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 TEST(ScannerPrologueTest, Int3PadReturnsFalse)
@@ -3923,7 +2673,7 @@ TEST(ScannerPrologueTest, Int3PadReturnsFalse)
     ExecBuffer buf(0x1000);
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
-    EXPECT_FALSE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_FALSE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 TEST(ScannerPrologueTest, BareRetC3ReturnsFalse)
@@ -3932,7 +2682,7 @@ TEST(ScannerPrologueTest, BareRetC3ReturnsFalse)
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0xC3;
-    EXPECT_FALSE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_FALSE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 TEST(ScannerPrologueTest, BareRetC2ReturnsFalse)
@@ -3941,7 +2691,7 @@ TEST(ScannerPrologueTest, BareRetC2ReturnsFalse)
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0xC2;
-    EXPECT_FALSE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_FALSE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 TEST(ScannerPrologueTest, PushRbpReturnsTrue)
@@ -3950,7 +2700,7 @@ TEST(ScannerPrologueTest, PushRbpReturnsTrue)
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0x55; // push rbp -- canonical x86-64 prologue
-    EXPECT_TRUE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_TRUE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 // Load-bearing case: documents the no-interference-with-nested-hooks contract. A target whose prologue has already been
@@ -3963,19 +2713,19 @@ TEST(ScannerPrologueTest, PatchedJmpE9ReturnsTrue)
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0xE9;
-    EXPECT_TRUE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_TRUE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 // Short JMP (0xEB rel8) is the second prologue-overwrite shape the helper is documented to accept. Some mid-function
 // hookers prefer 0xEB when the target lives within +/-127 bytes; the resolver must still treat it as a real prologue so
-// cascade recovery keeps working under nested hooks.
+// ladder recovery keeps working under nested hooks.
 TEST(ScannerPrologueTest, PatchedJmpEBReturnsTrue)
 {
     ExecBuffer buf(0x1000);
     ASSERT_NE(buf.base, nullptr);
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0xEB;
-    EXPECT_TRUE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_TRUE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 // Indirect JMP through memory (0xFF 0x25 disp32) is the third documented prologue-overwrite shape, used by trampoline
@@ -3989,91 +2739,24 @@ TEST(ScannerPrologueTest, PatchedJmpFF25ReturnsTrue)
     std::memset(buf.base, 0xCC, buf.size);
     buf.base[0x100] = 0xFF;
     buf.base[0x101] = 0x25;
-    EXPECT_TRUE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
+    EXPECT_TRUE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(buf.base + 0x100)));
 }
 
 TEST(ScannerPrologueTest, UnreadableAddrReturnsFalse)
 {
     void *na = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS);
     ASSERT_NE(na, nullptr);
-    EXPECT_FALSE(Scanner::is_likely_function_prologue(reinterpret_cast<std::uintptr_t>(na)));
+    EXPECT_FALSE(is_likely_prologue(reinterpret_cast<std::uintptr_t>(na)));
     VirtualFree(na, 0, MEM_RELEASE);
 }
 
-// --- Tests for resolve_cascade_in_host_module / _with_prologue_fallback ---
+// --- Tests for host-module-scoped resolve() and prologue_fallback ---
 
-// A unique 16-byte signature compiled into the test executable's own image so a host-module-scoped cascade has a real
+// A unique 16-byte signature compiled into the test executable's own image so a host-module-scoped ladder has a real
 // in-host target to resolve. volatile const keeps the linker from folding the bytes or discarding them as unused (the
 // fixture DLL uses the same idiom for its stable AOB markers).
 static volatile const unsigned char s_host_marker[16] = {0x5A, 0xC3, 0x91, 0x44, 0xE2, 0x7B, 0x10, 0x8F,
                                                          0x36, 0xBD, 0x09, 0xA1, 0xCE, 0x52, 0x74, 0xF0};
-
-TEST(ScannerHostModuleCascade, FindsMarkerInHostImage)
-{
-    const auto marker_addr = reinterpret_cast<std::uintptr_t>(&s_host_marker[0]);
-
-    // Host-scoping is only the correct scope when the target lives in the main
-    // EXE image; assert that precondition holds for the planted marker.
-    const auto host = Memory::host_module_range();
-    ASSERT_TRUE(host.valid());
-    ASSERT_TRUE(Memory::contains(host, marker_addr));
-
-    Scanner::AddrCandidate cands[] = {
-        {"host-marker", "5A C3 91 44 E2 7B 10 8F 36 BD 09 A1 CE 52 74 F0", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_host_module(cands, "host-marker");
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, marker_addr);
-    EXPECT_TRUE(Memory::contains(host, hit->address));
-}
-
-TEST(ScannerHostModuleCascade, PrologueFallbackOverloadFindsMarker)
-{
-    Scanner::AddrCandidate cands[] = {
-        {"host-marker", "5A C3 91 44 E2 7B 10 8F 36 BD 09 A1 CE 52 74 F0", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    // The marker is data, so the direct pass resolves it and the prologue-recovery pass never runs; this confirms the
-    // fallback overload forwards correctly on the happy path.
-    const auto hit = Scanner::resolve_cascade_in_host_module_with_prologue_fallback(cands, "host-marker");
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, reinterpret_cast<std::uintptr_t>(&s_host_marker[0]));
-}
-
-TEST(ScannerHostModuleCascade, AbsentSignatureMatchesExplicitHostRangeResult)
-{
-    const auto host = Memory::host_module_range();
-    ASSERT_TRUE(host.valid());
-
-    Scanner::AddrCandidate cands[] = {
-        {"absent", "13 57 9B DF 02 46 8A CE 11 33 55 77 99 BB DD FF", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    // The host overload must produce the same outcome as the explicit-range call against host_module_range(); this
-    // proves it forwards rather than resolving against some other scope. Asserted as equivalence so it holds whether or
-    // not the pattern happens to exist in the image.
-    const auto via_host = Scanner::resolve_cascade_in_host_module(cands, "absent");
-    const auto via_range = Scanner::resolve_cascade_in_module(cands, "absent", host);
-    ASSERT_EQ(via_host.has_value(), via_range.has_value());
-    if (!via_host.has_value())
-    {
-        EXPECT_EQ(via_host.error(), via_range.error());
-    }
-}
-
-TEST(ScannerHostModuleCascade, EmptyCandidatesReturnsEmptyCandidates)
-{
-    const std::span<const Scanner::AddrCandidate> empty{};
-
-    const auto direct = Scanner::resolve_cascade_in_host_module(empty, "empty");
-    ASSERT_FALSE(direct.has_value());
-    EXPECT_EQ(direct.error(), Scanner::ResolveError::EmptyCandidates);
-
-    const auto fallback = Scanner::resolve_cascade_in_host_module_with_prologue_fallback(empty, "empty");
-    ASSERT_FALSE(fallback.has_value());
-    EXPECT_EQ(fallback.error(), Scanner::ResolveError::EmptyCandidates);
-}
 
 // A signature that straddles the boundary between two adjacent accepted executable regions must be found. Two committed
 // pages allocated as one span but given different executable protections (RWX then RX) are reported by VirtualQuery as
@@ -4105,18 +2788,18 @@ TEST(ScannerBoundaryTest, FindsPatternStraddlingAdjacentExecutableRegions)
     DWORD old_protect = 0;
     ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old_protect));
 
-    auto pattern = Scanner::parse_aob("3E 9D 71 C4 06 BA 58 EF 12 A7 4F 83 DC 6B 90 25");
+    auto pattern = detail::parse_aob("3E 9D 71 C4 06 BA 58 EF 12 A7 4F 83 DC 6B 90 25");
     ASSERT_TRUE(pattern.has_value());
 
     // The straddling match must be found at the plant address even though it begins in the first region and ends in the
     // second.
-    const std::byte *hit = Scanner::scan_executable_regions(*pattern);
+    const std::byte *hit = scan_exec(*pattern);
     ASSERT_NE(hit, nullptr) << "cross-boundary straddling match was missed";
     EXPECT_EQ(hit, reinterpret_cast<const std::byte *>(plant));
 
     // The straddling occurrence is reported exactly once: a second occurrence of this unique signature must not exist
     // (the overlap must not double-count the match by scanning it from both regions).
-    const std::byte *second = Scanner::scan_executable_regions(*pattern, 2);
+    const std::byte *second = scan_exec(*pattern, 2);
     EXPECT_EQ(second, nullptr);
 
     VirtualFree(base, 0, MEM_RELEASE);
@@ -4147,16 +2830,16 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     ASSERT_NE(VirtualAlloc(base, size, MEM_COMMIT, PAGE_READWRITE), nullptr);
     std::memset(base, 0xAB, size); // 0xAB never matches the needle below; a fresh-recommitted page reads as 0x00
 
-    auto pattern = Scanner::parse_aob("DE AD BE EF CA FE");
+    auto pattern = detail::parse_aob("DE AD BE EF CA FE");
     ASSERT_TRUE(pattern.has_value());
 
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(base),
-                                    reinterpret_cast<std::uintptr_t>(base) + size};
+    const detail::ModuleSpan range{reinterpret_cast<std::uintptr_t>(base),
+                                   reinterpret_cast<std::uintptr_t>(base) + size};
 
     // Positive control: the refactored scan body still finds a planted needle at the right address.
     const std::uint8_t needle[] = {0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE};
     std::memcpy(base + 0x123, needle, sizeof(needle));
-    const std::byte *found = Scanner::detail::scan_module_readable(*pattern, range, 1);
+    const std::byte *found = detail::scan_module_readable(*pattern, range, 1).match;
     ASSERT_EQ(found, reinterpret_cast<const std::byte *>(base + 0x123));
     std::memset(base + 0x123, 0xAB, sizeof(needle)); // remove it so the race loop expects nullptr
 
@@ -4168,8 +2851,8 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     const std::uintptr_t window_high = window_low + size;
     std::size_t fault_events = 0;
     bool event_payload_ok = true;
-    auto fault_sub = Diagnostics::scanner_faults().subscribe(
-        [&fault_events, &event_payload_ok, window_low, window_high](const Diagnostics::ScannerFaultEvent &e)
+    auto fault_sub = diagnostics::scanner_faults().subscribe(
+        [&fault_events, &event_payload_ok, window_low, window_high](const diagnostics::ScannerFaultEvent &e)
         {
             ++fault_events;
             if (e.faulted_regions == 0 || e.window_low != window_low || e.window_high != window_high)
@@ -4191,7 +2874,7 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
 
     for (int i = 0; i < 5000; ++i)
     {
-        const std::byte *hit = Scanner::detail::scan_module_readable(*pattern, range, 1);
+        const std::byte *hit = detail::scan_module_readable(*pattern, range, 1).match;
         EXPECT_EQ(hit, nullptr);
     }
 
@@ -4199,421 +2882,3 @@ TEST(ScannerRegionGuard, SurvivesConcurrentDecommitMidSweep)
     EXPECT_TRUE(event_payload_ok);
 }
 #endif // _MSC_VER || _WIN64
-
-// --- Tests for the name/string resilience tiers (ResolveMode::RttiVtable / StringXref) ---
-
-namespace
-{
-    // Synthetic MSVC x64 RTTI layout, mirroring the build_synth fixture in tests/test_rtti_reverse.cpp. The cascade's
-    // RttiVtable tier resolves through Rtti::vtable_for_type, whose COL prelude validates each candidate against the
-    // real owning module (its pSelf RVA must reconstruct the owning image base), so the synthetic COL / TypeDescriptor
-    // / vtable must live in the test executable's own data segment. s_cas_rtti_pool provides that storage;
-    // cas_rtti_range() is a tight scope over the bytes written so far, so a unit test sweeps only the fixture, not the
-    // whole exe.
-    constexpr std::size_t CAS_RTTI_BUF_SIZE = 4096;
-    constexpr std::size_t CAS_RTTI_COL_OFFSET = 256;
-    constexpr std::size_t CAS_RTTI_TD_OFFSET = CAS_RTTI_COL_OFFSET + 24; // COL is 24 bytes
-    constexpr std::size_t CAS_RTTI_TD_NAME_OFFSET = CAS_RTTI_TD_OFFSET + 16;
-    constexpr std::size_t CAS_RTTI_COL_PTR_OFFSET = 2048; // the vtable[-1] meta-slot
-    constexpr std::size_t CAS_RTTI_VTABLE_OFFSET = CAS_RTTI_COL_PTR_OFFSET + 8;
-
-    constexpr std::size_t CAS_RTTI_POOL_FIXTURES = 6;
-    alignas(8) std::array<std::byte, CAS_RTTI_BUF_SIZE * CAS_RTTI_POOL_FIXTURES> s_cas_rtti_pool{};
-    std::size_t s_cas_rtti_used = 0;
-
-    void cas_rtti_reset() noexcept
-    {
-        s_cas_rtti_used = 0;
-    }
-
-    template <typename T> void cas_rtti_write(std::byte *buf, std::size_t off, const T &value) noexcept
-    {
-        std::memcpy(buf + off, &value, sizeof(T));
-    }
-
-    // Builds one synthetic COL/TypeDescriptor/vtable carrying @p name at sub-object offset @p col_offset and returns
-    // the synthetic vtable address (0 on pool exhaustion or a sub-image-base data segment).
-    [[nodiscard]] std::uintptr_t cas_build_synth_vtable(std::string_view name, std::uint32_t col_offset) noexcept
-    {
-        if (s_cas_rtti_used + CAS_RTTI_BUF_SIZE > s_cas_rtti_pool.size())
-        {
-            return 0;
-        }
-        std::byte *buf = s_cas_rtti_pool.data() + s_cas_rtti_used;
-        s_cas_rtti_used += CAS_RTTI_BUF_SIZE;
-        std::memset(buf, 0, CAS_RTTI_BUF_SIZE);
-
-        const std::uintptr_t exe_base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-        const std::uintptr_t buf_base = reinterpret_cast<std::uintptr_t>(buf);
-        if (buf_base < exe_base)
-        {
-            return 0;
-        }
-        const std::uintptr_t buf_rva = buf_base - exe_base;
-
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 0, 1);          // signature (x64)
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 4, col_offset); // offset in complete object
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 8, 0);          // cd_offset
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 12,
-                                      static_cast<std::uint32_t>(buf_rva + CAS_RTTI_TD_OFFSET)); // p_type_descriptor
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 16, 0);                         // p_class_descriptor
-        cas_rtti_write<std::uint32_t>(buf, CAS_RTTI_COL_OFFSET + 20,
-                                      static_cast<std::uint32_t>(buf_rva + CAS_RTTI_COL_OFFSET)); // p_self
-
-        const std::size_t max_name = CAS_RTTI_COL_PTR_OFFSET - CAS_RTTI_TD_NAME_OFFSET - 1;
-        const std::size_t name_len = name.size() < max_name ? name.size() : max_name;
-        std::memcpy(buf + CAS_RTTI_TD_NAME_OFFSET, name.data(), name_len);
-        buf[CAS_RTTI_TD_NAME_OFFSET + name_len] = std::byte{0};
-
-        const std::uintptr_t col_addr = buf_base + CAS_RTTI_COL_OFFSET;
-        cas_rtti_write<std::uintptr_t>(buf, CAS_RTTI_COL_PTR_OFFSET, col_addr);
-
-        return buf_base + CAS_RTTI_VTABLE_OFFSET;
-    }
-
-    // Plants a 16-byte signature into a fresh pool buffer (so it shares the module range with the synthetic vtables)
-    // and returns its address; the matching AOB is written to @p aob_out. Used as the byte fallback tier below an
-    // ambiguous name candidate. Returns 0 on pool exhaustion.
-    [[nodiscard]] std::uintptr_t cas_plant_pool_signature(std::uint8_t seed, std::string &aob_out) noexcept
-    {
-        if (s_cas_rtti_used + CAS_RTTI_BUF_SIZE > s_cas_rtti_pool.size())
-        {
-            return 0;
-        }
-        std::byte *buf = s_cas_rtti_pool.data() + s_cas_rtti_used;
-        s_cas_rtti_used += CAS_RTTI_BUF_SIZE;
-        std::memset(buf, 0, CAS_RTTI_BUF_SIZE);
-        constexpr std::size_t plant_off = 512;
-        aob_out = write_signature(buf + plant_off, 16, seed);
-        return reinterpret_cast<std::uintptr_t>(buf + plant_off);
-    }
-
-    [[nodiscard]] Memory::ModuleRange cas_rtti_range() noexcept
-    {
-        const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_cas_rtti_pool.data());
-        return Memory::ModuleRange{base, base + s_cas_rtti_used};
-    }
-
-    // A committed RWX page used as a synthetic module image for the StringXref tier, mirroring the SyntheticImage
-    // fixture in tests/test_string_xref.cpp. find_string_xref scans readable pages for the literal (phase 1) and
-    // execute-readable pages for the reference (phase 2); PAGE_EXECUTE_READWRITE satisfies both, so one page hosts the
-    // literal, its RIP-relative reference, and any byte fallback signature, with the ModuleRange spanning exactly it.
-    class CascadeStringImage
-    {
-    public:
-        CascadeStringImage()
-        {
-            SYSTEM_INFO si{};
-            GetSystemInfo(&si);
-            m_size = si.dwPageSize;
-            m_base = static_cast<std::uint8_t *>(
-                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
-        }
-
-        ~CascadeStringImage() noexcept
-        {
-            if (m_base)
-            {
-                VirtualFree(m_base, 0, MEM_RELEASE);
-            }
-        }
-
-        CascadeStringImage(const CascadeStringImage &) = delete;
-        CascadeStringImage &operator=(const CascadeStringImage &) = delete;
-        CascadeStringImage(CascadeStringImage &&) = delete;
-        CascadeStringImage &operator=(CascadeStringImage &&) = delete;
-
-        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
-
-        [[nodiscard]] std::byte *bytes(std::size_t off = 0) const noexcept
-        {
-            if (m_base == nullptr)
-            {
-                return nullptr;
-            }
-            return reinterpret_cast<std::byte *>(m_base + off);
-        }
-
-        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept
-        {
-            return reinterpret_cast<std::uintptr_t>(m_base) + off;
-        }
-
-        void write(std::size_t off, const void *data, std::size_t n) noexcept { std::memcpy(m_base + off, data, n); }
-
-        // Plants `48 <opcode> 05 <disp32>` (a REX.W RIP-relative lea/mov into rax) at instr_off whose computed target
-        // is target_off. opcode 0x8D is lea, the canonical string-load shape the narrow phase-2 scan recognizes.
-        void plant_rip_load(std::size_t instr_off, std::size_t target_off, std::uint8_t opcode) noexcept
-        {
-            std::uint8_t *p = m_base + instr_off;
-            p[0] = 0x48; // REX.W
-            p[1] = opcode;
-            p[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
-            const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
-            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
-            std::memcpy(p + 3, &disp, sizeof(disp));
-        }
-
-        [[nodiscard]] Memory::ModuleRange range() const noexcept
-        {
-            if (m_base == nullptr)
-            {
-                return {};
-            }
-            const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(m_base);
-            return Memory::ModuleRange{base, base + m_size};
-        }
-
-    private:
-        std::uint8_t *m_base = nullptr;
-        std::size_t m_size = 0;
-    };
-} // namespace
-
-// The RttiVtable tier resolves a candidate whose pattern is an MSVC mangled name through Rtti::vtable_for_type, scoped
-// to the cascade's module range. The branch lands ahead of parse_aob (the name is not an AOB), so the strongest tier
-// actually fires instead of degrading to a parse-warning skip.
-TEST(ScannerModuleCascade, RttiVtableResolvesInModuleRange)
-{
-    ASSERT_TRUE(Memory::init_cache());
-    cas_rtti_reset();
-
-    const std::uintptr_t vt = cas_build_synth_vtable(".?AVCasRttiHit@@", 0);
-    ASSERT_NE(vt, 0u);
-
-    Scanner::AddrCandidate cands[] = {
-        {"CasRttiHit", ".?AVCasRttiHit@@", Scanner::ResolveMode::RttiVtable},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "rtti-hit", cas_rtti_range());
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, vt);
-    EXPECT_EQ(hit->winning_name, std::string_view{"CasRttiHit"});
-}
-
-// vtable_for_type fails closed on an ambiguous name (two distinct primary vtables share it), so the RttiVtable tier
-// falls through to the byte AOB tier below it. The uniqueness is enforced by the backend, not by the byte-mode
-// require_unique rescan, which the new modes never run.
-TEST(ScannerModuleCascade, AmbiguousRttiNameFallsThroughToByteCandidate)
-{
-    ASSERT_TRUE(Memory::init_cache());
-    cas_rtti_reset();
-
-    ASSERT_NE(cas_build_synth_vtable(".?AVCasRttiDup@@", 0), 0u);
-    ASSERT_NE(cas_build_synth_vtable(".?AVCasRttiDup@@", 0), 0u);
-
-    std::string aob;
-    const std::uintptr_t sig_addr = cas_plant_pool_signature(0x4D, aob);
-    ASSERT_NE(sig_addr, 0u);
-
-    Scanner::AddrCandidate cands[] = {
-        {"CasRttiDup", ".?AVCasRttiDup@@", Scanner::ResolveMode::RttiVtable},
-        {"byte-fallback", aob, Scanner::ResolveMode::Direct, 0, 0},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "rtti-ambiguous", cas_rtti_range());
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, sig_addr);
-    EXPECT_EQ(hit->winning_name, std::string_view{"byte-fallback"});
-}
-
-// A cascade whose only candidate is a missing RttiVtable name returns NoMatch, not AllPatternsInvalid: the branch marks
-// the cascade as having seen a valid non-byte candidate, so the "every byte pattern failed to parse" diagnostic is
-// never reached for a name/string-only table.
-TEST(ScannerModuleCascade, SoleMissingRttiVtableReturnsNoMatchNotInvalid)
-{
-    ASSERT_TRUE(Memory::init_cache());
-    cas_rtti_reset();
-
-    // Plant an unrelated fixture so the pool range is non-empty, then resolve a name that does not exist.
-    ASSERT_NE(cas_build_synth_vtable(".?AVCasRttiPresent@@", 0), 0u);
-
-    Scanner::AddrCandidate cands[] = {
-        {"absent", ".?AVCasRttiAbsentNeverLinked@@", Scanner::ResolveMode::RttiVtable},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "rtti-absent", cas_rtti_range());
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-// The StringXref tier anchors on an immutable literal and resolves its unique RIP-relative reference through
-// find_string_xref, scoped to the cascade's module range. The branch lands ahead of parse_aob (the literal is not an
-// AOB), and the default ReferencingInstruction return mode yields the load-site address.
-TEST(ScannerModuleCascade, StringXrefResolvesReferenceInModuleRange)
-{
-    ASSERT_TRUE(Memory::init_cache());
-
-    CascadeStringImage img;
-    ASSERT_TRUE(img.ok());
-
-    constexpr std::size_t STR_OFF = 0x100;
-    constexpr std::size_t LEA_OFF = 0x040;
-    const char literal[] = "CasStringXrefAnchorLiteral";
-    img.write(STR_OFF, literal, sizeof(literal)); // sizeof includes the NUL terminator
-    img.plant_rip_load(LEA_OFF, STR_OFF, 0x8D);   // lea rax, [rip+str]
-
-    Scanner::AddrCandidate cands[] = {
-        {"anchor", "CasStringXrefAnchorLiteral", Scanner::ResolveMode::StringXref},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-hit", img.range());
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, img.addr(LEA_OFF));
-    EXPECT_EQ(hit->winning_name, std::string_view{"anchor"});
-}
-
-// find_string_xref reports StringAmbiguous when the literal is pooled (planted twice), so the StringXref tier falls
-// through to the byte AOB tier below it. As with RttiVtable, the unique-only behaviour is the backend's, not the
-// byte-mode require_unique rescan.
-TEST(ScannerModuleCascade, AmbiguousStringXrefFallsThroughToByteCandidate)
-{
-    ASSERT_TRUE(Memory::init_cache());
-
-    CascadeStringImage img;
-    ASSERT_TRUE(img.ok());
-
-    const char literal[] = "CasDupStringLiteral";
-    img.write(0x100, literal, sizeof(literal));
-    img.write(0x180, literal, sizeof(literal));
-
-    constexpr std::size_t SIG_OFF = 0x300;
-    const std::string aob = write_signature(img.bytes(SIG_OFF), 16, 0x71);
-
-    Scanner::AddrCandidate cands[] = {
-        {"anchor-dup", "CasDupStringLiteral", Scanner::ResolveMode::StringXref},
-        {"byte-fallback", aob, Scanner::ResolveMode::Direct, 0, 0},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-ambiguous", img.range());
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, img.addr(SIG_OFF));
-    EXPECT_EQ(hit->winning_name, std::string_view{"byte-fallback"});
-}
-
-// A single literal with two valid code references reports AmbiguousReference, so the StringXref tier falls through just
-// like a pooled literal does.
-TEST(ScannerModuleCascade, AmbiguousStringReferenceFallsThroughToByteCandidate)
-{
-    ASSERT_TRUE(Memory::init_cache());
-
-    CascadeStringImage img;
-    ASSERT_TRUE(img.ok());
-
-    constexpr std::size_t STR_OFF = 0x100;
-    constexpr std::size_t LEA_A_OFF = 0x040;
-    constexpr std::size_t LEA_B_OFF = 0x080;
-    const char literal[] = "CasMultiRefStringLiteral";
-    img.write(STR_OFF, literal, sizeof(literal));
-    img.plant_rip_load(LEA_A_OFF, STR_OFF, 0x8D);
-    img.plant_rip_load(LEA_B_OFF, STR_OFF, 0x8D);
-
-    constexpr std::size_t SIG_OFF = 0x300;
-    const std::string aob = write_signature(img.bytes(SIG_OFF), 16, 0x89);
-
-    Scanner::AddrCandidate cands[] = {
-        {"anchor-multiref", "CasMultiRefStringLiteral", Scanner::ResolveMode::StringXref},
-        {"byte-fallback", aob, Scanner::ResolveMode::Direct, 0, 0},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-ambiguous-reference", img.range());
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, img.addr(SIG_OFF));
-    EXPECT_EQ(hit->winning_name, std::string_view{"byte-fallback"});
-}
-
-// A cascade whose only candidate is a missing StringXref literal returns NoMatch, not AllPatternsInvalid, for the same
-// reason as the RttiVtable case: a valid non-byte candidate was attempted.
-TEST(ScannerModuleCascade, SoleMissingStringXrefReturnsNoMatchNotInvalid)
-{
-    ASSERT_TRUE(Memory::init_cache());
-
-    CascadeStringImage img;
-    ASSERT_TRUE(img.ok());
-
-    // No literal planted: phase 1 reports StringNotFound.
-    Scanner::AddrCandidate cands[] = {
-        {"absent", "CasAbsentLiteralNeverPlanted", Scanner::ResolveMode::StringXref},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module(cands, "string-absent", img.range());
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-// The prologue-recovery fallback rewrites only ResolveMode::Direct rows. Name/string rows that miss on the happy path
-// are skipped unchanged by the fallback pass, so the Direct row's hooked E9 prologue is the only one rebuilt and
-// recovered. This pins that the new tiers compose with prologue recovery without special-casing.
-TEST(ScannerModuleCascade, PrologueFallbackSkipsNameStringRowsAndRewritesDirect)
-{
-    const auto dest = reinterpret_cast<std::uintptr_t>(&alloc_exec_near);
-
-    VirtualPagePtr region{alloc_exec_near(dest, 0x1000)};
-    if (region.get() == nullptr)
-    {
-        GTEST_SKIP() << "no free executable region within rel32 of the test image";
-    }
-    std::memset(region.get(), 0xCC, 0x1000);
-
-    constexpr std::size_t PLANT_OFFSET = 0x200;
-    const auto match_site = reinterpret_cast<std::uintptr_t>(region.get()) + PLANT_OFFSET;
-    const std::int64_t rel = static_cast<std::int64_t>(dest) - static_cast<std::int64_t>(match_site + 5);
-    ASSERT_GE(rel, INT32_MIN);
-    ASSERT_LE(rel, INT32_MAX);
-
-    constexpr std::uint8_t TAIL_BYTES[] = {0x6C, 0xA3, 0xD2, 0xE8, 0xFA, 0x2C, 0x4E, 0x60, 0x82, 0x94};
-
-    region.get()[PLANT_OFFSET + 0] = 0xE9;
-    const std::int32_t disp = static_cast<std::int32_t>(rel);
-    std::memcpy(region.get() + PLANT_OFFSET + 1, &disp, sizeof(disp));
-    std::memcpy(region.get() + PLANT_OFFSET + 5, TAIL_BYTES, sizeof(TAIL_BYTES));
-
-    const Memory::ModuleRange range{reinterpret_cast<std::uintptr_t>(region.get()),
-                                    reinterpret_cast<std::uintptr_t>(region.get()) + 0x1000};
-
-    // The name/string rows miss (no COL or literal lives in this scratch page) and the fallback skips them, so only the
-    // Direct row's hooked prologue is rebuilt as E9 ?? ?? ?? ?? + tail and recovered at the planted site.
-    Scanner::AddrCandidate cands[] = {
-        {"name-tier", ".?AVNeverInThisScratchPage@@", Scanner::ResolveMode::RttiVtable},
-        {"string-tier", "NeverInThisScratchPageLiteral", Scanner::ResolveMode::StringXref},
-        {"hooked", "48 89 5C 24 08 6C A3 D2 E8 FA 2C 4E 60 82 94", Scanner::ResolveMode::Direct, 0, 0},
-    };
-
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "skip-name-string", range);
-    ASSERT_TRUE(hit.has_value());
-    EXPECT_EQ(hit->address, match_site);
-    EXPECT_EQ(hit->winning_name, std::string_view{"hooked"});
-}
-
-// A name/string-only cascade (no Direct row) that fully misses under the prologue-fallback resolver returns NoMatch,
-// not PrologueFallbackNotApplicable: the fallback has no Direct candidate to rebuild, so the "insufficient literal tail
-// bytes" classification (which only fits a present Direct row) does not apply.
-TEST(ScannerModuleCascade, PrologueFallbackNoDirectRowMissReturnsNoMatch)
-{
-    ASSERT_TRUE(Memory::init_cache());
-
-    CascadeStringImage img;
-    ASSERT_TRUE(img.ok());
-
-    // Neither tier can resolve in this empty scratch page (no COL, no literal), and neither is a Direct row the
-    // fallback could rebuild.
-    Scanner::AddrCandidate cands[] = {
-        {"name-tier", ".?AVNeverInThisScratchImage@@", Scanner::ResolveMode::RttiVtable},
-        {"string-tier", "NeverInThisScratchImageLiteral", Scanner::ResolveMode::StringXref},
-    };
-    const auto hit = Scanner::resolve_cascade_in_module_with_prologue_fallback(cands, "no-direct-row", img.range());
-    ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Scanner::ResolveError::NoMatch);
-}
-
-// The four xref_* facet fields are appended to AddrCandidate and defaulted, so every pre-existing positional aggregate
-// initializer keeps compiling and the new fields take their StringRefQuery-mirroring defaults. Verified at compile
-// time.
-TEST(ScannerCascade, PositionalAggregateInitStillCompiles)
-{
-    constexpr Scanner::AddrCandidate five{"n", "48 8B", Scanner::ResolveMode::RipRelative, 3, 7};
-    static_assert(five.disp_offset == 3 && five.instr_end_offset == 7);
-    static_assert(five.require_unique);
-    static_assert(five.xref_encoding == Scanner::StringEncoding::Utf8);
-    static_assert(five.xref_return == Scanner::XrefReturn::ReferencingInstruction);
-    static_assert(five.xref_require_terminator);
-    static_assert(!five.xref_broad_match);
-
-    constexpr Scanner::AddrCandidate six{"n", "90", Scanner::ResolveMode::Direct, 0, 0, false};
-    static_assert(!six.require_unique);
-
-    SUCCEED();
-}

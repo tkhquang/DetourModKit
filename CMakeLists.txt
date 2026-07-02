@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(DetourModKit VERSION 3.9.0 LANGUAGES CXX)
+project(DetourModKit VERSION 4.0.0 LANGUAGES CXX)
 
 # GNUInstallDirs defines CMAKE_INSTALL_LIBDIR / BINDIR / INCLUDEDIR / DOCDIR. It must be included before any
 # install() rule reads those variables; otherwise they expand to empty and components land at the install-prefix
@@ -37,6 +37,24 @@ if(MSVC)
   add_link_options(/DYNAMICBASE /NXCOMPAT /GUARD:CF)
   add_compile_options(/guard:cf)
 
+  # Pin the debug STL to _ITERATOR_DEBUG_LEVEL=0 for the Debug config. At the default debug level (>= 1, what /MDd
+  # selects) MSVC's std::vector and std::string allocate a hidden _Container_proxy through operator new the moment they
+  # are constructed -- including from inside their noexcept constructors, an allocation libstdc++ never makes. That
+  # breaks the out-of-memory contract tests: they inject allocation failure with a thread-local throwing operator new,
+  # and failing one of those proxy allocations makes bad_alloc escape a noexcept function, which calls std::terminate
+  # and aborts the process before the library's own catch can turn the failure into a degraded result. In particular a
+  # whole-batch resolver failure (which must fail the result container's allocation and propagate to the noexcept
+  # boundary) has no realizable injection point under debug iterators, because that container allocation is one of the
+  # noexcept-context proxies. Turning the debug iterators off removes the hidden proxies, so the injected failure lands
+  # on the library's own throwing-context allocation exactly as it does on libstdc++ and the contract is testable
+  # identically on both toolchains. The never-terminate-under-OOM guarantee itself is unaffected (it is real in every
+  # config and is also exercised on the MSVC release STL, which runs at level 0). This is set globally -- before the
+  # external subdirectories are added -- because _ITERATOR_DEBUG_LEVEL must be identical across every object linked into
+  # one binary; a per-target mismatch is an LNK2038 at link time. The rest of the Debug diagnostics are untouched:
+  # NDEBUG stays unset so assert() still fires, and the debug CRT heap checks, /RTC runtime checks, and
+  # AddressSanitizer all keep working.
+  add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+
   # Debug builds: embed CodeView debug info directly into .obj files (/Z7)
   # to avoid PDB file locking issues during parallel builds.
   # Release builds: no debug info to minimize binary size.
@@ -52,6 +70,25 @@ else()
   # GCC/Clang specific flags
   add_compile_options(-Wall -Wextra -Wpedantic -Wshadow)
 
+  # -Wdangling-reference (GCC 13+) flags a reference bound to a temporary that is destroyed at the end of the
+  # full expression. That is precisely the failure mode of the by-value view seams in this library: the
+  # OwnedScanRequest -> ScanRequest borrow, the Region/Pattern accessors that return by value, and any
+  # `const auto& r = returns_by_value();` in a consumer. The option is a GCC-only spelling: Clang rejects the
+  # exact name (it diagnoses the same class of bug under -Wdangling, which is on by default) and GCC before 13
+  # does not know it either. Probe for acceptance instead of hardcoding it so Clang and older GCC keep building
+  # warning-clean; check_cxx_compiler_flag treats the "unknown warning option" diagnostic as a rejection, so a
+  # non-supporting compiler simply does not receive the flag and DMK_WARNINGS_AS_ERRORS cannot escalate a
+  # -Wunknown-warning-option into a hard configure failure. The flag is guarded with COMPILE_LANGUAGE:CXX
+  # because this directory-scoped option is also inherited by the vendored Zydis/Zycore C sources added below,
+  # and cc1 emits a "valid for C++ but not for C" note for every C translation unit otherwise; the guard keeps
+  # the flag on DetourModKit's own C++ objects (a C++-only concept anyway) and off the C dependency build.
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-Wdangling-reference" DMK_HAS_WDANGLING_REFERENCE)
+
+  if(DMK_HAS_WDANGLING_REFERENCE)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-Wdangling-reference>)
+  endif()
+
   if(DMK_WARNINGS_AS_ERRORS)
     add_compile_options(-Werror)
   endif()
@@ -59,15 +96,57 @@ else()
   # Security hardening: ASLR and DEP (NX) for MinGW targets
   add_link_options(-Wl,--dynamicbase -Wl,--nxcompat)
 
-  # The scanner's SSE2/AVX2 intrinsics are already hand-optimized and do
+  # The scan engine's SSE2/AVX2 intrinsics are already hand-optimized and do
   # not benefit from -O3's aggressive loop unrolling and auto-vectorization;
-  # the scanner.cpp downgrade to -O2 is applied per-source below so the
+  # the scan engine downgrade to -O2 is applied per-source below so the
   # rest of the tree keeps -O3 (hot paths in logger/memory integer math
   # measurably benefit).
 
   # Suppress specific GCC/Clang warnings if they are noisy or from dependencies
   # add_compile_options(-Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
+
+# --- C++23 standard-library feature probes ---
+# DetourModKit's public contract is built directly on three C++23 *library* facilities:
+#   * std::expected           (<expected>)   -- the Result<T> error-as-value type every fallible API returns.
+#   * std::move_only_function (<functional>) -- the type-erased, move-only callback storage in the Session
+#                                               bootstrap surface and the RTTI dissection visitors.
+#   * std::format             (<format>)     -- the formatting layer beneath the logger and diagnostics.
+# target_compile_features(... cxx_std_23) below enforces the *language* level, but a toolchain can accept
+# -std=c++23 while shipping a standard library that predates one of these headers; older libstdc++/libc++
+# pairings do exactly that. Without an explicit gate such a toolchain fails deep inside the first public
+# header with an opaque "no member named 'expected' in namespace std" error that points at library code
+# rather than the real cause. Probe each feature-test macro at configure time so an under-provisioned
+# standard library is reported once, by name, with a minimum toolchain, before any object is compiled.
+include(CheckCXXSourceCompiles)
+
+# The probes must see the same C++23 level the library is built at. try_compile honours CMAKE_CXX_STANDARD /
+# CMAKE_CXX_STANDARD_REQUIRED / CMAKE_CXX_EXTENSIONS (CMP0067 is NEW under this file's cmake_minimum_required),
+# and those variables are set above, so every probe already compiles as strict C++23 with no per-check flag
+# override.
+function(_dmk_require_library_feature header macro feature min_toolchain)
+  # A bare include of the header plus a preprocessor assertion on its feature-test macro is sufficient: the
+  # probe fails if the header is missing entirely, and also if the library ships the header but has not yet
+  # implemented (and therefore does not advertise) the feature.
+  check_cxx_source_compiles(
+    "#include <${header}>
+     #ifndef ${macro}
+     #error feature-test macro not defined
+     #endif
+     int main() { return 0; }"
+    ${macro}_present)
+
+  if(NOT ${macro}_present)
+    message(FATAL_ERROR
+      "DetourModKit requires the C++23 library facility ${feature} (${macro}, from <${header}>), but the "
+      "configured standard library does not provide it. A compiler that accepts -std=c++23 is not enough; the "
+      "standard library must implement the facility too. Upgrade the standard library to at least ${min_toolchain}.")
+  endif()
+endfunction()
+
+_dmk_require_library_feature(expected   __cpp_lib_expected           "std::expected"           "GCC 12+, MSVC 19.33+ (VS 2022 17.3), or libc++ 16+")
+_dmk_require_library_feature(functional __cpp_lib_move_only_function "std::move_only_function" "GCC 12+ or MSVC 19.32+ (VS 2022 17.2)")
+_dmk_require_library_feature(format     __cpp_lib_format             "std::format"             "GCC 13+, MSVC 19.29+ (VS 2019 16.10), or libc++ 17+")
 
 # --- Dependencies ---
 # SimpleIni will be added as an include directory directly to the DetourModKit target.
@@ -105,7 +184,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/safetyhook/CMakeLists.txt")
   # SafetyHook and its dependencies (Zydis, Zycore) should also be built as static libraries.
   # Setting BUILD_SHARED_LIBS to OFF globally (done above) should influence this for
   # well-behaved CMake subprojects. Explicit definitions below will reinforce this.
-  add_subdirectory(external/safetyhook SYSTEM) # SYSTEM suppresses compiler warnings from external headers
+  #
+  # EXCLUDE_FROM_ALL keeps the backend out of the install prefix. SafetyHook's own CMakeLists registers
+  # unconditional install() rules for its headers, its lib/cmake/safetyhook export set, and its archives, with no
+  # SAFETYHOOK_INSTALL toggle to disable them. Adding the subdirectory with EXCLUDE_FROM_ALL causes CMake to ignore
+  # every install() rule defined in it (and below, so Zydis/Zycore too) when installing DetourModKit's prefix, so the
+  # backend is never advertised: no include/safetyhook*, no find_package(safetyhook)-satisfiable config. The backend
+  # is still built here because DetourModKit links it, and an inter-target dependency supersedes the ALL exclusion.
+  # DetourModKit ships the dependency archives itself, as plain files, through the DetourModKit::deps imported target
+  # (see the install(FILES ...) of _dmk_dep_archives below), so a find_package consumer still links the static chain.
+  # SYSTEM suppresses compiler warnings from the external headers.
+  add_subdirectory(external/safetyhook EXCLUDE_FROM_ALL SYSTEM)
 
   # Suppress all warnings when compiling external dependency sources
   foreach(_ext_target safetyhook Zydis Zycore)
@@ -133,6 +222,13 @@ endif()
 # wiring their own submodule. The PUBLIC include interface and the header install below ship it to find_package
 # consumers for that reason. This is intentional: dropping it is a breaking change for any downstream that relies
 # on the transitive include path.
+#
+# The re-export is on by default so existing consumers keep the transitive include path unchanged. A packager who
+# wants a prefix that ships only DetourModKit's own public headers (no vendored third-party tree) can turn it off.
+# Because the library never includes DirectXMath in its own build, the switch is purely an install/interface concern:
+# it gates only whether the vendored headers and the install-interface include directory reach find_package consumers,
+# and never affects DetourModKit's own compilation or the build-tree (add_subdirectory) include path.
+option(DMK_INSTALL_DIRECTXMATH "Install and re-export the vendored DirectXMath headers to find_package consumers" ON)
 set(DIRECTXMATH_INCLUDE_DIR "")
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/DirectXMath/Inc/DirectXMath.h")
@@ -156,7 +252,7 @@ configure_file(
 # header diagnostics to include/DetourModKit via HeaderFilterRegex. This option wires it into the build so clang-tidy
 # runs alongside compilation of DetourModKit's own sources (and the tests). Off by default so normal consumer and CI
 # builds are unaffected; CI runs it in a continue-on-error lane. Set here -- after the external submodules are added
-# above (line 108) and before the library and test targets below -- so only this project's targets inherit the launcher
+# above and before the library and test targets below -- so only this project's targets inherit the launcher
 # and SafetyHook / Zydis / Zycore are never analysed.
 option(DMK_ENABLE_CLANG_TIDY "Run clang-tidy on DetourModKit sources during the build (advisory)" OFF)
 
@@ -190,6 +286,7 @@ endif()
 file(GLOB DETOURMODKIT_SOURCE_FILES
   CONFIGURE_DEPENDS
   "src/*.cpp"
+  "src/internal/*.cpp"
 )
 
 if(NOT DETOURMODKIT_SOURCE_FILES)
@@ -238,13 +335,13 @@ else()
     $<$<CONFIG:Release>:-Wl,--gc-sections>
   )
 
-  # Per-source optimization override: downgrade scanner.cpp from -O3 to -O2
+  # Per-source optimization override: downgrade the scan engine from -O3 to -O2
   # because its SSE2/AVX2 verifier is hand-tuned and -O3 loop unrolling has
   # been observed to pessimize the inner loop. The rest of the library keeps
   # the Release default (-O3 via CMAKE_CXX_FLAGS_RELEASE). Appending -O2
-  # after -O3 on the scanner's compile line is the effective flag because
+  # after -O3 on the engine's compile line is the effective flag because
   # GCC and Clang resolve repeated -O levels by taking the last one.
-  set(_dmk_scanner_src "${CMAKE_CURRENT_SOURCE_DIR}/src/scanner.cpp")
+  set(_dmk_scanner_src "${CMAKE_CURRENT_SOURCE_DIR}/src/internal/scan_engine.cpp")
 
   if(EXISTS "${_dmk_scanner_src}")
     set_source_files_properties("${_dmk_scanner_src}"
@@ -286,14 +383,20 @@ target_include_directories(DetourModKit
   # Generated headers (version.hpp)
   $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
 
-  # DirectXMath headers for both build and install interfaces
+  # DirectXMath headers for the build interface (add_subdirectory consumers). The install-interface counterpart is
+  # attached separately below, gated on DMK_INSTALL_DIRECTXMATH, so a prefix that opts out of the re-export does not
+  # advertise an include path pointing at headers it never installed.
   $<BUILD_INTERFACE:${DIRECTXMATH_INCLUDE_DIR}>
-  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath>
 
   PRIVATE
 
   # For DetourModKit's *own sources* (in src/) to find its *public headers*
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
+
+  # For DetourModKit's own sources to find its private engine headers without `../` paths: src/ TUs
+  # include "internal/scan_engine.hpp" etc., and src/internal/ TUs include the shared src/ headers
+  # ("x86_decode.hpp", "fork_join.hpp"). These headers are never installed.
+  "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
 # External dependency headers marked as SYSTEM to suppress their warnings
@@ -305,6 +408,16 @@ target_include_directories(DetourModKit SYSTEM
   "${CMAKE_CURRENT_SOURCE_DIR}/external/simpleini"
   "${DIRECTXMATH_INCLUDE_DIR}"
 )
+
+# The DirectXMath install-interface include path is attached only when the re-export is installed, so an opted-out
+# prefix never exports an include directory pointing at DirectXMath headers it did not ship. Kept SYSTEM to mirror the
+# build-interface DirectXMath include above (external headers, their warnings suppressed for consumers too).
+if(DMK_INSTALL_DIRECTXMATH)
+  target_include_directories(DetourModKit SYSTEM
+    PUBLIC
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath>
+  )
+endif()
 
 # --- Linking Dependencies for DetourModKit ---
 if(TARGET ${SAFETYHOOK_LIBRARY_TARGET_NAME})
@@ -439,43 +552,64 @@ else()
   message(WARNING "No module headers found in 'include/DetourModKit/*.hpp' to install.")
 endif()
 
+# Install detail/ headers from include/DetourModKit/detail/. These carry compile-visible support (namespace
+# DetourModKit::detail) that public headers depend on by value, so they must ship alongside the public surface even
+# though consumers never include them directly. scan.hpp holds scan::Pattern by value, whose inline storage and
+# constexpr parser are detail/pattern_core.hpp, so that header must ship for an installed package to compile.
+file(GLOB _dmk_detail_headers_for_install
+  LIST_DIRECTORIES false
+  CONFIGURE_DEPENDS
+  "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit/detail/*.hpp"
+)
+
+if(_dmk_detail_headers_for_install)
+  install(FILES ${_dmk_detail_headers_for_install}
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit/detail"
+    COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+  )
+endif()
+
 # Install generated version header
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/generated/DetourModKit/version.hpp"
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DetourModKit"
   COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
 )
 
-# Install the centralized DetourModKit.hpp header
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp")
-  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-    COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
-  )
-  message(STATUS "Centralized DetourModKit.hpp header will be installed.")
-else()
-  message(WARNING "Centralized header 'include/DetourModKit.hpp' not found.")
-endif()
+# The umbrella + process-lifecycle surface is the root-level include/DetourModKit.hpp, placed beside (not inside) the
+# include/DetourModKit/ module directory so a consumer writes <DetourModKit.hpp> with no doubled path (the Boost.Asio
+# shape: an <asio.hpp> umbrella beside the <asio/...> parts). Because it lives one directory above the module-headers
+# glob, it is not swept up by that glob and needs its own rule installing it at the include-dir root.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/include/DetourModKit.hpp"
+  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+  COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+)
 
-# Install DirectXMath headers
-if(DIRECTXMATH_INCLUDE_DIR AND EXISTS "${DIRECTXMATH_INCLUDE_DIR}")
-  file(GLOB _directxmath_headers_for_install
-    LIST_DIRECTORIES false
-    "${DIRECTXMATH_INCLUDE_DIR}/*.h"
-    "${DIRECTXMATH_INCLUDE_DIR}/*.hpp"
-    "${DIRECTXMATH_INCLUDE_DIR}/*.inl"
-  )
-
-  if(_directxmath_headers_for_install)
-    install(FILES ${_directxmath_headers_for_install}
-      DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath"
-      COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+# Install DirectXMath headers, gated on DMK_INSTALL_DIRECTXMATH. When the re-export is off, nothing DirectXMath ships
+# and the install-interface include path attached above is likewise omitted, so an opted-out prefix carries only
+# DetourModKit's own public headers rather than a vendored third-party tree.
+if(DMK_INSTALL_DIRECTXMATH)
+  if(DIRECTXMATH_INCLUDE_DIR AND EXISTS "${DIRECTXMATH_INCLUDE_DIR}")
+    file(GLOB _directxmath_headers_for_install
+      LIST_DIRECTORIES false
+      "${DIRECTXMATH_INCLUDE_DIR}/*.h"
+      "${DIRECTXMATH_INCLUDE_DIR}/*.hpp"
+      "${DIRECTXMATH_INCLUDE_DIR}/*.inl"
     )
-    message(STATUS "DirectXMath headers will be installed from: ${DIRECTXMATH_INCLUDE_DIR}")
+
+    if(_directxmath_headers_for_install)
+      install(FILES ${_directxmath_headers_for_install}
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/DirectXMath"
+        COMPONENT ${DETOURMODKIT_DEV_COMPONENT}
+      )
+      message(STATUS "DirectXMath headers will be installed from: ${DIRECTXMATH_INCLUDE_DIR}")
+    else()
+      message(WARNING "No DirectXMath headers found in '${DIRECTXMATH_INCLUDE_DIR}' to install.")
+    endif()
   else()
-    message(WARNING "No DirectXMath headers found in '${DIRECTXMATH_INCLUDE_DIR}' to install.")
+    message(WARNING "DirectXMath include directory not found or empty: ${DIRECTXMATH_INCLUDE_DIR}")
   endif()
 else()
-  message(WARNING "DirectXMath include directory not found or empty: ${DIRECTXMATH_INCLUDE_DIR}")
+  message(STATUS "DirectXMath re-export disabled (DMK_INSTALL_DIRECTXMATH=OFF); the prefix will not ship DirectXMath headers.")
 endif()
 
 # --- CMake Package Configuration for Consumers ---
@@ -628,11 +762,28 @@ endif()
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported LANGUAGES CXX OUTPUT _ipo_error)
 
-if(_ipo_supported)
+# DetourModKit ships as a static archive that the consumer links into the final mod DLL, so enabling LTO here bakes
+# GIMPLE bytecode into the archive that the CONSUMER's linker must recompile (lto1) at its own final link. GCC 15's
+# lto1 has a defect that aborts that consumer link with "two or more sections for .gnu.lto_*" on the duplicate COMDAT
+# sections of weak template instantiations (std::atomic / std::vector specializations, etc.) pulled from the archive.
+# It is not fixable from the consumer side without every consumer passing -fno-lto, and slim vs fat LTO objects makes
+# no difference (the driver still invokes lto1 on the bytecode). GCC 13.x and MSVC's /GL LTCG are unaffected, so LTO
+# stays enabled there and is suppressed only on the broken GCC major version, keeping the shipped archive linkable by
+# any consumer regardless of their toolchain. Narrow the version guard once a fixed GCC 15.x is confirmed upstream.
+set(_dmk_lto_broken OFF)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
+  set(_dmk_lto_broken ON)
+endif()
+
+if(_ipo_supported AND NOT _dmk_lto_broken)
   set_target_properties(DetourModKit PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_RELEASE ON
   )
   message(STATUS "LTO enabled for DetourModKit Release builds")
+elseif(_dmk_lto_broken)
+  message(STATUS
+    "LTO disabled: GCC ${CMAKE_CXX_COMPILER_VERSION} lto1 mis-links LTO static archives at the consumer's final link; "
+    "shipping non-LTO objects for a portable archive")
 else()
   message(STATUS "LTO not supported: ${_ipo_error}")
 endif()

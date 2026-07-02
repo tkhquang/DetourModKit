@@ -22,13 +22,16 @@
 
 #include "test_alloc_probe.hpp"
 
-namespace Memory = DetourModKit::Memory;
-namespace Rtti = DetourModKit::Rtti;
+namespace memory = DetourModKit::memory;
+namespace rtti = DetourModKit::rtti;
+namespace dmk = DetourModKit;
+using DetourModKit::Address;
+using DetourModKit::ErrorCode;
 
-static_assert(static_cast<std::uint8_t>(Rtti::Indirection::PointerToObject) == 0);
-static_assert(static_cast<std::uint8_t>(Rtti::Indirection::ObjectBase) == 1);
-static_assert(static_cast<std::uint8_t>(Rtti::Indirection::Any) == 2);
-static_assert(static_cast<std::uint8_t>(Rtti::Indirection::CompleteObject) == 3);
+static_assert(static_cast<std::uint8_t>(rtti::Indirection::PointerToObject) == 0);
+static_assert(static_cast<std::uint8_t>(rtti::Indirection::ObjectBase) == 1);
+static_assert(static_cast<std::uint8_t>(rtti::Indirection::Any) == 2);
+static_assert(static_cast<std::uint8_t>(rtti::Indirection::CompleteObject) == 3);
 
 namespace
 {
@@ -43,7 +46,7 @@ namespace
     constexpr std::size_t SYN_VTABLE_OFFSET = SYN_COL_PTR_OFFSET + 8;
 
     // Static buffer pool for SyntheticVtable storage. Living in the test executable's data segment ensures
-    // Memory::module_range_for resolves every synthetic vtable back to the test exe's PE range, which the prelude's
+    // memory::module_of resolves every synthetic vtable back to the test exe's PE range, which the prelude's
     // bound-check guard requires. The pool is reset between tests.
     constexpr std::size_t SYN_POOL_FIXTURES = 32;
     constexpr std::size_t SYN_POOL_SIZE = SYN_BUF_SIZE * SYN_POOL_FIXTURES;
@@ -177,13 +180,13 @@ class RttiDissectTest : public ::testing::Test
 protected:
     void SetUp() override
     {
-        (void)Memory::init_cache();
+        (void)memory::init_cache();
         syn_reset();
     }
 
     void TearDown() override
     {
-        Memory::shutdown_cache();
+        memory::shutdown_cache();
         for (void *p : m_heap_pages)
         {
             VirtualFree(p, 0, MEM_RELEASE);
@@ -227,13 +230,13 @@ TEST_F(RttiDissectTest, Identify_DirectObjectBase)
     std::array<std::uintptr_t, 1> slot{v.vtable()};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    ASSERT_TRUE(Rtti::identify_pointee_type(slot_addr, pt));
+    rtti::PointeeType pt;
+    ASSERT_TRUE(rtti::identify_pointee_type(Address{slot_addr}, pt));
     EXPECT_FALSE(pt.was_pointer);
     // Direct contract: object base is the slot ADDRESS, vtable is the value.
-    EXPECT_EQ(pt.object_base, slot_addr);
-    EXPECT_EQ(pt.vtable, v.vtable());
-    EXPECT_EQ(pt.pointer_value, v.vtable());
+    EXPECT_EQ(pt.object_base.raw(), slot_addr);
+    EXPECT_EQ(pt.vtable.raw(), v.vtable());
+    EXPECT_EQ(pt.pointer_value.raw(), v.vtable());
     EXPECT_EQ(pt.name(), ".?AVDirect@@");
 }
 
@@ -246,13 +249,13 @@ TEST_F(RttiDissectTest, Identify_PointerToObject)
     std::array<std::uintptr_t, 1> slot{obj};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    ASSERT_TRUE(Rtti::identify_pointee_type(slot_addr, pt));
+    rtti::PointeeType pt;
+    ASSERT_TRUE(rtti::identify_pointee_type(Address{slot_addr}, pt));
     EXPECT_TRUE(pt.was_pointer);
     // Pointer-to-object contract: object base is the pointee value.
-    EXPECT_EQ(pt.object_base, obj);
-    EXPECT_EQ(pt.pointer_value, obj);
-    EXPECT_EQ(pt.vtable, v.vtable());
+    EXPECT_EQ(pt.object_base.raw(), obj);
+    EXPECT_EQ(pt.pointer_value.raw(), obj);
+    EXPECT_EQ(pt.vtable.raw(), v.vtable());
     EXPECT_EQ(pt.name(), ".?AVHeapObj@@");
 }
 
@@ -266,10 +269,10 @@ TEST_F(RttiDissectTest, Identify_NonzeroColOffsetRecoversCompleteObject)
     std::array<std::uintptr_t, 1> slot{obj};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    ASSERT_TRUE(Rtti::identify_pointee_type(slot_addr, pt));
+    rtti::PointeeType pt;
+    ASSERT_TRUE(rtti::identify_pointee_type(Address{slot_addr}, pt));
     EXPECT_EQ(pt.col_offset, 0x10u);
-    EXPECT_EQ(pt.complete_obj, obj - 0x10);
+    EXPECT_EQ(pt.complete_obj.raw(), obj - 0x10);
 }
 
 TEST_F(RttiDissectTest, Identify_DirectObjectNonzeroColOffsetRecoversCompleteObject)
@@ -281,12 +284,12 @@ TEST_F(RttiDissectTest, Identify_DirectObjectNonzeroColOffsetRecoversCompleteObj
     std::array<std::uintptr_t, 1> slot{v.vtable()};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    ASSERT_TRUE(Rtti::identify_pointee_type(slot_addr, pt));
+    rtti::PointeeType pt;
+    ASSERT_TRUE(rtti::identify_pointee_type(Address{slot_addr}, pt));
     EXPECT_FALSE(pt.was_pointer);
-    EXPECT_EQ(pt.object_base, slot_addr);
+    EXPECT_EQ(pt.object_base.raw(), slot_addr);
     EXPECT_EQ(pt.col_offset, 0x20u);
-    EXPECT_EQ(pt.complete_obj, slot_addr - 0x20);
+    EXPECT_EQ(pt.complete_obj.raw(), slot_addr - 0x20);
 }
 
 TEST_F(RttiDissectTest, Identify_ExposesColTdAndNameAddresses)
@@ -297,11 +300,11 @@ TEST_F(RttiDissectTest, Identify_ExposesColTdAndNameAddresses)
     std::array<std::uintptr_t, 1> slot{v.vtable()};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    ASSERT_TRUE(Rtti::identify_pointee_type(slot_addr, pt));
-    EXPECT_EQ(pt.col_addr, v.col_addr());
-    EXPECT_EQ(pt.td_addr, v.td_addr());
-    EXPECT_EQ(pt.name_addr, v.name_addr());
+    rtti::PointeeType pt;
+    ASSERT_TRUE(rtti::identify_pointee_type(Address{slot_addr}, pt));
+    EXPECT_EQ(pt.col_addr.raw(), v.col_addr());
+    EXPECT_EQ(pt.td_addr.raw(), v.td_addr());
+    EXPECT_EQ(pt.name_addr.raw(), v.name_addr());
 }
 
 TEST_F(RttiDissectTest, Identify_RejectsPoisonedTypeDescriptorRva)
@@ -311,8 +314,8 @@ TEST_F(RttiDissectTest, Identify_RejectsPoisonedTypeDescriptorRva)
     std::array<std::uintptr_t, 1> slot{v.vtable()};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    EXPECT_FALSE(Rtti::identify_pointee_type(slot_addr, pt));
+    rtti::PointeeType pt;
+    EXPECT_FALSE(rtti::identify_pointee_type(Address{slot_addr}, pt));
 }
 
 TEST_F(RttiDissectTest, Identify_RejectsPoisonedSelfRva)
@@ -322,15 +325,15 @@ TEST_F(RttiDissectTest, Identify_RejectsPoisonedSelfRva)
     std::array<std::uintptr_t, 1> slot{v.vtable()};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    EXPECT_FALSE(Rtti::identify_pointee_type(slot_addr, pt));
+    rtti::PointeeType pt;
+    EXPECT_FALSE(rtti::identify_pointee_type(Address{slot_addr}, pt));
 }
 
 TEST_F(RttiDissectTest, Identify_RejectsNullAndLowSlot)
 {
-    Rtti::PointeeType pt;
-    EXPECT_FALSE(Rtti::identify_pointee_type(0, pt));
-    EXPECT_FALSE(Rtti::identify_pointee_type(0x100, pt));
+    rtti::PointeeType pt;
+    EXPECT_FALSE(rtti::identify_pointee_type(Address{}, pt));
+    EXPECT_FALSE(rtti::identify_pointee_type(Address{0x100}, pt));
 }
 
 TEST_F(RttiDissectTest, Identify_RejectsUnreadableSlotAddress)
@@ -340,8 +343,8 @@ TEST_F(RttiDissectTest, Identify_RejectsUnreadableSlotAddress)
     // silently exercise the null-slot guard instead of the unmapped-read path. unmapped_addr returns a value, so the
     // fatal assert lives here rather than inside the helper.
     ASSERT_NE(gone, 0u);
-    Rtti::PointeeType pt;
-    EXPECT_FALSE(Rtti::identify_pointee_type(gone, pt));
+    rtti::PointeeType pt;
+    EXPECT_FALSE(rtti::identify_pointee_type(Address{gone}, pt));
 }
 
 TEST_F(RttiDissectTest, Identify_RejectsGarbageSlotValue)
@@ -351,8 +354,8 @@ TEST_F(RttiDissectTest, Identify_RejectsGarbageSlotValue)
     std::array<std::uintptr_t, 1> slot{0xDEADBEEFu};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    EXPECT_FALSE(Rtti::identify_pointee_type(slot_addr, pt));
+    rtti::PointeeType pt;
+    EXPECT_FALSE(rtti::identify_pointee_type(Address{slot_addr}, pt));
 }
 
 // --- L1 identify_pointee_type_or (RTTI fallback composition) ---
@@ -365,42 +368,42 @@ TEST_F(RttiDissectTest, IdentifyTyped_ResolvesAndMatchesBool)
     std::array<std::uintptr_t, 1> slot{v.vtable()};
     const std::uintptr_t slot_addr = reinterpret_cast<std::uintptr_t>(slot.data());
 
-    Rtti::PointeeType pt;
-    const auto typed = Rtti::identify_pointee_typed(slot_addr, pt);
+    rtti::PointeeType pt;
+    const auto typed = rtti::identify_pointee_typed(Address{slot_addr}, pt);
     ASSERT_TRUE(typed.has_value());
 
-    Rtti::PointeeType pt2;
-    EXPECT_TRUE(Rtti::identify_pointee_type(slot_addr, pt2));
+    rtti::PointeeType pt2;
+    EXPECT_TRUE(rtti::identify_pointee_type(Address{slot_addr}, pt2));
     EXPECT_EQ(pt.name(), pt2.name());
     EXPECT_EQ(pt.name(), ".?AVTyped@@");
 }
 
 TEST_F(RttiDissectTest, IdentifyTyped_ErrorMatrix)
 {
-    Rtti::PointeeType pt;
+    rtti::PointeeType pt;
 
     // Null and below-floor slot addresses are rejected before any read.
-    const auto null_slot = Rtti::identify_pointee_typed(0, pt);
+    const auto null_slot = rtti::identify_pointee_typed(Address{}, pt);
     ASSERT_FALSE(null_slot.has_value());
-    EXPECT_EQ(null_slot.error(), Rtti::IdentifyError::BadSlotAddress);
+    EXPECT_EQ(null_slot.error().code, ErrorCode::BadSlotAddress);
 
-    const auto low_slot = Rtti::identify_pointee_typed(0x100, pt);
+    const auto low_slot = rtti::identify_pointee_typed(Address{0x100}, pt);
     ASSERT_FALSE(low_slot.has_value());
-    EXPECT_EQ(low_slot.error(), Rtti::IdentifyError::BadSlotAddress);
+    EXPECT_EQ(low_slot.error().code, ErrorCode::BadSlotAddress);
 
     // A committed-then-freed page faults on read.
     const std::uintptr_t gone = unmapped_addr();
     ASSERT_NE(gone, 0u);
-    const auto unreadable = Rtti::identify_pointee_typed(gone, pt);
+    const auto unreadable = rtti::identify_pointee_typed(Address{gone}, pt);
     ASSERT_FALSE(unreadable.has_value());
-    EXPECT_EQ(unreadable.error(), Rtti::IdentifyError::UnreadableSlot);
+    EXPECT_EQ(unreadable.error().code, ErrorCode::UnreadableSlot);
 
     // A readable slot holding a plausible-but-unresolvable pointer resolves to no RTTI type.
     std::array<std::uintptr_t, 1> garbage{0xDEADBEEFu};
     const std::uintptr_t garbage_addr = reinterpret_cast<std::uintptr_t>(garbage.data());
-    const auto no_rtti = Rtti::identify_pointee_typed(garbage_addr, pt);
+    const auto no_rtti = rtti::identify_pointee_typed(Address{garbage_addr}, pt);
     ASSERT_FALSE(no_rtti.has_value());
-    EXPECT_EQ(no_rtti.error(), Rtti::IdentifyError::NoRtti);
+    EXPECT_EQ(no_rtti.error().code, ErrorCode::NoRtti);
 }
 
 TEST_F(RttiDissectTest, IdentifyOr_PrimaryWinsNoFallbackProbed)
@@ -413,8 +416,8 @@ TEST_F(RttiDissectTest, IdentifyOr_PrimaryWinsNoFallbackProbed)
     std::array<std::uintptr_t, 1> garbage{0xDEADBEEFu};
     const std::uintptr_t garbage_addr = reinterpret_cast<std::uintptr_t>(garbage.data());
 
-    Rtti::PointeeType pt;
-    const auto result = Rtti::identify_pointee_type_or(primary_addr, pt, garbage_addr);
+    rtti::PointeeType pt;
+    const auto result = rtti::identify_pointee_type_or(Address{primary_addr}, pt, Address{garbage_addr});
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(pt.name(), ".?AVPrimary@@");
 }
@@ -434,8 +437,9 @@ TEST_F(RttiDissectTest, IdentifyOr_FirstFallbackResolves)
     std::array<std::uintptr_t, 1> second_slot{second_good.vtable()};
     const std::uintptr_t second_addr = reinterpret_cast<std::uintptr_t>(second_slot.data());
 
-    Rtti::PointeeType pt;
-    const auto result = Rtti::identify_pointee_type_or(primary_addr, pt, first_addr, second_addr);
+    rtti::PointeeType pt;
+    const auto result =
+        rtti::identify_pointee_type_or(Address{primary_addr}, pt, Address{first_addr}, Address{second_addr});
     ASSERT_TRUE(result.has_value());
     EXPECT_EQ(pt.name(), ".?AVFirstGood@@");
 }
@@ -453,10 +457,11 @@ TEST_F(RttiDissectTest, IdentifyOr_AllFailPreservesFirstError)
     const std::uintptr_t garbage_a_addr = reinterpret_cast<std::uintptr_t>(garbage_a.data());
     const std::uintptr_t garbage_b_addr = reinterpret_cast<std::uintptr_t>(garbage_b.data());
 
-    Rtti::PointeeType pt;
-    const auto result = Rtti::identify_pointee_type_or(primary_addr, pt, garbage_a_addr, garbage_b_addr);
+    rtti::PointeeType pt;
+    const auto result =
+        rtti::identify_pointee_type_or(Address{primary_addr}, pt, Address{garbage_a_addr}, Address{garbage_b_addr});
     ASSERT_FALSE(result.has_value());
-    EXPECT_EQ(result.error(), Rtti::IdentifyError::UnreadableSlot);
+    EXPECT_EQ(result.error().code, ErrorCode::UnreadableSlot);
 }
 
 TEST_F(RttiDissectTest, IdentifyOr_NoFallbacksDegradesToPrimary)
@@ -466,15 +471,15 @@ TEST_F(RttiDissectTest, IdentifyOr_NoFallbacksDegradesToPrimary)
     std::array<std::uintptr_t, 1> garbage{0xDEADBEEFu};
     const std::uintptr_t garbage_addr = reinterpret_cast<std::uintptr_t>(garbage.data());
 
-    Rtti::PointeeType pt;
-    const auto miss = Rtti::identify_pointee_type_or(garbage_addr, pt);
+    rtti::PointeeType pt;
+    const auto miss = rtti::identify_pointee_type_or(Address{garbage_addr}, pt);
     ASSERT_FALSE(miss.has_value());
-    EXPECT_EQ(miss.error(), Rtti::IdentifyError::NoRtti);
+    EXPECT_EQ(miss.error().code, ErrorCode::NoRtti);
 
     SyntheticVtable v(".?AVNoFallback@@");
     std::array<std::uintptr_t, 1> good_slot{v.vtable()};
     const std::uintptr_t good_addr = reinterpret_cast<std::uintptr_t>(good_slot.data());
-    const auto hit = Rtti::identify_pointee_type_or(good_addr, pt);
+    const auto hit = rtti::identify_pointee_type_or(Address{good_addr}, pt);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(pt.name(), ".?AVNoFallback@@");
 }
@@ -487,41 +492,45 @@ TEST_F(RttiDissectTest, IdentifyOr_AllFailResetsOutToDefault)
     std::array<std::uintptr_t, 1> prior_slot{prior.vtable()};
     const std::uintptr_t prior_addr = reinterpret_cast<std::uintptr_t>(prior_slot.data());
 
-    Rtti::PointeeType pt;
-    const auto first = Rtti::identify_pointee_type_or(prior_addr, pt);
+    rtti::PointeeType pt;
+    const auto first = rtti::identify_pointee_type_or(Address{prior_addr}, pt);
     ASSERT_TRUE(first.has_value());
     ASSERT_FALSE(pt.name().empty());
-    ASSERT_NE(pt.vtable, 0u);
+    ASSERT_NE(pt.vtable.raw(), 0u);
 
     std::array<std::uintptr_t, 1> garbage_a{0xDEADBEEFu};
     std::array<std::uintptr_t, 1> garbage_b{0xDEADBEEFu};
     const std::uintptr_t garbage_a_addr = reinterpret_cast<std::uintptr_t>(garbage_a.data());
     const std::uintptr_t garbage_b_addr = reinterpret_cast<std::uintptr_t>(garbage_b.data());
 
-    const auto miss = Rtti::identify_pointee_type_or(garbage_a_addr, pt, garbage_b_addr);
+    const auto miss = rtti::identify_pointee_type_or(Address{garbage_a_addr}, pt, Address{garbage_b_addr});
     ASSERT_FALSE(miss.has_value());
 
     // out is the value-initialized default, not the prior success.
     EXPECT_TRUE(pt.name().empty());
     EXPECT_EQ(pt.name_len, 0u);
-    EXPECT_EQ(pt.vtable, 0u);
-    EXPECT_EQ(pt.col_addr, 0u);
-    EXPECT_EQ(pt.object_base, 0u);
-    EXPECT_EQ(pt.pointer_value, 0u);
+    EXPECT_EQ(pt.vtable.raw(), 0u);
+    EXPECT_EQ(pt.col_addr.raw(), 0u);
+    EXPECT_EQ(pt.object_base.raw(), 0u);
+    EXPECT_EQ(pt.pointer_value.raw(), 0u);
     EXPECT_FALSE(pt.was_pointer);
 }
 
 TEST_F(RttiDissectTest, Identify_ErrorStringsAreDistinct)
 {
-    EXPECT_NE(Rtti::identify_error_to_string(Rtti::IdentifyError::BadSlotAddress),
-              Rtti::identify_error_to_string(Rtti::IdentifyError::UnreadableSlot));
-    EXPECT_NE(Rtti::identify_error_to_string(Rtti::IdentifyError::UnreadableSlot),
-              Rtti::identify_error_to_string(Rtti::IdentifyError::NoRtti));
-    EXPECT_NE(Rtti::identify_error_to_string(Rtti::IdentifyError::BadSlotAddress),
-              Rtti::identify_error_to_string(Rtti::IdentifyError::NoRtti));
-    EXPECT_FALSE(Rtti::identify_error_to_string(Rtti::IdentifyError::BadSlotAddress).empty());
-    EXPECT_FALSE(Rtti::identify_error_to_string(Rtti::IdentifyError::UnreadableSlot).empty());
-    EXPECT_FALSE(Rtti::identify_error_to_string(Rtti::IdentifyError::NoRtti).empty());
+    // The identify error codes now fold into DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable
+    // rendering. Preserve the "distinct, non-empty strings" coverage over the three identify codes.
+    const auto bad_slot = dmk::to_string(ErrorCode::BadSlotAddress);
+    const auto unreadable = dmk::to_string(ErrorCode::UnreadableSlot);
+    const auto no_rtti = dmk::to_string(ErrorCode::NoRtti);
+
+    EXPECT_FALSE(bad_slot.empty());
+    EXPECT_FALSE(unreadable.empty());
+    EXPECT_FALSE(no_rtti.empty());
+
+    EXPECT_NE(bad_slot, unreadable);
+    EXPECT_NE(unreadable, no_rtti);
+    EXPECT_NE(bad_slot, no_rtti);
 }
 
 // --- L2 reverse_scan_block ---
@@ -542,8 +551,8 @@ TEST_F(RttiDissectTest, ScanBlock_LabelsOnlyRealSlots)
     };
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
-    std::vector<Rtti::LabeledSlot> out;
-    const std::size_t added = Rtti::reverse_scan_block(start, block.size(), out);
+    std::vector<rtti::LabeledSlot> out;
+    const std::size_t added = rtti::reverse_scan_block(Address{start}, block.size(), out);
     ASSERT_EQ(added, 2u);
     ASSERT_EQ(out.size(), 2u);
 
@@ -562,9 +571,9 @@ TEST_F(RttiDissectTest, ScanBlock_AppendsToExistingVector)
     std::array<std::uintptr_t, 1> block{v.vtable()};
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
-    std::vector<Rtti::LabeledSlot> out;
+    std::vector<rtti::LabeledSlot> out;
     out.emplace_back();
-    const std::size_t added = Rtti::reverse_scan_block(start, block.size(), out);
+    const std::size_t added = rtti::reverse_scan_block(Address{start}, block.size(), out);
     EXPECT_EQ(added, 1u);
     EXPECT_EQ(out.size(), 2u);
     EXPECT_EQ(out[1].type.name(), ".?AVAppend@@");
@@ -572,8 +581,8 @@ TEST_F(RttiDissectTest, ScanBlock_AppendsToExistingVector)
 
 TEST_F(RttiDissectTest, ScanBlock_OverflowingCountRejected)
 {
-    std::vector<Rtti::LabeledSlot> out;
-    EXPECT_EQ(Rtti::reverse_scan_block(0x10000, SIZE_MAX, out, 16), 0u);
+    std::vector<rtti::LabeledSlot> out;
+    EXPECT_EQ(rtti::reverse_scan_block(Address{0x10000}, SIZE_MAX, out, 16), 0u);
     EXPECT_TRUE(out.empty());
 }
 
@@ -590,21 +599,21 @@ TEST_F(RttiDissectTest, ScanBlock_CustomStrideLabelsInterleaved)
     };
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
-    std::vector<Rtti::LabeledSlot> out;
-    const std::size_t added = Rtti::reverse_scan_block(start, 3, out, 16);
+    std::vector<rtti::LabeledSlot> out;
+    const std::size_t added = rtti::reverse_scan_block(Address{start}, 3, out, 16);
     ASSERT_EQ(added, 3u);
     ASSERT_EQ(out.size(), 3u);
 
     EXPECT_EQ(out[0].slot_index, 0u);
-    EXPECT_EQ(out[0].slot_addr, start);
+    EXPECT_EQ(out[0].slot_addr.raw(), start);
     EXPECT_EQ(out[0].type.name(), ".?AVStrideA@@");
 
     EXPECT_EQ(out[1].slot_index, 1u);
-    EXPECT_EQ(out[1].slot_addr, start + 16);
+    EXPECT_EQ(out[1].slot_addr.raw(), start + 16);
     EXPECT_EQ(out[1].type.name(), ".?AVStrideB@@");
 
     EXPECT_EQ(out[2].slot_index, 2u);
-    EXPECT_EQ(out[2].slot_addr, start + 32);
+    EXPECT_EQ(out[2].slot_addr.raw(), start + 32);
     EXPECT_EQ(out[2].type.name(), ".?AVStrideC@@");
 }
 
@@ -615,8 +624,8 @@ TEST_F(RttiDissectTest, ScanBlockBytes_DividesByStride)
     std::array<std::uintptr_t, 2> block{a.vtable(), b.vtable()};
     const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(block.data());
 
-    std::vector<Rtti::LabeledSlot> out;
-    const std::size_t added = Rtti::reverse_scan_block_bytes(start, 2 * sizeof(std::uintptr_t), out);
+    std::vector<rtti::LabeledSlot> out;
+    const std::size_t added = rtti::reverse_scan_block_bytes(Address{start}, 2 * sizeof(std::uintptr_t), out);
     EXPECT_EQ(added, 2u);
 }
 
@@ -630,12 +639,12 @@ TEST_F(RttiDissectTest, ScanBlockBytes_ZeroStrideTreatedAsPointerSize)
     // The byte overload normalizes stride 0 to sizeof(uintptr_t) before the
     // byte_len / stride division, so a zero stride must not divide by zero;
     // 16 bytes then resolves to two slots.
-    std::vector<Rtti::LabeledSlot> out;
-    const std::size_t added = Rtti::reverse_scan_block_bytes(start, 2 * sizeof(std::uintptr_t), out, 0);
+    std::vector<rtti::LabeledSlot> out;
+    const std::size_t added = rtti::reverse_scan_block_bytes(Address{start}, 2 * sizeof(std::uintptr_t), out, 0);
     EXPECT_EQ(added, 2u);
 }
 
-// --- L3 heal_landmark / heal_offset ---
+// --- L3 heal_landmark ---
 
 namespace
 {
@@ -652,6 +661,15 @@ namespace
             std::memcpy(reinterpret_cast<std::byte *>(base()) + byte_off, &value, sizeof(value));
         }
     };
+
+    // Assert a heal / fingerprint Result carries a BadDescriptor error WITHOUT tripping std::expected::error()'s
+    // has_value() == false precondition when the call unexpectedly succeeds: ASSERT_FALSE returns from this helper
+    // (not the test), so the error() read is skipped and a regression reports a clean failure rather than UB.
+    template <typename R> void expect_bad_descriptor(const R &result)
+    {
+        ASSERT_FALSE(result.has_value());
+        EXPECT_EQ(result.error().code, ErrorCode::BadDescriptor);
+    }
 } // anonymous namespace
 
 TEST_F(RttiDissectTest, Heal_NoDriftHealsToNominalAndIgnoresSameTypedNeighbor)
@@ -664,13 +682,13 @@ TEST_F(RttiDissectTest, Heal_NoDriftHealsToNominalAndIgnoresSameTypedNeighbor)
     // before any window scan.
     st.put(nominal + 0x08, syn_heap_object(t.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVHealT@@",
     };
 
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal));
     EXPECT_TRUE(hit->was_pointer);
@@ -683,15 +701,15 @@ TEST_F(RttiDissectTest, Heal_PositiveDrift)
     const std::size_t nominal = 0x80;
     st.put(nominal + 0x10, syn_heap_object(t.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVDriftPos@@",
     };
 
-    const auto off = Rtti::heal_offset(lm);
-    ASSERT_TRUE(off.has_value());
-    EXPECT_EQ(*off, static_cast<std::ptrdiff_t>(nominal + 0x10));
+    const auto hit = rtti::heal_landmark(lm);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x10));
 }
 
 TEST_F(RttiDissectTest, Heal_NegativeDrift)
@@ -701,15 +719,15 @@ TEST_F(RttiDissectTest, Heal_NegativeDrift)
     const std::size_t nominal = 0x80;
     st.put(nominal - 0x08, syn_heap_object(t.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVDriftNeg@@",
     };
 
-    const auto off = Rtti::heal_offset(lm);
-    ASSERT_TRUE(off.has_value());
-    EXPECT_EQ(*off, static_cast<std::ptrdiff_t>(nominal - 0x08));
+    const auto hit = rtti::heal_landmark(lm);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal - 0x08));
 }
 
 TEST_F(RttiDissectTest, Heal_RecoversWhenNominalHoldsWrongTypedObject)
@@ -725,16 +743,16 @@ TEST_F(RttiDissectTest, Heal_RecoversWhenNominalHoldsWrongTypedObject)
     st.put(nominal, syn_heap_object(stale.vtable()));           // what a stale read now sees
     st.put(nominal + 0x10, syn_heap_object(expected.vtable())); // where the field actually moved
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVHealExpected@@",
     };
 
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x10));
-    EXPECT_EQ(hit->vtable, expected.vtable());
+    EXPECT_EQ(hit->vtable.raw(), expected.vtable());
     EXPECT_TRUE(hit->was_pointer);
 }
 
@@ -761,28 +779,28 @@ TEST_F(RttiDissectTest, Heal_ChainedHealAcrossTwoStructsWithNonUniformDrift)
     outer.put(0xB0, inner_obj);
 
     // Link 1: heal outer -> inner (+0x30, a 6-ring scan) against the outer base.
-    const Rtti::Landmark lm_outer{
-        .base = outer.base(),
+    const rtti::Landmark lm_outer{
+        .base = Address{outer.base()},
         .nominal_offset = 0x80,
         .expected_mangled = ".?AVChainOuterTarget@@",
     };
-    const auto hit_outer = Rtti::heal_landmark(lm_outer);
+    const auto hit_outer = rtti::heal_landmark(lm_outer);
     ASSERT_TRUE(hit_outer.has_value());
     EXPECT_EQ(hit_outer->healed_offset, 0xB0);
     EXPECT_TRUE(hit_outer->was_pointer);
     // object_addr must be the resolved pointee so it can root the next heal.
-    EXPECT_EQ(hit_outer->object_addr, inner_obj);
+    EXPECT_EQ(hit_outer->object_addr.raw(), inner_obj);
 
     // Link 2: heal inner -> leaf (+0x08) rooted at link 1's object_addr.
-    const Rtti::Landmark lm_inner{
+    const rtti::Landmark lm_inner{
         .base = hit_outer->object_addr,
         .nominal_offset = 0xD0,
         .expected_mangled = ".?AVChainInnerTarget@@",
     };
-    const auto hit_inner = Rtti::heal_landmark(lm_inner);
+    const auto hit_inner = rtti::heal_landmark(lm_inner);
     ASSERT_TRUE(hit_inner.has_value());
     EXPECT_EQ(hit_inner->healed_offset, 0xD8);
-    EXPECT_EQ(hit_inner->object_addr, leaf_obj);
+    EXPECT_EQ(hit_inner->object_addr.raw(), leaf_obj);
 }
 
 TEST_F(RttiDissectTest, Heal_NoMatchWhenTypeAbsent)
@@ -792,15 +810,15 @@ TEST_F(RttiDissectTest, Heal_NoMatchWhenTypeAbsent)
     const std::size_t nominal = 0x80;
     st.put(nominal, syn_heap_object(other.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVHealMissing@@",
     };
 
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Rtti::HealError::NoMatch);
+    EXPECT_EQ(hit.error().code, ErrorCode::HealNoMatch);
 }
 
 TEST_F(RttiDissectTest, Heal_NearestWinsOverFarNeighbor)
@@ -811,15 +829,15 @@ TEST_F(RttiDissectTest, Heal_NearestWinsOverFarNeighbor)
     st.put(nominal + 0x08, syn_heap_object(t.vtable())); // near
     st.put(nominal + 0x20, syn_heap_object(t.vtable())); // far
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVNearest@@",
     };
 
-    const auto off = Rtti::heal_offset(lm);
-    ASSERT_TRUE(off.has_value());
-    EXPECT_EQ(*off, static_cast<std::ptrdiff_t>(nominal + 0x08));
+    const auto hit = rtti::heal_landmark(lm);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x08));
 }
 
 TEST_F(RttiDissectTest, Heal_EquidistantTieIsAmbiguous)
@@ -830,15 +848,15 @@ TEST_F(RttiDissectTest, Heal_EquidistantTieIsAmbiguous)
     st.put(nominal - 0x08, syn_heap_object(t.vtable()));
     st.put(nominal + 0x08, syn_heap_object(t.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVTie@@",
     };
 
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Rtti::HealError::Ambiguous);
+    EXPECT_EQ(hit.error().code, ErrorCode::HealAmbiguous);
 }
 
 TEST_F(RttiDissectTest, Heal_WindowEdgeInclusive)
@@ -848,16 +866,16 @@ TEST_F(RttiDissectTest, Heal_WindowEdgeInclusive)
     const std::size_t nominal = 0x80;
     st.put(nominal + 0x40, syn_heap_object(t.vtable())); // exactly +window
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .window = 0x40,
         .expected_mangled = ".?AVEdge@@",
     };
 
-    const auto off = Rtti::heal_offset(lm);
-    ASSERT_TRUE(off.has_value());
-    EXPECT_EQ(*off, static_cast<std::ptrdiff_t>(nominal + 0x40));
+    const auto hit = rtti::heal_landmark(lm);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x40));
 }
 
 TEST_F(RttiDissectTest, Heal_WindowEdgeExclusiveBeyond)
@@ -867,16 +885,16 @@ TEST_F(RttiDissectTest, Heal_WindowEdgeExclusiveBeyond)
     const std::size_t nominal = 0x80;
     st.put(nominal + 0x48, syn_heap_object(t.vtable())); // window + stride
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .window = 0x40,
         .expected_mangled = ".?AVBeyond@@",
     };
 
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Rtti::HealError::NoMatch);
+    EXPECT_EQ(hit.error().code, ErrorCode::HealNoMatch);
 }
 
 TEST_F(RttiDissectTest, Heal_ExactMangledDiscriminationRejectsSuperstring)
@@ -886,13 +904,13 @@ TEST_F(RttiDissectTest, Heal_ExactMangledDiscriminationRejectsSuperstring)
     const std::size_t nominal = 0x80;
     st.put(nominal, syn_heap_object(foobar.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVFoo@@",
     };
 
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     EXPECT_FALSE(hit.has_value());
 }
 
@@ -909,10 +927,10 @@ TEST_F(RttiDissectTest, Heal_ShapeFilterPointerVsObjectVsAny)
     SynStruct pointed;
     pointed.put(nominal, syn_heap_object(t.vtable()));
 
-    const auto lm_for = [&](std::uintptr_t base, Rtti::Indirection ind) noexcept
+    const auto lm_for = [&](std::uintptr_t base, rtti::Indirection ind) noexcept
     {
-        return Rtti::Landmark{
-            .base = base,
+        return rtti::Landmark{
+            .base = Address{base},
             .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
             .expected_mangled = ".?AVShape@@",
             .indirection = ind,
@@ -920,20 +938,20 @@ TEST_F(RttiDissectTest, Heal_ShapeFilterPointerVsObjectVsAny)
     };
 
     // ObjectBase matches the direct slot, rejects the pointer slot.
-    EXPECT_TRUE(Rtti::heal_landmark(lm_for(direct.base(), Rtti::Indirection::ObjectBase)).has_value());
-    EXPECT_FALSE(Rtti::heal_landmark(lm_for(pointed.base(), Rtti::Indirection::ObjectBase)).has_value());
+    EXPECT_TRUE(rtti::heal_landmark(lm_for(direct.base(), rtti::Indirection::ObjectBase)).has_value());
+    EXPECT_FALSE(rtti::heal_landmark(lm_for(pointed.base(), rtti::Indirection::ObjectBase)).has_value());
 
     // PointerToObject matches the pointer slot, rejects the direct slot.
-    EXPECT_TRUE(Rtti::heal_landmark(lm_for(pointed.base(), Rtti::Indirection::PointerToObject)).has_value());
-    EXPECT_FALSE(Rtti::heal_landmark(lm_for(direct.base(), Rtti::Indirection::PointerToObject)).has_value());
+    EXPECT_TRUE(rtti::heal_landmark(lm_for(pointed.base(), rtti::Indirection::PointerToObject)).has_value());
+    EXPECT_FALSE(rtti::heal_landmark(lm_for(direct.base(), rtti::Indirection::PointerToObject)).has_value());
 
     // CompleteObject matches the direct primary subobject only, not a pointer-shaped slot.
-    EXPECT_TRUE(Rtti::heal_landmark(lm_for(direct.base(), Rtti::Indirection::CompleteObject)).has_value());
-    EXPECT_FALSE(Rtti::heal_landmark(lm_for(pointed.base(), Rtti::Indirection::CompleteObject)).has_value());
+    EXPECT_TRUE(rtti::heal_landmark(lm_for(direct.base(), rtti::Indirection::CompleteObject)).has_value());
+    EXPECT_FALSE(rtti::heal_landmark(lm_for(pointed.base(), rtti::Indirection::CompleteObject)).has_value());
 
     // Any matches either.
-    EXPECT_TRUE(Rtti::heal_landmark(lm_for(direct.base(), Rtti::Indirection::Any)).has_value());
-    EXPECT_TRUE(Rtti::heal_landmark(lm_for(pointed.base(), Rtti::Indirection::Any)).has_value());
+    EXPECT_TRUE(rtti::heal_landmark(lm_for(direct.base(), rtti::Indirection::Any)).has_value());
+    EXPECT_TRUE(rtti::heal_landmark(lm_for(pointed.base(), rtti::Indirection::Any)).has_value());
 }
 
 TEST_F(RttiDissectTest, Heal_CompleteObjectRejectsSecondaryVtableObjectBaseAccepts)
@@ -948,10 +966,10 @@ TEST_F(RttiDissectTest, Heal_CompleteObjectRejectsSecondaryVtableObjectBaseAccep
     const std::size_t nominal = 0x80;
     st.put(nominal, secondary.vtable());
 
-    const auto lm_with = [&](Rtti::Indirection ind) noexcept
+    const auto lm_with = [&](rtti::Indirection ind) noexcept
     {
-        return Rtti::Landmark{
-            .base = st.base(),
+        return rtti::Landmark{
+            .base = Address{st.base()},
             .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
             .expected_mangled = ".?AVMISecondary@@",
             .indirection = ind,
@@ -959,16 +977,16 @@ TEST_F(RttiDissectTest, Heal_CompleteObjectRejectsSecondaryVtableObjectBaseAccep
     };
 
     // ObjectBase latches the secondary slot and heals to it; col_offset reports the subobject delta.
-    const auto as_object = Rtti::heal_landmark(lm_with(Rtti::Indirection::ObjectBase));
+    const auto as_object = rtti::heal_landmark(lm_with(rtti::Indirection::ObjectBase));
     ASSERT_TRUE(as_object.has_value());
     EXPECT_EQ(as_object->healed_offset, static_cast<std::ptrdiff_t>(nominal));
     EXPECT_FALSE(as_object->was_pointer);
     EXPECT_EQ(as_object->col_offset, 0x08u);
 
     // CompleteObject refuses the secondary subobject and, with nothing else in the window, fails closed.
-    const auto as_complete = Rtti::heal_landmark(lm_with(Rtti::Indirection::CompleteObject));
+    const auto as_complete = rtti::heal_landmark(lm_with(rtti::Indirection::CompleteObject));
     ASSERT_FALSE(as_complete.has_value());
-    EXPECT_EQ(as_complete.error(), Rtti::HealError::NoMatch);
+    EXPECT_EQ(as_complete.error().code, ErrorCode::HealNoMatch);
 }
 
 TEST_F(RttiDissectTest, Heal_CompleteObjectMatchesPrimarySubobject)
@@ -980,14 +998,14 @@ TEST_F(RttiDissectTest, Heal_CompleteObjectMatchesPrimarySubobject)
     const std::size_t nominal = 0x80;
     st.put(nominal, primary.vtable());
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVMIPrimary@@",
-        .indirection = Rtti::Indirection::CompleteObject,
+        .indirection = rtti::Indirection::CompleteObject,
     };
 
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal));
     EXPECT_FALSE(hit->was_pointer);
@@ -1011,10 +1029,10 @@ TEST_F(RttiDissectTest, Heal_CompleteObjectAvoidsSilentSecondaryShortCircuit)
     st.put(nominal, secondary.vtable());      // secondary landed on the old offset
     st.put(nominal - 0x08, primary.vtable()); // the true complete-object base, one subobject earlier
 
-    const auto lm_with = [&](Rtti::Indirection ind) noexcept
+    const auto lm_with = [&](rtti::Indirection ind) noexcept
     {
-        return Rtti::Landmark{
-            .base = st.base(),
+        return rtti::Landmark{
+            .base = Address{st.base()},
             .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
             .expected_mangled = ".?AVMITrap@@",
             .indirection = ind,
@@ -1022,13 +1040,13 @@ TEST_F(RttiDissectTest, Heal_CompleteObjectAvoidsSilentSecondaryShortCircuit)
     };
 
     // The trap: ObjectBase heals to the nominal secondary, off by the subobject delta (col_offset flags it).
-    const auto as_object = Rtti::heal_landmark(lm_with(Rtti::Indirection::ObjectBase));
+    const auto as_object = rtti::heal_landmark(lm_with(rtti::Indirection::ObjectBase));
     ASSERT_TRUE(as_object.has_value());
     EXPECT_EQ(as_object->healed_offset, static_cast<std::ptrdiff_t>(nominal));
     EXPECT_EQ(as_object->col_offset, 0x08u);
 
     // The fix: CompleteObject recovers the true complete-object base.
-    const auto as_complete = Rtti::heal_landmark(lm_with(Rtti::Indirection::CompleteObject));
+    const auto as_complete = rtti::heal_landmark(lm_with(rtti::Indirection::CompleteObject));
     ASSERT_TRUE(as_complete.has_value());
     EXPECT_EQ(as_complete->healed_offset, static_cast<std::ptrdiff_t>(nominal - 0x08));
     EXPECT_EQ(as_complete->col_offset, 0u);
@@ -1042,43 +1060,37 @@ TEST_F(RttiDissectTest, Heal_BadDescriptorMatrix)
     const std::uintptr_t base = st.base();
 
     // Low base.
-    EXPECT_EQ(Rtti::heal_landmark({.base = 0x100, .expected_mangled = ".?AVBad@@"}).error(),
-              Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{0x100}, .expected_mangled = ".?AVBad@@"}));
 
     // Empty expected name.
-    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = ""}).error(), Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = ""}));
 
     // Oversized expected name.
-    const std::string huge(Rtti::MAX_TYPE_NAME_LEN + 1, 'X');
-    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = huge}).error(), Rtti::HealError::BadDescriptor);
+    const std::string huge(rtti::MAX_TYPE_NAME_LEN + 1, 'X');
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = huge}));
 
     // Expected name of exactly MAX_TYPE_NAME_LEN: the guard is size() >=
     // MAX_TYPE_NAME_LEN, so this length is the first rejected one (pins the boundary against an off-by-one that would
     // let it through).
-    const std::string at_cap(Rtti::MAX_TYPE_NAME_LEN, 'X');
-    EXPECT_EQ(Rtti::heal_landmark({.base = base, .expected_mangled = at_cap}).error(), Rtti::HealError::BadDescriptor);
+    const std::string at_cap(rtti::MAX_TYPE_NAME_LEN, 'X');
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base}, .expected_mangled = at_cap}));
 
     // Window over the hard cap.
-    EXPECT_EQ(Rtti::heal_landmark({.base = base,
-                                   .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-                                   .window = Rtti::MAX_HEAL_WINDOW + 1,
-                                   .expected_mangled = ".?AVBad@@"})
-                  .error(),
-              Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
+                                               .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+                                               .window = rtti::MAX_HEAL_WINDOW + 1,
+                                               .expected_mangled = ".?AVBad@@"}));
 
     // Unknown indirection enumerator.
-    EXPECT_EQ(Rtti::heal_landmark({.base = base,
-                                   .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-                                   .expected_mangled = ".?AVBad@@",
-                                   .indirection = static_cast<Rtti::Indirection>(99)})
-                  .error(),
-              Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
+                                               .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
+                                               .expected_mangled = ".?AVBad@@",
+                                               .indirection = static_cast<rtti::Indirection>(99)}));
 
     // nominal_offset drives the address out of the user-mode window.
-    EXPECT_EQ(Rtti::heal_landmark(
-                  {.base = base, .nominal_offset = -static_cast<std::ptrdiff_t>(base), .expected_mangled = ".?AVBad@@"})
-                  .error(),
-              Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::heal_landmark({.base = Address{base},
+                                               .nominal_offset = -static_cast<std::ptrdiff_t>(base),
+                                               .expected_mangled = ".?AVBad@@"}));
 }
 
 TEST_F(RttiDissectTest, Heal_AllocatesNothing)
@@ -1091,40 +1103,23 @@ TEST_F(RttiDissectTest, Heal_AllocatesNothing)
     // contract is most at risk, so it is the path worth measuring.
     st.put(nominal + 0x10, syn_heap_object(t.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVNoAlloc@@",
     };
 
     // Warm the module-range cache so its one-time per-module insert does not count against the measured call;
     // heal_landmark itself must not allocate.
-    (void)Rtti::heal_landmark(lm);
+    (void)rtti::heal_landmark(lm);
 
     const long long before = dmk_test::thread_new_calls();
-    const auto hit = Rtti::heal_landmark(lm);
+    const auto hit = rtti::heal_landmark(lm);
     const long long after = dmk_test::thread_new_calls();
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x10));
     EXPECT_EQ(after - before, 0);
-}
-
-TEST_F(RttiDissectTest, HealOffset_ReturnsNulloptOnFailure)
-{
-    // heal_offset collapses any heal_landmark error to std::nullopt.
-    SyntheticVtable other(".?AVHealOffOther@@");
-    SynStruct st;
-    const std::size_t nominal = 0x80;
-    st.put(nominal, syn_heap_object(other.vtable()));
-
-    const Rtti::Landmark lm{
-        .base = st.base(),
-        .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
-        .expected_mangled = ".?AVHealOffMissing@@",
-    };
-
-    EXPECT_FALSE(Rtti::heal_offset(lm).has_value());
 }
 
 TEST_F(RttiDissectTest, Heal_ZeroStrideTreatedAsPointerSize)
@@ -1134,25 +1129,33 @@ TEST_F(RttiDissectTest, Heal_ZeroStrideTreatedAsPointerSize)
     const std::size_t nominal = 0x80;
     st.put(nominal + 0x08, syn_heap_object(t.vtable()));
 
-    const Rtti::Landmark lm{
-        .base = st.base(),
+    const rtti::Landmark lm{
+        .base = Address{st.base()},
         .nominal_offset = static_cast<std::ptrdiff_t>(nominal),
         .expected_mangled = ".?AVZeroStride@@",
         .stride = 0,
     };
 
-    const auto off = Rtti::heal_offset(lm);
-    ASSERT_TRUE(off.has_value());
-    EXPECT_EQ(*off, static_cast<std::ptrdiff_t>(nominal + 0x08));
+    const auto hit = rtti::heal_landmark(lm);
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->healed_offset, static_cast<std::ptrdiff_t>(nominal + 0x08));
 }
 
 TEST_F(RttiDissectTest, Heal_ErrorStringsAreDistinct)
 {
-    EXPECT_NE(Rtti::heal_error_to_string(Rtti::HealError::BadDescriptor),
-              Rtti::heal_error_to_string(Rtti::HealError::NoMatch));
-    EXPECT_NE(Rtti::heal_error_to_string(Rtti::HealError::NoMatch),
-              Rtti::heal_error_to_string(Rtti::HealError::Ambiguous));
-    EXPECT_FALSE(Rtti::heal_error_to_string(Rtti::HealError::Ambiguous).empty());
+    // The heal error codes now fold into DetourModKit::ErrorCode; to_string(ErrorCode) supplies the human-readable
+    // rendering. Preserve the "distinct, non-empty strings" coverage over the three heal codes.
+    const auto bad_descriptor = dmk::to_string(ErrorCode::BadDescriptor);
+    const auto no_match = dmk::to_string(ErrorCode::HealNoMatch);
+    const auto ambiguous = dmk::to_string(ErrorCode::HealAmbiguous);
+
+    EXPECT_FALSE(bad_descriptor.empty());
+    EXPECT_FALSE(no_match.empty());
+    EXPECT_FALSE(ambiguous.empty());
+
+    EXPECT_NE(bad_descriptor, no_match);
+    EXPECT_NE(no_match, ambiguous);
+    EXPECT_NE(bad_descriptor, ambiguous);
 }
 
 // --- L4 solve_fingerprint ---
@@ -1172,12 +1175,12 @@ namespace
     constexpr std::size_t FP_OC = 0x80;
     constexpr std::size_t FP_OD = 0xA0;
 
-    [[nodiscard]] std::array<Rtti::Landmark, 3> fp_required(std::uintptr_t base)
+    [[nodiscard]] std::array<rtti::Landmark, 3> fp_required(std::uintptr_t base)
     {
         return {
-            Rtti::Landmark{.base = base, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
-            Rtti::Landmark{.base = base, .nominal_offset = FP_OB, .expected_mangled = ".?AVFpB@@"},
-            Rtti::Landmark{.base = base, .nominal_offset = FP_OC, .expected_mangled = ".?AVFpC@@"},
+            rtti::Landmark{.base = Address{base}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
+            rtti::Landmark{.base = Address{base}, .nominal_offset = FP_OB, .expected_mangled = ".?AVFpB@@"},
+            rtti::Landmark{.base = Address{base}, .nominal_offset = FP_OC, .expected_mangled = ".?AVFpC@@"},
         };
     }
 } // anonymous namespace
@@ -1191,7 +1194,7 @@ TEST_F(RttiDissectTest, Fingerprint_ZeroDrift)
     st.put(FP_OC, syn_heap_object(ty.c.vtable()));
 
     const auto fp = fp_required(st.base());
-    const auto hit = Rtti::solve_fingerprint(st.base(), fp, 0x20);
+    const auto hit = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->delta, 0);
     EXPECT_EQ(hit->matched, 3u);
@@ -1207,7 +1210,7 @@ TEST_F(RttiDissectTest, Fingerprint_UniformDrift)
     st.put(FP_OC + 0x10, syn_heap_object(ty.c.vtable()));
 
     const auto fp = fp_required(st.base());
-    const auto hit = Rtti::solve_fingerprint(st.base(), fp, 0x20);
+    const auto hit = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->delta, 0x10);
     EXPECT_EQ(hit->matched, 3u);
@@ -1222,9 +1225,9 @@ TEST_F(RttiDissectTest, Fingerprint_NonRigidIsNoMatch)
     st.put(FP_OC, syn_heap_object(ty.c.vtable()));
 
     const auto fp = fp_required(st.base());
-    const auto hit = Rtti::solve_fingerprint(st.base(), fp, 0x20);
+    const auto hit = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
     ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Rtti::HealError::NoMatch);
+    EXPECT_EQ(hit.error().code, ErrorCode::HealNoMatch);
 }
 
 TEST_F(RttiDissectTest, Fingerprint_SecondCopyIsAmbiguousAndOptionalBreaksTie)
@@ -1242,19 +1245,20 @@ TEST_F(RttiDissectTest, Fingerprint_SecondCopyIsAmbiguousAndOptionalBreaksTie)
     st.put(FP_OC + 0x10, syn_heap_object(ty.c.vtable()));
 
     const auto fp3 = fp_required(st.base());
-    const auto tied = Rtti::solve_fingerprint(st.base(), fp3, 0x20);
+    const auto tied = rtti::solve_fingerprint(Address{st.base()}, fp3, 0x20);
     ASSERT_FALSE(tied.has_value());
-    EXPECT_EQ(tied.error(), Rtti::HealError::Ambiguous);
+    EXPECT_EQ(tied.error().code, ErrorCode::HealAmbiguous);
 
     // An optional landmark present only at the delta-0 copy breaks the tie.
     st.put(FP_OD, syn_heap_object(d.vtable()));
-    std::array<Rtti::Landmark, 4> fp4{
+    std::array<rtti::Landmark, 4> fp4{
         fp3[0],
         fp3[1],
         fp3[2],
-        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OD, .expected_mangled = ".?AVFpD@@", .required = false},
+        rtti::Landmark{
+            .base = Address{st.base()}, .nominal_offset = FP_OD, .expected_mangled = ".?AVFpD@@", .required = false},
     };
-    const auto broken = Rtti::solve_fingerprint(st.base(), fp4, 0x20);
+    const auto broken = rtti::solve_fingerprint(Address{st.base()}, fp4, 0x20);
     ASSERT_TRUE(broken.has_value());
     EXPECT_EQ(broken->delta, 0);
     EXPECT_EQ(broken->matched, 3u);
@@ -1267,14 +1271,14 @@ TEST_F(RttiDissectTest, Fingerprint_SingleLandmarkMatchesHeal)
     SynStruct st;
     st.put(FP_OA + 0x08, syn_heap_object(a.vtable()));
 
-    const std::array<Rtti::Landmark, 1> fp{
-        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OA, .expected_mangled = ".?AVFpSolo@@"},
+    const std::array<rtti::Landmark, 1> fp{
+        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpSolo@@"},
     };
-    const auto solved = Rtti::solve_fingerprint(st.base(), fp, 0x20);
+    const auto solved = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
     ASSERT_TRUE(solved.has_value());
     EXPECT_EQ(solved->delta, 0x08);
 
-    const auto healed = Rtti::heal_landmark(fp[0]);
+    const auto healed = rtti::heal_landmark(fp[0]);
     ASSERT_TRUE(healed.has_value());
     // The fingerprint delta is the drift; the heal offset is the absolute field offset. They agree once the nominal
     // offset is removed.
@@ -1292,15 +1296,15 @@ TEST_F(RttiDissectTest, Fingerprint_DuplicateOffsetIsBadDescriptor)
     st.put(FP_OB, syn_heap_object(ty.b.vtable()));
     st.put(FP_OC, syn_heap_object(ty.c.vtable()));
 
-    const std::array<Rtti::Landmark, 4> with_dup{
-        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
-        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OB, .expected_mangled = ".?AVFpB@@"},
-        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OC, .expected_mangled = ".?AVFpC@@"},
-        Rtti::Landmark{.base = st.base(), .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
+    const std::array<rtti::Landmark, 4> with_dup{
+        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
+        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OB, .expected_mangled = ".?AVFpB@@"},
+        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OC, .expected_mangled = ".?AVFpC@@"},
+        rtti::Landmark{.base = Address{st.base()}, .nominal_offset = FP_OA, .expected_mangled = ".?AVFpA@@"},
     };
-    const auto hit = Rtti::solve_fingerprint(st.base(), with_dup, 0x20);
+    const auto hit = rtti::solve_fingerprint(Address{st.base()}, with_dup, 0x20);
     ASSERT_FALSE(hit.has_value());
-    EXPECT_EQ(hit.error(), Rtti::HealError::BadDescriptor);
+    EXPECT_EQ(hit.error().code, ErrorCode::BadDescriptor);
 }
 
 TEST_F(RttiDissectTest, Fingerprint_AllocatesNothing)
@@ -1317,10 +1321,10 @@ TEST_F(RttiDissectTest, Fingerprint_AllocatesNothing)
     const auto fp = fp_required(st.base());
 
     // Warm the module-range cache so its one-time per-module insert is not attributed to the measured call.
-    (void)Rtti::solve_fingerprint(st.base(), fp, 0x20);
+    (void)rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
 
     const long long before = dmk_test::thread_new_calls();
-    const auto hit = Rtti::solve_fingerprint(st.base(), fp, 0x20);
+    const auto hit = rtti::solve_fingerprint(Address{st.base()}, fp, 0x20);
     const long long after = dmk_test::thread_new_calls();
 
     ASSERT_TRUE(hit.has_value());
@@ -1334,31 +1338,31 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
     const std::uintptr_t base = st.base();
 
     // Empty span.
-    EXPECT_EQ(Rtti::solve_fingerprint(base, std::span<const Rtti::Landmark>{}, 0x20).error(),
-              Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, std::span<const rtti::Landmark>{}, 0x20));
 
     // Low base.
-    EXPECT_EQ(Rtti::solve_fingerprint(0x100, fp_required(0x100), 0x20).error(), Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{0x100}, fp_required(0x100), 0x20));
 
     // Window over the hard cap.
-    EXPECT_EQ(Rtti::solve_fingerprint(base, fp_required(base), Rtti::MAX_HEAL_WINDOW + 1).error(),
-              Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, fp_required(base), rtti::MAX_HEAL_WINDOW + 1));
 
     // Over the landmark cap.
-    std::array<Rtti::Landmark, Rtti::MAX_FINGERPRINT_LANDMARKS + 1> too_many{};
+    std::array<rtti::Landmark, rtti::MAX_FINGERPRINT_LANDMARKS + 1> too_many{};
     for (auto &lm : too_many)
     {
-        lm.base = base;
+        lm.base = Address{base};
         lm.expected_mangled = ".?AVCap@@";
     }
-    EXPECT_EQ(Rtti::solve_fingerprint(base, too_many, 0x20).error(), Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, too_many, 0x20));
 
     // Every landmark optional: nothing to anchor on.
-    std::array<Rtti::Landmark, 2> all_optional{
-        Rtti::Landmark{.base = base, .nominal_offset = FP_OA, .expected_mangled = ".?AVCap@@", .required = false},
-        Rtti::Landmark{.base = base, .nominal_offset = FP_OB, .expected_mangled = ".?AVCap@@", .required = false},
+    std::array<rtti::Landmark, 2> all_optional{
+        rtti::Landmark{
+            .base = Address{base}, .nominal_offset = FP_OA, .expected_mangled = ".?AVCap@@", .required = false},
+        rtti::Landmark{
+            .base = Address{base}, .nominal_offset = FP_OB, .expected_mangled = ".?AVCap@@", .required = false},
     };
-    EXPECT_EQ(Rtti::solve_fingerprint(base, all_optional, 0x20).error(), Rtti::HealError::BadDescriptor);
+    expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, all_optional, 0x20));
 }
 
 // --- heal_report (drift telemetry) ---
@@ -1373,13 +1377,17 @@ TEST_F(RttiDissectTest, HealReport_RecordsNoDriftAndPositiveDrift)
     st.put(off_a, syn_heap_object(a.vtable()));        // stays put: delta 0
     st.put(off_b + 0x10, syn_heap_object(b.vtable())); // drifted +0x10
 
-    const Rtti::Landmark lms[] = {
-        {.base = st.base(), .nominal_offset = static_cast<std::ptrdiff_t>(off_a), .expected_mangled = ".?AVReportA@@"},
-        {.base = st.base(), .nominal_offset = static_cast<std::ptrdiff_t>(off_b), .expected_mangled = ".?AVReportB@@"},
+    const rtti::Landmark lms[] = {
+        {.base = Address{st.base()},
+         .nominal_offset = static_cast<std::ptrdiff_t>(off_a),
+         .expected_mangled = ".?AVReportA@@"},
+        {.base = Address{st.base()},
+         .nominal_offset = static_cast<std::ptrdiff_t>(off_b),
+         .expected_mangled = ".?AVReportB@@"},
     };
 
-    Rtti::DriftEntry report[2];
-    const std::size_t n = Rtti::heal_report(lms, report);
+    rtti::DriftEntry report[2];
+    const std::size_t n = rtti::heal_report(lms, report);
     ASSERT_EQ(n, 2u);
 
     EXPECT_TRUE(report[0].ok);
@@ -1396,21 +1404,21 @@ TEST_F(RttiDissectTest, HealReport_RecordsNoDriftAndPositiveDrift)
 TEST_F(RttiDissectTest, HealReport_RecordsTypedFailure)
 {
     SynStruct st; // nothing of the expected type anywhere in the window
-    const Rtti::Landmark lms[] = {
-        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVReportMissing@@"},
+    const rtti::Landmark lms[] = {
+        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVReportMissing@@"},
     };
 
     // Pre-seed the output with stale values to prove a failed entry is reset and never exposes a reused buffer's prior
     // contents.
-    Rtti::DriftEntry report[1];
+    rtti::DriftEntry report[1];
     report[0].healed_offset = 0x7777;
     report[0].delta = 0x1234;
     report[0].ok = true;
 
-    const std::size_t n = Rtti::heal_report(lms, report);
+    const std::size_t n = rtti::heal_report(lms, report);
     ASSERT_EQ(n, 1u);
     EXPECT_FALSE(report[0].ok);
-    EXPECT_EQ(report[0].error, Rtti::HealError::NoMatch);
+    EXPECT_EQ(report[0].error, ErrorCode::HealNoMatch);
     EXPECT_EQ(report[0].name, ".?AVReportMissing@@");
     EXPECT_EQ(report[0].nominal_offset, 0x40); // populated regardless of success
     EXPECT_EQ(report[0].healed_offset, 0);     // reset, not the stale 0x7777
@@ -1423,14 +1431,14 @@ TEST_F(RttiDissectTest, HealReport_RespectsOutputCapacity)
     SynStruct st;
     st.put(0x40, syn_heap_object(a.vtable()));
 
-    const Rtti::Landmark lms[] = {
-        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
-        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
-        {.base = st.base(), .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
+    const rtti::Landmark lms[] = {
+        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
+        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
+        {.base = Address{st.base()}, .nominal_offset = 0x40, .expected_mangled = ".?AVCapReport@@"},
     };
 
-    Rtti::DriftEntry report[2]; // smaller than the landmark set
-    const std::size_t n = Rtti::heal_report(lms, report);
+    rtti::DriftEntry report[2]; // smaller than the landmark set
+    const std::size_t n = rtti::heal_report(lms, report);
     EXPECT_EQ(n, 2u); // min(landmarks.size(), out.size())
 
     // The written entries must be real heals, not just a returned count.

@@ -10,7 +10,7 @@ using namespace DetourModKit;
 
 TEST(FilesystemTest, GetRuntimeDirectory)
 {
-    auto dir = Filesystem::get_runtime_directory();
+    auto dir = filesystem::get_runtime_directory();
 
     EXPECT_FALSE(dir.empty());
     EXPECT_TRUE(std::filesystem::exists(dir));
@@ -19,15 +19,15 @@ TEST(FilesystemTest, GetRuntimeDirectory)
 
 TEST(FilesystemTest, GetRuntimeDirectory_Consistent)
 {
-    auto dir1 = Filesystem::get_runtime_directory();
-    auto dir2 = Filesystem::get_runtime_directory();
+    auto dir1 = filesystem::get_runtime_directory();
+    auto dir2 = filesystem::get_runtime_directory();
 
     EXPECT_EQ(dir1, dir2);
 }
 
 TEST(FilesystemTest, GetRuntimeDirectory_PathFormat)
 {
-    auto dir = Filesystem::get_runtime_directory();
+    auto dir = filesystem::get_runtime_directory();
 
     EXPECT_FALSE(dir.empty());
     EXPECT_TRUE(std::filesystem::path(dir).is_absolute());
@@ -41,7 +41,7 @@ TEST(FilesystemTest, GetRuntimeDirectory_ThreadSafety)
 
     for (int i = 0; i < num_threads; ++i)
     {
-        threads.emplace_back([&results, i]() { results[i] = Filesystem::get_runtime_directory(); });
+        threads.emplace_back([&results, i]() { results[i] = filesystem::get_runtime_directory(); });
     }
 
     for (auto &t : threads)
@@ -57,18 +57,18 @@ TEST(FilesystemTest, GetRuntimeDirectory_ThreadSafety)
 
 TEST(FilesystemTest, GetRuntimeDirectory_NoThrow)
 {
-    EXPECT_NO_THROW((void)Filesystem::get_runtime_directory());
+    EXPECT_NO_THROW((void)filesystem::get_runtime_directory());
 }
 
 TEST(FilesystemTest, GetRuntimeDirectory_IsDirectory)
 {
-    auto dir = Filesystem::get_runtime_directory();
+    auto dir = filesystem::get_runtime_directory();
     EXPECT_TRUE(std::filesystem::is_directory(dir));
 }
 
 TEST(FilesystemTest, GetRuntimeDirectory_NoTrailingSeparator)
 {
-    auto dir = Filesystem::get_runtime_directory();
+    auto dir = filesystem::get_runtime_directory();
     ASSERT_FALSE(dir.empty());
     wchar_t last = dir.back();
     EXPECT_NE(last, L'/');
@@ -79,8 +79,8 @@ TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
 {
     // Verify that repeated calls return identical values, consistent with the internal caching of the resolved module
     // directory.
-    const auto dir1 = Filesystem::get_runtime_directory();
-    const auto dir2 = Filesystem::get_runtime_directory();
+    const auto dir1 = filesystem::get_runtime_directory();
+    const auto dir2 = filesystem::get_runtime_directory();
 
     EXPECT_EQ(dir1, dir2);
 
@@ -89,7 +89,7 @@ TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
     const auto start = std::chrono::steady_clock::now();
     for (int i = 0; i < iterations; ++i)
     {
-        auto dir = Filesystem::get_runtime_directory();
+        auto dir = filesystem::get_runtime_directory();
         (void)dir;
     }
     const auto elapsed = std::chrono::steady_clock::now() - start;
@@ -101,13 +101,13 @@ TEST(FilesystemTest, GetRuntimeDirectory_CachedResult)
 
 TEST(FilesystemUtf8, ReturnsNonEmpty)
 {
-    const std::string utf8 = Filesystem::get_runtime_directory_utf8();
+    const std::string utf8 = filesystem::get_runtime_directory_utf8();
     EXPECT_FALSE(utf8.empty());
 }
 
 TEST(FilesystemUtf8, Cached)
 {
-    const std::string a = Filesystem::get_runtime_directory_utf8();
-    const std::string b = Filesystem::get_runtime_directory_utf8();
+    const std::string a = filesystem::get_runtime_directory_utf8();
+    const std::string b = filesystem::get_runtime_directory_utf8();
     EXPECT_EQ(a, b);
 }

@@ -1,5 +1,7 @@
 # EventDispatcher Bench, v3.1.0
 
+> Archived benchmark snapshot; record new measurements in a new folder rather than editing existing results.
+
 Before/after numbers for the lock-free COW snapshot `emit()` landed in v3.1.0. The previous implementation used `std::shared_mutex` for `emit()` / `emit_safe()` and an exclusive lock for `subscribe()` / `unsubscribe()`. The new implementation stores handlers in a `std::atomic<std::shared_ptr<const std::vector<Entry>>>` snapshot published on mutation, with a lock-free atomic handler-count fast path for the zero-subscriber case.
 
 ## Results (median of 5 runs per side)

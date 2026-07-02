@@ -1,0 +1,5 @@
+# Non-Markdown config files whose YAML/INI '#' comment lines markdownlint would
+# otherwise misread as Markdown '#' headings. These are not documentation.
+.clang-format
+.clang-tidy
+.editorconfig
