@@ -138,7 +138,9 @@ namespace DetourModKit
          * @param source Source byte span. An empty span is a successful no-op.
          * @return An empty `Result` on success; one of `ErrorCode::NullTargetAddress`, `NullSourceBytes`,
          * `SizeTooLarge`
-         *         (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, or `ProtectionRestoreFailed` on failure.
+         *         (over @ref MAX_WRITE_SIZE), `ProtectionChangeFailed`, `WriteFaulted` (the slow path made the page
+         *         writable but the guarded copy faulted, e.g. a concurrent reprotect), or `ProtectionRestoreFailed` on
+         *         failure.
          * @details A single primitive that serves both the per-frame data write and the one-shot code patch. It first
          *          attempts a guarded write that changes NO page protection: when the target is already writable -- a
          *          live game field, or any page held writable by a @ref ProtectGuard -- this fast path succeeds with no
@@ -147,7 +149,10 @@ namespace DetourModKit
          *          it take the slow path: change protection to writable, copy, flush the instruction cache, restore the
          *          original protection, and invalidate the affected cache range. Because protection is changed only on
          *          the slow path, holding a @ref ProtectGuard over a hot region keeps the writes inside it on the cheap
-         *          path. On a fault mid-copy on the slow path the target may have been partially written.
+         *          path. The slow-path copy also runs under the fault guard: if the page is reprotected or unmapped out
+         *          from under it mid-copy, the target may have been partially written, but the restore path and
+         *          instruction-cache flush still run. If the restore succeeds the call fails with `WriteFaulted`; if the
+         *          restore fails, `ProtectionRestoreFailed` takes priority.
          * @note Callback-safe on the fast path; the slow (protection-changing) path is setup/control-plane work.
          */
         [[nodiscard]] Result<void> write_bytes(Address address, std::span<const std::byte> source) noexcept;
@@ -174,8 +179,9 @@ namespace DetourModKit
          * @brief Strict guarded write of a byte span that NEVER changes page protection.
          * @param address Destination address.
          * @param source Source byte span. An empty span is a successful no-op.
-         * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` for a rejected
-         *         argument, or `ErrorCode::WriteFaulted` when the target was not already writable.
+         * @return An empty `Result` on success; `ErrorCode::NullTargetAddress` / `NullSourceBytes` / `SizeTooLarge`
+         *         (over @ref MAX_WRITE_SIZE) for a rejected argument, or `ErrorCode::WriteFaulted` when the target was
+         *         not already writable.
          * @details The counterpart to @ref write_bytes for memory the target already keeps writable -- a live game
          *          field a hook updates every frame. Unlike @ref write_bytes it does NOT escalate: a read-only,
          *          executable, or no-access target FAILS CLOSED (`WriteFaulted`) rather than being unprotected and
@@ -270,18 +276,32 @@ namespace DetourModKit
          *          window stays on its cheap no-reprotect fast path because the page is already writable. Restoration is
          *          best-effort (a destructor cannot report failure); a caller needing to observe the restore result
          *          should re-apply protection explicitly instead of relying on the destructor.
+         * @note Single-protection-region precondition: the guard captures ONE prior protection value (the first page's,
+         *       as `VirtualProtect` reports it) and restores the whole span to it. Applied to a range that spans pages
+         *       of DIFFERENT protection, the restore flattens them all to the first page's protection. Scope a guard to
+         *       a region that lies within a single protection block -- the normal case for a patch site or a field --
+         *       and split a mixed-protection range into one guard per block.
+         * @note @ref make and the destructor each call @ref invalidate_range for the guarded span, so the protection
+         *       cache never answers a later @ref is_readable / @ref is_writable from a snapshot taken before the guard
+         *       changed (or restored) the protection.
          */
         class ProtectGuard
         {
         public:
             /**
              * @brief Changes @p region to @p protection and returns a guard that restores the prior protection.
-             * @param region The span whose protection is changed; an empty region fails closed.
+             * @param region The span whose protection is changed; an empty region fails closed. It should lie within a
+             *               single protection block (see the class note on the single-region precondition).
              * @param protection The protection to apply for the guard's lifetime.
-             * @return An armed guard on success, or `ErrorCode::ProtectionChangeFailed` (with the OS error in
-             *         `Error::extra`) if the protection could not be changed.
+             * @return An armed guard on success; `ErrorCode::OutOfMemory` if the guard's capture state could not be
+             *         allocated (no protection change is attempted, so nothing leaks), or
+             *         `ErrorCode::ProtectionChangeFailed` (with the OS error in `Error::extra`) if the protection could
+             *         not be changed.
+             * @details The capture state is allocated BEFORE the protection is changed, so a failed allocation cannot
+             *          strand the region in the new protection with no guard to restore it. On success the changed range
+             *          is dropped from the protection cache (@ref invalidate_range).
              */
-            [[nodiscard]] static Result<ProtectGuard> make(Region region, Prot protection);
+            [[nodiscard]] static Result<ProtectGuard> make(Region region, Prot protection) noexcept;
 
             ProtectGuard(ProtectGuard &&other) noexcept;
             ProtectGuard &operator=(ProtectGuard &&other) noexcept;
@@ -289,7 +309,7 @@ namespace DetourModKit
             ProtectGuard &operator=(const ProtectGuard &) = delete;
 
             /// Restores the original page protection unless the guard was moved-from or @ref release was called.
-            ~ProtectGuard();
+            ~ProtectGuard() noexcept;
 
             /// True while the guard is armed (it will restore on destruction); false after a move or @ref release.
             [[nodiscard]] explicit operator bool() const noexcept;

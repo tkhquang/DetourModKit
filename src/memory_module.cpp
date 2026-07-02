@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cwchar>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -24,6 +25,32 @@
 
 namespace DetourModKit
 {
+    namespace
+    {
+        using DetourModKit::detail::SrwSharedMutex;
+
+        /**
+         * @struct ModuleRangeCache
+         * @brief Per-process cache mapping a loaded module handle to its resolved image Region.
+         * @details Shared by detail::cached_module_image_region, and thus by both memory::module_of and the Region
+         *          factories in region.cpp (host / own / module_named), so a repeated module-range query resolves
+         *          against one cache rather than re-walking PE headers per caller. Consulted only by DetourModKit code
+         *          that has already initialized its own subsystems, so the static-storage destruction order is a
+         *          non-issue (no caller queries ranges from an atexit handler).
+         */
+        struct ModuleRangeCache
+        {
+            SrwSharedMutex mutex;
+            std::unordered_map<HMODULE, Region> entries;
+        };
+
+        [[nodiscard]] ModuleRangeCache &module_range_cache() noexcept
+        {
+            static ModuleRangeCache cache;
+            return cache;
+        }
+    } // namespace
+
     namespace detail
     {
         // The canonical module-base -> Region resolver (declared in internal/memory_guarded.hpp). Both region.cpp's
@@ -65,31 +92,56 @@ namespace DetourModKit
 
             return Region{module_base, size_of_image};
         }
+
+        Region cached_module_image_region(Address module_base) noexcept
+        {
+            if (!module_base)
+            {
+                return Region{};
+            }
+
+            // An HMODULE IS the mapped image's base address, so the base address is the natural per-module cache key.
+            const HMODULE handle = reinterpret_cast<HMODULE>(module_base.raw());
+            ModuleRangeCache &cache = module_range_cache();
+            {
+                std::shared_lock<SrwSharedMutex> lock(cache.mutex);
+                const auto it = cache.entries.find(handle);
+                if (it != cache.entries.end())
+                {
+                    return it->second;
+                }
+            }
+
+            const Region range = module_image_region(module_base);
+            if (!range.base || range.size == 0)
+            {
+                // Do not cache a failed resolve: a partially-mapped image that later completes, or a handle value a
+                // freshly loaded module reuses, must stay resolvable on a later call.
+                return Region{};
+            }
+
+            {
+                try
+                {
+                    std::unique_lock<SrwSharedMutex> lock(cache.mutex);
+                    // Another thread may have inserted between the shared and unique acquisitions; emplace keeps the
+                    // first-resolved entry.
+                    cache.entries.emplace(handle, range);
+                }
+                catch (const std::bad_alloc &)
+                {
+                    // Caching is a performance hint. Returning the freshly resolved range keeps this noexcept query
+                    // useful under memory pressure instead of terminating the host.
+                }
+            }
+            return range;
+        }
     } // namespace detail
 
     namespace memory
     {
         namespace
         {
-            using DetourModKit::detail::SrwSharedMutex;
-
-            /**
-             * @brief Per-process cache mapping a module handle to its resolved Region.
-             * @details Consulted only by DetourModKit code that has already initialized its own subsystems, so the
-             *          static-storage destruction order is a non-issue (no caller queries ranges from an atexit handler).
-             */
-            struct ModuleRangeCache
-            {
-                SrwSharedMutex mutex;
-                std::unordered_map<HMODULE, Region> entries;
-            };
-
-            [[nodiscard]] ModuleRangeCache &module_range_cache() noexcept
-            {
-                static ModuleRangeCache cache;
-                return cache;
-            }
-
             /**
              * @brief Widens a UTF-8 module name to the UTF-16 the Win32 module APIs expect.
              * @return The widened name, or an empty string when the name is empty or the conversion measurement fails.
@@ -131,29 +183,9 @@ namespace DetourModKit
                 return Region{};
             }
 
-            ModuleRangeCache &cache = module_range_cache();
-            {
-                std::shared_lock<SrwSharedMutex> lock(cache.mutex);
-                const auto it = cache.entries.find(owning_module);
-                if (it != cache.entries.end())
-                {
-                    return it->second;
-                }
-            }
-
-            const Region range = detail::module_image_region(Address{owning_module});
-            if (!range.base || range.size == 0)
-            {
-                return Region{};
-            }
-
-            {
-                std::unique_lock<SrwSharedMutex> lock(cache.mutex);
-                // Another thread may have inserted between the shared and unique acquisitions; emplace keeps the
-                // first-resolved entry.
-                cache.entries.emplace(owning_module, range);
-            }
-            return range;
+            // The resolved image span is cached per module handle by cached_module_image_region, so a repeated probe of
+            // the same module degenerates to this loader lookup plus a hash hit rather than re-walking the PE headers.
+            return detail::cached_module_image_region(Address{owning_module});
         }
 
         bool is_module_loaded(std::string_view basename, bool case_insensitive) noexcept

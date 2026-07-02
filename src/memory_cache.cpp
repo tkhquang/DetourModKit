@@ -84,13 +84,17 @@ namespace DetourModKit
 
             /**
              * @struct CacheShard
-             * @brief One cache shard with O(1) address lookup and O(log n) LRU eviction.
-             * @details An unordered_map keyed by region base address gives the fast hit path; a std::map keyed by a
-             *          monotonic counter gives oldest-entry eviction; a sorted deque gives O(log n) containment lookup
-             *          for sub-page queries inside larger regions. The per-shard SRW lock and the in_flight
-             *          stampede-coalescing flag are inline and the struct is cache-line aligned, so one shard's lock
-             *          word never shares a line with another's. Inlining the mutex makes the shard non-movable, so the
-             *          shards are a fixed-size array allocated once, never a resizable vector.
+             * @brief One cache shard: a base-keyed hit map, an LRU map for O(log n) eviction, and a sorted range index.
+             * @details An unordered_map keyed by region base address (mbi.BaseAddress) is the store. It gives a direct
+             *          O(1) hit only for a query whose page base equals a region base -- a query landing in the FIRST
+             *          page of a cached region -- because it is keyed by the region base, not by every page the region
+             *          spans; a query deeper into a multi-page region is served by the sorted range index instead. A
+             *          std::map keyed by a monotonic counter gives oldest-entry eviction; a sorted deque
+             *          (`sorted_ranges`) gives the O(log n) containment lookup for an address anywhere inside a larger
+             *          cached region. The per-shard SRW lock and the in_flight stampede-coalescing flag are inline and
+             *          the struct is cache-line aligned, so one shard's lock word never shares a line with another's.
+             *          Inlining the mutex makes the shard non-movable, so the shards are a fixed-size array allocated
+             *          once, never a resizable vector.
              */
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -258,15 +262,27 @@ namespace DetourModKit
             std::atomic<std::uint64_t> s_last_cleanup_time_ns{0};
             constexpr std::uint64_t CLEANUP_INTERVAL_NS = 1'000'000'000ULL;
 
-            // Always-available cache statistics.
+            // Always-available cache statistics. Each counter is alignas(64) so it lands on its own cache line: the hot
+            // cache_hits / cache_misses counters are bumped by a fetch_add on every is_readable / is_writable, and
+            // packing all five into one or two lines would false-share -- two threads incrementing different counters
+            // would ping-pong the shared line's ownership even though the writes never conflict. Same
+            // cache-line-hygiene rationale as CacheShard and ReaderStripe above.
+#if defined(_MSC_VER)
+#pragma warning(push)
+// C4324: each counter is intentionally padded to a full cache line by alignas(64) to prevent false sharing.
+#pragma warning(disable : 4324)
+#endif
             struct CacheStats
             {
-                std::atomic<std::uint64_t> cache_hits{0};
-                std::atomic<std::uint64_t> cache_misses{0};
-                std::atomic<std::uint64_t> invalidations{0};
-                std::atomic<std::uint64_t> coalesced_queries{0};
-                std::atomic<std::uint64_t> on_demand_cleanups{0};
+                alignas(64) std::atomic<std::uint64_t> cache_hits{0};
+                alignas(64) std::atomic<std::uint64_t> cache_misses{0};
+                alignas(64) std::atomic<std::uint64_t> invalidations{0};
+                alignas(64) std::atomic<std::uint64_t> coalesced_queries{0};
+                alignas(64) std::atomic<std::uint64_t> on_demand_cleanups{0};
             };
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
             CacheStats s_stats;
 
             /**
@@ -332,11 +348,15 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Finds and validates a cache entry in a shard by scanning for range containment.
+             * @brief Finds and validates a cache entry in a shard that covers [address, address + size).
              * @note Must be called with the shard mutex held (shared or exclusive).
-             * @note First attempts direct lookup by page-aligned base address for the O(1) fast path, then falls back
-             * to
-             *       O(log n) binary search via sorted_ranges for addresses within larger regions.
+             * @note Two-tier lookup. The unordered_map probe by page-aligned base address hits only when that key
+             *       equals a cached entry's STORE key (the region base, mbi.BaseAddress) -- i.e. when the query lands in
+             *       the first page of a cached VirtualQuery region -- so it is a first-page fast path, not a general
+             *       O(1) path. A query anywhere deeper into a multi-page region misses the direct probe and is served by
+             *       the O(log n) binary search over sorted_ranges. There is no per-page index (one would be unbounded
+             *       for a large module), and the per-shard entry count is small and bounded, so the containment search
+             *       is effectively constant-time for interior addresses in practice.
              */
             CachedMemoryRegionInfo *find_in_shard(CacheShard &shard, std::uintptr_t address, std::size_t size,
                                                   std::uint64_t current_ns, std::uint64_t expiry_ns) noexcept
@@ -743,10 +763,14 @@ namespace DetourModKit
                     return false;
                 }
 
-                s_shard_count.store(shard_count, std::memory_order_release);
                 s_max_entries_per_shard.store(entries_per_shard, std::memory_order_release);
                 s_configured_expiry_ms.store(expiry_ms, std::memory_order_release);
                 s_last_cleanup_time_ns.store(current_time_ns(), std::memory_order_release);
+                // Publish the shard count LAST. It is the "cache is fully built" signal every reader gates on after the
+                // seq_cst s_cache_initialized check, so an acquiring reader that observes a non-zero count is
+                // guaranteed (release/acquire) to also see the shard array and the config fields stored above -- never
+                // a torn half-initialized snapshot where shard_count is set but expiry / max-entries are still zero.
+                s_shard_count.store(shard_count, std::memory_order_release);
 
                 log().debug("MemoryCache: Initialized with {} shards ({} entries/shard, {}ms expiry, {} max).",
                             shard_count, entries_per_shard, expiry_ms, hard_max_per_shard);
@@ -1106,31 +1130,45 @@ namespace DetourModKit
         MemoryStats get_memory_stats() noexcept
         {
             MemoryStats stats{};
+            // Cumulative counters live in the static CacheStats, independent of the shard-array lifetime, so a relaxed
+            // load outside the reader guard is safe.
             stats.hits = s_stats.cache_hits.load(std::memory_order_relaxed);
             stats.misses = s_stats.cache_misses.load(std::memory_order_relaxed);
             stats.invalidations = s_stats.invalidations.load(std::memory_order_relaxed);
             stats.coalesced_queries = s_stats.coalesced_queries.load(std::memory_order_relaxed);
             stats.on_demand_cleanups = s_stats.on_demand_cleanups.load(std::memory_order_relaxed);
 
-            stats.shard_count = s_shard_count.load(std::memory_order_acquire);
-            stats.max_entries_per_shard = s_max_entries_per_shard.load(std::memory_order_acquire);
-            stats.expiry_ms = s_configured_expiry_ms.load(std::memory_order_acquire);
-
-            // Sum live entries and hard-max capacity across shards under the reader guard. A non-zero shard count
-            // implies the array is allocated (init publishes the count after the array) and the reader guard keeps it
-            // alive.
-            std::size_t total_hard_max = 0;
+            // Capture the configuration fields AND the live-entry totals as one coherent snapshot behind the reader
+            // guard and the SAME seq_cst s_cache_initialized gate the permission readers use (see
+            // check_memory_permission). The gate is what makes the shard-array access below safe: ActiveReaderGuard's
+            // seq_cst increment, paired with an observed s_cache_initialized == true, forbids the store-buffering race
+            // with shutdown_cache (which stores s_cache_initialized = false seq_cst, then drains readers before freeing
+            // s_cache_shards). Loading s_shard_count with a plain acquire alone does NOT establish that pairing, so a
+            // concurrent shutdown could free the array between a stale non-zero count and the loop (a use-after-free)
+            // and could tear these config fields against its field-by-field zeroing.
+            // Leaving every field at its zero default while the cache is down keeps the snapshot internally consistent.
             {
                 ActiveReaderGuard reader_guard;
-                const std::size_t active_shard_count = s_shard_count.load(std::memory_order_acquire);
-                for (std::size_t i = 0; i < active_shard_count; ++i)
+                if (s_cache_initialized.load(std::memory_order_seq_cst))
                 {
-                    std::shared_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
-                    stats.total_entries += s_cache_shards[i].entries.size();
-                    total_hard_max += s_cache_shards[i].max_capacity;
+                    const std::size_t active_shard_count = s_shard_count.load(std::memory_order_acquire);
+                    if (active_shard_count > 0)
+                    {
+                        stats.shard_count = active_shard_count;
+                        stats.max_entries_per_shard = s_max_entries_per_shard.load(std::memory_order_acquire);
+                        stats.expiry_ms = s_configured_expiry_ms.load(std::memory_order_acquire);
+
+                        std::size_t total_hard_max = 0;
+                        for (std::size_t i = 0; i < active_shard_count; ++i)
+                        {
+                            std::shared_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
+                            stats.total_entries += s_cache_shards[i].entries.size();
+                            total_hard_max += s_cache_shards[i].max_capacity;
+                        }
+                        stats.hard_max_per_shard = total_hard_max / active_shard_count;
+                    }
                 }
             }
-            stats.hard_max_per_shard = (stats.shard_count > 0) ? total_hard_max / stats.shard_count : 0;
 
             const std::uint64_t total_queries = stats.hits + stats.misses;
             stats.hit_rate_percent =
