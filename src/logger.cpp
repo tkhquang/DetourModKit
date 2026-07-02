@@ -26,7 +26,7 @@ namespace DetourModKit
 
         struct AsyncLoggerLeakSlot
         {
-            alignas(std::shared_ptr<AsyncLogger>) unsigned char storage[sizeof(std::shared_ptr<AsyncLogger>)];
+            alignas(std::shared_ptr<AsyncLogger>) unsigned char storage[sizeof(std::shared_ptr<AsyncLogger>)]{};
             std::atomic<bool> occupied{false};
         };
 
@@ -584,6 +584,7 @@ namespace DetourModKit
         }
     }
 
+    // NOLINTNEXTLINE(bugprone-exception-escape): OOM constructing the logger deliberately terminates (see below)
     Logger &log() noexcept
     {
         // The process-default logger, allocated once and INTENTIONALLY never destroyed. A plain function-local static
@@ -594,6 +595,7 @@ namespace DetourModKit
         // explicitly, so the deliberate leak costs only the object's storage, never a lost flush. Constructing it
         // can allocate; under true out-of-memory at first use the noexcept boundary turns that throw into termination,
         // the only sane outcome when the logger itself cannot start.
+        // NOLINTNEXTLINE(bugprone-unhandled-exception-at-new): first-use OOM deliberately terminates (see above)
         static Logger *const instance = new Logger();
         return *instance;
     }

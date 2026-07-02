@@ -625,9 +625,10 @@ namespace DetourModKit
         bool expected = false;
         if (m_drift_warned.compare_exchange_strong(expected, true, std::memory_order_relaxed))
         {
-            log().warning("Self-heal: layout drifted (first change: {} by {:+#x}); pointer offsets recovered. "
-                          "Re-verify non-healable scalars.",
-                          label, delta);
+            (void)log().try_log(LogLevel::Warning,
+                                "Self-heal: layout drifted (first change: {} by {:+#x}); pointer offsets recovered. "
+                                "Re-verify non-healable scalars.",
+                                label, delta);
         }
     }
 
@@ -645,12 +646,13 @@ namespace DetourModKit
             if (delta != 0)
             {
                 warn_drift_once(label, delta);
-                logger.info("Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta, landmark.nominal_offset,
-                            result->healed_offset);
+                (void)logger.try_log(LogLevel::Info, "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta,
+                                     landmark.nominal_offset, result->healed_offset);
             }
             else
             {
-                logger.debug("Self-heal: {} confirmed at nominal {:#x}", label, landmark.nominal_offset);
+                (void)logger.try_log(LogLevel::Debug, "Self-heal: {} confirmed at nominal {:#x}", label,
+                                     landmark.nominal_offset);
             }
             return result;
         }
@@ -661,13 +663,13 @@ namespace DetourModKit
         const std::string_view reason = to_string(result.error().code);
         if (required && m_config.escalate == HealEscalation::WarnRequired)
         {
-            logger.warning("Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author if drifted)", label, reason,
-                           landmark.nominal_offset);
+            (void)logger.try_log(LogLevel::Warning, "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
+                                 "if drifted)", label, reason, landmark.nominal_offset);
         }
         else
         {
-            logger.debug("Self-heal: {} not resolvable now ({}); keeping nominal {:#x}", label, reason,
-                         landmark.nominal_offset);
+            (void)logger.try_log(LogLevel::Debug, "Self-heal: {} not resolvable now ({}); keeping nominal {:#x}", label,
+                                 reason, landmark.nominal_offset);
         }
         return result;
     }
@@ -680,11 +682,12 @@ namespace DetourModKit
         if (delta != 0)
         {
             warn_drift_once(label, delta);
-            logger.info("Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta, nominal_offset, healed_offset);
+            (void)logger.try_log(LogLevel::Info, "Self-heal: {} moved {:+#x} ({:#x} -> {:#x})", label, delta,
+                                 nominal_offset, healed_offset);
         }
         else
         {
-            logger.debug("Self-heal: {} confirmed at nominal {:#x}", label, nominal_offset);
+            (void)logger.try_log(LogLevel::Debug, "Self-heal: {} confirmed at nominal {:#x}", label, nominal_offset);
         }
     }
 } // namespace DetourModKit

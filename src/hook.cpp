@@ -49,7 +49,7 @@ namespace DetourModKit
     namespace
     {
         /// Result of the foreign-inline-hook pre-flight: whether the target already redirects, and to where.
-        enum class PrehookState
+        enum class PrehookState : std::uint8_t
         {
             NotHooked,
             HookedBySameModule,
@@ -132,7 +132,7 @@ namespace DetourModKit
         }
 
         /// The flagged prologue shapes the inline/mid pre-flight refuses under Prologue::Fail.
-        enum class PrologueRisk
+        enum class PrologueRisk : std::uint8_t
         {
             None,
             LeadingCall, // 0xE8 call rel32
@@ -358,6 +358,7 @@ namespace DetourModKit
          * passes straight through; a deferred OwnedScanRequest is resolved through
          *          scan::resolve and its winning address returned (or its Error).
          */
+        // NOLINTNEXTLINE(bugprone-exception-escape): scan::resolve's throw is caught below; std::get is on a checked variant
         Result<std::uintptr_t> resolve_target(const hook::Target &target) noexcept
         {
             if (const Address *absolute = std::get_if<Address>(&target))
@@ -704,6 +705,7 @@ namespace DetourModKit
             return inline_backend->original<void *>();
         }
 
+        // NOLINTNEXTLINE(bugprone-exception-escape): only mutex-lock and std::visit throw (catastrophic/impossible)
         Result<void> Hook::enable() noexcept
         {
             if (!m_impl)
@@ -744,6 +746,7 @@ namespace DetourModKit
             return std::unexpected(Error{ErrorCode::EnableFailed, "hook::enable"});
         }
 
+        // NOLINTNEXTLINE(bugprone-exception-escape): only mutex-lock and std::visit throw (catastrophic/impossible)
         Result<void> Hook::disable() noexcept
         {
             if (!m_impl)

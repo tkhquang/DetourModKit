@@ -159,7 +159,9 @@ namespace DetourModKit
         // the handler to target.
         [[noreturn]] __attribute__((noinline)) void veh_perform_longjmp(void *env) noexcept
         {
-            __builtin_longjmp(env, 1);
+            // __builtin_longjmp is typed void(void **, int); env points at the VehAccessGuard::env[5] buffer. The
+            // explicit cast matches that signature (GCC accepts the bare void *, clang's frontend rejects it).
+            __builtin_longjmp(static_cast<void **>(env), 1);
         }
 
         // Vectored exception handler, installed at the front of the list. It claims a fault only when the current
@@ -273,7 +275,7 @@ namespace DetourModKit
         __attribute__((noinline)) bool veh_guarded_copy(void *out, const void *src, std::size_t len) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
-            VehAccessGuard guard;
+            VehAccessGuard guard{};
             guard.guard_lo = reinterpret_cast<std::uintptr_t>(src);
             guard.guard_hi = guard.guard_lo + len;
 
@@ -310,7 +312,7 @@ namespace DetourModKit
                                                           void (*fn)(void *) noexcept, void *ctx) noexcept
         {
             const DWORD slot = s_veh_tls_index.load(std::memory_order_acquire);
-            VehAccessGuard guard;
+            VehAccessGuard guard{};
             guard.guard_lo = lo;
             guard.guard_hi = hi;
 

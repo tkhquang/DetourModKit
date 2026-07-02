@@ -146,7 +146,7 @@ namespace DetourModKit
                         DetourModKit::rtti::vtable_for_type(rtti->mangled, request.scope);
                     if (vtable && range.contains(vtable->raw()))
                     {
-                        const Hit hit{*vtable, candidate.name()};
+                        Hit hit{*vtable, candidate.name()};
                         log_resolved(request, hit, false);
                         return hit;
                     }
@@ -166,7 +166,7 @@ namespace DetourModKit
                     const Result<Address> site = find_string_xref(query, request.scope);
                     if (site && range.contains(site->raw()))
                     {
-                        const Hit hit{*site, candidate.name()};
+                        Hit hit{*site, candidate.name()};
                         log_resolved(request, hit, false);
                         return hit;
                     }
@@ -221,7 +221,7 @@ namespace DetourModKit
                     // module); reject it here so the ladder falls through instead of committing out of scope.
                     continue;
                 }
-                const Hit hit{Address{*resolved}, candidate.name()};
+                Hit hit{Address{*resolved}, candidate.name()};
                 log_resolved(request, hit, false);
                 return hit;
             }

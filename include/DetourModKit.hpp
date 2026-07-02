@@ -127,7 +127,7 @@ namespace DetourModKit
          * @note noexcept by contract: bootstrap() calls this under the loader lock, where an escaping exception is
          *       undefined behavior, so every throwing step is caught and mapped to a Result failure.
          */
-        [[nodiscard]] static Result<Session> start(ModInfo info) noexcept;
+        [[nodiscard]] static Result<Session> start(const ModInfo &info) noexcept;
 
         /** @brief Move-constructs, transferring the live teardown; the moved-from Session is left inert. */
         Session(Session &&other) noexcept;
@@ -222,7 +222,7 @@ namespace DetourModKit
      *       and starts a thread. noexcept by contract: it runs under the loader lock, so any internal throw is caught,
      *       the partial attach is rolled back, and a Result failure is returned rather than unwinding across the lock.
      */
-    [[nodiscard]] Result<void> bootstrap(ModInfo info,
+    [[nodiscard]] Result<void> bootstrap(const ModInfo &info,
                                          std::move_only_function<Result<void>(Session &)> on_ready) noexcept;
 
     /**

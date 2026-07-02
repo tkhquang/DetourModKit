@@ -224,6 +224,9 @@ namespace DetourModKit
             block->free_list = slot;
         }
 
+        // buffer is intentionally left uninitialized on this hot path (see async_logger_queue.hpp): only [0, length)
+        // is written before any read, so zero-filling it every message would be wasted work.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
         LogMessage::LogMessage(LogLevel lvl, std::string_view msg) noexcept
             : level(lvl), timestamp(std::chrono::system_clock::now()), thread_id(std::this_thread::get_id())
         {
@@ -241,7 +244,7 @@ namespace DetourModKit
                 {
                     try
                     {
-                        overflow->assign(msg.data(), msg_size);
+                        overflow->assign(msg.substr(0, msg_size));
                         length = overflow->size();
                     }
                     catch (...)
@@ -268,6 +271,7 @@ namespace DetourModKit
         // StringPool or m_heap_fallback_count. The allocation/deallocation balance is maintained because exactly one
         // LogMessage owns the pointer at any time, and only reset() (called by the eventual owner's destructor) returns
         // it to the pool.
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) buffer is filled by the length-guarded memcpy below
         LogMessage::LogMessage(LogMessage &&other) noexcept
             : level(other.level), timestamp(other.timestamp), thread_id(other.thread_id), length(other.length),
               overflow(other.overflow)
