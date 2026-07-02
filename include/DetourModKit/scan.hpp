@@ -303,7 +303,10 @@ namespace DetourModKit::scan
      *          than one -> AmbiguousReference). A reference counts only when its resolved target exactly equals the
      *          located string address, which is itself a plausible in-image pointer, so the equality subsumes the
      *          plausible-userspace floor without a separate check. The xref is RIP-relative, so the result is
-     *          ASLR-correct by construction.
+     *          ASLR-correct by construction. Both phases fail closed on incompleteness: if any page-gated window is
+     *          skipped after faulting mid-scan under the TOCTOU guard (a concurrent decommit/reprotect), the occurrence
+     *          count is only a lower bound, so a would-be unique result is reported as StringAmbiguous (phase 1) or
+     *          AmbiguousReference (phase 2) rather than a possibly-non-unique anchor.
      * @note Not noexcept: the broad-match phase may allocate while decoding. Setup/control-plane only.
      */
     [[nodiscard]] Result<Address> find_string_xref(const StringRefQuery &query, Region scope = Region::host());
@@ -646,6 +649,29 @@ namespace DetourModKit::scan
                                      bool prologue_fallback = false, bool require_unique = true,
                                      CandidateOrder order = CandidateOrder::AsDeclared,
                                      Pages pages = Pages::Readable) noexcept;
+
+    /**
+     * @brief Builds a borrowed ScanRequest preset for resolving a CODE (hook) target.
+     * @param ladder Candidates tried in order; borrowed for the call.
+     * @param label Optional diagnostic label; borrowed.
+     * @param scope Module image to resolve within; defaults to the host process image.
+     * @return A ScanRequest carrying the code-target resolution policy.
+     * @details A hook target must land on an instruction, so this preset differs from the default data-capable request
+     *          in three deliberate ways: Pages::Executable (an instruction signature scans only committed code pages,
+     *          so it cannot alias an identical byte run in .rdata / .data), CandidateOrder::UniqueFirst (promote the
+     *          unique-only text tiers and anchored byte patterns so a confident hit precedes a looser fallback), and
+     *          prologue_fallback (rebuild a Direct candidate's prologue as a near/far JMP to recover a target another
+     *          mod already inline-hooked). require_unique stays true. Pages::Executable narrows only the Direct /
+     *          RipRelative byte scans; the RTTI and string-xref tiers are unique-only by construction and resolve
+     *          through their own backends regardless, so a mixed ladder keeps its RTTI / string tiers intact. For a
+     *          data / RTTI / string target, use the default ScanRequest (Pages::Readable) or borrow().
+     * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation. For a stored or
+     *       deferred request, copy the fields onto an OwnedScanRequest (Pages::Executable, UniqueFirst, prologue
+     *       fallback) so the ladder is owned.
+     */
+    [[nodiscard]] ScanRequest borrow_code_target(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
+                                                 std::string_view label DMK_LIFETIMEBOUND = {},
+                                                 Region scope = Region::host()) noexcept;
 
     /**
      * @struct OwnedScanRequest

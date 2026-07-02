@@ -1125,3 +1125,53 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
         EXPECT_FALSE(to_string(code).empty());
     }
 }
+
+// borrow_code_target packs the code/hook-target resolution policy into a borrowed ScanRequest: Pages::Executable so an
+// instruction signature cannot alias a data-section run, UniqueFirst so the unique-only tiers lead, prologue_fallback
+// so a target another mod already inline-hooked is recovered, and require_unique kept true. The default request keeps
+// Pages::Readable for the data / RTTI / string tiers.
+TEST(ScanResolve, BorrowCodeTargetPresetsTheCodeTargetPolicy)
+{
+    ReadableBuffer buffer(0x400);
+    const std::array<Candidate, 1> ladder = {Candidate::direct("code-sig", scan::Pattern::literal("DE AD BE EF"))};
+
+    const scan::ScanRequest request = scan::borrow_code_target(ladder, "hook-target", buffer.region());
+
+    EXPECT_EQ(request.pages, scan::Pages::Executable);
+    EXPECT_EQ(request.order, scan::CandidateOrder::UniqueFirst);
+    EXPECT_TRUE(request.prologue_fallback);
+    EXPECT_TRUE(request.require_unique);
+    EXPECT_EQ(request.label, "hook-target");
+    EXPECT_EQ(request.scope.base.raw(), buffer.region().base.raw());
+    ASSERT_EQ(request.ladder.size(), 1U);
+    EXPECT_EQ(request.ladder[0].name(), "code-sig");
+}
+
+// End-to-end: a request built by borrow_code_target resolves a genuine code match (the Executable narrowing it presets
+// does not reject a match that really sits on an executable page), and excludes a match that lives only on a
+// non-executable data page (the aliasing footgun the preset closes).
+TEST(ScanResolve, BorrowCodeTargetResolvesCodeAndExcludesDataMatch)
+{
+    ExecutableBuffer code(0x400);
+    if (!code.valid())
+    {
+        GTEST_SKIP() << "could not allocate an executable buffer";
+    }
+    code.put(0x80, {0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("code-sig", scan::Pattern::literal("DE AD BE EF 11 22"))};
+
+    const auto code_hit = scan::resolve(scan::borrow_code_target(ladder, "code", code.region()));
+    ASSERT_TRUE(code_hit.has_value()) << code_hit.error().message();
+    EXPECT_EQ(code_hit->address.raw(), code.address_of(0x80));
+
+    // The same signature planted only on a readable-but-not-executable heap page is excluded by the preset's
+    // Pages::Executable, so the resolve fails closed instead of committing to a data-page address.
+    ReadableBuffer data(0x400);
+    data.put(0x80, {0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22});
+    const auto data_hit = scan::resolve(scan::borrow_code_target(ladder, "data", data.region()));
+    // Excluded: the match sits only on a non-executable page, so the preset's Pages::Executable never sees it and the
+    // resolve fails closed. The exact failure code depends on the preset's prologue fallback (which then also finds no
+    // executable prologue to rebuild), so assert the fail-closed outcome rather than a specific enum.
+    ASSERT_FALSE(data_hit.has_value());
+}

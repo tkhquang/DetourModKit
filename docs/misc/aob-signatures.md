@@ -250,6 +250,13 @@ const auto hit = sc::resolve(req);
 
 One scope covers both `.text` and `.rdata` / `.data` candidates via the `Pages::Readable` default. `ErrorCode::NoMatch` is returned when no candidate resolves; the resolver never falls back to a whole-process scan (which would re-introduce the cross-module shadowing the scoped request exists to prevent). With `prologue_fallback = true`, the rewritten near-JMP must be found inside the scope, but its jump destination may still point at a sibling mod's trampoline outside the module.
 
+For a hook target -- a signature that must land on an instruction, not data -- prefer `scan::borrow_code_target(ladder, label, scope)` over a hand-built request. It presets the code-target policy in one place: `Pages::Executable` (so an instruction signature cannot alias an identical byte run in `.rdata` / `.data`), `CandidateOrder::UniqueFirst`, and `prologue_fallback`, with `require_unique` kept true. `Pages::Executable` narrows only the byte tiers; a mixed ladder's RTTI and string-xref tiers still resolve through their own backends. Keep the default `Pages::Readable` (or `borrow()`) for a data / RTTI / string target.
+
+```cpp
+const auto hit = sc::resolve(
+    sc::borrow_code_target(k_candidates, "frustum", DetourModKit::Region::module_named(L"game.exe")));
+```
+
 > Use a named-module scope only for a single contiguous mapped image. For packed or protected targets whose code is unpacked into separate `VirtualAlloc` regions, use `Region::whole_process()` with `Pages::Executable`.
 
 #### Requiring a unique match (`require_unique`)
@@ -402,6 +409,8 @@ When the most stable thing about a target is the text it uses, anchor on the str
 
 1. Locate the literal in the image's readable pages (`.rdata` / `.data`). The linker pools identical strings, so a second occurrence is treated as ambiguous and the resolve fails closed (`StringAmbiguous`).
 2. Scan the image's execute-readable pages for the single RIP-relative reference whose resolved absolute target is that string, and return it. Zero references is `NoReference`; more than one is `AmbiguousReference`.
+
+Both phases also fail closed on incompleteness. If a page-gated window faults mid-scan under the TOCTOU guard (a concurrent decommit or reprotect skips it), the occurrence count becomes a lower bound, so a would-be-unique result is reported as `StringAmbiguous` (phase 1) or `AmbiguousReference` (phase 2) rather than a possibly-non-unique anchor. A hidden duplicate string or a second reference behind a faulted page is never returned as the unique result.
 
 ```cpp
 namespace sc = DetourModKit::scan;

@@ -83,5 +83,16 @@ namespace DetourModKit
                 .pages = pages,
             };
         }
+
+        ScanRequest borrow_code_target(std::span<const Candidate> ladder, std::string_view label,
+                                       Region scope) noexcept
+        {
+            // The code-target policy: scan only executable pages (an instruction signature must not alias a byte run in
+            // data), promote the unique-only / anchored tiers first, and enable hooked-prologue recovery so a target
+            // another mod already inline-hooked is still resolved. require_unique stays true. Routed through borrow()
+            // so the ScanRequest field set is defined in exactly one place.
+            return borrow(ladder, label, scope, /*prologue_fallback=*/true, /*require_unique=*/true,
+                          CandidateOrder::UniqueFirst, Pages::Executable);
+        }
     } // namespace scan
 } // namespace DetourModKit
