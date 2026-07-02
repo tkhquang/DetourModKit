@@ -663,8 +663,10 @@ namespace DetourModKit
         const std::string_view reason = to_string(result.error().code);
         if (required && m_config.escalate == HealEscalation::WarnRequired)
         {
-            (void)logger.try_log(LogLevel::Warning, "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
-                                 "if drifted)", label, reason, landmark.nominal_offset);
+            (void)logger.try_log(LogLevel::Warning,
+                                 "Self-heal: {} unresolved ({}); kept nominal {:#x} (re-author "
+                                 "if drifted)",
+                                 label, reason, landmark.nominal_offset);
         }
         else
         {
