@@ -179,15 +179,20 @@ namespace DetourModKit::detail
          * @param item The item to push. Moved into the queue on success only;
          *             left unchanged on failure so the caller can retry or handle overflow.
          * @return true if successful, false if queue is full.
+         * @note noexcept: the lock-free path is atomic loads/CAS plus a noexcept LogMessage move, so it never
+         *       allocates or throws. try_pop_batch and the writer's noexcept frames depend on this; the keyword makes
+         *       the contract explicit so a future throwing change fails to compile rather than silently terminating.
          */
-        [[nodiscard]] bool try_push(LogMessage &item);
+        [[nodiscard]] bool try_push(LogMessage &item) noexcept;
 
         /**
          * @brief Attempts to pop an item from the queue.
          * @param item Reference to store the popped item.
          * @return true if successful, false if queue is empty.
+         * @note noexcept: same non-throwing lock-free contract as try_push (atomic ops plus a noexcept LogMessage
+         *       move). try_pop_batch relies on it, so the keyword pins the guarantee at the type level.
          */
-        [[nodiscard]] bool try_pop(LogMessage &item);
+        [[nodiscard]] bool try_pop(LogMessage &item) noexcept;
 
         /**
          * @brief Attempts to pop multiple items up to a maximum count.

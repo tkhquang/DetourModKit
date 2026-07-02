@@ -351,7 +351,7 @@ namespace DetourModKit
             }
         }
 
-        bool DynamicMPMCQueue::try_push(LogMessage &item)
+        bool DynamicMPMCQueue::try_push(LogMessage &item) noexcept
         {
             size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
 
@@ -381,7 +381,7 @@ namespace DetourModKit
             }
         }
 
-        bool DynamicMPMCQueue::try_pop(LogMessage &item)
+        bool DynamicMPMCQueue::try_pop(LogMessage &item) noexcept
         {
             size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
 

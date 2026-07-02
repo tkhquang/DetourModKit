@@ -602,6 +602,72 @@ TEST(EventDispatcherTest, UnsubscribeInHandler_SeparateSameTypeDispatcher_Remove
     EXPECT_EQ(other_calls, 0) << "the removed handler must not fire on the other dispatcher's next emit";
 }
 
+TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoStaleCallback)
+{
+    // Concurrent counterpart to the single-threaded deferred-removal tests: two threads emit the SAME dispatcher
+    // instance in a tight loop while one subscription unsubscribes itself from inside its own handler. This drives the
+    // deferred-removal path under contention -- is_emitting_this_dispatcher() and enqueue_pending_removal() under one
+    // thread's guard, and drain_pending_removals() reached via the m_has_pending_removals flag by EITHER thread's
+    // EmitGuard, with both drains serialized on the writer mutex. It must remove the subscription exactly once
+    // (idempotent drain) and leave no stranded entry and no torn state. Run under TSan to also prove the flag and
+    // snapshot accesses are race-free; single-threaded coverage cannot.
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    std::atomic<int> self_calls{0};
+    std::atomic<bool> unsub_requested{false};
+    Subscription self_sub;
+    self_sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            self_calls.fetch_add(1, std::memory_order_relaxed);
+            // Exactly one handler invocation (whichever thread wins the CAS) requests the unsubscribe, so the shared
+            // Subscription object is never reset() from two threads at once. The request is deferred (this thread is
+            // mid-emit on this dispatcher) and drained by an EmitGuard on either thread.
+            bool expected = false;
+            if (unsub_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+            {
+                self_sub.reset();
+            }
+        });
+
+    // A permanent second subscription so the dispatcher is never empty and the removal shows up as a count drop.
+    std::atomic<int> keeper_calls{0};
+    auto keeper =
+        dispatcher.subscribe([&](const SimpleEvent &) { keeper_calls.fetch_add(1, std::memory_order_relaxed); });
+
+    constexpr int per_thread = 20000;
+    std::atomic<bool> go{false};
+    const auto emitter = [&]
+    {
+        while (!go.load(std::memory_order_acquire))
+        {
+        }
+        for (int i = 0; i < per_thread; ++i)
+        {
+            dispatcher.emit(SimpleEvent{i});
+        }
+    };
+
+    std::thread t1(emitter);
+    std::thread t2(emitter);
+    go.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+
+    // The self subscription must have been drained (only the permanent keeper remains) -- not stranded behind the
+    // concurrent emits, and removed exactly once despite both threads' guards racing to drain the flag.
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+
+    // After the drain, a fresh single-threaded emit must not invoke the removed handler again (no stale callback).
+    const int calls_after_join = self_calls.load(std::memory_order_relaxed);
+    dispatcher.emit(SimpleEvent{-1});
+    EXPECT_EQ(self_calls.load(std::memory_order_relaxed), calls_after_join)
+        << "the removed handler must not fire once its unsubscribe has been drained";
+    EXPECT_GT(keeper_calls.load(std::memory_order_relaxed), 0);
+
+    keeper.reset();
+}
+
 // --- Lock-free empty fast path ---
 
 TEST(EventDispatcherTest, EmptyFastPath_SkipsLock)
