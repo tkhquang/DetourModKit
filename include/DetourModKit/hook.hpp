@@ -26,6 +26,7 @@
 #include "DetourModKit/scan.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -222,9 +223,9 @@ namespace DetourModKit
             /**
              * @brief Refuse the install when the target already appears hooked.
              * @details The pre-flight first consults the process-wide ledger for an exact same-kit hook at the target
-             *          address, then falls back to a foreign-JMP prologue heuristic (an E9 rel32 or FF25 indirect jump
-             *          already at the site, decoded under a fault guard). The default (false) installs anyway and the
-             *          new hook simply layers on top.
+             *          address, then falls back to a foreign-JMP heuristic: an E9 rel32 jump, an FF25 indirect jump,
+             *          or a mov rax, imm64; jmp rax absolute-jump trampoline planted over the prologue, each decoded
+             *          under a fault guard. The default (false) installs anyway and the new hook layers on top.
              */
             bool fail_if_already_hooked = false;
         };
@@ -328,10 +329,28 @@ namespace DetourModKit
              *         real by-value C ABI.
              * @return The original's return value, or a value-initialized Ret when the hook is inactive / not inline.
              * @details The opt-in safety twin of @ref original, modelled on SafetyHook's own call/unsafe_call split.
-             *          It holds DMK's OWN per-hook recursive_mutex across the trampoline invocation, so @ref enable,
-             *          @ref disable, and ~Hook cannot run concurrently and free the trampoline mid-call. Reach for it
-             *          when the hook can be torn down (dynamically unloaded) while another thread is calling through
-             *          it; for the common hook-outlives-the-process case, @ref original is cheaper.
+             *          It pins a refcounted per-hook control block (the call gate: a recursive_mutex plus the currently
+             *          callable trampoline, published under that mutex) into a local strong reference BEFORE locking,
+             *          then holds the mutex across the trampoline invocation. Two properties follow. First, a
+             *          concurrent @ref enable / @ref disable / ~Hook / @ref operator=(Hook&&) that drops the handle's
+             *          own reference cannot free the gate itself while this call is entering: the local strong
+             *          reference keeps the gate (its mutex and its published-callable slot) alive until the call
+             *          returns, so a caller stalled just before locking still finds a live mutex to lock and a live
+             *          slot to read. A teardown that wins the race publishes a null callable under the mutex, so a
+             *          late caller reads null and fails closed to the inactive default rather than dispatching through
+             *          a freed trampoline. Second, the trampoline's own liveness comes from the mutex, not the gate
+             *          reference: a teardown frees the backend trampoline only after acquiring that same mutex and
+             *          nulling the callable, and this call holds the mutex across the dispatch, so a teardown cannot
+             *          free the trampoline while a call is in-flight. Reach for it when the hook can be torn down
+             *          (dynamically unloaded) while another thread is calling through it; for the common
+             *          hook-outlives-the-process case, @ref original is cheaper.
+             *
+             *          Lifetime precondition: the Hook object itself must outlive the call. The gate refcount keeps
+             *          the trampoline and mutex alive across a concurrent teardown, but reading this handle to reach
+             *          the gate is still an ordinary member access, so a caller must not race the destruction of the
+             *          `Hook` object's storage. Teardown work (restoring the prologue, freeing the trampoline) may run
+             *          concurrently with a call; only the handle's storage must remain alive until the member call has
+             *          copied the gate.
              *
              *          Parameters are `Args... args` BY VALUE (not a forwarding reference): for an lvalue argument a
              *          forwarding reference would deduce `Args` as a reference type, making the reconstructed
@@ -347,10 +366,12 @@ namespace DetourModKit
              */
             template <typename Ret = void, typename... Args> Ret call(Args... args) const
             {
-                // A disengaged handle (moved-from or released) has no Impl and therefore no call_mutex to lock; return
-                // the inactive default here so call() matches the null-tolerance of original()/active_trampoline()
-                // instead of dereferencing a null Impl inside acquire_call_lock().
-                if (!m_impl)
+                // Pin the shared call gate: copy the atomic shared_ptr into a local strong reference so a concurrent
+                // ~Hook / operator=(Hook&&) that drops the handle's own reference cannot free the gate's mutex or the
+                // published trampoline while this call is entering. A disengaged handle (moved-from or released) has
+                // an empty gate, so the null check below also covers it without dereferencing a null control block.
+                const std::shared_ptr<CallGate> gate = pin_call_gate();
+                if (!gate)
                 {
                     if constexpr (!std::is_void_v<Ret>)
                     {
@@ -361,10 +382,25 @@ namespace DetourModKit
                         return;
                     }
                 }
-                // Hold DMK's own per-hook guard for the whole invocation so a concurrent disable()/~Hook on another
-                // thread blocks until the call returns, instead of freeing the trampoline under our feet.
-                std::unique_lock<std::recursive_mutex> guard = acquire_call_lock();
-                void *trampoline = active_trampoline();
+                // acquire_call_lock is noexcept: on the rare recursive_mutex::lock failure (max recursion / resource
+                // exhaustion) it returns an unowned lock so the call fails closed here instead of dispatching
+                // unguarded or letting a std::system_error escape into a host that may be mid-teardown.
+                std::unique_lock<std::recursive_mutex> guard = acquire_call_lock(gate.get());
+                if (!guard.owns_lock())
+                {
+                    if constexpr (!std::is_void_v<Ret>)
+                    {
+                        return Ret{};
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
+                // Read the callable trampoline under the gate lock. A teardown that already published a null callable
+                // (and freed the backend) leaves this nullptr, so a late caller returns the inactive default instead
+                // of dispatching through a freed trampoline.
+                void *trampoline = active_trampoline(gate.get());
                 if (trampoline == nullptr)
                 {
                     if constexpr (!std::is_void_v<Ret>)
@@ -408,18 +444,38 @@ namespace DetourModKit
 
         private:
             struct Impl;
-            explicit Hook(std::unique_ptr<Impl> impl) noexcept;
+            /**
+             * @brief The refcounted per-hook call guard (recursive_mutex + published trampoline) defined in
+             *        src/internal/hook_backend.hpp.
+             * @details Held behind a shared_ptr so a late @ref call keeps the mutex and trampoline alive after the
+             *          handle's teardown drops its own reference; see @ref call and the CallGate definition.
+             */
+            struct CallGate;
+            Hook(std::unique_ptr<Impl> impl, std::shared_ptr<CallGate> gate) noexcept;
 
             /// Raw inline trampoline (or nullptr); the UNGUARDED backend touch behind original<Fn>(). Defined in .cpp.
             [[nodiscard]] void *original_address() const noexcept;
 
-            /// Locks DMK's per-hook recursive_mutex and returns the owning token; the call() guard. Defined in .cpp.
-            [[nodiscard]] std::unique_lock<std::recursive_mutex> acquire_call_lock() const;
+            /// Copies the atomic call-gate reference into a strong local for @ref call to pin. Defined in .cpp.
+            [[nodiscard]] std::shared_ptr<CallGate> pin_call_gate() const noexcept;
 
-            /// Inline trampoline if the hook is active, else nullptr; read with the call lock held. Defined in .cpp.
-            [[nodiscard]] void *active_trampoline() const noexcept;
+            /**
+             * @brief Locks the gate's recursive_mutex and returns the owning token; the @ref call guard. Defined in
+             *        .cpp.
+             * @details noexcept: a recursive_mutex::lock failure yields an unowned lock (the caller checks
+             *          owns_lock()) rather than throwing out of the non-noexcept @ref call.
+             */
+            [[nodiscard]] std::unique_lock<std::recursive_mutex> acquire_call_lock(CallGate *gate) const noexcept;
+
+            /// The gate's published callable trampoline (nullptr when inactive); read with the call lock held.
+            [[nodiscard]] void *active_trampoline(CallGate *gate) const noexcept;
 
             std::unique_ptr<Impl> m_impl;
+            /**
+             * @brief The shared call gate, held atomically so @ref call can pin it without racing a concurrent
+             *        teardown/move that publishes over it.
+             */
+            std::atomic<std::shared_ptr<CallGate>> m_gate;
 
             friend Result<Hook> mid_at(MidRequest request, MidHookFn detour);
             friend Result<Hook> detail::inline_at_raw(InlineRequest request, void *detour);
@@ -533,10 +589,12 @@ namespace DetourModKit
         [[nodiscard]] Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept;
 
         /**
-         * @brief Reports whether a DMK hook (this kit) currently patches @p target.
+         * @brief Reports whether a DMK hook (this kit) currently owns or is installing @p target.
          * @details Consults the process-wide ledger only; it is the exact same-kit query, not the foreign-JMP
          *          heuristic. Hooks installed by other statically-linked DMK consumers in the same process are not
-         *          visible. Use it to short-circuit a redundant install; to also catch foreign hooks, set
+         *          visible. During a concurrent install it may report true after the target is reserved but before the
+         *          backend patch is committed; that fail-closed bias prevents a redundant racing install from treating
+         *          the target as free. Use it to short-circuit a redundant install; to also catch foreign hooks, set
          *          Options::fail_if_already_hooked on the install instead.
          */
         [[nodiscard]] bool is_target_hooked(Address target) noexcept;
@@ -590,11 +648,13 @@ namespace DetourModKit
          * @warning Restoring a vptr is a bare pointer write with no thread protection: the caller must guarantee no
          *          thread is dispatching through a cloned slot across create/apply/remove, that each applied object
          *          outlives the hook, and that the object's vptr was not re-layered since the clone went on.
-         * @note Concurrency: @ref original copies the pre-hook slot pointer out under a shared-read lock and returns
-         *       it, so a lock-free call through that pointer is serialised against a concurrent @ref apply_to /
-         *       @ref hook_method / @ref remove_method (each takes the matching exclusive write). The lock guards the
-         *       snapshot, not the call: the caller still owns the hook-outlives-the-call guarantee, exactly as with
-         *       @ref Hook::original.
+         * @note Concurrency: object-vptr transitions in @ref vmt_for / @ref apply_to / @ref remove_from / teardown are
+         *       serialized by a setup-time object gate so duplicate create/apply checks and swaps are one ordered
+         *       operation. @ref original copies the pre-hook slot pointer out under a shared-read lock and returns it,
+         *       so TAKING that snapshot is serialised against a concurrent @ref apply_to / @ref hook_method /
+         *       @ref remove_method (each takes the matching exclusive write) and never reads a torn mutation. The lock
+         *       guards the snapshot, not the call: the returned pointer is then invoked lock-free, so the caller still
+         *       owns the hook-outlives-the-call guarantee, exactly as with @ref Hook::original.
          */
         class VmtHook
         {
