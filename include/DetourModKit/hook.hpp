@@ -333,14 +333,17 @@ namespace DetourModKit
              *          callable trampoline, published under that mutex) into a local strong reference BEFORE locking,
              *          then holds the mutex across the trampoline invocation. Two properties follow. First, a
              *          concurrent @ref enable / @ref disable / ~Hook / @ref operator=(Hook&&) that drops the handle's
-             *          own reference cannot free the gate while this call is entering: the trampoline the guarded
-             *          dispatch runs is kept alive by the local reference until the call returns, and a teardown that
-             *          wins the race publishes a null callable under the mutex so a late caller fails closed to the
-             *          inactive default rather than dispatching through a freed trampoline. Second, because the mutex
-             *          is held across the dispatch, a teardown cannot START freeing the trampoline while a call is
-             *          in-flight. Reach for it when the hook can be torn down (dynamically unloaded) while another
-             *          thread is calling through it; for the common hook-outlives-the-process case, @ref original is
-             *          cheaper.
+             *          own reference cannot free the gate itself while this call is entering: the local strong
+             *          reference keeps the gate (its mutex and its published-callable slot) alive until the call
+             *          returns, so a caller stalled just before locking still finds a live mutex to lock and a live
+             *          slot to read. A teardown that wins the race publishes a null callable under the mutex, so a
+             *          late caller reads null and fails closed to the inactive default rather than dispatching through
+             *          a freed trampoline. Second, the trampoline's own liveness comes from the mutex, not the gate
+             *          reference: a teardown frees the backend trampoline only after acquiring that same mutex and
+             *          nulling the callable, and this call holds the mutex across the dispatch, so a teardown cannot
+             *          free the trampoline while a call is in-flight. Reach for it when the hook can be torn down
+             *          (dynamically unloaded) while another thread is calling through it; for the common
+             *          hook-outlives-the-process case, @ref original is cheaper.
              *
              *          Lifetime precondition: the Hook object itself must outlive the call. The gate refcount keeps
              *          the trampoline and mutex alive across a concurrent teardown, but reading this handle to reach
@@ -648,10 +651,10 @@ namespace DetourModKit
          * @note Concurrency: object-vptr transitions in @ref vmt_for / @ref apply_to / @ref remove_from / teardown are
          *       serialized by a setup-time object gate so duplicate create/apply checks and swaps are one ordered
          *       operation. @ref original copies the pre-hook slot pointer out under a shared-read lock and returns it,
-         *       so a lock-free call through that pointer is serialised against a concurrent @ref apply_to /
-         *       @ref hook_method / @ref remove_method (each takes the matching exclusive write). The lock guards the
-         *       snapshot, not the call: the caller still owns the hook-outlives-the-call guarantee, exactly as with
-         *       @ref Hook::original.
+         *       so TAKING that snapshot is serialised against a concurrent @ref apply_to / @ref hook_method /
+         *       @ref remove_method (each takes the matching exclusive write) and never reads a torn mutation. The lock
+         *       guards the snapshot, not the call: the returned pointer is then invoked lock-free, so the caller still
+         *       owns the hook-outlives-the-call guarantee, exactly as with @ref Hook::original.
          */
         class VmtHook
         {

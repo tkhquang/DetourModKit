@@ -113,6 +113,13 @@ namespace DetourModKit
                         // (ids are a monotonic counter with no reuse requirement).
                         return Reservation{ReserveStatus::AlreadyHooked, 0, true};
                     }
+                    // No fixed ceiling on order/pending: unlike an event-rate backlog (AGENTS.md's bounded-backlog
+                    // rule targets queues fed at an external event rate), this ledger is fed only by DMK install
+                    // calls. `order` is the live/reserved hook set for the target -- capping it would refuse
+                    // legitimate layering, and a real backend hook per entry already bounds it by backend resources
+                    // -- and `pending` holds only in-flight reservations, bounded by the number of concurrent
+                    // installer threads (a single thread must commit or release before reserving the same target
+                    // again, or it deadlocks on the wait below per the @warning, so it cannot grow the queue alone).
                     if (preexisting)
                     {
                         // Layering on an already-tracked target: push_back gives the strong guarantee, so a failed

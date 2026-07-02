@@ -1544,13 +1544,11 @@ namespace DetourModKit
                     return std::unexpected(
                         Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
                 }
-                // make_unique and the info log, the only steps that can throw under OOM, run before the ledger record
-                // so a throw unwinds `impl` (restoring the object's vptr) without leaving a phantom ledger entry.
+                // make_unique, the only step that can still throw under OOM, runs before the ledger record so a throw
+                // unwinds `impl` (restoring the object's vptr) without leaving a phantom ledger entry.
                 auto impl =
                     std::make_unique<VmtHook::Impl>(std::move(backend_hook), std::move(name), *base, *method_count, 0);
                 const std::string_view created_name = impl->name;
-                log().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
-                           format::format_address(reinterpret_cast<std::uintptr_t>(object)));
                 // Record the clone as the final committed step. try_record_vmt is noexcept: on an out-of-memory
                 // bookkeeping failure it returns nullopt, and failing the create here unwinds `impl` (restoring the
                 // vptr off the clone) rather than leaving a live-but-untracked clone that is_vmt_clone_base cannot see.
@@ -1562,11 +1560,24 @@ namespace DetourModKit
                 }
                 impl->ledger_id = *recorded;
                 // The object gate has served its purpose (the check / vptr swap / ledger record are now one ordered
-                // step). Release it BEFORE dispatching the lifecycle event: emit_lifecycle runs arbitrary subscriber
-                // code, which must not execute while the process-wide VMT mutex is held (CP.22 -- never call unknown
-                // code under a lock), or a subscriber that re-enters vmt_for/apply_to/remove_from on this thread would
-                // self-deadlock on the non-recursive mutex.
+                // step). Release it BEFORE the create log and the lifecycle event: emit_lifecycle runs arbitrary
+                // subscriber code, which must not execute while the process-wide VMT mutex is held (CP.22 -- never call
+                // unknown code under a lock), or a subscriber that re-enters vmt_for/apply_to/remove_from on this
+                // thread would self-deadlock on the non-recursive mutex; and the info log formats a std::string and
+                // touches the sink, work that likewise must not run under a process-wide gate that serializes every VMT
+                // transition.
                 object_gate.unlock();
+                // Best-effort post-commit log, now outside the gate. log().info can throw bad_alloc on the format, so
+                // contain it and degrade to no log line rather than failing an already-committed clone (matching the
+                // post-commit logs in hook_method_raw / remove_method).
+                try
+                {
+                    log().info("hook::vmt_for: created VMT hook '{}' on object {}.", created_name,
+                               format::format_address(reinterpret_cast<std::uintptr_t>(object)));
+                }
+                catch (...)
+                {
+                }
                 emit_lifecycle(created_name, *recorded, diagnostics::HookKind::Vmt,
                                diagnostics::HookTransition::Created);
                 return VmtHook(std::move(impl));

@@ -422,7 +422,18 @@ TEST(HookLedger, SameTargetReservationsWaitForCommit)
             (void)ledger.release_hook(target, second.id);
         });
 
-    ASSERT_TRUE(wait_for_flag(second_started, 100));
+    // Wait for the waiter to enter try_reserve_hook. If it does not start in time, tear it down safely before
+    // failing: an early return here would destroy a still-joinable std::thread and call std::terminate. Committing
+    // first unblocks the waiter's pending reservation so the join cannot hang, and allow_second_cleanup releases its
+    // post-reservation cleanup loop.
+    if (!wait_for_flag(second_started, 100))
+    {
+        ledger.commit_hook(target, first.id);
+        allow_second_cleanup.store(true, std::memory_order_release);
+        waiter.join();
+        (void)ledger.release_hook(target, first.id);
+        FAIL() << "waiter thread did not start within the timeout";
+    }
     EXPECT_FALSE(wait_for_flag(second_returned, 20));
 
     ledger.commit_hook(target, first.id);
@@ -493,14 +504,14 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
     Hook dest = std::move(*first);
     EXPECT_EQ(echo(7), 107); // echo hooked by dest
 
-    Result<Hook> second = inline_at(
-        InlineRequest{.name = "MoveAssignNew", .target = addr_of(&real_hook_target_add)}, &real_hook_detour_add);
+    Result<Hook> second = inline_at(InlineRequest{.name = "MoveAssignNew", .target = addr_of(&real_hook_target_add)},
+                                    &real_hook_detour_add);
     ASSERT_TRUE(second.has_value()) << second.error().message();
     Hook src = std::move(*second);
 
     // Move-assign src over dest: dest's old echo hook is torn down (echo restored) and dest adopts src's hook + gate.
     dest = std::move(src);
-    EXPECT_EQ(echo(7), 7);              // dest's overwritten echo hook was restored by the discard teardown
+    EXPECT_EQ(echo(7), 7);                // dest's overwritten echo hook was restored by the discard teardown
     EXPECT_FALSE(static_cast<bool>(src)); // src is moved-from / inert
     EXPECT_EQ(src.call<int>(3), int{});   // a guarded call on the moved-from handle is a defined no-op (empty gate)
 

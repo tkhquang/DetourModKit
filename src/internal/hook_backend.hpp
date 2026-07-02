@@ -65,8 +65,12 @@ namespace DetourModKit
          *
          *          The mutex is recursive because a detour may re-enter @ref Hook::call on the same handle (the
          *          original it calls can itself be hooked). `callable` is the inline trampoline while the hook is armed
-         *          and inline, and nullptr otherwise (a disabled hook, a mid hook, or a torn-down hook). It is a plain
-         *          pointer guarded by `mutex`, not an atomic, because every reader and writer holds `mutex`.
+         *          and inline, and nullptr otherwise: a disabled hook, a mid hook, or a normally torn-down hook (~Hook
+         *          nulls it under `mutex` before freeing the backend). The one exception is the loader-lock teardown
+         *          branch, which intentionally leaks the backend with the module pinned and LEAVES `callable` set, so a
+         *          late guarded @ref Hook::call through a still-pinned gate keeps dispatching to the leaked-but-live
+         *          trampoline. It is a plain pointer guarded by `mutex`, not an atomic, because every reader and writer
+         *          holds `mutex`.
          */
         struct Hook::CallGate
         {
