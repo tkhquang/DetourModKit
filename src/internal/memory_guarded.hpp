@@ -76,6 +76,22 @@ namespace DetourModKit
         [[nodiscard]] Region module_image_region(Address module_base) noexcept;
 
         /**
+         * @brief module_image_region cached per module handle for the process lifetime.
+         * @param module_base The module's base address (its HMODULE value); null yields an empty Region.
+         * @return The module image span, or an empty Region when @p module_base is null or its PE headers do not
+         *         validate. Only valid (non-empty) results are cached.
+         * @details The caching front end to @ref module_image_region, backed by a process-lifetime handle-keyed cache
+         *          (a shared-lock hit on the fast path, an exclusive insert on the first resolve). memory::module_of and
+         *          region.cpp's Region factories (host / own / module_named) both route through this so a repeated
+         *          module-range query degenerates to a loader handle lookup plus a hash hit, instead of re-walking the
+         *          PE headers (DOS magic, e_lfanew, NT signature, SizeOfImage) through the guarded engine every call.
+         *          Entries are never invalidated on module unload, so a handle reused after unload can return a stale
+         *          span -- an intentional, fault-contained tradeoff for the transient non-owning Region contract; the
+         *          rationale (and when to resolve fresh instead) is documented on ModuleRangeCache in memory_module.cpp.
+         */
+        [[nodiscard]] Region cached_module_image_region(Address module_base) noexcept;
+
+        /**
          * @brief Guarded copy of @p bytes bytes from @p address into @p out.
          * @param address Source address. Below memory::USERSPACE_PTR_MIN, or an end that wraps the address space, is
          *                rejected without a read.
@@ -127,21 +143,33 @@ namespace DetourModKit
             Ok,
             /// The page could not be made writable; nothing was written.
             ProtectionChangeFailed,
+            /**
+             * The page was made writable but the guarded copy faulted (a concurrent reprotect / decommit of the
+             * target); the original protection has been restored and the instruction cache flushed, and the write is
+             * reported as failed rather than terminating the host. The target may have been partially written.
+             */
+            WriteFaulted,
             /// The bytes were written but the original protection could not be restored.
             ProtectionRestoreFailed
         };
 
         /**
-         * @brief Changes @p address's page(s) to writable, copies @p bytes, flushes the instruction cache, and restores
-         *        the original protection.
+         * @brief Changes @p address's page(s) to writable, copies @p bytes through the fault guard, flushes the
+         *        instruction cache, and restores the original protection.
          * @param address Destination address (caller has validated it is non-null and the size is in bounds).
          * @param source Source buffer.
          * @param bytes Byte count (caller has validated it is non-zero and within memory::MAX_WRITE_SIZE).
-         * @param os_error Receives the OS error code from the failing VirtualProtect when the result is not Ok.
+         * @param os_error Receives the OS error code from the failing VirtualProtect when the result is
+         *        ProtectionChangeFailed or ProtectionRestoreFailed.
          * @return PatchStatus describing how far the protect / write / restore sequence got.
          * @details The slow path for read-only or executable targets (code patches). It is reached only after the
          *          no-reprotect guarded_write_bytes faulted, so the cache invalidation that must follow a protection
-         *          change is the caller's responsibility (it owns the public memory::invalidate_range surface).
+         *          change is the caller's responsibility (it owns the public memory::invalidate_range surface). The copy
+         *          runs through guarded_write_bytes rather than a bare memcpy so that a fault mid-copy (the page
+         *          reprotected or unmapped out from under this noexcept host path) is contained: the protection restore
+         *          and the flush still run on that exit, `ProtectionRestoreFailed` takes priority if the restore fails,
+         *          and otherwise the caller learns the write did not complete (`WriteFaulted`) instead of the process
+         *          terminating.
          */
         [[nodiscard]] PatchStatus patch_bytes(std::uintptr_t address, const void *source, std::size_t bytes,
                                               std::uint32_t &os_error) noexcept;

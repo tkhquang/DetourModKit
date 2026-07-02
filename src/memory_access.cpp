@@ -75,6 +75,12 @@ namespace DetourModKit
             case detail::PatchStatus::Ok:
                 invalidate_range(Region{address, source.size()});
                 return {};
+            case detail::PatchStatus::WriteFaulted:
+                // The slow path changed protection (so a cached entry may describe the pre-change state) but the
+                // guarded copy faulted; the engine has already restored the original protection and flushed. Invalidate
+                // the range and fail closed rather than reporting a write that did not complete.
+                invalidate_range(Region{address, source.size()});
+                return std::unexpected(Error{ErrorCode::WriteFaulted, "memory::write_bytes", address.raw(), 0});
             case detail::PatchStatus::ProtectionRestoreFailed:
                 invalidate_range(Region{address, source.size()});
                 return std::unexpected(
@@ -101,6 +107,13 @@ namespace DetourModKit
             if (source.empty())
             {
                 return {};
+            }
+            // Cap oversized spans for parity with write_bytes: the guarded copy already fails closed at the first
+            // unwritable page, so this is an API-symmetry guard that rejects an obviously-wrong length up front with
+            // the same ErrorCode::SizeTooLarge rather than attempting a multi-gigabyte guarded copy.
+            if (source.size() > MAX_WRITE_SIZE)
+            {
+                return std::unexpected(Error{ErrorCode::SizeTooLarge, "memory::write_in_place", address.raw(), 0});
             }
 
             // The strict path: a guarded write that changes NO protection. A read-only, executable, or no-access target

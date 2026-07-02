@@ -17,6 +17,9 @@
 #include "internal/memory_guarded.hpp"
 #include "internal/memory_fault.hpp"
 
+// Deterministic thread-local out-of-memory injection for the ProtectGuard allocation-failure test.
+#include "test_alloc_probe.hpp"
+
 using namespace DetourModKit;
 
 namespace
@@ -2962,4 +2965,226 @@ TEST_F(MemoryTest, RegionOwn_ContainsDmkFunctionAndModuleOfAgrees)
 TEST(MemoryErrorTest, ToString_ReadFaulted)
 {
     EXPECT_EQ(to_string(ErrorCode::ReadFaulted), "ReadFaulted");
+}
+
+// Memory-fault containment and cache coherence.
+
+namespace
+{
+    // Current page protection of a single address via VirtualQuery, or 0 when the query fails.
+    [[nodiscard]] DWORD current_page_protection(const void *address) noexcept
+    {
+        MEMORY_BASIC_INFORMATION mbi{};
+        if (VirtualQuery(address, &mbi, sizeof(mbi)) == 0)
+        {
+            return 0;
+        }
+        return mbi.Protect;
+    }
+} // namespace
+
+// write_bytes' protection-changing slow path routes its copy through the guarded writer and restores the ORIGINAL
+// protection on the success exit, so a patched read-only page ends up read-only again rather than stranded writable.
+TEST_F(MemoryTest, WriteBytes_ReadOnlyPageRestoresProtectionAfterSlowPath)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem, nullptr);
+    auto *target = static_cast<std::byte *>(mem);
+
+    const std::array<std::byte, 4> source{std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}};
+    const auto result = memory::write_bytes(Address{target}, std::span<const std::byte>{source});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(target[0], std::byte{0x11});
+    EXPECT_EQ(target[3], std::byte{0x44});
+
+    // The captured original protection is restored after the guarded copy: the page is read-only again.
+    EXPECT_EQ(current_page_protection(mem), static_cast<DWORD>(PAGE_READONLY));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// Patching an executable page leaves it PAGE_EXECUTE_READ, never stranded PAGE_EXECUTE_READWRITE: the slow path
+// restores the captured original protection, so a code patch cannot leave an RWX page behind for an attacker to reuse.
+TEST_F(MemoryTest, WriteBytes_ExecutablePageRestoresExecuteProtection)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ);
+    ASSERT_NE(mem, nullptr);
+    auto *target = static_cast<std::byte *>(mem);
+
+    const std::array<std::byte, 3> source{std::byte{0x90}, std::byte{0x90}, std::byte{0xC3}};
+    const auto result = memory::write_bytes(Address{target}, std::span<const std::byte>{source});
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(target[2], std::byte{0xC3});
+
+    EXPECT_EQ(current_page_protection(mem), static_cast<DWORD>(PAGE_EXECUTE_READ));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// write_in_place rejects an oversized span with SizeTooLarge, matching write_bytes' cap. The source pointer is never
+// dereferenced -- the cap is checked before any copy -- so an obviously-wrong length is a clean rejection.
+TEST_F(MemoryTest, WriteInPlace_SizeTooLarge)
+{
+    std::array<std::byte, 16> target{};
+    const std::byte source_byte{0xAB};
+    const auto result = memory::write_in_place(Address{target.data()},
+                                               std::span<const std::byte>{&source_byte, memory::MAX_WRITE_SIZE + 1});
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::SizeTooLarge);
+}
+
+// ProtectGuard::make allocates its capture state BEFORE changing protection, so an allocation failure leaves the page's
+// protection untouched (no leak) and is reported as OutOfMemory rather than thrown out of the noexcept factory. OOM is
+// injected deterministically on this thread for the single make() call.
+TEST_F(MemoryTest, ProtectGuard_BadAllocDoesNotLeakProtection)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem, nullptr);
+
+    bool has_value = true;
+    ErrorCode code = ErrorCode::ProtectionChangeFailed; // sentinel distinct from the expected OutOfMemory
+    {
+        // allow = 0 fails the very first throwing operator new on this thread: the make() pimpl allocation. No gtest
+        // macro (which would allocate) runs inside the armed window.
+        dmk_test::AllocFailScope fail{0};
+        auto guard = memory::ProtectGuard::make(Region{Address{mem}, 4096}, Prot::RW);
+        has_value = guard.has_value();
+        if (!has_value)
+        {
+            code = guard.error().code;
+        }
+    }
+
+    EXPECT_FALSE(has_value);
+    EXPECT_EQ(code, ErrorCode::OutOfMemory);
+    // The protection change never ran, so the page is still read-only: no leaked PAGE_READWRITE.
+    EXPECT_EQ(current_page_protection(mem), static_cast<DWORD>(PAGE_READONLY));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// ProtectGuard::make and ~ProtectGuard each invalidate the protection cache for the guarded span, so a stale
+// is_writable snapshot cannot survive the protection change or its restoration.
+TEST_F(MemoryTest, ProtectGuard_MakeAndDestroyInvalidateCache)
+{
+    memory::shutdown_cache();
+    ASSERT_TRUE(memory::init_cache(16, 60000));
+
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem, nullptr);
+
+    // Prime the cache: the read-only page caches "not writable".
+    EXPECT_FALSE(is_writable(mem, 1));
+
+    {
+        auto guard = memory::ProtectGuard::make(Region{Address{mem}, 4096}, Prot::RW);
+        ASSERT_TRUE(guard.has_value());
+        // make() dropped the stale entry, so a re-query sees the now-writable page rather than the cached "no".
+        EXPECT_TRUE(is_writable(mem, 1));
+    }
+
+    // ~ProtectGuard restored PAGE_READONLY and invalidated again, so is_writable re-queries and sees read-only.
+    EXPECT_FALSE(is_writable(mem, 1));
+
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// Move-assigning into an armed guard restores the guard's OWN region before adopting the source's, so reassignment
+// never silently abandons a protection change the destination still owned.
+TEST_F(MemoryTest, ProtectGuard_MoveAssignRestoresReplacedRegion)
+{
+    void *mem1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    void *mem2 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READONLY);
+    ASSERT_NE(mem1, nullptr);
+    ASSERT_NE(mem2, nullptr);
+
+    auto r1 = memory::ProtectGuard::make(Region{Address{mem1}, 4096}, Prot::RW);
+    auto r2 = memory::ProtectGuard::make(Region{Address{mem2}, 4096}, Prot::RW);
+    ASSERT_TRUE(r1.has_value());
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(current_page_protection(mem1), static_cast<DWORD>(PAGE_READWRITE));
+    EXPECT_EQ(current_page_protection(mem2), static_cast<DWORD>(PAGE_READWRITE));
+
+    {
+        memory::ProtectGuard g1 = std::move(*r1);
+        memory::ProtectGuard g2 = std::move(*r2);
+
+        // Move-assign: g1 restores its own region (mem1 -> read-only) before adopting g2's (mem2 stays writable).
+        g1 = std::move(g2);
+        EXPECT_EQ(current_page_protection(mem1), static_cast<DWORD>(PAGE_READONLY));
+        EXPECT_EQ(current_page_protection(mem2), static_cast<DWORD>(PAGE_READWRITE));
+    } // g1 (now owning mem2) restores mem2 -> read-only on destruction
+
+    EXPECT_EQ(current_page_protection(mem1), static_cast<DWORD>(PAGE_READONLY));
+    EXPECT_EQ(current_page_protection(mem2), static_cast<DWORD>(PAGE_READONLY));
+
+    VirtualFree(mem1, 0, MEM_RELEASE);
+    VirtualFree(mem2, 0, MEM_RELEASE);
+}
+
+// get_memory_stats walks the shard array behind the reader guard and the SAME seq_cst s_cache_initialized gate the
+// permission readers use, so a concurrent shutdown_cache (which frees that array) cannot pull it out from under the
+// stats loop, and cannot tear the config snapshot against its field-by-field zeroing.
+TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
+{
+    std::atomic<bool> stop{false};
+    std::atomic<bool> torn{false};
+    std::atomic<long long> reads{0};
+
+    std::vector<std::thread> readers;
+    for (int i = 0; i < 4; ++i)
+    {
+        readers.emplace_back(
+            [&stop, &torn, &reads]() -> void
+            {
+                while (!stop.load(std::memory_order_relaxed))
+                {
+                    const memory::MemoryStats s = memory::get_memory_stats();
+                    // Snapshot coherence, recorded via a flag because gtest macros are not safe to call off the main
+                    // thread. A down cache reports every shard-derived field as zero; a live cache (non-zero shard
+                    // count) reports the configured non-zero expiry, never a torn mix of the two.
+                    if (s.shard_count == 0)
+                    {
+                        if (s.total_entries != 0 || s.hard_max_per_shard != 0 || s.max_entries_per_shard != 0 ||
+                            s.expiry_ms != 0)
+                        {
+                            torn.store(true, std::memory_order_relaxed);
+                        }
+                    }
+                    else if (s.expiry_ms == 0)
+                    {
+                        torn.store(true, std::memory_order_relaxed);
+                    }
+                    reads.fetch_add(1, std::memory_order_relaxed);
+                }
+            });
+    }
+
+    // A failed init must NOT longjmp out of the test via ASSERT_* while the reader threads are still running: that would
+    // skip the join loop below and destroy joinable std::thread objects, calling std::terminate. Record the failure,
+    // break, and let stop + join + the assert run afterwards.
+    bool init_ok = true;
+    for (int cycle = 0; cycle < 200 && init_ok; ++cycle)
+    {
+        memory::shutdown_cache();
+        init_ok = memory::init_cache(64, 10000);
+        if (!init_ok)
+        {
+            break;
+        }
+        // Populate an entry so the stats loop has shard content to walk during the race.
+        int probe = 0;
+        (void)memory::is_readable(Region{Address{&probe}, sizeof(probe)});
+    }
+
+    stop.store(true, std::memory_order_relaxed);
+    for (auto &t : readers)
+    {
+        t.join();
+    }
+
+    EXPECT_TRUE(init_ok);
+    EXPECT_GT(reads.load(), 0);
+    EXPECT_FALSE(torn.load());
+    // The loop ended with the cache initialized (64, 10000); the fixture TearDown shuts it down.
 }
