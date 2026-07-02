@@ -358,7 +358,7 @@ namespace DetourModKit
          * passes straight through; a deferred OwnedScanRequest is resolved through
          *          scan::resolve and its winning address returned (or its Error).
          */
-        // NOLINTNEXTLINE(bugprone-exception-escape): scan::resolve's throw is caught below; std::get is on a checked variant
+        // NOLINTNEXTLINE(bugprone-exception-escape): scan::resolve throw is caught; std::get is on a checked variant
         Result<std::uintptr_t> resolve_target(const hook::Target &target) noexcept
         {
             if (const Address *absolute = std::get_if<Address>(&target))
