@@ -609,19 +609,38 @@ namespace DetourModKit
             return PatchStatus::ProtectionChangeFailed;
         }
 
-        std::memcpy(reinterpret_cast<void *>(address), source, bytes);
+        // Route the store through the fault-guarded writer rather than a bare memcpy. The page was just made writable,
+        // so on a quiescent target this takes guarded_write_bytes' no-reprotect fast path (a single guarded copy, no
+        // further syscall). The guard is what makes this noexcept host path survivable: if the page is reprotected or
+        // decommitted out from under the store (a concurrent unmap of a code region being patched), the fault is
+        // contained and reported here instead of terminating the host, and the restore + flush below still run before
+        // status is reported.
+        const bool copied = guarded_write_bytes(address, source, bytes);
 
-        // The bytes are now modified, so the instruction-cache flush and the protection restore must both run. Restore
-        // first so its outcome is known, but keep the flush unconditional: a code patch that changed bytes must flush
-        // even if the restore fails, or a stale instruction stream could execute the old bytes.
+        // The protection was changed and the bytes may have been (partially) modified, so the instruction-cache flush
+        // and the protection restore must BOTH run on every exit from here -- including the copy-fault path. Restore
+        // first so its outcome is known, but keep the flush unconditional: a code patch that changed any byte must
+        // flush even if the restore fails, or a stale instruction stream could execute the old bytes.
         DWORD restored_from = 0;
         const bool restore_succeeded =
             VirtualProtect(reinterpret_cast<LPVOID>(address), bytes, old_protection, &restored_from) != FALSE;
-        if (!restore_succeeded)
-            os_error = static_cast<std::uint32_t>(GetLastError());
+        // Capture the restore's OS error BEFORE FlushInstructionCache, which would otherwise overwrite GetLastError().
+        const std::uint32_t restore_error = restore_succeeded ? 0u : static_cast<std::uint32_t>(GetLastError());
 
         FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), bytes);
 
-        return restore_succeeded ? PatchStatus::Ok : PatchStatus::ProtectionRestoreFailed;
+        if (!restore_succeeded)
+        {
+            os_error = restore_error;
+            return PatchStatus::ProtectionRestoreFailed;
+        }
+        if (!copied)
+        {
+            // The guarded store faulted after protection was changed (target reprotected / unmapped concurrently), and
+            // the restore above succeeded. Report the write failure so the caller fails closed rather than assuming the
+            // patch landed. os_error stays 0: this is a hardware fault, not a VirtualProtect API failure.
+            return PatchStatus::WriteFaulted;
+        }
+        return PatchStatus::Ok;
     }
 } // namespace DetourModKit

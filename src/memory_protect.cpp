@@ -14,6 +14,7 @@
 #include <windows.h>
 
 #include <memory>
+#include <new>
 #include <utility>
 
 namespace DetourModKit
@@ -73,13 +74,17 @@ namespace DetourModKit
                     DWORD restored_from = 0;
                     VirtualProtect(reinterpret_cast<LPVOID>(m_impl->base), m_impl->size, m_impl->old_protection,
                                    &restored_from);
+                    // The restore changed protection, so drop any cached snapshot of the range taken while the guard
+                    // held it writable, matching the invalidation write_bytes and make() perform on a protection
+                    // change.
+                    invalidate_range(Region{Address{m_impl->base}, m_impl->size});
                 }
                 m_impl = std::move(other.m_impl);
             }
             return *this;
         }
 
-        ProtectGuard::~ProtectGuard()
+        ProtectGuard::~ProtectGuard() noexcept
         {
             if (!m_impl)
             {
@@ -90,6 +95,9 @@ namespace DetourModKit
             DWORD restored_from = 0;
             VirtualProtect(reinterpret_cast<LPVOID>(m_impl->base), m_impl->size, m_impl->old_protection,
                            &restored_from);
+            // The protection just changed back, so a cached snapshot taken while the page was writable is now stale;
+            // drop the range so a later is_readable / is_writable re-queries the restored protection.
+            invalidate_range(Region{Address{m_impl->base}, m_impl->size});
         }
 
         ProtectGuard::operator bool() const noexcept
@@ -103,7 +111,7 @@ namespace DetourModKit
             m_impl.reset();
         }
 
-        Result<ProtectGuard> ProtectGuard::make(Region region, Prot protection)
+        Result<ProtectGuard> ProtectGuard::make(Region region, Prot protection) noexcept
         {
             // An empty region (null base or zero size) has no pages to protect; fail closed rather than issue a
             // VirtualProtect on a degenerate range.
@@ -113,6 +121,21 @@ namespace DetourModKit
                     Error{ErrorCode::ProtectionChangeFailed, "memory::ProtectGuard::make", region.base.raw(), 0});
             }
 
+            // Allocate the capture state BEFORE changing protection. If this throws (OOM), the guard fails with no
+            // protection change to leak; the reverse order -- VirtualProtect then allocate -- would strand the region
+            // in the changed protection with no guard to restore it if the allocation threw. make() is noexcept, so the
+            // bad_alloc is caught and reported as an error rather than propagating out of the factory.
+            std::unique_ptr<Impl> impl;
+            try
+            {
+                impl = std::make_unique<Impl>();
+            }
+            catch (const std::bad_alloc &)
+            {
+                return std::unexpected(
+                    Error{ErrorCode::OutOfMemory, "memory::ProtectGuard::make", region.base.raw(), 0});
+            }
+
             DWORD old_protection = 0;
             if (!VirtualProtect(region.base.ptr<void>(), region.size, prot_to_win32(protection), &old_protection))
             {
@@ -120,11 +143,16 @@ namespace DetourModKit
                                              region.base.raw(), static_cast<std::uint32_t>(GetLastError())});
             }
 
+            impl->base = region.base.raw();
+            impl->size = region.size;
+            impl->old_protection = old_protection;
+
+            // The page protection just changed, so any cached snapshot for this range is stale; drop it so a later
+            // is_readable / is_writable re-queries, mirroring write_bytes' invalidate on its protection-changing path.
+            invalidate_range(region);
+
             ProtectGuard guard;
-            guard.m_impl = std::make_unique<Impl>();
-            guard.m_impl->base = region.base.raw();
-            guard.m_impl->size = region.size;
-            guard.m_impl->old_protection = old_protection;
+            guard.m_impl = std::move(impl);
             return guard;
         }
     } // namespace memory
