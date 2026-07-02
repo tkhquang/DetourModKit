@@ -504,8 +504,18 @@ namespace DetourModKit
             // write racing the worker's read (UB) and a wait-on-a-closed/recycled-handle. Leak both handles instead --
             // the OS reclaims them at process exit -- and record the intentional leak. A mod needing a drained unload
             // calls request_shutdown() off the loader lock first (which routes to the join path below); DetourModKit
-            // does not guarantee graceful worker teardown for a bare FreeLibrary. s_module is not touched by the
-            // worker, so clear it so module_handle() stops naming the unloading module.
+            // does not guarantee graceful worker teardown for a bare FreeLibrary.
+            //
+            // Pin the module before leaking the worker. Clearing s_module (below) only stops module_handle() from
+            // naming the unloading DLL -- it says nothing about the code pages the leaked worker keeps executing. The
+            // worker's lifecycle_thread runs through run_subsystem_teardown into each leaf shutdown(), all of which
+            // lives in this DLL's .text; because the worker is OFF the loader lock, every leaf takes its JOIN branch
+            // rather than its own pin/detach branch, so nothing else pins. If the consumer's FreeLibrary drops the
+            // module refcount to zero, the DLL unmaps while that code is still running -- a use-after-unmap. A
+            // GET_MODULE_HANDLE_EX_FLAG_PIN reference holds the mapping alive for the rest of the process, matching
+            // every other detach-and-leak site (StoppableWorker::shutdown, ~ConfigWatcher, the logger, the memory
+            // cache). The pin must come first so the mapping is secured before the worker is observably leaked.
+            detail::pin_current_module();
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             s_module = nullptr;
             return;

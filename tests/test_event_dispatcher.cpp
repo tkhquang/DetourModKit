@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -360,8 +361,12 @@ TEST(EventDispatcherTest, SubscribeInsideHandler_IsRejected)
     EXPECT_FALSE(handler_ran);
 }
 
-TEST(EventDispatcherTest, UnsubscribeInsideHandler_IsRejected)
+TEST(EventDispatcherTest, UnsubscribeInsideHandler_TakesEffectAtEmitUnwind)
 {
+    // An unsubscribe requested from inside a handler is deferred -- the published snapshot cannot be mutated mid-emit
+    // -- and completed when that dispatcher's emit unwinds. The handler therefore fires exactly once (during the emit
+    // that unsubscribed it) and never again. Before the deferred-removal drain landed, the entry survived and the
+    // handler re-fired on every subsequent emit.
     EventDispatcher<SimpleEvent> dispatcher;
     int call_count = 0;
 
@@ -370,17 +375,23 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_IsRejected)
         [&](const SimpleEvent &)
         {
             ++call_count;
-            // Attempting to unsubscribe from within a handler is silently skipped to prevent deadlock.
-            held_sub.reset();
+            held_sub.reset(); // deferred mid-emit; drained when emit() unwinds
         });
 
     dispatcher.emit(SimpleEvent{1});
     EXPECT_EQ(call_count, 1);
-    // The subscription should still be active because reset() was rejected inside the handler.
-    EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+    // The deferred unsubscribe drains on unwind, so the entry is already gone. held_sub still reports active() because
+    // it retains its retry lambda until an out-of-emit reset(); subscriber_count() is the authoritative signal.
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+    EXPECT_TRUE(held_sub.active());
 
-    // Now unsubscribe outside the handler (must work)
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_EQ(call_count, 1) << "handler must not fire again after its in-handler unsubscribe took effect";
+
+    // An out-of-emit reset() now finds the entry already removed: a harmless idempotent no-op that also clears the
+    // Subscription's retained lambda.
     held_sub.reset();
+    EXPECT_FALSE(held_sub.active());
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
 }
 
@@ -466,8 +477,8 @@ TEST(EventDispatcherTest, EmitSafe_AllHandlersRunDespiteMultipleExceptions)
 
 TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
 {
-    // Verifies that a subscription whose reset() was deferred during emit is properly cleaned up when the Subscription
-    // object is destroyed.
+    // A subscription whose reset() was deferred during emit is drained when the emit unwinds; destroying the
+    // Subscription afterwards is a clean, idempotent no-op (its retained retry lambda finds the entry already gone).
     EventDispatcher<SimpleEvent> dispatcher;
     int call_count = 0;
 
@@ -477,17 +488,184 @@ TEST(EventDispatcherTest, UnsubscribeInsideHandler_SucceedsOnDestruction)
             [&](const SimpleEvent &)
             {
                 ++call_count;
-                // Deferred: reset() inside handler is silently skipped
-                held_sub.reset();
+                held_sub.reset(); // deferred mid-emit; drained on unwind
             });
 
         dispatcher.emit(SimpleEvent{1});
         EXPECT_EQ(call_count, 1);
-        EXPECT_EQ(dispatcher.subscriber_count(), 1u);
-        // held_sub destroyed here -- destructor retries reset() outside handler
+        EXPECT_EQ(dispatcher.subscriber_count(), 0u); // drained when emit() unwound
+        // held_sub destroyed here -- its retained retry lambda is a no-op since the entry is already removed
     }
 
     EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+}
+
+TEST(EventDispatcherTest, DestroyOwnerInHandler_NoReinvokeAfterUnwind)
+{
+    // The memory-unsafe variant of the deferred-removal gap: a handler destroys its own owner (which holds the
+    // Subscription) mid-emit. The in-handler ~Subscription defers its unsubscribe, and the drain on emit unwind
+    // removes the entry, so a later emit does NOT re-invoke the handler -- which would dereference the freed owner.
+    // Before the fix the entry survived and re-fired on the next emit, touching freed storage (an ASan use-after-free;
+    // here it is observable as the handler running a second time against a destroyed owner).
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    struct Owner
+    {
+        int fired = 0;
+        Subscription sub;
+    };
+
+    auto owner = std::make_unique<Owner>();
+    Owner *owner_ptr = owner.get();
+    int destroyed_in_handler = 0;
+
+    owner->sub = dispatcher.subscribe(
+        [&owner, &destroyed_in_handler, owner_ptr](const SimpleEvent &)
+        {
+            // Safe on the first (and only intended) invocation: the owner is still alive here. Touch it before the
+            // reset so a hypothetical re-invocation after destruction would be a clear use-after-free.
+            owner_ptr->fired += 1;
+            if (owner)
+            {
+                ++destroyed_in_handler;
+                owner.reset(); // ~Owner -> ~Subscription -> unsubscribe deferred (emitting_depth > 0)
+            }
+        });
+
+    dispatcher.emit(SimpleEvent{1});
+    EXPECT_EQ(destroyed_in_handler, 1);
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u) << "the in-handler unsubscribe must be drained on emit unwind";
+
+    // Must not re-invoke the (now destroyed) owner's handler.
+    dispatcher.emit(SimpleEvent{2});
+    EXPECT_EQ(dispatcher.subscriber_count(), 0u);
+}
+
+TEST(EventDispatcherTest, UnsubscribeInHandler_NestedSameTypeDispatcher_TakesEffect)
+{
+    // Two dispatchers of the SAME event type nest emits on one thread; the inner dispatcher's handler unsubscribes.
+    // emitting_depth() is a per-template-instantiation thread_local shared by BOTH dispatchers, so gating the drain on
+    // "depth back to 0" would drain whichever instance owns the OUTER emit and strand the inner instance's deferred
+    // removal until the inner dispatcher next emits (a re-fire, or a use-after-free in the destroy-owner variant).
+    // Because each EmitGuard drains its OWN dispatcher, the inner unsubscribe must take effect when the inner emit
+    // unwinds -- inside the still-running outer emit.
+    EventDispatcher<SimpleEvent> outer;
+    EventDispatcher<SimpleEvent> inner;
+
+    int inner_calls = 0;
+    Subscription inner_sub;
+    inner_sub = inner.subscribe(
+        [&](const SimpleEvent &)
+        {
+            ++inner_calls;
+            inner_sub.reset(); // deferred; must drain when inner.emit (nested in outer.emit) unwinds, not later
+        });
+
+    auto outer_sub = outer.subscribe([&](const SimpleEvent &) { inner.emit(SimpleEvent{2}); });
+
+    outer.emit(SimpleEvent{1});
+    EXPECT_EQ(inner_calls, 1);
+    EXPECT_EQ(inner.subscriber_count(), 0u)
+        << "the inner unsubscribe must take effect at the inner emit unwind, not be stranded by the shared depth";
+
+    // A subsequent emit of the inner dispatcher must not re-invoke the handler.
+    inner.emit(SimpleEvent{3});
+    EXPECT_EQ(inner_calls, 1) << "handler must not re-fire on the inner dispatcher's next emit";
+}
+
+TEST(EventDispatcherTest, UnsubscribeInHandler_SeparateSameTypeDispatcher_RemovesImmediately)
+{
+    // A handler on dispatcher A destroys a Subscription owned by dispatcher B, with both dispatchers using the same
+    // Event type. The shared same-type emit depth is non-zero, but B itself is not emitting, so B has no EmitGuard that
+    // could drain a deferred removal. The unsubscribe must therefore run immediately; otherwise B would keep the dead
+    // subscription until its next emit and invoke it once more.
+    EventDispatcher<SimpleEvent> outer;
+    EventDispatcher<SimpleEvent> other;
+
+    int other_calls = 0;
+    struct Owner
+    {
+        Subscription sub;
+    };
+
+    auto owner = std::make_unique<Owner>();
+    owner->sub = other.subscribe([&](const SimpleEvent &) { ++other_calls; });
+
+    auto outer_sub = outer.subscribe([&](const SimpleEvent &) { owner.reset(); });
+
+    outer.emit(SimpleEvent{1});
+    EXPECT_FALSE(owner);
+    EXPECT_EQ(other.subscriber_count(), 0u)
+        << "a non-emitting same-type dispatcher must not strand its removal behind another dispatcher's emit";
+
+    other.emit(SimpleEvent{2});
+    EXPECT_EQ(other_calls, 0) << "the removed handler must not fire on the other dispatcher's next emit";
+}
+
+TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoStaleCallback)
+{
+    // Concurrent counterpart to the single-threaded deferred-removal tests: two threads emit the SAME dispatcher
+    // instance in a tight loop while one subscription unsubscribes itself from inside its own handler. This drives the
+    // deferred-removal path under contention -- is_emitting_this_dispatcher() and enqueue_pending_removal() under one
+    // thread's guard, and drain_pending_removals() reached via the m_has_pending_removals flag by EITHER thread's
+    // EmitGuard, with both drains serialized on the writer mutex. It must remove the subscription exactly once
+    // (idempotent drain) and leave no stranded entry and no torn state. Run under TSan to also prove the flag and
+    // snapshot accesses are race-free; single-threaded coverage cannot.
+    EventDispatcher<SimpleEvent> dispatcher;
+
+    std::atomic<int> self_calls{0};
+    std::atomic<bool> unsub_requested{false};
+    Subscription self_sub;
+    self_sub = dispatcher.subscribe(
+        [&](const SimpleEvent &)
+        {
+            self_calls.fetch_add(1, std::memory_order_relaxed);
+            // Exactly one handler invocation (whichever thread wins the CAS) requests the unsubscribe, so the shared
+            // Subscription object is never reset() from two threads at once. The request is deferred (this thread is
+            // mid-emit on this dispatcher) and drained by an EmitGuard on either thread.
+            bool expected = false;
+            if (unsub_requested.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+            {
+                self_sub.reset();
+            }
+        });
+
+    // A permanent second subscription so the dispatcher is never empty and the removal shows up as a count drop.
+    std::atomic<int> keeper_calls{0};
+    auto keeper =
+        dispatcher.subscribe([&](const SimpleEvent &) { keeper_calls.fetch_add(1, std::memory_order_relaxed); });
+
+    constexpr int per_thread = 20000;
+    std::atomic<bool> go{false};
+    const auto emitter = [&]
+    {
+        while (!go.load(std::memory_order_acquire))
+        {
+        }
+        for (int i = 0; i < per_thread; ++i)
+        {
+            dispatcher.emit(SimpleEvent{i});
+        }
+    };
+
+    std::thread t1(emitter);
+    std::thread t2(emitter);
+    go.store(true, std::memory_order_release);
+    t1.join();
+    t2.join();
+
+    // The self subscription must have been drained (only the permanent keeper remains) -- not stranded behind the
+    // concurrent emits, and removed exactly once despite both threads' guards racing to drain the flag.
+    EXPECT_EQ(dispatcher.subscriber_count(), 1u);
+
+    // After the drain, a fresh single-threaded emit must not invoke the removed handler again (no stale callback).
+    const int calls_after_join = self_calls.load(std::memory_order_relaxed);
+    dispatcher.emit(SimpleEvent{-1});
+    EXPECT_EQ(self_calls.load(std::memory_order_relaxed), calls_after_join)
+        << "the removed handler must not fire once its unsubscribe has been drained";
+    EXPECT_GT(keeper_calls.load(std::memory_order_relaxed), 0);
+
+    keeper.reset();
 }
 
 // --- Lock-free empty fast path ---
