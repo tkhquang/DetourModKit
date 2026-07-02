@@ -17,7 +17,7 @@ namespace DetourModKit
         }
 
         m_thread = std::jthread(
-            [fn = std::move(body), label = m_name](std::stop_token st)
+            [fn = std::move(body), label = m_name](const std::stop_token &st)
             {
                 try
                 {

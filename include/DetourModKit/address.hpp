@@ -8,9 +8,9 @@
  *          the one genuinely unsafe operation (integer <-> pointer punning) across the whole codebase and made
  *          "is this number a pointer, an offset, or a size?" a matter of reading the variable name. Address replaces
  *          that with a zero-overhead strong type: it is exactly a machine pointer wide (asserted below), every
- *          arithmetic helper is `constexpr`, and the reinterpret_cast story is confined to the three audited members
- *          (the templated pointer constructor, `as<T>()`, and `ptr<T>()`). Everything else is plain integer math on a
- *          value that cannot be silently confused with an int.
+ *          arithmetic helper is `constexpr`, and the reinterpret_cast story is confined to the four audited members
+ *          (the templated pointer constructor, `as<T>()`, `ptr<T>()`, and the RIP-relative read in `rip()`).
+ *          Everything else is plain integer math on a value that cannot be silently confused with an int.
  */
 
 #include "DetourModKit/defines.hpp"
@@ -62,7 +62,7 @@ namespace DetourModKit
          * @param pointer The pointer to capture as an address.
          * @details The `T*` parameter only deduces against an actual pointer argument, so a non-pointer is a deduction
          *          failure and never competes here, and `std::nullptr_t` is taken by the overload above. That keeps
-         *          this one of the three audited reinterpret_cast sites instead of letting pointer punning leak to
+         *          this one of the four audited reinterpret_cast sites instead of letting pointer punning leak to
          *          call sites.
          */
         template <class T> explicit Address(T *pointer) noexcept : m_value{reinterpret_cast<std::uintptr_t>(pointer)} {}
@@ -127,7 +127,7 @@ namespace DetourModKit
         /**
          * @brief Reinterprets the address as a value of type @p T.
          * @tparam T The destination type: an integral type, or any pointer / function-pointer type.
-         * @details One of the three audited cast sites. An integral @p T takes the value-preserving `static_cast`
+         * @details One of the four audited cast sites. An integral @p T takes the value-preserving `static_cast`
          *          path; any other @p T (pointer or function pointer) takes the single `reinterpret_cast`. This is how
          *          a resolved address is turned back into a typed function pointer to call or a typed data pointer to
          *          read, with the pun confined to here rather than the call site.

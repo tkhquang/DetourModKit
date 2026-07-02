@@ -10,7 +10,7 @@ namespace DetourModKit::detail
 {
     // --- WinFileStreamBuf ---
 
-    WinFileStreamBuf::WinFileStreamBuf() noexcept : m_handle(INVALID_HANDLE_VALUE)
+    WinFileStreamBuf::WinFileStreamBuf() noexcept : m_handle(INVALID_HANDLE_VALUE), m_buffer{}
     {
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
     }

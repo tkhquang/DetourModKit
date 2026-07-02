@@ -308,7 +308,7 @@ namespace DetourModKit
                 "ConfigWatcher",
                 [directory = std::move(directory), filename = std::move(filename), debounce_ms,
                  callback = std::move(callback), label = std::move(label), open_result,
-                 worker_id_slot](std::stop_token st)
+                 worker_id_slot](const std::stop_token &st)
                 {
                     // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
                     // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush

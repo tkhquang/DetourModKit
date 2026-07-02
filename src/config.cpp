@@ -807,11 +807,13 @@ namespace DetourModKit
                             }
                             catch (const std::exception &e)
                             {
-                                logger.error("Config: reload servicer caught exception: {}", e.what());
+                                (void)logger.try_log(LogLevel::Error, "Config: reload servicer caught exception: {}",
+                                                     e.what());
                             }
                             catch (...)
                             {
-                                logger.error("Config: reload servicer caught unknown exception.");
+                                (void)logger.try_log(LogLevel::Error,
+                                                     "Config: reload servicer caught unknown exception.");
                             }
                         }
                     }
@@ -903,7 +905,7 @@ namespace DetourModKit
                         std::string(section), std::string(ini_key), std::string(log_key_name), setter, default_value));
                     if (setter)
                     {
-                        deferred = [setter, val = default_value]() mutable
+                        deferred = [setter = std::move(setter), val = std::move(default_value)]() mutable
                         {
                             if constexpr (std::same_as<T, std::string>)
                             {
@@ -979,7 +981,7 @@ namespace DetourModKit
                     std::string(section), std::string(key), std::string(display_name), setter, default_combos));
                 if (setter)
                 {
-                    deferred = [setter, combos = std::move(default_combos)]() { setter(combos); };
+                    deferred = [setter = std::move(setter), combos = std::move(default_combos)]() { setter(combos); };
                 }
             }
             if (deferred)
@@ -1229,6 +1231,8 @@ namespace DetourModKit
                         // read.
                         if (auto &cached_hash = get_last_loaded_ini_hash(); cached_hash.has_value())
                         {
+                            // load_ini_into sets hash whenever read_succeeded, and this is the read_succeeded branch.
+                            // NOLINTNEXTLINE(bugprone-unchecked-optional-access)
                             const std::uint64_t current_hash = *outcome.hash;
                             if (current_hash == *cached_hash)
                             {
@@ -1387,7 +1391,8 @@ namespace DetourModKit
                 // own disable flag.
                 if (watcher && watcher->is_worker_thread(std::this_thread::get_id()))
                 {
-                    log().error(
+                    (void)log().try_log(
+                        LogLevel::Error,
                         "Config: disable_auto_reload() called from the watcher thread; ignoring to avoid self-join "
                         "deadlock. Call from a different thread or disable the hotkey binding instead.");
                     return;

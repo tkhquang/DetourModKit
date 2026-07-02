@@ -470,7 +470,7 @@ namespace DetourModKit
                     new_entry.lru_key = new_lru_key;
                     new_entry.valid = true;
 
-                    shard.entries.insert_or_assign(base_addr, std::move(new_entry));
+                    shard.entries.insert_or_assign(base_addr, new_entry);
                     shard.lru_index.emplace(new_lru_key, base_addr);
                     insert_sorted_range(shard, base_addr, mbi.RegionSize);
                 }

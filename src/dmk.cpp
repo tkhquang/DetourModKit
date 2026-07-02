@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cwchar>
 #include <exception>
 #include <optional>
@@ -87,7 +88,7 @@ namespace DetourModKit
 
         // Outcome of a single-instance mutex acquisition. Distinguishing AlreadyHeld from SystemError lets
         // Session::start map each to its own ErrorCode (InstanceAlreadyRunning vs SystemCallFailed).
-        enum class MutexAcquire
+        enum class MutexAcquire : std::uint8_t
         {
             /// A fresh mutex was created; @p out holds the handle the Session must close.
             Acquired,
@@ -212,16 +213,17 @@ namespace DetourModKit
                     Result<void> ready = s_on_ready(session);
                     if (!ready)
                     {
-                        log().error("bootstrap: on_ready reported failure: {}", ready.error().message());
+                        (void)log().try_log(LogLevel::Error, "bootstrap: on_ready reported failure: {}",
+                                            ready.error().message());
                     }
                 }
                 catch (const std::exception &e)
                 {
-                    log().error("bootstrap: on_ready threw: {}", e.what());
+                    (void)log().try_log(LogLevel::Error, "bootstrap: on_ready threw: {}", e.what());
                 }
                 catch (...)
                 {
-                    log().error("bootstrap: on_ready threw an unknown exception.");
+                    (void)log().try_log(LogLevel::Error, "bootstrap: on_ready threw an unknown exception.");
                 }
             }
 
@@ -235,7 +237,7 @@ namespace DetourModKit
         }
 
         // The throwing core of bootstrap, separated so the public entry point stays noexcept under the loader lock.
-        [[nodiscard]] Result<void> bootstrap_core(ModInfo info,
+        [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info,
                                                   std::move_only_function<Result<void>(Session &)> on_ready)
         {
             if (s_worker_thread || s_shutdown_event)
@@ -352,7 +354,7 @@ namespace DetourModKit
         s_session_active.store(false, std::memory_order_release);
     }
 
-    Result<Session> Session::start(ModInfo info) noexcept
+    Result<Session> Session::start(const ModInfo &info) noexcept
     {
         // Claim the single-session guard first; a mod DLL has one process lifetime, so a second start is a caller bug.
         bool expected = false;
@@ -439,7 +441,7 @@ namespace DetourModKit
 
     // --- Bootstrap free functions ----------------------------------------------------------------------------------
 
-    Result<void> bootstrap(ModInfo info, std::move_only_function<Result<void>(Session &)> on_ready) noexcept
+    Result<void> bootstrap(const ModInfo &info, std::move_only_function<Result<void>(Session &)> on_ready) noexcept
     {
         // Fail closed on any throw so nothing unwinds across the loader lock; the partial attach is rolled back.
         try
