@@ -351,7 +351,7 @@ namespace DetourModKit
             }
         }
 
-        bool DynamicMPMCQueue::try_push(LogMessage &item)
+        bool DynamicMPMCQueue::try_push(LogMessage &item) noexcept
         {
             size_t pos = m_enqueue_pos.load(std::memory_order_relaxed);
 
@@ -381,7 +381,7 @@ namespace DetourModKit
             }
         }
 
-        bool DynamicMPMCQueue::try_pop(LogMessage &item)
+        bool DynamicMPMCQueue::try_pop(LogMessage &item) noexcept
         {
             size_t pos = m_dequeue_pos.load(std::memory_order_relaxed);
 
@@ -411,19 +411,34 @@ namespace DetourModKit
             }
         }
 
-        size_t DynamicMPMCQueue::try_pop_batch(std::vector<LogMessage> &items, size_t max_count)
+        size_t DynamicMPMCQueue::try_pop_batch(std::vector<LogMessage> &items, size_t max_count) noexcept
         {
             if (max_count == 0)
             {
                 return 0;
             }
 
-            items.reserve(items.size() + max_count);
+            // Reserve headroom so the push_back loop below never reallocates. This runs on the writer's noexcept
+            // frames, so a throwing allocator here must not escape: on bad_alloc the reserve is skipped and the pop
+            // is capped to whatever spare capacity the vector already holds. Failing closed to a smaller batch is
+            // correct behaviour for an out-of-memory host; terminating it is not.
+            try
+            {
+                items.reserve(items.size() + max_count);
+            }
+            catch (...)
+            {
+            }
+
+            // Never pop more than fits in the reserved capacity. Within capacity, push_back performs no allocation and
+            // the LogMessage move constructor is noexcept, so the loop cannot throw even if the reserve above failed.
+            const size_t headroom = items.capacity() - items.size();
+            const size_t budget = std::min(max_count, headroom);
 
             size_t count = 0;
             LogMessage msg;
 
-            while (count < max_count && try_pop(msg))
+            while (count < budget && try_pop(msg))
             {
                 items.push_back(std::move(msg));
                 ++count;
@@ -699,8 +714,10 @@ namespace DetourModKit
         // preempted mid-publish cannot turn the idle path into a tight hot loop.
         constexpr size_t INFLIGHT_SPIN_LIMIT = 8;
 
+        // No pre-reserve here: this frame is noexcept, so a throwing reserve would std::terminate on host OOM.
+        // try_pop_batch owns the (fail-closed) reservation and only pops within the capacity it can secure. After the
+        // first pop the batch retains its capacity across the clear()s below, so the steady-state reserve is a no-op.
         std::vector<LogMessage> batch;
-        batch.reserve(m_config.batch_size);
 
         auto last_flush = std::chrono::steady_clock::now();
 
@@ -785,8 +802,10 @@ namespace DetourModKit
 
     void AsyncLogger::Impl::drain_remaining() noexcept
     {
+        // No pre-reserve: this frame is noexcept and try_pop_batch owns the fail-closed reservation (see
+        // writer_thread_func). Under OOM a drain iteration may pop fewer items or none; the loop then exits with
+        // some messages still queued, which is the correct fail-closed shutdown behaviour (never a terminate).
         std::vector<LogMessage> remaining;
-        remaining.reserve(m_config.batch_size);
         while (m_queue.try_pop_batch(remaining, m_config.batch_size) > 0)
         {
             write_batch(remaining);

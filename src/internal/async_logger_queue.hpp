@@ -179,23 +179,34 @@ namespace DetourModKit::detail
          * @param item The item to push. Moved into the queue on success only;
          *             left unchanged on failure so the caller can retry or handle overflow.
          * @return true if successful, false if queue is full.
+         * @note noexcept: the lock-free path is atomic loads/CAS plus a noexcept LogMessage move, so it never
+         *       allocates or throws. try_pop_batch and the writer's noexcept frames depend on this; the keyword makes
+         *       the contract explicit so a future throwing change fails to compile rather than silently terminating.
          */
-        [[nodiscard]] bool try_push(LogMessage &item);
+        [[nodiscard]] bool try_push(LogMessage &item) noexcept;
 
         /**
          * @brief Attempts to pop an item from the queue.
          * @param item Reference to store the popped item.
          * @return true if successful, false if queue is empty.
+         * @note noexcept: same non-throwing lock-free contract as try_push (atomic ops plus a noexcept LogMessage
+         *       move). try_pop_batch relies on it, so the keyword pins the guarantee at the type level.
          */
-        [[nodiscard]] bool try_pop(LogMessage &item);
+        [[nodiscard]] bool try_pop(LogMessage &item) noexcept;
 
         /**
          * @brief Attempts to pop multiple items up to a maximum count.
          * @param items Reference to a vector to store popped items.
          * @param max_count Maximum number of items to pop.
          * @return size_t Number of items actually popped.
+         * @note noexcept and fail-closed under allocation pressure. It is called from the writer thread's noexcept
+         *       frames (writer_thread_func / drain_remaining), so a throwing reserve would be an unrecoverable
+         *       std::terminate. Instead it reserves headroom under a local try/catch and, if that allocation fails,
+         *       pops only as many items as the vector's existing spare capacity allows -- the LogMessage move is
+         *       noexcept, so push_back within capacity never allocates and never throws. Under OOM a smaller batch
+         *       (possibly zero) is returned this call; the un-popped items stay queued for the next call.
          */
-        [[nodiscard]] size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count);
+        [[nodiscard]] size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count) noexcept;
 
         /// Returns the approximate number of items in the queue.
         [[nodiscard]] size_t size() const noexcept;

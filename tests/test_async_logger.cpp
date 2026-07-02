@@ -17,6 +17,7 @@
 
 #include "internal/async_logger_queue.hpp"
 #include "internal/win_file_stream.hpp"
+#include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
 // White-box access: StringPool, LogMessage, and DynamicMPMCQueue (plus their sizing constants) are the AsyncLogger
@@ -655,6 +656,44 @@ TEST(DynamicMPMCQueueTest, FullAndEmptyQueue)
     EXPECT_TRUE(queue.try_pop(wrap_out));
     EXPECT_EQ(wrap_out.message(), "wrap2");
     EXPECT_TRUE(queue.empty());
+}
+
+TEST(DynamicMPMCQueueTest, TryPopBatch_ReserveOom_FailsClosed)
+{
+    // try_pop_batch is called from the writer thread's noexcept frames (writer_thread_func / drain_remaining), so a
+    // throwing reserve would std::terminate the host under memory pressure. It must instead fail closed: catch the
+    // allocation failure and pop only within the vector's existing spare capacity. Here the destination vector has zero
+    // capacity, so the injected reserve failure leaves no headroom and the call pops nothing -- rather than
+    // terminating -- and the queued messages survive for a later, non-failing drain.
+    DynamicMPMCQueue queue(8);
+
+    // Seed short (inline-stored) messages before injection is armed, so these pushes do not allocate on the heap.
+    for (int i = 0; i < 4; ++i)
+    {
+        LogMessage m(LogLevel::Info, "payload");
+        ASSERT_TRUE(queue.try_push(m));
+    }
+    ASSERT_EQ(queue.size(), 4u);
+
+    std::vector<LogMessage> out; // capacity 0, so try_pop_batch's reserve is the first (and failing) allocation
+
+    size_t popped = 123; // sentinel; must be overwritten with 0
+    {
+        // Fail the very next throwing operator new on this thread -- the reserve inside try_pop_batch.
+        dmk_test::AllocFailScope fail(0);
+        popped = queue.try_pop_batch(out, 4);
+    }
+
+    EXPECT_EQ(popped, 0u) << "no headroom + rejected reserve must pop nothing, not terminate";
+    EXPECT_TRUE(out.empty());
+    EXPECT_EQ(queue.size(), 4u) << "the un-popped messages must remain queued";
+
+    // With capacity available (reserved up front, outside the injected window), a subsequent call drains normally.
+    std::vector<LogMessage> out2;
+    out2.reserve(4);
+    const size_t popped2 = queue.try_pop_batch(out2, 4);
+    EXPECT_EQ(popped2, 4u);
+    EXPECT_EQ(queue.size(), 0u);
 }
 
 TEST(LogMessageTest, MoveConstructor)

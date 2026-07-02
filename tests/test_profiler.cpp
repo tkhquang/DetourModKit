@@ -65,6 +65,77 @@ protected:
     void TearDown() override { Profiler::get_instance().reset(); }
 };
 
+TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_SeqlockPayloadRaceFree)
+{
+    // record() publishes each sample's payload (name / start_ticks / duration_us / thread_id) through std::atomic_ref,
+    // and export_chrome_json() reads it back the same way, so the concurrent producer/consumer pair is free of a
+    // formal data race rather than merely benign on x86. This drives that path: several producers record while a
+    // consumer exports in a loop. Every export must yield a well-formed JSON array and never crash; the final export
+    // (after all writes have committed and with no ring wrap) must carry the exact literal name each producer stored.
+    auto &profiler = Profiler::get_instance();
+
+    static constexpr char kName[] = "concurrent_scope";
+    constexpr int producer_count = 3;
+    constexpr int per_producer = 4000; // 12000 total < ring capacity, so no wrap: committed samples stay committed
+
+    std::atomic<bool> go{false};
+    std::atomic<bool> stop{false};
+
+    std::vector<std::thread> producers;
+    producers.reserve(producer_count);
+    for (int p = 0; p < producer_count; ++p)
+    {
+        producers.emplace_back(
+            [&profiler, &go, p]
+            {
+                while (!go.load(std::memory_order_acquire))
+                {
+                }
+                LARGE_INTEGER tick;
+                QueryPerformanceCounter(&tick);
+                for (int i = 0; i < per_producer; ++i)
+                {
+                    profiler.record(kName, tick.QuadPart, tick.QuadPart + 10, static_cast<uint32_t>(p));
+                }
+            });
+    }
+
+    std::thread consumer(
+        [&profiler, &go, &stop]
+        {
+            while (!go.load(std::memory_order_acquire))
+            {
+            }
+            while (!stop.load(std::memory_order_acquire))
+            {
+                // Structural validity on every iteration: a torn read or UB in the seqlock would corrupt or crash
+                // this. Content is checked after the join, where a well-defined set of samples is guaranteed present.
+                const std::string json = profiler.export_chrome_json();
+                EXPECT_FALSE(json.empty());
+                if (!json.empty())
+                {
+                    EXPECT_EQ(json.front(), '[');
+                    EXPECT_EQ(json.back(), ']');
+                }
+            }
+        });
+
+    go.store(true, std::memory_order_release);
+    for (auto &t : producers)
+    {
+        t.join();
+    }
+    stop.store(true, std::memory_order_release);
+    consumer.join();
+
+    const std::string final_json = profiler.export_chrome_json();
+    ASSERT_FALSE(final_json.empty());
+    EXPECT_EQ(final_json.front(), '[');
+    EXPECT_EQ(final_json.back(), ']');
+    EXPECT_NE(final_json.find(kName), std::string::npos) << "committed samples must carry the untorn literal name";
+    EXPECT_EQ(profiler.total_samples_recorded(), static_cast<size_t>(producer_count) * per_producer);
+}
+
 TEST_F(ProfilerRecordTest, Record_IncrementsSampleCount)
 {
     auto &profiler = Profiler::get_instance();

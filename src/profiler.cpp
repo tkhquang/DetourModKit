@@ -7,9 +7,11 @@
 
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <format>
 #include <memory>
+#include <new>
 #include <string>
 #include <string_view>
 
@@ -96,8 +98,19 @@ namespace DetourModKit
 
     Profiler &Profiler::get_instance() noexcept
     {
-        static Profiler instance;
-        return instance;
+        // Constructed once into function-local static storage and never destroyed, mirroring StringPool::instance().
+        // A Meyers singleton (`static Profiler instance;`) registers a static destructor that frees m_buffer at
+        // static-teardown time. A ScopedProfile whose own destructor runs *after* that -- a static/thread_local
+        // ScopedProfile, or one on a thread still alive at process teardown -- would then call record() through this
+        // accessor and dereference the freed m_buffer (use-after-free under DLL unload / loader-lock teardown).
+        // Placement-new into raw static storage keeps the object alive for the whole process and never runs its
+        // destructor, so a late record() is always safe. The single fixed-size ring-buffer leak is reclaimed by the
+        // OS at process exit. (Construction still uses a throwing make_unique for m_buffer; a first-use OOM there
+        // terminates this noexcept accessor exactly as the Meyers form did; this lifetime change does not alter
+        // construction-OOM behaviour.)
+        alignas(Profiler) static unsigned char storage[sizeof(Profiler)];
+        static Profiler *const instance = ::new (static_cast<void *>(storage)) Profiler();
+        return *instance;
     }
 
     void Profiler::record(const char *name, int64_t start_ticks, int64_t end_ticks, uint32_t thread_id) noexcept
@@ -137,10 +150,16 @@ namespace DetourModKit
                       "sequence counter must be lock-free for the seqlock protocol");
         (void)sample.sequence.fetch_add(1, std::memory_order_acq_rel);
 
-        sample.name = name;
-        sample.start_ticks = start_ticks;
-        sample.duration_us = duration_us;
-        sample.thread_id = thread_id;
+        // Publish the payload through std::atomic_ref rather than plain stores. The exporter reads these same fields
+        // concurrently under the seqlock, so plain non-atomic stores here would be a formal C++ data race even though
+        // they are benign for aligned scalars on x86. Relaxed ordering is sufficient: the odd/even sequence protocol
+        // provides the synchronization. The opening fetch_add above is acq_rel and the closing fetch_add below is
+        // release, so a reader that sees an even sequence (via its acquire load) is guaranteed to see these stores;
+        // the counter, not the payload ordering, is what makes the sample consistent.
+        std::atomic_ref<const char *>(sample.name).store(name, std::memory_order_relaxed);
+        std::atomic_ref<int64_t>(sample.start_ticks).store(start_ticks, std::memory_order_relaxed);
+        std::atomic_ref<uint32_t>(sample.duration_us).store(duration_us, std::memory_order_relaxed);
+        std::atomic_ref<uint32_t>(sample.thread_id).store(thread_id, std::memory_order_relaxed);
 
         // Close the write window. Another +1 keeps the slot's sequence monotonic and lands it on an even value,
         // signalling a fully committed sample. Readers that observe an odd value skip this slot to avoid reading torn
@@ -158,10 +177,13 @@ namespace DetourModKit
         {
             auto &sample = m_buffer[i];
             sample.sequence.store(0, std::memory_order_relaxed);
-            sample.name = nullptr;
-            sample.start_ticks = 0;
-            sample.duration_us = 0;
-            sample.thread_id = 0;
+            // Zero the payload through std::atomic_ref for the same reason record() does: reset() is contractually
+            // single-threaded against record(), but a cold-path export() may still be walking the buffer, so the
+            // plain-store form would be a data race against that reader. Relaxed matches the seqlock read side.
+            std::atomic_ref<const char *>(sample.name).store(nullptr, std::memory_order_relaxed);
+            std::atomic_ref<int64_t>(sample.start_ticks).store(0, std::memory_order_relaxed);
+            std::atomic_ref<uint32_t>(sample.duration_us).store(0, std::memory_order_relaxed);
+            std::atomic_ref<uint32_t>(sample.thread_id).store(0, std::memory_order_relaxed);
         }
     }
 
@@ -190,24 +212,30 @@ namespace DetourModKit
         bool first = true;
         for (size_t i = 0; i < count; ++i)
         {
-            const auto &sample = m_buffer[(start_idx + i) & m_mask];
+            // Bind a non-const reference so the payload can be read through std::atomic_ref (its constructor takes a
+            // non-const lvalue). std::unique_ptr<T[]>::operator[] is const-qualified and returns a non-const T&, so
+            // this is well-formed even though export runs on a const Profiler. The reference is only read from.
+            auto &sample = m_buffer[(start_idx + i) & m_mask];
 
             // Seqlock read: load the sequence, copy the sample fields into locals, then re-load the sequence. record()
             // opens a write with an odd sequence and closes it with the next even value, so a sample is consistent only
             // when the pre-read sequence is even (no in-flight write) AND the post-read sequence is unchanged (no write
-            // started and finished mid-copy). The acquire fence between the field copies and the second load stops the
-            // copies from being reordered after it. This runs on the cold export path; the second load costs nothing
-            // measurable and the producer hot path is untouched.
+            // started and finished mid-copy). The payload is read through std::atomic_ref (relaxed) to match record()'s
+            // atomic_ref stores, so the concurrent read/write pair is race-free rather than merely benign; the acquire
+            // fence between the field copies and the second sequence load stops the copies from being reordered after
+            // it. This runs on the cold export path; the second load costs nothing measurable and the producer hot path
+            // is untouched.
             const uint32_t seq_before = sample.sequence.load(std::memory_order_acquire);
-            if ((seq_before & 1) != 0 || sample.name == nullptr)
+            const char *const sampled_name = std::atomic_ref<const char *>(sample.name).load(std::memory_order_relaxed);
+            if ((seq_before & 1) != 0 || sampled_name == nullptr)
             {
                 continue;
             }
 
-            const char *name = sample.name;
-            const auto start_ticks = sample.start_ticks;
-            const auto duration_us = sample.duration_us;
-            const auto thread_id = sample.thread_id;
+            const char *name = sampled_name;
+            const auto start_ticks = std::atomic_ref<int64_t>(sample.start_ticks).load(std::memory_order_relaxed);
+            const auto duration_us = std::atomic_ref<uint32_t>(sample.duration_us).load(std::memory_order_relaxed);
+            const auto thread_id = std::atomic_ref<uint32_t>(sample.thread_id).load(std::memory_order_relaxed);
 
             std::atomic_thread_fence(std::memory_order_acquire);
             const uint32_t seq_after = sample.sequence.load(std::memory_order_relaxed);
