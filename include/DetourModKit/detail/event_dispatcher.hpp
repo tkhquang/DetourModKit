@@ -31,8 +31,9 @@
  *            allocates a new handler vector (O(n) in the current subscriber count), appends or removes an entry, and
  *            publishes it atomically. Typical dispatcher usage is 1-10 subscribers and write-rarely, so the O(n)
  *            publish cost is negligible in practice.
- *          - No heap allocation on `emit()` beyond the `shared_ptr` refcount
- *            bump. Handler vector is cache-friendly.
+ *          - No heap allocation on the ordinary no-deferral `emit()` path beyond the `shared_ptr` refcount bump.
+ *            If a handler unsubscribes from the same dispatcher during emit, the guard may allocate a replacement
+ *            snapshot while draining that deferred removal on unwind. Handler vector is cache-friendly.
  *
  *          **Usage:**
  *          @code
@@ -106,13 +107,19 @@ namespace DetourModKit
 
         /**
          * @brief Manually unsubscribes. Safe to call multiple times.
-         * @details If called from within a handler on the same dispatcher (i.e. emitting_depth > 0 on this thread), the
-         *          unsubscribe is silently skipped and the subscription remains active. The m_unsubscribe lambda is
-         *          retained so that a subsequent reset() call outside the emit stack -- including the
-         *          Subscription destructor -- will complete the removal. If the Subscription is also destroyed inside
-         *          the same handler scope, the destructor's reset() is likewise skipped because emitting_depth is still
-         *          positive. This keeps the no-mutation-during-emit invariant intact so the in-flight snapshot
-         *          iteration remains consistent.
+         * @details If called from within a handler on the same dispatcher (that dispatcher's EmitGuard is on the
+         *          current thread's stack), the removal is deferred rather than performed immediately: the dispatcher
+         *          queues this subscription's id and completes the removal when this dispatcher's emit unwinds, so the
+         *          handler will not fire on any subsequent emit. Rebuilding the published snapshot mid-emit would break
+         *          the no-mutation-during-emit invariant the in-flight iteration relies on, which is why it is deferred
+         *          and not done here. An unsubscribe for a different same-type dispatcher is removed immediately even
+         *          when this thread is inside another dispatcher's handler, because that other dispatcher has no
+         *          EmitGuard that could drain this one. The m_unsubscribe lambda is retained as a retry safety net: if
+         *          the deferred drain cannot allocate a replacement snapshot, a later reset() outside the emit stack --
+         *          including the Subscription destructor -- still completes the removal; once the drain has succeeded
+         *          that retry is a harmless idempotent no-op. Because the lambda is retained, active() keeps reporting
+         *          true until a reset() runs outside any emit, even though the entry itself is already gone after the
+         *          drain.
          */
         void reset() noexcept
         {
@@ -167,9 +174,8 @@ namespace DetourModKit
      *   mutex. Each mutation allocates a new handler vector, appends or removes the entry, and publishes the new
      *   snapshot atomically. See the method docs for the OOM contract.
      * - Handlers are invoked while the snapshot's `shared_ptr` keeps the
-     *   vector alive. A thread-local reentrancy guard detects and rejects subscribe/unsubscribe calls from within a
-     *   handler; the guard is what guarantees the user's "do not mutate during emit" invariant, not the snapshot
-     *   mechanism.
+     *   vector alive. A thread-local reentrancy guard rejects subscribe calls from within a same-type handler and
+     *   defers unsubscribe calls only when this exact dispatcher is on the current thread's emit stack.
      *
      * **Reentrancy guard scope:** The guard is per-template-instantiation, not per-instance. Two dispatchers of the
      * same Event type share the same thread-local counter. Subscribing to a second dispatcher of the same type from
@@ -195,6 +201,12 @@ namespace DetourModKit
         {
             SubscriptionId id;
             Handler callback;
+        };
+
+        struct EmitStackNode
+        {
+            const EventDispatcher *owner;
+            EmitStackNode *previous;
         };
 
         using HandlerList = std::vector<Entry>;
@@ -266,7 +278,7 @@ namespace DetourModKit
             }
 
             SharedList snap = this->m_handlers.load(std::memory_order_acquire);
-            EmitGuard guard{emitting_depth()};
+            EmitGuard guard{*this, emitting_depth()};
             for (const auto &entry : *snap)
             {
                 entry.callback(event);
@@ -290,7 +302,7 @@ namespace DetourModKit
             // std::shared_ptr copy-construction and load are noexcept, so the entire function remains noexcept despite
             // the per-handler catch.
             SharedList snap = this->m_handlers.load(std::memory_order_acquire);
-            EmitGuard guard{emitting_depth()};
+            EmitGuard guard{*this, emitting_depth()};
             for (const auto &entry : *snap)
             {
                 try
@@ -369,12 +381,20 @@ namespace DetourModKit
         // so the RAII retry path handles it naturally.
         bool unsubscribe(SubscriptionId id) noexcept
         {
-            if (emitting_depth() > 0)
+            if (is_emitting_this_dispatcher())
             {
-                // Same per-instantiation guard as subscribe(): a handler that triggers an unsubscribe (directly or via
-                // a Subscription reset/destructor) on a same-type dispatcher is rejected here. Surface it best-effort
-                // so the rejection is not silent; the RAII path retries the unsubscribe after the emit stack unwinds.
-                report_reentrant_rejection("unsubscribe");
+                // Deferred removal. A handler on this thread requested this unsubscribe mid-emit (directly, or via a
+                // Subscription reset/destructor). Rebuilding the published snapshot now would break the
+                // no-mutation-during-emit invariant the in-flight iteration relies on, so the id is queued and the
+                // real removal runs when THIS dispatcher's emit unwinds (its own EmitGuard drains the queue).
+                // If this exact dispatcher is not on the current thread's emit stack, the unsubscribe must run
+                // immediately: a different same-type dispatcher has no guard that could drain this queue, and
+                // stranding a destroyed owner's subscription until this dispatcher emits again would re-fire it once.
+                // Returning false keeps the Subscription's m_unsubscribe lambda as a retry safety net: should the
+                // deferred drain fail to allocate, a later out-of-emit reset()/destructor still completes the removal.
+                // This is distinct from subscribe()'s hard reentrancy rejection, which cannot be deferred because it
+                // must return a live Subscription synchronously.
+                enqueue_pending_removal(id);
                 return false;
             }
 
@@ -416,18 +436,99 @@ namespace DetourModKit
             return true;
         }
 
+        // Records an id whose removal was requested while this dispatcher is already emitting on the current thread,
+        // for this dispatcher's own EmitGuard to drain on unwind. Duplicates are skipped so repeated in-handler
+        // reset() calls on the same Subscription cannot grow the queue without bound. noexcept and best-effort: if the
+        // push_back allocation fails the id is simply not queued here, and the Subscription's retained m_unsubscribe
+        // lambda (unsubscribe returned false) still completes the removal after the emit unwinds.
+        void enqueue_pending_removal(SubscriptionId id) noexcept
+        {
+            std::scoped_lock lock{this->m_writer_mutex};
+            try
+            {
+                if (std::find(this->m_pending_removals.begin(), this->m_pending_removals.end(), id) ==
+                    this->m_pending_removals.end())
+                {
+                    this->m_pending_removals.push_back(id);
+                    // Publish that this instance has work for its next EmitGuard to drain. Set only on a successful
+                    // push so an OOM here leaves the flag reflecting the unchanged queue; the Subscription's retained
+                    // retry lambda then completes the removal out of emit. A duplicate id is a no-op with the flag
+                    // already set by the first enqueue.
+                    this->m_has_pending_removals.store(true, std::memory_order_release);
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
+        // Completes the removals queued by unsubscribe() calls that occurred mid-emit on THIS dispatcher. Invoked from
+        // this dispatcher's own EmitGuard as its emit() unwinds. It must drain the instance whose emit is unwinding,
+        // not "the thread's outermost emit": emitting_depth() is shared across every same-type dispatcher on the
+        // thread, so a depth==0 gate would drain whichever instance owns the outermost emit and strand a nested inner
+        // instance's queued removals (re-fire, or a use-after-free if the handler destroyed its owner). Rebuilding the
+        // snapshot here is safe even if another emit of this instance is still iterating higher on the stack, because
+        // that iteration holds its own copy-on-write snapshot alive. Const because emit() is const; it mutates only the
+        // mutable snapshot / count / queue / flag members, serialized against writers by the mutable writer mutex.
+        // noexcept and best-effort: on allocation failure the queue and flag are left set so the next guard (or a
+        // Subscription retry) completes the removal.
+        void drain_pending_removals() const noexcept
+        {
+            std::scoped_lock lock{this->m_writer_mutex};
+            if (this->m_pending_removals.empty())
+            {
+                // A concurrent drain on another thread may have emptied the queue after this guard observed the flag;
+                // keep the flag consistent with the now-empty queue.
+                this->m_has_pending_removals.store(false, std::memory_order_release);
+                return;
+            }
+
+            auto current = this->m_handlers.load(std::memory_order_acquire);
+            std::shared_ptr<HandlerList> next;
+            try
+            {
+                next = std::make_shared<HandlerList>();
+                next->reserve(current->size());
+                for (const auto &entry : *current)
+                {
+                    const bool queued = std::find(this->m_pending_removals.begin(), this->m_pending_removals.end(),
+                                                  entry.id) != this->m_pending_removals.end();
+                    if (!queued)
+                    {
+                        next->push_back(entry);
+                    }
+                }
+            }
+            catch (...)
+            {
+                // Leave m_pending_removals and the flag set; retry on the next guard or a Subscription's lambda.
+                return;
+            }
+
+            // Publish the snapshot before the counter, matching unsubscribe(): an emit that briefly loads the stale
+            // snapshot (still holding a removed handler) stays safe because that handler is retained by the old
+            // snapshot's shared_ptr.
+            const size_t new_count = next->size();
+            this->m_handlers.store(std::shared_ptr<const HandlerList>(std::move(next)), std::memory_order_release);
+            this->m_handler_count.store(new_count, std::memory_order_release);
+            this->m_pending_removals.clear();
+            this->m_has_pending_removals.store(false, std::memory_order_release);
+        }
+
         /**
-         * @brief Best-effort report that the reentrancy guard rejected a mutation from within a handler.
-         * @details Emits a Debug log via log().try_log so the otherwise-silent per-instantiation rejection surfaces
-         *          during development. The try/catch swallows try_log's own formatting and sink failures once the
-         *          logger is available, so a routine logging hiccup never turns a rejected mutation into host
-         *          termination. It cannot catch a first-use logger-construction failure: log() is noexcept, so an
-         *          out-of-memory there terminates before try_log runs, an unrecoverable condition rather than this
-         *          best-effort path's concern. Deliberately does NOT assert: an
-         *          unsubscribe rejected mid-emit is a legitimate RAII path -- a Subscription reset or destroyed inside
-         *          a handler calls unsubscribe(), which is refused here and retried after the emit stack unwinds -- so
-         *          aborting on it would be wrong. Zero-cost on the success path because it is only reached after the
-         *          guard has already rejected the call.
+         * @brief Best-effort report that the reentrancy guard rejected a subscribe() from within a handler.
+         * @details Only subscribe() routes here. A subscribe cannot be deferred -- it must hand back a live
+         *          Subscription synchronously -- so a subscribe requested from inside a handler on a same-type
+         *          dispatcher is hard-rejected and reported here. (An unsubscribe requested mid-emit is NOT routed
+         *          here: it is deferred and completed when that dispatcher's emit unwinds; see unsubscribe().) Emits a
+         *          Debug log via log().try_log so the otherwise-silent per-instantiation rejection surfaces during
+         *          development. The try/catch swallows try_log's own formatting and sink failures once the logger is
+         *          available, so a routine logging hiccup never turns a rejected mutation into host termination. It
+         *          cannot catch a first-use logger-construction failure: log() is noexcept, so an out-of-memory there
+         *          terminates before try_log runs, an unrecoverable condition rather than this best-effort path's
+         *          concern. Deliberately does NOT assert: a reentrant subscribe is a defined, observable outcome (the
+         *          returned Subscription is inactive), not a bug to abort on. Zero-cost on the success path because it
+         *          is only reached after the guard has already rejected the call.
          */
         static void report_reentrant_rejection(const char *op) noexcept
         {
@@ -456,12 +557,58 @@ namespace DetourModKit
             return depth;
         }
 
-        /// RAII guard that increments/decrements the emit depth counter.
+        static EmitStackNode *&active_emit_stack() noexcept
+        {
+            thread_local EmitStackNode *head{nullptr};
+            return head;
+        }
+
+        [[nodiscard]] bool is_emitting_this_dispatcher() const noexcept
+        {
+            for (const EmitStackNode *node = active_emit_stack(); node != nullptr; node = node->previous)
+            {
+                if (node->owner == this)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /**
+         * @brief RAII guard that increments/decrements the emit depth counter and, on unwind, drains any
+         *        unsubscribe()s that THIS dispatcher deferred while a handler was on the stack.
+         */
         struct EmitGuard
         {
+            const EventDispatcher &owner;
             int &depth;
-            explicit EmitGuard(int &depth_ref) noexcept : depth(depth_ref) { ++depth; }
-            ~EmitGuard() noexcept { --depth; }
+            EmitStackNode node;
+            EmitGuard(const EventDispatcher &owner_ref, int &depth_ref) noexcept
+                : owner(owner_ref), depth(depth_ref), node{&owner_ref, EventDispatcher::active_emit_stack()}
+            {
+                EventDispatcher::active_emit_stack() = &node;
+                ++depth;
+            }
+            ~EmitGuard() noexcept
+            {
+                EventDispatcher::active_emit_stack() = node.previous;
+                --depth;
+                // Each guard drains ITS OWN dispatcher's deferred removals -- not "the thread's outermost emit."
+                // emitting_depth() is shared across every same-type dispatcher on the thread, so gating the drain on
+                // depth==0 would drain whichever instance owns the outermost emit and strand a different instance's
+                // queued removals when two same-type dispatchers nest emits on one thread (the handler then re-fires
+                // on that instance's next emit -- a use-after-free if the handler destroyed its owner). `owner` is the
+                // dispatcher whose emit() created this guard, so it is alive for the guard's whole lifetime and
+                // draining it here is always safe. The atomic flag keeps the common no-deferral path lock-free (a
+                // single acquire load); the writer mutex is taken only when a removal was actually queued on this
+                // instance. drain_pending_removals is noexcept, so this stays safe even while unwinding a throwing
+                // handler out of emit().
+                if (owner.m_has_pending_removals.load(std::memory_order_acquire))
+                {
+                    owner.drain_pending_removals();
+                }
+            }
             EmitGuard(const EmitGuard &) = delete;
             EmitGuard &operator=(const EmitGuard &) = delete;
             EmitGuard(EmitGuard &&) = delete;
@@ -471,9 +618,18 @@ namespace DetourModKit
         // alignas(64) keeps the hot atomics on their own cache line so the writer mutex and shared_ptr control-block
         // traffic do not produce false sharing with readers doing the fast-path counter load.
         alignas(64) mutable std::atomic<SharedList> m_handlers;
-        std::atomic<size_t> m_handler_count{0};
+        // mutable: emit() is const, but its EmitGuard drains this dispatcher's deferred removals, which republishes
+        // both the snapshot and this count. The drain is serialized against writers by the (also mutable) writer mutex.
+        mutable std::atomic<size_t> m_handler_count{0};
         std::atomic<uint64_t> m_next_id{1};
-        std::mutex m_writer_mutex; // serializes writers only
+        mutable std::mutex m_writer_mutex; // serializes writers and the const deferred-removal drain
+        // Ids whose unsubscribe was requested from within a handler (emitting_depth > 0) and deferred until this
+        // dispatcher's emit unwinds. Guarded by m_writer_mutex.
+        mutable std::vector<SubscriptionId> m_pending_removals;
+        // Fast-path flag: true iff m_pending_removals is non-empty. Lets an EmitGuard skip the writer-mutex drain
+        // entirely on the common no-deferral emit (a single acquire load). Set/cleared under m_writer_mutex alongside
+        // the queue so the two stay consistent; read without the lock by the guard on unwind.
+        mutable std::atomic<bool> m_has_pending_removals{false};
         // Prevents Subscription::reset() from calling unsubscribe() after dispatcher destruction.
         std::shared_ptr<void> m_alive;
     };

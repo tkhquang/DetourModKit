@@ -194,8 +194,14 @@ namespace DetourModKit::detail
          * @param items Reference to a vector to store popped items.
          * @param max_count Maximum number of items to pop.
          * @return size_t Number of items actually popped.
+         * @note noexcept and fail-closed under allocation pressure. It is called from the writer thread's noexcept
+         *       frames (writer_thread_func / drain_remaining), so a throwing reserve would be an unrecoverable
+         *       std::terminate. Instead it reserves headroom under a local try/catch and, if that allocation fails,
+         *       pops only as many items as the vector's existing spare capacity allows -- the LogMessage move is
+         *       noexcept, so push_back within capacity never allocates and never throws. Under OOM a smaller batch
+         *       (possibly zero) is returned this call; the un-popped items stay queued for the next call.
          */
-        [[nodiscard]] size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count);
+        [[nodiscard]] size_t try_pop_batch(std::vector<LogMessage> &items, size_t max_count) noexcept;
 
         /// Returns the approximate number of items in the queue.
         [[nodiscard]] size_t size() const noexcept;
