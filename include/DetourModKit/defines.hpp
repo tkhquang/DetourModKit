@@ -31,16 +31,20 @@ namespace DMK = DetourModKit;
 
 // Target architecture gate
 // DetourModKit manipulates raw process memory and 64-bit code on Win64 game targets; an Address is exactly a machine
-// pointer and the scan/hook engines assume the x86-64 register file and instruction encodings. Encode the target as a
-// 1/0 macro so it can drive both `#if` ladders and the static_assert that fails the build early on an unsupported
-// architecture rather than at some later, more confusing miscompile.
+// pointer and the scan/hook engines assume the x86-64 register file and instruction encodings. DMK_ARCH_X64 encodes the
+// target as a 1/0 macro for any `#if` ladder that needs it. The accompanying #error is the single, deliberate
+// architecture gate for the whole library: on a 32-bit or non-x86 configure it halts translation immediately with one
+// clear message, before the scattered pointer-width / ABI-layout static_asserts in the engine (the x86 decoder and
+// the RTTI ColHead layout) plus the x64-only fault-guard arms elsewhere (which carry no 32-bit branch) would fail as a
+// confusing cascade. Because this header is pulled in early by every public header, that one diagnostic is what a
+// consumer sees instead of a wall of opaque failures. Those local guards remain as point-of-use backstops; this gate is
+// the primary, human-readable one.
 #if defined(_M_X64) || defined(__x86_64__)
 #define DMK_ARCH_X64 1
 #else
 #define DMK_ARCH_X64 0
+#error "DetourModKit targets x86-64 (Win64) only; no 32-bit or non-x86 build is supported."
 #endif
-
-static_assert(DMK_ARCH_X64 == 1, "DetourModKit targets x86-64 (Win64) only; no 32-bit or non-x86 build is supported.");
 
 // Force inline
 // `inline` alone is only a linkage/ODR hint and lets the optimizer decline to inline a hot accessor. The force-inline

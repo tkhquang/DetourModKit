@@ -1168,11 +1168,13 @@ TEST(StringXrefTest, ErrorToStringIsNoexceptAndTotal)
 // Zydis decoding (broad scan); scan_window_narrow_guarded / scan_window_broad_guarded backstop a concurrent decommit /
 // reprotect that the per-window VirtualQuery gate cannot close. This test resolves a planted anchor in the first
 // executable window while a second thread decommits and recommits a separate trailing executable window. Every
-// iteration must still resolve to the stable site: a faulted trailing window is skipped, and any references collected
-// before a swallowed fault are discarded by the guarded wrappers. A run where the decommit never lands inside the read
-// window is a valid pass for the fault path; the __except / VEH skip-the-window mechanism is pinned deterministically
-// by MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp. 32-bit MinGW is
-// excluded because the process-wide vectored guard is x64-only there.
+// iteration returns either the stable site (no fault landed) or a fail-closed ambiguity verdict (a faulted trailing
+// window is skipped, which taints uniqueness); references collected before a swallowed fault are discarded by the
+// guarded wrappers, so the result is never a wrong address and never a crash. A run where the decommit never lands
+// inside the read window is a valid pass for the fault path; the __except / VEH skip-the-window mechanism is pinned
+// deterministically by MemoryGuardedReadFault and the seh_read_bytes NoAccess / GuardPage tests in test_memory.cpp.
+// Supported builds enter this block through MSVC SEH or the MinGW x64 vectored guard; 32-bit is rejected by the global
+// architecture gate in defines.hpp.
 TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 {
     SYSTEM_INFO si{};
@@ -1226,12 +1228,125 @@ TEST(StringXrefRegionGuard, SurvivesConcurrentDecommitMidScan)
 
     // The toggler races every iteration; a few hundred resolves give the decommit ample chance to land mid-scan while
     // keeping the broad Zydis sweep's per-iteration cost bounded. Page 0 (anchor + reference) is never decommitted, so
-    // a correct resolve always returns reference_site even when a trailing window faults and is skipped.
+    // a fault-free resolve returns reference_site; when the decommit lands mid-scan the trailing window is skipped,
+    // which taints uniqueness and fails the resolve closed to ambiguous. Each result is therefore the stable site or a
+    // fail-closed ambiguity verdict -- never a wrong address, never a crash.
     for (int i = 0; i < 600; ++i)
     {
         const auto result = scan::find_string_xref(query, range);
-        ASSERT_TRUE(result.has_value());
-        EXPECT_EQ(result->raw(), reference_site);
+        if (result.has_value())
+        {
+            EXPECT_EQ(result->raw(), reference_site);
+        }
+        else
+        {
+            EXPECT_TRUE(result.error().code == ErrorCode::AmbiguousReference ||
+                        result.error().code == ErrorCode::StringAmbiguous)
+                << "unexpected fail-closed code: " << to_string(result.error().code);
+        }
     }
+}
+
+// Incompleteness gate: a faulted execute-readable window must taint find_string_xref's uniqueness verdict. The phase-1
+// readable sweep and the phase-2 narrow and broad sweeps each skip a window that faults mid-scan under the TOCTOU
+// guard, which leaves the occurrence count a lower bound: a second reference (or a second pooled copy of the string)
+// could hide in the skipped window. The verdict must then fail closed to ambiguous, never report the lone surviving
+// reference as unique.
+//
+// The fixture plants exactly one copy of the string and exactly one reference to it, both in a stable page that never
+// faults, so any ambiguous result is unambiguously incompleteness-driven: there is structurally no second reference or
+// string that could make the verdict ambiguous by count. A background thread flips the readability of a separate
+// trailing execute-readable window (its bytes are irrelevant INT3 fill that never references the string), so some scans
+// read that window while it faults. Every result must therefore be either the unique reference site (no fault landed)
+// or a fail-closed StringAmbiguous / AmbiguousReference (a fault was skipped). Crucially, at least one fail-closed
+// result must appear across the run; without the incompleteness gate, the faulted-window skip would only be logged and
+// the lone reference would still be returned as unique. broad_match runs phase 1 plus the narrow and broad phase-2
+// sweeps in a single call, so one loop exercises all three uniqueness gates. This test shares the x64-guard block of
+// the region-guard test above (the vectored guard is x64-only; the architecture gate forbids 32-bit outright, so on
+// every supported build one of these macros is defined).
+TEST(StringXrefIncompleteGate, FaultedWindowForcesAmbiguousNeverFalselyUnique)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
+    // Four pages: page 0 (string + reference), page 1 reserved gap, page 2 (the toggled window), page 3 reserved. The
+    // gap keeps page 0 and page 2 as two distinct windows (VirtualQuery would coalesce adjacent same-protection pages),
+    // so collect_executable_windows returns both and the sweep reads the toggled window as a separate window.
+    const SIZE_T pages = 4;
+    const SIZE_T size = page * pages;
+
+    VirtualPagePtr allocation(static_cast<std::uint8_t *>(VirtualAlloc(nullptr, size, MEM_RESERVE, PAGE_NOACCESS)));
+    ASSERT_NE(allocation.get(), nullptr);
+    auto *base = allocation.get();
+    auto *toggled_window = base + 2 * page;
+
+    // Page 0 holds the sole string and the sole reference; it is never toggled, so a fault-free resolve is unique.
+    ASSERT_NE(VirtualAlloc(base, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
+    // A separate trailing executable window whose readability the toggler flips. Its INT3 fill never references the
+    // string, so it can only ever contribute a faulted-window skip, never a real second reference or string copy.
+    ASSERT_NE(VirtualAlloc(toggled_window, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
+    std::memset(base, 0xCC, page);
+    std::memset(toggled_window, 0xCC, page);
+
+    const char anchor[] = "IncompleteGateAnchor";
+    std::memcpy(base + 0x40, anchor, sizeof(anchor));
+    std::uint8_t *insn = base + 0x100;
+    insn[0] = 0x48; // REX.W
+    insn[1] = 0x8D; // lea
+    insn[2] = 0x05; // ModRM: RIP-relative, reg = rax
+    const auto next = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(insn) + 7);
+    const auto target = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(base + 0x40));
+    const auto disp = static_cast<std::int32_t>(target - next);
+    std::memcpy(insn + 3, &disp, sizeof(disp));
+    const std::uintptr_t reference_site = reinterpret_cast<std::uintptr_t>(insn);
+
+    const Region range{Address{reinterpret_cast<std::uintptr_t>(base)}, size};
+    scan::StringRefQuery query = utf8_query("IncompleteGateAnchor");
+    query.broad_match = true; // exercise phase 1 + narrow + broad in one call
+
+    // Positive control with no contention: the sole reference resolves uniquely.
+    const auto control = scan::find_string_xref(query, range);
+    ASSERT_TRUE(control.has_value());
+    EXPECT_EQ(control->raw(), reference_site);
+
+    // Flip the trailing window between readable and no-access. VirtualProtect (not decommit) keeps the page committed
+    // throughout, so it is always a gate candidate when readable and faults on read exactly when flipped mid-scan --
+    // maximizing the chance a scan reads it while it faults.
+    std::jthread toggler(
+        [toggled_window, page](std::stop_token stop_token)
+        {
+            DWORD old_protect = 0;
+            while (!stop_token.stop_requested())
+            {
+                VirtualProtect(toggled_window, page, PAGE_NOACCESS, &old_protect);
+                VirtualProtect(toggled_window, page, PAGE_EXECUTE_READWRITE, &old_protect);
+            }
+        });
+
+    // Loop until a faulted-window skip forces the fail-closed verdict, then stop. A generous ceiling guards against a
+    // hang if the race never lands; in practice the fault lands within a few hundred iterations.
+    bool saw_fail_closed = false;
+    for (int i = 0; i < 30000 && !saw_fail_closed; ++i)
+    {
+        const auto result = scan::find_string_xref(query, range);
+        if (result.has_value())
+        {
+            // Never a wrong address: a fault-free (or before-the-fault) resolve returns the sole planted reference.
+            EXPECT_EQ(result->raw(), reference_site);
+        }
+        else
+        {
+            // The only non-value outcomes possible here are the two fail-closed ambiguity verdicts: phase 1 skipped a
+            // faulted readable window (StringAmbiguous) or phase 2 skipped a faulted executable window
+            // (AmbiguousReference). No second reference/string exists, so neither can arise from a real duplicate.
+            EXPECT_TRUE(result.error().code == ErrorCode::AmbiguousReference ||
+                        result.error().code == ErrorCode::StringAmbiguous)
+                << "unexpected fail-closed code: " << to_string(result.error().code);
+            saw_fail_closed = true;
+        }
+    }
+
+    EXPECT_TRUE(saw_fail_closed) << "the concurrent fault never landed inside a scan window, so the incompleteness "
+                                   "gate was never exercised; raise the iteration budget or window size.";
 }
 #endif // _MSC_VER || _WIN64
