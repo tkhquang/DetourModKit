@@ -281,9 +281,10 @@ namespace DetourModKit
          *       of DIFFERENT protection, the restore flattens them all to the first page's protection. Scope a guard to
          *       a region that lies within a single protection block -- the normal case for a patch site or a field --
          *       and split a mixed-protection range into one guard per block.
-         * @note @ref make and the destructor each call @ref invalidate_range for the guarded span, so the protection
-         *       cache never answers a later @ref is_readable / @ref is_writable from a snapshot taken before the guard
-         *       changed (or restored) the protection.
+         * @note Every protection-restoring path invalidates the cached span: @ref make, the destructor, AND
+         *       move-assignment (which restores the replaced guard's own region before adopting the source) each call
+         *       @ref invalidate_range, so the protection cache never answers a later @ref is_readable / @ref is_writable
+         *       from a snapshot taken before the guard changed (or restored) the protection.
          */
         class ProtectGuard
         {

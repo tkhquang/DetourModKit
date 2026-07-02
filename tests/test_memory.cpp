@@ -3135,7 +3135,7 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
     for (int i = 0; i < 4; ++i)
     {
         readers.emplace_back(
-            [&]()
+            [&stop, &torn, &reads]() -> void
             {
                 while (!stop.load(std::memory_order_relaxed))
                 {
@@ -3160,10 +3160,18 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
             });
     }
 
-    for (int cycle = 0; cycle < 200; ++cycle)
+    // A failed init must NOT longjmp out of the test via ASSERT_* while the reader threads are still running: that would
+    // skip the join loop below and destroy joinable std::thread objects, calling std::terminate. Record the failure,
+    // break, and let stop + join + the assert run afterwards.
+    bool init_ok = true;
+    for (int cycle = 0; cycle < 200 && init_ok; ++cycle)
     {
         memory::shutdown_cache();
-        ASSERT_TRUE(memory::init_cache(64, 10000));
+        init_ok = memory::init_cache(64, 10000);
+        if (!init_ok)
+        {
+            break;
+        }
         // Populate an entry so the stats loop has shard content to walk during the race.
         int probe = 0;
         (void)memory::is_readable(Region{Address{&probe}, sizeof(probe)});
@@ -3175,6 +3183,7 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
         t.join();
     }
 
+    EXPECT_TRUE(init_ok);
     EXPECT_GT(reads.load(), 0);
     EXPECT_FALSE(torn.load());
     // The loop ended with the cache initialized (64, 10000); the fixture TearDown shuts it down.

@@ -37,6 +37,18 @@ namespace DetourModKit
          *          against one cache rather than re-walking PE headers per caller. Consulted only by DetourModKit code
          *          that has already initialized its own subsystems, so the static-storage destruction order is a
          *          non-issue (no caller queries ranges from an atexit handler).
+         *
+         *          Lifetime tradeoff (intentional): entries live for the process lifetime and are NOT invalidated on
+         *          module unload, so if a module unloads and the loader reuses its base address for a different module,
+         *          a later query for that handle returns the stale span. This is accepted rather than defect: (1) the
+         *          Region is a transient, non-owning scan scope, not an ownership claim, so pinning the module to keep
+         *          the cache exact would violate that contract and leak references for modules the host wanted unloaded;
+         *          (2) every consumer feeds the span to the guarded read/scan engine, so a stale (larger) span at worst
+         *          over-scans into adjacent mappings whose faults are contained, never a crash or UB; (3) DMK resolves
+         *          module ranges at init for images that do not unload mid-session (the host EXE, the mod's own DLL).
+         *          The alternative -- hooking loader unload notifications to evict -- is disproportionate machinery for
+         *          this fault-contained, rare (base-reuse-after-unload) case. Callers that must track a module across an
+         *          unload/reload should resolve the range fresh at the point of use instead of caching a handle.
          */
         struct ModuleRangeCache
         {

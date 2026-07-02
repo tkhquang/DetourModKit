@@ -350,13 +350,17 @@ namespace DetourModKit
             /**
              * @brief Finds and validates a cache entry in a shard that covers [address, address + size).
              * @note Must be called with the shard mutex held (shared or exclusive).
-             * @note Two-tier lookup. The unordered_map probe by page-aligned base address hits only when that key
-             *       equals a cached entry's STORE key (the region base, mbi.BaseAddress) -- i.e. when the query lands in
-             *       the first page of a cached VirtualQuery region -- so it is a first-page fast path, not a general
-             *       O(1) path. A query anywhere deeper into a multi-page region misses the direct probe and is served by
-             *       the O(log n) binary search over sorted_ranges. There is no per-page index (one would be unbounded
-             *       for a large module), and the per-shard entry count is small and bounded, so the containment search
-             *       is effectively constant-time for interior addresses in practice.
+             * @note Two-tier lookup, and both tiers are shard-LOCAL: the caller has already picked the shard via
+             *       compute_shard_index(address), so this only ever sees entries seeded from a query that hashed to the
+             *       same shard. The unordered_map probe by page-aligned base address hits only when that key equals a
+             *       cached entry's STORE key (the region base, mbi.BaseAddress) -- i.e. when the query lands in the first
+             *       page of a region already cached in THIS shard -- so it is a first-page fast path, not a general O(1)
+             *       path. A query anywhere deeper into a multi-page region misses the direct probe and is served by the
+             *       O(log n) binary search over this shard's sorted_ranges when the region is cached here; if it is not
+             *       (the shard was never seeded for it), this returns nullptr and the caller re-queries via VirtualQuery,
+             *       seeding the shard. There is no per-page index (one would be unbounded for a large module), and the
+             *       per-shard entry count is small and bounded, so the containment search is effectively constant-time
+             *       for interior addresses in practice.
              */
             CachedMemoryRegionInfo *find_in_shard(CacheShard &shard, std::uintptr_t address, std::size_t size,
                                                   std::uint64_t current_ns, std::uint64_t expiry_ns) noexcept

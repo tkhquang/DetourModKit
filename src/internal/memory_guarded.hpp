@@ -85,6 +85,9 @@ namespace DetourModKit
          *          region.cpp's Region factories (host / own / module_named) both route through this so a repeated
          *          module-range query degenerates to a loader handle lookup plus a hash hit, instead of re-walking the
          *          PE headers (DOS magic, e_lfanew, NT signature, SizeOfImage) through the guarded engine every call.
+         *          Entries are never invalidated on module unload, so a handle reused after unload can return a stale
+         *          span -- an intentional, fault-contained tradeoff for the transient non-owning Region contract; the
+         *          rationale (and when to resolve fresh instead) is documented on ModuleRangeCache in memory_module.cpp.
          */
         [[nodiscard]] Region cached_module_image_region(Address module_base) noexcept;
 
