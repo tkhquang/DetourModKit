@@ -64,20 +64,18 @@ namespace DetourModKit
         // faulted, so the sweep skips it and continues -- the same skip-the-region contract guarded_read_bytes follows.
         // On MinGW x64 the same scan runs through the process-wide vectored read guard
         // (detail::run_guarded_region) that the guarded_read paths use, so a fault inside the scanned span is
-        // swallowed and the region is skipped + counted there too. On 32-bit MinGW that x64-only vectored guard is
-        // unavailable, so the body runs directly and the per-region VirtualQuery gate is the only guard. *out_faulted
-        // is set true only when a fault was swallowed.
+        // swallowed and the region is skipped + counted there too. A 32-bit build is rejected outright by the
+        // architecture gate in defines.hpp, so only these two x64 arms exist. *out_faulted is set true only when a
+        // fault was swallowed.
         const std::byte *scan_region_guarded(const std::byte *region_start, std::size_t scan_size,
                                              const detail::EnginePattern &pattern, std::uintptr_t needle_lo,
                                              std::uintptr_t needle_hi, std::size_t &matches_remaining,
                                              bool &out_faulted) noexcept
         {
-            // The 64-bit-only contract, asserted locally so the unguarded 32-bit MinGW arm of this function (the bare
-            // #else below, which runs scan_region_for_match with no vectored fault guard) is provably unreachable in
-            // any build that compiles: a 32-bit build fails here at compile time rather than silently shipping a sweep
-            // whose only TOCTOU protection is the per-region VirtualQuery gate.
-            static_assert(sizeof(void *) == 8, "scan_region_guarded requires a 64-bit target: the MinGW fault guard "
-                                               "(run_guarded_region) is x64-only and the 32-bit arm is unguarded.");
+            // A 64-bit target is guaranteed by the single architecture gate in defines.hpp (a 32-bit or non-x86
+            // configure fails there with one clear #error), so this function carries only the two supported x64 arms:
+            // MSVC SEH and the MinGW x64 vectored guard. There is deliberately no 32-bit arm, whose only TOCTOU
+            // protection would have been the bare per-region VirtualQuery gate.
             out_faulted = false;
 #ifdef _MSC_VER
             const std::size_t original_matches_remaining = matches_remaining;
@@ -129,8 +127,6 @@ namespace DetourModKit
             matches_remaining = original_matches_remaining;
             out_faulted = true;
             return nullptr;
-#else
-            return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, matches_remaining);
 #endif
         }
 

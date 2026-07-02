@@ -41,6 +41,11 @@ namespace DetourModKit
             {
                 std::uintptr_t site = 0;
                 std::size_t count = 0;
+                // True when any execute-readable window faulted mid-sweep and was skipped under the TOCTOU guard, so
+                // the reference count is only a lower bound: a second reference to the string could hide in the skipped
+                // window. A uniqueness verdict must then fail closed to ambiguous rather than report the lone surviving
+                // reference as the unique site. Accumulated across the narrow and broad merges.
+                bool incomplete = false;
             };
 
             // The matched narrow reference's lea destination register and instruction length, recovered alongside the
@@ -56,8 +61,12 @@ namespace DetourModKit
                 bool is_lea = false;
             };
 
-            void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::size_t count) noexcept
+            void merge_reference_scan(ReferenceScanResult &result, std::uintptr_t site, std::size_t count,
+                                      bool incomplete) noexcept
             {
+                // Incompleteness is monotonic: once either sweep skipped a faulted window, the merged count is a lower
+                // bound regardless of what the other sweep found.
+                result.incomplete = result.incomplete || incomplete;
                 if (count == 0)
                 {
                     return;
@@ -194,8 +203,8 @@ namespace DetourModKit
             // exactly the foreign-read faults (detail::is_guarded_read_fault) and reports the window faulted so
             // the sweep skips it. On MinGW x64 the body runs through the same process-wide vectored read guard the
             // guarded_read paths use (detail::run_guarded_region), so the fault is swallowed and the window skipped
-            // + counted there too; only on 32-bit MinGW, where that x64-only vectored guard is unavailable, does the
-            // body run directly behind just the VirtualQuery gate. Returns true when a fault was swallowed.
+            // + counted there too. A 32-bit build is rejected by the defines.hpp architecture gate, so only the two
+            // x64 arms exist. Returns true when a fault was swallowed.
             bool scan_window_narrow_guarded(const detail::ExecutableWindow &window, std::uintptr_t string_addr,
                                             std::size_t instr_len, std::size_t &found_count, std::uintptr_t &first_site,
                                             LeaReferenceInfo *info) noexcept
@@ -259,9 +268,6 @@ namespace DetourModKit
                     *info = original_info;
                 }
                 return true;
-#else
-                scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
-                return false;
 #endif
             }
 
@@ -281,9 +287,10 @@ namespace DetourModKit
             // resolving to precisely string_addr is not a realistic false positive. Counting stops at the second hit so
             // the caller can fail closed on ambiguity.
             std::uintptr_t scan_string_ref_narrow(std::uintptr_t string_addr, detail::ModuleSpan range,
-                                                  std::size_t &found_count, LeaReferenceInfo &info)
+                                                  std::size_t &found_count, LeaReferenceInfo &info, bool &incomplete)
             {
                 found_count = 0;
+                incomplete = false;
                 std::uintptr_t first_site = 0;
                 info = LeaReferenceInfo{};
                 // REX.W + opcode + ModRM + disp32.
@@ -312,10 +319,14 @@ namespace DetourModKit
                     if (found_count >= 2)
                     {
                         // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                        incomplete = faulted_windows > 0;
                         log_faulted_windows(faulted_windows);
                         return 0;
                     }
                 }
+                // A skipped faulted window makes the count a lower bound: surface it so a lone surviving reference is
+                // not committed as unique. The caller fails closed to AmbiguousReference when incomplete is set.
+                incomplete = faulted_windows > 0;
                 log_faulted_windows(faulted_windows);
                 return (found_count == 1) ? first_site : 0;
             }
@@ -512,8 +523,8 @@ namespace DetourModKit
                 }
 #elif defined(_WIN64)
                 // MinGW x64: same vectored read guard as the narrow sibling, armed over the gated window bytes; a fault
-                // is swallowed and the window reported faulted. Only 32-bit MinGW falls back to the bare VirtualQuery
-                // gate.
+                // is swallowed and the window reported faulted. A 32-bit build is rejected by the defines.hpp
+                // architecture gate, so only the two x64 arms exist.
                 const std::size_t original_found_count = found_count;
                 const std::uintptr_t original_first_site = first_site;
                 struct BroadScanContext
@@ -540,9 +551,6 @@ namespace DetourModKit
                 found_count = original_found_count;
                 first_site = original_first_site;
                 return true;
-#else
-                scan_window_broad_body(decoder, window, string_addr, found_count, first_site);
-                return false;
 #endif
             }
 
@@ -558,9 +566,10 @@ namespace DetourModKit
             // subsumes the plausibility floor and neutralizes a mid-.text desync. Counting stops at the second
             // referencing instruction so the caller fails closed on ambiguity.
             std::uintptr_t scan_string_ref_broad(std::uintptr_t string_addr, detail::ModuleSpan range,
-                                                 std::size_t &found_count)
+                                                 std::size_t &found_count, bool &incomplete)
             {
                 found_count = 0;
+                incomplete = false;
                 std::uintptr_t first_site = 0;
 
                 ZydisDecoder decoder;
@@ -582,10 +591,14 @@ namespace DetourModKit
                     if (found_count >= 2)
                     {
                         // Ambiguous; caller maps found_count >= 2 to AmbiguousReference.
+                        incomplete = faulted_windows > 0;
                         log_faulted_windows(faulted_windows);
                         return 0;
                     }
                 }
+                // Surface any skipped faulted window (see scan_string_ref_narrow): the caller fails closed on a
+                // lower-bound count rather than reporting a lone surviving reference as unique.
+                incomplete = faulted_windows > 0;
                 log_faulted_windows(faulted_windows);
                 return (found_count == 1) ? first_site : 0;
             }
@@ -610,7 +623,12 @@ namespace DetourModKit
                 // byte-at-a-time walk would have faulted going downward, so any boundary in the already-buffered higher
                 // bytes is still found, and a fault below them returns 0 just as the per-byte version did. window[k]
                 // holds the byte at floor + k; valid_lo is the lowest address actually buffered.
-                std::array<std::uint8_t, static_cast<std::size_t>(back_scan_window)> window{};
+                //
+                // Left deliberately uninitialized: the chunk-read loop fills exactly [valid_lo, instr_addr) via
+                // guarded_read_bytes, and both probe loops below read only indices within that filled span (they are
+                // bounded by valid_lo / instr_addr), so no unwritten byte is ever observed. Value-initializing the full
+                // 8 KiB every call would be dead work on this control-plane path.
+                std::array<std::uint8_t, static_cast<std::size_t>(back_scan_window)> window;
                 std::uintptr_t valid_lo = instr_addr;
                 // Windows x86/x64 base page size; guarded_read_bytes faults at this granularity. Chunks are
                 // page-aligned, not instr-aligned, so a single guarded read covers at most one page and never straddles
@@ -680,10 +698,23 @@ namespace DetourModKit
             const detail::MatchResult first = detail::scan_module_readable(*pattern, range, 1);
             if (first.match == nullptr)
             {
+                // Not located in any readable region. A region that faulted mid-scan could hide the literal, but with
+                // no anchor there is nothing to resolve, so report not-found either way (fail closed: the resolver
+                // never guesses an address).
                 return std::unexpected(Error{ErrorCode::StringNotFound, "scan::find_string_xref"});
             }
-            if (detail::scan_module_readable(*pattern, range, 2).match != nullptr)
+            const detail::MatchResult second = detail::scan_module_readable(*pattern, range, 2);
+            if (second.match != nullptr)
             {
+                return std::unexpected(Error{ErrorCode::StringAmbiguous, "scan::find_string_xref"});
+            }
+            if (first.incomplete || second.incomplete)
+            {
+                // The linker pools identical literals, so the located occurrence's uniqueness is load-bearing. A
+                // readable region skipped by the TOCTOU guard after faulting mid-scan makes the occurrence count a
+                // lower bound: a second pooled copy could hide in the skipped bytes. Fail closed to ambiguous rather
+                // than anchor on a literal a concurrent decommit/reprotect could have made non-unique. This mirrors the
+                // incomplete gate every other MatchResult consumer already applies (scan_resolution, scan_matching).
                 return std::unexpected(Error{ErrorCode::StringAmbiguous, "scan::find_string_xref"});
             }
             const auto string_addr = reinterpret_cast<std::uintptr_t>(first.match);
@@ -693,22 +724,34 @@ namespace DetourModKit
             ReferenceScanResult references{};
             std::size_t narrow_count = 0;
             LeaReferenceInfo lea_info{};
-            const std::uintptr_t narrow_site = scan_string_ref_narrow(string_addr, range, narrow_count, lea_info);
-            merge_reference_scan(references, narrow_site, narrow_count);
+            bool narrow_incomplete = false;
+            const std::uintptr_t narrow_site =
+                scan_string_ref_narrow(string_addr, range, narrow_count, lea_info, narrow_incomplete);
+            merge_reference_scan(references, narrow_site, narrow_count, narrow_incomplete);
             if (query.broad_match && references.count < 2)
             {
                 std::size_t broad_count = 0;
-                const std::uintptr_t broad_site = scan_string_ref_broad(string_addr, range, broad_count);
-                merge_reference_scan(references, broad_site, broad_count);
+                bool broad_incomplete = false;
+                const std::uintptr_t broad_site =
+                    scan_string_ref_broad(string_addr, range, broad_count, broad_incomplete);
+                merge_reference_scan(references, broad_site, broad_count, broad_incomplete);
             }
 
-            if (references.count == 0)
-            {
-                return std::unexpected(Error{ErrorCode::NoReference, "scan::find_string_xref"});
-            }
             if (references.count >= 2)
             {
                 return std::unexpected(Error{ErrorCode::AmbiguousReference, "scan::find_string_xref"});
+            }
+            if (references.incomplete)
+            {
+                // An execute-readable window faulted mid-sweep and was skipped, so the reference count is a lower
+                // bound: a second reference to the string could hide in the skipped window. A lone surviving reference
+                // (or none) is therefore not provably unique. Fail closed to ambiguous rather than commit to a
+                // reference a race could have demoted from unique -- the phase-2 twin of the phase-1 gate above.
+                return std::unexpected(Error{ErrorCode::AmbiguousReference, "scan::find_string_xref"});
+            }
+            if (references.count == 0)
+            {
+                return std::unexpected(Error{ErrorCode::NoReference, "scan::find_string_xref"});
             }
 
             if (query.return_mode == XrefReturn::StringPointerSlot)
