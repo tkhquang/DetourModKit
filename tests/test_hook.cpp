@@ -19,6 +19,8 @@
 #include "DetourModKit/region.hpp"
 #include "DetourModKit/scan.hpp"
 
+#include "internal/hook_ledger.hpp"
+
 #include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
@@ -324,6 +326,34 @@ TEST(HookInline, DefaultModeLayersSecondHook)
     // Teardown is newest-first by natural reverse-order destruction: layer (declared last) is destroyed before base.
 }
 
+// A foreign inline hook can redirect a prologue with a `mov rax, imm64; jmp rax` absolute-jump trampoline
+// (48 B8 <imm64> FF E0) when its detour is beyond rel32 reach and it does not use the FF 25 RIP-relative form. The
+// pre-flight foreign-JMP heuristic must decode that shape and, under fail_if_already_hooked, refuse.
+TEST(HookInline, FailIfAlreadyHookedDetectsAbsJumpTrampoline)
+{
+    // Destination in a different module (kernel32) so the redirect classifies as HookedByOtherModule (foreign).
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+    ASSERT_NE(kernel32, nullptr);
+    const auto foreign_destination = reinterpret_cast<std::uintptr_t>(GetProcAddress(kernel32, "Sleep"));
+    ASSERT_NE(foreign_destination, 0u);
+
+    // Plant 48 B8 <foreign_destination> FF E0 into a readable buffer and hook its address. The create fails at the
+    // foreign-JMP pre-flight, before any backend touches the buffer, so a plain stack buffer is a valid target here.
+    alignas(16) std::array<std::uint8_t, 16> abs_jump{};
+    abs_jump[0] = 0x48; // REX.W
+    abs_jump[1] = 0xB8; // mov rax, imm64
+    std::memcpy(abs_jump.data() + 2, &foreign_destination, sizeof(foreign_destination));
+    abs_jump[10] = 0xFF; // jmp
+    abs_jump[11] = 0xE0; // rax
+
+    Result<Hook> r = inline_at(InlineRequest{.name = "AbsJumpForeign",
+                                             .target = Address{reinterpret_cast<std::uintptr_t>(abs_jump.data())},
+                                             .options = Options{.fail_if_already_hooked = true}},
+                               &echo_detour);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedInProcess);
+}
+
 // ----------------------------------------------------------------------------
 // is_target_hooked(Address)
 // ----------------------------------------------------------------------------
@@ -345,6 +375,72 @@ TEST(HookLedger, IsTargetHookedTrueWhileLiveFalseAfterDrop)
     }
     // The hook handle dropped, restoring the prologue and clearing the ledger entry.
     EXPECT_FALSE(is_target_hooked(target));
+}
+
+TEST(HookLedger, SameTargetReservationsWaitForCommit)
+{
+    auto &ledger = DetourModKit::detail::HookLedger::instance();
+    static int target_marker = 0;
+    const std::uintptr_t target = reinterpret_cast<std::uintptr_t>(&target_marker);
+
+    const DetourModKit::detail::HookLedger::Reservation first = ledger.try_reserve_hook(target, false);
+    ASSERT_EQ(first.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+    ASSERT_NE(first.id, 0u);
+
+    std::atomic<bool> second_started{false};
+    std::atomic<bool> second_returned{false};
+    std::atomic<bool> allow_second_cleanup{false};
+    std::uint64_t second_id = 0;
+
+    auto wait_for_flag = [](const std::atomic<bool> &flag, int attempts) -> bool
+    {
+        for (int i = 0; i < attempts; ++i)
+        {
+            if (flag.load(std::memory_order_acquire))
+            {
+                return true;
+            }
+            Sleep(1);
+        }
+        return flag.load(std::memory_order_acquire);
+    };
+
+    std::thread waiter(
+        [&]
+        {
+            second_started.store(true, std::memory_order_release);
+            const DetourModKit::detail::HookLedger::Reservation second = ledger.try_reserve_hook(target, false);
+            EXPECT_EQ(second.status, DetourModKit::detail::HookLedger::ReserveStatus::Reserved);
+            EXPECT_TRUE(second.preexisting);
+            second_id = second.id;
+            second_returned.store(true, std::memory_order_release);
+            while (!allow_second_cleanup.load(std::memory_order_acquire))
+            {
+                Sleep(1);
+            }
+            ledger.commit_hook(target, second.id);
+            (void)ledger.release_hook(target, second.id);
+        });
+
+    ASSERT_TRUE(wait_for_flag(second_started, 100));
+    EXPECT_FALSE(wait_for_flag(second_returned, 20));
+
+    ledger.commit_hook(target, first.id);
+    const bool second_completed = wait_for_flag(second_returned, 1000);
+    EXPECT_TRUE(second_completed);
+    EXPECT_NE(second_id, 0u);
+    if (second_completed)
+    {
+        EXPECT_EQ(ledger.release_hook(target, first.id), 1u);
+    }
+    else
+    {
+        (void)ledger.release_hook(target, first.id);
+    }
+
+    allow_second_cleanup.store(true, std::memory_order_release);
+    waiter.join();
+    EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
 // ----------------------------------------------------------------------------
@@ -385,6 +481,32 @@ TEST(HookCall, GuardedCallReturnsValueInitWhenInactive)
 
     ASSERT_TRUE(h.disable().has_value());
     EXPECT_EQ(h.call<int>(7), int{});
+}
+
+// operator=(Hook&&) is the second teardown entry point the shared call gate must cover: adopting the source's hook
+// transfers its gate atomically, tears down the overwritten hook (restoring its old target), and leaves the moved-into
+// handle's guarded call() dispatching through the SOURCE's trampoline while the moved-from source is inert.
+TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
+{
+    Result<Hook> first = inline_at(InlineRequest{.name = "MoveAssignOld", .target = addr_of(&echo)}, &echo_detour);
+    ASSERT_TRUE(first.has_value()) << first.error().message();
+    Hook dest = std::move(*first);
+    EXPECT_EQ(echo(7), 107); // echo hooked by dest
+
+    Result<Hook> second = inline_at(
+        InlineRequest{.name = "MoveAssignNew", .target = addr_of(&real_hook_target_add)}, &real_hook_detour_add);
+    ASSERT_TRUE(second.has_value()) << second.error().message();
+    Hook src = std::move(*second);
+
+    // Move-assign src over dest: dest's old echo hook is torn down (echo restored) and dest adopts src's hook + gate.
+    dest = std::move(src);
+    EXPECT_EQ(echo(7), 7);              // dest's overwritten echo hook was restored by the discard teardown
+    EXPECT_FALSE(static_cast<bool>(src)); // src is moved-from / inert
+    EXPECT_EQ(src.call<int>(3), int{});   // a guarded call on the moved-from handle is a defined no-op (empty gate)
+
+    ASSERT_TRUE(static_cast<bool>(dest));
+    EXPECT_EQ(real_hook_target_add(2, 3), 2 + 3 + 1000); // dest's adopted detour is active
+    EXPECT_EQ(dest.call<int>(2, 3), 5);                  // guarded call reaches the original through the trampoline
 }
 
 // ----------------------------------------------------------------------------
@@ -795,6 +917,44 @@ TEST(HookInstallAll, AllocFailureReturnsOutOfMemoryWithoutEscaping)
     EXPECT_FALSE(is_target_hooked(addr_of(&install_target_one)));
 }
 
+// On a mandatory miss, install_all rolls the already-installed rows back NEWEST-FIRST. A std::vector<InstallOutcome>
+// unwind would destroy them oldest-first (forward), which for hooks layered on one target restores an older hook's
+// prologue over a newer hook's live trampoline (a use-after-free); install_all's InstallRollback guard pops back-to-
+// front instead. The Removed lifecycle events make the teardown order observable without forcing a faulting repro.
+TEST(HookInstallAll, MandatoryMissRollsBackNewestFirst)
+{
+    std::vector<std::string> removed;
+    auto sub = diagnostics::hook_lifecycle().subscribe(
+        [&removed](const diagnostics::HookLifecycleEvent &e)
+        {
+            if (e.transition == diagnostics::HookTransition::Removed)
+            {
+                removed.emplace_back(e.name);
+            }
+        });
+
+    const HookSpec table[] = {
+        HookSpec::inline_hook("RollbackOlder", resolvable_request("RbOlderPat", &install_target_one),
+                              &install_detour_one, Severity::Mandatory),
+        HookSpec::inline_hook("RollbackNewer", resolvable_request("RbNewerPat", &install_target_two),
+                              &install_detour_two, Severity::Mandatory),
+        HookSpec::inline_hook("RollbackMiss", unresolvable_request("RbMissPat"), &install_detour_one,
+                              Severity::Mandatory),
+    };
+
+    Result<std::vector<InstallOutcome>> res = install_all(table);
+    ASSERT_FALSE(res.has_value());
+    EXPECT_EQ(res.error().code, ErrorCode::NoMatch);
+
+    // Both installed rows rolled back cleanly...
+    EXPECT_FALSE(is_target_hooked(addr_of(&install_target_one)));
+    EXPECT_FALSE(is_target_hooked(addr_of(&install_target_two)));
+    // ...and newest-first: RollbackNewer (installed second) was torn down before RollbackOlder.
+    ASSERT_EQ(removed.size(), 2u);
+    EXPECT_EQ(removed[0], "RollbackNewer");
+    EXPECT_EQ(removed[1], "RollbackOlder");
+}
+
 // ----------------------------------------------------------------------------
 // VMT object hooking (RAII VmtHook)
 // ----------------------------------------------------------------------------
@@ -924,6 +1084,84 @@ TEST(HookVmt, CreateNullObject)
     Result<VmtHook> r = vmt_for("NullVmt", nullptr);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
+}
+
+// A corrupted or forged vptr can point at an arbitrarily long run of executable-looking qwords. count_vmt_method_slots
+// hard-caps the slot walk (mirroring the bounded RTTI walkers) so it cannot spin unbounded, failing closed on the
+// malformed seed object -- which vmt_for surfaces as InvalidObject. Filling well past the internal cap with an
+// executable address makes every slot read as callable, so the walk terminates only at the cap.
+TEST(HookVmt, SlotWalkHardCapRejectsMalformedVtable)
+{
+    constexpr std::size_t OVER_CAP = 5000; // exceeds the internal MAX_VMT_SLOTS (4096)
+    static std::vector<std::uintptr_t> fake_vtable(OVER_CAP, reinterpret_cast<std::uintptr_t>(&echo));
+    struct FakeObject
+    {
+        std::uintptr_t vptr;
+    } object{reinterpret_cast<std::uintptr_t>(fake_vtable.data())};
+
+    Result<VmtHook> r = vmt_for("MalformedVtable", &object);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
+}
+
+// vmt_for must RELEASE the process-wide object gate BEFORE dispatching its Created lifecycle event: emit_lifecycle
+// runs arbitrary subscriber code (CP.22 -- never call unknown code under a lock), and holding the non-recursive
+// object mutex across it would let a subscriber that re-enters a VMT operation deadlock. This confirms the gate is
+// free during the emit: a subscriber launches a concurrent VMT op on another object and it completes promptly. If the
+// gate were still held, the concurrent op would block on it for the whole wait window (a regression fails this
+// EXPECT_TRUE rather than hanging the suite -- the probe is on a separate thread with a bounded wait).
+TEST(HookVmt, ObjectGateReleasedBeforeCreateLifecycleEmit)
+{
+    auto outer_target = std::make_unique<VmtTestTarget>();
+    auto inner_target = std::make_unique<VmtTestTarget>();
+
+    std::atomic<bool> reentered{false};
+    std::atomic<bool> inner_done{false};
+    std::atomic<bool> inner_ok{false};
+    std::atomic<bool> inner_done_in_window{false};
+    std::thread inner_thread;
+
+    auto sub = diagnostics::hook_lifecycle().subscribe(
+        [&](const diagnostics::HookLifecycleEvent &e)
+        {
+            if (e.kind != diagnostics::HookKind::Vmt || e.transition != diagnostics::HookTransition::Created)
+            {
+                return;
+            }
+            // The concurrent vmt_for below also emits Created (on inner_thread); re-enter the probe only once.
+            if (reentered.exchange(true))
+            {
+                return;
+            }
+            inner_thread = std::thread(
+                [&]
+                {
+                    Result<VmtHook> inner = vmt_for("InnerConcurrent", inner_target.get());
+                    inner_ok.store(inner.has_value(), std::memory_order_release);
+                    inner_done.store(true, std::memory_order_release);
+                    // `inner` (if present) destructs here, restoring inner_target's vptr under the free object gate.
+                });
+            // A released gate lets the concurrent vmt_for finish in microseconds; a still-held gate blocks it for the
+            // whole window (this thread holds the gate, so it could only proceed after this outer vmt_for returns).
+            for (int i = 0; i < 500 && !inner_done.load(std::memory_order_acquire); ++i)
+            {
+                Sleep(1);
+            }
+            inner_done_in_window.store(inner_done.load(std::memory_order_acquire), std::memory_order_release);
+        });
+
+    Result<VmtHook> outer = vmt_for("OuterConcurrent", outer_target.get());
+    ASSERT_TRUE(outer.has_value()) << outer.error().message();
+    VmtHook outer_hold = std::move(*outer);
+
+    if (inner_thread.joinable())
+    {
+        inner_thread.join();
+    }
+    EXPECT_TRUE(reentered.load(std::memory_order_acquire)) << "the Created lifecycle event was never observed";
+    EXPECT_TRUE(inner_done_in_window.load(std::memory_order_acquire))
+        << "vmt_for held the object gate across its Created emit; a concurrent VMT op could not proceed";
+    EXPECT_TRUE(inner_ok.load(std::memory_order_acquire)) << "the concurrent re-entrant vmt_for failed";
 }
 
 // fail_if_already_hooked refuses a second clone of an object already on a clone owned by this kit.
