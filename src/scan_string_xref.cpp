@@ -628,6 +628,7 @@ namespace DetourModKit
                 // guarded_read_bytes, and both probe loops below read only indices within that filled span (they are
                 // bounded by valid_lo / instr_addr), so no unwritten byte is ever observed. Value-initializing the full
                 // 8 KiB every call would be dead work on this control-plane path.
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init) filled before any read, see above
                 std::array<std::uint8_t, static_cast<std::size_t>(back_scan_window)> window;
                 std::uintptr_t valid_lo = instr_addr;
                 // Windows x86/x64 base page size; guarded_read_bytes faults at this granularity. Chunks are
