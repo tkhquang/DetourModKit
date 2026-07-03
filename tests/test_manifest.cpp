@@ -224,16 +224,16 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
     // Manual literal.
     records.push_back(manual_record("debug.flag_ptr", 0x14000ABCD, 0x9F2C7A10B3D45E88ULL));
 
-    const std::string text = mf::serialize(records);
+    const std::string text = mf::serialize(mf::Manifest{.records = records});
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
-    ASSERT_EQ(parsed->size(), records.size());
+    ASSERT_EQ(parsed->records.size(), records.size());
 
     // Re-serializing the parsed records reproduces the exact text: a full structural round-trip.
     EXPECT_EQ(mf::serialize(*parsed), text);
 
     // Spot-check the fields that carry the repair semantics.
-    const mf::SignatureRecord &fov = (*parsed)[0];
+    const mf::SignatureRecord &fov = parsed->records[0];
     EXPECT_EQ(fov.label, "camera.fov_write");
     EXPECT_EQ(fov.kind, an::AnchorKind::RipGlobal);
     EXPECT_EQ(fov.module, "engine.dll");
@@ -249,7 +249,7 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
     EXPECT_EQ(fov.ladder[1].string_text, "CameraFov");
     EXPECT_TRUE(fov.ladder[1].string_broad_match);
 
-    const mf::SignatureRecord &health = (*parsed)[1];
+    const mf::SignatureRecord &health = parsed->records[1];
     EXPECT_EQ(health.kind, an::AnchorKind::CodeOperand);
     EXPECT_EQ(health.operand_kind, sc::OperandKind::MemoryDisplacement);
     EXPECT_EQ(health.byte_width, 4);
@@ -260,20 +260,20 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
     EXPECT_EQ(health.binding.value_width, 4);
     EXPECT_EQ(health.ladder[0].walk_back, -3);
 
-    const mf::SignatureRecord &think = (*parsed)[2];
+    const mf::SignatureRecord &think = parsed->records[2];
     EXPECT_EQ(think.kind, an::AnchorKind::VtableIdentity);
     EXPECT_EQ(think.mangled, ".?AVCAIController@@");
     EXPECT_EQ(think.binding.kind, mf::BindingKind::VmtMethod);
     EXPECT_EQ(think.binding.vmt_index, 7u);
 
-    const mf::SignatureRecord &damage = (*parsed)[3];
+    const mf::SignatureRecord &damage = parsed->records[3];
     EXPECT_EQ(damage.kind, an::AnchorKind::StringXref);
     EXPECT_EQ(damage.xref_text, "CombatSystem::ApplyDamage");
     EXPECT_EQ(damage.xref_encoding, sc::StringEncoding::Utf16le);
     EXPECT_EQ(damage.xref_return, sc::XrefReturn::EnclosingFunction);
     EXPECT_FALSE(damage.xref_require_terminator);
 
-    const mf::SignatureRecord &flag = (*parsed)[4];
+    const mf::SignatureRecord &flag = parsed->records[4];
     EXPECT_EQ(flag.kind, an::AnchorKind::Manual);
     EXPECT_EQ(flag.manual_value, 0x14000ABCD);
     EXPECT_EQ(flag.expected_fingerprint, 0x9F2C7A10B3D45E88ULL);
@@ -281,10 +281,10 @@ TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
 
 TEST(ManifestSerializeTest, EmptyRecordSetProducesParsableHeaderOnly)
 {
-    const std::string text = mf::serialize({});
+    const std::string text = mf::serialize(mf::Manifest{});
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_TRUE(parsed->empty());
+    EXPECT_TRUE(parsed->records.empty());
 }
 
 TEST(ManifestSerializeTest, SignedMinimumManualValueRoundTrips)
@@ -292,13 +292,13 @@ TEST(ManifestSerializeTest, SignedMinimumManualValueRoundTrips)
     std::vector<mf::SignatureRecord> records;
     records.push_back(manual_record("floor", std::numeric_limits<std::int64_t>::min()));
 
-    const std::string text = mf::serialize(records);
+    const std::string text = mf::serialize(mf::Manifest{.records = records});
     EXPECT_NE(text.find("-0x8000000000000000"), std::string::npos);
 
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
-    ASSERT_EQ(parsed->size(), 1u);
-    EXPECT_EQ((*parsed)[0].manual_value, std::numeric_limits<std::int64_t>::min());
+    ASSERT_EQ(parsed->records.size(), 1u);
+    EXPECT_EQ(parsed->records[0].manual_value, std::numeric_limits<std::int64_t>::min());
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -420,10 +420,10 @@ TEST(ManifestParseTest, LabelWithDotsRoundTripsWithLadder)
                              "[sig.a.b.c.rung.0]\nmode = direct\npattern = 90 90\n";
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
-    ASSERT_EQ(parsed->size(), 1u);
-    EXPECT_EQ((*parsed)[0].label, "a.b.c");
-    ASSERT_EQ((*parsed)[0].ladder.size(), 1u);
-    EXPECT_EQ((*parsed)[0].ladder[0].pattern, "90 90");
+    ASSERT_EQ(parsed->records.size(), 1u);
+    EXPECT_EQ(parsed->records[0].label, "a.b.c");
+    ASSERT_EQ(parsed->records[0].ladder.size(), 1u);
+    EXPECT_EQ(parsed->records[0].ladder[0].pattern, "90 90");
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -845,12 +845,12 @@ TEST(ManifestFileTest, SaveThenLoadRoundTrips)
 
     const ScopedManifestFile file("roundtrip");
 
-    const auto saved = mf::save(file.path(), records);
+    const auto saved = mf::save(file.path(), mf::Manifest{.records = records});
     ASSERT_TRUE(saved.has_value()) << saved.error().message();
 
     const auto loaded = mf::load(file.path());
     ASSERT_TRUE(loaded.has_value()) << loaded.error().message();
-    EXPECT_EQ(mf::serialize(*loaded), mf::serialize(records));
+    EXPECT_EQ(mf::serialize(*loaded), mf::serialize(mf::Manifest{.records = records}));
 }
 
 TEST(ManifestFileTest, LoadMissingFileReportsFileOpenFailed)
@@ -880,4 +880,59 @@ TEST(ManifestStringTest, FingerprintStateTokens)
     EXPECT_EQ(mf::fingerprint_state_to_string(mf::FingerprintState::Unset), "unset");
     EXPECT_EQ(mf::fingerprint_state_to_string(mf::FingerprintState::Match), "match");
     EXPECT_EQ(mf::fingerprint_state_to_string(mf::FingerprintState::Drifted), "drifted");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Contract revision: the manifest-level version stamp and the gate that ignores a stale file.
+// ---------------------------------------------------------------------------------------------------------------------
+
+TEST(ManifestRevisionTest, RevisionRoundTripsAndOmitsWhenZero)
+{
+    mf::Manifest versioned;
+    versioned.header.revision = 7;
+    versioned.records.push_back(manual_record("flag", 0x1234));
+
+    const std::string text = mf::serialize(versioned);
+    EXPECT_NE(text.find("revision"), std::string::npos);
+
+    const auto parsed = mf::parse(text);
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    EXPECT_EQ(parsed->header.schema, mf::SCHEMA_VERSION);
+    EXPECT_EQ(parsed->header.revision, 7u);
+
+    // An unversioned (revision 0) manifest omits the key entirely, so an un-gated file stays clean.
+    mf::Manifest unversioned;
+    unversioned.records.push_back(manual_record("flag", 0x1234));
+    EXPECT_EQ(mf::serialize(unversioned).find("revision"), std::string::npos);
+}
+
+TEST(ManifestRevisionTest, AbsentRevisionParsesAsZero)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = manual\n");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    EXPECT_EQ(parsed->header.revision, 0u);
+}
+
+TEST(ManifestRevisionTest, MalformedRevisionIsRejected)
+{
+    const auto bad_token = mf::parse("[manifest]\nschema = 1\nrevision = nope\n");
+    ASSERT_FALSE(bad_token.has_value());
+    EXPECT_EQ(bad_token.error().code, dmk::ErrorCode::MalformedLine);
+
+    // A value beyond the 32-bit field is rejected rather than silently truncated.
+    const auto too_big = mf::parse("[manifest]\nschema = 1\nrevision = 0x100000000\n");
+    ASSERT_FALSE(too_big.has_value());
+    EXPECT_EQ(too_big.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestRevisionTest, RevisionCompatibleGatesStaleFiles)
+{
+    // build_revision 0 opts out of gating: any file is accepted.
+    EXPECT_TRUE(mf::revision_compatible(mf::ManifestHeader{.revision = 3}, 0));
+
+    // Otherwise the file must target this build's exact contract epoch. A mismatch -- an older file, or an
+    // unversioned file under a versioned build -- is rejected so the consumer falls back to its in-code defaults.
+    EXPECT_TRUE(mf::revision_compatible(mf::ManifestHeader{.revision = 2}, 2));
+    EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 1}, 2));
+    EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 0}, 2));
 }

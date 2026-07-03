@@ -325,48 +325,95 @@ namespace DetourModKit
             std::vector<scan::Candidate> m_ladder;
         };
 
-        // --- Serialization: text (for tests / in-memory) and file (for shipping) ---
+        /// The manifest INI format version this build reads and writes. Bumped only on an incompatible format change.
+        inline constexpr std::uint32_t SCHEMA_VERSION = 1;
 
         /**
-         * @brief Parses a manifest's INI text into owning records.
+         * @struct ManifestHeader
+         * @brief The `[manifest]` metadata: the DetourModKit parse-format schema and the author's contract revision.
+         * @details Two independent version axes. @ref schema is the file-format version -- whether this build can parse
+         *          the file at all; @ref parse rejects a schema it does not understand. @ref revision is the mod
+         *          author's own signature-contract epoch, bumped only when an in-code change makes older manifests
+         *          incompatible (a renamed label, a re-meaning of a binding, a dropped signature). DetourModKit never
+         *          interprets @ref revision; a consumer compares it to its build's expected value through
+         *          @ref revision_compatible and safe-ignores a stale file. This catches staleness the per-signature
+         *          fingerprint gate cannot, because a contract change need not alter the located game code at all.
+         */
+        struct ManifestHeader
+        {
+            /// The format version the file declares; @ref parse rejects a value this build cannot read.
+            std::uint32_t schema = SCHEMA_VERSION;
+            /// The author's signature-contract epoch (0 = unversioned); compared to a build revision, never by DMK.
+            std::uint32_t revision = 0;
+        };
+
+        /**
+         * @struct Manifest
+         * @brief A parsed manifest: its @ref ManifestHeader plus the signature records in file order.
+         */
+        struct Manifest
+        {
+            /// The `[manifest]` metadata (schema and contract revision).
+            ManifestHeader header{};
+            /// The signatures, one per `[sig.<label>]` section, in file order.
+            std::vector<SignatureRecord> records{};
+        };
+
+        /**
+         * @brief Reports whether a manifest may be applied under a build's signature-contract revision.
+         * @param header The parsed manifest header.
+         * @param build_revision The revision this build authored its in-code signatures against; 0 disables the check.
+         * @return true when @p build_revision is 0 (the consumer opts out of revision gating) or the manifest's
+         *         @ref ManifestHeader::revision equals it; false when the file targets a different contract epoch.
+         * @details The manifest-level counterpart to the per-signature fingerprint gate. Bump @p build_revision (and
+         * the
+         *          file's `revision`) only on a breaking in-code contract change, so a routine mod update leaves
+         *          still-valid repair files working and only a genuinely incompatible file is rejected. On a false
+         *          result a consumer logs and falls back to its in-code defaults (an empty override set), telling the
+         *          user to delete the stale file or, only after re-verifying it, bump its `revision`.
+         */
+        [[nodiscard]] bool revision_compatible(const ManifestHeader &header, std::uint32_t build_revision) noexcept;
+
+        /**
+         * @brief Parses a manifest's INI text.
          * @param text The manifest text (a `[manifest]` header plus one `[sig.<label>]` section per contract).
-         * @return The parsed records in file order, or an Error: MissingHeader (no `[manifest]` section or an
-         *         unsupported schema), or MalformedLine (a section with an unparseable field or an unknown kind).
+         * @return The parsed @ref Manifest (header plus records in file order), or an Error: MissingHeader (no
+         *         `[manifest]` section or an unsupported schema), or MalformedLine (a section or header field that does
+         *         not parse, or an unknown kind).
          * @details Fails closed, mirroring @ref rtti::parse_drift_report: a manifest that cannot be trusted to describe
          *          the signatures faithfully is rejected whole rather than partially applied. Blank values and missing
-         *          optional keys fall back to the record defaults.
+         *          optional keys fall back to the defaults; an absent `revision` is 0 (unversioned).
          */
-        [[nodiscard]] Result<std::vector<SignatureRecord>> parse(std::string_view text);
+        [[nodiscard]] Result<Manifest> parse(std::string_view text);
 
         /**
-         * @brief Serializes owning records to a manifest's INI text.
-         * @param records The records to emit.
-         * @return The manifest text, round-trippable through @ref parse.
+         * @brief Serializes a manifest to INI text.
+         * @param manifest The header (its @ref ManifestHeader::revision is emitted when non-zero) and records to emit.
+         * @return The manifest text, round-trippable through @ref parse. The `schema` line always reflects this build's
+         *         @ref SCHEMA_VERSION.
          */
-        [[nodiscard]] std::string serialize(std::span<const SignatureRecord> records);
+        [[nodiscard]] std::string serialize(const Manifest &manifest);
 
         /**
          * @brief Reads and parses a manifest file.
          * @param path Source file path.
-         * @return The parsed records, or FileOpenFailed (missing, locked, denied, or not a regular file), or a
+         * @return The parsed @ref Manifest, or FileOpenFailed (missing, locked, denied, or not a regular file), or a
          *         parse error (MissingHeader / MalformedLine) when the file is present but its contents are corrupt.
          * @note A missing file is a distinct, recoverable FileOpenFailed, so an overlay can treat "no file" as "no
          *       overrides" (the defaults pass through) rather than a hard failure.
          */
-        [[nodiscard]] Result<std::vector<SignatureRecord>> load(const std::filesystem::path &path);
+        [[nodiscard]] Result<Manifest> load(const std::filesystem::path &path);
 
         /**
-         * @brief Writes records to a manifest file via @ref serialize.
+         * @brief Writes a manifest to a file via @ref serialize.
          * @param path Destination file path.
-         * @param records The records to serialize.
+         * @param manifest The manifest to serialize.
          * @return Empty on success, or an Error: FileOpenFailed when the file could not be opened for writing.
          * @note The write truncates @p path in place and is not atomic. The manifest is a maintainer artifact, not
          *       load-bearing runtime state, so a torn write is reported on the next @ref load and rewritten; do not
          *       route load-bearing data through this path without first making the write atomic.
          */
-        [[nodiscard]] Result<void> save(const std::filesystem::path &path, std::span<const SignatureRecord> records);
-
-        // --- Overlay: merge in-code anchor defaults with optional file overrides, by label ---
+        [[nodiscard]] Result<void> save(const std::filesystem::path &path, const Manifest &manifest);
 
         /**
          * @brief Merges a mod's in-code anchor defaults with optional file overrides, keyed by label.
@@ -393,8 +440,6 @@ namespace DetourModKit
          */
         [[nodiscard]] Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
                                                              std::span<const SignatureRecord> overrides);
-
-        // --- The gate: resolve a manifest and partition it by trust ---
 
         /**
          * @struct GatePolicy
@@ -493,8 +538,6 @@ namespace DetourModKit
          */
         [[nodiscard]] GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy = {},
                                                   Region scope = Region::host());
-
-        // --- Enum-to-string helpers (symmetric with anchor_status_to_string / gate_verdict_to_string) ---
 
         /**
          * @brief Maps a @ref BindingKind to a short human-readable label (its file token).
