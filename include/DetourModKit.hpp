@@ -38,6 +38,7 @@
 #include "DetourModKit/rtti.hpp"
 #include "DetourModKit/rtti_dissect.hpp"
 #include "DetourModKit/scan.hpp"
+#include "DetourModKit/sighealth.hpp"
 #include "DetourModKit/detail/worker.hpp"
 
 #include <functional>
