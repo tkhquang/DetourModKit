@@ -1,0 +1,72 @@
+name: Architecture Gate
+
+on:
+  pull_request:
+    branches: [main]
+    # The gate guards the x86-64-only contract, so it runs whenever a header on the public surface,
+    # an engine source carrying a pointer-width assertion, the gate script itself, or this workflow
+    # changes. It deliberately does not watch docs/tests: neither can move the architecture gate.
+    paths:
+      - 'include/**'
+      - 'src/**'
+      - 'scripts/check_arch_gate.sh'
+      - '.github/workflows/arch-gate.yml'
+  workflow_dispatch:
+
+# Read-only: the gate compiles headers with -fsyntax-only and never writes to the repository.
+permissions:
+  contents: read
+
+env:
+  # Reuse the exact pinned GCC the build/coverage gate and the released artifact ship with. The
+  # gate's #error semantics are compiler-version-independent, but sharing this cache key with
+  # pr-check.yml means the MinGW toolchain is downloaded at most once across the two workflows.
+  MINGW_BIN: C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin
+
+jobs:
+  arch-gate:
+    name: x86-64 architecture gate (blocking)
+    runs-on: windows-latest
+    # A stalled Chocolatey install or a hung compile must not block a PR on this required gate. The real
+    # work is a cold MinGW install plus two -fsyntax-only header compiles, so 15 minutes is generous
+    # headroom that still fails fast on a hang.
+    timeout-minutes: 15
+    # Not advisory. DetourModKit is x86-64 (Win64) only by design (an Address is a 64-bit pointer;
+    # the scan / hook engines assume the x86-64 register file and instruction encodings). A
+    # regression that let a non-x64 target slip past the single defines.hpp #error -- or buried that
+    # one clear message under an engine static_assert cascade -- must fail the PR, so this job carries
+    # no continue-on-error, matching the header-encapsulation gate in quality.yml.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # No submodules: the probe compiles only public headers, which the header-encapsulation
+          # gate already keeps free of any external/ backend include, so nothing under external/ is
+          # reached by -fsyntax-only. Skipping the submodule fetch keeps this gate fast.
+          persist-credentials: false
+
+      - name: Cache MinGW
+        id: cache-mingw
+        # Third-party actions are pinned to a full commit SHA (like the checkout above), not a moving
+        # tag, so a compromised or retagged release cannot alter this gate. The comment tracks the human
+        # version the SHA corresponds to.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: C:\ProgramData\chocolatey\lib\mingw
+          key: ${{ runner.os }}-mingw-13.2.0-v2
+
+      - name: Install MinGW (if not cached)
+        if: steps.cache-mingw.outputs.cache-hit != 'true'
+        run: choco install mingw --version=13.2.0 --yes --force --no-progress
+        shell: powershell
+
+      - name: Add MinGW to PATH
+        run: echo "${{ env.MINGW_BIN }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        shell: powershell
+
+      - name: Run x86-64 architecture-gate check
+        # Simulates a non-x86-64 target by clearing the compiler's __x86_64__ predefine and asserts
+        # translation halts at the single, human-readable defines.hpp #error -- never an opaque engine
+        # static_assert cascade -- while a native x64 syntax check of the same headers stays clean.
+        run: bash scripts/check_arch_gate.sh
+        shell: bash
