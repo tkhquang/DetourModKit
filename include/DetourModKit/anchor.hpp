@@ -15,9 +15,9 @@
  *          backends that already resolve from a module range alone. Each @ref AnchorKind maps onto one v4 backend --
  *          VtableIdentity -> @ref rtti::vtable_for_type, RipGlobal -> @ref scan::resolve, CodeOperand ->
  *          @ref scan::read_code_constant, StringXref -> @ref scan::find_string_xref -- plus the composite @ref
- *          AnchorKind::Quorum that corroborates two independent sub-anchors and the pinned @ref AnchorKind::Manual
- *          last resort. Every backend already fails closed, so a missing constant surfaces as @ref AnchorStatus::Failed
- *          (no value invented) rather than a silent wrong address.
+ *          AnchorKind::Quorum that corroborates a target by N-of-M voting across independent sub-anchors and the
+ *          pinned @ref AnchorKind::Manual last resort. Every backend already fails closed, so a missing constant
+ *          surfaces as @ref AnchorStatus::Failed (no value invented) rather than a silent wrong address.
  */
 
 #include "DetourModKit/error.hpp"
@@ -38,9 +38,9 @@ namespace DetourModKit
          * @enum AnchorKind
          * @brief Which backend resolves an anchor, and therefore how update-resilient it is.
          * @details When a target can be expressed more than one way, prefer the most update-resilient backend:
-         *          StringXref > VtableIdentity > RipGlobal > CodeOperand, with Quorum over two of those raising
-         *          confidence further and Manual as the last resort. A string literal and a mangled type name survive
-         *          game patches far better than the code bytes and addresses around them.
+         *          StringXref > VtableIdentity > RipGlobal > CodeOperand, with a Quorum voting over several of those
+         *          raising confidence further and Manual as the last resort. A string literal and a mangled type name
+         *          survive game patches far better than the code bytes and addresses around them.
          */
         enum class AnchorKind : std::uint8_t
         {
@@ -63,7 +63,11 @@ namespace DetourModKit
              *        @ref AnchorStatus::Unsupported.
              */
             CallArgHome,
-            /// A corroborated value accepted only when two independent sub-anchors both resolve and agree.
+            /**
+             * @brief A corroborated value accepted only when at least N of M independent sub-anchors resolve and agree
+             *        (N-of-M voting). Corroboration survives a patch that breaks some of the M signals as long as N of
+             *        them still agree, which a single backend cannot.
+             */
             Quorum
         };
 
@@ -74,15 +78,19 @@ namespace DetourModKit
 
         /**
          * @enum QuorumMatch
-         * @brief The agreement policy a @ref AnchorKind::Quorum applies to its two resolved sub-anchor values.
+         * @brief The agreement policy a @ref AnchorKind::Quorum applies when deciding whether two resolved member
+         *        values count as one vote for the same target.
          */
         enum class QuorumMatch : std::uint8_t
         {
-            /// The two resolved values must be identical (the default, strongest policy).
+            /// Two member values agree only when identical (the default, strongest policy).
             ExactValue,
             /**
-             * @brief Accept a gap of at most @ref Anchor::quorum_tolerance; a negative tolerance fails closed
-             *        (never accepts).
+             * @brief Two member values agree when their gap is at most @ref Anchor::quorum_tolerance; a negative
+             *        tolerance fails closed (never accepts). Because a near-match is looser than an exact one, it is
+             *        confined to content-independent members (the fail-closed pairwise-independence gate all quorums
+             *        run), so a cluster of near values can never be an artifact of two members decoding adjacent bytes
+             *        of one site.
              */
             WithinTolerance
         };
@@ -104,7 +112,7 @@ namespace DetourModKit
             Failed,
             /// The kind has no resolver yet (@ref AnchorKind::CallArgHome).
             Unsupported,
-            /// A quorum's two sub-anchors were not genuinely independent evidence, so corroboration is meaningless.
+            /// A quorum's members were not all pairwise-independent evidence, so corroboration would be meaningless.
             QuorumNotIndependent
         };
 
@@ -177,16 +185,26 @@ namespace DetourModKit
             /**
              * @brief Reject a backend-resolvable anchor that carries no @ref validator (status Failed). Only the four
              *        backend kinds are subject to this: a pinned Manual literal and a Quorum are both exempt -- a
-             *        Manual is not a resolved target, and a Quorum's two-signal corroboration is already the
-             *        verification.
+             *        Manual is not a resolved target, and a Quorum's N-of-M corroboration is already the verification.
              */
             bool require_validator = false;
 
-            /// Quorum: the first sub-anchor (non-owning; keep it alive across the resolve call).
-            const Anchor *quorum_a = nullptr;
-            /// Quorum: the second sub-anchor (non-owning; keep it alive across the resolve call).
-            const Anchor *quorum_b = nullptr;
-            /// Quorum: how the two resolved values must relate to accept.
+            /**
+             * @brief Quorum: the M candidate sub-anchors that vote on the target. Non-owning pointers into the caller's
+             *        own anchor storage; every member must outlive the resolve call. The quorum fails closed (status
+             *        @ref AnchorStatus::Failed) on a malformed declaration -- fewer than two members, a null member, or
+             *        a member that is itself a Quorum (nesting is bounded to one level).
+             */
+            std::span<const Anchor *const> quorum_members;
+            /**
+             * @brief Quorum: N, the minimum number of members that must resolve AND agree for the quorum to accept
+             *        (N-of-M voting). 0 (the default) means unanimous -- every member in @ref quorum_members must
+             *        agree, so a two-member quorum with the default is the strict 2-of-2 corroboration. A quorum is
+             *        corroboration, so an explicit N below 2 or above the member count is a malformed vote and fails
+             *        the quorum closed rather than degrading to a single signal.
+             */
+            std::size_t quorum_threshold = 0;
+            /// Quorum: how two resolved member values must relate for a vote to count them as agreeing.
             QuorumMatch quorum_match = QuorumMatch::ExactValue;
             /// Quorum: the tolerance for @ref QuorumMatch::WithinTolerance (a negative tolerance fails closed).
             std::int64_t quorum_tolerance = 0;
@@ -275,8 +293,8 @@ namespace DetourModKit
             double min_resolved_ratio = 1.0;
             /**
              * @brief Hard cap on non-resolving failures (@ref AnchorQuality::failed plus @ref
-             *        AnchorQuality::not_independent); exceeding it fails the gate regardless of the ratio. The default 0
-             *        tolerates no failure.
+             *        AnchorQuality::not_independent); exceeding it fails the gate regardless of the ratio. The default
+             *        0 tolerates no failure.
              */
             std::size_t max_failed = 0;
             /**
@@ -300,11 +318,11 @@ namespace DetourModKit
          *          declaring a forward-compatible kind never drags an otherwise-healthy manifest below the threshold.
          *          Everything that could resolve but did not -- a Failed anchor, a QuorumNotIndependent one, or an
          *          untouched Unresolved slot -- stays in the denominator, so a partial resolve fails closed. A report
-         *          with nothing to assess (empty, or every anchor unsupported) is @ref GateVerdict::Degraded rather than
-         *          a false Pass. Because this overload is public, a hand-built @ref AnchorQuality whose status counts
-         *          exceed @ref AnchorQuality::total is rejected as internally inconsistent and fails closed to @ref
-         *          GateVerdict::Fail, so a caller assembling a summary directly cannot inflate the resolved count past a
-         *          threshold. Allocation-free and side-effect-free.
+         *          with nothing to assess (empty, or every anchor unsupported) is @ref GateVerdict::Degraded rather
+         *          than a false Pass. Because this overload is public, a hand-built @ref AnchorQuality whose status
+         *          counts exceed @ref AnchorQuality::total is rejected as internally inconsistent and fails closed to
+         *          @ref GateVerdict::Fail, so a caller assembling a summary directly cannot inflate the resolved count
+         *          past a threshold. Allocation-free and side-effect-free.
          */
         [[nodiscard]] GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy = {}) noexcept;
 
@@ -420,9 +438,10 @@ namespace DetourModKit
          *          signature itself was rewritten (a new pattern, a renamed type, a different string) and is the entry
          *          to re-review. The evidence is content-derived -- for byte tiers it hashes the compiled Pattern's
          *          bytes, mask, and decode parameters (the source AOB text is not retained past compilation) -- so it
-         *          is stable across runs and builds on a given platform. A Quorum combines its two sub-anchors'
-         *          evidence order-independently and folds in the agreement mode and tolerance. It reads only the
-         *          declarative views, resolves nothing, and allocates nothing.
+         *          is stable across runs and builds on a given platform. A Quorum combines all of its members'
+         *          evidence order-independently (voting is symmetric, so reordering the members must not change the
+         *          fingerprint) and folds in the effective vote threshold, agreement mode, and tolerance. It reads only
+         *          the declarative views, resolves nothing, and allocates nothing.
          */
         [[nodiscard]] std::uint64_t anchor_fingerprint(const Anchor &anchor) noexcept;
 

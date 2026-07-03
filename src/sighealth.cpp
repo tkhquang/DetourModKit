@@ -417,8 +417,8 @@ namespace DetourModKit
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:
             {
-                // A Quorum composes two anchors by pointer and CallArgHome has no resolver, so neither can be expressed
-                // as a flat file record; the compiler rejects both, and the linter names the same reason.
+                // A Quorum composes its M voting sub-anchors by pointer and CallArgHome has no resolver, so neither can
+                // be expressed as a flat file record; the compiler rejects both, and the linter names the same reason.
                 add_finding(health.findings, FindingKind::NonSerializableKind, Severity::Critical);
                 health.grade = grade_from(health.findings);
                 break;

@@ -12,7 +12,7 @@ The Anchor Registry (`anchor.hpp`, `DetourModKit::anchor`) collapses patch-fragi
 | `StringXref` | `scan::find_string_xref` | The instruction (or enclosing function) that references an immutable string literal |
 | `Manual` | none (pinned literal) | The literal, flagged as at-risk in a report |
 | `CallArgHome` | reserved | Not yet resolvable (reports `Unsupported`) |
-| `Quorum` | two sub-anchors via `resolve` | The corroborated value, accepted only when both independent signals resolve and agree |
+| `Quorum` | N-of-M vote across sub-anchors via `resolve` | The corroborated value, accepted only when at least N of M independent signals resolve and agree |
 
 A `StringXref` anchor is the most update-resilient kind: it locates an immutable string literal in the image's read-only data and resolves the unique RIP-relative `lea` / `mov` that references it, returning that instruction (or, with `xref_return = scan::XrefReturn::EnclosingFunction`, a best-effort prologue back-scan to the function that uses it, or with `xref_return = scan::XrefReturn::StringPointerSlot`, the global data slot that a `mov [rip+slot], reg` caches the loaded pointer into -- see [String-reference anchors](../../misc/aob-signatures.md)). Strings survive game patches far better than the code bytes around them. It fails closed on a missing, duplicated (linker-pooled), or unreferenced string, so pick a long, specific literal that occurs and is referenced exactly once. Set `xref_encoding = scan::StringEncoding::Utf16le` for `wchar_t` literals; `xref_require_terminator` (default true) keeps a prefix of a longer literal from matching ("Player" inside "PlayerController"). `xref_broad_match` (default false) selects the phase-2 reference scan: the default shape scan matches only `REX.W lea` / `mov reg, [rip+disp32]`, while `xref_broad_match = true` keeps that scan and adds a Zydis-verified sweep for rarer shapes (`cmp [rip+d], imm`, `push [rip+d]`, a no-REX `lea` / `mov`). Reach for it only when the default reports a miss for a string you know is referenced. See [String-reference anchors](../../misc/aob-signatures.md) for the full two-mode model.
 
@@ -20,37 +20,38 @@ A `StringXref` anchor is the most update-resilient kind: it locates an immutable
 
 ### Corroborating a critical target (`Quorum`)
 
-For a target whose breakage would be costly, a single signal can be too weak: one AOB or code constant might resolve to a coincidental match after a patch. A `Quorum` anchor requires two independent sub-anchors to resolve *and agree* before it accepts a value, so a coincidental match has to fool both signals at once. Point `quorum_a` and `quorum_b` at two sub-anchors of any resolvable kind (the canonical pair is a `StringXref` plus a `CodeOperand`) and pick the agreement policy:
+For a target whose breakage would be costly, a single signal can be too weak: one AOB or code constant might resolve to a coincidental match after a patch. A `Quorum` anchor votes across `M` independent sub-anchors and accepts only when at least `N` of them resolve *and agree* (N-of-M voting), so a coincidental match has to fool a whole cluster at once -- and, unlike a strict pair, the target still corroborates when a game patch breaks some of the signals, as long as `N` of the rest still agree. List the members in `quorum_members` (non-owning pointers into your own anchor storage, kept alive across the `resolve` call), set `quorum_threshold` to `N`, and pick the agreement policy:
 
 ```cpp
-// Corroborate a struct stride: two independent code sites must agree on it.
-const an::Anchor stride_code = {.kind = an::AnchorKind::CodeOperand,
-                                .site = k_equip_stride, .operand_index = 1};
-const an::Anchor stride_alt = {.kind = an::AnchorKind::CodeOperand,
-                               .site = k_equip_stride_alt, .operand_index = 1};
+// Corroborate a struct stride read from three independent code sites; any two agreeing is enough,
+// so the stride still resolves when a patch shifts one of the three call sites.
+const an::Anchor stride_a = {.kind = an::AnchorKind::CodeOperand, .site = k_equip_stride_a, .operand_index = 1};
+const an::Anchor stride_b = {.kind = an::AnchorKind::CodeOperand, .site = k_equip_stride_b, .operand_index = 1};
+const an::Anchor stride_c = {.kind = an::AnchorKind::CodeOperand, .site = k_equip_stride_c, .operand_index = 1};
+const an::Anchor *stride_votes[] = {&stride_a, &stride_b, &stride_c};
 const an::Anchor stride = {
     .label = "equip_stride",
     .kind = an::AnchorKind::Quorum,
-    .quorum_a = &stride_code,
-    .quorum_b = &stride_alt,
+    .quorum_members = stride_votes,
+    .quorum_threshold = 2, // 2-of-3; the default 0 means unanimous (all members)
     .quorum_match = an::QuorumMatch::ExactValue, // or WithinTolerance + quorum_tolerance
 };
 ```
 
-`quorum_a` / `quorum_b` are non-owning pointers into your own anchor storage, so keep the sub-anchors alive across the `resolve` call. `QuorumMatch::ExactValue` (the default) requires the two resolved values to be identical; `QuorumMatch::WithinTolerance` accepts a gap of at most `quorum_tolerance` and does not require equality (a negative tolerance fails closed, never accepts). On success `value` carries the first sub-anchor's value, which under the selected policy is within `quorum_tolerance` of the second (exactly equal under `ExactValue`). It fails closed -- to `AnchorStatus::Failed` -- when either signal fails, the two disagree, a sub-anchor pointer is null, or a sub-anchor is itself a `Quorum` (nesting is bounded to one level).
+`quorum_members` are non-owning pointers into your own anchor storage, so keep the members alive across the `resolve` call. `quorum_threshold` is `N`: `0` (the default) means unanimous, so a two-member quorum with the default is the strict 2-of-2 corroboration; a quorum is corroboration, so an explicit `N` below 2 or above the member count is a malformed vote and fails closed. `QuorumMatch::ExactValue` (the default) counts two member values as agreeing only when identical; `QuorumMatch::WithinTolerance` counts them as agreeing when their gap is at most `quorum_tolerance` (a negative tolerance fails closed, never accepts). On success `value` carries the accepting cluster's center -- the first member value, in declaration order, that at least `N` members agree with (under `ExactValue` every member of that cluster shares the value; under `WithinTolerance` the rest are within `quorum_tolerance` of it). It fails closed -- to `AnchorStatus::Failed` -- when fewer than `N` members agree, a member pointer is null, a member is itself a `Quorum` (nesting is bounded to one level), or fewer than two members are declared.
 
-Before resolving, the two sub-anchors are checked for independence: corroboration only means something if the two signals are genuinely separate evidence. A pair that is the same `Anchor` object used twice (pointer-equal), two pinned `Manual` literals (an author typing the same number twice is not live evidence), or the same backend with the same inputs (the same site decoded twice) reports `AnchorStatus::QuorumNotIndependent` instead of agreeing. The "same inputs" test compares by view/span identity, so two *separately authored* candidate arrays that happen to encode the same pattern still count as two independent scan sites -- it is sharing the same storage, not duplicating the same bytes, that trips the gate.
+Before resolving, the members are checked for independence pairwise: corroboration only means something if every signal is genuinely separate evidence. If any pair is the same `Anchor` object used twice (pointer-equal), two pinned `Manual` literals (an author typing the same number twice is not live evidence), or the same backend with the same inputs (the same site decoded twice), the whole quorum reports `AnchorStatus::QuorumNotIndependent` instead of voting. The "same inputs" test compares by view/span identity, so two *separately authored* candidate arrays that happen to encode the same pattern still count as two independent scan sites -- it is sharing the same storage, not duplicating the same bytes, that trips the gate. Because a `WithinTolerance` near-match is looser than an exact one, this pairwise gate is what keeps it honest: it confines a tolerance vote to content-independent members, so a cluster of near values can never be an artifact of two members decoding adjacent bytes of one site.
 
 ### Post-resolve validators
 
-Any backend-resolved anchor (not `Manual` or `CallArgHome`) may carry an optional `validator`: a `bool(*)(std::int64_t value, const void* context) noexcept` predicate run on the resolved value just before it is accepted. Returning `false` fails the anchor closed (`Failed`, value reset to 0), identical to a backend miss, so the caller re-heals by re-running `resolve`. Use it to assert a domain invariant a generic backend cannot know -- the target lies in an expected sub-range, a displacement points into `.rdata`, or the site begins with a plausible prologue (`scan::is_likely_function_prologue`). `validator_context` is an opaque pointer forwarded verbatim to the predicate (nullptr if unused). For a `Quorum`, the validator runs once on the corroborated value after both sub-anchors agree.
+Any backend-resolved anchor (not `Manual` or `CallArgHome`) may carry an optional `validator`: a `bool(*)(std::int64_t value, const void* context) noexcept` predicate run on the resolved value just before it is accepted. Returning `false` fails the anchor closed (`Failed`, value reset to 0), identical to a backend miss, so the caller re-heals by re-running `resolve`. Use it to assert a domain invariant a generic backend cannot know -- the target lies in an expected sub-range, a displacement points into `.rdata`, or the site begins with a plausible prologue (`scan::is_likely_function_prologue`). `validator_context` is an opaque pointer forwarded verbatim to the predicate (nullptr if unused). For a `Quorum`, the validator runs once on the corroborated value after the members vote.
 
 Two opt-in policy flags harden this further (both default to preserving the existing behaviour):
 
 - `validate_manual = true` runs the `validator` on a `Manual` anchor too, instead of taking the pinned literal unchecked -- so you can assert a domain invariant on a hand-pinned constant.
-- `require_validator = true` rejects a backend-resolvable anchor that carries no `validator` at all (status `Failed`): a function/global target with no domain check is treated as unverified. A `Quorum` is exempt, because its two-signal corroboration already is the verification.
+- `require_validator = true` rejects a backend-resolvable anchor that carries no `validator` at all (status `Failed`): a function/global target with no domain check is treated as unverified. A `Quorum` is exempt, because its N-of-M corroboration already is the verification.
 
-When a target can be expressed more than one way, prefer the most update-resilient backend: `StringXref` > `VtableIdentity` > `RipGlobal` > `CodeOperand`, with `Quorum` over two of those raising confidence further and `Manual` as the last resort.
+When a target can be expressed more than one way, prefer the most update-resilient backend: `StringXref` > `VtableIdentity` > `RipGlobal` > `CodeOperand`, with a `Quorum` voting over several of those raising confidence further and `Manual` as the last resort.
 
 RTTI pointer-field offset healing (`rtti::heal_landmark`) is intentionally **not** a registry kind: it needs a runtime struct base that is itself resolved from another anchor, so it is driven directly once that base is known (see [rtti-self-heal.md](../rtti/rtti-self-heal.md)).
 
@@ -151,7 +152,7 @@ The point is a diffable identity that is stable when only the address drifts. Pe
 - **Same evidence, new address** -- the fingerprint matches but the resolved value moved. This is expected drift the anchor self-healed; nothing to do.
 - **New evidence path** -- the fingerprint changed, so the signature itself was rewritten (a new pattern, a renamed type, a different string). This is the entry to re-review.
 
-A `Quorum` combines its two sub-anchors' fingerprints order-independently (swapping `quorum_a` / `quorum_b` does not change the result) and folds in the agreement mode and tolerance; a null sub-anchor contributes a fixed sentinel. `CallArgHome` has no resolvable evidence yet, so its fingerprint reflects only the kind. The result is a 64-bit FNV-1a hash, stable across runs and builds on a given platform -- a diff key, not a cryptographic digest. The function reads only the anchor's declarative views, resolves nothing, and allocates nothing.
+A `Quorum` combines all member fingerprints order-independently (reordering `quorum_members` does not change the result) and folds in the effective vote threshold, agreement mode, and tolerance; a null member contributes a fixed sentinel. `CallArgHome` has no resolvable evidence yet, so its fingerprint reflects only the kind. The result is a 64-bit FNV-1a hash, stable across runs and builds on a given platform -- a diff key, not a cryptographic digest. The function reads only the anchor's declarative views, resolves nothing, and allocates nothing.
 
 ## Per-game scan profile
 

@@ -542,11 +542,11 @@ TEST(AnchorTest, QuorumAcceptsWhenSignalsAgree)
     sub_b.site = site_b;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.label = "corroborated";
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members; // default threshold 0 == unanimous == the strict 2-of-2
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
@@ -568,10 +568,10 @@ TEST(AnchorTest, QuorumAcceptsAcrossBackends)
     sub_code.site = site_code;
     sub_code.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_manual, &sub_code};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_manual;
-    quorum.quorum_b = &sub_code;
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
@@ -596,10 +596,10 @@ TEST(AnchorTest, QuorumFailsWhenSignalsDisagree)
     sub_b.site = site_b;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
@@ -621,10 +621,10 @@ TEST(AnchorTest, QuorumFailsWhenOneSignalFails)
     sub_bad.kind = an::AnchorKind::RipGlobal;
     sub_bad.site = site_absent;
 
+    const an::Anchor *members[] = {&sub_ok, &sub_bad};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_ok;
-    quorum.quorum_b = &sub_bad;
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
@@ -636,10 +636,10 @@ TEST(AnchorTest, QuorumNullSubAnchorFailsClosed)
     sub.kind = an::AnchorKind::Manual;
     sub.manual_value = 1;
 
+    const an::Anchor *members[] = {&sub, nullptr}; // a null member fails the quorum closed
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub;
-    quorum.quorum_b = nullptr; // missing second signal
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum);
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
@@ -652,10 +652,10 @@ TEST(AnchorTest, QuorumRejectsNestedQuorum)
     leaf.manual_value = 1;
     an::Anchor nested{};
     nested.kind = an::AnchorKind::Quorum; // a Quorum as a sub-anchor is rejected (nesting bounded to one level)
+    const an::Anchor *members[] = {&leaf, &nested};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &leaf;
-    quorum.quorum_b = &nested;
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum);
     EXPECT_EQ(result.status, an::AnchorStatus::Failed);
@@ -679,16 +679,16 @@ TEST(AnchorTest, QuorumWithinToleranceAcceptsCloseValues)
     sub_b.site = site_b;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
     quorum.quorum_match = an::QuorumMatch::WithinTolerance;
     quorum.quorum_tolerance = 4; // gap is 2
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
-    EXPECT_EQ(result.value, 0xF0); // the first sub-anchor's value
+    EXPECT_EQ(result.value, 0xF0); // the cluster center (first member's value)
 }
 
 TEST(AnchorTest, QuorumWithinToleranceRejectsDistantValues)
@@ -709,10 +709,10 @@ TEST(AnchorTest, QuorumWithinToleranceRejectsDistantValues)
     sub_b.site = site_b;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
     quorum.quorum_match = an::QuorumMatch::WithinTolerance;
     quorum.quorum_tolerance = 2; // gap is 0xF (15)
 
@@ -735,10 +735,10 @@ TEST(AnchorTest, QuorumRejectsNegativeTolerance)
     sub_b.site = site;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
     quorum.quorum_match = an::QuorumMatch::WithinTolerance;
     quorum.quorum_tolerance = -1; // a negative tolerance never accepts, even for equal values
 
@@ -761,10 +761,10 @@ TEST(AnchorTest, QuorumHonoursOwnValidator)
     sub_b.site = site;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
     quorum.validator = &always_reject; // runs once on the corroborated value
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
@@ -777,10 +777,10 @@ TEST(AnchorTest, QuorumRejectsPointerEqualSubAnchors)
     sub.kind = an::AnchorKind::Manual;
     sub.manual_value = 1;
 
+    const an::Anchor *members[] = {&sub, &sub}; // the same object twice is not independent evidence
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub;
-    quorum.quorum_b = &sub; // the same object twice is not independent evidence
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum);
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
@@ -795,10 +795,10 @@ TEST(AnchorTest, QuorumRejectsDualManual)
     sub_b.kind = an::AnchorKind::Manual;
     sub_b.manual_value = 5;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b}; // two hand-pinned literals are not live corroboration
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b; // two hand-pinned literals are not live corroboration
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum);
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
@@ -820,10 +820,10 @@ TEST(AnchorTest, QuorumRejectsSameBackendConfig)
     sub_b.site = site; // SAME storage -> same backend config
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
@@ -848,10 +848,10 @@ TEST(AnchorTest, QuorumAcceptsDistinctCandidateArrays)
     sub_b.site = site_b;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
@@ -873,11 +873,11 @@ TEST(AnchorTest, QuorumExemptFromRequireValidator)
     sub_b.site = site;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
-    quorum.require_validator = true; // exempt: two-signal corroboration is the verification, no validator needed
+    quorum.quorum_members = members;
+    quorum.require_validator = true; // exempt: N-of-M corroboration is the verification, no validator needed
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
@@ -899,11 +899,11 @@ TEST(AnchorTest, ResolveAllCarriesQuorum)
     sub_b.site = site;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor table[1]{};
     table[0].label = "q";
     table[0].kind = an::AnchorKind::Quorum;
-    table[0].quorum_a = &sub_a;
-    table[0].quorum_b = &sub_b;
+    table[0].quorum_members = members;
 
     an::ResolvedAnchor report[1]{};
     const std::size_t written = an::resolve_all(table, report, page.range());
@@ -911,6 +911,313 @@ TEST(AnchorTest, ResolveAllCarriesQuorum)
     EXPECT_EQ(report[0].status, an::AnchorStatus::Resolved);
     EXPECT_EQ(report[0].value, 0x30);
     EXPECT_EQ(report[0].kind, an::AnchorKind::Quorum);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// N-of-M voting: at least N of M independent members must resolve and agree.
+// ---------------------------------------------------------------------------------------------------------------------
+
+TEST(AnchorTest, QuorumNofMResolvesWhenThresholdMetDespiteFailure)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
+    const sc::Candidate site_code[] = {sc::Candidate::direct("add-rax", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate site_absent[] = {sc::Candidate::direct("absent", aob("11 22 33 44 55 66 77 88"))};
+
+    an::Anchor by_hand{};
+    by_hand.kind = an::AnchorKind::Manual;
+    by_hand.manual_value = 0xF0;
+    an::Anchor by_code{};
+    by_code.kind = an::AnchorKind::CodeOperand;
+    by_code.site = site_code;
+    by_code.operand_index = 1;
+    an::Anchor by_scan{}; // this signal is broken on the "patch": its pattern is not present
+    by_scan.kind = an::AnchorKind::RipGlobal;
+    by_scan.site = site_absent;
+
+    // 2-of-3: the third member fails to resolve, but the other two independent signals agree, so the target still
+    // corroborates. A strict 2-of-2 or 3-of-3 quorum would have failed here.
+    const an::Anchor *members[] = {&by_hand, &by_code, &by_scan};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_threshold = 2;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0xF0);
+}
+
+TEST(AnchorTest, QuorumNofMFailsBelowThreshold)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    const sc::Candidate site_absent[] = {sc::Candidate::direct("absent", aob("11 22 33 44 55 66 77 88"))};
+
+    an::Anchor by_hand{};
+    by_hand.kind = an::AnchorKind::Manual;
+    by_hand.manual_value = 0xF0;
+    an::Anchor by_code{}; // fails: pattern not on the page
+    by_code.kind = an::AnchorKind::CodeOperand;
+    by_code.site = site_absent;
+    by_code.operand_index = 1;
+    an::Anchor by_scan{}; // fails: pattern not on the page
+    by_scan.kind = an::AnchorKind::RipGlobal;
+    by_scan.site = site_absent;
+
+    // Only one of three members resolves, below the 2-of-3 threshold, so a lone signal cannot masquerade as
+    // corroborated.
+    const an::Anchor *members[] = {&by_hand, &by_code, &by_scan};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_threshold = 2;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+TEST(AnchorTest, QuorumNofMOutvotesDisagreeingMember)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0xF0, 0x00, 0x00, 0x00}); // add rcx, 0xF0
+    page.put(0x180, {0x48, 0x81, 0xC2, 0xE0, 0x00, 0x00, 0x00}); // add rdx, 0xE0 (the odd one out)
+    const sc::Candidate site_a[] = {sc::Candidate::direct("add-rax", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("add-rcx", aob("48 81 C1 F0 00 00 00"))};
+    const sc::Candidate site_c[] = {sc::Candidate::direct("add-rdx", aob("48 81 C2 E0 00 00 00"))};
+
+    an::Anchor agree_a{};
+    agree_a.kind = an::AnchorKind::CodeOperand;
+    agree_a.site = site_a;
+    agree_a.operand_index = 1;
+    an::Anchor agree_b{};
+    agree_b.kind = an::AnchorKind::CodeOperand;
+    agree_b.site = site_b;
+    agree_b.operand_index = 1;
+    an::Anchor dissent{};
+    dissent.kind = an::AnchorKind::CodeOperand;
+    dissent.site = site_c;
+    dissent.operand_index = 1;
+
+    // Two of three independent members agree on 0xF0; the third resolves to a different value and is outvoted.
+    const an::Anchor *members[] = {&agree_a, &agree_b, &dissent};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_threshold = 2;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0xF0);
+}
+
+TEST(AnchorTest, QuorumDefaultThresholdResolvesWhenUnanimous)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0xF0, 0x00, 0x00, 0x00}); // add rcx, 0xF0
+    page.put(0x180, {0x48, 0x81, 0xC2, 0xF0, 0x00, 0x00, 0x00}); // add rdx, 0xF0
+    const sc::Candidate site_a[] = {sc::Candidate::direct("add-rax", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("add-rcx", aob("48 81 C1 F0 00 00 00"))};
+    const sc::Candidate site_c[] = {sc::Candidate::direct("add-rdx", aob("48 81 C2 F0 00 00 00"))};
+
+    an::Anchor m_a{};
+    m_a.kind = an::AnchorKind::CodeOperand;
+    m_a.site = site_a;
+    m_a.operand_index = 1;
+    an::Anchor m_b{};
+    m_b.kind = an::AnchorKind::CodeOperand;
+    m_b.site = site_b;
+    m_b.operand_index = 1;
+    an::Anchor m_c{};
+    m_c.kind = an::AnchorKind::CodeOperand;
+    m_c.site = site_c;
+    m_c.operand_index = 1;
+
+    // Default threshold 0 means unanimous: all three members must agree.
+    const an::Anchor *members[] = {&m_a, &m_b, &m_c};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0xF0);
+}
+
+TEST(AnchorTest, QuorumDefaultThresholdFailsWithoutUnanimity)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0xF0, 0x00, 0x00, 0x00}); // add rcx, 0xF0
+    page.put(0x180, {0x48, 0x81, 0xC2, 0xE0, 0x00, 0x00, 0x00}); // add rdx, 0xE0 (breaks unanimity)
+    const sc::Candidate site_a[] = {sc::Candidate::direct("add-rax", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("add-rcx", aob("48 81 C1 F0 00 00 00"))};
+    const sc::Candidate site_c[] = {sc::Candidate::direct("add-rdx", aob("48 81 C2 E0 00 00 00"))};
+
+    an::Anchor m_a{};
+    m_a.kind = an::AnchorKind::CodeOperand;
+    m_a.site = site_a;
+    m_a.operand_index = 1;
+    an::Anchor m_b{};
+    m_b.kind = an::AnchorKind::CodeOperand;
+    m_b.site = site_b;
+    m_b.operand_index = 1;
+    an::Anchor m_c{};
+    m_c.kind = an::AnchorKind::CodeOperand;
+    m_c.site = site_c;
+    m_c.operand_index = 1;
+
+    // Two members agree but the default threshold demands unanimity, so a 2-of-3 majority is not enough.
+    const an::Anchor *members[] = {&m_a, &m_b, &m_c};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+TEST(AnchorTest, QuorumWithinToleranceNofMFormsCluster)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0xF2, 0x00, 0x00, 0x00}); // add rcx, 0xF2 (gap 2 from 0xF0)
+    page.put(0x180, {0x48, 0x81, 0xC2, 0xFF, 0x00, 0x00, 0x00}); // add rdx, 0xFF (gap 15, outside tolerance)
+    const sc::Candidate site_a[] = {sc::Candidate::direct("add-rax", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate site_b[] = {sc::Candidate::direct("add-rcx", aob("48 81 C1 F2 00 00 00"))};
+    const sc::Candidate site_c[] = {sc::Candidate::direct("add-rdx", aob("48 81 C2 FF 00 00 00"))};
+
+    an::Anchor near_a{};
+    near_a.kind = an::AnchorKind::CodeOperand;
+    near_a.site = site_a;
+    near_a.operand_index = 1;
+    an::Anchor near_b{};
+    near_b.kind = an::AnchorKind::CodeOperand;
+    near_b.site = site_b;
+    near_b.operand_index = 1;
+    an::Anchor far_c{};
+    far_c.kind = an::AnchorKind::CodeOperand;
+    far_c.site = site_c;
+    far_c.operand_index = 1;
+
+    // Two of three members are within tolerance of 0xF0 and form the accepting cluster; the far member is excluded.
+    const an::Anchor *members[] = {&near_a, &near_b, &far_c};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_threshold = 2;
+    quorum.quorum_match = an::QuorumMatch::WithinTolerance;
+    quorum.quorum_tolerance = 4;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(result.value, 0xF0); // the cluster center
+}
+
+TEST(AnchorTest, QuorumThresholdBelowTwoFailsClosed)
+{
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::Manual;
+    sub_a.manual_value = 0xF0;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::VtableIdentity;
+    sub_b.mangled = ".?AVAbsent@@";
+
+    // A quorum is corroboration, so a threshold of 1 (accept any lone signal) is a malformed vote and fails closed.
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_threshold = 1;
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+TEST(AnchorTest, QuorumThresholdAboveMemberCountFailsClosed)
+{
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::Manual;
+    sub_a.manual_value = 0xF0;
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::VtableIdentity;
+    sub_b.mangled = ".?AVAbsent@@";
+
+    // Demanding more agreeing votes than there are members can never be satisfied, so it is malformed and fails closed.
+    const an::Anchor *members[] = {&sub_a, &sub_b};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_threshold = 3;
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+TEST(AnchorTest, QuorumEmptyMembersFailsClosed)
+{
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum; // quorum_members left empty
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+TEST(AnchorTest, QuorumSingleMemberFailsClosed)
+{
+    an::Anchor sub{};
+    sub.kind = an::AnchorKind::Manual;
+    sub.manual_value = 1;
+
+    // One member is a single signal, not corroboration; a quorum needs at least two members.
+    const an::Anchor *members[] = {&sub};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum);
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+}
+
+TEST(AnchorTest, QuorumRejectsDependentPairAmongIndependentMembers)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0xF0, 0x00, 0x00, 0x00}); // add rcx, 0xF0
+    const sc::Candidate site_shared[] = {sc::Candidate::direct("add-rax", aob("48 05 F0 00 00 00"))};
+    const sc::Candidate site_other[] = {sc::Candidate::direct("add-rcx", aob("48 81 C1 F0 00 00 00"))};
+
+    an::Anchor first{};
+    first.kind = an::AnchorKind::CodeOperand;
+    first.site = site_shared;
+    first.operand_index = 1;
+    an::Anchor second{};
+    second.kind = an::AnchorKind::CodeOperand;
+    second.site = site_other;
+    second.operand_index = 1;
+    an::Anchor third{}; // SAME storage as first -> a dependent pair the all-pairs check must catch
+    third.kind = an::AnchorKind::CodeOperand;
+    third.site = site_shared;
+    third.operand_index = 1;
+
+    // The dependent pair is (first, third), which are not adjacent in the member list: independence is checked over
+    // ALL pairs, not just neighbours, so the whole vote fails as non-independent.
+    const an::Anchor *members[] = {&first, &second, &third};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+    quorum.quorum_threshold = 2;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1109,14 +1416,14 @@ TEST(AnchorFingerprintTest, QuorumIsOrderIndependent)
     sub_b.kind = an::AnchorKind::VtableIdentity;
     sub_b.mangled = ".?AVB@@";
 
+    const an::Anchor *members1[] = {&sub_a, &sub_b};
+    const an::Anchor *members2[] = {&sub_b, &sub_a}; // swapped
     an::Anchor q1{};
     q1.kind = an::AnchorKind::Quorum;
-    q1.quorum_a = &sub_a;
-    q1.quorum_b = &sub_b;
+    q1.quorum_members = members1;
     an::Anchor q2{};
     q2.kind = an::AnchorKind::Quorum;
-    q2.quorum_a = &sub_b; // swapped
-    q2.quorum_b = &sub_a;
+    q2.quorum_members = members2;
     EXPECT_EQ(an::anchor_fingerprint(q1), an::anchor_fingerprint(q2));
 }
 
@@ -1129,10 +1436,10 @@ TEST(AnchorFingerprintTest, QuorumMatchModeAndToleranceAreEvidence)
     sub_b.kind = an::AnchorKind::VtableIdentity;
     sub_b.mangled = ".?AVB@@";
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor base{};
     base.kind = an::AnchorKind::Quorum;
-    base.quorum_a = &sub_a;
-    base.quorum_b = &sub_b;
+    base.quorum_members = members;
 
     an::Anchor mode = base;
     mode.quorum_match = an::QuorumMatch::WithinTolerance;
@@ -1143,15 +1450,115 @@ TEST(AnchorFingerprintTest, QuorumMatchModeAndToleranceAreEvidence)
     EXPECT_NE(an::anchor_fingerprint(mode), an::anchor_fingerprint(tol));
 }
 
+TEST(AnchorFingerprintTest, QuorumThresholdIsEvidence)
+{
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::VtableIdentity;
+    sub_a.mangled = ".?AVA@@";
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::VtableIdentity;
+    sub_b.mangled = ".?AVB@@";
+    an::Anchor sub_c{};
+    sub_c.kind = an::AnchorKind::VtableIdentity;
+    sub_c.mangled = ".?AVC@@";
+
+    // Two quorums with the same members but a different vote threshold are a different corroboration contract, so
+    // their fingerprints must differ (2-of-3 vs the unanimous default).
+    const an::Anchor *members[] = {&sub_a, &sub_b, &sub_c};
+    an::Anchor unanimous{};
+    unanimous.kind = an::AnchorKind::Quorum;
+    unanimous.quorum_members = members;
+    an::Anchor two_of_three = unanimous;
+    two_of_three.quorum_threshold = 2;
+    EXPECT_NE(an::anchor_fingerprint(unanimous), an::anchor_fingerprint(two_of_three));
+}
+
+TEST(AnchorFingerprintTest, QuorumDefaultThresholdMatchesExplicitUnanimous)
+{
+    an::Anchor sub_a{};
+    sub_a.kind = an::AnchorKind::VtableIdentity;
+    sub_a.mangled = ".?AVA@@";
+    an::Anchor sub_b{};
+    sub_b.kind = an::AnchorKind::VtableIdentity;
+    sub_b.mangled = ".?AVB@@";
+    an::Anchor sub_c{};
+    sub_c.kind = an::AnchorKind::VtableIdentity;
+    sub_c.mangled = ".?AVC@@";
+
+    // The default threshold 0 means unanimous, so spelling a three-member quorum as 0 or 3 is the same contract.
+    const an::Anchor *members[] = {&sub_a, &sub_b, &sub_c};
+    an::Anchor default_unanimous{};
+    default_unanimous.kind = an::AnchorKind::Quorum;
+    default_unanimous.quorum_members = members;
+    an::Anchor explicit_unanimous = default_unanimous;
+    explicit_unanimous.quorum_threshold = 3;
+    EXPECT_EQ(an::anchor_fingerprint(default_unanimous), an::anchor_fingerprint(explicit_unanimous));
+}
+
+TEST(AnchorFingerprintTest, QuorumFingerprintDistinguishesMemberMultiplicity)
+{
+    // Two anchors with identical evidence (same kind + inputs) hash to the same member evidence, so the quorum
+    // fingerprint must fold each evidence value once PER member, not once per distinct value. Otherwise {A, A, B}
+    // and {A, B, B} -- the same distinct set at different multiplicity -- would collide. This locks the
+    // duplicate-counting step of the allocation-free sorted fold.
+    an::Anchor a{};
+    a.kind = an::AnchorKind::VtableIdentity;
+    a.mangled = ".?AVA@@";
+    an::Anchor a_dup{};
+    a_dup.kind = an::AnchorKind::VtableIdentity;
+    a_dup.mangled = ".?AVA@@"; // identical evidence to a
+    an::Anchor b{};
+    b.kind = an::AnchorKind::VtableIdentity;
+    b.mangled = ".?AVB@@";
+    an::Anchor b_dup{};
+    b_dup.kind = an::AnchorKind::VtableIdentity;
+    b_dup.mangled = ".?AVB@@"; // identical evidence to b
+
+    const an::Anchor *two_a_one_b[] = {&a, &a_dup, &b};
+    const an::Anchor *one_a_two_b[] = {&a, &b, &b_dup};
+    an::Anchor q1{};
+    q1.kind = an::AnchorKind::Quorum;
+    q1.quorum_members = two_a_one_b;
+    an::Anchor q2{};
+    q2.kind = an::AnchorKind::Quorum;
+    q2.quorum_members = one_a_two_b;
+    EXPECT_NE(an::anchor_fingerprint(q1), an::anchor_fingerprint(q2));
+}
+
+TEST(AnchorFingerprintTest, QuorumFingerprintOrderIndependentWithDuplicates)
+{
+    // The allocation-free sorted fold must stay order-independent even when two members share evidence: {A, A, B}
+    // and {A, B, A} are the same multiset and must fingerprint identically.
+    an::Anchor a{};
+    a.kind = an::AnchorKind::VtableIdentity;
+    a.mangled = ".?AVA@@";
+    an::Anchor a_dup{};
+    a_dup.kind = an::AnchorKind::VtableIdentity;
+    a_dup.mangled = ".?AVA@@";
+    an::Anchor b{};
+    b.kind = an::AnchorKind::VtableIdentity;
+    b.mangled = ".?AVB@@";
+
+    const an::Anchor *aab[] = {&a, &a_dup, &b};
+    const an::Anchor *aba[] = {&a, &b, &a_dup};
+    an::Anchor q1{};
+    q1.kind = an::AnchorKind::Quorum;
+    q1.quorum_members = aab;
+    an::Anchor q2{};
+    q2.kind = an::AnchorKind::Quorum;
+    q2.quorum_members = aba;
+    EXPECT_EQ(an::anchor_fingerprint(q1), an::anchor_fingerprint(q2));
+}
+
 TEST(AnchorFingerprintTest, QuorumNullSubAnchorIsDefined)
 {
     an::Anchor sub{};
     sub.kind = an::AnchorKind::VtableIdentity;
     sub.mangled = ".?AVA@@";
+    const an::Anchor *members[] = {&sub, nullptr}; // a null member contributes a fixed sentinel, never a nullptr deref
     an::Anchor q{};
     q.kind = an::AnchorKind::Quorum;
-    q.quorum_a = &sub;
-    q.quorum_b = nullptr; // a null sub-anchor contributes a fixed sentinel, never a nullptr deref
+    q.quorum_members = members;
     EXPECT_EQ(an::anchor_fingerprint(q), an::anchor_fingerprint(q));
 }
 
@@ -1225,10 +1632,10 @@ TEST(AnchorProfileTest, QuorumWithDeniedSubAnchorFailsClosed)
     sub_b.site = site;
     sub_b.operand_index = 1;
 
+    const an::Anchor *members[] = {&sub_a, &sub_b};
     an::Anchor quorum{};
     quorum.kind = an::AnchorKind::Quorum;
-    quorum.quorum_a = &sub_a;
-    quorum.quorum_b = &sub_b;
+    quorum.quorum_members = members;
 
     an::ScanProfile profile{};
     profile.deny_backend[static_cast<std::size_t>(an::AnchorKind::CodeOperand)] = true; // threads into the sub-anchor
