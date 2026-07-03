@@ -143,9 +143,9 @@ namespace DetourModKit::detail
         void bump_wheel_notch(std::atomic<int> &slot) noexcept
         {
             int current = slot.load(std::memory_order_relaxed);
-            while (current < MAX_WHEEL_NOTCHES &&
-                   !slot.compare_exchange_weak(current, current + 1, std::memory_order_relaxed,
-                                               std::memory_order_relaxed))
+            while (
+                current < MAX_WHEEL_NOTCHES &&
+                !slot.compare_exchange_weak(current, current + 1, std::memory_order_relaxed, std::memory_order_relaxed))
             {
             }
         }
@@ -783,8 +783,7 @@ namespace DetourModKit::detail
         // keep entering the detour after the trampoline pointers are retired, and teardown must still make progress.
         constexpr uint64_t XINPUT_QUIESCE_TIMEOUT_MS = 10;
         const uint64_t quiesce_deadline_ms = GetTickCount64() + XINPUT_QUIESCE_TIMEOUT_MS;
-        while (s_xinput_inflight.load(std::memory_order_acquire) != 0 &&
-               GetTickCount64() < quiesce_deadline_ms)
+        while (s_xinput_inflight.load(std::memory_order_acquire) != 0 && GetTickCount64() < quiesce_deadline_ms)
         {
             std::this_thread::yield();
         }

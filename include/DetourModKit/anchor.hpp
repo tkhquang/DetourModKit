@@ -235,6 +235,94 @@ namespace DetourModKit
         };
 
         /**
+         * @enum GateVerdict
+         * @brief The startup decision a drift report yields: enable, enable-with-caution, or safe-disable.
+         * @details Drift telemetry on its own only describes health; this is the verdict that lets a mod act on it --
+         *          turn a feature off before it runs on unverified addresses instead of logging the low quality and
+         *          patching the game's memory anyway.
+         */
+        enum class GateVerdict : std::uint8_t
+        {
+            /// Healthy enough to enable outright: the resolve ratio met the threshold and no at-risk signal fired.
+            Pass,
+            /**
+             * @brief Resolved above the threshold, but a soft signal (a pinned Manual literal that cannot self-heal,
+             *        or a report with nothing assessable) means the feature should run only with a logged caution.
+             */
+            Degraded,
+            /**
+             * @brief Below the threshold -- too few anchors resolved, or too many failed. Safe-disable the feature
+             *        rather than run it on addresses the manifest could not verify.
+             */
+            Fail
+        };
+
+        /**
+         * @struct GatePolicy
+         * @brief The thresholds that turn an @ref AnchorQuality summary into a @ref GateVerdict. Defaults fail closed.
+         * @details A plain value with no global state, so a mod can hold one policy per feature (a cosmetic overlay can
+         *          tolerate a lower ratio than a frame-time camera patch that writes a live pointer). The defaults are
+         *          the strictest: every resolvable anchor must heal and nothing may fail.
+         */
+        struct GatePolicy
+        {
+            /**
+             * @brief Minimum fraction, in [0, 1], of RESOLVABLE anchors (@ref AnchorQuality::total minus the
+             *        unsupported @ref AnchorKind::CallArgHome kind) that must resolve for the gate to pass. A
+             *        caller-supplied value outside [0, 1] is clamped; NaN is treated as the strict default. The default
+             *        1.0 requires every resolvable anchor to heal.
+             */
+            double min_resolved_ratio = 1.0;
+            /**
+             * @brief Hard cap on non-resolving failures (@ref AnchorQuality::failed plus @ref
+             *        AnchorQuality::not_independent); exceeding it fails the gate regardless of the ratio. The default 0
+             *        tolerates no failure.
+             */
+            std::size_t max_failed = 0;
+            /**
+             * @brief When true (the default), a resolved-but-pinned Manual anchor downgrades an otherwise-passing
+             *        verdict to @ref GateVerdict::Degraded, because a Manual literal cannot self-heal across a patch.
+             */
+            bool manual_at_risk_degrades = true;
+        };
+
+        /**
+         * @brief Turns a drift-report robustness summary into a startup enable/disable decision.
+         * @param quality The summary from @ref assess_quality (or @ref diagnostics::Snapshot::anchor_quality).
+         * @param policy The thresholds; the default policy fails closed (every resolvable anchor must heal, zero
+         *               failures tolerated).
+         * @return @ref GateVerdict::Fail when the report is below the threshold (safe-disable the feature), @ref
+         *         GateVerdict::Degraded when it resolved but carries a soft risk, else @ref GateVerdict::Pass.
+         * @details Feature-granular gating falls out of the report subset: resolve just a feature's anchors into a
+         *          report (or gate a sub-span of a shared one), so one primitive serves both a whole-manifest health
+         *          check and a per-feature kill switch. The ratio denominator excludes the
+         *          unsupported @ref AnchorKind::CallArgHome kind (which has no resolver and can never heal), so
+         *          declaring a forward-compatible kind never drags an otherwise-healthy manifest below the threshold.
+         *          Everything that could resolve but did not -- a Failed anchor, a QuorumNotIndependent one, or an
+         *          untouched Unresolved slot -- stays in the denominator, so a partial resolve fails closed. A report
+         *          with nothing to assess (empty, or every anchor unsupported) is @ref GateVerdict::Degraded rather than
+         *          a false Pass. Allocation-free and side-effect-free.
+         */
+        [[nodiscard]] GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy = {}) noexcept;
+
+        /**
+         * @brief Summarizes a drift report and gates it in one call.
+         * @param report The @ref ResolvedAnchor array (or a per-feature sub-span) produced by a resolve_all variant.
+         * @param policy The gate thresholds.
+         * @return The gate verdict for @p report under @p policy; equivalent to
+         *         `evaluate_gate(assess_quality(report), policy)`.
+         */
+        [[nodiscard]] GateVerdict evaluate_gate(std::span<const ResolvedAnchor> report,
+                                                const GatePolicy &policy = {}) noexcept;
+
+        /**
+         * @brief Maps a @ref GateVerdict to a short human-readable label.
+         * @param verdict The verdict.
+         * @return A static string view naming the verdict.
+         */
+        [[nodiscard]] std::string_view gate_verdict_to_string(GateVerdict verdict) noexcept;
+
+        /**
          * @struct ScanProfile
          * @brief A per-game bundle of setup-only scan-tuning DEFAULTS, applied as a plain value with no global state.
          * @details It supplies defaults only: an explicit per-anchor choice still wins, so wiring a profile never

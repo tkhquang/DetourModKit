@@ -84,8 +84,7 @@ namespace DetourModKit
             };
         }
 
-        ScanRequest borrow_code_target(std::span<const Candidate> ladder, std::string_view label,
-                                       Region scope) noexcept
+        ScanRequest borrow_code_target(std::span<const Candidate> ladder, std::string_view label, Region scope) noexcept
         {
             // The code-target policy: scan only executable pages (an instruction signature must not alias a byte run in
             // data), promote the unique-only / anchored tiers first, and enable hooked-prologue recovery so a target
