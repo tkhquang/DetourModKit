@@ -11,6 +11,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 #include "DetourModKit/anchor.hpp"
@@ -116,6 +117,35 @@ namespace
         name += ".signatures.ini";
         return std::filesystem::temp_directory_path() / name;
     }
+
+    // Owns a unique temp manifest path and deletes the file on every scope exit. A gtest ASSERT_* returns early from
+    // the test body on failure, so a trailing std::filesystem::remove would be skipped and leak the artifact; tying the
+    // cleanup to this guard's destructor keeps the temp directory clean whether the test passes or an assertion aborts
+    // it. The constructor also clears any stale file so a test starts from a known-absent state, and both paths use the
+    // noexcept remove(path, ec) overload so the destructor never throws.
+    class ScopedManifestFile
+    {
+    public:
+        explicit ScopedManifestFile(std::string_view stem) : m_path(unique_manifest_path(stem))
+        {
+            std::error_code ec;
+            std::filesystem::remove(m_path, ec);
+        }
+
+        ~ScopedManifestFile()
+        {
+            std::error_code ec;
+            std::filesystem::remove(m_path, ec);
+        }
+
+        ScopedManifestFile(const ScopedManifestFile &) = delete;
+        ScopedManifestFile &operator=(const ScopedManifestFile &) = delete;
+
+        [[nodiscard]] const std::filesystem::path &path() const noexcept { return m_path; }
+
+    private:
+        std::filesystem::path m_path;
+    };
 } // namespace
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -813,25 +843,22 @@ TEST(ManifestFileTest, SaveThenLoadRoundTrips)
         records.push_back(std::move(record));
     }
 
-    const std::filesystem::path path = unique_manifest_path("roundtrip");
-    std::filesystem::remove(path);
+    const ScopedManifestFile file("roundtrip");
 
-    const auto saved = mf::save(path, records);
+    const auto saved = mf::save(file.path(), records);
     ASSERT_TRUE(saved.has_value()) << saved.error().message();
 
-    const auto loaded = mf::load(path);
+    const auto loaded = mf::load(file.path());
     ASSERT_TRUE(loaded.has_value()) << loaded.error().message();
     EXPECT_EQ(mf::serialize(*loaded), mf::serialize(records));
-
-    std::filesystem::remove(path);
 }
 
 TEST(ManifestFileTest, LoadMissingFileReportsFileOpenFailed)
 {
-    const std::filesystem::path path = unique_manifest_path("absent");
-    std::filesystem::remove(path);
+    // The guard's constructor clears any stale file, so the path starts absent.
+    const ScopedManifestFile file("absent");
 
-    const auto loaded = mf::load(path);
+    const auto loaded = mf::load(file.path());
     ASSERT_FALSE(loaded.has_value());
     EXPECT_EQ(loaded.error().code, dmk::ErrorCode::FileOpenFailed);
 }
