@@ -13,6 +13,7 @@ Guides and references for building mods with DetourModKit. New here? Start with 
 
 ### Hooking
 
+- [Hook Type Coverage](guides/hooking/hook-type-coverage.md) -- the inline / mid / VMT surface DMK ships, and the hook types (IAT/EAT, software and hardware breakpoints, DBI trace) it deliberately excludes, with the reason for each.
 - [VMT Hook Configuration](guides/hooking/vmt-hook-config.md) -- object and per-method virtual-table hooking and the `VmtOptions` pre-flight safety knobs.
 
 ### Memory
