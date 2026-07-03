@@ -231,26 +231,6 @@ namespace DetourModKit
                 return false;
             }
 
-            /// Reports whether any consume binding carries a wheel trigger (gates wheel swallowing).
-            bool scan_for_wheel_consume_bindings(const std::vector<InputBinding> &bindings) noexcept
-            {
-                for (const auto &binding : bindings)
-                {
-                    if (!binding.consume)
-                    {
-                        continue;
-                    }
-                    for (const auto &key : binding.keys)
-                    {
-                        if (key.source == InputSource::MouseWheel)
-                        {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-
             /**
              * @brief Builds the detour-evaluable consume rule list from the current bindings.
              * @details A rule is emitted for every consume binding whose masked triggers include a digital gamepad
@@ -400,8 +380,6 @@ namespace DetourModKit
                 m_has_wheel_bindings.store(scan_for_wheel_bindings(m_bindings), std::memory_order_relaxed);
                 m_has_consume_gamepad_bindings.store(scan_for_consume_gamepad_bindings(m_bindings),
                                                      std::memory_order_relaxed);
-                m_has_wheel_consume_bindings.store(scan_for_wheel_consume_bindings(m_bindings),
-                                                   std::memory_order_relaxed);
 
                 // Publish the detour-side consume rule list. The XInput detour evaluates these against the exact
                 // snapshot the game reads, closing the leading-edge window the poll-published mask leaves for a
@@ -418,7 +396,6 @@ namespace DetourModKit
                 m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_has_wheel_bindings.store(false, std::memory_order_relaxed);
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
-                m_has_wheel_consume_bindings.store(false, std::memory_order_relaxed);
                 publish_gamepad_consume_rules(nullptr, 0);
                 (void)log().try_log(LogLevel::Error,
                                     "InputPoller: out of memory rebuilding modifier caches; "
@@ -697,16 +674,15 @@ namespace DetourModKit
                     wheel_pulse_mask = step_wheel_pulse(wheel_pulse);
                 }
 
-                // Drive the wheel-swallow flag every cycle, outside the wheel-binding guard above, so it disarms on the
-                // first cycle after the last consume wheel binding is removed at runtime: the window-procedure subclass
-                // stays installed until shutdown, so a stale true would keep eating the game's wheel forever (the
-                // gamepad mask self-heals via its TTL, but the wheel flag has none). Gate it on focus to mirror the
-                // gamepad mask clear below: a backgrounded mod must not swallow the focused app's wheel.
-                set_wheel_consume(process_focused && m_has_wheel_consume_bindings.load(std::memory_order_relaxed));
-
-                // Digital gamepad button bits claimed by active consume chords this cycle, accumulated in the binding
-                // loop and published afterwards.
+                // Digital gamepad button bits and wheel directions claimed by active consume bindings this cycle. Both
+                // are accumulated in the binding loop (where each binding's modifiers are evaluated against the live
+                // physical state) and published to the interception detours after the loop, so a consume binding masks
+                // only what it actually owns: a "Ctrl+WheelUp" binding contributes the Up direction only while Ctrl is
+                // held, and never the Down direction. wheel_owned stays 0 when unfocused (the whole evaluation runs
+                // under process_focused) or when no consume wheel binding's modifiers are satisfied, so publishing it
+                // every cycle also disarms wheel swallowing the moment the last such binding is removed.
                 uint16_t gamepad_owned = 0;
+                uint8_t wheel_owned = 0;
 
                 // Poll gamepad state once per cycle when connected, into the hoisted gamepad_state buffer. When
                 // disconnected, throttle reconnection attempts to avoid the per-cycle overhead of XInputGetState on
@@ -834,6 +810,21 @@ namespace DetourModKit
                                             static_cast<uint16_t>(gamepad_owned | static_cast<uint16_t>(key.code));
                                     }
 
+                                    // Pre-arm the wheel-consume bit while this consume wheel binding's modifiers are
+                                    // held, before the notch itself arrives. The wheel is edge-driven and the swallow
+                                    // decision runs in the WndProc detour the instant a message arrives, so the
+                                    // published mask must reflect "modifiers currently satisfied" rather than the
+                                    // derived wheel_pulse_mask (which is itself built from past notches, so keying the
+                                    // consume off it would be circular). WheelCode direction values are dense from
+                                    // Up=1 and match the WheelDirection bit order, so the direction bit is
+                                    // 1 << (code - Up). Mirrors the gamepad pre-arm above.
+                                    if (binding.consume && key.source == InputSource::MouseWheel &&
+                                        key.code >= WheelCode::Up && key.code <= WheelCode::Right)
+                                    {
+                                        wheel_owned = static_cast<uint8_t>(
+                                            wheel_owned | static_cast<uint8_t>(1u << (key.code - WheelCode::Up)));
+                                    }
+
                                     // Activation still keys off the real press: a non-consume binding fires on the
                                     // first pressed key and stops, while a consume binding keeps scanning so the
                                     // pre-arm above sees every owned bit.
@@ -911,6 +902,13 @@ namespace DetourModKit
                         set_gamepad_rule_suppress_enabled(false);
                     }
                 }
+
+                // Publish the per-direction wheel-swallow mask for the WndProc detour. Driven every cycle (not gated on
+                // wheel bindings) so it disarms on the first cycle after the last consume wheel binding is removed:
+                // wheel_owned is already 0 in that case, and a zero publish forwards every wheel message. A non-zero
+                // mask refreshes its time-to-live so a stalled poll thread stops swallowing and the game keeps its
+                // wheel.
+                publish_wheel_consume(wheel_owned);
 
                 for (auto &callback : pending)
                 {
@@ -1294,7 +1292,6 @@ namespace DetourModKit
                 m_has_gamepad_bindings.store(false, std::memory_order_relaxed);
                 m_has_wheel_bindings.store(false, std::memory_order_relaxed);
                 m_has_consume_gamepad_bindings.store(false, std::memory_order_relaxed);
-                m_has_wheel_consume_bindings.store(false, std::memory_order_relaxed);
                 publish_gamepad_consume_rules(nullptr, 0);
                 m_active_states = std::move(new_states);
             }

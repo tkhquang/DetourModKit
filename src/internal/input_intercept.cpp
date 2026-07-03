@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <thread>
 #include <utility>
 
 namespace DetourModKit::detail
@@ -54,6 +55,30 @@ namespace DetourModKit::detail
         std::atomic<uint16_t> s_suppress_mask{0};
         std::atomic<uint64_t> s_suppress_deadline_ms{0};
 
+        // Count of game threads currently executing inside an XInput detour body. uninstall() first retires the
+        // published trampoline pointers, then drains this to zero before destroying the hook objects, so no thread that
+        // already copied a trampoline keeps running through memory the hook owns. SafetyHook still relocates a thread
+        // caught mid-prologue during removal, so this is defense-in-depth that shrinks the window rather than the sole
+        // guarantee; the poll thread (our other trampoline reader) is already joined by then.
+        std::atomic<int> s_xinput_inflight{0};
+
+        /**
+         * @brief RAII marker for a game thread executing an XInput detour body.
+         * @details Increment-on-entry / decrement-on-exit so uninstall() can observe when no detour is in flight. The
+         *          acquire increment keeps the trampoline load inside the detour from moving before the counter becomes
+         *          non-zero, and the release decrement pairs with uninstall()'s acquire drain when it observes zero.
+         *          Trivial and noexcept so it never perturbs the hot per-frame detour path.
+         */
+        struct InflightGuard
+        {
+            InflightGuard() noexcept { s_xinput_inflight.fetch_add(1, std::memory_order_acquire); }
+            ~InflightGuard() noexcept { s_xinput_inflight.fetch_sub(1, std::memory_order_release); }
+            InflightGuard(const InflightGuard &) = delete;
+            InflightGuard &operator=(const InflightGuard &) = delete;
+            InflightGuard(InflightGuard &&) = delete;
+            InflightGuard &operator=(InflightGuard &&) = delete;
+        };
+
         // --- Consume rule list (detour-side chord evaluation) ---
         //
         // A binding rebuild publishes one rule per detour-evaluable consume chord;
@@ -72,7 +97,7 @@ namespace DetourModKit::detail
         // Gate for detour-side rule masking, driven every poll cycle. The published rule list and its time-to-live
         // survive focus changes, so without this gate apply_suppress would keep masking the foreground game's input
         // while the mod is unfocused. The poll loop sets it true only while focused and connected, mirroring how the
-        // reactive mask is cleared and how s_wheel_consume is gated.
+        // reactive mask is cleared and how the per-direction wheel-consume mask is gated.
         std::atomic<bool> s_rule_suppress_enabled{false};
 
         /**
@@ -97,10 +122,50 @@ namespace DetourModKit::detail
         // --- Mouse-wheel capture state ---
 
         std::array<std::atomic<int>, 4> s_wheel_count{};
-        std::atomic<bool> s_wheel_consume{false};
+        // Per-direction wheel-swallow mask (WheelDirection bits), refreshed every poll cycle. Paired with a TTL so a
+        // stalled poll thread stops swallowing and the game regains its wheel. A chord such as "Ctrl+WheelUp" must not
+        // eat a bare WheelDown or an unmodified WheelUp.
+        std::atomic<uint8_t> s_wheel_consume_mask{0};
+        std::atomic<uint64_t> s_wheel_consume_deadline_ms{0};
         std::atomic<HWND> s_hwnd{nullptr};
         std::atomic<LONG_PTR> s_prev_wndproc{0};
         std::atomic<bool> s_wndproc_installed{false};
+
+        /**
+         * @brief Saturating single-notch increment for a per-direction wheel counter.
+         * @details Uses a compare/exchange loop so every writer sees the current slot value before incrementing. The
+         *          slot never exceeds MAX_WHEEL_NOTCHES, even if a foreign subclass or nested message dispatch
+         *          re-enters the procedure. A concurrent drain-to-zero only lowers the value. This is the last line of
+         *          defense for the idle-accretion case -- after the last wheel binding is removed the poll loop stops
+         *          draining (take_wheel_counts is gated on live wheel bindings) yet the subclass stays installed to
+         *          shutdown, so an unbounded fetch_add would eventually wrap a signed int.
+         */
+        void bump_wheel_notch(std::atomic<int> &slot) noexcept
+        {
+            int current = slot.load(std::memory_order_relaxed);
+            while (current < MAX_WHEEL_NOTCHES &&
+                   !slot.compare_exchange_weak(current, current + 1, std::memory_order_relaxed,
+                                               std::memory_order_relaxed))
+            {
+            }
+        }
+
+        /**
+         * @brief Reports whether the detour should swallow a wheel message of the given direction this instant.
+         * @details Reads the poll-published per-direction mask and its time-to-live. The acquire load of the mask also
+         *          orders the relaxed deadline read: publish_wheel_consume writes the deadline before the release store
+         *          on the mask, so observing a set direction bit guarantees observing its refreshed deadline. A lapsed
+         *          deadline (stalled poll thread) forwards the message so the game is never latched out of its wheel.
+         * @param direction_bit A single WheelDirection bit for the message's direction.
+         */
+        bool wheel_direction_consumed(uint8_t direction_bit) noexcept
+        {
+            if ((s_wheel_consume_mask.load(std::memory_order_acquire) & direction_bit) == 0)
+            {
+                return false;
+            }
+            return GetTickCount64() < s_wheel_consume_deadline_ms.load(std::memory_order_relaxed);
+        }
 
         /**
          * @brief Clears the suppressed button bits from a game-bound XINPUT_STATE.
@@ -154,6 +219,7 @@ namespace DetourModKit::detail
 
         DWORD WINAPI xinput_get_state_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
+            const InflightGuard inflight;
             const XInputGetStateFn original = s_xinput_original.load(std::memory_order_acquire);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
             if (result == ERROR_SUCCESS)
@@ -165,6 +231,7 @@ namespace DetourModKit::detail
 
         DWORD WINAPI xinput_get_state_ex_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
+            const InflightGuard inflight;
             const XInputGetStateFn original = s_xinput_ex_original.load(std::memory_order_acquire);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
             if (result == ERROR_SUCCESS)
@@ -183,42 +250,48 @@ namespace DetourModKit::detail
             case WM_MOUSEWHEEL:
             {
                 // GET_WHEEL_DELTA_WPARAM is a signed short: positive scrolls the wheel forward (up/away from the user),
-                // negative backward (down).
+                // negative backward (down). Each message is exactly one direction, so latch that direction's notch and
+                // swallow the message only when a consume binding currently owns that same direction -- a
+                // "Ctrl+WheelUp" binding must not eat a bare WheelDown or an unmodified WheelUp.
                 const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
                 if (delta > 0)
                 {
-                    // Up
-                    s_wheel_count[0].fetch_add(1, std::memory_order_relaxed);
+                    bump_wheel_notch(s_wheel_count[0]); // Up
+                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Up)))
+                    {
+                        return 0;
+                    }
                 }
                 else if (delta < 0)
                 {
-                    // Down
-                    s_wheel_count[1].fetch_add(1, std::memory_order_relaxed);
-                }
-                if (s_wheel_consume.load(std::memory_order_relaxed))
-                {
-                    return 0;
+                    bump_wheel_notch(s_wheel_count[1]); // Down
+                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Down)))
+                    {
+                        return 0;
+                    }
                 }
                 break;
             }
             case WM_MOUSEHWHEEL:
             {
-                // Horizontal wheel sign is opposite the vertical intuition:
-                // positive tilts right, negative left.
+                // Horizontal wheel sign is opposite the vertical intuition: positive tilts right, negative left. Same
+                // per-direction latch-and-swallow as the vertical wheel.
                 const int delta = GET_WHEEL_DELTA_WPARAM(wparam);
                 if (delta > 0)
                 {
-                    // Right
-                    s_wheel_count[3].fetch_add(1, std::memory_order_relaxed);
+                    bump_wheel_notch(s_wheel_count[3]); // Right
+                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Right)))
+                    {
+                        return 0;
+                    }
                 }
                 else if (delta < 0)
                 {
-                    // Left
-                    s_wheel_count[2].fetch_add(1, std::memory_order_relaxed);
-                }
-                if (s_wheel_consume.load(std::memory_order_relaxed))
-                {
-                    return 0;
+                    bump_wheel_notch(s_wheel_count[2]); // Left
+                    if (wheel_direction_consumed(wheel_direction_bit(WheelDirection::Left)))
+                    {
+                        return 0;
+                    }
                 }
                 break;
             }
@@ -668,9 +741,17 @@ namespace DetourModKit::detail
         return out;
     }
 
-    void set_wheel_consume(bool consume) noexcept
+    void publish_wheel_consume(uint8_t direction_mask) noexcept
     {
-        s_wheel_consume.store(consume, std::memory_order_relaxed);
+        // Refresh the deadline before the release store on the mask (only when arming a non-zero mask), so a detour
+        // observing a set direction bit with acquire is guaranteed to also observe the fresh deadline. A zero mask
+        // needs no deadline: the detour checks the direction bit first and forwards immediately when it is clear, so
+        // skipping the clock read on the common all-forward path costs nothing and keeps the disarm cheap.
+        if (direction_mask != 0)
+        {
+            s_wheel_consume_deadline_ms.store(GetTickCount64() + SUPPRESS_TTL_MS, std::memory_order_relaxed);
+        }
+        s_wheel_consume_mask.store(direction_mask, std::memory_order_release);
     }
 
     void uninstall() noexcept
@@ -685,18 +766,35 @@ namespace DetourModKit::detail
         // republishes before re-enabling the gate.
         s_suppress_mask.store(0, std::memory_order_release);
         s_rule_suppress_enabled.store(false, std::memory_order_relaxed);
-        s_wheel_consume.store(false, std::memory_order_relaxed);
+        s_wheel_consume_mask.store(0, std::memory_order_release);
 
         uninstall_wndproc();
 
-        // Destroying the safetyhook objects rewrites the patched prologue pages and, under a transient vectored
-        // exception handler, relocates the instruction pointer of any thread caught mid-prologue (no thread is
-        // suspended). The poll thread (the sole reader of the trampolines via xinput_trampoline()) is already joined,
-        // so clearing the saved pointers afterwards races nothing.
-        s_xinput_ex_hook = {};
-        s_xinput_hook = {};
+        // Retire the published trampoline pointers before draining. A game thread that already copied one keeps the
+        // in-flight counter non-zero until it leaves; a late entrant after this point sees nullptr and returns a closed
+        // result instead of taking a pointer into the hook object that teardown is about to destroy.
         s_xinput_ex_original.store(nullptr, std::memory_order_release);
         s_xinput_original.store(nullptr, std::memory_order_release);
+
+        // Quiesce XInput detours that might already have copied a trampoline before destroying the hook objects. The
+        // poll thread is already joined, so the only remaining callers are the game's own XInput threads. SafetyHook
+        // additionally relocates a thread caught mid-prologue during removal, so this drain shrinks the window rather
+        // than being the sole guarantee. Use a short wall-clock bound instead of a yield count: a hot game thread can
+        // keep entering the detour after the trampoline pointers are retired, and teardown must still make progress.
+        constexpr uint64_t XINPUT_QUIESCE_TIMEOUT_MS = 10;
+        const uint64_t quiesce_deadline_ms = GetTickCount64() + XINPUT_QUIESCE_TIMEOUT_MS;
+        while (s_xinput_inflight.load(std::memory_order_acquire) != 0 &&
+               GetTickCount64() < quiesce_deadline_ms)
+        {
+            std::this_thread::yield();
+        }
+
+        // Destroying the safetyhook objects rewrites the patched prologue pages and, under a transient vectored
+        // exception handler, relocates the instruction pointer of any thread caught mid-prologue (no thread is
+        // suspended). The saved trampoline pointers were cleared before the drain above, so late detour entrants no
+        // longer acquire trampoline memory owned by these hook objects.
+        s_xinput_ex_hook = {};
+        s_xinput_hook = {};
         s_xinput_installed.store(false, std::memory_order_release);
         // Re-arm the enable()-failure latches so a fresh install after a hot-reload can warn again.
         s_xinput_enable_warned.store(false, std::memory_order_relaxed);

@@ -542,6 +542,33 @@ protected:
     void TearDown() override { input::Input::instance().shutdown(); }
 };
 
+TEST_F(InputTest, EmptyStartBuildsNoEngineAndLaterRegistrationsStayStagedUntilNextStart)
+{
+    auto &mgr = input::Input::instance();
+
+    // An empty start() -- nothing staged -- is a no-op success that builds no poll thread. Documented contract: it
+    // does not go running, because there is nothing to poll.
+    ASSERT_TRUE(mgr.start().has_value());
+    EXPECT_FALSE(mgr.is_running());
+    EXPECT_EQ(mgr.binding_count(), 0u);
+
+    // A registration after that empty start() is STAGED, not live: it counts as pending but does not retroactively
+    // start the engine (there is no live engine to forward it to).
+    (void)input::register_combo(input::ComboBinding{.name = "staged_after_empty_start",
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x70)}, {}}},
+                                                    .on_press = [] {}});
+    EXPECT_FALSE(mgr.is_running()) << "a post-empty-start registration must not start the engine on its own";
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    // The next start() sees the staged binding, builds the engine, and now goes running.
+    ASSERT_TRUE(mgr.start().has_value());
+    EXPECT_TRUE(mgr.is_running());
+    EXPECT_EQ(mgr.binding_count(), 1u);
+
+    mgr.shutdown();
+}
+
 TEST_F(InputTest, SetConsumeBeforeStartUpdatesPendingBinding)
 {
     auto &mgr = input::Input::instance();
@@ -1972,6 +1999,37 @@ TEST(InputCodeNameTest, SourceTaggedHexRoundTrip)
         ASSERT_TRUE(parsed.has_value()) << "failed to round-trip " << formatted;
         EXPECT_EQ(*parsed, code) << "round-trip mismatch for " << formatted;
     }
+}
+
+TEST(InputCodeNameTest, KeyboardBareHexRoundTripsThroughConfigParser)
+{
+    // format_input_code emits bare hex for an off-table keyboard code, and parse_input_name is deliberately not its
+    // inverse for that form -- a bare hex token yields nullopt so it cannot silently claim a device source. The config
+    // combo parser reached through config::bind_combos is the documented reconstruction path: its untagged-hex
+    // fallback defaults to the Keyboard source, closing the round-trip without ambiguity.
+    const InputCode original = keyboard_key(0xFF);
+    const std::string formatted = format_input_code(original);
+    ASSERT_EQ(formatted, "0xFF");
+    EXPECT_FALSE(parse_input_name(formatted).has_value()) << "parse_input_name must not reconstruct a bare hex token";
+
+    // bind_combos parses its default value immediately and delivers the combo list to the setter, so no INI file is
+    // needed to exercise the reconstruction path end to end.
+    input::KeyComboList captured;
+    bool fired = false;
+    config::bind_combos(
+        "RoundTrip", "Key", "Round Trip Key",
+        [&](const input::KeyComboList &combos)
+        {
+            captured = combos;
+            fired = true;
+        },
+        formatted);
+    config::clear(); // drop the registration so its setter does not fire against later config tests
+
+    ASSERT_TRUE(fired);
+    ASSERT_EQ(captured.size(), 1u);
+    ASSERT_EQ(captured[0].keys.size(), 1u);
+    EXPECT_EQ(captured[0].keys[0], original) << "config combo parser must recover the bare-hex keyboard code";
 }
 
 TEST(InputCodeNameTest, ParseSourceTaggedHexFormats)
