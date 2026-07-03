@@ -22,6 +22,7 @@ DetourModKit is organized into focused modules. Each module's full API is docume
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | [`rtti.hpp`](include/DetourModKit/rtti.hpp) |
 | RTTI Self-Heal | Reverse-identify the object behind a pointer slot and self-heal a field offset after a patch; multi-field drift solver, a frame-driven `HealScheduler`, and a diffable drift manifest | [`rtti_dissect.hpp`](include/DetourModKit/rtti_dissect.hpp), [`detail/drift_manifest.hpp`](include/DetourModKit/detail/drift_manifest.hpp) |
 | Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, code constant, string xref, pinned literal) with quorum corroboration, optional validators, address-independent evidence fingerprints, and a startup drift gate (`evaluate_gate`) that safe-disables a feature when anchor quality drops below a threshold | [`anchor.hpp`](include/DetourModKit/anchor.hpp) |
+| Signature Manifest | The resolved contract as editable data: an owning, serializable superset of an anchor plus a consumer binding (register / offset chain / vtable slot), round-tripped through a versioned INI, overlaid on in-code defaults by label, and gated into trusted vs safe-disabled at resolve time so a game-patch repair is a text edit instead of a recompiled DLL | [`manifest.hpp`](include/DetourModKit/manifest.hpp) |
 | Event Dispatcher | Typed pub/sub with RAII subscriptions | [`detail/event_dispatcher.hpp`](include/DetourModKit/detail/event_dispatcher.hpp) |
 | Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | [`profiler.hpp`](include/DetourModKit/profiler.hpp) |
 | Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | [`format.hpp`](include/DetourModKit/format.hpp) |
@@ -164,6 +165,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
     │   │   ├── scan.hpp              <-- v4 scanning surface (scan::Pattern + resolve / Candidate / ScanRequest)
     │   │   ├── anchor.hpp            <-- Declarative anchor registry (namespace anchor): AnchorKind / Anchor / ResolvedAnchor / AnchorQuality / ScanProfile / resolve_all / anchor_fingerprint / evaluate_gate
+    │   │   ├── manifest.hpp          <-- Signature manifest (namespace manifest): SignatureRecord / Binding / Signature / parse-serialize-load-save / overlay / resolve_and_gate over anchor
     │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
     │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (logger.hpp / DetourModKit.hpp stay light)
     │   │   ├── detail/               <-- Installed compile-visible support (pattern_core.hpp + demoted headers: event_dispatcher.hpp, worker.hpp, drift_manifest.hpp; private impl lives in src/internal/)
@@ -714,7 +716,7 @@ AlsoDisabled=NONE             ; literal NONE (case-insensitive) -> same effect
 
 ## Supported Input Names
 
-The accepted names are defined in `input_codes.hpp`; the tables below mirror them for quick reference.
+The accepted names are defined in [`input_codes.hpp`](include/DetourModKit/input_codes.hpp); the tables below mirror them for quick reference.
 
 The configuration system recognizes the following named input codes (case-insensitive):
 
@@ -765,6 +767,7 @@ For practical reference and real-world usage examples:
 
 - **OBR-NoCarryWeight**: [https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight](https://github.com/tkhquang/OBRTools/tree/main/NoCarryWeight)
 - **KCD1-TPVToggle**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD1Tools/tree/main/TPVToggle)
+- **KCD1-TPVCamera**: [https://github.com/tkhquang/KCD1Tools/tree/main/TPVCamera](https://github.com/tkhquang/KCD1Tools/tree/main/TPVCamera)
 - **KCD2-TPVToggle**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle](https://github.com/tkhquang/KCD2Tools/tree/main/TPVToggle)
 - **KCD2-TPVCamera**: [https://github.com/tkhquang/KCD2Tools/tree/main/TPVCamera](https://github.com/tkhquang/KCD2Tools/tree/main/TPVCamera)
 - **CrimsonDesert-EquipHide**: [https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide](https://github.com/tkhquang/CrimsonDesertTools/tree/main/CrimsonDesertEquipHide)

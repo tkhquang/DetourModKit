@@ -1,0 +1,1390 @@
+/**
+ * @file manifest.cpp
+ * @brief Signature manifest implementation: INI serialization, ladder compilation, and the resolve-time trust gate.
+ * @details The INI parser and emitter are confined to this translation unit: manifest.hpp names no INI type, so the
+ *          simpleini dependency never reaches a consumer's include path. The file schema is a versioned `[manifest]`
+ *          header followed by one `[sig.<label>]` section per contract, with the candidate ladder for the byte-scanned
+ *          kinds spilling into ordered `[sig.<label>.rung.<N>]` sub-sections. Uniform rung sub-sections (rather than an
+ *          inline first rung) keep the parse unambiguous: a section-level key never has to serve double duty as both an
+ *          anchor field and a candidate field, so round-tripping is mechanical and a hand-edit cannot be misread.
+ */
+
+#include "DetourModKit/manifest.hpp"
+
+#include "DetourModKit/hook.hpp"
+#include "DetourModKit/logger.hpp"
+
+#include "SimpleIni.h"
+
+#include <array>
+#include <charconv>
+#include <cstddef>
+#include <cstdint>
+#include <format>
+#include <fstream>
+#include <iterator>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+
+namespace DetourModKit::manifest
+{
+    namespace
+    {
+        // The manifest format version. Bumped only on an incompatible schema change; a file whose schema does not match
+        // is rejected as MissingHeader rather than silently misread under the wrong field grammar.
+        constexpr int SCHEMA_VERSION = 1;
+
+        // The general-purpose register token table, indexed by the hook::Gpr enumerator value. It mirrors hook::Gpr one
+        // for one (rsp and rip are deliberately absent from that enum, so they are absent here too), so a token maps to
+        // a register and back without a second source of truth.
+        constexpr std::array<std::string_view, 15> GPR_TOKENS = {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "r8",
+                                                                 "r9",  "r10", "r11", "r12", "r13", "r14", "r15"};
+
+        [[nodiscard]] std::string to_lower(std::string_view text)
+        {
+            std::string out(text);
+            for (char &c : out)
+            {
+                // Lowercase only ASCII A-Z by hand: std::tolower with a char that is negative on a signed-char platform
+                // is undefined behaviour, and manifest tokens are ASCII keywords, so a locale-aware fold is neither
+                // needed nor safe here.
+                if (c >= 'A' && c <= 'Z')
+                {
+                    c = static_cast<char>(c - 'A' + 'a');
+                }
+            }
+            return out;
+        }
+
+        [[nodiscard]] std::string_view trim(std::string_view text) noexcept
+        {
+            const auto is_space = [](char c) noexcept { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+            while (!text.empty() && is_space(text.front()))
+            {
+                text.remove_prefix(1);
+            }
+            while (!text.empty() && is_space(text.back()))
+            {
+                text.remove_suffix(1);
+            }
+            return text;
+        }
+
+        // The whole token must consume, so a trailing-garbage value ("0x1G", "12abc") is rejected rather than silently
+        // truncated to its valid prefix. Magnitude is parsed unsigned then signed at the end so a value like INT64_MIN
+        // (whose magnitude does not fit a signed type) still round-trips.
+
+        [[nodiscard]] std::optional<unsigned long long> parse_magnitude(std::string_view body) noexcept
+        {
+            int base = 10;
+            if (body.size() >= 2 && body[0] == '0' && (body[1] == 'x' || body[1] == 'X'))
+            {
+                base = 16;
+                body.remove_prefix(2);
+            }
+            if (body.empty())
+            {
+                return std::nullopt;
+            }
+            unsigned long long value = 0;
+            const char *first = body.data();
+            const char *last = body.data() + body.size();
+            const auto [ptr, ec] = std::from_chars(first, last, value, base);
+            if (ec != std::errc{} || ptr != last)
+            {
+                return std::nullopt;
+            }
+            return value;
+        }
+
+        [[nodiscard]] std::optional<long long> parse_signed(std::string_view token) noexcept
+        {
+            token = trim(token);
+            if (token.empty())
+            {
+                return std::nullopt;
+            }
+            bool negative = false;
+            if (token.front() == '+' || token.front() == '-')
+            {
+                negative = token.front() == '-';
+                token.remove_prefix(1);
+            }
+            const std::optional<unsigned long long> magnitude = parse_magnitude(token);
+            if (!magnitude)
+            {
+                return std::nullopt;
+            }
+
+            constexpr unsigned long long MAX_SIGNED =
+                static_cast<unsigned long long>(std::numeric_limits<long long>::max());
+            if (negative)
+            {
+                constexpr unsigned long long MIN_MAGNITUDE = MAX_SIGNED + 1ULL;
+                if (*magnitude > MIN_MAGNITUDE)
+                {
+                    return std::nullopt;
+                }
+                if (*magnitude == MIN_MAGNITUDE)
+                {
+                    return std::numeric_limits<long long>::min();
+                }
+                return -static_cast<long long>(*magnitude);
+            }
+            if (*magnitude > MAX_SIGNED)
+            {
+                return std::nullopt;
+            }
+            return static_cast<long long>(*magnitude);
+        }
+
+        [[nodiscard]] std::optional<unsigned long long> parse_unsigned(std::string_view token) noexcept
+        {
+            token = trim(token);
+            if (token.empty() || token.front() == '-')
+            {
+                return std::nullopt;
+            }
+            if (token.front() == '+')
+            {
+                token.remove_prefix(1);
+            }
+            return parse_magnitude(token);
+        }
+
+        // Parse an unsigned token that must fit a byte-wide field (value_width, operand_index, byte_width, xmm_index).
+        [[nodiscard]] std::optional<std::uint8_t> parse_u8(std::string_view token) noexcept
+        {
+            const std::optional<unsigned long long> value = parse_unsigned(token);
+            if (!value || *value > 0xFFULL)
+            {
+                return std::nullopt;
+            }
+            return static_cast<std::uint8_t>(*value);
+        }
+
+        [[nodiscard]] std::optional<bool> parse_bool(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "true" || lowered == "1" || lowered == "yes" || lowered == "on")
+            {
+                return true;
+            }
+            if (lowered == "false" || lowered == "0" || lowered == "no" || lowered == "off")
+            {
+                return false;
+            }
+            return std::nullopt;
+        }
+
+        // Enum <-> token maps: emit lowercase tokens, accept them case-insensitively for hand-edit tolerance.
+
+        [[nodiscard]] std::string_view anchor_kind_token(anchor::AnchorKind kind) noexcept
+        {
+            switch (kind)
+            {
+            case anchor::AnchorKind::VtableIdentity:
+                return "vtable_identity";
+            case anchor::AnchorKind::RipGlobal:
+                return "rip_global";
+            case anchor::AnchorKind::CodeOperand:
+                return "code_operand";
+            case anchor::AnchorKind::StringXref:
+                return "string_xref";
+            case anchor::AnchorKind::Manual:
+                return "manual";
+            case anchor::AnchorKind::CallArgHome:
+                return "call_arg_home";
+            case anchor::AnchorKind::Quorum:
+                return "quorum";
+            }
+            return "manual";
+        }
+
+        // Accepts only the five serializable kinds; the composite Quorum and the resolver-less CallArgHome are in-code
+        // constructs (a Quorum composes two other anchors by pointer), so their tokens are rejected here on purpose.
+        [[nodiscard]] std::optional<anchor::AnchorKind> parse_anchor_kind(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "vtable_identity")
+            {
+                return anchor::AnchorKind::VtableIdentity;
+            }
+            if (lowered == "rip_global")
+            {
+                return anchor::AnchorKind::RipGlobal;
+            }
+            if (lowered == "code_operand")
+            {
+                return anchor::AnchorKind::CodeOperand;
+            }
+            if (lowered == "string_xref")
+            {
+                return anchor::AnchorKind::StringXref;
+            }
+            if (lowered == "manual")
+            {
+                return anchor::AnchorKind::Manual;
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::string_view scan_mode_token(scan::Mode mode) noexcept
+        {
+            switch (mode)
+            {
+            case scan::Mode::Direct:
+                return "direct";
+            case scan::Mode::RipRelative:
+                return "rip_relative";
+            case scan::Mode::RttiVtable:
+                return "rtti_vtable";
+            case scan::Mode::StringXref:
+                return "string_xref";
+            }
+            return "direct";
+        }
+
+        [[nodiscard]] std::optional<scan::Mode> parse_scan_mode(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "direct")
+            {
+                return scan::Mode::Direct;
+            }
+            if (lowered == "rip_relative")
+            {
+                return scan::Mode::RipRelative;
+            }
+            if (lowered == "rtti_vtable")
+            {
+                return scan::Mode::RttiVtable;
+            }
+            if (lowered == "string_xref")
+            {
+                return scan::Mode::StringXref;
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::string_view operand_kind_token(scan::OperandKind kind) noexcept
+        {
+            return kind == scan::OperandKind::MemoryDisplacement ? "memory_displacement" : "immediate";
+        }
+
+        [[nodiscard]] std::optional<scan::OperandKind> parse_operand_kind(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "immediate")
+            {
+                return scan::OperandKind::Immediate;
+            }
+            if (lowered == "memory_displacement")
+            {
+                return scan::OperandKind::MemoryDisplacement;
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::string_view encoding_token(scan::StringEncoding encoding) noexcept
+        {
+            return encoding == scan::StringEncoding::Utf16le ? "utf16le" : "utf8";
+        }
+
+        [[nodiscard]] std::optional<scan::StringEncoding> parse_encoding(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "utf8")
+            {
+                return scan::StringEncoding::Utf8;
+            }
+            if (lowered == "utf16le")
+            {
+                return scan::StringEncoding::Utf16le;
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::string_view xref_return_token(scan::XrefReturn mode) noexcept
+        {
+            switch (mode)
+            {
+            case scan::XrefReturn::ReferencingInstruction:
+                return "instruction";
+            case scan::XrefReturn::EnclosingFunction:
+                return "function";
+            case scan::XrefReturn::StringPointerSlot:
+                return "pointer_slot";
+            }
+            return "instruction";
+        }
+
+        [[nodiscard]] std::optional<scan::XrefReturn> parse_xref_return(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "instruction")
+            {
+                return scan::XrefReturn::ReferencingInstruction;
+            }
+            if (lowered == "function")
+            {
+                return scan::XrefReturn::EnclosingFunction;
+            }
+            if (lowered == "pointer_slot")
+            {
+                return scan::XrefReturn::StringPointerSlot;
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::optional<BindingKind> parse_binding_kind(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "address")
+            {
+                return BindingKind::Address;
+            }
+            if (lowered == "pointer_chain")
+            {
+                return BindingKind::PointerChain;
+            }
+            if (lowered == "mid_hook_register")
+            {
+                return BindingKind::MidHookRegister;
+            }
+            if (lowered == "vmt_method")
+            {
+                return BindingKind::VmtMethod;
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::optional<hook::Gpr> parse_gpr(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            for (std::size_t index = 0; index < GPR_TOKENS.size(); ++index)
+            {
+                if (lowered == GPR_TOKENS[index])
+                {
+                    return static_cast<hook::Gpr>(index);
+                }
+            }
+            return std::nullopt;
+        }
+
+        [[nodiscard]] std::string_view gpr_token(hook::Gpr reg) noexcept
+        {
+            const auto index = static_cast<std::size_t>(reg);
+            return index < GPR_TOKENS.size() ? GPR_TOKENS[index] : GPR_TOKENS[0];
+        }
+
+        // Format a signed offset as human-editable hex, preserving the sign so a negative field offset reads naturally.
+        [[nodiscard]] std::string format_signed_hex(long long value)
+        {
+            const unsigned long long magnitude =
+                value < 0 ? 0ULL - static_cast<unsigned long long>(value) : static_cast<unsigned long long>(value);
+            if (value < 0)
+            {
+                return std::format("-0x{:X}", magnitude);
+            }
+            return std::format("0x{:X}", magnitude);
+        }
+
+        [[nodiscard]] std::unexpected<Error> fail(ErrorCode code, const char *where) noexcept
+        {
+            return std::unexpected(Error{code, where});
+        }
+
+        struct RungSectionName
+        {
+            std::string_view parent;
+            std::size_t index = 0;
+        };
+
+        // A rung section is always `[sig.<label>.rung.<N>]`. The parent is the anchor section, and N must be a decimal
+        // index that fits size_t; malformed tails are treated as ordinary labels so a label containing ".rung." in the
+        // middle is still legal.
+        [[nodiscard]] std::optional<RungSectionName> parse_rung_section_name(std::string_view name) noexcept
+        {
+            const std::size_t pos = name.rfind(".rung.");
+            if (pos == std::string_view::npos)
+            {
+                return std::nullopt;
+            }
+            const std::string_view tail = name.substr(pos + 6);
+            if (tail.empty())
+            {
+                return std::nullopt;
+            }
+            std::size_t index = 0;
+            for (const char c : tail)
+            {
+                if (c < '0' || c > '9')
+                {
+                    return std::nullopt;
+                }
+                const std::size_t digit = static_cast<std::size_t>(c - '0');
+                constexpr std::size_t MAX_INDEX = std::numeric_limits<std::size_t>::max();
+                if (index > (MAX_INDEX - digit) / 10U)
+                {
+                    return std::nullopt;
+                }
+                index = (index * 10U) + digit;
+            }
+            return RungSectionName{.parent = name.substr(0, pos), .index = index};
+        }
+
+        // Reads one candidate-ladder rung out of its sub-section. Returns nullopt-shaped failure via the Result so a
+        // bad field fails the whole parse closed (a partially-trusted ladder is worse than none).
+        [[nodiscard]] Result<CandidateSpec> parse_rung(const CSimpleIniA &ini, const char *section)
+        {
+            CandidateSpec spec;
+            if (const char *name = ini.GetValue(section, "name", nullptr))
+            {
+                spec.name = name;
+            }
+
+            const char *mode_raw = ini.GetValue(section, "mode", nullptr);
+            if (mode_raw == nullptr)
+            {
+                return fail(ErrorCode::MalformedLine, "manifest::parse");
+            }
+            const std::optional<scan::Mode> mode = parse_scan_mode(mode_raw);
+            if (!mode)
+            {
+                return fail(ErrorCode::MalformedLine, "manifest::parse");
+            }
+            spec.mode = *mode;
+
+            switch (*mode)
+            {
+            case scan::Mode::Direct:
+            case scan::Mode::RipRelative:
+            {
+                if (const char *pattern = ini.GetValue(section, "pattern", nullptr))
+                {
+                    spec.pattern = pattern;
+                }
+                else
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                if (const char *walk = ini.GetValue(section, "walk_back", nullptr))
+                {
+                    const std::optional<long long> value = parse_signed(walk);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    spec.walk_back = static_cast<std::ptrdiff_t>(*value);
+                }
+                if (const char *disp = ini.GetValue(section, "displacement_at", nullptr))
+                {
+                    const std::optional<long long> value = parse_signed(disp);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    spec.displacement_at = static_cast<std::ptrdiff_t>(*value);
+                }
+                if (const char *len = ini.GetValue(section, "instruction_length", nullptr))
+                {
+                    const std::optional<unsigned long long> value = parse_unsigned(len);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    spec.instruction_length = static_cast<std::size_t>(*value);
+                }
+                break;
+            }
+            case scan::Mode::RttiVtable:
+            {
+                if (const char *mangled = ini.GetValue(section, "mangled", nullptr))
+                {
+                    spec.mangled = mangled;
+                }
+                else
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                break;
+            }
+            case scan::Mode::StringXref:
+            {
+                if (const char *text = ini.GetValue(section, "string_text", nullptr))
+                {
+                    spec.string_text = text;
+                }
+                else
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                if (const char *encoding = ini.GetValue(section, "string_encoding", nullptr))
+                {
+                    const std::optional<scan::StringEncoding> value = parse_encoding(encoding);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    spec.string_encoding = *value;
+                }
+                if (const char *ret = ini.GetValue(section, "string_return", nullptr))
+                {
+                    const std::optional<scan::XrefReturn> value = parse_xref_return(ret);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    spec.string_return = *value;
+                }
+                if (const char *term = ini.GetValue(section, "string_require_terminator", nullptr))
+                {
+                    const std::optional<bool> value = parse_bool(term);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    spec.string_require_terminator = *value;
+                }
+                if (const char *broad = ini.GetValue(section, "string_broad_match", nullptr))
+                {
+                    const std::optional<bool> value = parse_bool(broad);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    spec.string_broad_match = *value;
+                }
+                break;
+            }
+            }
+            return spec;
+        }
+
+        // Reads one signature's anchor-level fields out of its `[sig.<label>]` section. The candidate ladder is
+        // attached by the caller (it lives in sub-sections), so this handles only the fields keyed directly on the
+        // section.
+        [[nodiscard]] Result<SignatureRecord> parse_record(const CSimpleIniA &ini, const char *section,
+                                                           std::string label)
+        {
+            SignatureRecord record;
+            record.label = std::move(label);
+
+            const char *kind_raw = ini.GetValue(section, "kind", nullptr);
+            if (kind_raw == nullptr)
+            {
+                return fail(ErrorCode::MalformedLine, "manifest::parse");
+            }
+            const std::optional<anchor::AnchorKind> kind = parse_anchor_kind(kind_raw);
+            if (!kind)
+            {
+                return fail(ErrorCode::MalformedLine, "manifest::parse");
+            }
+            record.kind = *kind;
+
+            if (const char *module = ini.GetValue(section, "module", nullptr))
+            {
+                record.module = module;
+            }
+
+            if (const char *binding_raw = ini.GetValue(section, "binding", nullptr))
+            {
+                const std::optional<BindingKind> binding_kind = parse_binding_kind(binding_raw);
+                if (!binding_kind)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.binding.kind = *binding_kind;
+            }
+            if (const char *offsets = ini.GetValue(section, "offsets", nullptr))
+            {
+                std::string_view rest = offsets;
+                while (!rest.empty())
+                {
+                    const std::size_t comma = rest.find(',');
+                    const std::string_view token = trim(rest.substr(0, comma));
+                    if (!token.empty())
+                    {
+                        const std::optional<long long> value = parse_signed(token);
+                        if (!value)
+                        {
+                            return fail(ErrorCode::MalformedLine, "manifest::parse");
+                        }
+                        record.binding.offsets.push_back(static_cast<std::ptrdiff_t>(*value));
+                    }
+                    if (comma == std::string_view::npos)
+                    {
+                        break;
+                    }
+                    rest.remove_prefix(comma + 1);
+                }
+            }
+            if (const char *width = ini.GetValue(section, "value_width", nullptr))
+            {
+                const std::optional<std::uint8_t> value = parse_u8(width);
+                if (!value)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.binding.value_width = *value;
+            }
+            if (const char *reg = ini.GetValue(section, "read_register", nullptr))
+            {
+                const std::optional<hook::Gpr> value = parse_gpr(reg);
+                if (!value)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.binding.read_register = *value;
+            }
+            if (const char *xmm = ini.GetValue(section, "xmm_index", nullptr))
+            {
+                const std::optional<std::uint8_t> value = parse_u8(xmm);
+                if (!value)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.binding.xmm_index = *value;
+            }
+            if (const char *vmt = ini.GetValue(section, "vmt_index", nullptr))
+            {
+                const std::optional<unsigned long long> value = parse_unsigned(vmt);
+                if (!value)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.binding.vmt_index = static_cast<std::size_t>(*value);
+            }
+
+            if (const char *fingerprint = ini.GetValue(section, "fingerprint", nullptr))
+            {
+                const std::optional<unsigned long long> value = parse_unsigned(fingerprint);
+                if (!value)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.expected_fingerprint = static_cast<std::uint64_t>(*value);
+            }
+
+            switch (record.kind)
+            {
+            case anchor::AnchorKind::VtableIdentity:
+                if (const char *mangled = ini.GetValue(section, "mangled", nullptr))
+                {
+                    record.mangled = mangled;
+                }
+                break;
+            case anchor::AnchorKind::CodeOperand:
+                if (const char *operand_kind = ini.GetValue(section, "operand_kind", nullptr))
+                {
+                    const std::optional<scan::OperandKind> value = parse_operand_kind(operand_kind);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.operand_kind = *value;
+                }
+                if (const char *index = ini.GetValue(section, "operand_index", nullptr))
+                {
+                    const std::optional<std::uint8_t> value = parse_u8(index);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.operand_index = *value;
+                }
+                if (const char *width = ini.GetValue(section, "byte_width", nullptr))
+                {
+                    const std::optional<std::uint8_t> value = parse_u8(width);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.byte_width = *value;
+                }
+                break;
+            case anchor::AnchorKind::StringXref:
+                if (const char *text = ini.GetValue(section, "xref_text", nullptr))
+                {
+                    record.xref_text = text;
+                }
+                if (const char *encoding = ini.GetValue(section, "xref_encoding", nullptr))
+                {
+                    const std::optional<scan::StringEncoding> value = parse_encoding(encoding);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.xref_encoding = *value;
+                }
+                if (const char *ret = ini.GetValue(section, "xref_return", nullptr))
+                {
+                    const std::optional<scan::XrefReturn> value = parse_xref_return(ret);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.xref_return = *value;
+                }
+                if (const char *term = ini.GetValue(section, "xref_require_terminator", nullptr))
+                {
+                    const std::optional<bool> value = parse_bool(term);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.xref_require_terminator = *value;
+                }
+                if (const char *broad = ini.GetValue(section, "xref_broad_match", nullptr))
+                {
+                    const std::optional<bool> value = parse_bool(broad);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.xref_broad_match = *value;
+                }
+                break;
+            case anchor::AnchorKind::Manual:
+                if (const char *manual = ini.GetValue(section, "manual_value", nullptr))
+                {
+                    const std::optional<long long> value = parse_signed(manual);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.manual_value = static_cast<std::int64_t>(*value);
+                }
+                break;
+            case anchor::AnchorKind::RipGlobal:
+            case anchor::AnchorKind::CallArgHome:
+            case anchor::AnchorKind::Quorum:
+                // RipGlobal carries only the ladder (attached by the caller). CallArgHome / Quorum are unreachable here
+                // because parse_anchor_kind rejects their tokens, but they are listed so the switch is exhaustive.
+                break;
+            }
+            return record;
+        }
+
+        // Copies one anchor-ladder rung out of a resolved anchor's site into the equivalent scan::Candidate for a
+        // compiled Signature. Used by both compile() (from CandidateSpec text) and adopt() (from an existing
+        // Candidate).
+        [[nodiscard]] Result<scan::Candidate> compile_rung(const CandidateSpec &spec)
+        {
+            switch (spec.mode)
+            {
+            case scan::Mode::Direct:
+            {
+                const Result<scan::Pattern> pattern = scan::Pattern::compile(spec.pattern);
+                if (!pattern)
+                {
+                    return std::unexpected(pattern.error());
+                }
+                return scan::Candidate::direct(spec.name, *pattern, spec.walk_back);
+            }
+            case scan::Mode::RipRelative:
+            {
+                const Result<scan::Pattern> pattern = scan::Pattern::compile(spec.pattern);
+                if (!pattern)
+                {
+                    return std::unexpected(pattern.error());
+                }
+                return scan::Candidate::rip_relative(spec.name, *pattern, spec.displacement_at,
+                                                     spec.instruction_length);
+            }
+            case scan::Mode::RttiVtable:
+                return scan::Candidate::rtti_vtable(spec.name, spec.mangled);
+            case scan::Mode::StringXref:
+            {
+                const scan::StringRefQuery query{
+                    .text = spec.string_text,
+                    .encoding = spec.string_encoding,
+                    .require_terminator = spec.string_require_terminator,
+                    .return_mode = spec.string_return,
+                    .broad_match = spec.string_broad_match,
+                };
+                return scan::Candidate::string_xref(spec.name, query);
+            }
+            }
+            return fail(ErrorCode::BadPattern, "manifest::compile");
+        }
+    } // namespace
+
+    Signature::Signature(SignatureRecord record, std::vector<scan::Candidate> ladder) noexcept
+        : m_record(std::move(record)), m_ladder(std::move(ladder))
+    {
+    }
+
+    anchor::Anchor Signature::make_anchor() const noexcept
+    {
+        // Rebuild a borrowed anchor view over this object's owned storage. It is a set of view/POD assignments only, so
+        // it never allocates; the returned Anchor's label/mangled/xref_text string_views alias m_record's strings and
+        // its site span aliases m_ladder, all valid for the duration of the resolve/fingerprint call it feeds.
+        anchor::Anchor anchor{};
+        anchor.label = m_record.label;
+        anchor.kind = m_record.kind;
+        anchor.mangled = m_record.mangled;
+        anchor.site = m_ladder;
+        anchor.operand_kind = m_record.operand_kind;
+        anchor.operand_index = m_record.operand_index;
+        anchor.byte_width = m_record.byte_width;
+        anchor.xref_text = m_record.xref_text;
+        anchor.xref_encoding = m_record.xref_encoding;
+        anchor.xref_return = m_record.xref_return;
+        anchor.xref_require_terminator = m_record.xref_require_terminator;
+        anchor.xref_broad_match = m_record.xref_broad_match;
+        anchor.manual_value = m_record.manual_value;
+        return anchor;
+    }
+
+    Result<Signature> Signature::compile(SignatureRecord record)
+    {
+        // The composite kinds have no flat record form: reject them here rather than build a Signature that can never
+        // resolve. A mod using Quorum / CallArgHome keeps them as in-code anchors and gates them via evaluate_gate().
+        if (record.kind == anchor::AnchorKind::Quorum || record.kind == anchor::AnchorKind::CallArgHome)
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+
+        std::vector<scan::Candidate> ladder;
+        const bool uses_ladder =
+            record.kind == anchor::AnchorKind::RipGlobal || record.kind == anchor::AnchorKind::CodeOperand;
+        if (uses_ladder)
+        {
+            if (record.ladder.empty())
+            {
+                return fail(ErrorCode::EmptyCandidates, "manifest::compile");
+            }
+            ladder.reserve(record.ladder.size());
+            for (const CandidateSpec &spec : record.ladder)
+            {
+                Result<scan::Candidate> candidate = compile_rung(spec);
+                if (!candidate)
+                {
+                    return std::unexpected(candidate.error());
+                }
+                ladder.push_back(std::move(*candidate));
+            }
+        }
+        return Signature(std::move(record), std::move(ladder));
+    }
+
+    Result<Signature> Signature::adopt(const anchor::Anchor &source)
+    {
+        if (source.kind == anchor::AnchorKind::Quorum || source.kind == anchor::AnchorKind::CallArgHome)
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+
+        SignatureRecord record;
+        record.label = std::string(source.label);
+        record.kind = source.kind;
+        record.mangled = std::string(source.mangled);
+        record.operand_kind = source.operand_kind;
+        record.operand_index = source.operand_index;
+        record.byte_width = source.byte_width;
+        record.xref_text = std::string(source.xref_text);
+        record.xref_encoding = source.xref_encoding;
+        record.xref_return = source.xref_return;
+        record.xref_require_terminator = source.xref_require_terminator;
+        record.xref_broad_match = source.xref_broad_match;
+        record.manual_value = source.manual_value;
+        // An adopted signature carries no captured baseline (an in-code default has no persisted fingerprint), so its
+        // record.ladder text stays empty (a compiled Pattern cannot be turned back into source AOB) and the resolved
+        // anchor view is fed from the copied site candidates below.
+        std::vector<scan::Candidate> ladder(source.site.begin(), source.site.end());
+        return Signature(std::move(record), std::move(ladder));
+    }
+
+    anchor::ResolvedAnchor Signature::resolve(Region fallback_scope) const
+    {
+        const Region effective = m_record.module.empty() ? fallback_scope : Region::module_named(m_record.module);
+        return anchor::resolve(make_anchor(), effective);
+    }
+
+    Region Signature::scope() const noexcept
+    {
+        return m_record.module.empty() ? Region::host() : Region::module_named(m_record.module);
+    }
+
+    std::uint64_t Signature::current_fingerprint() const noexcept
+    {
+        return anchor::anchor_fingerprint(make_anchor());
+    }
+
+    FingerprintState Signature::fingerprint_state() const noexcept
+    {
+        if (m_record.expected_fingerprint == 0)
+        {
+            return FingerprintState::Unset;
+        }
+        return current_fingerprint() == m_record.expected_fingerprint ? FingerprintState::Match
+                                                                      : FingerprintState::Drifted;
+    }
+
+    void Signature::recapture_fingerprint() noexcept
+    {
+        m_record.expected_fingerprint = current_fingerprint();
+    }
+
+    std::string_view Signature::label() const noexcept
+    {
+        return m_record.label;
+    }
+
+    anchor::AnchorKind Signature::kind() const noexcept
+    {
+        return m_record.kind;
+    }
+
+    const Binding &Signature::binding() const noexcept
+    {
+        return m_record.binding;
+    }
+
+    const SignatureRecord &Signature::record() const noexcept
+    {
+        return m_record;
+    }
+
+    Result<std::vector<SignatureRecord>> parse(std::string_view text)
+    {
+        CSimpleIniA ini;
+        ini.SetMultiKey(false);
+        if (ini.LoadData(text.data(), text.size()) < 0)
+        {
+            return fail(ErrorCode::MalformedLine, "manifest::parse");
+        }
+
+        // The `[manifest]` header both proves this is a manifest (not some unrelated INI) and pins the schema. A
+        // missing header or a schema this build does not understand fails closed, so a future format is never misread
+        // under the wrong grammar.
+        const char *schema_raw = ini.GetValue("manifest", "schema", nullptr);
+        if (schema_raw == nullptr)
+        {
+            return fail(ErrorCode::MissingHeader, "manifest::parse");
+        }
+        const std::optional<unsigned long long> schema = parse_unsigned(schema_raw);
+        if (!schema || *schema != static_cast<unsigned long long>(SCHEMA_VERSION))
+        {
+            return fail(ErrorCode::MissingHeader, "manifest::parse");
+        }
+
+        CSimpleIniA::TNamesDepend sections;
+        ini.GetAllSections(sections);
+        // Emit records in the file's load order, so a round-trip and a hand-diff stay stable.
+        sections.sort(CSimpleIniA::Entry::LoadOrder());
+
+        for (const CSimpleIniA::Entry &entry : sections)
+        {
+            const std::string_view name = entry.pItem;
+            if (!name.starts_with("sig."))
+            {
+                continue;
+            }
+
+            const std::optional<RungSectionName> rung = parse_rung_section_name(name);
+            if (!rung)
+            {
+                continue;
+            }
+
+            const std::string parent{rung->parent};
+            if (parent.size() <= 4U || ini.GetSection(parent.c_str()) == nullptr)
+            {
+                return fail(ErrorCode::MalformedLine, "manifest::parse");
+            }
+        }
+
+        std::vector<SignatureRecord> records;
+        for (const CSimpleIniA::Entry &entry : sections)
+        {
+            const std::string_view name = entry.pItem;
+            if (!name.starts_with("sig.") || parse_rung_section_name(name).has_value())
+            {
+                continue;
+            }
+
+            const std::string_view label = name.substr(4);
+            if (label.empty())
+            {
+                return fail(ErrorCode::MalformedLine, "manifest::parse");
+            }
+
+            Result<SignatureRecord> record = parse_record(ini, entry.pItem, std::string(label));
+            if (!record)
+            {
+                return std::unexpected(record.error());
+            }
+
+            // Attach the candidate ladder by probing rung sub-sections in order until the first gap. Probing by name
+            // (rather than filtering the enumerated section list) keeps the rungs correctly ordered regardless of how
+            // the underlying store enumerated them, and works even for a label that itself contains dots.
+            std::size_t first_missing_rung = 0;
+            for (;; ++first_missing_rung)
+            {
+                const std::string rung_section = std::format("{}.rung.{}", entry.pItem, first_missing_rung);
+                if (ini.GetValue(rung_section.c_str(), "mode", nullptr) == nullptr)
+                {
+                    break;
+                }
+                Result<CandidateSpec> rung = parse_rung(ini, rung_section.c_str());
+                if (!rung)
+                {
+                    return std::unexpected(rung.error());
+                }
+                record->ladder.push_back(std::move(*rung));
+            }
+
+            for (const CSimpleIniA::Entry &maybe_rung_entry : sections)
+            {
+                const std::string_view maybe_rung = maybe_rung_entry.pItem;
+                const std::optional<RungSectionName> rung = parse_rung_section_name(maybe_rung);
+                if (rung && rung->parent == name && rung->index >= first_missing_rung)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+            }
+
+            records.push_back(std::move(*record));
+        }
+        return records;
+    }
+
+    std::string serialize(std::span<const SignatureRecord> records)
+    {
+        CSimpleIniA ini;
+        ini.SetMultiKey(false);
+        ini.SetValue("manifest", "schema", std::to_string(SCHEMA_VERSION).c_str());
+
+        for (const SignatureRecord &record : records)
+        {
+            const std::string section = std::format("sig.{}", record.label);
+            const char *sec = section.c_str();
+
+            ini.SetValue(sec, "kind", std::string(anchor_kind_token(record.kind)).c_str());
+            if (!record.module.empty())
+            {
+                ini.SetValue(sec, "module", record.module.c_str());
+            }
+
+            ini.SetValue(sec, "binding", std::string(binding_kind_to_string(record.binding.kind)).c_str());
+            switch (record.binding.kind)
+            {
+            case BindingKind::PointerChain:
+            {
+                std::string offsets;
+                for (std::size_t index = 0; index < record.binding.offsets.size(); ++index)
+                {
+                    if (index != 0)
+                    {
+                        offsets += ", ";
+                    }
+                    offsets += format_signed_hex(static_cast<long long>(record.binding.offsets[index]));
+                }
+                ini.SetValue(sec, "offsets", offsets.c_str());
+                ini.SetValue(sec, "value_width", std::to_string(record.binding.value_width).c_str());
+                break;
+            }
+            case BindingKind::MidHookRegister:
+                ini.SetValue(sec, "read_register", std::string(gpr_token(record.binding.read_register)).c_str());
+                if (record.binding.xmm_index != XMM_INDEX_UNUSED)
+                {
+                    ini.SetValue(sec, "xmm_index", std::to_string(record.binding.xmm_index).c_str());
+                }
+                break;
+            case BindingKind::VmtMethod:
+                ini.SetValue(sec, "vmt_index", std::to_string(record.binding.vmt_index).c_str());
+                break;
+            case BindingKind::Address:
+                break;
+            }
+
+            if (record.expected_fingerprint != 0)
+            {
+                ini.SetValue(sec, "fingerprint", std::format("0x{:X}", record.expected_fingerprint).c_str());
+            }
+
+            switch (record.kind)
+            {
+            case anchor::AnchorKind::VtableIdentity:
+                ini.SetValue(sec, "mangled", record.mangled.c_str());
+                break;
+            case anchor::AnchorKind::CodeOperand:
+                ini.SetValue(sec, "operand_kind", std::string(operand_kind_token(record.operand_kind)).c_str());
+                ini.SetValue(sec, "operand_index", std::to_string(record.operand_index).c_str());
+                ini.SetValue(sec, "byte_width", std::to_string(record.byte_width).c_str());
+                break;
+            case anchor::AnchorKind::StringXref:
+                ini.SetValue(sec, "xref_text", record.xref_text.c_str());
+                ini.SetValue(sec, "xref_encoding", std::string(encoding_token(record.xref_encoding)).c_str());
+                ini.SetValue(sec, "xref_return", std::string(xref_return_token(record.xref_return)).c_str());
+                ini.SetValue(sec, "xref_require_terminator", record.xref_require_terminator ? "true" : "false");
+                ini.SetValue(sec, "xref_broad_match", record.xref_broad_match ? "true" : "false");
+                break;
+            case anchor::AnchorKind::Manual:
+                ini.SetValue(sec, "manual_value",
+                             format_signed_hex(static_cast<long long>(record.manual_value)).c_str());
+                break;
+            case anchor::AnchorKind::RipGlobal:
+            case anchor::AnchorKind::CallArgHome:
+            case anchor::AnchorKind::Quorum:
+                break;
+            }
+
+            for (std::size_t index = 0; index < record.ladder.size(); ++index)
+            {
+                const CandidateSpec &spec = record.ladder[index];
+                const std::string rung_section = std::format("{}.rung.{}", section, index);
+                const char *rsec = rung_section.c_str();
+
+                ini.SetValue(rsec, "mode", std::string(scan_mode_token(spec.mode)).c_str());
+                if (!spec.name.empty())
+                {
+                    ini.SetValue(rsec, "name", spec.name.c_str());
+                }
+                switch (spec.mode)
+                {
+                case scan::Mode::Direct:
+                    ini.SetValue(rsec, "pattern", spec.pattern.c_str());
+                    if (spec.walk_back != 0)
+                    {
+                        ini.SetValue(rsec, "walk_back",
+                                     format_signed_hex(static_cast<long long>(spec.walk_back)).c_str());
+                    }
+                    break;
+                case scan::Mode::RipRelative:
+                    ini.SetValue(rsec, "pattern", spec.pattern.c_str());
+                    ini.SetValue(rsec, "displacement_at",
+                                 format_signed_hex(static_cast<long long>(spec.displacement_at)).c_str());
+                    ini.SetValue(rsec, "instruction_length", std::to_string(spec.instruction_length).c_str());
+                    break;
+                case scan::Mode::RttiVtable:
+                    ini.SetValue(rsec, "mangled", spec.mangled.c_str());
+                    break;
+                case scan::Mode::StringXref:
+                    ini.SetValue(rsec, "string_text", spec.string_text.c_str());
+                    ini.SetValue(rsec, "string_encoding", std::string(encoding_token(spec.string_encoding)).c_str());
+                    ini.SetValue(rsec, "string_return", std::string(xref_return_token(spec.string_return)).c_str());
+                    ini.SetValue(rsec, "string_require_terminator", spec.string_require_terminator ? "true" : "false");
+                    ini.SetValue(rsec, "string_broad_match", spec.string_broad_match ? "true" : "false");
+                    break;
+                }
+            }
+        }
+
+        std::string out;
+        ini.Save(out);
+        return out;
+    }
+
+    Result<std::vector<SignatureRecord>> load(const std::filesystem::path &path)
+    {
+        std::ifstream in(path, std::ios::binary);
+        if (!in)
+        {
+            return fail(ErrorCode::FileOpenFailed, "manifest::load");
+        }
+        const std::string text{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+        return parse(text);
+    }
+
+    Result<void> save(const std::filesystem::path &path, std::span<const SignatureRecord> records)
+    {
+        const std::string text = serialize(records);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out)
+        {
+            return fail(ErrorCode::FileOpenFailed, "manifest::save");
+        }
+        out.write(text.data(), static_cast<std::streamsize>(text.size()));
+        if (!out)
+        {
+            return fail(ErrorCode::FileOpenFailed, "manifest::save");
+        }
+        return {};
+    }
+
+    Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
+                                           std::span<const SignatureRecord> overrides)
+    {
+        std::vector<Signature> merged;
+        merged.reserve(defaults.size());
+
+        for (const anchor::Anchor &def : defaults)
+        {
+            // Find a file override that speaks to this exact in-code label. The file overrides only what it names, so a
+            // default with no matching entry keeps its in-code form.
+            const SignatureRecord *override_record = nullptr;
+            for (const SignatureRecord &candidate : overrides)
+            {
+                if (candidate.label == def.label)
+                {
+                    override_record = &candidate;
+                    break;
+                }
+            }
+
+            if (override_record != nullptr)
+            {
+                Result<Signature> compiled = Signature::compile(*override_record);
+                if (compiled)
+                {
+                    merged.push_back(std::move(*compiled));
+                    continue;
+                }
+                // A malformed override falls back to the in-code default rather than dropping the feature: an override
+                // must never make things worse than not shipping the file.
+                log().warning("manifest overlay: override '{}' failed to compile ({}); keeping in-code default",
+                              def.label, compiled.error().message());
+            }
+
+            Result<Signature> adopted = Signature::adopt(def);
+            if (adopted)
+            {
+                merged.push_back(std::move(*adopted));
+            }
+            else
+            {
+                // A Quorum / CallArgHome default cannot be flattened into a Signature; it stays an in-code concern
+                // gated through anchor::evaluate_gate, so it is skipped here rather than silently mis-adopted.
+                log().warning("manifest overlay: default '{}' is not a serializable anchor kind; gate it in code",
+                              def.label);
+            }
+        }
+        return merged;
+    }
+
+    const GatedSignature *GateResult::find(std::string_view label) const noexcept
+    {
+        for (const GatedSignature &entry : trusted)
+        {
+            if (entry.label == label)
+            {
+                return &entry;
+            }
+        }
+        return nullptr;
+    }
+
+    GateResult resolve_and_gate(std::span<const Signature> signatures, const GatePolicy &policy, Region scope)
+    {
+        GateResult result;
+
+        // Resolve every signature first, then summarize: assess_quality needs the whole report, and a signature's
+        // fingerprint verdict is independent of the resolve outcome.
+        std::vector<anchor::ResolvedAnchor> report;
+        report.reserve(signatures.size());
+        for (const Signature &signature : signatures)
+        {
+            report.push_back(signature.resolve(scope));
+        }
+        result.quality = anchor::assess_quality(report);
+
+        // The fingerprint state of each provisionally-trusted signature, kept parallel to result.trusted so a
+        // whole-manifest floor demotion below can report the true drift state rather than guessing it.
+        std::vector<FingerprintState> trusted_fingerprints;
+        trusted_fingerprints.reserve(signatures.size());
+
+        for (std::size_t index = 0; index < signatures.size(); ++index)
+        {
+            const Signature &signature = signatures[index];
+            const anchor::ResolvedAnchor &resolved = report[index];
+            const FingerprintState fingerprint = signature.fingerprint_state();
+
+            // A non-unique or missed locate is never trusted: acting on an un-resolved address is the corruption this
+            // gate exists to prevent.
+            if (resolved.status != anchor::AnchorStatus::Resolved)
+            {
+                result.rejected.push_back(RejectedSignature{
+                    .label = signature.label(), .status = resolved.status, .fingerprint = fingerprint});
+                continue;
+            }
+            // A drifted fingerprint means the located code's shape changed, so the binding can no longer be trusted
+            // even though something resolved at that address.
+            if (policy.reject_on_fingerprint_drift && fingerprint == FingerprintState::Drifted)
+            {
+                result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                            .status = anchor::AnchorStatus::Resolved,
+                                                            .fingerprint = FingerprintState::Drifted});
+                continue;
+            }
+            if (policy.reject_unset_fingerprint && fingerprint == FingerprintState::Unset)
+            {
+                result.rejected.push_back(RejectedSignature{.label = signature.label(),
+                                                            .status = anchor::AnchorStatus::Resolved,
+                                                            .fingerprint = FingerprintState::Unset});
+                continue;
+            }
+
+            result.trusted.push_back(GatedSignature{.label = signature.label(),
+                                                    .kind = signature.kind(),
+                                                    .address = Address{static_cast<std::uintptr_t>(resolved.value)},
+                                                    .binding = &signature.binding()});
+            trusted_fingerprints.push_back(fingerprint);
+        }
+
+        // Whole-manifest health floor: if too small a fraction of the manifest is trustworthy, none of it is. The guard
+        // `!(floor >= 0)` folds a negative or NaN floor to "no floor", matching the anchor gate's strict-default
+        // handling of a nonsensical threshold.
+        double floor = policy.min_resolved_fraction;
+        if (!(floor >= 0.0))
+        {
+            floor = 0.0;
+        }
+        if (floor > 1.0)
+        {
+            floor = 1.0;
+        }
+        if (!signatures.empty() && floor > 0.0)
+        {
+            const double fraction = static_cast<double>(result.trusted.size()) / static_cast<double>(signatures.size());
+            if (fraction < floor)
+            {
+                for (std::size_t index = 0; index < result.trusted.size(); ++index)
+                {
+                    result.rejected.push_back(RejectedSignature{.label = result.trusted[index].label,
+                                                                .status = anchor::AnchorStatus::Resolved,
+                                                                .fingerprint = trusted_fingerprints[index]});
+                }
+                result.trusted.clear();
+            }
+        }
+
+        return result;
+    }
+
+    std::string_view binding_kind_to_string(BindingKind kind) noexcept
+    {
+        switch (kind)
+        {
+        case BindingKind::Address:
+            return "address";
+        case BindingKind::PointerChain:
+            return "pointer_chain";
+        case BindingKind::MidHookRegister:
+            return "mid_hook_register";
+        case BindingKind::VmtMethod:
+            return "vmt_method";
+        }
+        return "address";
+    }
+
+    std::string_view fingerprint_state_to_string(FingerprintState state) noexcept
+    {
+        switch (state)
+        {
+        case FingerprintState::Unset:
+            return "unset";
+        case FingerprintState::Match:
+            return "match";
+        case FingerprintState::Drifted:
+            return "drifted";
+        }
+        return "unset";
+    }
+} // namespace DetourModKit::manifest

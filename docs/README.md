@@ -8,6 +8,7 @@ Guides and references for building mods with DetourModKit. New here? Start with 
 
 - [AOB Signature Scanning](misc/aob-signatures.md) -- pattern syntax, RIP-relative resolution, and patch-proof signature practices.
 - [Anchor Registry](guides/scanning/anchors.md) -- declare every patch-fragile constant once and resolve the whole table in a single self-healing pass.
+- [Signature Manifest](guides/scanning/signature-manifest.md) -- ship the resolved contract (address plus register/offset/vtable-slot binding) as an editable `.signatures.ini`, so a game-patch repair is a text edit gated into trusted vs safe-disabled instead of a recompiled DLL.
 
 ### Hooking
 
