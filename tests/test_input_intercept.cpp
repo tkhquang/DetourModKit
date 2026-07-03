@@ -30,11 +30,11 @@ using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
 using DetourModKit::detail::publish_wheel_consume;
 using DetourModKit::detail::step_gamepad_suppress;
-using DetourModKit::detail::wheel_direction_bit;
-using DetourModKit::detail::WheelDirection;
 using DetourModKit::detail::step_wheel_pulse;
 using DetourModKit::detail::take_wheel_counts;
 using DetourModKit::detail::uninstall;
+using DetourModKit::detail::wheel_direction_bit;
+using DetourModKit::detail::WheelDirection;
 using DetourModKit::detail::WheelPulseState;
 using DetourModKit::detail::wndproc_installed;
 using DetourModKit::detail::xinput_installed;
@@ -930,8 +930,7 @@ TEST(InterceptXInputTest, UninstallQuiescesInFlightDetoursUnderConcurrentCallers
                 });
         }
 
-        ASSERT_TRUE(wait_until([&] { return started.load(std::memory_order_acquire) == 3; },
-                               std::chrono::seconds(5)));
+        ASSERT_TRUE(wait_until([&] { return started.load(std::memory_order_acquire) == 3; }, std::chrono::seconds(5)));
         // Give the callers time to be actively cycling through the detour, then stop new calls and tear it down before
         // joining so any caller already in the detour must quiesce safely.
         std::this_thread::sleep_for(std::chrono::milliseconds(3));

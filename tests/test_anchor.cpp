@@ -1,10 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <initializer_list>
+#include <limits>
 #include <span>
+#include <string>
 #include <string_view>
 
 #include "DetourModKit/anchor.hpp"
@@ -1310,4 +1313,161 @@ TEST(AnchorProfileTest, AppliesCandidateOrderToRipGlobal)
     const an::ResolvedAnchor result = an::resolve_with_profile(anchor, profile, page.range());
     EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
     EXPECT_EQ(static_cast<std::uintptr_t>(result.value), page.addr(0x200));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Drift-telemetry gate: assess_quality summary -> GateVerdict startup enable/disable decision.
+// ---------------------------------------------------------------------------------------------------------------------
+
+namespace
+{
+    // Builds one synthetic ResolvedAnchor so a gate test can assemble an exact drift report without resolving real
+    // anchors; only kind and status feed the quality summary the gate reads.
+    [[nodiscard]] an::ResolvedAnchor ra(an::AnchorKind kind, an::AnchorStatus status)
+    {
+        return an::ResolvedAnchor{.label = "t", .kind = kind, .status = status, .value = 0};
+    }
+} // namespace
+
+TEST(AnchorGateTest, AllResolvedPassesDefaultPolicy)
+{
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::VtableIdentity, an::AnchorStatus::Resolved)};
+    EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Pass);
+}
+
+TEST(AnchorGateTest, FailedAnchorFailsDefaultPolicy)
+{
+    // Default max_failed is 0, so a single failure disables the feature regardless of how many others resolved.
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::CodeOperand, an::AnchorStatus::Failed)};
+    EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Fail);
+}
+
+TEST(AnchorGateTest, QuorumNotIndependentCountsAsHardFailure)
+{
+    // A quorum whose sub-anchors were not independent committed no value; it fails closed and counts against max_failed
+    // exactly like a Failed anchor.
+    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::Quorum, an::AnchorStatus::QuorumNotIndependent)};
+    EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Fail);
+}
+
+TEST(AnchorGateTest, PartialResolveIsGatedByRatio)
+{
+    // One of three resolvable anchors resolved; the other two are Unresolved (an untouched slot still drags the ratio).
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)};
+
+    // 1/3 < 0.5 -> Fail.
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.5}), an::GateVerdict::Fail);
+    // 1/3 >= 0.3 -> clears the ratio; no failure and no manual, so Pass.
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.3}), an::GateVerdict::Pass);
+}
+
+TEST(AnchorGateTest, UnsupportedKindExcludedFromDenominator)
+{
+    // Two resolved plus one CallArgHome (no resolver, always Unsupported). Under the strict default ratio 1.0 the
+    // unsupported kind must NOT be counted against the manifest, so 2/2 resolvable resolved -> Pass.
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported)};
+    EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Pass);
+}
+
+TEST(AnchorGateTest, ResolvedManualDowngradesToDegraded)
+{
+    // Every anchor resolved, but one is a pinned Manual literal that cannot self-heal: Degraded by default...
+    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved)};
+    EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Degraded);
+    // ...but a policy that opts out of the manual downgrade treats it as a plain Pass.
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.manual_at_risk_degrades = false}), an::GateVerdict::Pass);
+}
+
+TEST(AnchorGateTest, EmptyReportIsDegraded)
+{
+    // No anchors means no evidence for the gate to assess; never report it as healthy.
+    EXPECT_EQ(an::evaluate_gate(std::span<const an::ResolvedAnchor>{}), an::GateVerdict::Degraded);
+}
+
+TEST(AnchorGateTest, AllUnsupportedReportIsDegraded)
+{
+    // A non-empty report with nothing assessable proves nothing about health: Degraded, never a false Pass.
+    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported),
+                                                   ra(an::AnchorKind::CallArgHome, an::AnchorStatus::Unsupported)};
+    EXPECT_EQ(an::evaluate_gate(report), an::GateVerdict::Degraded);
+}
+
+TEST(AnchorGateTest, MaxFailedToleratesConfiguredFailures)
+{
+    // Two failures with a cap of two clears the hard-failure gate; the remaining resolved fraction then decides. Here
+    // 1 resolved of 3 resolvable at ratio 0.3 passes the ratio, so the verdict is Pass.
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Failed)};
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.3, .max_failed = 2}),
+              an::GateVerdict::Pass);
+    // One below the cap still fails.
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 0.3, .max_failed = 1}),
+              an::GateVerdict::Fail);
+}
+
+TEST(AnchorGateTest, OutOfRangeRatioIsClamped)
+{
+    const std::array<an::ResolvedAnchor, 2> report{ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::RipGlobal, an::AnchorStatus::Unresolved)};
+    // A ratio above 1.0 clamps to 1.0 (still requires every resolvable anchor): 1/2 -> Fail.
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = 5.0}), an::GateVerdict::Fail);
+    // A negative ratio clamps to 0.0 (any resolved fraction clears it): Pass.
+    EXPECT_EQ(an::evaluate_gate(report, an::GatePolicy{.min_resolved_ratio = -1.0}), an::GateVerdict::Pass);
+    // NaN is treated as the strict default, not as a threshold that silently passes every report.
+    const an::GatePolicy nan_policy{.min_resolved_ratio = std::numeric_limits<double>::quiet_NaN()};
+    EXPECT_EQ(an::evaluate_gate(report, nan_policy), an::GateVerdict::Fail);
+}
+
+TEST(AnchorGateTest, SpanOverloadMatchesQualityOverload)
+{
+    const std::array<an::ResolvedAnchor, 3> report{ra(an::AnchorKind::StringXref, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::Manual, an::AnchorStatus::Resolved),
+                                                   ra(an::AnchorKind::CodeOperand, an::AnchorStatus::Failed)};
+    const an::GatePolicy policy{.min_resolved_ratio = 0.5, .max_failed = 1};
+    EXPECT_EQ(an::evaluate_gate(report, policy), an::evaluate_gate(an::assess_quality(report), policy));
+}
+
+TEST(AnchorGateTest, InconsistentQualitySummaryFailsClosed)
+{
+    const an::AnchorQuality quality{.total = 1, .resolved = 2};
+    EXPECT_EQ(an::evaluate_gate(quality), an::GateVerdict::Fail);
+}
+
+TEST(AnchorGateTest, VerdictToStringMapsEveryVerdict)
+{
+    EXPECT_EQ(an::gate_verdict_to_string(an::GateVerdict::Pass), "Pass");
+    EXPECT_EQ(an::gate_verdict_to_string(an::GateVerdict::Degraded), "Degraded");
+    EXPECT_EQ(an::gate_verdict_to_string(an::GateVerdict::Fail), "Fail");
+}
+
+TEST(AnchorGateTest, GatesARealResolvedReport)
+{
+    // End-to-end: resolve a real table (one healthy Manual, one Failed backend anchor whose site is absent), then gate
+    // the produced report. The Failed anchor trips the default zero-failure cap, so the feature safe-disables.
+    an::Anchor anchors[2]{};
+    anchors[0].label = "pinned";
+    anchors[0].kind = an::AnchorKind::Manual;
+    anchors[0].manual_value = 0x40;
+    anchors[1].label = "absent";
+    anchors[1].kind = an::AnchorKind::StringXref;
+    const std::string absent_text =
+        std::string{"dmk-anchor-gate-absent-"} + std::to_string(GetCurrentProcessId()) + "-marker";
+    anchors[1].xref_text = absent_text;
+
+    an::ResolvedAnchor report[2]{};
+    const std::size_t written = an::resolve_all(anchors, report);
+    ASSERT_EQ(written, 2u);
+    ASSERT_EQ(report[1].status, an::AnchorStatus::Failed);
+    EXPECT_EQ(an::evaluate_gate(std::span<const an::ResolvedAnchor>{report, written}), an::GateVerdict::Fail);
 }

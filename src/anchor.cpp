@@ -18,6 +18,7 @@
 
 #include "fork_join.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -158,6 +159,23 @@ namespace DetourModKit
             [[nodiscard]] ResolvedAnchor failed_anchor_result(const Anchor &anchor) noexcept
             {
                 return ResolvedAnchor{anchor.label, anchor.kind, AnchorStatus::Failed, 0};
+            }
+
+            [[nodiscard]] double clamped_gate_ratio(double ratio) noexcept
+            {
+                if (std::isnan(ratio))
+                {
+                    return 1.0;
+                }
+                if (ratio < 0.0)
+                {
+                    return 0.0;
+                }
+                if (ratio > 1.0)
+                {
+                    return 1.0;
+                }
+                return ratio;
             }
 
             // FNV-1a 64 evidence hashing for anchor_fingerprint. The fingerprint must be stable across runs and builds
@@ -568,6 +586,80 @@ namespace DetourModKit
             return quality;
         }
 
+        GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy) noexcept
+        {
+            // The span overload always feeds a self-consistent summary, but the direct AnchorQuality overload is
+            // public. If a caller supplies impossible counts, fail closed rather than letting an inflated resolved
+            // count create a healthy verdict.
+            std::size_t accounted = 0;
+            const auto count_fits = [&accounted, total = quality.total](std::size_t count) noexcept -> bool
+            {
+                if (count > total - accounted)
+                {
+                    return false;
+                }
+                accounted += count;
+                return true;
+            };
+            if (!count_fits(quality.resolved) || !count_fits(quality.failed) || !count_fits(quality.unsupported) ||
+                !count_fits(quality.not_independent))
+            {
+                return GateVerdict::Fail;
+            }
+
+            // A QuorumNotIndependent outcome committed no value (it fails closed exactly like a backend miss), so it
+            // counts as a failure alongside Failed for the cap: both mean an anchor the manifest declared did not yield
+            // a verified value. Check the hard cap first so a manifest riddled with failures fails the gate even if the
+            // few that did resolve happen to clear the ratio.
+            if (quality.failed > policy.max_failed)
+            {
+                return GateVerdict::Fail;
+            }
+            const std::size_t remaining_failure_budget = policy.max_failed - quality.failed;
+            if (quality.not_independent > remaining_failure_budget)
+            {
+                return GateVerdict::Fail;
+            }
+
+            // Resolvable excludes the Unsupported (CallArgHome) kind: it has no backend and can never heal, so folding
+            // it into the denominator would permanently penalize a manifest that merely declares a forward-compatible
+            // kind. Everything else that could have resolved but did not -- Failed, QuorumNotIndependent, and any
+            // untouched Unresolved slot (e.g. a caller that gated the whole output buffer instead of the written
+            // prefix) -- stays in the denominator, so a partial resolve drags the ratio down and fails closed rather
+            // than flattering the resolved count.
+            const std::size_t resolvable = quality.total - quality.unsupported;
+            if (resolvable == 0)
+            {
+                // Nothing assessable proves nothing about runtime health: an empty report or an all-unsupported table
+                // should not become a healthy Pass merely because there were no resolvable anchors to contradict it.
+                return GateVerdict::Degraded;
+            }
+
+            // Clamp a caller-supplied ratio to [0, 1] so an out-of-range value cannot invert the comparison. NaN is
+            // treated as the strict default rather than as a threshold that never compares true. Test resolved >= ratio
+            // * resolvable as `resolved < ratio * resolvable` to fail closed. The comparison avoids division so the
+            // exact-full case (ratio 1.0, every resolvable anchor resolved) stays an exact floating-point equality.
+            const double ratio = clamped_gate_ratio(policy.min_resolved_ratio);
+            if (static_cast<double>(quality.resolved) < ratio * static_cast<double>(resolvable))
+            {
+                return GateVerdict::Fail;
+            }
+
+            // Cleared the hard thresholds. A pinned Manual literal resolved but cannot self-heal, so surface it as a
+            // soft risk when the policy asks: the feature can run, but the caller should log that a manual offset is
+            // load-bearing and will silently drift on the next patch.
+            if (policy.manual_at_risk_degrades && quality.manual_at_risk > 0)
+            {
+                return GateVerdict::Degraded;
+            }
+            return GateVerdict::Pass;
+        }
+
+        GateVerdict evaluate_gate(std::span<const ResolvedAnchor> report, const GatePolicy &policy) noexcept
+        {
+            return evaluate_gate(assess_quality(report), policy);
+        }
+
         std::uint64_t anchor_fingerprint(const Anchor &anchor) noexcept
         {
             if (anchor.kind != AnchorKind::Quorum)
@@ -607,6 +699,20 @@ namespace DetourModKit
                 return "Unsupported";
             case AnchorStatus::QuorumNotIndependent:
                 return "QuorumNotIndependent";
+            }
+            return "Unknown";
+        }
+
+        std::string_view gate_verdict_to_string(GateVerdict verdict) noexcept
+        {
+            switch (verdict)
+            {
+            case GateVerdict::Pass:
+                return "Pass";
+            case GateVerdict::Degraded:
+                return "Degraded";
+            case GateVerdict::Fail:
+                return "Fail";
             }
             return "Unknown";
         }

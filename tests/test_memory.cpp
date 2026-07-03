@@ -3160,9 +3160,9 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
             });
     }
 
-    // A failed init must NOT longjmp out of the test via ASSERT_* while the reader threads are still running: that would
-    // skip the join loop below and destroy joinable std::thread objects, calling std::terminate. Record the failure,
-    // break, and let stop + join + the assert run afterwards.
+    // A failed init must NOT longjmp out of the test via ASSERT_* while the reader threads are still running: that
+    // would skip the join loop below and destroy joinable std::thread objects, calling std::terminate. Record the
+    // failure, break, and let stop + join + the assert run afterwards.
     bool init_ok = true;
     for (int cycle = 0; cycle < 200 && init_ok; ++cycle)
     {
