@@ -7,7 +7,7 @@
  *          - CodeOperand    -> scan::read_code_constant (in-code immediate / displacement decode),
  *          - StringXref     -> scan::find_string_xref (string-literal cross-reference resolve),
  *          - Manual         -> a pinned literal (no backend),
- *          - Quorum         -> two independent sub-anchors corroborated,
+ *          - Quorum         -> N-of-M voting across independent sub-anchors,
  *          - CallArgHome    -> reserved (no resolver yet).
  *          This layer adds no scanning of its own: it maps each backend's typed failure onto the common
  *          AnchorStatus and threads the optional post-resolve validator and the per-game ScanProfile defaults.
@@ -18,8 +18,10 @@
 
 #include "fork_join.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace DetourModKit
@@ -129,6 +131,45 @@ namespace DetourModKit
                 return !same_backend_config(a, b);
             }
 
+            // Checks the M members of an N-of-M vote: EVERY pair must be independent evidence. N-of-M only corroborates
+            // when no member duplicates another, so a single dependent pair taints the whole vote (one site could be
+            // counted twice toward the threshold). This is also what confines a WithinTolerance quorum -- whose votes
+            // need only be near, not equal -- to content-independent members, so a cluster of near values can never be
+            // an artifact of two members reading adjacent bytes of one site. The caller guarantees no member pointer is
+            // null before this runs. O(M^2) over a tiny declared M.
+            [[nodiscard]] bool quorum_members_pairwise_independent(std::span<const Anchor *const> members) noexcept
+            {
+                for (std::size_t i = 0; i < members.size(); ++i)
+                {
+                    for (std::size_t j = i + 1; j < members.size(); ++j)
+                    {
+                        if (!quorum_sub_anchors_independent(*members[i], *members[j]))
+                        {
+                            return false;
+                        }
+                    }
+                }
+                return true;
+            }
+
+            // Counts how many of the cast votes agree with a candidate cluster-center value under the match policy,
+            // reusing the same fail-closed pairwise agreement test. A quorum accepts when some member's value anchors a
+            // cluster of at least N agreeing votes. Under a negative WithinTolerance the pairwise test rejects even the
+            // center against itself, so every cluster is empty and the quorum fails closed, as intended.
+            [[nodiscard]] std::size_t votes_agreeing_with(std::int64_t center, std::span<const std::int64_t> votes,
+                                                          QuorumMatch match, std::int64_t tolerance) noexcept
+            {
+                std::size_t agree = 0;
+                for (const std::int64_t vote : votes)
+                {
+                    if (quorum_values_agree(center, vote, match, tolerance))
+                    {
+                        ++agree;
+                    }
+                }
+                return agree;
+            }
+
             // Commits a backend-resolved value, applying the anchor's optional fail-closed validator. On a validator
             // miss the anchor is reported Failed with no value, identical to a backend miss, so the caller re-heals by
             // re-running resolve.
@@ -137,7 +178,7 @@ namespace DetourModKit
                 // Opt-in required-validator policy: a backend-resolved (function/global) target with no domain check is
                 // treated as unverified and fails closed. Manual and Quorum are both exempt -- a pinned Manual literal
                 // is not a resolved target (require_validator is a backend-target policy, and a Manual only reaches
-                // this path at all via validate_manual), and a Quorum's two-signal corroboration is already the
+                // this path at all via validate_manual), and a Quorum's N-of-M corroboration is already the
                 // verification. Only the four backend kinds reach this rejection.
                 if (anchor.require_validator && anchor.kind != AnchorKind::Quorum &&
                     anchor.kind != AnchorKind::Manual && anchor.validator == nullptr)
@@ -318,6 +359,13 @@ namespace DetourModKit
                 }
                 return hash;
             }
+
+            constexpr std::uint64_t NULL_SUB_ANCHOR = 0;
+
+            [[nodiscard]] std::uint64_t quorum_member_evidence(const Anchor *member) noexcept
+            {
+                return member != nullptr ? fingerprint_evidence(*member) : NULL_SUB_ANCHOR;
+            }
         } // anonymous namespace
 
         scan::StringRefQuery apply_profile(const ScanProfile &profile, scan::StringRefQuery query) noexcept
@@ -444,42 +492,78 @@ namespace DetourModKit
                 break;
             case AnchorKind::Quorum:
             {
-                // A critical target accepts only when two independent signals corroborate. Fail closed on a malformed
-                // declaration (a missing sub-anchor, or a sub-anchor that is itself a Quorum) exactly as the
-                // single-signal backends fail closed on ambiguity; rejecting nested Quorum bounds recursion to one
-                // level.
-                const Anchor *first = anchor.quorum_a;
-                const Anchor *second = anchor.quorum_b;
-                if (first == nullptr || second == nullptr || first->kind == AnchorKind::Quorum ||
-                    second->kind == AnchorKind::Quorum)
+                // A critical target accepts only when at least N of its M candidate signals independently resolve and
+                // agree (N-of-M voting). Corroboration this way survives a patch that breaks some of the M signals as
+                // long as N of them still agree, which no single backend can. Fail closed on a malformed declaration
+                // exactly as the single-signal backends fail closed on ambiguity.
+                const std::span<const Anchor *const> members = anchor.quorum_members;
+
+                // A quorum needs at least two members to corroborate; a null member or a member that is itself a Quorum
+                // is malformed (rejecting nested Quorum bounds recursion to one level).
+                if (members.size() < 2)
                 {
                     result.status = AnchorStatus::Failed;
                     break;
                 }
+                const bool malformed_member =
+                    std::any_of(members.begin(), members.end(), [](const Anchor *member) noexcept
+                                { return member == nullptr || member->kind == AnchorKind::Quorum; });
+                if (malformed_member)
+                {
+                    result.status = AnchorStatus::Failed;
+                    break;
+                }
+
+                // Effective N: 0 means unanimous (all members), so a default two-member quorum is the strict 2-of-2.
+                // A quorum is corroboration, so an explicit N below 2 or above the member count is a malformed vote and
+                // fails closed rather than silently degrading to a single signal.
+                const std::size_t threshold = (anchor.quorum_threshold == 0) ? members.size() : anchor.quorum_threshold;
+                if (threshold < 2 || threshold > members.size())
+                {
+                    result.status = AnchorStatus::Failed;
+                    break;
+                }
+
                 // Independence is a static property of the declaration, so check it before the (potentially expensive)
-                // recursive resolves. A dependent pair (same object, dual Manual, or same backend + inputs) is not
-                // corroboration; report it precisely instead of letting two scans of one site look corroborated.
-                if (!quorum_sub_anchors_independent(*first, *second))
+                // recursive resolves. Every member must be independent of every other; one dependent pair means the
+                // vote could count a single site twice, so report it precisely instead of letting it look corroborated.
+                if (!quorum_members_pairwise_independent(members))
                 {
                     result.status = AnchorStatus::QuorumNotIndependent;
                     break;
                 }
 
-                // Recurse with the same profile so a denied sub-anchor kind (or a profile broad-default) threads down
-                // and a denied signal fails the quorum closed.
-                const ResolvedAnchor resolved_first = resolve_with_profile(*first, profile, scope);
-                const ResolvedAnchor resolved_second = resolve_with_profile(*second, profile, scope);
-                if (resolved_first.status == AnchorStatus::Resolved &&
-                    resolved_second.status == AnchorStatus::Resolved &&
-                    quorum_values_agree(resolved_first.value, resolved_second.value, anchor.quorum_match,
-                                        anchor.quorum_tolerance))
+                // Resolve each member with the same profile so a denied sub-anchor kind (or a profile broad-default)
+                // threads down; only a member that resolves casts a vote. A member that fails contributes nothing
+                // rather than vetoing the vote -- that is the whole point of N-of-M: the target still corroborates when
+                // one of several independent signals breaks on a patch, so long as N of the rest agree.
+                std::vector<std::int64_t> votes;
+                votes.reserve(members.size());
+                for (const Anchor *member : members)
                 {
-                    // Both agree under the policy. Commit through the same path as the single-signal backends so the
-                    // Quorum anchor's own validator runs on the corroborated value (each sub-anchor's validator already
-                    // ran in its recursive resolve).
-                    commit_resolved(anchor, result, resolved_first.value);
+                    const ResolvedAnchor resolved_member = resolve_with_profile(*member, profile, scope);
+                    if (resolved_member.status == AnchorStatus::Resolved)
+                    {
+                        votes.push_back(resolved_member.value);
+                    }
                 }
-                else
+
+                // Accept if some member's value anchors an agreement cluster of at least N votes. Scanning the votes in
+                // declaration order and committing the first qualifying center keeps the corroborated value
+                // deterministic: for ExactValue every cluster member shares the value; for WithinTolerance it is the
+                // cluster center, within tolerance of the rest. Commit through the shared path so the Quorum's own
+                // validator runs on that value (each member's validator already ran in its recursive resolve).
+                bool corroborated = false;
+                for (const std::int64_t center : votes)
+                {
+                    if (votes_agreeing_with(center, votes, anchor.quorum_match, anchor.quorum_tolerance) >= threshold)
+                    {
+                        commit_resolved(anchor, result, center);
+                        corroborated = true;
+                        break;
+                    }
+                }
+                if (!corroborated)
                 {
                     result.status = AnchorStatus::Failed;
                 }
@@ -577,7 +661,7 @@ namespace DetourModKit
                 {
                     ++quality.manual_at_risk;
                 }
-                // A corroborated quorum is the strongest evidence: two independent signals had to agree.
+                // A corroborated quorum is the strongest evidence: N independent signals had to agree.
                 if (entry.kind == AnchorKind::Quorum && entry.status == AnchorStatus::Resolved)
                 {
                     ++quality.corroborated;
@@ -667,19 +751,63 @@ namespace DetourModKit
                 return fingerprint_evidence(anchor);
             }
 
-            // A quorum's evidence is its two sub-anchors, combined order-independently (the resolver treats the pair
-            // symmetrically when checking agreement, so swapping quorum_a / quorum_b must not change the fingerprint).
-            // A null sub-anchor -- which fails closed at resolve time -- contributes a fixed sentinel so the result
-            // stays defined rather than dereferencing through nullptr.
-            constexpr std::uint64_t NULL_SUB_ANCHOR = 0;
-            const std::uint64_t fp_a = anchor.quorum_a ? fingerprint_evidence(*anchor.quorum_a) : NULL_SUB_ANCHOR;
-            const std::uint64_t fp_b = anchor.quorum_b ? fingerprint_evidence(*anchor.quorum_b) : NULL_SUB_ANCHOR;
-            const std::uint64_t lo = fp_a < fp_b ? fp_a : fp_b;
-            const std::uint64_t hi = fp_a < fp_b ? fp_b : fp_a;
+            // A quorum's evidence is the combined evidence of its M members, folded order-independently (voting is
+            // symmetric, so reordering the members must not change the fingerprint) plus the effective vote threshold
+            // and agreement policy. The per-member evidence hashes are emitted in sorted order without allocating: each
+            // pass finds the next larger evidence value and folds all duplicates of that value. A null member -- which
+            // fails closed at resolve time -- contributes a fixed sentinel so the result stays defined rather than
+            // dereferencing through nullptr.
+            const std::span<const Anchor *const> members = anchor.quorum_members;
 
             std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(AnchorKind::Quorum));
-            hash = fnv1a_int(hash, lo);
-            hash = fnv1a_int(hash, hi);
+            hash = fnv1a_int(hash, static_cast<std::uint64_t>(members.size()));
+
+            std::uint64_t previous = 0;
+            bool have_previous = false;
+            std::size_t emitted = 0;
+            while (emitted < members.size())
+            {
+                std::uint64_t next = 0;
+                bool found_next = false;
+                for (const Anchor *member : members)
+                {
+                    const std::uint64_t evidence = quorum_member_evidence(member);
+                    if (have_previous && evidence <= previous)
+                    {
+                        continue;
+                    }
+                    if (!found_next || evidence < next)
+                    {
+                        next = evidence;
+                        found_next = true;
+                    }
+                }
+
+                if (!found_next)
+                {
+                    break;
+                }
+
+                std::size_t duplicate_count = 0;
+                for (const Anchor *member : members)
+                {
+                    if (quorum_member_evidence(member) == next)
+                    {
+                        ++duplicate_count;
+                    }
+                }
+                for (std::size_t i = 0; i < duplicate_count; ++i)
+                {
+                    hash = fnv1a_int(hash, next);
+                }
+
+                previous = next;
+                have_previous = true;
+                emitted += duplicate_count;
+            }
+            const std::size_t effective_threshold =
+                (anchor.quorum_threshold == 0) ? members.size() : anchor.quorum_threshold;
+            hash = fnv1a_int(hash, static_cast<std::uint64_t>(effective_threshold));
             hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.quorum_match));
             hash = fnv1a_int(hash, anchor.quorum_tolerance);
             return hash;
