@@ -42,6 +42,17 @@
 
 namespace DetourModKit::scan
 {
+    class Pattern;
+} // namespace DetourModKit::scan
+
+namespace DetourModKit::detail
+{
+    /// Returns @p pattern's immutable compiled buffer for internal scan adapters.
+    [[nodiscard]] constexpr const PatternBuffer &pattern_buffer(const scan::Pattern &pattern) noexcept;
+} // namespace DetourModKit::detail
+
+namespace DetourModKit::scan
+{
     /**
      * @class Pattern
      * @brief A value-semantic compiled AOB pattern that owns its bytes and mask inline.
@@ -99,19 +110,44 @@ namespace DetourModKit::scan
         /// Number of bytes in the compiled pattern.
         [[nodiscard]] constexpr std::size_t size() const noexcept { return m_data.length; }
 
-        /// The `|` result offset (0 when the pattern carries no offset marker).
+        /**
+         * @brief The `|` result offset as an index into the fixed byte stream (0 when there is no offset marker).
+         * @details For a pattern with bounded jumps the resolver adds the actual gap bytes at match time, so the
+         *          returned address still points at the intended run; this reports only the fixed-byte portion.
+         */
         [[nodiscard]] constexpr std::size_t offset() const noexcept { return m_data.offset; }
 
-        /// View over the compiled pattern bytes (length == size()).
+        /**
+         * @brief View over the compiled fixed pattern bytes, all segments concatenated (length == size()).
+         * @details Gap bytes are not stored, so for a jump-bearing pattern this is the fixed bytes only, not the span.
+         */
         [[nodiscard]] constexpr std::span<const std::byte> bytes() const noexcept
         {
             return std::span<const std::byte>(m_data.bytes.data(), m_data.length);
         }
 
-        /// View over the per-byte match mask (length == size()).
+        /// View over the per-byte match mask paralleling bytes() (length == size()).
         [[nodiscard]] constexpr std::span<const std::byte> mask() const noexcept
         {
             return std::span<const std::byte>(m_data.mask.data(), m_data.length);
+        }
+
+        /// True when the pattern carries at least one bounded jump (and therefore more than one segment).
+        [[nodiscard]] constexpr bool has_jumps() const noexcept { return m_data.jump_count > 0; }
+
+        /// Number of fixed segments the pattern splits into (1 for a plain pattern; one more than the jump count).
+        [[nodiscard]] constexpr std::size_t segment_count() const noexcept { return m_data.jump_count + 1; }
+
+        /// Fewest bytes any match can occupy: the fixed byte count plus every gap's minimum skip.
+        [[nodiscard]] constexpr std::size_t min_match_length() const noexcept
+        {
+            return detail::min_match_length(m_data);
+        }
+
+        /// Most bytes any match can occupy: the fixed byte count plus every gap's maximum skip.
+        [[nodiscard]] constexpr std::size_t max_match_length() const noexcept
+        {
+            return detail::max_match_length(m_data);
         }
 
         /// True when the pattern has at least one fully-known byte the prefilter can anchor on.
@@ -127,39 +163,45 @@ namespace DetourModKit::scan
         }
 
         /**
-         * @brief Tests whether the pattern matches the bytes at the start of @p window.
-         * @param window The candidate byte window; must be at least size() bytes to match.
-         * @return True when every masked byte agrees.
+         * @brief Tests whether the pattern matches the bytes at the start of @p window, honoring any bounded jumps.
+         * @param window The candidate byte window; must be at least min_match_length() bytes for a match to be
+         * possible.
+         * @return True when the pattern (every segment placed across its gaps) matches beginning at the window start.
          * @details Applies the same compare the scan engine uses, expressed per byte: a position matches when
          *          (memory ^ pattern) & mask is zero for every byte, so wildcard bytes (mask 0x00) always agree and a
-         *          nibble mask (0xF0 / 0x0F) compares only the fixed nibble. A window shorter than the pattern cannot
-         *          match.
+         *          nibble mask (0xF0 / 0x0F) compares only the fixed nibble. A jump-free pattern is a single fixed-width
+         *          compare; a pattern with bounded jumps runs the same bounded backtracking search the engine uses,
+         *          trying each gap width in ascending order. A window too short to hold the pattern cannot match.
          * @note Callback-safe -- a pure masked byte compare with no allocation, I/O, or locking.
          */
         [[nodiscard]] constexpr bool matches_at(std::span<const std::byte> window) const noexcept
         {
-            if (window.size() < m_data.length)
-            {
-                return false;
-            }
-            for (std::size_t index = 0; index < m_data.length; ++index)
-            {
-                const std::byte masked_diff = (window[index] ^ m_data.bytes[index]) & m_data.mask[index];
-                if (masked_diff != std::byte{0x00})
-                {
-                    return false;
-                }
-            }
-            return true;
+            return detail::matches_buffer_at(m_data, window);
         }
 
     private:
+        friend constexpr const detail::PatternBuffer &detail::pattern_buffer(const Pattern &pattern) noexcept;
+
         // Private so the only ways to obtain a Pattern are the validating factories; a default-constructed or
         // arbitrary-buffer Pattern can never exist.
         constexpr explicit Pattern(const detail::PatternBuffer &data) noexcept : m_data{data} {}
 
         detail::PatternBuffer m_data{};
     };
+
+} // namespace DetourModKit::scan
+
+namespace DetourModKit::detail
+{
+    /// Returns @p pattern's immutable compiled buffer for internal scan adapters.
+    [[nodiscard]] constexpr const PatternBuffer &pattern_buffer(const scan::Pattern &pattern) noexcept
+    {
+        return pattern.m_data;
+    }
+} // namespace DetourModKit::detail
+
+namespace DetourModKit::scan
+{
 
     /**
      * @enum Pages

@@ -100,11 +100,12 @@ Parsed by `scan::Pattern::compile(std::string_view)` ([include/DetourModKit/scan
 | `??` | Wildcard byte: any value matches at this position. |
 | `?` | Same as `??`. Accepted for brevity. |
 | `4?`, `?A` | Per-nibble wildcard. One hex digit paired with `?`: `4?` matches any byte whose high nibble is 4 (low nibble wildcarded); `?A` matches any byte whose low nibble is A (high nibble wildcarded). Useful for a ModRM byte where only the reg or r/m field is fixed, or any operand where a single nibble is invariant across builds. |
-| `\|` | Offset marker: records the byte position of the next token as the "point of interest", or the position one past the last byte (`offset == size()`) if placed at the very end of the pattern. Accessible via `Pattern::offset()`. Cannot appear more than once. |
+| `[X-Y]`, `[X]` | Bounded jump: skip a run of bytes between two fixed segments. `[2-5]` matches any 2-to-5-byte gap; `[3]` is the exact-count shorthand for `[3-3]`. Unlike a fixed run of `??`, a bounded jump tolerates a gap whose *size* shifts between builds (an intervening instruction whose encoding grows or shrinks). A jump may not lead or trail the pattern and two jumps may not be adjacent (there is always at least one fixed byte between gaps), so the pattern always splits into non-empty fixed segments. The gap span is bounded (`MAX_JUMP_SPAN`); YARA's unbounded `[X-]` form is intentionally not accepted. |
+| `\|` | Offset marker: records the byte position of the next token as the "point of interest", or the position one past the last byte (`offset == size()`) if placed at the very end of the pattern. Accessible via `Pattern::offset()`. Cannot appear more than once. With a bounded jump before the marker, `scan` adds the actual gap bytes at match time so the resolved address still points at the intended run. |
 
-`scan::Pattern::compile` returns `Result<Pattern>` (an `std::expected<Pattern, Error>`) -- a `BadPattern` error on any malformed token (e.g. `"GG"`, `"1FF"`, three-character tokens, a second `|`). Empty or whitespace-only input is treated as a parse failure. The compile-time variant `scan::Pattern::literal(dsl)` is `consteval`: a malformed literal is a build error rather than a runtime failure.
+`scan::Pattern::compile` returns `Result<Pattern>` (an `std::expected<Pattern, Error>`) -- a `BadPattern` error on any malformed token (e.g. `"GG"`, `"1FF"`, three-character tokens, a second `|`, or a bad / mis-placed jump such as `"[5-2]"`, `"[2-]"`, a leading / trailing / adjacent jump, or more than `MAX_PATTERN_JUMPS` gaps). Empty or whitespace-only input is treated as a parse failure. The compile-time variant `scan::Pattern::literal(dsl)` is `consteval`: a malformed literal is a build error rather than a runtime failure.
 
-The scan prefilter anchors on a single fully-known byte (`memchr` cannot search for a partial nibble), so a per-nibble token is never chosen as the anchor: give a nibble-heavy pattern at least one full literal byte for fast scanning. A pattern made entirely of nibble tokens still resolves correctly, but falls back to a masked compare at every position (no prefilter) and is correspondingly slower.
+The scan prefilter anchors on a single fully-known byte (`memchr` cannot search for a partial nibble), so a per-nibble token is never chosen as the anchor: give a nibble-heavy pattern at least one full literal byte for fast scanning. A pattern made entirely of nibble tokens still resolves correctly, but falls back to a masked compare at every position (no prefilter) and is correspondingly slower. With a bounded jump, the anchor is chosen from the first fixed segment (the run before the first `[...]`): the scanner locates that segment, then extends across the gaps, so give the leading segment a distinctive literal byte.
 
 Example with an offset marker:
 
@@ -113,6 +114,14 @@ Example with an offset marker:
 ```
 
 The `|` sits after seven literal bytes, so `Pattern::offset() == 7`. This lets you anchor on a wide distinctive window while hooking the second instruction in the chain.
+
+Example with a bounded jump:
+
+```text
+"48 8B 05 ?? ?? ?? ?? [2-6] E8 ?? ?? ?? ??"
+```
+
+The two known instructions (`mov rax, [rip+disp32]` and a `call rel32`) are separated by a 2-to-6-byte gap that absorbs an intervening instruction whose length varies between builds. The 12 fixed bytes (7 in the first segment, 5 in the second) frame the gap, so `Pattern::segment_count()` is 2 here and `Pattern::min_match_length()` / `max_match_length()` report the 14-to-18-byte span a match can occupy.
 
 ## 4. Scan API tour
 

@@ -12,10 +12,8 @@
 
 #include "DetourModKit/detail/pattern_core.hpp"
 
-#include <cctype>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <optional>
 #include <vector>
 
@@ -288,16 +286,22 @@ namespace DetourModKit
 #endif // DMK_HAS_AVX512
 
         /**
-         * @brief Picks the rarest fully-known byte's index in a compiled pattern.
-         * @return The byte index in `[0, pattern.size())` with the lowest frequency score, or `pattern.size()` when no
-         *         position is a fully-known literal byte (every position is a wildcard or only partially masked).
+         * @brief Picks the rarest fully-known byte's index in segment 0 of a compiled pattern.
+         * @return The byte index in segment 0 with the lowest frequency score, or `pattern.size()` when segment 0 has
+         * no
+         *         fully-known literal byte (every position is a wildcard or only partially masked).
+         * @details Confined to segment 0 (the fixed run before the first bounded jump; the whole pattern when
+         * jump-free)
+         *          because the matcher locates that run first and extends across the variable gaps, so only a segment-0
+         *          byte sits at a fixed offset the memchr prefilter can sweep for.
          */
         std::size_t select_pattern_anchor(const detail::EnginePattern &pattern) noexcept
         {
             const std::size_t pattern_size = pattern.size();
+            const std::size_t segment0_end = pattern.jumps.empty() ? pattern_size : pattern.jumps.front().position;
             std::size_t best = pattern_size;
             std::uint8_t best_score = UINT8_MAX;
-            for (std::size_t i = 0; i < pattern_size; ++i)
+            for (std::size_t i = 0; i < segment0_end; ++i)
             {
                 // Only a fully-known byte (mask 0xFF) can anchor the memchr / SIMD prefilter, which searches for one
                 // exact byte value. A wildcard (mask 0x00) or a partially-masked nibble byte (0xF0 / 0x0F) carries no
@@ -327,21 +331,6 @@ namespace DetourModKit
         anchor = select_pattern_anchor(*this);
     }
 
-    namespace
-    {
-        /// Converts a single hex character to its numeric value, or -1 if not a valid hex digit.
-        constexpr int hex_char_to_int(char c) noexcept
-        {
-            if (c >= '0' && c <= '9')
-                return c - '0';
-            if (c >= 'A' && c <= 'F')
-                return c - 'A' + 10;
-            if (c >= 'a' && c <= 'f')
-                return c - 'a' + 10;
-            return -1;
-        }
-    } // anonymous namespace
-
     bool detail::pattern_has_literal_byte(const detail::EnginePattern &pattern) noexcept
     {
         for (const std::byte mask_byte : pattern.mask)
@@ -352,108 +341,68 @@ namespace DetourModKit
         return false;
     }
 
+    namespace
+    {
+        // Heap-backed storage sink for the runtime AOB parse. It drives the one shared grammar
+        // (detail::parse_pattern_into) so the runtime engine and the compile-time scan::Pattern can never diverge on
+        // the DSL, but -- unlike the fixed-array compile-time sink -- it imposes no byte cap: the growable
+        // EnginePattern has none, so a long runtime pattern (for example the byte pattern find_string_xref builds from
+        // a long search string) compiles here even though the same length would overflow the literal Pattern's
+        // MAX_PATTERN_BYTES inline storage. The jump count is still capped at MAX_PATTERN_JUMPS because the segmented
+        // matcher indexes a fixed-size segment-start array bounded by it.
+        struct EnginePatternSink
+        {
+            detail::EnginePattern pattern;
+
+            [[nodiscard]] std::size_t length() const noexcept { return pattern.bytes.size(); }
+            [[nodiscard]] std::size_t jump_count() const noexcept { return pattern.jumps.size(); }
+
+            [[nodiscard]] bool add_byte(std::byte value, std::byte mask)
+            {
+                pattern.bytes.push_back(value);
+                pattern.mask.push_back(mask);
+                return true;
+            }
+
+            [[nodiscard]] bool add_jump(std::size_t position, std::size_t min_skip, std::size_t max_skip)
+            {
+                if (pattern.jumps.size() >= detail::MAX_PATTERN_JUMPS)
+                {
+                    return false;
+                }
+                pattern.jumps.push_back(detail::PatternJump{position, min_skip, max_skip});
+                return true;
+            }
+
+            void set_offset(std::size_t position) noexcept { pattern.offset = static_cast<std::ptrdiff_t>(position); }
+        };
+    } // namespace
+
     std::optional<detail::EnginePattern> detail::parse_aob(std::string_view aob_str)
     {
-        auto is_ws = [](char c) noexcept
-        { return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v'; };
-
-        // Trim leading/trailing whitespace without allocating.
-        std::string_view input = aob_str;
-        while (!input.empty() && is_ws(input.front()))
-            input.remove_prefix(1);
-        while (!input.empty() && is_ws(input.back()))
-            input.remove_suffix(1);
-
-        if (input.empty())
+        // Parse through the shared grammar into a heap-backed sink so the runtime engine and scan::Pattern accept the
+        // same DSL, while long runtime patterns keep using growable storage instead of the literal type's fixed cap.
+        EnginePatternSink sink;
+        if (detail::parse_pattern_into(aob_str, sink) != detail::PatternStatus::Ok)
         {
             return std::nullopt;
         }
-
-        EnginePattern result;
-        bool offset_set = false;
-
-        std::size_t pos = 0;
-        while (pos < input.size())
-        {
-            // Skip whitespace between tokens.
-            while (pos < input.size() && is_ws(input[pos]))
-                ++pos;
-            if (pos >= input.size())
-                break;
-
-            // Find token end.
-            const std::size_t token_start = pos;
-            while (pos < input.size() && !is_ws(input[pos]))
-                ++pos;
-            const std::string_view token = input.substr(token_start, pos - token_start);
-
-            if (token == "|")
-            {
-                if (offset_set)
-                {
-                    return std::nullopt;
-                }
-                result.offset = static_cast<std::ptrdiff_t>(result.bytes.size());
-                offset_set = true;
-            }
-            else if (token == "??" || token == "?")
-            {
-                result.bytes.push_back(std::byte{0x00});
-                result.mask.push_back(std::byte{0x00});
-            }
-            else if (token.length() == 2)
-            {
-                const char hi_char = token[0];
-                const char lo_char = token[1];
-                const int hi = hex_char_to_int(hi_char);
-                const int lo = hex_char_to_int(lo_char);
-                if (hi >= 0 && lo >= 0)
-                {
-                    result.bytes.push_back(static_cast<std::byte>((hi << 4) | lo));
-                    result.mask.push_back(std::byte{0xFF});
-                }
-                else if (hi >= 0 && lo_char == '?')
-                {
-                    // High-nibble token (e.g. "4?"): the high nibble is fixed and the low nibble is a wildcard. Store
-                    // the known nibble in place with a zeroed wildcard nibble and a 0xF0 mask, so the masked compare
-                    // (mem ^ pat) & mask checks only the high nibble.
-                    result.bytes.push_back(static_cast<std::byte>(hi << 4));
-                    result.mask.push_back(std::byte{0xF0});
-                }
-                else if (hi_char == '?' && lo >= 0)
-                {
-                    // Low-nibble token (e.g. "?5"): the low nibble is fixed and the high nibble is a wildcard. A 0x0F
-                    // mask checks only the low nibble.
-                    result.bytes.push_back(static_cast<std::byte>(lo));
-                    result.mask.push_back(std::byte{0x0F});
-                }
-                else
-                {
-                    return std::nullopt;
-                }
-            }
-            else
-            {
-                return std::nullopt;
-            }
-        }
-
-        if (result.empty())
-        {
-            return std::nullopt;
-        }
-
-        result.compile_anchor();
-        return result;
+        // The anchor is storage-specific, so it is computed here rather than in the shared grammar: select it over
+        // segment 0 with the engine's size() "no fully-known byte" sentinel.
+        sink.pattern.compile_anchor();
+        return std::move(sink.pattern);
     }
 
     detail::EnginePattern detail::engine_pattern_from(const scan::Pattern &pattern, std::size_t anchor_index)
     {
         const std::span<const std::byte> bytes = pattern.bytes();
         const std::span<const std::byte> mask = pattern.mask();
+        const detail::PatternBuffer &data = detail::pattern_buffer(pattern);
+        const std::span<const detail::PatternJump> jumps(data.jumps.data(), data.jump_count);
         EnginePattern compiled;
         compiled.bytes.assign(bytes.begin(), bytes.end());
         compiled.mask.assign(mask.begin(), mask.end());
+        compiled.jumps.assign(jumps.begin(), jumps.end());
         compiled.offset = static_cast<std::ptrdiff_t>(pattern.offset());
         compiled.anchor = anchor_index;
         return compiled;
@@ -599,9 +548,11 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
+    // Flat single-segment matcher: the memchr-anchored SIMD body, returning the match START (no offset applied).
+    // Every jump-free pattern dispatches here, so the overwhelmingly common case runs the direct fixed-width fast path.
     DMK_NO_SANITIZE_ADDRESS
-    const std::byte *detail::find_pattern_raw(const std::byte *start_address, std::size_t region_size,
-                                              const detail::EnginePattern &pattern) noexcept
+    static const std::byte *find_pattern_flat_start(const std::byte *start_address, std::size_t region_size,
+                                                    const detail::EnginePattern &pattern) noexcept
     {
         const std::size_t pattern_size = pattern.size();
 
@@ -618,7 +569,7 @@ namespace DetourModKit
 
         // No fully-known byte to anchor on. Two sub-cases:
         //   - The pattern is entirely wildcards (no mask bit set anywhere): the search degenerates to
-        //     "always match at region start", preserved for backward compatibility.
+        //     "always match at region start", the defined result for an all-wildcard pattern.
         //   - The pattern carries only partially-masked (nibble) bytes: there is no exact byte for the
         //     memchr / SIMD prefilter, so fall back to a masked compare at every candidate position. This
         //     path is rare -- a real signature almost always carries at least one full literal byte -- so a
@@ -764,6 +715,204 @@ namespace DetourModKit
         return nullptr;
     }
 
+    // Masked-compares one fixed segment run [body_begin, body_end) of the pattern against memory at addr. The caller
+    // guarantees [addr, addr + (body_end - body_begin)) is inside the scanned region, so this does no bounds check. The
+    // per-byte test is the same (mem ^ pat) & mask == 0 the flat verify uses, so wildcard and nibble bytes behave
+    // identically here.
+    DMK_NO_SANITIZE_ADDRESS
+    static bool segment_run_matches(const std::byte *addr, const detail::EnginePattern &pattern, std::size_t body_begin,
+                                    std::size_t body_end) noexcept
+    {
+        for (std::size_t i = body_begin; i < body_end; ++i)
+        {
+            const auto mem = std::to_integer<unsigned>(addr[i - body_begin]);
+            const auto pat = std::to_integer<unsigned>(pattern.bytes[i]);
+            const auto msk = std::to_integer<unsigned>(pattern.mask[i]);
+            if (((mem ^ pat) & msk) != 0)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Backtracking segment extension for a bounded-jump pattern. Tries to place segment `segment_index` (and every
+    // segment after it) starting at `addr`, staying within [.., region_end). On success it records each segment's
+    // absolute start in segment_starts and returns true. Gap widths are tried in ascending order, so the first success
+    // is the leftmost feasible placement; backtracking is required because a nearer gap position can strand a later
+    // segment a farther position would satisfy. Recursion DEPTH is bounded by the segment count (<= jumps + 1), but the
+    // total WORK is not memoized: on a miss it can explore every skip of every gap, so the worst case is the product of
+    // the gap spans. Each segment run fails fast on its first literal byte, so a real signature (few gaps,
+    // literal-anchored segments) prunes to near-linear; only a pathological all-wildcard, wide-gap pattern approaches
+    // the product bound, and patterns are author-written so such a cost is self-inflicted.
+    DMK_NO_SANITIZE_ADDRESS
+    static bool extend_segments(const detail::EnginePattern &pattern, const std::byte *addr,
+                                const std::byte *region_end, std::size_t segment_index,
+                                const std::byte **segment_starts) noexcept
+    {
+        const std::size_t jump_count = pattern.jumps.size();
+        const std::size_t segment_begin = (segment_index == 0) ? 0 : pattern.jumps[segment_index - 1].position;
+        const std::size_t segment_end =
+            (segment_index < jump_count) ? pattern.jumps[segment_index].position : pattern.size();
+        const std::size_t segment_length = segment_end - segment_begin;
+
+        // The segment run must fit in the bytes that remain before region_end.
+        if (segment_length > static_cast<std::size_t>(region_end - addr))
+        {
+            return false;
+        }
+        if (!segment_run_matches(addr, pattern, segment_begin, segment_end))
+        {
+            return false;
+        }
+        segment_starts[segment_index] = addr;
+        if (segment_index == jump_count)
+        {
+            // The last segment matched, so the whole pattern is placed.
+            return true;
+        }
+
+        const std::byte *const after = addr + segment_length;
+        const detail::PatternJump &gap = pattern.jumps[segment_index];
+        const std::size_t available = static_cast<std::size_t>(region_end - after);
+        for (std::size_t skip = gap.min_skip; skip <= gap.max_skip; ++skip)
+        {
+            // Once the gap alone overruns the region no larger skip can fit either. Checking skip against the available
+            // bytes before forming the pointer keeps the arithmetic in-bounds (never past region_end).
+            if (skip > available)
+            {
+                break;
+            }
+            if (extend_segments(pattern, after + skip, region_end, segment_index + 1, segment_starts))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Resolves the offset-applied result point and the one-past-end pointer for a placed bounded-jump match. The `|`
+    // marker records a fixed-byte index; the run-time point is the address of that fixed byte, which lives in whichever
+    // segment contains the index (or the end when the marker is trailing). `end` is one past the final segment's last
+    // byte -- the match's true span, which varies with the gap widths chosen.
+    static detail::RawMatch segmented_result(const detail::EnginePattern &pattern,
+                                             const std::byte *const *segment_starts) noexcept
+    {
+        const std::size_t jump_count = pattern.jumps.size();
+        const std::size_t last_index = jump_count; // segment count is jump_count + 1
+        const std::size_t last_begin = pattern.jumps.back().position;
+        const std::byte *const end = segment_starts[last_index] + (pattern.size() - last_begin);
+
+        const std::size_t marker = static_cast<std::size_t>(pattern.offset);
+        const std::byte *point = end; // trailing marker (offset == size()) resolves to the end
+        if (marker < pattern.size())
+        {
+            for (std::size_t segment_index = 0; segment_index <= jump_count; ++segment_index)
+            {
+                const std::size_t segment_begin = (segment_index == 0) ? 0 : pattern.jumps[segment_index - 1].position;
+                const std::size_t segment_end =
+                    (segment_index < jump_count) ? pattern.jumps[segment_index].position : pattern.size();
+                if (marker >= segment_begin && marker < segment_end)
+                {
+                    point = segment_starts[segment_index] + (marker - segment_begin);
+                    break;
+                }
+            }
+        }
+        return detail::RawMatch{segment_starts[0], end, point};
+    }
+
+    // Segmented backtracking matcher for a bounded-jump pattern. Locates segment 0 with the same memchr anchor sweep
+    // the flat matcher uses (or scans every start position when segment 0 has no literal anchor), then extends across
+    // the gaps. Returns the leftmost match: the smallest segment-0 start that admits a full placement.
+    DMK_NO_SANITIZE_ADDRESS
+    static detail::RawMatch find_pattern_segmented(const std::byte *start_address, std::size_t region_size,
+                                                   const detail::EnginePattern &pattern, bool use_avx2) noexcept
+    {
+        const std::size_t min_length = pattern.min_match_length();
+        if (region_size < min_length)
+        {
+            return detail::RawMatch{};
+        }
+        const std::byte *const region_end = start_address + region_size;
+        // A segment-0 start must leave room for at least a minimum-length match.
+        const std::byte *const last_candidate = start_address + (region_size - min_length);
+        const std::size_t segment0_end = pattern.jumps.front().position;
+
+        // Segment count is bounded by MAX_PATTERN_JUMPS + 1, so a fixed local array avoids any allocation on the match
+        // path. Value-initialized so a compiler cannot flag a maybe-uninitialized read through the recursive fill:
+        // segmented_result runs only after extend_segments has written every index, but that write crosses a call
+        // boundary the optimizer may not see through.
+        const std::byte *segment_starts[detail::MAX_PATTERN_JUMPS + 1] = {};
+
+        const std::size_t anchor = pattern.anchor;
+        if (anchor < segment0_end)
+        {
+            // Anchored sweep: memchr for the segment-0 anchor byte, then try to extend from each hit. The anchor sits
+            // `anchor` bytes into segment 0, so a hit at H means a candidate segment-0 start at H - anchor.
+            const auto target = static_cast<unsigned char>(pattern.bytes[anchor]);
+            const std::byte *const search_hi = last_candidate + anchor; // inclusive, mirrors the flat matcher
+            const std::byte *search_start = start_address + anchor;
+            while (search_start <= search_hi)
+            {
+                const std::byte *const hit = scan_for_byte(search_start, search_hi, target, use_avx2);
+                if (!hit)
+                {
+                    break;
+                }
+                const std::byte *const candidate = hit - anchor;
+                if (extend_segments(pattern, candidate, region_end, 0, segment_starts))
+                {
+                    return segmented_result(pattern, segment_starts);
+                }
+                search_start = hit + 1;
+            }
+            return detail::RawMatch{};
+        }
+
+        // No literal byte in segment 0 (all wildcard or nibble-only): fall back to trying every start position. Rare --
+        // a real signature almost always carries a literal byte in its leading run.
+        for (const std::byte *candidate = start_address; candidate <= last_candidate; ++candidate)
+        {
+            if (extend_segments(pattern, candidate, region_end, 0, segment_starts))
+            {
+                return segmented_result(pattern, segment_starts);
+            }
+        }
+        return detail::RawMatch{};
+    }
+
+    detail::RawMatch detail::find_pattern_raw(const std::byte *start_address, std::size_t region_size,
+                                              const detail::EnginePattern &pattern) noexcept
+    {
+        const std::size_t pattern_size = pattern.size();
+        if (pattern_size == 0 || !start_address || region_size < pattern_size)
+        {
+            return RawMatch{};
+        }
+
+        if (pattern.jumps.empty())
+        {
+            // Plain pattern: the flat fixed-width fast path. end is the fixed span; point applies the constant
+            // offset.
+            const std::byte *const start = find_pattern_flat_start(start_address, region_size, pattern);
+            if (!start)
+            {
+                return RawMatch{};
+            }
+            return RawMatch{start, start + pattern_size, start + pattern.offset};
+        }
+
+        // Bounded-jump pattern: hoist the AVX2 gate once for the segmented sweep's memchr, then run the segmented
+        // matcher, which applies the offset itself because a jump match's marker delta is not a constant.
+#ifdef DMK_HAS_AVX2
+        const bool use_avx2 = cpu_has_avx2();
+#else
+        const bool use_avx2 = false;
+#endif
+        return find_pattern_segmented(start_address, region_size, pattern, use_avx2);
+    }
+
     const std::byte *detail::find_pattern(const std::byte *start_address, std::size_t region_size,
                                           const detail::EnginePattern &pattern)
     {
@@ -772,10 +921,9 @@ namespace DetourModKit
             return nullptr;
         }
 
-        const std::byte *match = find_pattern_raw(start_address, region_size, pattern);
-        if (!match)
-            return nullptr;
-        return match + pattern.offset;
+        // find_pattern_raw bakes the offset into point (constant for a plain pattern, gap-dependent for a jump one), so
+        // point is the final result address and is nullptr when there is no match.
+        return find_pattern_raw(start_address, region_size, pattern).point;
     }
 
     const std::byte *detail::find_pattern(const std::byte *start_address, std::size_t region_size,
@@ -794,20 +942,22 @@ namespace DetourModKit
         std::size_t remaining = region_size;
         std::size_t found_count = 0;
 
-        // Iterate via the raw helper so the `match + 1` continuation stays correct regardless of the pattern's offset
-        // marker. Offset is applied exactly once when we return the Nth hit.
+        // Iterate via the raw helper so the continuation advances past each match START (RawMatch::start), which is
+        // correct regardless of the pattern's offset marker or its variable jump span. The offset-applied result
+        // (RawMatch::point) is returned only for the Nth hit. A jump pattern needs at least min_match_length() bytes;
+        // the weaker size() loop guard is a safe lower bound, and find_pattern_raw fails closed on a short tail.
         while (remaining >= pattern.size())
         {
-            const std::byte *match = find_pattern_raw(cursor, remaining, pattern);
-            if (!match)
+            const RawMatch match = find_pattern_raw(cursor, remaining, pattern);
+            if (!match.start)
             {
                 break;
             }
             if (++found_count == occurrence)
             {
-                return match + pattern.offset;
+                return match.point;
             }
-            const std::size_t advance = static_cast<std::size_t>(match - cursor) + 1;
+            const std::size_t advance = static_cast<std::size_t>(match.start - cursor) + 1;
             cursor += advance;
             remaining -= advance;
         }
