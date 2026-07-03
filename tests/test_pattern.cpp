@@ -204,3 +204,128 @@ TEST(Pattern, BytesAndMaskExposeCompiledForm)
     EXPECT_EQ(bytes[3], std::byte{0x05});
     EXPECT_EQ(mask[3], std::byte{0x0F});
 }
+
+// Compile-time proof that a bounded jump parses and reports its segmentation during constant evaluation.
+static_assert(scan::Pattern::literal("48 8B [2-5] E8").has_jumps());
+static_assert(scan::Pattern::literal("48 8B [2-5] E8").segment_count() == 2);
+static_assert(scan::Pattern::literal("48 8B [2-5] E8").size() == 3);             // fixed bytes only: 48 8B E8
+static_assert(scan::Pattern::literal("48 8B [2-5] E8").min_match_length() == 5); // 3 fixed + 2 min gap
+static_assert(scan::Pattern::literal("48 8B [2-5] E8").max_match_length() == 8); // 3 fixed + 5 max gap
+// A jump-free pattern reports one segment and equal min / max span, so nothing about the plain case shifts.
+static_assert(scan::Pattern::literal("48 8B 05").segment_count() == 1);
+static_assert(!scan::Pattern::literal("48 8B 05").has_jumps());
+static_assert(scan::Pattern::literal("48 8B 05").min_match_length() == 3);
+static_assert(scan::Pattern::literal("48 8B 05").max_match_length() == 3);
+// A bounded jump literal is usable in matches_at during constant evaluation (the same backtracking search). The window
+// is a named constexpr array so the span binds to an lvalue.
+inline constexpr std::array<std::byte, 3> kJumpMatchWindow = {std::byte{0xAA}, std::byte{0x00}, std::byte{0xBB}};
+static_assert(scan::Pattern::literal("AA [1-2] BB").matches_at(kJumpMatchWindow));
+// A worked two-instruction example: 12 fixed bytes (7 in segment 0, 5 in segment 1) framing a 2-to-6-byte gap, so a
+// match spans 14 to 18 bytes. Pins the multi-segment span arithmetic so the documented figures cannot drift.
+static_assert(scan::Pattern::literal("48 8B 05 ?? ?? ?? ?? [2-6] E8 ?? ?? ?? ??").segment_count() == 2);
+static_assert(scan::Pattern::literal("48 8B 05 ?? ?? ?? ?? [2-6] E8 ?? ?? ?? ??").size() == 12);
+static_assert(scan::Pattern::literal("48 8B 05 ?? ?? ?? ?? [2-6] E8 ?? ?? ?? ??").min_match_length() == 14);
+static_assert(scan::Pattern::literal("48 8B 05 ?? ?? ?? ?? [2-6] E8 ?? ?? ?? ??").max_match_length() == 18);
+
+TEST(PatternJumps, CompileParsesBoundedJump)
+{
+    const auto p = scan::Pattern::compile("48 8B [2-5] E8");
+    ASSERT_TRUE(p.has_value());
+    EXPECT_TRUE(p->has_jumps());
+    EXPECT_EQ(p->segment_count(), 2U);
+    EXPECT_EQ(p->size(), 3U);
+    EXPECT_EQ(p->min_match_length(), 5U);
+    EXPECT_EQ(p->max_match_length(), 8U);
+    // The anchor stays in segment 0: 0x8B (class 7) beats 0x48 (class 8); the rarer 0xE8 in segment 1 is never chosen.
+    EXPECT_TRUE(p->has_anchor());
+    EXPECT_EQ(p->anchor_index(), 1U);
+    EXPECT_EQ(p->anchor_byte(), std::byte{0x8B});
+
+    const detail::PatternParse parsed = detail::parse_pattern("48 8B [2-5] E8");
+    ASSERT_EQ(parsed.status, detail::PatternStatus::Ok);
+    ASSERT_EQ(parsed.buffer.jump_count, 1U);
+    EXPECT_EQ(parsed.buffer.jumps[0].position, 2U);
+    EXPECT_EQ(parsed.buffer.jumps[0].min_skip, 2U);
+    EXPECT_EQ(parsed.buffer.jumps[0].max_skip, 5U);
+}
+
+TEST(PatternJumps, ExactJumpShorthand)
+{
+    const auto p = scan::Pattern::compile("AA [3] BB");
+    ASSERT_TRUE(p.has_value());
+    EXPECT_TRUE(p->has_jumps());
+    EXPECT_EQ(p->segment_count(), 2U);
+    EXPECT_EQ(p->min_match_length(), p->max_match_length());
+    EXPECT_EQ(p->min_match_length(), 5U); // 2 fixed + exactly 3 gap
+}
+
+TEST(PatternJumps, MatchesAtHonorsVariableGap)
+{
+    const auto p = scan::Pattern::compile("AA BB [1-3] CC");
+    ASSERT_TRUE(p.has_value());
+
+    EXPECT_TRUE(p->matches_at(window<4>({0xAA, 0xBB, 0x99, 0xCC})));                    // gap 1
+    EXPECT_TRUE(p->matches_at(window<5>({0xAA, 0xBB, 0x11, 0x22, 0xCC})));              // gap 2
+    EXPECT_TRUE(p->matches_at(window<6>({0xAA, 0xBB, 0x11, 0x22, 0x33, 0xCC})));        // gap 3
+    EXPECT_FALSE(p->matches_at(window<3>({0xAA, 0xBB, 0xCC})));                         // gap 0 < min
+    EXPECT_FALSE(p->matches_at(window<7>({0xAA, 0xBB, 0x11, 0x22, 0x33, 0x44, 0xCC}))); // gap 4 > max
+    EXPECT_FALSE(p->matches_at(window<4>({0xAB, 0xBB, 0x99, 0xCC})));                   // leading mismatch
+}
+
+TEST(PatternJumps, MatchesAtBacktracksStrandedSegment)
+{
+    // The first B0 placement strands the final C0; matches_at must backtrack to the second B0.
+    const auto p = scan::Pattern::compile("A0 [0-3] B0 [0-1] C0");
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->segment_count(), 3U);
+    EXPECT_TRUE(p->matches_at(window<5>({0xA0, 0xB0, 0x11, 0xB0, 0xC0})));
+    // No C0 reachable after any B0 placement: no match.
+    EXPECT_FALSE(p->matches_at(window<5>({0xA0, 0xB0, 0x11, 0xB0, 0x99})));
+}
+
+TEST(PatternJumps, RejectsMalformedAndIllegalJumps)
+{
+    EXPECT_FALSE(scan::Pattern::compile("[2-5] 48").has_value());          // leading jump
+    EXPECT_FALSE(scan::Pattern::compile("48 [2-5]").has_value());          // trailing jump
+    EXPECT_FALSE(scan::Pattern::compile("48 [1-2] [3-4] 8B").has_value()); // consecutive jumps
+    EXPECT_FALSE(scan::Pattern::compile("48 [5-2] 8B").has_value());       // inverted range
+    EXPECT_FALSE(scan::Pattern::compile("48 [2-] 8B").has_value());        // unbounded, not this dialect
+    EXPECT_FALSE(scan::Pattern::compile("48 [2 8B").has_value());          // missing close bracket
+    EXPECT_FALSE(scan::Pattern::compile("48 [] 8B").has_value());          // empty brackets
+    EXPECT_FALSE(scan::Pattern::compile("48 [x-y] 8B").has_value());       // non-decimal
+
+    // The specific parse status rides in the Error's extra slot, so a caller can tell a bad jump from another failure.
+    const auto inverted = scan::Pattern::compile("48 [5-2] 8B");
+    ASSERT_FALSE(inverted.has_value());
+    EXPECT_EQ(inverted.error().code, ErrorCode::BadPattern);
+    EXPECT_EQ(inverted.error().extra, static_cast<std::uint32_t>(detail::PatternStatus::InvalidJump));
+}
+
+TEST(PatternJumps, RejectsTooManyJumps)
+{
+    // Exactly MAX_PATTERN_JUMPS gaps compiles; one more fails closed with the TooManyJumps status.
+    std::string at_cap = "00";
+    for (std::size_t i = 0; i < detail::MAX_PATTERN_JUMPS; ++i)
+    {
+        at_cap += " [1] 00";
+    }
+    const auto ok = scan::Pattern::compile(at_cap);
+    ASSERT_TRUE(ok.has_value());
+    EXPECT_EQ(ok->segment_count(), detail::MAX_PATTERN_JUMPS + 1);
+
+    std::string over_cap = "00";
+    for (std::size_t i = 0; i < detail::MAX_PATTERN_JUMPS + 1; ++i)
+    {
+        over_cap += " [1] 00";
+    }
+    const auto over = scan::Pattern::compile(over_cap);
+    ASSERT_FALSE(over.has_value());
+    EXPECT_EQ(over.error().extra, static_cast<std::uint32_t>(detail::PatternStatus::TooManyJumps));
+}
+
+TEST(PatternJumps, JumpBoundIsCapped)
+{
+    // A gap upper bound within MAX_JUMP_SPAN compiles; one above it is rejected as an invalid jump.
+    EXPECT_TRUE(scan::Pattern::compile("AA [1-" + std::to_string(detail::MAX_JUMP_SPAN) + "] BB").has_value());
+    EXPECT_FALSE(scan::Pattern::compile("AA [1-" + std::to_string(detail::MAX_JUMP_SPAN + 1) + "] BB").has_value());
+}

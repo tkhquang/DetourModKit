@@ -84,8 +84,13 @@ namespace DetourModKit
         // When a sufficient haystack sample exists, pick the pattern's fully-known byte whose value is rarest in this
         // image (the most selective prefilter for this haystack), overriding the compile-time rarest-byte anchor the
         // Pattern carries; otherwise fall back to that compile-time anchor. Returns the engine "no fully-known byte"
-        // sentinel (size()) when the pattern has no full byte. Correctness-neutral: the anchor only selects which
-        // single byte the memchr prefilter sweeps for; the full masked compare still decides every accepted position.
+        // sentinel (size()) when segment 0 has no full byte. Correctness-neutral: the anchor only selects which single
+        // byte the memchr prefilter sweeps for; the full masked compare still decides every accepted position.
+        //
+        // The override is confined to segment 0 (the fixed run before the first bounded jump), exactly like the
+        // compile-time anchor: the segmented matcher locates that first run and then walks the variable gaps, so a byte
+        // in a later segment sits at a gap-dependent address the memchr prefilter cannot sweep for. Choosing an anchor
+        // outside segment 0 would compute a wrong candidate start and silently miss real matches.
         [[nodiscard]] inline std::size_t choose_scan_anchor(const scan::Pattern &pattern,
                                                             const HaystackHistogram &histogram) noexcept
         {
@@ -96,9 +101,11 @@ namespace DetourModKit
             }
             const std::span<const std::byte> bytes = pattern.bytes();
             const std::span<const std::byte> mask = pattern.mask();
+            const detail::PatternBuffer &data = detail::pattern_buffer(pattern);
+            const std::size_t segment0_end = (data.jump_count == 0) ? size : data.jumps[0].position;
             std::size_t best_index = size;
             std::uint32_t best_count = 0;
-            for (std::size_t i = 0; i < size; ++i)
+            for (std::size_t i = 0; i < segment0_end; ++i)
             {
                 if (mask[i] != std::byte{0xFF})
                 {

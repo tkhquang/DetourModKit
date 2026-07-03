@@ -136,6 +136,238 @@ TEST(ScannerTest, find_pattern_span_overload)
     EXPECT_EQ(detail::find_pattern(std::span<const std::byte>{}, *pattern), nullptr);
 }
 
+namespace
+{
+    // Builds a byte buffer from raw byte values so the jump-matcher tests read as the bytes a scan would see.
+    [[nodiscard]] std::vector<std::byte> bytes_of(std::initializer_list<unsigned char> raw)
+    {
+        std::vector<std::byte> out;
+        out.reserve(raw.size());
+        for (const unsigned char b : raw)
+        {
+            out.push_back(std::byte{b});
+        }
+        return out;
+    }
+} // namespace
+
+// The unified parser accepts bounded jumps at the engine layer too, because parse_aob now delegates to the same
+// constexpr core scan::Pattern uses. The gap is recorded as a segment boundary; the fixed byte count excludes gap
+// bytes.
+TEST(ScannerJumpsTest, ParseAobAcceptsBoundedJump)
+{
+    auto p = detail::parse_aob("48 8B [2-5] E8");
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->size(), 3U); // fixed bytes only: 48 8B E8
+    ASSERT_EQ(p->jumps.size(), 1U);
+    EXPECT_EQ(p->jumps[0].position, 2U);
+    EXPECT_EQ(p->jumps[0].min_skip, 2U);
+    EXPECT_EQ(p->jumps[0].max_skip, 5U);
+    EXPECT_EQ(p->min_match_length(), 5U);
+    EXPECT_EQ(p->max_match_length(), 8U);
+    // The anchor is confined to segment 0 (index 1 = 0x8B), never the rarer 0xE8 that sits in segment 1.
+    EXPECT_EQ(p->anchor, 1U);
+}
+
+// Every illegal jump placement / form fails the shared parser, so parse_aob returns nullopt rather than a broken engine
+// pattern.
+TEST(ScannerJumpsTest, ParseAobRejectsBadJumps)
+{
+    EXPECT_FALSE(detail::parse_aob("[2-5] 48").has_value());      // leading jump
+    EXPECT_FALSE(detail::parse_aob("48 [2-5]").has_value());      // trailing jump
+    EXPECT_FALSE(detail::parse_aob("48 [1] [2] 8B").has_value()); // consecutive jumps
+    EXPECT_FALSE(detail::parse_aob("48 [5-2] 8B").has_value());   // inverted range
+    EXPECT_FALSE(detail::parse_aob("48 [2-] 8B").has_value());    // unbounded (bounded dialect only)
+    EXPECT_FALSE(detail::parse_aob("48 [2 8B").has_value());      // missing close bracket
+    EXPECT_FALSE(detail::parse_aob("48 [] 8B").has_value());      // empty brackets
+}
+
+// The segmented matcher finds a signature whose two fixed runs are separated by a run-time-variable gap.
+TEST(ScannerJumpsTest, FindsMatchAcrossVariableGap)
+{
+    const auto data = bytes_of({0x00, 0x00, 0x11, 0x22, 0xAA, 0xBB, 0xCC, 0x00}); // gap of 2 (AA BB) between 22 and CC
+    const auto p = detail::parse_aob("11 22 [1-3] CC");
+    ASSERT_TRUE(p.has_value());
+    const std::byte *m = detail::find_pattern(data.data(), data.size(), *p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - data.data(), 2); // match starts at the 0x11
+}
+
+// A gap smaller than the pattern's minimum skip is not a match.
+TEST(ScannerJumpsTest, GapBelowMinDoesNotMatch)
+{
+    const auto data = bytes_of({0x11, 0x22, 0xCC, 0x00, 0x00}); // CC immediately after 22: gap 0 < min 1
+    const auto p = detail::parse_aob("11 22 [1-3] CC");
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(detail::find_pattern(data.data(), data.size(), *p), nullptr);
+}
+
+// Backtracking: the first placement of a middle segment can strand a later one, so the matcher must try a farther gap
+// position that lets the whole ladder fit.
+TEST(ScannerJumpsTest, BacktracksStrandedMiddleSegment)
+{
+    // A0 [0-3] B0 [0-1] C0 : the B0 at gap 0 leaves no C0 within [0-1] after it; the B0 at gap 2 does.
+    const auto data = bytes_of({0xA0, 0xB0, 0x11, 0xB0, 0xC0, 0x00});
+    const auto p = detail::parse_aob("A0 [0-3] B0 [0-1] C0");
+    ASSERT_TRUE(p.has_value());
+    const std::byte *m = detail::find_pattern(data.data(), data.size(), *p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - data.data(), 0);
+}
+
+// The `|` marker resolves through the actual gap bytes, so its result address includes the gap width chosen at match
+// time (not just the fixed offset).
+TEST(ScannerJumpsTest, OffsetMarkerResolvesThroughGap)
+{
+    // "11 22 [2] | 33": start + 2 fixed + 2 gap = the 0x33 at index 4.
+    const auto data = bytes_of({0x11, 0x22, 0xAA, 0xBB, 0x33, 0x00});
+    const auto p = detail::parse_aob("11 22 [2] | 33");
+    ASSERT_TRUE(p.has_value());
+    const std::byte *m = detail::find_pattern(data.data(), data.size(), *p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - data.data(), 4); // points at 0x33
+
+    const auto before_jump = detail::parse_aob("11 22 | [2] 33");
+    ASSERT_TRUE(before_jump.has_value());
+    const std::byte *before_jump_match = detail::find_pattern(data.data(), data.size(), *before_jump);
+    ASSERT_NE(before_jump_match, nullptr);
+    EXPECT_EQ(before_jump_match - data.data(), 4);
+}
+
+// Ascending gap widths make the nearest placement win, so a marker after the gap resolves to the closest matching run.
+TEST(ScannerJumpsTest, LeftmostGapPlacementWins)
+{
+    // "AA [0-3] | BB": two BBs reachable (gap 1 and gap 3); the marker resolves to the nearer one (index 2).
+    const auto data = bytes_of({0xAA, 0x00, 0xBB, 0x00, 0xBB, 0x00});
+    const auto p = detail::parse_aob("AA [0-3] | BB");
+    ASSERT_TRUE(p.has_value());
+    const std::byte *m = detail::find_pattern(data.data(), data.size(), *p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - data.data(), 2);
+}
+
+// Nth-occurrence works for jump patterns: the continuation advances past each match START.
+TEST(ScannerJumpsTest, NthOccurrenceWithGap)
+{
+    const auto data = bytes_of({0xAA, 0x00, 0xBB, 0x00, 0xAA, 0x00, 0x00, 0xBB, 0x00});
+    const auto p = detail::parse_aob("AA [1-2] BB");
+    ASSERT_TRUE(p.has_value());
+    const std::byte *first = detail::find_pattern(data.data(), data.size(), *p, 1);
+    const std::byte *second = detail::find_pattern(data.data(), data.size(), *p, 2);
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_EQ(first - data.data(), 0);
+    EXPECT_EQ(second - data.data(), 4);
+}
+
+// Segment 0 without a literal anchor (nibble-only) falls back to scanning every start position and still matches.
+TEST(ScannerJumpsTest, SegmentZeroWithoutLiteralAnchor)
+{
+    const auto data = bytes_of({0x00, 0x4A, 0x99, 0xCC, 0x00});
+    const auto p = detail::parse_aob("4? [1-2] CC"); // seg0 "4?" carries no fully-known byte
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->anchor, p->size()); // no anchor sentinel
+    const std::byte *m = detail::find_pattern(data.data(), data.size(), *p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - data.data(), 1); // 0x4A matches 4?
+}
+
+// A multi-gap pattern with an all-wildcard leading segment drives the worst-case matcher shape: no anchor forces an
+// iterate-every-start sweep, and each start explores the product of the gap spans (no memoization). This pins that the
+// shape TERMINATES and is CORRECT -- a miss returns nullptr after exhausting every start x skip combination, and a
+// reachable target is still found -- documenting that the cost is bounded in depth but combinatorial in work.
+TEST(ScannerJumpsTest, MultiGapExhaustiveBacktrackingTerminates)
+{
+    const auto p = detail::parse_aob("?? [0-3] ?? [0-3] FF");
+    ASSERT_TRUE(p.has_value());
+
+    // No 0xFF anywhere: every start and every gap combination is explored and rejected, and the scan still returns.
+    std::vector<std::byte> miss(64, std::byte{0x00});
+    EXPECT_EQ(detail::find_pattern(miss.data(), miss.size(), *p), nullptr);
+
+    // A single 0xFF reachable only by the widest gaps (offset 2 + 3 + 3 = 8) is still found from the first start.
+    std::vector<std::byte> hit(64, std::byte{0x00});
+    hit[8] = std::byte{0xFF};
+    const std::byte *m = detail::find_pattern(hit.data(), hit.size(), *p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - hit.data(), 0);
+}
+
+// The runtime engine parser and the compile-time value parser are one and the same, so both produce an identical
+// segmentation, and engine_pattern_from carries the jumps over from a value Pattern.
+TEST(ScannerJumpsTest, ParserUnifiedWithPatternCore)
+{
+    const char *dsl = "48 8B [2-5] E8 ?? ?? ?? ??";
+    const auto engine = detail::parse_aob(dsl);
+    const auto value = scan::Pattern::compile(dsl);
+    ASSERT_TRUE(engine.has_value());
+    ASSERT_TRUE(value.has_value());
+    EXPECT_EQ(engine->size(), value->size());
+    EXPECT_EQ(static_cast<std::size_t>(engine->offset), value->offset());
+    const detail::PatternBuffer &value_buffer = detail::pattern_buffer(*value);
+    ASSERT_EQ(engine->jumps.size(), value_buffer.jump_count);
+    for (std::size_t i = 0; i < engine->jumps.size(); ++i)
+    {
+        EXPECT_EQ(engine->jumps[i].position, value_buffer.jumps[i].position);
+        EXPECT_EQ(engine->jumps[i].min_skip, value_buffer.jumps[i].min_skip);
+        EXPECT_EQ(engine->jumps[i].max_skip, value_buffer.jumps[i].max_skip);
+    }
+    const std::size_t anchor = value->has_anchor() ? value->anchor_index() : value->size();
+    const detail::EnginePattern via_value = detail::engine_pattern_from(*value, anchor);
+    EXPECT_EQ(via_value.jumps.size(), engine->jumps.size());
+}
+
+// The page-gated whole-process readable sweep (the path public scan() takes) drives the segmented matcher through
+// find_pattern_raw, so a jump-bearing signature planted in a readable static is found end-to-end.
+TEST(ScannerJumpsTest, PageGatedScanFindsJumpPattern)
+{
+    static const unsigned char kBlob[] = {0x63, 0x1C, 0xB4, 0x2F, 0x88, 0xD6, 0x00, 0x00, 0x5A, 0x91, 0x07, 0xE3};
+    const auto p = detail::parse_aob("63 1C B4 2F 88 D6 [1-4] 5A 91 07 E3");
+    ASSERT_TRUE(p.has_value());
+    const std::byte *m = scan_read(*p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(reinterpret_cast<const unsigned char *>(m), kBlob);
+}
+
+// The runtime engine parser shares the compile-time grammar but not its fixed-array cap: a pattern longer than
+// MAX_PATTERN_BYTES (which the value Pattern rejects as TooLong) still compiles and scans at run time, preserving
+// long-string-xref patterns built from large string literals.
+TEST(ScannerJumpsTest, RuntimeParserAcceptsPatternLongerThanLiteralCap)
+{
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    const std::size_t long_len = detail::MAX_PATTERN_BYTES + 8;
+    std::string aob;
+    std::vector<std::byte> needle;
+    needle.reserve(long_len);
+    for (std::size_t i = 0; i < long_len; ++i)
+    {
+        // A dense, zero-free byte run so it is unique against the zero padding below (i < 219 never yields 0x00).
+        const auto b = static_cast<unsigned char>((i * 7 + 3) & 0xFF);
+        aob += kHex[b >> 4];
+        aob += kHex[b & 0x0F];
+        aob += ' ';
+        needle.push_back(std::byte{b});
+    }
+
+    // Runtime engine parser: uncapped heap storage accepts the long pattern.
+    const auto engine = detail::parse_aob(aob);
+    ASSERT_TRUE(engine.has_value());
+    EXPECT_EQ(engine->size(), long_len);
+
+    // Value Pattern: the fixed-array literal storage rejects the identical string as TooLong.
+    const auto value = scan::Pattern::compile(aob);
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(value.error().extra, static_cast<std::uint32_t>(detail::PatternStatus::TooLong));
+
+    // And the long runtime pattern actually resolves against memory.
+    std::vector<std::byte> region(64, std::byte{0x00});
+    region.insert(region.end(), needle.begin(), needle.end());
+    region.resize(region.size() + 64, std::byte{0x00});
+    const std::byte *m = detail::find_pattern(region.data(), region.size(), *engine);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - region.data(), 64);
+}
+
 // The AOB prefilter routes through a self-provided dmk_memchr that is ASan-safe in every build. The observable
 // contract pinned here is "first match wins, nullptr when no match, treat n==0 as no match", covered across the
 // boundary cases of the 8-byte qword loop: the unaligned head, the aligned body, and the byte-wise tail. The qword
@@ -2761,10 +2993,10 @@ static volatile const unsigned char s_host_marker[16] = {0x5A, 0xC3, 0x91, 0x44,
 // A signature that straddles the boundary between two adjacent accepted executable regions must be found. Two committed
 // pages allocated as one span but given different executable protections (RWX then RX) are reported by VirtualQuery as
 // two separate adjacent regions, because VirtualQuery never coalesces regions with differing attributes. The scanner
-// extends each accepted region's scan back by pattern_size - 1 bytes into the contiguous already-accepted run it abuts,
-// so a match beginning in the first page's tail and ending in the second is recovered. Without that overlap the
-// straddling match would be missed (each region scanned independently). The signature is a rare 16-byte sequence so a
-// process-wide scan returns this planted copy.
+// extends each accepted region's scan back into the contiguous already-accepted run it abuts, so a match beginning in
+// the first page's tail and ending in the second is recovered. Without that overlap the straddling match would be
+// missed (each region scanned independently). The signature is a rare 16-byte sequence so a process-wide scan returns
+// this planted copy.
 TEST(ScannerBoundaryTest, FindsPatternStraddlingAdjacentExecutableRegions)
 {
     SYSTEM_INFO si{};
@@ -2799,6 +3031,43 @@ TEST(ScannerBoundaryTest, FindsPatternStraddlingAdjacentExecutableRegions)
 
     // The straddling occurrence is reported exactly once: a second occurrence of this unique signature must not exist
     // (the overlap must not double-count the match by scanning it from both regions).
+    const std::byte *second = scan_exec(*pattern, 2);
+    EXPECT_EQ(second, nullptr);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+TEST(ScannerBoundaryTest, FindsBoundedJumpPatternStraddlingAdjacentExecutableRegions)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
+
+    auto *base =
+        static_cast<std::uint8_t *>(VirtualAlloc(nullptr, page * 2, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+    ASSERT_NE(base, nullptr);
+    std::memset(base, 0xCC, page * 2);
+
+    // The fixed bytes occupy only 8 bytes, but the actual match spans 32 bytes once the gap is included. A fixed
+    // size() - 1 carry would not reach back far enough from the second page to include this start.
+    const std::uint8_t head[] = {0x13, 0x57, 0x9B, 0xDF};
+    const std::uint8_t tail[] = {0x24, 0x68, 0xAC, 0xF0};
+    constexpr std::size_t gap = 24;
+    std::uint8_t *const plant = base + page - 16;
+    std::memcpy(plant, head, sizeof(head));
+    std::memset(plant + sizeof(head), 0xA5, gap);
+    std::memcpy(plant + sizeof(head) + gap, tail, sizeof(tail));
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old_protect));
+
+    auto pattern = detail::parse_aob("13 57 9B DF [24] 24 68 AC F0");
+    ASSERT_TRUE(pattern.has_value());
+
+    const std::byte *hit = scan_exec(*pattern);
+    ASSERT_NE(hit, nullptr) << "bounded-jump cross-boundary match was missed";
+    EXPECT_EQ(hit, reinterpret_cast<const std::byte *>(plant));
+
     const std::byte *second = scan_exec(*pattern, 2);
     EXPECT_EQ(second, nullptr);
 
