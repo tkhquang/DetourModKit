@@ -13,6 +13,12 @@ git ls-files lists only this repo's files) it flags:
     ``@return``, ``@note``, ``@name`` and the like -- the moment one is needed,
     switch to ``/** */``). Inline link markup (``@ref``, ``@c``, ``@p``, ``@a``)
     is allowed on a ``///`` line and is not flagged.
+  - a decorative ``// ---`` separator rule (a full-line ``//`` comment carrying a
+    run of three or more dashes, whether a bare ruler or a boxed ``// --- Label
+    --- `` header). Namespaces, functions, and doc-blocks already delimit a file;
+    replace a labeled ruler with a plain descriptive ``//`` sentence above the
+    group, and drop a bare one. The ``--`` em-dash replacement stays legal because
+    only three-or-more consecutive dashes trip this rule.
 
 Exit status is 1 with the offenders printed when any rule is violated, else 0.
 """
@@ -28,6 +34,11 @@ BLOCK_TAG = re.compile(
 # A /// documentation line, excluding the trailing-doc ///< form and ////
 # banner/separator lines (four or more slashes are not documentation).
 DOC_LINE = re.compile(r"^\s*///(?![</])")
+# A decorative separator: a full-line // comment holding a run of three or more
+# dashes. Anchored to the start of the comment line so a string literal or a
+# trailing code comment cannot trip it, and set at three dashes so the sanctioned
+# `--` em-dash replacement in prose is untouched.
+SEPARATOR_RULE = re.compile(r"^\s*//.*-{3,}")
 
 
 def main() -> int:
@@ -46,6 +57,8 @@ def main() -> int:
                 problems.append(f"{path}:{number}: trailing ///< (move the doc above the member)")
             if BLOCK_TAG.match(line):
                 problems.append(f"{path}:{number}: block Doxygen tag on a /// line (use /** */)")
+            if SEPARATOR_RULE.match(line):
+                problems.append(f"{path}:{number}: decorative // --- separator (use a plain // sentence, or drop it)")
             is_doc = bool(DOC_LINE.match(line))
             if is_doc and prev_is_doc:
                 problems.append(f"{path}:{number}: multi-line /// doc (use /** */)")

@@ -38,7 +38,7 @@ namespace DetourModKit::detail
          */
         constexpr uint64_t SUPPRESS_TTL_MS = 2000;
 
-        // --- XInput interception state ---
+        // XInput interception state
 
         safetyhook::InlineHook s_xinput_hook;
         safetyhook::InlineHook s_xinput_ex_hook;
@@ -79,7 +79,7 @@ namespace DetourModKit::detail
             InflightGuard &operator=(InflightGuard &&) = delete;
         };
 
-        // --- Consume rule list (detour-side chord evaluation) ---
+        // Consume rule list (detour-side chord evaluation)
         //
         // A binding rebuild publishes one rule per detour-evaluable consume chord;
         // the XInput detour reads the list against the exact button snapshot the game is about to read. Each rule is
@@ -119,7 +119,7 @@ namespace DetourModKit::detail
                                       static_cast<uint16_t>((packed >> 32) & 0xFFFFu)};
         }
 
-        // --- Mouse-wheel capture state ---
+        // Mouse-wheel capture state
 
         std::array<std::atomic<int>, 4> s_wheel_count{};
         // Per-direction wheel-swallow mask (WheelDirection bits), refreshed every poll cycle. Paired with a TTL so a

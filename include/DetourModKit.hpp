@@ -48,7 +48,7 @@
 // HMODULE is `struct HINSTANCE__ *`. Forward-declaring the incomplete tag lets this public header expose the
 // module-handle type without pulling <windows.h> (and its macro soup) into every consumer translation unit. A TU that
 // also includes <windows.h> sees the identical type, so a real HMODULE binds with no cast. The implementation file
-// (src/dmk.cpp) includes <windows.h> directly for the Win32 calls in the function bodies.
+// (src/session.cpp) includes <windows.h> directly for the Win32 calls in the function bodies.
 struct HINSTANCE__;
 
 namespace DetourModKit

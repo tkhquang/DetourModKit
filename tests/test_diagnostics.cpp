@@ -128,7 +128,7 @@ TEST_F(DiagnosticsTest, ResetZeroesEverySubsystem)
     EXPECT_EQ(diag::intentional_leak_count(LeakSubsystem::Bootstrap), 0u);
 }
 
-// ---- Diagnostic event bus: scanner-fault / hook-lifecycle dispatchers ----
+// Diagnostic event bus: scanner-fault / hook-lifecycle dispatchers
 
 TEST(DiagnosticsEventBusTest, ScannerFaultDispatcherIsStable)
 {
@@ -204,7 +204,7 @@ TEST(DiagnosticsEventBusTest, UnsubscribeStopsDelivery)
     EXPECT_EQ(hits, 1);
 }
 
-// ---- Hook lifecycle events: typed transitions sourced from the hook verbs ----
+// Hook lifecycle events: typed transitions sourced from the hook verbs
 //
 // The event API (hook_lifecycle / HookLifecycleEvent / HookKind / HookTransition) is unchanged; only the SOURCE moved
 // from the dropped HookManager registry to caller-owned RAII handles. An inline_at / mid_at / vmt_for emits Created;
@@ -301,7 +301,7 @@ TEST(DiagnosticsHookLifecycleTest, VmtHookEmitsVmtKindCreatedRemoved)
     EXPECT_EQ(events[1].transition, diag::HookTransition::Removed);
 }
 
-// ---- Runtime-diagnostics Snapshot: the one-call aggregator folded in from diagnostics_dump ----
+// Runtime-diagnostics Snapshot: the one-call aggregator folded in from diagnostics_dump
 
 class DiagnosticsSnapshotTest : public ::testing::Test
 {

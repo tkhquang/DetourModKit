@@ -41,11 +41,9 @@
 
 namespace DetourModKit
 {
-    // -----------------------------------------------------------------------------------------------------------------
     // File-local helpers. These live at DetourModKit scope (not inside namespace hook) so a bare `detail::` resolves to
     // DetourModKit::detail (the memory/x86/platform engine), not the hook::detail sub-namespace that would otherwise
     // shadow it and break the unqualified lookup.
-    // -----------------------------------------------------------------------------------------------------------------
     namespace
     {
         /// Result of the foreign-inline-hook pre-flight: whether the target already redirects, and to where.
@@ -572,7 +570,6 @@ namespace DetourModKit
 
     namespace hook
     {
-        // -------------------------------------------------------------------------------------------------------------
         // hook::MidContext accessor bridge.
         //
         // At every mid-hook call the backend hands the detour a safetyhook::Context64& (the captured register file).
@@ -580,7 +577,6 @@ namespace DetourModKit
         // defined, so these accessors are the single place that recovers the real type by reinterpret_cast; the cast
         // is well-defined precisely because MidContext is forever incomplete and is only ever the very Context64 the
         // backend passed in.
-        // -------------------------------------------------------------------------------------------------------------
         std::uintptr_t &gpr(MidContext &ctx, Gpr reg) noexcept
         {
             auto &context = reinterpret_cast<safetyhook::Context64 &>(ctx);
@@ -667,9 +663,7 @@ namespace DetourModKit
             return allocator;
         }
 
-        // -------------------------------------------------------------------------------------------------------------
         // Hook -- RAII handle for one inline or mid hook.
-        // -------------------------------------------------------------------------------------------------------------
         Hook::Hook(std::unique_ptr<Impl> impl, std::shared_ptr<CallGate> gate) noexcept : m_impl(std::move(impl))
         {
             m_gate.store(std::move(gate), std::memory_order_release);
@@ -963,9 +957,7 @@ namespace DetourModKit
             m_gate.store(nullptr, std::memory_order_release);
         }
 
-        // -------------------------------------------------------------------------------------------------------------
         // Free install verbs.
-        // -------------------------------------------------------------------------------------------------------------
         namespace detail
         {
             Result<Hook> inline_at_raw(InlineRequest request, void *detour)
@@ -1179,9 +1171,7 @@ namespace DetourModKit
             return DetourModKit::detail::HookLedger::instance().is_target_hooked(target.raw());
         }
 
-        // -------------------------------------------------------------------------------------------------------------
         // VmtHook -- RAII handle for a cloned vtable (object-level clone lifecycle).
-        // -------------------------------------------------------------------------------------------------------------
         VmtHook::VmtHook(std::unique_ptr<Impl> impl) noexcept : m_impl(std::move(impl)) {}
 
         VmtHook::VmtHook(VmtHook &&other) noexcept : m_impl(std::move(other.m_impl)) {}

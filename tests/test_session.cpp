@@ -100,7 +100,7 @@ static_assert(!std::is_copy_constructible_v<Session>, "Session is move-only.");
 static_assert(std::is_nothrow_move_constructible_v<Session>, "Session move must be noexcept for the RAII contract.");
 static_assert(std::is_nothrow_move_assignable_v<Session>, "Session move-assign must be noexcept.");
 
-// --- ModInfo + free-function preconditions ------------------------------------------------------------------------
+// ModInfo + free-function preconditions
 
 TEST(SessionModInfo, Defaults)
 {
@@ -122,7 +122,7 @@ TEST(SessionFreeFunctions, ModuleHandleNullBeforeBootstrap)
     EXPECT_EQ(module_handle(), nullptr);
 }
 
-// --- Session::start gating ----------------------------------------------------------------------------------------
+// Session::start gating
 
 TEST(SessionStart, ProcessGateMismatchReturnsProcessMismatch)
 {
@@ -216,7 +216,7 @@ TEST(SessionStart, StartDestroyCyclesReleaseTheGuard)
     }
 }
 
-// --- Move + inertness ---------------------------------------------------------------------------------------------
+// Move + inertness
 
 TEST(SessionMove, MovedFromSessionIsInert)
 {
@@ -270,7 +270,7 @@ TEST(SessionMove, MoveAssignEndsTheOverwrittenSession)
     EXPECT_TRUE(again.has_value()) << again.error().message();
 }
 
-// --- Ordered teardown (the ~Session body) -------------------------------------------------------------------------
+// Ordered teardown (the ~Session body)
 
 TEST(SessionTeardown, TeardownWithNoSubsystemsInitialized)
 {
@@ -613,7 +613,7 @@ TEST(SessionTeardown, HookLifetimeIsCallerOwned)
     EXPECT_FALSE(is_target_hooked(target));
 }
 
-// --- Async bootstrap / bootstrap_detach ---------------------------------------------------------------------------
+// Async bootstrap / bootstrap_detach
 
 class SessionBootstrapTest : public ::testing::Test
 {
@@ -737,7 +737,7 @@ TEST_F(SessionBootstrapTest, OnReadyExceptionIsCaught)
     EXPECT_EQ(m_sig.ready_calls.load(), 1);
 }
 
-// --- Hot-reload helpers -------------------------------------------------------------------------------------------
+// Hot-reload helpers
 
 namespace
 {

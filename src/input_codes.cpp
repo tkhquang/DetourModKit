@@ -27,7 +27,7 @@ namespace DetourModKit
 
         // clang-format off
         constexpr NameEntry NAME_TABLE[] = {
-            // --- Keyboard: Modifiers ---
+            // Keyboard: Modifiers
             {"Ctrl",        {InputSource::Keyboard, 0x11}},
             {"LCtrl",       {InputSource::Keyboard, 0xA2}},
             {"RCtrl",       {InputSource::Keyboard, 0xA3}},
@@ -38,7 +38,7 @@ namespace DetourModKit
             {"LAlt",        {InputSource::Keyboard, 0xA4}},
             {"RAlt",        {InputSource::Keyboard, 0xA5}},
 
-            // --- Keyboard: Function keys ---
+            // Keyboard: Function keys
             {"F1",          {InputSource::Keyboard, 0x70}},
             {"F2",          {InputSource::Keyboard, 0x71}},
             {"F3",          {InputSource::Keyboard, 0x72}},
@@ -64,7 +64,7 @@ namespace DetourModKit
             {"F23",         {InputSource::Keyboard, 0x86}},
             {"F24",         {InputSource::Keyboard, 0x87}},
 
-            // --- Keyboard: Letters ---
+            // Keyboard: Letters
             {"A",           {InputSource::Keyboard, 0x41}},
             {"B",           {InputSource::Keyboard, 0x42}},
             {"C",           {InputSource::Keyboard, 0x43}},
@@ -92,7 +92,7 @@ namespace DetourModKit
             {"Y",           {InputSource::Keyboard, 0x59}},
             {"Z",           {InputSource::Keyboard, 0x5A}},
 
-            // --- Keyboard: Digits ---
+            // Keyboard: Digits
             {"0",           {InputSource::Keyboard, 0x30}},
             {"1",           {InputSource::Keyboard, 0x31}},
             {"2",           {InputSource::Keyboard, 0x32}},
@@ -104,7 +104,7 @@ namespace DetourModKit
             {"8",           {InputSource::Keyboard, 0x38}},
             {"9",           {InputSource::Keyboard, 0x39}},
 
-            // --- Keyboard: Navigation ---
+            // Keyboard: Navigation
             {"Up",          {InputSource::Keyboard, 0x26}},
             {"Down",        {InputSource::Keyboard, 0x28}},
             {"Left",        {InputSource::Keyboard, 0x25}},
@@ -116,7 +116,7 @@ namespace DetourModKit
             {"Insert",      {InputSource::Keyboard, 0x2D}},
             {"Delete",      {InputSource::Keyboard, 0x2E}},
 
-            // --- Keyboard: Common keys ---
+            // Keyboard: Common keys
             {"Space",       {InputSource::Keyboard, 0x20}},
             {"Enter",       {InputSource::Keyboard, 0x0D}},
             {"Escape",      {InputSource::Keyboard, 0x1B}},
@@ -128,13 +128,13 @@ namespace DetourModKit
             {"PrintScreen", {InputSource::Keyboard, 0x2C}},
             {"Pause",       {InputSource::Keyboard, 0x13}},
 
-            // --- Keyboard: Windows / application keys ---
+            // Keyboard: Windows / application keys
             {"LWin",        {InputSource::Keyboard, 0x5B}},
             {"RWin",        {InputSource::Keyboard, 0x5C}},
             {"Apps",        {InputSource::Keyboard, 0x5D}},
             {"Menu",        {InputSource::Keyboard, 0x5D}}, // alias for the application/context-menu key
 
-            // --- Keyboard: OEM punctuation (US layout) ---
+            // Keyboard: OEM punctuation (US layout)
             // The canonical name is listed first so the reverse lookup picks it; trailing aliases still parse. Grave
             // (VK_OEM_3) is the backtick/tilde key many games use to open the console.
             {"Semicolon",   {InputSource::Keyboard, 0xBA}},
@@ -152,7 +152,7 @@ namespace DetourModKit
             {"Apostrophe",  {InputSource::Keyboard, 0xDE}},
             {"Quote",       {InputSource::Keyboard, 0xDE}}, // alias for Apostrophe
 
-            // --- Keyboard: Numpad ---
+            // Keyboard: Numpad
             {"Numpad0",         {InputSource::Keyboard, 0x60}},
             {"Numpad1",         {InputSource::Keyboard, 0x61}},
             {"Numpad2",         {InputSource::Keyboard, 0x62}},
@@ -169,20 +169,20 @@ namespace DetourModKit
             {"NumpadDivide",    {InputSource::Keyboard, 0x6F}},
             {"NumpadDecimal",   {InputSource::Keyboard, 0x6E}},
 
-            // --- Mouse buttons ---
+            // Mouse buttons
             {"Mouse1",     {InputSource::Mouse, 0x01}},
             {"Mouse2",     {InputSource::Mouse, 0x02}},
             {"Mouse3",     {InputSource::Mouse, 0x04}},
             {"Mouse4",     {InputSource::Mouse, 0x05}},
             {"Mouse5",     {InputSource::Mouse, 0x06}},
 
-            // --- Mouse wheel (event-only; captured via the input layer's WndProc hook) ---
+            // Mouse wheel (event-only; captured via the input layer's WndProc hook)
             {"WheelUp",    {InputSource::MouseWheel, WheelCode::Up}},
             {"WheelDown",  {InputSource::MouseWheel, WheelCode::Down}},
             {"WheelLeft",  {InputSource::MouseWheel, WheelCode::Left}},
             {"WheelRight", {InputSource::MouseWheel, WheelCode::Right}},
 
-            // --- Gamepad buttons ---
+            // Gamepad buttons
             {"Gamepad_A",          {InputSource::Gamepad, GamepadCode::A}},
             {"Gamepad_B",          {InputSource::Gamepad, GamepadCode::B}},
             {"Gamepad_X",          {InputSource::Gamepad, GamepadCode::X}},
@@ -200,7 +200,7 @@ namespace DetourModKit
             {"Gamepad_DpadLeft",   {InputSource::Gamepad, GamepadCode::DpadLeft}},
             {"Gamepad_DpadRight",  {InputSource::Gamepad, GamepadCode::DpadRight}},
 
-            // --- Gamepad thumbstick axes (digital) ---
+            // Gamepad thumbstick axes (digital)
             {"Gamepad_LSUp",       {InputSource::Gamepad, GamepadCode::LeftStickUp}},
             {"Gamepad_LSDown",     {InputSource::Gamepad, GamepadCode::LeftStickDown}},
             {"Gamepad_LSLeft",     {InputSource::Gamepad, GamepadCode::LeftStickLeft}},

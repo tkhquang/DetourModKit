@@ -525,7 +525,7 @@ namespace DetourModKit
                 }
             }
 
-            // --- Global storage for registered configuration items ---
+            // Global storage for registered configuration items
             std::mutex &get_config_mutex()
             {
                 static std::mutex s_mtx;

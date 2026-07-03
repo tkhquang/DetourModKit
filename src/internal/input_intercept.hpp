@@ -189,7 +189,7 @@ namespace DetourModKit::detail
      */
     void set_gamepad_rule_suppress_enabled(bool enabled) noexcept;
 
-    // --- XInput interception (gamepad passthrough suppression) ---
+    // XInput interception (gamepad passthrough suppression)
 
     /**
      * @brief Installs the XInputGetState hook for the given controller index.
@@ -219,7 +219,7 @@ namespace DetourModKit::detail
      */
     void publish_gamepad_suppress(uint16_t suppress_bits) noexcept;
 
-    // --- Mouse-wheel capture (window-procedure subclass) ---
+    // Mouse-wheel capture (window-procedure subclass)
 
     /**
      * @brief Wheel direction bit positions in the per-direction consume mask.

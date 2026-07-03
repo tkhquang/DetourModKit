@@ -51,10 +51,9 @@ namespace DetourModKit
     // authorizing unguarded dereferences after a page is reprotected.
     namespace
     {
-        // VirtualQuery-validated read. On x64 it is the fallback used only when the vectored handler could not be
-        // installed; on a 32-bit MinGW build, where the handler's x64 register redirect is unavailable, it is the only
-        // guard. The copy itself goes through ReadProcessMemory so a page that changes after the query fails as an API
-        // result rather than as a user-mode fault.
+        // VirtualQuery-validated read. It is the fallback used only when the vectored handler could not be installed.
+        // The copy itself goes through ReadProcessMemory so a page that changes after the query fails as an API result
+        // rather than as a user-mode fault.
         bool virtualquery_validated_copy(std::uintptr_t addr, void *out, std::size_t bytes) noexcept
         {
             std::size_t copied = 0;
@@ -374,23 +373,6 @@ namespace DetourModKit
             s_veh_in_flight.fetch_sub(1, std::memory_order_release);
             return ok;
         }
-#else // !_WIN64
-      // 32-bit MinGW: the handler's recovery redirect rewrites x64 CONTEXT registers (Rcx/Rip) and the longjmp buffer
-      // is x64-sized, so the vectored guard is x64-only. A guarded access here validates every region with VirtualQuery
-      // before copying through ReadProcessMemory / WriteProcessMemory instead.
-        bool veh_read_bytes(std::uintptr_t addr, void *out, std::size_t bytes) noexcept
-        {
-            if (addr < memory::USERSPACE_PTR_MIN || addr + bytes < addr)
-                return false;
-            return virtualquery_validated_copy(addr, out, bytes);
-        }
-
-        bool veh_write_bytes(std::uintptr_t addr, const void *source, std::size_t bytes) noexcept
-        {
-            if (addr < memory::USERSPACE_PTR_MIN || addr + bytes < addr)
-                return false;
-            return virtualquery_validated_write(addr, source, bytes);
-        }
 #endif // _WIN64
     } // namespace
 #endif // !_MSC_VER
@@ -505,9 +487,8 @@ namespace DetourModKit
             return false;
         }
 #else
-        // MinGW: write through the same guard/fallback split as guarded_read_bytes. x64 uses the process-wide vectored
-        // guard when available; otherwise, and on 32-bit builds, it validates the destination and writes through
-        // WriteProcessMemory.
+        // MinGW: write through the same guard/fallback split as guarded_read_bytes. The process-wide vectored guard is
+        // used when available; otherwise it validates the destination and writes through WriteProcessMemory.
         return veh_write_bytes(address, source, bytes);
 #endif
     }

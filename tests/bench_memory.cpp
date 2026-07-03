@@ -149,12 +149,10 @@ namespace
     }
 } // namespace
 
-// ---------------------------------------------------------------------------
 // (E) Contention study: p50/p99 latency of is_readable under N threads forcing cache misses. Each thread round-robins
 // over a large set of distinct committed addresses so most lookups miss (256-entry cache vs thousands of addresses) and
 // take the per-shard EXCLUSIVE lock on the rebuild path -> cross-thread serialization. This is the jitter source behind
 // "framerate instability".
-// ---------------------------------------------------------------------------
 namespace
 {
     struct LatencyResult
@@ -298,7 +296,6 @@ namespace
         return secs > 0.0 ? (total_ops / secs) / 1.0e6 : 0.0;
     }
 
-    // -----------------------------------------------------------------------
     // Probe model: a hook resolves one object and reads K dependent fields off it, spanning a few distinct heap objects
     // rather than a single page.
     //
@@ -394,7 +391,7 @@ int main()
     );
     std::printf("DEFAULT_CACHE_EXPIRY_MS = %u\n\n", static_cast<unsigned>(Mem::DEFAULT_CACHE_EXPIRY_MS));
 
-    // --- Phase 1: cache OFF -> validators take the direct-VirtualQuery branch.
+    // Phase 1: cache OFF -> validators take the direct-VirtualQuery branch.
     Mem::shutdown_cache(); // ensure uninitialized
     std::printf("[1] Validation MISS / uncached (cache off -> VirtualQuery branch)\n");
     const double ns_qry = median_ns_per_call(ITERS, SAMPLES,
@@ -409,7 +406,7 @@ int main()
     const double ns_isw_miss = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_writable(page, 8) ? 1u : 0u); });
     report("is_writable MISS", ns_isw_miss);
 
-    // --- Phase 2: cache ON, warm -> validators hit the fresh entry.
+    // Phase 2: cache ON, warm -> validators hit the fresh entry.
     if (!Mem::init_cache())
     {
         std::fprintf(stderr, "[bench] init_cache failed\n");
@@ -423,7 +420,7 @@ int main()
     const double ns_isw_hit = median_ns_per_call(ITERS, SAMPLES, [&]() { sink(is_writable(page, 8) ? 1u : 0u); });
     report("is_writable HIT", ns_isw_hit);
 
-    // --- Phase 3: direct access primitives (no cache dependence).
+    // Phase 3: direct access primitives (no cache dependence).
     std::printf("\n[3] Direct access primitives\n");
     const double ns_dread =
         median_ns_per_call(ITERS, SAMPLES, [&]() { sink(*reinterpret_cast<volatile std::uint64_t *>(page)); });
@@ -448,7 +445,7 @@ int main()
 
     std::printf("\n  cache stats: %s\n", Mem::get_cache_stats().c_str());
 
-    // --- Phase 4: VirtualQuery cost vs VAD-tree size.
+    // Phase 4: VirtualQuery cost vs VAD-tree size.
     std::printf("\n[4] raw VirtualQuery vs VAD-tree size (single fixed address)\n");
     const std::size_t vad_steps[] = {0, 1000, 4000, 12000};
     std::size_t grown = 0;
@@ -468,7 +465,7 @@ int main()
         std::printf("  +%6zu reserved regions   %10.2f ns/call\n", grown, ns);
     }
 
-    // --- Phase 5: contention p50/p99 (the jitter mechanism).
+    // Phase 5: contention p50/p99 (the jitter mechanism).
     std::printf("\n[5] is_readable latency under contention (mostly-miss workload)\n");
     auto pool = make_churn_pool(4096); // 4096 addrs vs 256-entry cache => ~mostly miss
     std::printf("  churn pool: %zu committed pages\n", pool.size());
@@ -479,7 +476,7 @@ int main()
                     r.max_ns);
     }
 
-    // --- Phase 6: REALISTIC probe cost + tail. A probe = K dependent reads across a few distinct objects. GATED =
+    // Phase 6: REALISTIC probe cost + tail. A probe = K dependent reads across a few distinct objects. GATED =
     // is_readable() before each read (the per-read gated pattern). DIRECT = raw volatile read, no predicate and no
     // __try (the direct, unchecked access path; on MSVC a guarded read is about as cheap, Phase 3). Distinct objects
     // per probe -> cache misses dominate (the real apply path).
@@ -498,7 +495,7 @@ int main()
                 direct.mean > 0 ? gated.mean / direct.mean : 0.0, gated.mean - direct.mean);
     std::printf("  cache stats after probes : %s\n", Mem::get_cache_stats().c_str());
 
-    // --- Phase 7: per-frame budget. A per-bind / apply hook fires P probes in a frame (one per material instance /
+    // Phase 7: per-frame budget. A per-bind / apply hook fires P probes in a frame (one per material instance /
     // bound object touched). Show what fraction of a 16.67 ms (60 FPS) frame the GATED vs DIRECT path consumes. This is
     // the model that matters: cost scales with PROBES-PER-FRAME, which for an apply path touching many bound objects is
     // large -- not "2/frame".
@@ -520,7 +517,7 @@ int main()
     // validated path is imperceptible while the high-frequency probe path above is not.
     std::printf("  contrast (2 warm validations/frame): %.4f ms/frame\n", (ns_isr_hit + ns_isw_hit) / 1.0e6);
 
-    // --- Phase 8: pointer-chain primitives. Walk a stable in-process chain (warm cache, the favorable case for the
+    // Phase 8: pointer-chain primitives. Walk a stable in-process chain (warm cache, the favorable case for the
     // gated walk) three ways: a GATED per-link walk that calls is_readable before each dereference, vs walk (resolve
     // the leaf address) and walk + read<u64> (resolve then load) which guard the whole walk with one fault frame.
     // Shows the per-link predicate cost stacking up even when every address is cached.
@@ -580,7 +577,7 @@ int main()
     report("walk + read<u64>", ns_read_chain);
     std::printf("  gated/(walk+read) ratio: %.1fx\n", ns_read_chain > 0 ? ns_gated_walk / ns_read_chain : 0.0);
 
-    // --- Phase 9: warm-HIT is_readable throughput under contention. The cache stays on and a small pre-warmed pool
+    // Phase 9: warm-HIT is_readable throughput under contention. The cache stays on and a small pre-warmed pool
     // keeps almost every lookup a hit, so this isolates the cross-thread cost of the reader-tracking counter and the
     // per-shard shared lock -- the path the striped reader counters and cache-line-aligned shards target. Throughput
     // that keeps scaling with thread count (rather than flattening as readers serialize on one counter line) is the
@@ -601,7 +598,7 @@ int main()
         }
     }
 
-    // --- TSV block for machine parsing.
+    // TSV block for machine parsing.
     std::printf("\n#TSV\tscenario\tns_per_call\n");
     for (const auto &r : g_rows)
         std::printf("#TSV\t%s\t%.2f\n", r.name, r.ns);

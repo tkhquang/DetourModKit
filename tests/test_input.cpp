@@ -19,7 +19,7 @@ using namespace DetourModKit;
 using DetourModKit::gamepad_button;
 using DetourModKit::keyboard_key;
 
-// --- InputSource string conversion ---
+// InputSource string conversion
 
 TEST(InputSourceTest, KeyboardToString)
 {
@@ -41,7 +41,7 @@ TEST(InputSourceTest, MouseWheelToString)
     EXPECT_EQ(input_source_to_string(InputSource::MouseWheel), "MouseWheel");
 }
 
-// --- InputCode ---
+// InputCode
 
 TEST(InputCodeTest, DefaultConstruction)
 {
@@ -77,7 +77,7 @@ TEST(InputCodeTest, FactoryFunctions)
     EXPECT_EQ(wheel.code, WheelCode::Up);
 }
 
-// --- Mouse-wheel name resolution ---
+// Mouse-wheel name resolution
 
 TEST(WheelNameTest, ParseWheelNames)
 {
@@ -101,7 +101,7 @@ TEST(WheelNameTest, FormatWheelNames)
     EXPECT_EQ(format_input_code(mouse_wheel(WheelCode::Right)), "WheelRight");
 }
 
-// --- Trigger string conversion ---
+// Trigger string conversion
 
 TEST(TriggerTest, PressToString)
 {
@@ -113,7 +113,7 @@ TEST(TriggerTest, HoldToString)
     EXPECT_EQ(input::to_string(input::Trigger::Hold), "Hold");
 }
 
-// --- InputBinding ---
+// InputBinding
 
 TEST(InputBindingTest, DefaultTriggerIsPress)
 {
@@ -121,7 +121,7 @@ TEST(InputBindingTest, DefaultTriggerIsPress)
     EXPECT_EQ(binding.trigger, input::Trigger::Press);
 }
 
-// --- InputPoller ---
+// InputPoller
 
 class InputPollerTest : public ::testing::Test
 {
@@ -414,7 +414,7 @@ TEST_F(InputPollerTest, IsRunningFalseAfterShutdownCompletes)
     EXPECT_FALSE(poller.is_running());
 }
 
-// --- InputPoller: Gamepad ---
+// InputPoller: Gamepad
 
 TEST_F(InputPollerTest, GamepadBindingConstruction)
 {
@@ -523,7 +523,7 @@ TEST_F(InputPollerTest, MixedKeyboardAndGamepadBindings)
     poller.shutdown();
 }
 
-// --- Input facade ---
+// Input facade
 
 class InputTest : public ::testing::Test
 {
@@ -892,7 +892,7 @@ TEST_F(InputTest, ConcurrentAccess)
     EXPECT_EQ(mgr.binding_count(), static_cast<size_t>(thread_count * ops_per_thread));
 }
 
-// --- InputPoller: Focus, Modifiers, Active State ---
+// InputPoller: Focus, Modifiers, Active State
 
 TEST_F(InputPollerTest, DefaultRequiresFocus)
 {
@@ -1060,7 +1060,7 @@ TEST_F(InputPollerTest, HoldBindingShutdownSafety)
     EXPECT_FALSE(poller.is_binding_active(0));
 }
 
-// --- InputPoller: Strict Modifier Matching ---
+// InputPoller: Strict Modifier Matching
 
 TEST_F(InputPollerTest, StrictModifierMatchingConstruction)
 {
@@ -1280,7 +1280,7 @@ TEST_F(InputPollerTest, StrictModifierMatchingCrossFeatureIsolation)
     poller.shutdown();
 }
 
-// --- Input facade: Focus, Modifiers, Active State ---
+// Input facade: Focus, Modifiers, Active State
 
 TEST_F(InputTest, RegisterPressWithModifiers)
 {
@@ -1438,7 +1438,7 @@ TEST_F(InputTest, ModifierBindingsAppendLiveWhileRunning)
     mgr.shutdown();
 }
 
-// --- Input facade: Gamepad ---
+// Input facade: Gamepad
 
 TEST_F(InputTest, RegisterGamepadBinding)
 {
@@ -1521,7 +1521,7 @@ TEST_F(InputTest, MixedKeyboardAndGamepadBindings)
     mgr.shutdown();
 }
 
-// --- Input facade: KeyComboList overloads ---
+// Input facade: KeyComboList overloads
 
 TEST_F(InputTest, RegisterPressFromKeyComboList)
 {
@@ -1650,7 +1650,7 @@ TEST_F(InputTest, KeyComboListAppendsLiveWhileRunning)
     mgr.shutdown();
 }
 
-// --- InputCode: Name Resolution ---
+// InputCode: Name Resolution
 
 TEST(InputCodeNameTest, ParseKeyboardNames)
 {
@@ -1737,7 +1737,7 @@ TEST(InputCodeNameTest, FormatInputCode)
     EXPECT_EQ(format_input_code(keyboard_key(0xFF)), "0xFF");
 }
 
-// --- Thumbstick axis codes ---
+// Thumbstick axis codes
 
 TEST(InputCodeNameTest, ParseThumbstickNames)
 {
@@ -1921,7 +1921,7 @@ TEST(InputReshapeContract, MutatorsAreNoexcept)
     SUCCEED();
 }
 
-// --- InputCodeHash ---
+// InputCodeHash
 
 TEST(InputCodeHashTest, DifferentCodesProduceDifferentHashes)
 {
@@ -2506,7 +2506,7 @@ TEST(InputPollerStatePreservation, AddBindingPreservesSurvivingState)
     im.set_require_focus(true);
 }
 
-// --- KeyStateCache: per-cycle keyboard memoization ---
+// KeyStateCache: per-cycle keyboard memoization
 
 TEST(KeyStateCacheTest, ProbesEachDistinctVkOncePerCycle)
 {
@@ -2646,7 +2646,7 @@ TEST(InputPollerStatePreservation, RemovePreservesSurvivingState)
     im.set_require_focus(true);
 }
 
-// --- BindingToken: generation-checked binding handles ---
+// BindingToken: generation-checked binding handles
 
 namespace
 {

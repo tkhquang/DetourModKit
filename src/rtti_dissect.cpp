@@ -451,8 +451,6 @@ namespace DetourModKit
         return written;
     }
 
-    // --- HealScheduler / HealRun -------------------------------------------------------------------------------------
-
     struct rtti::HealScheduler::Impl
     {
         // One independently-latched heal group: its own retry countdown and its own success latch, so a group whose

@@ -161,9 +161,7 @@ namespace
     }
 } // anonymous namespace
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Backend dispatch: each kind maps onto its v4 backend and maps success/failure onto AnchorStatus.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorTest, ManualResolvesToLiteral)
 {
@@ -318,9 +316,7 @@ TEST(AnchorTest, StatusToStringNonEmpty)
     EXPECT_FALSE(an::anchor_status_to_string(an::AnchorStatus::QuorumNotIndependent).empty());
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Table resolution (serial, parallel, capacity).
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorTest, ResolveAllWritesReport)
 {
@@ -385,9 +381,7 @@ TEST(AnchorTest, ResolveAllRespectsCapacity)
     EXPECT_EQ(written, 2u); // min(anchors, out)
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Post-resolve validators.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorTest, ValidatorRejectionFailsClosed)
 {
@@ -520,9 +514,7 @@ TEST(AnchorTest, RequireValidatorExemptsManualWhenValidated)
     EXPECT_EQ(result.value, 0x44);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Quorum corroboration.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorTest, QuorumAcceptsWhenSignalsAgree)
 {
@@ -913,9 +905,7 @@ TEST(AnchorTest, ResolveAllCarriesQuorum)
     EXPECT_EQ(report[0].kind, an::AnchorKind::Quorum);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // N-of-M voting: at least N of M independent members must resolve and agree.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorTest, QuorumNofMResolvesWhenThresholdMetDespiteFailure)
 {
@@ -1220,9 +1210,7 @@ TEST(AnchorTest, QuorumRejectsDependentPairAmongIndependentMembers)
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Quality assessment.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorTest, AssessQualityTalliesReport)
 {
@@ -1244,9 +1232,7 @@ TEST(AnchorTest, AssessQualityTalliesReport)
     EXPECT_EQ(quality.corroborated, 1u); // only the RESOLVED quorum counts as corroborated
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Fingerprints: hash the resolution EVIDENCE, excluding the resolved address.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorFingerprintTest, DeterministicForSameEvidence)
 {
@@ -1573,10 +1559,8 @@ TEST(AnchorFingerprintTest, CallArgHomeReflectsKindOnly)
     EXPECT_EQ(an::anchor_fingerprint(a), an::anchor_fingerprint(b));
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // ScanProfile: setup-only defaults (broad-widen, deny-list, candidate order), applied without overriding explicit
 // calls.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(AnchorProfileTest, BroadDefaultWidensQuery)
 {
@@ -1722,9 +1706,7 @@ TEST(AnchorProfileTest, AppliesCandidateOrderToRipGlobal)
     EXPECT_EQ(static_cast<std::uintptr_t>(result.value), page.addr(0x200));
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Drift-telemetry gate: assess_quality summary -> GateVerdict startup enable/disable decision.
-// ---------------------------------------------------------------------------------------------------------------------
 
 namespace
 {

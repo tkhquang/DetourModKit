@@ -76,8 +76,6 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    // --- Profiler ---
-
     Profiler::Profiler()
         : m_buffer(std::make_unique<ProfileSample[]>(DEFAULT_CAPACITY)), m_capacity(DEFAULT_CAPACITY),
           m_mask(DEFAULT_CAPACITY - 1)
@@ -314,8 +312,6 @@ namespace DetourModKit
     {
         return m_qpc_frequency;
     }
-
-    // --- ScopedProfile ---
 
     ScopedProfile::ScopedProfile(const char *name, literal_tag) noexcept
         : m_name(name), m_thread_id(GetCurrentThreadId())
