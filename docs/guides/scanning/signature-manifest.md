@@ -75,17 +75,17 @@ namespace mf = DetourModKit::manifest;
 namespace hook = DetourModKit::hook;
 using namespace DetourModKit;
 
-// Startup: a missing file is a clean FileOpenFailed, not a crash.
-auto records = mf::load("MyMod.signatures.ini");
-if (!records)
+// Startup: a missing file is a clean FileOpenFailed, not a crash. load() returns a Manifest (header + records).
+auto loaded = mf::load("MyMod.signatures.ini");
+if (!loaded)
 {
-    log().error("signatures: {}", records.error().message());
+    log().error("signatures: {}", loaded.error().message());
     return;
 }
 
 // Compile each record into a resolvable Signature (fail-closed on a bad pattern or empty ladder).
 std::vector<mf::Signature> sigs;
-for (auto &record : *records)
+for (auto &record : loaded->records)
     if (auto sig = mf::Signature::compile(std::move(record)))
         sigs.push_back(std::move(*sig));
 
@@ -133,7 +133,7 @@ std::span<const anchor::Anchor> defaults = my_mod_anchors();   // the in-code ba
 // A missing file yields no overrides, so the defaults pass through untouched.
 std::vector<mf::SignatureRecord> overrides;
 if (auto loaded = mf::load("MyMod.signatures.ini"))
-    overrides = std::move(*loaded);
+    overrides = std::move(loaded->records);
 
 // File wins where it speaks; the rest keep their in-code form. Then gate the merged result.
 if (auto merged = mf::overlay(defaults, overrides))
@@ -157,11 +157,11 @@ for (auto &sig : sigs)
 std::vector<mf::SignatureRecord> to_save;
 for (const auto &sig : sigs)
     to_save.push_back(sig.record());
-if (auto saved = mf::save("MyMod.signatures.ini", to_save); !saved)
+if (auto saved = mf::save("MyMod.signatures.ini", mf::Manifest{.records = std::move(to_save)}); !saved)
     log().warning("could not write manifest: {}", saved.error().message());
 ```
 
-`save` emits the canonical form of every record; hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path -- unit tests, an embedded default -- `manifest::serialize` / `parse` round-trip the same records through a `std::string`.
+`save` emits the canonical form of every record; hand-written `;` comments are not preserved across a programmatic re-save (they survive manual editing). For a filesystem-free path -- unit tests, an embedded default -- `manifest::serialize` / `parse` round-trip the same `Manifest` through a `std::string`.
 
 ## Repair side: after a game update
 
@@ -176,6 +176,38 @@ read_register = rax          ; was rcx
 ```
 
 If a pattern itself broke, they edit the rung's `pattern`. Once the edit is verified correct, re-capture the fingerprint (the one-line `recapture_fingerprint()` above, or an offline tool) so the gate trusts the repaired signature again. Until then, a signature whose located code changed shape enough that its fingerprint no longer matches is safe-disabled and logged, while the rest of the mod keeps working.
+
+## Versioning across mod releases
+
+The overlay merges *file over code by label*, so a stale `.signatures.ini` a user still has on disk silently overrides a same-label default your new build corrected. The per-signature fingerprint gate does not catch this, because it only sees changes to the located *game* code, not a change to how your own build interprets it.
+
+The `[manifest]` header carries an optional `revision` for exactly this: an integer contract epoch you bump **only when an in-code change makes older manifests incompatible** (a renamed label, a re-meaning of a binding, a dropped signature). A routine mod update keeps the same revision, so still-valid repair files keep working; only a genuinely breaking change trips the gate. Keep it distinct from your mod's marketing version, which would otherwise invalidate every repair file on every release.
+
+```ini
+[manifest]
+schema = 1
+revision = 2      ; the signature-contract epoch this file targets
+```
+
+Carry your build's current epoch and gate on it with `manifest::revision_compatible`, falling back to your in-code defaults when the file is stale:
+
+```cpp
+constexpr std::uint32_t BUILD_REVISION = 2;   // bump only on a breaking signature-contract change
+
+std::vector<mf::SignatureRecord> overrides;
+if (auto loaded = mf::load("MyMod.signatures.ini"))
+{
+    if (mf::revision_compatible(loaded->header, BUILD_REVISION))
+        overrides = std::move(loaded->records);
+    else
+        log().warning("MyMod.signatures.ini targets revision {} but this build is {}; ignoring it. Delete it, "
+                      "or set revision = {} only after re-verifying every entry.",
+                      loaded->header.revision, BUILD_REVISION, BUILD_REVISION);
+}
+auto merged = mf::overlay(my_mod_anchors(), overrides);
+```
+
+`revision_compatible` returns true when `BUILD_REVISION` is 0 (you opt out of gating) or the file's `revision` equals it; any other value -- an older file, or an unversioned file under a versioned build -- is safe-ignored so your in-code defaults stand. This axis is independent of `schema` (whether DetourModKit can parse the file at all) and of the fingerprint gate (whether the located code still matches). Letting a *user* raise the file's `revision` to silence the warning re-enables a file you declared incompatible, so keep "delete" the obvious remedy and treat "bump" as a deliberate expert action.
 
 ## The gate, precisely
 

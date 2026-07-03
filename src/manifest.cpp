@@ -33,10 +33,6 @@ namespace DetourModKit::manifest
 {
     namespace
     {
-        // The manifest format version. Bumped only on an incompatible schema change; a file whose schema does not match
-        // is rejected as MissingHeader rather than silently misread under the wrong field grammar.
-        constexpr int SCHEMA_VERSION = 1;
-
         // The general-purpose register token table, indexed by the hook::Gpr enumerator value. It mirrors hook::Gpr one
         // for one (rsp and rip are deliberately absent from that enum, so they are absent here too), so a token maps to
         // a register and back without a second source of truth.
@@ -951,7 +947,7 @@ namespace DetourModKit::manifest
         return m_record;
     }
 
-    Result<std::vector<SignatureRecord>> parse(std::string_view text)
+    Result<Manifest> parse(std::string_view text)
     {
         CSimpleIniA ini;
         ini.SetMultiKey(false);
@@ -972,6 +968,20 @@ namespace DetourModKit::manifest
         if (!schema || *schema != static_cast<unsigned long long>(SCHEMA_VERSION))
         {
             return fail(ErrorCode::MissingHeader, "manifest::parse");
+        }
+
+        // The author's signature-contract revision (optional; absent is 0 = unversioned). DetourModKit does not
+        // interpret it -- a consumer gates on it through revision_compatible -- but a present value must parse and fit
+        // a 32-bit field, else the file is not trustworthy and fails closed.
+        std::uint32_t revision = 0;
+        if (const char *revision_raw = ini.GetValue("manifest", "revision", nullptr))
+        {
+            const std::optional<unsigned long long> parsed_revision = parse_unsigned(revision_raw);
+            if (!parsed_revision || *parsed_revision > 0xFFFFFFFFULL)
+            {
+                return fail(ErrorCode::MalformedLine, "manifest::parse");
+            }
+            revision = static_cast<std::uint32_t>(*parsed_revision);
         }
 
         CSimpleIniA::TNamesDepend sections;
@@ -1052,16 +1062,22 @@ namespace DetourModKit::manifest
 
             records.push_back(std::move(*record));
         }
-        return records;
+        return Manifest{.header = {.schema = static_cast<std::uint32_t>(*schema), .revision = revision},
+                        .records = std::move(records)};
     }
 
-    std::string serialize(std::span<const SignatureRecord> records)
+    std::string serialize(const Manifest &manifest)
     {
         CSimpleIniA ini;
         ini.SetMultiKey(false);
         ini.SetValue("manifest", "schema", std::to_string(SCHEMA_VERSION).c_str());
+        // The revision is the author's contract epoch; omit it when unversioned so an un-gated manifest stays clean.
+        if (manifest.header.revision != 0)
+        {
+            ini.SetValue("manifest", "revision", std::to_string(manifest.header.revision).c_str());
+        }
 
-        for (const SignatureRecord &record : records)
+        for (const SignatureRecord &record : manifest.records)
         {
             const std::string section = std::format("sig.{}", record.label);
             const char *sec = section.c_str();
@@ -1182,7 +1198,7 @@ namespace DetourModKit::manifest
         return out;
     }
 
-    Result<std::vector<SignatureRecord>> load(const std::filesystem::path &path)
+    Result<Manifest> load(const std::filesystem::path &path)
     {
         std::ifstream in(path, std::ios::binary);
         if (!in)
@@ -1193,9 +1209,9 @@ namespace DetourModKit::manifest
         return parse(text);
     }
 
-    Result<void> save(const std::filesystem::path &path, std::span<const SignatureRecord> records)
+    Result<void> save(const std::filesystem::path &path, const Manifest &manifest)
     {
-        const std::string text = serialize(records);
+        const std::string text = serialize(manifest);
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out)
         {
@@ -1207,6 +1223,13 @@ namespace DetourModKit::manifest
             return fail(ErrorCode::FileOpenFailed, "manifest::save");
         }
         return {};
+    }
+
+    bool revision_compatible(const ManifestHeader &header, std::uint32_t build_revision) noexcept
+    {
+        // build_revision 0 opts out (no gating). Otherwise the file must target this build's exact contract epoch; any
+        // other value means it was authored for a different in-code contract and must be safe-ignored.
+        return build_revision == 0 || header.revision == build_revision;
     }
 
     Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
