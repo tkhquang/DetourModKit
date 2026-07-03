@@ -366,8 +366,7 @@ namespace DetourModKit
          * @return true when @p build_revision is 0 (the consumer opts out of revision gating) or the manifest's
          *         @ref ManifestHeader::revision equals it; false when the file targets a different contract epoch.
          * @details The manifest-level counterpart to the per-signature fingerprint gate. Bump @p build_revision (and
-         * the
-         *          file's `revision`) only on a breaking in-code contract change, so a routine mod update leaves
+         *          the file's `revision`) only on a breaking in-code contract change, so a routine mod update leaves
          *          still-valid repair files working and only a genuinely incompatible file is rejected. On a false
          *          result a consumer logs and falls back to its in-code defaults (an empty override set), telling the
          *          user to delete the stale file or, only after re-verifying it, bump its `revision`.

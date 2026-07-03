@@ -893,7 +893,9 @@ TEST(ManifestRevisionTest, RevisionRoundTripsAndOmitsWhenZero)
     versioned.records.push_back(manual_record("flag", 0x1234));
 
     const std::string text = mf::serialize(versioned);
-    EXPECT_NE(text.find("revision"), std::string::npos);
+    // The exact `revision = N` key line is emitted, not just the substring (which would also match a comment or a
+    // hypothetical payload key prefix).
+    EXPECT_NE(text.find("revision = 7"), std::string::npos);
 
     const auto parsed = mf::parse(text);
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
@@ -935,4 +937,39 @@ TEST(ManifestRevisionTest, RevisionCompatibleGatesStaleFiles)
     EXPECT_TRUE(mf::revision_compatible(mf::ManifestHeader{.revision = 2}, 2));
     EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 1}, 2));
     EXPECT_FALSE(mf::revision_compatible(mf::ManifestHeader{.revision = 0}, 2));
+}
+
+TEST(ManifestRevisionTest, FileLoadPreservesRevision)
+{
+    // The on-disk round-trip must carry the header through save/load too, not just the in-memory serialize/parse.
+    // load() parses the file and parse() rebuilds the Manifest, so a non-zero revision survives the same path a
+    // consumer hits at startup.
+    mf::Manifest manifest;
+    manifest.header.revision = 42;
+    manifest.records.push_back(manual_record("flag", 0xABCD));
+
+    const ScopedManifestFile file("revision_roundtrip");
+    ASSERT_TRUE(mf::save(file.path(), manifest).has_value());
+
+    const auto loaded = mf::load(file.path());
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().message();
+    EXPECT_EQ(loaded->header.schema, mf::SCHEMA_VERSION);
+    EXPECT_EQ(loaded->header.revision, 42u);
+    EXPECT_EQ(loaded->records.size(), 1u);
+}
+
+TEST(ManifestRevisionTest, SchemaEmittedBeforeRevisionInHeader)
+{
+    // The [manifest] section is read top-down; a hand-edit that reorders the keys must not change the parsed
+    // header, but a serialize/parse round-trip must keep schema first and revision after it so the output is
+    // canonical.
+    mf::Manifest manifest;
+    manifest.header.revision = 3;
+    const std::string text = mf::serialize(manifest);
+
+    const std::size_t schema_pos = text.find("schema");
+    const std::size_t revision_pos = text.find("revision");
+    ASSERT_NE(schema_pos, std::string::npos);
+    ASSERT_NE(revision_pos, std::string::npos);
+    EXPECT_LT(schema_pos, revision_pos);
 }
