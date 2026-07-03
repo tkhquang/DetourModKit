@@ -27,6 +27,10 @@ jobs:
   arch-gate:
     name: x86-64 architecture gate (blocking)
     runs-on: windows-latest
+    # A stalled Chocolatey install or a hung compile must not block a PR on this required gate. The real
+    # work is a cold MinGW install plus two -fsyntax-only header compiles, so 15 minutes is generous
+    # headroom that still fails fast on a hang.
+    timeout-minutes: 15
     # Not advisory. DetourModKit is x86-64 (Win64) only by design (an Address is a 64-bit pointer;
     # the scan / hook engines assume the x86-64 register file and instruction encodings). A
     # regression that let a non-x64 target slip past the single defines.hpp #error -- or buried that
@@ -43,7 +47,10 @@ jobs:
 
       - name: Cache MinGW
         id: cache-mingw
-        uses: actions/cache@v4
+        # Third-party actions are pinned to a full commit SHA (like the checkout above), not a moving
+        # tag, so a compromised or retagged release cannot alter this gate. The comment tracks the human
+        # version the SHA corresponds to.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: C:\ProgramData\chocolatey\lib\mingw
           key: ${{ runner.os }}-mingw-13.2.0-v2

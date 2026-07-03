@@ -42,6 +42,15 @@ GATE_HEADER="include/DetourModKit/defines.hpp"
 SURFACE_HEADER="include/DetourModKit/hook.hpp"
 status=0
 
+# Pre-flight the compiler so a missing toolchain fails with a clear, actionable message instead of
+# surfacing as a spurious gate mismatch: a non-zero compile that emits no #error would otherwise be
+# reported by expect_gated as "failed WITHOUT the gate #error (wrong reason)", which reads like a gate
+# regression rather than an environment problem.
+if ! command -v "$CXX" >/dev/null 2>&1; then
+    echo "FAIL: C++ compiler '$CXX' not found on PATH (set CXX or add the toolchain to PATH)." >&2
+    exit 2
+fi
+
 if [ ! -f "$GATE_HEADER" ]; then
     echo "FAIL: run this from the repository root ($GATE_HEADER not found)." >&2
     exit 2

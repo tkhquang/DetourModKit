@@ -9,6 +9,7 @@ DetourModKit ships three families of code-interception primitives -- inline, mid
 3. [Intentionally excluded hook types](#3-intentionally-excluded-hook-types)
 4. [Reference frameworks and where DMK sits](#4-reference-frameworks-and-where-dmk-sits)
 5. [If you need an excluded primitive](#5-if-you-need-an-excluded-primitive)
+6. [Further reading](#6-further-reading)
 
 ---
 
