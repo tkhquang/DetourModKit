@@ -272,6 +272,27 @@ TEST(ScannerJumpsTest, SegmentZeroWithoutLiteralAnchor)
     EXPECT_EQ(m - data.data(), 1); // 0x4A matches 4?
 }
 
+// A multi-gap pattern with an all-wildcard leading segment drives the worst-case matcher shape: no anchor forces an
+// iterate-every-start sweep, and each start explores the product of the gap spans (no memoization). This pins that the
+// shape TERMINATES and is CORRECT -- a miss returns nullptr after exhausting every start x skip combination, and a
+// reachable target is still found -- documenting that the cost is bounded in depth but combinatorial in work.
+TEST(ScannerJumpsTest, MultiGapExhaustiveBacktrackingTerminates)
+{
+    const auto p = detail::parse_aob("?? [0-3] ?? [0-3] FF");
+    ASSERT_TRUE(p.has_value());
+
+    // No 0xFF anywhere: every start and every gap combination is explored and rejected, and the scan still returns.
+    std::vector<std::byte> miss(64, std::byte{0x00});
+    EXPECT_EQ(detail::find_pattern(miss.data(), miss.size(), *p), nullptr);
+
+    // A single 0xFF reachable only by the widest gaps (offset 2 + 3 + 3 = 8) is still found from the first start.
+    std::vector<std::byte> hit(64, std::byte{0x00});
+    hit[8] = std::byte{0xFF};
+    const std::byte *m = detail::find_pattern(hit.data(), hit.size(), *p);
+    ASSERT_NE(m, nullptr);
+    EXPECT_EQ(m - hit.data(), 0);
+}
+
 // The runtime engine parser and the compile-time value parser are one and the same, so both produce an identical
 // segmentation, and engine_pattern_from carries the jumps over from a value Pattern.
 TEST(ScannerJumpsTest, ParserUnifiedWithPatternCore)

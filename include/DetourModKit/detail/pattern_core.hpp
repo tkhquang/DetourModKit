@@ -46,18 +46,20 @@ namespace DetourModKit::detail
     /**
      * @brief Maximum number of bounded-jump gaps a single pattern may carry.
      * @details A bounded jump (`[X-Y]`) splits the fixed byte stream into segments; each jump records one gap between
-     *          two fixed runs. Real signatures need only a handful of gaps, so a small fixed cap keeps PatternBuffer a
-     *          modestly-sized literal type while covering every realistic case. A pattern that names more gaps fails
-     *          closed at parse with TooManyJumps rather than silently truncating.
+     *          two fixed runs. `PatternBuffer::jumps` is a fixed `std::array` sized to this cap, and every value Pattern
+     *          (and every Candidate that holds one) carries it inline, so the cap is kept to a small handful of gaps: a
+     *          real signature anchors on a few stable points and rarely needs more than one or two gaps. A pattern that
+     *          names more gaps fails closed at parse with TooManyJumps rather than silently truncating.
      */
-    inline constexpr std::size_t MAX_PATTERN_JUMPS = 16;
+    inline constexpr std::size_t MAX_PATTERN_JUMPS = 8;
 
     /**
      * @brief Upper bound on a single jump gap's maximum skip, in bytes.
      * @details A jump range is deliberately bounded (this is a bounded-jump dialect, not YARA's unbounded `[X-]`): the
      *          gap consumes match-window bytes and each extra byte of span multiplies the backtracking matcher's work,
-     *          so an unbounded gap could turn a scan into a region-wide quadratic sweep. Capping the span keeps every
-     *          match attempt a bounded, predictable cost. A gap whose upper bound exceeds this is rejected at parse.
+     *          so an unbounded gap could turn a scan into a region-wide sweep. Capping the span bounds each gap's
+     *          contribution to that work (see try_segments_at for the full cost profile). A gap whose upper bound
+     *          exceeds this is rejected at parse.
      */
     inline constexpr std::size_t MAX_JUMP_SPAN = 256;
 
@@ -626,8 +628,11 @@ namespace DetourModKit::detail
      *          ascending order, recursing into the next segment. Ascending-skip order makes the overall match the
      *          leftmost feasible placement. Backtracking is required because a greedy choice for one segment can strand a
      *          later one: an earlier gap position that lets the tail match must be found even if a nearer position fails.
-     *          Recursion depth is bounded by the segment count (<= MAX_PATTERN_JUMPS + 1) and each gap's span is bounded
-     *          by MAX_JUMP_SPAN, so the search is a bounded, predictable cost.
+     *          Recursion DEPTH is bounded by the segment count (<= MAX_PATTERN_JUMPS + 1), but the total WORK is not
+     *          memoized: on a miss the search can explore every skip of every gap, so the worst case is the product of
+     *          the gap spans. In practice each segment run fails fast on its first literal byte, so a real signature
+     *          (few gaps, literal-anchored segments) prunes to near-linear; only a pathological all-wildcard, wide-gap
+     *          pattern approaches the product bound, and patterns are author-written so such a cost is self-inflicted.
      */
     [[nodiscard]] constexpr bool try_segments_at(const PatternBuffer &buffer, std::span<const std::byte> window,
                                                  std::size_t segment_index, std::size_t window_pos) noexcept
@@ -660,8 +665,8 @@ namespace DetourModKit::detail
      * @brief Tests whether @p buffer matches at the start of @p window, honoring any bounded jumps.
      * @return True when a placement of every segment and gap fits in the window with all masked bytes agreeing.
      * @details For a jump-free pattern this is exactly the single fixed-width masked compare (one segment covering the
-     *          whole length); a pattern with gaps runs the bounded backtracking search. A window shorter than the
-     *          pattern's minimum span can never match.
+     *          whole length); a pattern with gaps runs the backtracking search (see try_segments_at for its cost
+     *          profile). A window shorter than the pattern's minimum span can never match.
      */
     [[nodiscard]] constexpr bool matches_buffer_at(const PatternBuffer &buffer,
                                                    std::span<const std::byte> window) noexcept

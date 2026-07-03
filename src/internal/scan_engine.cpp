@@ -740,8 +740,11 @@ namespace DetourModKit
     // segment after it) starting at `addr`, staying within [.., region_end). On success it records each segment's
     // absolute start in segment_starts and returns true. Gap widths are tried in ascending order, so the first success
     // is the leftmost feasible placement; backtracking is required because a nearer gap position can strand a later
-    // segment a farther position would satisfy. Recursion depth is bounded by the segment count (<= jumps + 1) and each
-    // gap span by MAX_JUMP_SPAN, so the search is a bounded, predictable cost.
+    // segment a farther position would satisfy. Recursion DEPTH is bounded by the segment count (<= jumps + 1), but the
+    // total WORK is not memoized: on a miss it can explore every skip of every gap, so the worst case is the product of
+    // the gap spans. Each segment run fails fast on its first literal byte, so a real signature (few gaps,
+    // literal-anchored segments) prunes to near-linear; only a pathological all-wildcard, wide-gap pattern approaches
+    // the product bound, and patterns are author-written so such a cost is self-inflicted.
     DMK_NO_SANITIZE_ADDRESS
     static bool extend_segments(const detail::EnginePattern &pattern, const std::byte *addr,
                                 const std::byte *region_end, std::size_t segment_index,
