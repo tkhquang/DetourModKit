@@ -28,7 +28,7 @@ using DetourModKit::ErrorCode;
 // silent pre-gate that polls a not-yet-live target without spending the retry budget, and a fail-closed heal that keeps
 // the nominal offset on a miss and publishes the recovered offset on a hit.
 
-// --- Scheduling primitives (mock work/gate, no RTTI needed) ------------------------------------------------------
+// Scheduling primitives (mock work/gate, no RTTI needed)
 
 TEST(HealSchedulerTest, StartRejectsZeroInterval)
 {
@@ -228,7 +228,7 @@ TEST(HealSchedulerTest, AddGroupFromCallbackDefersToNextTick)
     EXPECT_TRUE(sched.all_resolved());
 }
 
-// --- heal_into behaviour (with synthetic RTTI) -------------------------------------------------------------------
+// heal_into behaviour (with synthetic RTTI)
 
 namespace
 {

@@ -33,7 +33,7 @@ namespace
     }
 } // anonymous namespace
 
-// --- Profiler singleton ---
+// Profiler singleton
 
 TEST(ProfilerTest, GetInstance_ReturnsSameInstance)
 {
@@ -56,7 +56,7 @@ TEST(ProfilerTest, QpcFrequency_IsPositive)
     EXPECT_GT(profiler.qpc_frequency(), 0);
 }
 
-// --- Recording ---
+// Recording
 
 class ProfilerRecordTest : public ::testing::Test
 {
@@ -198,7 +198,7 @@ TEST_F(ProfilerRecordTest, RingBuffer_WrapsAtCapacity)
     EXPECT_EQ(profiler.available_samples(), cap);
 }
 
-// --- ScopedProfile ---
+// ScopedProfile
 
 TEST_F(ProfilerRecordTest, ScopedProfile_RecordsSample)
 {
@@ -236,7 +236,7 @@ TEST_F(ProfilerRecordTest, ScopedProfile_MeasuresPositiveDuration)
     EXPECT_NE(json.find("duration_test"), std::string::npos);
 }
 
-// --- Chrome Tracing JSON export ---
+// Chrome Tracing JSON export
 
 TEST_F(ProfilerRecordTest, ExportChromeJson_EmptyBuffer)
 {
@@ -300,7 +300,7 @@ TEST_F(ProfilerRecordTest, ExportChromeJson_MultipleSamples_ValidArray)
     EXPECT_NE(json.find("\"name\":\"second\""), std::string::npos);
 }
 
-// --- File export ---
+// File export
 
 TEST_F(ProfilerRecordTest, ExportToFile_WritesValidFile)
 {
@@ -337,7 +337,7 @@ TEST_F(ProfilerRecordTest, ExportToFile_InvalidPath_ReturnsFalse)
     EXPECT_FALSE(ok);
 }
 
-// --- Concurrent recording ---
+// Concurrent recording
 
 TEST_F(ProfilerRecordTest, ConcurrentRecord_NoDataRace)
 {
@@ -399,7 +399,7 @@ TEST_F(ProfilerRecordTest, ConcurrentScopedProfile_NoDataRace)
     EXPECT_EQ(profiler.total_samples_recorded(), static_cast<size_t>(threads * scopes_per_thread));
 }
 
-// --- Sequence counter (torn read protection) ---
+// Sequence counter (torn read protection)
 
 TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
 {
@@ -456,7 +456,7 @@ TEST_F(ProfilerRecordTest, ConcurrentRecordAndExport_NoTornReads)
     EXPECT_GT(export_count.load(), 0);
 }
 
-// --- Macro tests ---
+// Macro tests
 
 #ifdef DMK_ENABLE_PROFILING
 
@@ -518,7 +518,7 @@ TEST_F(ProfilerRecordTest, AvailableSamples_MatchesRecordCount)
     EXPECT_EQ(profiler.available_samples(), 5u);
 }
 
-// --- JSON escaping ---
+// JSON escaping
 
 TEST_F(ProfilerRecordTest, ExportChromeJson_EscapesQuotesInName)
 {

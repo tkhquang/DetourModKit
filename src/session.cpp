@@ -22,7 +22,7 @@ namespace DetourModKit
 {
     namespace
     {
-        // --- Static bootstrap machinery (the async DllMain path only) ---------------------------------------------
+        // Static bootstrap machinery (the async DllMain path only)
         // The synchronous Session::start path touches none of these: it returns a Session the caller holds directly.
         // These statics exist only to host a Session on a worker thread across a DllMain attach/detach pair.
         HANDLE s_shutdown_event = nullptr;
@@ -295,8 +295,6 @@ namespace DetourModKit
         }
     } // anonymous namespace
 
-    // --- Session ---------------------------------------------------------------------------------------------------
-
     Session::Session(void *instance_mutex) noexcept : m_instance_mutex(instance_mutex), m_active(true) {}
 
     Session::Session(Session &&other) noexcept
@@ -439,7 +437,7 @@ namespace DetourModKit
         s_session_active.store(false, std::memory_order_release);
     }
 
-    // --- Bootstrap free functions ----------------------------------------------------------------------------------
+    // Bootstrap free functions
 
     Result<void> bootstrap(const ModInfo &info, std::move_only_function<Result<void>(Session &)> on_ready) noexcept
     {
@@ -555,7 +553,7 @@ namespace DetourModKit
         return s_module;
     }
 
-    // --- Hot-reload helpers ----------------------------------------------------------------------------------------
+    // Hot-reload helpers
 
     void on_logic_dll_unload(std::span<const std::string_view> binding_names) noexcept
     {

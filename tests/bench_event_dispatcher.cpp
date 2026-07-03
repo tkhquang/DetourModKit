@@ -213,25 +213,25 @@ int main()
 
     std::printf("scenario\tsubscribers\titerations\tmedian_ns_per_op\ttotal_ms\n");
 
-    // --- Single-thread emit() ---
+    // Single-thread emit()
     bench_emit(0, 10'000'000, samples, "emit", false);
     bench_emit(1, 5'000'000, samples, "emit", false);
     bench_emit(8, 1'000'000, samples, "emit", false);
     bench_emit(64, 200'000, samples, "emit", false);
 
-    // --- Single-thread emit_safe() ---
+    // Single-thread emit_safe()
     bench_emit(0, 10'000'000, samples, "emit_safe", true);
     bench_emit(1, 5'000'000, samples, "emit_safe", true);
     bench_emit(8, 1'000'000, samples, "emit_safe", true);
     bench_emit(64, 200'000, samples, "emit_safe", true);
 
-    // --- Subscribe + unsubscribe round-trip ---
+    // Subscribe + unsubscribe round-trip
     bench_subscribe_unsubscribe(100'000, samples);
 
-    // --- Concurrent emit throughput ---
+    // Concurrent emit throughput
     bench_concurrent_emit(4, 1'000'000, 8);
 
-    // --- Reentrancy-rejection path ---
+    // Reentrancy-rejection path
     bench_reentrancy_rejection(500'000, samples);
 
     // Touch s_sink so the optimizer keeps the handler body.

@@ -71,10 +71,8 @@ namespace DetourModKit
                 bool preexisting{false};
             };
 
-            // ---------------------------------------------------------------------------------------------------------
             // Inline / mid hooks -- keyed by the patched target address. Inline and mid hooks at one address share the
             // same prologue bytes, so they share one key space, one pending-install queue, and one layering order.
-            // ---------------------------------------------------------------------------------------------------------
 
             /**
              * @brief Atomically checks the target and reserves a ledger id under a single lock acquisition.
@@ -223,10 +221,8 @@ namespace DetourModKit
                 return m_by_target.find(target) != m_by_target.end();
             }
 
-            // ---------------------------------------------------------------------------------------------------------
             // VMT clones -- keyed by the cloned-vptr base SafetyHook installs. One base per VmtHook (every object the
             // clone is applied to shares that base), so a clone is recorded once at create.
-            // ---------------------------------------------------------------------------------------------------------
 
             /**
              * @brief Records a live VMT clone (installed vptr base @p cloned_base); returns its unique ledger id.

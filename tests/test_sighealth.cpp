@@ -76,7 +76,7 @@ namespace
     }
 } // namespace
 
-// --- Pattern-level analysis ------------------------------------------------------------------------------------------
+// Pattern-level analysis
 
 TEST(SigHealthPattern, LongRareByteRunGradesRobustWithNoFindings)
 {
@@ -162,7 +162,7 @@ TEST(SigHealthPattern, TrailingFixedRunIsCounted)
     EXPECT_EQ(health.longest_atom, 3u);
 }
 
-// --- Policy knobs ----------------------------------------------------------------------------------------------------
+// Policy knobs
 
 TEST(SigHealthPolicy, LargerHaystackRaisesExpectedMatches)
 {
@@ -232,7 +232,7 @@ TEST(SigHealthPolicy, WildcardAndAtomKnobsMoveTheirBoundaries)
     EXPECT_TRUE(has_finding(sh::analyze_pattern(gappy, tight_wild).findings, sh::FindingKind::HighWildcardRatio));
 }
 
-// --- Candidate (ladder rung) analysis --------------------------------------------------------------------------------
+// Candidate (ladder rung) analysis
 
 TEST(SigHealthCandidate, ByteRungMirrorsPatternAnalysis)
 {
@@ -276,7 +276,7 @@ TEST(SigHealthCandidate, ShortMangledNameIsStillRobust)
     EXPECT_TRUE(has_finding(sh::analyze_candidate(rtti_rung("")).findings, sh::FindingKind::EmptyAnchorText));
 }
 
-// --- Record analysis -------------------------------------------------------------------------------------------------
+// Record analysis
 
 TEST(SigHealthRecord, LadderGradesByItsStrongestRung)
 {
@@ -374,7 +374,7 @@ TEST(SigHealthRecord, ReportOwnsTheLabel)
     EXPECT_EQ(health.label, "temporary.label");
 }
 
-// --- Manifest roll-up ------------------------------------------------------------------------------------------------
+// Manifest roll-up
 
 TEST(SigHealthManifest, GradeIsTheWeakestRecordAndCountsPartition)
 {
@@ -425,7 +425,7 @@ TEST(SigHealthManifest, HealthyManifestGradesRobust)
     EXPECT_EQ(health.robust, 2u);
 }
 
-// --- Stringifiers and report formatting ------------------------------------------------------------------------------
+// Stringifiers and report formatting
 
 TEST(SigHealthFormat, StringifiersNeverEmptyForNamedValues)
 {

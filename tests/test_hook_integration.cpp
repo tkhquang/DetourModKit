@@ -323,7 +323,7 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
 {
     EXPECT_EQ(m_fn_compute_damage(10, 5), 15);
 
-    // --- Cycle 1: hook, verify, teardown ---
+    // Cycle 1: hook, verify, teardown
     auto r1 = hook::inline_at(
         InlineRequest{.name = "HotReloadDamage", .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)}},
         &detour_compute_damage);
@@ -338,7 +338,7 @@ TEST_F(HookIntegrationTest, HotReload_FullCycle)
 
     EXPECT_EQ(m_fn_compute_damage(10, 5), 15);
 
-    // --- Cycle 2: re-hook same function, verify, teardown ---
+    // Cycle 2: re-hook same function, verify, teardown
     auto r2 = hook::inline_at(
         InlineRequest{.name = "HotReloadDamage", .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)}},
         &detour_compute_damage);
@@ -400,7 +400,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
         gpr(ctx, Gpr::Rdx) = 1;
     };
 
-    // --- Cycle 1: inline + mid hooks ---
+    // Cycle 1: inline + mid hooks
     auto r1 = hook::inline_at(
         InlineRequest{.name = "ReloadInline", .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)}},
         &detour_compute_damage);
@@ -420,7 +420,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
     EXPECT_TRUE(m_hooks[0]->is_enabled());
     EXPECT_TRUE(m_hooks[1]->is_enabled());
 
-    // --- Teardown ---
+    // Teardown
     drop_all_hooks();
     s_original_compute_damage = nullptr;
 
@@ -429,7 +429,7 @@ TEST_F(HookIntegrationTest, HotReload_MultipleHookTypes)
     EXPECT_FALSE(hook::is_target_hooked(Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)}));
     EXPECT_FALSE(hook::is_target_hooked(Address{reinterpret_cast<uintptr_t>(m_fn_compute_armor)}));
 
-    // --- Cycle 2: recreate both ---
+    // Cycle 2: recreate both
     auto r3 = hook::inline_at(
         InlineRequest{.name = "ReloadInline", .target = Address{reinterpret_cast<uintptr_t>(m_fn_compute_damage)}},
         &detour_compute_damage);

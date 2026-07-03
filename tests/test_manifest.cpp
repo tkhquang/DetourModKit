@@ -148,9 +148,7 @@ namespace
     };
 } // namespace
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Serialization round-trip: every kind and binding survives serialize -> parse unchanged.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestSerializeTest, RoundTripsEveryKindAndBinding)
 {
@@ -301,9 +299,7 @@ TEST(ManifestSerializeTest, SignedMinimumManualValueRoundTrips)
     EXPECT_EQ(parsed->records[0].manual_value, std::numeric_limits<std::int64_t>::min());
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Parse fails closed: a manifest that cannot be trusted to describe the signatures faithfully is rejected whole.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestParseTest, MissingHeaderIsRejected)
 {
@@ -426,9 +422,7 @@ TEST(ManifestParseTest, LabelWithDotsRoundTripsWithLadder)
     EXPECT_EQ(parsed->records[0].ladder[0].pattern, "90 90");
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Signature::compile: valid records compile; invalid ones fail closed with a typed error.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestCompileTest, BadPatternRungFailsClosed)
 {
@@ -467,9 +461,7 @@ TEST(ManifestCompileTest, NonSerializableKindFailsClosed)
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Resolution: a compiled signature resolves through its anchor backend, honouring scope.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestResolveTest, RipGlobalDirectResolvesInScope)
 {
@@ -552,9 +544,7 @@ TEST(ManifestResolveTest, ScopeIsHostWhenNoModuleNamed)
     EXPECT_EQ(sig.scope().base.raw(), dmk::Region::host().base.raw());
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // adopt: an in-code anchor becomes an owning signature whose views survive the source going out of scope.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestAdoptTest, AdoptsManualAnchor)
 {
@@ -606,9 +596,7 @@ TEST(ManifestAdoptTest, RejectsCompositeAnchor)
     EXPECT_EQ(adopted.error().code, dmk::ErrorCode::InvalidArg);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Fingerprint drift: the baseline distinguishes a moved address from a rewritten signature.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestFingerprintTest, UnsetMatchAndDrift)
 {
@@ -628,9 +616,7 @@ TEST(ManifestFingerprintTest, RecaptureAdoptsCurrentAsBaseline)
     EXPECT_EQ(sig.record().expected_fingerprint, sig.current_fingerprint());
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // The gate: resolve a manifest and partition it into trusted vs safe-disabled.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestGateTest, TrustsResolvedRejectsDrifted)
 {
@@ -738,9 +724,7 @@ TEST(ManifestGateTest, TrustedSignatureCarriesItsBinding)
     EXPECT_EQ(hp->binding->offsets[1], 0x20);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Overlay: file records override in-code defaults by label; the rest of the defaults pass through.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestOverlayTest, FileOverridesCodeByLabelAndAdoptsTheRest)
 {
@@ -824,9 +808,7 @@ TEST(ManifestOverlayTest, MalformedOverrideFallsBackToDefault)
     EXPECT_EQ((*merged)[0].resolve().value, 111); // fell back to the in-code Manual default
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // File I/O: load / save round-trips through a real file.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestFileTest, SaveThenLoadRoundTrips)
 {
@@ -863,9 +845,7 @@ TEST(ManifestFileTest, LoadMissingFileReportsFileOpenFailed)
     EXPECT_EQ(loaded.error().code, dmk::ErrorCode::FileOpenFailed);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Enum-to-string helpers.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestStringTest, BindingKindTokens)
 {
@@ -882,9 +862,7 @@ TEST(ManifestStringTest, FingerprintStateTokens)
     EXPECT_EQ(mf::fingerprint_state_to_string(mf::FingerprintState::Drifted), "drifted");
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
 // Contract revision: the manifest-level version stamp and the gate that ignores a stale file.
-// ---------------------------------------------------------------------------------------------------------------------
 
 TEST(ManifestRevisionTest, RevisionRoundTripsAndOmitsWhenZero)
 {

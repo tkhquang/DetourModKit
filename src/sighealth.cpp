@@ -21,7 +21,7 @@ namespace DetourModKit
     {
         namespace
         {
-            // --- Grade algebra -------------------------------------------------------------------------------------
+            // Grade algebra
             // Grade is ordered Robust (0) < Fragile (1) < Unusable (2). "Worse" folds two verdicts toward the more
             // severe one (the rule for a manifest, limited by its weakest record); "better" folds toward the milder one
             // (the rule for a record, as strong as its best rung, since the resolver tries the ladder until one hits).
@@ -60,7 +60,7 @@ namespace DetourModKit
                 findings.push_back(Finding{kind, severity});
             }
 
-            // --- Byte-selectivity model ----------------------------------------------------------------------------
+            // Byte-selectivity model
 
             // Estimated selectivity of one fully-known byte, in bits. A byte drawn uniformly at random contributes 8
             // bits (one position in 256 matches). Real x64 .text is far from uniform: padding (0x00), INT3 fill (0xCC),
@@ -104,7 +104,7 @@ namespace DetourModKit
                 return entropy;
             }
 
-            // --- Enum naming (local: no public stringifier exists for these) --------------------------------------
+            // Enum naming (local: no public stringifier exists for these)
 
             [[nodiscard]] std::string_view anchor_kind_name(anchor::AnchorKind kind) noexcept
             {
@@ -144,7 +144,7 @@ namespace DetourModKit
                 return "Unknown";
             }
 
-            // --- Text-anchor grading -------------------------------------------------------------------------------
+            // Text-anchor grading
             // Shared by the StringXref rung/record path. A mangled RTTI name is unique by construction, so an empty
             // name is the only defect worth flagging there; a string literal, by contrast, can genuinely collide when
             // it is short (the linker pools identical literals), so a length floor applies to strings but not to type

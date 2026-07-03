@@ -8,8 +8,6 @@
 
 namespace DetourModKit::detail
 {
-    // --- WinFileStreamBuf ---
-
     WinFileStreamBuf::WinFileStreamBuf() noexcept : m_handle(INVALID_HANDLE_VALUE), m_buffer{}
     {
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
@@ -188,8 +186,6 @@ namespace DetourModKit::detail
         setp(m_buffer.data(), m_buffer.data() + BUFFER_SIZE);
         return drained;
     }
-
-    // --- WinFileStream ---
 
     WinFileStream::WinFileStream() : std::ostream(&m_buf) {}
 

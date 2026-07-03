@@ -36,10 +36,8 @@ using namespace DetourModKit::hook;
 #define DMK_TEST_NOINLINE
 #endif
 
-// ----------------------------------------------------------------------------
 // Real, hookable functions used as inline/mid hook targets. DMK_TEST_NOINLINE plus a volatile result forces a real call
 // to the patched entry, so a post-teardown call observes the restored prologue rather than a constant-folded value.
-// ----------------------------------------------------------------------------
 namespace
 {
     DMK_TEST_NOINLINE int echo(int x)
@@ -113,9 +111,7 @@ namespace
     }
 } // namespace
 
-// ----------------------------------------------------------------------------
 // INLINE create + validation
-// ----------------------------------------------------------------------------
 
 TEST(HookInline, CreateSuccessAutoEnabled)
 {
@@ -154,9 +150,7 @@ TEST(HookInline, CreateEmptyName)
     EXPECT_EQ(r.error().code, ErrorCode::InvalidArg);
 }
 
-// ----------------------------------------------------------------------------
 // INLINE typed trampoline + enable/disable
-// ----------------------------------------------------------------------------
 
 TEST(HookInline, TypedTrampolineCallsOriginal)
 {
@@ -219,9 +213,7 @@ TEST(HookInline, OriginalNullForDisengagedHandle)
     EXPECT_EQ(h.original<EchoFn>(), nullptr);
 }
 
-// ----------------------------------------------------------------------------
 // INLINE prologue policy
-// ----------------------------------------------------------------------------
 namespace
 {
     // Synthetic prologue buffers for the inline/mid prologue pre-flight. const (read-only) and alignas(16) so the
@@ -292,9 +284,7 @@ TEST(HookInlinePrologue, RelocateInstallsOnUnsafePrologue)
     h.release(); // the synthetic buffer is not relocatable code; leak the clone rather than restore it
 }
 
-// ----------------------------------------------------------------------------
 // INLINE duplicate detection (Options::fail_if_already_hooked + is_target_hooked)
-// ----------------------------------------------------------------------------
 
 TEST(HookInline, FailIfAlreadyHookedRefusesSecondHook)
 {
@@ -354,9 +344,7 @@ TEST(HookInline, FailIfAlreadyHookedDetectsAbsJumpTrampoline)
     EXPECT_EQ(r.error().code, ErrorCode::TargetAlreadyHookedInProcess);
 }
 
-// ----------------------------------------------------------------------------
 // is_target_hooked(Address)
-// ----------------------------------------------------------------------------
 
 TEST(HookLedger, IsTargetHookedFalseForZero)
 {
@@ -454,9 +442,7 @@ TEST(HookLedger, SameTargetReservationsWaitForCommit)
     EXPECT_FALSE(ledger.is_target_hooked(target));
 }
 
-// ----------------------------------------------------------------------------
 // Hook::call<Ret>(args): the guarded trampoline call, with the by-value-ABI lvalue case
-// ----------------------------------------------------------------------------
 
 TEST(HookCall, GuardedCallReachesOriginalThroughTrampoline)
 {
@@ -520,9 +506,7 @@ TEST(HookCall, MoveAssignTransfersGuardedCallAndTearsDownOld)
     EXPECT_EQ(dest.call<int>(2, 3), 5);                  // guarded call reaches the original through the trampoline
 }
 
-// ----------------------------------------------------------------------------
 // release(): detach but stay installed for the process lifetime
-// ----------------------------------------------------------------------------
 
 TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
 {
@@ -540,9 +524,7 @@ TEST(HookRelease, ReleaseLeavesHookInstalledAndFiring)
     // No restore: leak_target_inline stays hooked for the process lifetime. Intentional leak.
 }
 
-// ----------------------------------------------------------------------------
 // RAII teardown + moved-from inertness
-// ----------------------------------------------------------------------------
 
 TEST(HookTeardown, DestructorRestoresPrologue)
 {
@@ -575,9 +557,7 @@ TEST(HookTeardown, MovedFromHandleIsInert)
     EXPECT_EQ(echo(7), 7);
 }
 
-// ----------------------------------------------------------------------------
 // MID create / lifecycle (the MidContext-accessor semantics live in test_mid_hook_context.cpp)
-// ----------------------------------------------------------------------------
 
 TEST(HookMid, CreateSuccessAutoEnabled)
 {
@@ -769,9 +749,7 @@ TEST(HookMid, MovedFromMidHandleIsInert)
     EXPECT_EQ(real_hook_target_mul(4, 5), 20);
 }
 
-// ----------------------------------------------------------------------------
 // install_all: declarative table with severity + ordering + rollback
-// ----------------------------------------------------------------------------
 namespace
 {
     // Real, hookable functions used as install_all scan targets. Their first bytes are scanned by AOB so the deferred
@@ -966,9 +944,7 @@ TEST(HookInstallAll, MandatoryMissRollsBackNewestFirst)
     EXPECT_EQ(removed[1], "RollbackOlder");
 }
 
-// ----------------------------------------------------------------------------
 // VMT object hooking (RAII VmtHook)
-// ----------------------------------------------------------------------------
 
 class VmtTestInterface
 {
@@ -1422,9 +1398,7 @@ TEST(HookVmt, ReleaseLeavesCloneInstalled)
     *reinterpret_cast<std::uintptr_t *>(target.get()) = original_vptr;
 }
 
-// ----------------------------------------------------------------------------
 // VMT per-method hooking (hook_method / original<Fn>(index) / remove_method)
-// ----------------------------------------------------------------------------
 
 // A method hook redirects one vtable slot in the clone, and original<Fn>(index) reaches the pre-hook method: a hooked
 // compute returns original + 1000, and the typed snapshot yields the unmodified sum.
@@ -1617,9 +1591,7 @@ TEST(HookVmtMethod, DisengagedHandleFailsClosed)
     EXPECT_EQ(a.original<VmtComputeFn>(VMT_COMPUTE_INDEX), nullptr);
 }
 
-// ----------------------------------------------------------------------------
 // Lifecycle events: typed transitions on the diagnostic bus
-// ----------------------------------------------------------------------------
 namespace
 {
     struct CapturedLifecycle
@@ -1729,12 +1701,10 @@ TEST(HookLifecycle, NotEmittedForNoOpTransition)
     h.release(); // detach without a Removed transition path through teardown
 }
 
-// ----------------------------------------------------------------------------
 // Concurrency + reentrancy: the per-hook status machine and the call() guard under thread stress and self-reentry. The
 // per-hook recursive_mutex is held across call(), and disable()/~Hook must drain that mutex before the trampoline can
 // be restored or freed. These tests pin the caller-visible guarantees directly, including a parked original that keeps
 // the guard held until the test releases it.
-// ----------------------------------------------------------------------------
 namespace
 {
     // Reentrancy fixture: a recursive target whose self-call re-enters the hooked prologue, so a detour that forwards

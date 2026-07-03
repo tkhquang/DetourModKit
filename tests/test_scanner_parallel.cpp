@@ -570,7 +570,6 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
     }
 }
 
-// ----------------------------------------------------------------------------
 // noexcept-batch degradation under injected out-of-memory.
 //
 // resolve_batch is noexcept: injected into a running host, it must degrade rather than terminate under true OOM. The
@@ -583,7 +582,6 @@ TEST(ScannerBatchTest, ResolveBatchResolvesStringXrefTierLikeSerial)
 //      slot degrades to Error{OutOfMemory}; the inner vector still has one result per request.
 // The fork-join driver's own two-tier catch (a non-bad_alloc throw keeps the fail-closed seed) is proven directly by
 // the last test, which needs no injection.
-// ----------------------------------------------------------------------------
 
 // The batch entry point must be noexcept for the never-terminate contract to hold at all; pin it at compile time so a
 // future signature change that drops noexcept fails the build rather than silently regressing the guarantee.

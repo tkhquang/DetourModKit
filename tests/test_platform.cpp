@@ -23,7 +23,7 @@ TEST(PlatformTest, PinCurrentModule_IdempotentMultipleCalls)
     EXPECT_TRUE(pin_current_module());
 }
 
-// --- Version macro tests ---
+// Version macro tests
 
 TEST(VersionTest, MajorMinorPatchAreDefined)
 {
