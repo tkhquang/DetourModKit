@@ -222,7 +222,7 @@ private:
     std::vector<void *> m_heap_pages;
 };
 
-// --- L1 identify_pointee_type ---
+// L1 identify_pointee_type
 
 TEST_F(RttiDissectTest, Identify_DirectObjectBase)
 {
@@ -358,7 +358,7 @@ TEST_F(RttiDissectTest, Identify_RejectsGarbageSlotValue)
     EXPECT_FALSE(rtti::identify_pointee_type(Address{slot_addr}, pt));
 }
 
-// --- L1 identify_pointee_type_or (RTTI fallback composition) ---
+// L1 identify_pointee_type_or (RTTI fallback composition)
 
 TEST_F(RttiDissectTest, IdentifyTyped_ResolvesAndMatchesBool)
 {
@@ -533,7 +533,7 @@ TEST_F(RttiDissectTest, Identify_ErrorStringsAreDistinct)
     EXPECT_NE(bad_slot, no_rtti);
 }
 
-// --- L2 reverse_scan_block ---
+// L2 reverse_scan_block
 
 TEST_F(RttiDissectTest, ScanBlock_LabelsOnlyRealSlots)
 {
@@ -644,7 +644,7 @@ TEST_F(RttiDissectTest, ScanBlockBytes_ZeroStrideTreatedAsPointerSize)
     EXPECT_EQ(added, 2u);
 }
 
-// --- L3 heal_landmark ---
+// L3 heal_landmark
 
 namespace
 {
@@ -1158,7 +1158,7 @@ TEST_F(RttiDissectTest, Heal_ErrorStringsAreDistinct)
     EXPECT_NE(bad_descriptor, ambiguous);
 }
 
-// --- L4 solve_fingerprint ---
+// L4 solve_fingerprint
 
 namespace
 {
@@ -1365,7 +1365,7 @@ TEST_F(RttiDissectTest, Fingerprint_CapGuards)
     expect_bad_descriptor(rtti::solve_fingerprint(Address{base}, all_optional, 0x20));
 }
 
-// --- heal_report (drift telemetry) ---
+// heal_report (drift telemetry)
 
 TEST_F(RttiDissectTest, HealReport_RecordsNoDriftAndPositiveDrift)
 {

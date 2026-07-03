@@ -166,7 +166,7 @@ protected:
     void TearDown() override { memory::shutdown_cache(); }
 };
 
-// --- type_name_of ---
+// type_name_of
 
 TEST_F(RttiTest, TypeNameOf_BasicSyntheticName)
 {
@@ -221,7 +221,7 @@ TEST_F(RttiTest, TypeNameOf_ZeroMaxLenUsesDefault)
     EXPECT_EQ(*name, ".?AVDefaultLen@@");
 }
 
-// --- type_name_into ---
+// type_name_into
 
 TEST_F(RttiTest, TypeNameInto_WritesNulTerminatedName)
 {
@@ -263,7 +263,7 @@ TEST_F(RttiTest, TypeNameInto_FailureClearsBuffer)
     EXPECT_EQ(out[0], '\0');
 }
 
-// --- vtable_is_type ---
+// vtable_is_type
 
 TEST_F(RttiTest, VtableIsType_ExactMatch)
 {
@@ -312,7 +312,7 @@ TEST_F(RttiTest, VtableIsType_OversizedExpectedRejected)
     EXPECT_FALSE(rtti::vtable_is_type(Address{v.vtable()}, huge));
 }
 
-// --- find_in_pointer_table ---
+// find_in_pointer_table
 
 TEST_F(RttiTest, FindInTable_HitsFirstMatchingSlot)
 {
@@ -479,7 +479,7 @@ TEST_F(RttiTest, FindInTable_OverflowingRangeRejected)
     EXPECT_FALSE(rtti::find_in_pointer_table(Address{UINTPTR_MAX - 8}, 4, ".?AVAnything@@", nullptr, 16).has_value());
 }
 
-// --- Bound-check guards against poisoned RTTI fields ---
+// Bound-check guards against poisoned RTTI fields
 
 TEST_F(RttiTest, ResolveRejectsPoisonedTypeDescriptorRva)
 {
@@ -524,7 +524,7 @@ TEST_F(RttiTest, ResolveRejectsHeapAllocatedVtable)
     EXPECT_FALSE(rtti::vtable_is_type(Address{fake_vt}, ".?AVAnything@@"));
 }
 
-// --- Default values / constants ---
+// Default values / constants
 
 TEST(RttiConstantsTest, Defaults)
 {

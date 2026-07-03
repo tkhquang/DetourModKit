@@ -739,7 +739,7 @@ TEST(ScannerTest, parse_aob_wildcard_mask)
     EXPECT_EQ(result->mask[3], std::byte{0x00});
 }
 
-// --- Per-nibble wildcard tokens ---
+// Per-nibble wildcard tokens
 
 // A high-nibble token ("A?") fixes the high nibble and wildcards the low one: the byte holds the known nibble in place
 // (0xA0) with the unknown nibble zeroed, and the mask is 0xF0 so the masked compare checks only the high nibble.
@@ -1132,7 +1132,7 @@ TEST(ScannerTest, parse_aob_invariant)
     EXPECT_EQ(single->bytes.size(), single->mask.size());
 }
 
-// --- Pipe offset marker ---
+// Pipe offset marker
 
 TEST(ScannerTest, parse_aob_offset_marker)
 {
@@ -1202,7 +1202,7 @@ TEST(ScannerTest, FindPattern_OffsetMarker_ReturnsMarkedByte)
     EXPECT_EQ(result - data.data(), 52);
 }
 
-// --- Nth-occurrence matching ---
+// Nth-occurrence matching
 
 TEST(ScannerTest, find_pattern_nth_occurrence_first)
 {
@@ -1681,7 +1681,7 @@ TEST_F(ScannerRipTest, find_and_resolve_mov_rcx_rip)
     EXPECT_EQ(result->raw(), expected);
 }
 
-// --- Tests for scan_executable_regions ---
+// Tests for scan_executable_regions
 
 TEST(ScannerExecRegionTest, FindsPatternInExecutableMemory)
 {
@@ -1890,7 +1890,7 @@ TEST(ScannerExecRegionTest, SkipsGuardPages)
     VirtualFree(exec_mem, 0, MEM_RELEASE);
 }
 
-// --- Tests for scan_readable_regions ---
+// Tests for scan_readable_regions
 
 namespace
 {
@@ -2192,7 +2192,7 @@ TEST(ScannerTest, find_pattern_all_common_bytes_still_found)
     EXPECT_EQ(result, &data[2]);
 }
 
-// --- SIMD level detection ---
+// SIMD level detection
 
 TEST(ScannerTest, active_simd_level_returns_valid_tier)
 {
@@ -2225,7 +2225,7 @@ TEST(ScannerTest, active_simd_level_print)
     std::printf("[  DIAG   ] Scanner SIMD level: %s\n", names[static_cast<int>(level)]);
 }
 
-// --- AVX2 path tests (32+ byte patterns) ---
+// AVX2 path tests (32+ byte patterns)
 // Correctness tests for patterns that exercise the AVX2 verification tier. active_simd_level() above confirms whether
 // AVX2 is actually in use.
 
@@ -2301,7 +2301,7 @@ TEST(ScannerTest, find_pattern_avx2_path_64_bytes)
     EXPECT_EQ(result, &data[32]);
 }
 
-// --- AVX-512 path tests (64+ byte patterns) ---
+// AVX-512 path tests (64+ byte patterns)
 // Patterns of 64 bytes or more drive the AVX-512 verify body (64 bytes per iteration) when the library is built with
 // DMK_ENABLE_AVX512 and the host has AVX-512F + AVX-512BW; on every other build or host the same patterns fall through
 // to the AVX2 -> SSE2 -> scalar tiers. Each test asserts an identical result regardless of which tier runs, so it
@@ -2982,7 +2982,7 @@ TEST(ScannerPrologueTest, UnreadableAddrReturnsFalse)
     VirtualFree(na, 0, MEM_RELEASE);
 }
 
-// --- Tests for host-module-scoped resolve() and prologue_fallback ---
+// Tests for host-module-scoped resolve() and prologue_fallback
 
 // A unique 16-byte signature compiled into the test executable's own image so a host-module-scoped ladder has a real
 // in-host target to resolve. volatile const keeps the linker from folding the bytes or discarding them as unused (the

@@ -1787,7 +1787,7 @@ TEST_F(AsyncLoggerTest, LogFormat_MatchesSyncFormat)
     EXPECT_EQ(content.find("[DEBUG00]"), std::string::npos);
 }
 
-// --- LogMessage move semantics ---
+// LogMessage move semantics
 
 TEST(LogMessageMoveTest, MoveConstructorZerosSourceLength)
 {
@@ -1824,7 +1824,7 @@ TEST(LogMessageMoveTest, MovedFromMessageReturnsEmpty)
     EXPECT_TRUE(src.message().empty());
 }
 
-// --- Writer wakeup latency ---
+// Writer wakeup latency
 
 TEST_F(AsyncLoggerTest, EnqueueWakesParkedWriterPromptly)
 {

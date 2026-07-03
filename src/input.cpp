@@ -30,8 +30,6 @@ namespace DetourModKit
 {
     namespace input
     {
-        // --- BindingGuard ---
-
         struct BindingGuard::Impl
         {
             // Shared cancellation flag the binding's callback wrapper gates on; release() clears it so subsequent
@@ -105,8 +103,6 @@ namespace DetourModKit
             return m_impl ? std::string_view{m_impl->name} : std::string_view{};
         }
 
-        // --- Scope ---
-
         void Scope::add(BindingGuard guard)
         {
             m_guards.push_back(std::move(guard));
@@ -133,8 +129,6 @@ namespace DetourModKit
             }
             return *this;
         }
-
-        // --- Input ---
 
         struct Input::Impl
         {
@@ -581,7 +575,7 @@ namespace DetourModKit
             }
         }
 
-        // --- Free-function ergonomics ---
+        // Free-function ergonomics
 
         Result<BindingGuard> register_combo(ComboBinding binding) noexcept
         {

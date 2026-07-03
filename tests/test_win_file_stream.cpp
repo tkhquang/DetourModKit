@@ -46,7 +46,7 @@ protected:
     std::filesystem::path m_test_path;
 };
 
-// --- WinFileStreamBuf tests ---
+// WinFileStreamBuf tests
 
 TEST_F(WinFileStreamBufTest, DefaultConstruct_NotOpen)
 {
@@ -277,7 +277,7 @@ TEST_F(WinFileStreamBufTest, DestructorFlushes_RAII)
     EXPECT_EQ(read_file(m_test_path), "raii_data");
 }
 
-// --- WinFileStream (ostream wrapper) tests ---
+// WinFileStream (ostream wrapper) tests
 
 class WinFileStreamTest : public WinFileStreamBufTest
 {

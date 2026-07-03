@@ -74,7 +74,7 @@ namespace
         std::filesystem::path m_ini_path;
     };
 
-    // --- Basic lifecycle ---
+    // Basic lifecycle
 
     TEST_F(ConfigWatcherTest, NoStartDestructIsSafe)
     {
@@ -217,7 +217,7 @@ namespace
         SUCCEED();
     }
 
-    // --- Basic fire ---
+    // Basic fire
 
     TEST_F(ConfigWatcherTest, BasicFire_CallbackInvokedOnWrite)
     {
@@ -237,7 +237,7 @@ namespace
         EXPECT_EQ(hits.load(), 1) << "Expected exactly one debounced fire";
     }
 
-    // --- Debounce ---
+    // Debounce
 
     TEST_F(ConfigWatcherTest, Debounce_BurstyWritesCollapseToOneFire)
     {
@@ -275,7 +275,7 @@ namespace
                                "fire";
     }
 
-    // --- Rename-swap-save (Notepad++, VSCode) ---
+    // Rename-swap-save (Notepad++, VSCode)
 
     TEST_F(ConfigWatcherTest, RenameSwapSave_TriggersReload)
     {
@@ -300,7 +300,7 @@ namespace
         watcher.stop();
     }
 
-    // --- Stop bound ---
+    // Stop bound
 
     TEST_F(ConfigWatcherTest, Stop_ReturnsWithinBound)
     {
@@ -318,7 +318,7 @@ namespace
         EXPECT_LT(elapsed, 1s);
     }
 
-    // --- Empty callback is accepted ---
+    // Empty callback is accepted
 
     TEST_F(ConfigWatcherTest, EmptyCallback_DoesNotCrashOnEvent)
     {

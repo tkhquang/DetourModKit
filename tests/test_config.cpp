@@ -1535,7 +1535,7 @@ TEST(BindingGuard, DestructorReleasesFlag)
     EXPECT_FALSE(outer.is_active());
 }
 
-// --- Reload tests ---
+// Reload tests
 
 TEST_F(ConfigTest, Reload_WithoutInitialLoad_ReturnsFalse)
 {
@@ -2686,9 +2686,9 @@ static_assert(!ConfigBindDefaultCallable<double>::value,
 static_assert(!ConfigBindDefaultCallable<long>::value,
               "config::bind<long> inferred-default overload must stay unavailable.");
 
-// --- Input-binding fusion: the BindingGuard release action, the HoldGate teardown gate, and the hold_combo / consume
-// --- facet (config layer). The HoldGate synchronization is exercised directly through its internal header because the
-// --- poll loop reads real key state and cannot deliver hold edges deterministically from a test.
+// Input-binding fusion: the BindingGuard release action, the HoldGate teardown gate, and the hold_combo / consume
+// facet (config layer). The HoldGate synchronization is exercised directly through its internal header because the
+// poll loop reads real key state and cannot deliver hold edges deterministically from a test.
 //
 // input::BindingGuard has a private ctor, so these cases obtain a real Hold guard from input::register_combo. The
 // guard's release action is the HoldGate teardown, which synthesizes a balancing on_state_change(false) ONLY for a

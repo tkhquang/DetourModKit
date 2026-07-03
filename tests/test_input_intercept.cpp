@@ -113,7 +113,7 @@ namespace
     };
 } // namespace
 
-// --- Control API safe to call without an installed hook ---
+// Control API safe to call without an installed hook
 
 TEST(InterceptControlTest, AccessorsAndSettersWithNothingInstalled)
 {
@@ -140,7 +140,7 @@ TEST(InterceptControlTest, AccessorsAndSettersWithNothingInstalled)
     EXPECT_FALSE(wndproc_installed());
 }
 
-// --- step_wheel_pulse: one notch maps to exactly one Press edge ---
+// step_wheel_pulse: one notch maps to exactly one Press edge
 
 TEST(WheelPulseTest, IdleProducesNoPulse)
 {
@@ -184,7 +184,7 @@ TEST(WheelPulseTest, DirectionsAreIndependent)
     EXPECT_EQ(step_wheel_pulse(state), 0u);
 }
 
-// --- add_wheel_notches: backlog accumulation is capped ---
+// add_wheel_notches: backlog accumulation is capped
 
 TEST(WheelPulseTest, AddWheelNotchesAccumulatesBelowCap)
 {
@@ -242,7 +242,7 @@ TEST(WheelPulseTest, CappedBacklogStillDrainsOnePulsePerNotch)
     EXPECT_EQ(state.pending[1], 0);
 }
 
-// --- step_gamepad_suppress: consume-until-release latch ---
+// step_gamepad_suppress: consume-until-release latch
 
 TEST(GamepadSuppressTest, BarePressIsNotSuppressed)
 {
@@ -339,7 +339,7 @@ TEST(GamepadSuppressTest, PreArmAbandonedWithoutPressDisarmsAfterGrace)
     EXPECT_EQ(step_gamepad_suppress(state, 0, 0, 1200, GRACE_MS), 0u);
 }
 
-// --- evaluate_consume_rules: detour-side chord evaluation ---
+// evaluate_consume_rules: detour-side chord evaluation
 
 TEST(ConsumeRuleTest, EmptyListMasksNothing)
 {
@@ -412,7 +412,7 @@ TEST(ConsumeRuleTest, MultipleRulesAccumulateMatchingTriggers)
     EXPECT_EQ(evaluate_consume_rules(static_cast<uint16_t>(rb | down), rules.data(), rules.size()), down);
 }
 
-// --- publish_gamepad_consume_rules / evaluate_published_consume_rules: seqlock ---
+// publish_gamepad_consume_rules / evaluate_published_consume_rules: seqlock
 
 class ConsumeRulePublishTest : public ::testing::Test
 {
@@ -467,7 +467,7 @@ TEST_F(ConsumeRulePublishTest, ClearPublishesEmpty)
     EXPECT_EQ(evaluate_published_consume_rules(up), 0u);
 }
 
-// --- build_gamepad_consume_rules, via the InputPoller build+publish path ---
+// build_gamepad_consume_rules, via the InputPoller build+publish path
 
 class ConsumeRuleBuildTest : public ::testing::Test
 {
@@ -523,7 +523,7 @@ TEST_F(ConsumeRuleBuildTest, AnalogTriggerProducesNoRule)
     EXPECT_EQ(evaluate_published_consume_rules(lb), 0u);
 }
 
-// --- Live-hook lifecycle: window-procedure subclass and XInput inline hook ---
+// Live-hook lifecycle: window-procedure subclass and XInput inline hook
 //
 // These drive the real interceptors against a throwaway top-level window (and a loaded XInput runtime) owned by the
 // test process. They exercise the install/uninstall, self-heal, and message-routing branches that the pure

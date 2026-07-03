@@ -17,7 +17,7 @@
 
 using namespace DetourModKit;
 
-// --- Test event types ---
+// Test event types
 
 struct SimpleEvent
 {
@@ -29,7 +29,7 @@ struct StringEvent
     std::string message;
 };
 
-// --- Basic subscribe/emit ---
+// Basic subscribe/emit
 
 TEST(EventDispatcherTest, EmitWithNoSubscribers_DoesNothing)
 {
@@ -82,7 +82,7 @@ TEST(EventDispatcherTest, EmitPassesEventByConstRef)
     EXPECT_EQ(captured, "hello world");
 }
 
-// --- RAII Subscription ---
+// RAII Subscription
 
 TEST(EventDispatcherTest, SubscriptionUnsubscribesOnDestruction)
 {
@@ -169,7 +169,7 @@ TEST(EventDispatcherTest, DefaultConstructedSubscription_IsInactive)
     sub.reset(); // Must not crash
 }
 
-// --- Selective unsubscribe ---
+// Selective unsubscribe
 
 TEST(EventDispatcherTest, UnsubscribeOne_LeavesOthers)
 {
@@ -187,7 +187,7 @@ TEST(EventDispatcherTest, UnsubscribeOne_LeavesOthers)
     EXPECT_EQ(count_b, 1);
 }
 
-// --- Clear ---
+// Clear
 
 TEST(EventDispatcherTest, Clear_RemovesAllSubscribers)
 {
@@ -204,7 +204,7 @@ TEST(EventDispatcherTest, Clear_RemovesAllSubscribers)
     EXPECT_EQ(count, 0);
 }
 
-// --- emit_safe ---
+// emit_safe
 
 TEST(EventDispatcherTest, EmitSafe_CatchesHandlerExceptions)
 {
@@ -219,7 +219,7 @@ TEST(EventDispatcherTest, EmitSafe_CatchesHandlerExceptions)
     EXPECT_EQ(count, 1);
 }
 
-// --- Dispatcher destruction before Subscription ---
+// Dispatcher destruction before Subscription
 
 TEST(EventDispatcherTest, DispatcherDestroyedBeforeSubscription_SafeReset)
 {
@@ -234,7 +234,7 @@ TEST(EventDispatcherTest, DispatcherDestroyedBeforeSubscription_SafeReset)
     sub.reset(); // Safe: weak_ptr expired
 }
 
-// --- Multiple event types ---
+// Multiple event types
 
 TEST(EventDispatcherTest, IndependentDispatchers_DoNotInterfere)
 {
@@ -256,7 +256,7 @@ TEST(EventDispatcherTest, IndependentDispatchers_DoNotInterfere)
     EXPECT_EQ(str_count, 1);
 }
 
-// --- Concurrent emit ---
+// Concurrent emit
 
 TEST(EventDispatcherTest, ConcurrentEmit_NoDataRace)
 {
@@ -334,7 +334,7 @@ TEST(EventDispatcherTest, ConcurrentEmitAndSubscribe_NoDataRace)
     (void)emit_count;
 }
 
-// --- Reentrancy guard ---
+// Reentrancy guard
 
 TEST(EventDispatcherTest, SubscribeInsideHandler_IsRejected)
 {
@@ -408,7 +408,7 @@ TEST(EventDispatcherTest, EmitSafe_ReentrancyGuardAlsoApplies)
     EXPECT_EQ(dispatcher.subscriber_count(), 1u);
 }
 
-// --- Subscription order preserved after unsubscribe ---
+// Subscription order preserved after unsubscribe
 
 TEST(EventDispatcherTest, UnsubscribeMiddle_PreservesOrder)
 {
@@ -430,7 +430,7 @@ TEST(EventDispatcherTest, UnsubscribeMiddle_PreservesOrder)
     EXPECT_EQ(order[1], 3);
 }
 
-// --- Subscription vector in container ---
+// Subscription vector in container
 
 TEST(EventDispatcherTest, SubscriptionsInVector_CleanupOnClear)
 {
@@ -668,7 +668,7 @@ TEST(EventDispatcherTest, ConcurrentEmitWithInHandlerUnsubscribe_RemovedOnceNoSt
     keeper.reset();
 }
 
-// --- Lock-free empty fast path ---
+// Lock-free empty fast path
 
 TEST(EventDispatcherTest, EmptyFastPath_SkipsLock)
 {
@@ -695,7 +695,7 @@ TEST(EventDispatcherTest, EmptyFastPath_SkipsLock)
     EXPECT_EQ(dispatcher.debug_snapshot_use_count(), use_count_before);
 }
 
-// --- Snapshot stability: in-flight emit sees pre-subscribe snapshot ---
+// Snapshot stability: in-flight emit sees pre-subscribe snapshot
 
 TEST(EventDispatcherTest, SnapshotStability_DuringEmit)
 {
@@ -759,7 +759,7 @@ TEST(EventDispatcherTest, SnapshotStability_DuringEmit)
     EXPECT_EQ(new_calls.load(), 1);
 }
 
-// --- Snapshot reclamation: no leaked shared_ptr references after churn ---
+// Snapshot reclamation: no leaked shared_ptr references after churn
 
 TEST(EventDispatcherTest, SnapshotReclamation_NoLeak)
 {
