@@ -156,8 +156,8 @@ namespace DetourModKit
          *          Only the fields the active @ref kind uses are meaningful (the RipGlobal / CodeOperand ladder, the
          *          VtableIdentity mangled name, the StringXref facets, or the Manual literal); the rest keep their
          *          defaults. The two composite anchor kinds @ref anchor::AnchorKind::Quorum and
-         *          @ref anchor::AnchorKind::CallArgHome are deliberately not serializable here: a Quorum composes two
-         *          other anchors by pointer and CallArgHome has no resolver, so both stay in-code constructs gated
+         *          @ref anchor::AnchorKind::CallArgHome are deliberately not serializable here: a Quorum composes
+         *          voting members by pointer and CallArgHome has no resolver, so both stay in-code constructs gated
          *          through @ref anchor::evaluate_gate rather than the file.
          */
         struct SignatureRecord

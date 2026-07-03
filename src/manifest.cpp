@@ -201,7 +201,8 @@ namespace DetourModKit::manifest
         }
 
         // Accepts only the five serializable kinds; the composite Quorum and the resolver-less CallArgHome are in-code
-        // constructs (a Quorum composes two other anchors by pointer), so their tokens are rejected here on purpose.
+        // constructs (a Quorum composes its M voting sub-anchors by pointer), so their tokens are rejected here on
+        // purpose.
         [[nodiscard]] std::optional<anchor::AnchorKind> parse_anchor_kind(std::string_view token)
         {
             const std::string lowered = to_lower(trim(token));

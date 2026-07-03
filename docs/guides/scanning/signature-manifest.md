@@ -223,6 +223,6 @@ The defaults reject drift but tolerate an unset baseline, so an author who has n
 ## Boundaries
 
 - **Structural change (class 4).** If the function was inlined away, split, or removed, there is no site to bind and no data fixes it. The gate safe-disables; the fix is code.
-- **Composite anchor kinds.** `Quorum` composes two anchors by pointer and `CallArgHome` has no resolver, so neither is file-serializable. Keep them as in-code anchors and gate them directly with [`anchor::evaluate_gate`](anchors.md#gating-a-feature-on-drift-quality); `overlay` skips a composite default rather than mis-adopting it.
+- **Composite anchor kinds.** `Quorum` composes voting members by pointer and `CallArgHome` has no resolver, so neither is file-serializable. Keep them as in-code anchors and gate them directly with [`anchor::evaluate_gate`](anchors.md#gating-a-feature-on-drift-quality); `overlay` skips a composite default rather than mis-adopting it.
 - **Callback logic is code.** Only the bindings -- the register, the offset chain, the vtable slot, the pattern -- are data. What the mod does with the resolved value is always code.
 - **Fingerprints are per game build and platform.** The evidence hash is stable across runs and rebuilds on one platform, not across compilers, which matches how a mod ships one manifest per game version.
