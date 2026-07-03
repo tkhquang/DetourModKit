@@ -24,11 +24,14 @@ using DetourModKit::detail::GamepadSuppressState;
 using DetourModKit::detail::install_wndproc;
 using DetourModKit::detail::install_xinput;
 using DetourModKit::detail::MAX_GAMEPAD_CONSUME_RULES;
+using DetourModKit::detail::MAX_WHEEL_NOTCHES;
 using DetourModKit::detail::MAX_WHEEL_PENDING;
 using DetourModKit::detail::publish_gamepad_consume_rules;
 using DetourModKit::detail::publish_gamepad_suppress;
-using DetourModKit::detail::set_wheel_consume;
+using DetourModKit::detail::publish_wheel_consume;
 using DetourModKit::detail::step_gamepad_suppress;
+using DetourModKit::detail::wheel_direction_bit;
+using DetourModKit::detail::WheelDirection;
 using DetourModKit::detail::step_wheel_pulse;
 using DetourModKit::detail::take_wheel_counts;
 using DetourModKit::detail::uninstall;
@@ -126,8 +129,8 @@ TEST(InterceptControlTest, AccessorsAndSettersWithNothingInstalled)
         EXPECT_EQ(value, 0);
     }
 
-    set_wheel_consume(true);
-    set_wheel_consume(false);
+    publish_wheel_consume(wheel_direction_bit(WheelDirection::Up));
+    publish_wheel_consume(0);
     publish_gamepad_suppress(0x0001);
     publish_gamepad_suppress(0);
 
@@ -617,7 +620,7 @@ protected:
         uninstall(); // start from a known-clean interception state
         s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
         (void)take_wheel_counts();
-        set_wheel_consume(false);
+        publish_wheel_consume(0);
         m_hwnd = make_test_window();
         if (m_hwnd == nullptr)
         {
@@ -684,7 +687,7 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     EXPECT_EQ(counts[3], 1); // Right
 }
 
-TEST_F(InterceptWndProcTest, ConsumeSwallowsOwnedWheelMessages)
+TEST_F(InterceptWndProcTest, ConsumeSwallowsOnlyTheOwnedWheelDirection)
 {
     // Make the window's own procedure the predecessor the detour forwards to, so "was the game notified" is observable
     // via s_forwarded_wheel_msgs.
@@ -697,19 +700,48 @@ TEST_F(InterceptWndProcTest, ConsumeSwallowsOwnedWheelMessages)
     (void)take_wheel_counts();
 
     // Not consuming: the notch is latched for the poll loop AND forwarded to the game's procedure.
-    set_wheel_consume(false);
+    publish_wheel_consume(0);
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
     EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1);
     EXPECT_EQ(take_wheel_counts()[0], 1);
 
-    // Consuming: still latched for the poll loop, but swallowed so the game's
-    // procedure never sees it.
-    set_wheel_consume(true);
+    // Consume only the Up direction -- the mask a "Ctrl+WheelUp" binding publishes while Ctrl is held. The Up notch is
+    // still latched for the poll loop, but swallowed so the game's procedure never sees it.
+    publish_wheel_consume(wheel_direction_bit(WheelDirection::Up));
     SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
-    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1); // unchanged
+    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 1); // unchanged: Up was swallowed
     EXPECT_EQ(take_wheel_counts()[0], 1);
 
-    set_wheel_consume(false);
+    // A Down notch is not owned by the Up-only mask, so it must still reach the game. This is the important
+    // per-direction invariant: consuming one wheel direction must not suppress the others.
+    SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(-1), 0);
+    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), 2); // Down forwarded to the game
+    EXPECT_EQ(take_wheel_counts()[1], 1);
+
+    publish_wheel_consume(0);
+}
+
+TEST_F(InterceptWndProcTest, WheelCounterSaturatesWhenNotDrained)
+{
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    (void)take_wheel_counts(); // start from a clean slate
+
+    // Reproduce the idle-accretion case: the subclass stays installed but nothing drains the counter (the poll loop's
+    // take_wheel_counts is gated on live wheel bindings, so once the last wheel binding is removed the counter is no
+    // longer drained). Drive far more Up notches than the cap without draining between them; the counter must saturate
+    // at MAX_WHEEL_NOTCHES rather than continuing toward signed overflow.
+    const int overshoot = MAX_WHEEL_NOTCHES + 128;
+    for (int i = 0; i < overshoot; ++i)
+    {
+        SendMessageW(m_hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0);
+    }
+    const auto counts = take_wheel_counts();
+    EXPECT_EQ(counts[0], MAX_WHEEL_NOTCHES) << "idle wheel counter must saturate at the cap, not accrete every notch";
+    // The drain exchanged the slot to zero, so a second drain reads clean -- saturation did not wedge the counter.
+    EXPECT_EQ(take_wheel_counts()[0], 0);
 }
 
 TEST_F(InterceptWndProcTest, WmNcDestroySelfHealsAndAllowsResubclass)
@@ -849,6 +881,72 @@ TEST(InterceptXInputTest, InstallHooksExportAndTrampolineRoundTrips)
     FreeLibrary(xinput);
 }
 
+TEST(InterceptXInputTest, UninstallQuiescesInFlightDetoursUnderConcurrentCallers)
+{
+    HMODULE xinput = nullptr;
+    for (const wchar_t *name : {L"xinput1_4.dll", L"xinput1_3.dll", L"xinput9_1_0.dll"})
+    {
+        xinput = LoadLibraryW(name);
+        if (xinput != nullptr)
+        {
+            break;
+        }
+    }
+    if (xinput == nullptr)
+    {
+        GTEST_SKIP() << "no XInput runtime available on this host";
+    }
+
+    const auto get_state =
+        reinterpret_cast<XInputGetStateFn>(reinterpret_cast<void *>(GetProcAddress(xinput, "XInputGetState")));
+    ASSERT_NE(get_state, nullptr);
+
+    // Install the hook, drive the hooked export from several threads, then signal them to stop and immediately
+    // uninstall before joining. Some callers may still be inside the detour body at the instant teardown begins, so the
+    // retired-trampoline plus in-flight drain path is exercised without creating an endless stream of new prologue
+    // entrants while SafetyHook is restoring the target. A regression surfaces as an access violation, so surviving the
+    // rounds cleanly is the assertion.
+    for (int round = 0; round < 5; ++round)
+    {
+        uninstall();
+        ASSERT_TRUE(install_xinput(0));
+
+        std::atomic<bool> stop{false};
+        std::atomic<int> started{0};
+        std::vector<std::thread> callers;
+        for (int t = 0; t < 3; ++t)
+        {
+            callers.emplace_back(
+                [&]
+                {
+                    XINPUT_STATE state{};
+                    started.fetch_add(1, std::memory_order_release);
+                    while (!stop.load(std::memory_order_acquire))
+                    {
+                        // Routes through the detour while installed, and through the restored real export after
+                        // uninstall; both must be crash-free.
+                        (void)get_state(0, &state);
+                    }
+                });
+        }
+
+        ASSERT_TRUE(wait_until([&] { return started.load(std::memory_order_acquire) == 3; },
+                               std::chrono::seconds(5)));
+        // Give the callers time to be actively cycling through the detour, then stop new calls and tear it down before
+        // joining so any caller already in the detour must quiesce safely.
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        stop.store(true, std::memory_order_release);
+        uninstall();
+        for (auto &caller : callers)
+        {
+            caller.join();
+        }
+    }
+
+    EXPECT_FALSE(xinput_installed());
+    FreeLibrary(xinput);
+}
+
 TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
 {
     // Reproduces the Logic-DLL hot-reload path: a consume wheel binding arms the wheel-swallow flag, and
@@ -928,6 +1026,74 @@ TEST(InterceptDisarmTest, PollerDisarmsWheelConsumeAfterClearBindings)
         },
         std::chrono::seconds(5));
     EXPECT_TRUE(consume_disarmed);
+
+    cleanup();
+}
+
+TEST(InterceptDisarmTest, PollerConsumeSwallowsOnlyTheBoundWheelDirection)
+{
+    // End-to-end proof of the per-direction wheel consume through the poll loop: a consume binding on WheelUp must
+    // swallow Up notches while leaving WheelDown notches reaching the game. This exercises the poll loop's wheel_owned
+    // accumulation (Up binding -> Up bit only) plus the detour's per-direction gate together.
+    uninstall();
+    s_forwarded_wheel_msgs.store(0, std::memory_order_relaxed);
+
+    HWND hwnd = make_test_window();
+    if (hwnd == nullptr)
+    {
+        GTEST_SKIP() << "no window station available to create a top-level window";
+    }
+    const LONG_PTR predecessor = reinterpret_cast<LONG_PTR>(&recording_wndproc);
+    SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+
+    // require_focus=false keeps process_focused true so the consume mask is published regardless of foreground owner.
+    detail::InputBinding binding;
+    binding.name = "wheel_up_zoom";
+    binding.keys = {mouse_wheel(WheelCode::Up)};
+    binding.consume = true;
+    binding.trigger = input::Trigger::Press;
+
+    std::vector<detail::InputBinding> bindings;
+    bindings.push_back(std::move(binding));
+    detail::InputPoller poller(std::move(bindings), std::chrono::milliseconds(2), false);
+    poller.start();
+
+    const auto cleanup = [&]() noexcept
+    {
+        poller.shutdown();
+        uninstall();
+        if (IsWindow(hwnd))
+        {
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, predecessor);
+            DestroyWindow(hwnd);
+        }
+    };
+
+    const bool hooked_ours =
+        wait_until([&] { return wndproc_installed() && GetWindowLongPtrW(hwnd, GWLP_WNDPROC) != predecessor; },
+                   std::chrono::seconds(5));
+    if (!hooked_ours)
+    {
+        cleanup();
+        GTEST_SKIP() << "poll thread did not subclass the test window";
+    }
+
+    // Wait until the Up swallow engages: an Up notch stops reaching the game's predecessor procedure.
+    const bool up_consumed = wait_until(
+        [&]
+        {
+            const int before = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
+            SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(1), 0); // Up
+            return s_forwarded_wheel_msgs.load(std::memory_order_relaxed) == before;
+        },
+        std::chrono::seconds(5));
+    EXPECT_TRUE(up_consumed);
+
+    // A Down notch is not owned by the Up binding, so it must still reach the game even while Up is being swallowed.
+    const int before_down = s_forwarded_wheel_msgs.load(std::memory_order_relaxed);
+    SendMessageW(hwnd, WM_MOUSEWHEEL, wheel_wparam(-1), 0); // Down
+    EXPECT_EQ(s_forwarded_wheel_msgs.load(std::memory_order_relaxed), before_down + 1)
+        << "Down notch must reach the game while only Up is consumed (per-direction wheel consume)";
 
     cleanup();
 }

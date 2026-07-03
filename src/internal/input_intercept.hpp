@@ -222,6 +222,39 @@ namespace DetourModKit::detail
     // --- Mouse-wheel capture (window-procedure subclass) ---
 
     /**
+     * @brief Wheel direction bit positions in the per-direction consume mask.
+     * @details A single wheel message carries exactly one direction. The bit order matches WheelPulseState / the
+     *          s_wheel_count slots (0=Up, 1=Down, 2=Left, 3=Right) so the poll loop, the pulse machine, and the detour
+     *          agree on indexing.
+     */
+    enum class WheelDirection : uint8_t
+    {
+        Up = 1u << 0,
+        Down = 1u << 1,
+        Left = 1u << 2,
+        Right = 1u << 3,
+    };
+
+    /// Returns the mask bit for a wheel direction.
+    [[nodiscard]] constexpr uint8_t wheel_direction_bit(WheelDirection direction) noexcept
+    {
+        return static_cast<uint8_t>(direction);
+    }
+
+    /**
+     * @brief Hard ceiling on the raw per-direction wheel-notch counter the WndProc detour accumulates.
+     * @details The detour increments a counter per wheel notch and the poll loop drains it with take_wheel_counts, but
+     *          only while a wheel binding exists. Once the last wheel binding is removed the poll loop stops draining
+     *          (its drain is gated on live wheel bindings) yet the subclass stays installed until shutdown, so the
+     *          counter would otherwise accrete every idle notch until it overflows a signed int (undefined behavior)
+     *          and violates the bounded-backlog rule. Saturating the raw counter at the write site bounds it
+     *          regardless of poll-thread liveness (a stalled thread never drains either). The ceiling is far above any
+     *          real burst a single poll interval can accumulate -- the pulse backlog itself caps at MAX_WHEEL_PENDING
+     *          -- so a legitimate fast scroll is never truncated; only the pathological idle-accretion case saturates.
+     */
+    inline constexpr int MAX_WHEEL_NOTCHES = 1024;
+
+    /**
      * @brief Installs the window-procedure subclass on the game's main window.
      * @details Idempotent. Returns false without side effects if no suitable top-level window owned by this process is
      *          found yet, so the caller can retry on a later poll cycle.
@@ -239,11 +272,15 @@ namespace DetourModKit::detail
     [[nodiscard]] std::array<int, 4> take_wheel_counts() noexcept;
 
     /**
-     * @brief Sets whether the wheel detour swallows owned wheel messages.
-     * @param consume When true, intercepted wheel messages are not forwarded to the game so a binding that owns the
-     *                wheel does not double-act.
+     * @brief Publishes the set of wheel directions the WndProc detour should swallow this cycle.
+     * @details Uses a per-direction mask so a chord such as "Ctrl+WheelUp" eats neither a bare WheelDown nor an
+     *          unmodified WheelUp. The poll loop evaluates each consume wheel binding's modifiers every cycle and
+     *          unions the owned direction bits (see WheelDirection). Like the gamepad reactive suppression mask, the
+     *          detour only swallows a message whose own direction bit is set. A short time-to-live is refreshed
+     *          alongside a non-zero mask so a stalled poll thread stops swallowing and the game regains its wheel.
+     * @param direction_mask OR of WheelDirection bits to swallow; 0 forwards every wheel message.
      */
-    void set_wheel_consume(bool consume) noexcept;
+    void publish_wheel_consume(uint8_t direction_mask) noexcept;
 
     /**
      * @brief Tears down both interceptors and stops all masking.
@@ -252,9 +289,11 @@ namespace DetourModKit::detail
      *          bytes) under a transiently registered vectored exception handler that relocates the instruction pointer
      *          of any thread caught executing inside the patched range -- it does not suspend threads. Registering
      *          process-global VEH machinery and rewriting live code pages this way must not run under the loader lock.
-     *          The poll thread is additionally the sole reader of the trampoline pointers, so it has to be joined
-     *          first. On the loader-lock teardown path this is intentionally skipped (the detours stay installed
-     *          against the pinned module). Idempotent.
+     *          The poll thread has to be joined first because it reads the XInput trampoline directly; game threads may
+     *          still enter the detours until the hooks are removed, so uninstall retires the published trampoline
+     *          pointers and drains in-flight detour bodies before destroying the hook objects. On the loader-lock
+     *          teardown path this is intentionally skipped (the detours stay installed against the pinned module).
+     *          Idempotent.
      */
     void uninstall() noexcept;
 

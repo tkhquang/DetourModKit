@@ -200,6 +200,11 @@ namespace DetourModKit
      *
      * @param name The input name to resolve.
      * @return std::optional<InputCode> The resolved code, or std::nullopt if unrecognized.
+     * @note A bare (untagged) hex token such as "0xFF" is not recognized here and yields std::nullopt: this resolver
+     *       handles named keys and source-tagged hex only. The config combo parser used by config::bind_combos is the
+     *       path that reconstructs a bare-hex token, defaulting it to the Keyboard source. So parse_input_name is the
+     *       inverse of format_input_code for a named or non-keyboard off-table code, but not for a bare-hex keyboard
+     *       code.
      */
     [[nodiscard]] std::optional<InputCode> parse_input_name(std::string_view name);
 
@@ -214,8 +219,12 @@ namespace DetourModKit
      * @brief Formats an InputCode as a human-readable string.
      * @details Returns the canonical name if the code is in the lookup table. Off-table codes fall back to hex: a
      *          Keyboard code emits bare hex ("0x72"), while any other source is tagged with its device name
-     *          ("Mouse:0xFE", "Gamepad:0x800") so the source is not lost and parse_input_name can reconstruct the same
-     *          code on a config round-trip. Untagged bare hex always parses back as Keyboard.
+     *          ("Mouse:0xFE", "Gamepad:0x800") so the source is not lost. The two off-table forms reconstruct through
+     *          different readers: a source-tagged token round-trips through parse_input_name (which recognizes the
+     *          tag), whereas a bare-hex Keyboard token round-trips through the config combo parser used by
+     *          config::bind_combos, whose untagged-hex fallback defaults to the Keyboard source. parse_input_name
+     *          deliberately treats a bare-hex token as unresolved (it returns nullopt), so the config parser -- not
+     *          parse_input_name -- is the named reconstruction path for a bare-hex keyboard binding.
      * @param code The input code to format.
      * @return std::string Formatted string.
      */

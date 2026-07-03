@@ -50,10 +50,13 @@ namespace DetourModKit
         {
             /**
              * @brief Parses a comma-separated string of input tokens into a vector of InputCodes.
-             * @details Each token is first matched against the named key table (case-insensitive). If no name matches,
-             *          the token is parsed as a hexadecimal VK code (with or without 0x prefix), defaulting to
-             *          InputSource::Keyboard. Handles inline semicolon comments, whitespace, and gracefully skips
-             *          invalid tokens.
+             * @details Each token is first matched against the named key table and source-tagged hex via
+             *          parse_input_name (case-insensitive). If that yields nothing, the token is parsed as a bare
+             *          hexadecimal VK code (with or without 0x prefix), defaulting to InputSource::Keyboard. That
+             *          bare-hex fallback is the reconstruction path for format_input_code's bare-hex keyboard form
+             *          (e.g. "0xFF" -> Keyboard 0xFF): parse_input_name alone returns nullopt for a bare-hex token, so
+             *          this parser -- not parse_input_name -- closes the keyboard round-trip. Handles inline semicolon
+             *          comments, whitespace, and gracefully skips invalid tokens.
              * @param input The raw string to parse.
              * @return std::vector<InputCode> Parsed valid input codes.
              */
