@@ -197,6 +197,16 @@ Mid hook tests that modify registers (`gpr(ctx, Gpr::Rcx)`, `gpr(ctx, Gpr::Rdx)`
 #endif
 ```
 
+### Fault-injection tests (`tests/fault/`, standalone runner)
+
+A test that must observe a guarded primitive contain a real hardware fault needs a committed `PAGE_NOACCESS` page held until process teardown (never `MEM_RELEASE`d, so a recycled virtual address cannot flake the fault onto live memory). These fixtures do **not** join the `tests/test_*.cpp` glob: adding a file there forces a `CONFIGURE_DEPENDS` reconfigure that rebuilds the main C++23 test target. Instead:
+
+- Reusable fixtures live in [`tests/fixtures/fault_injection.hpp`](../../tests/fixtures/fault_injection.hpp): `dmk_test::NoAccessPage` (a leaked-on-purpose committed no-access page) and `dmk_test::ProtectedPage` (a page pinned to a chosen protection, with `current_protection()` for asserting a fault path restored it).
+- Fault TUs live in `tests/fault/test_*.cpp` and are built + run by [`scripts/run_fault_tests.sh`](../../scripts/run_fault_tests.sh): `bash scripts/run_fault_tests.sh`. The runner standalone-links a fault-test executable against the prebuilt `libDetourModKit.a` (rebuild just that target with `cmake --build build/mingw-debug --target DetourModKit` after any `src/` change). A new fault TU is picked up automatically -- no reconfigure.
+- Inject the fault into the **foreign target** a guard actually arms (the target of a read / walk / in-place write), not a write's caller-owned source: the MinGW vectored guard confines its claim to the target range and lets a fault outside it reach the host, so a faulting source is a caller-contract violation that crashes rather than failing closed (MSVC's whole-copy `__try` catches it only incidentally). This is also why the escalating write slow-path copy-fault arm is not deterministic single-threaded -- once the slow path has made the target writable, only a concurrent reprotect can fault the copy.
+
+`tests/fault/test_fault_containment.cpp` proves guarded read, pointer-chain walk, and `write_in_place` all fail closed against a no-access page, plus the deterministic escalating write slow-path protection restore.
+
 ## Test Naming Conventions
 
 ```cpp

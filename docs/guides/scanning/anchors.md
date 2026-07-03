@@ -103,17 +103,44 @@ for (std::size_t i = 0; i < n; ++i)
 {
     const auto &r = report[i];
     if (r.status != an::AnchorStatus::Resolved)
-        log.warning("anchor {}: {}", r.label, an::anchor_status_to_string(r.status));
+        log().warning("anchor {}: {}", r.label, an::anchor_status_to_string(r.status));
     else if (r.kind == an::AnchorKind::Manual)
-        log.warning("anchor {}: pinned literal {:#x} (cannot self-heal)", r.label, r.value);
+        log().warning("anchor {}: pinned literal {:#x} (cannot self-heal)", r.label, r.value);
     else
-        log.info("anchor {}: {:#x}", r.label, r.value);
+        log().info("anchor {}: {:#x}", r.label, r.value);
 }
 ```
 
 Every backend already fails closed, so a missing constant surfaces as `AnchorStatus::Failed` (no value invented), and `Manual` anchors stand out as the ones a future patch can silently break.
 
 `anchor::assess_quality(report)` rolls the same `ResolvedAnchor[]` into an `AnchorQuality` summary in one pass (no re-resolve): how many resolved, failed, are pinned `Manual` literals that cannot self-heal (`manual_at_risk`), or are corroborated quorums (the strongest evidence). It is a cheap, allocation-free way to gate "is this manifest healthy enough to run?" or to log a one-line robustness snapshot per build. The same summary is what `diagnostics::collect(drift_report, anchor_report)` folds into its `Snapshot.anchor_quality` field.
+
+## Gating a feature on drift quality
+
+Telemetry alone only describes health. `anchor::evaluate_gate` turns it into a decision, so startup can safe-disable a feature when its anchors did not resolve well enough instead of patching the game on addresses the manifest could not verify:
+
+```cpp
+// Resolve only the anchors this one feature depends on into its own report...
+an::ResolvedAnchor report[std::size(camera_anchors)]{};
+const std::size_t n = an::resolve_all(camera_anchors, report);
+
+// ...then gate it. The default policy fails closed: every resolvable anchor must heal, zero failures.
+switch (an::evaluate_gate(std::span{report, n}))
+{
+case an::GateVerdict::Pass:
+    enable_camera_tweak();
+    break;
+case an::GateVerdict::Degraded:
+    log().warning("camera tweak: pinned offset at risk");
+    enable_camera_tweak();
+    break;
+case an::GateVerdict::Fail:
+    log().error("camera tweak disabled: signatures drifted");
+    break;
+}
+```
+
+Because the gate reads a report (or a sub-span of one), feature-granular gating is just a matter of which anchors you resolve into which report: one primitive serves both a whole-manifest health check and a per-feature kill switch. A `GatePolicy` tunes the thresholds -- `min_resolved_ratio` (the fraction of *resolvable* anchors that must resolve; the unsupported `CallArgHome` kind is excluded from the denominator so a forward-compatible declaration never drags the score down), `max_failed` (a hard cap on `Failed` + `QuorumNotIndependent`), and `manual_at_risk_degrades` (whether a resolved-but-pinned `Manual` literal downgrades `Pass` to `Degraded`). A cosmetic overlay can afford a lower ratio than a frame-time camera patch that writes a live pointer, so hold one policy per feature. An empty report or a report with only unsupported anchors has nothing assessable and returns `Degraded`, never a false `Pass`.
 
 ## Anchor fingerprints
 

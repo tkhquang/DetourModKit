@@ -1347,6 +1347,6 @@ TEST(StringXrefIncompleteGate, FaultedWindowForcesAmbiguousNeverFalselyUnique)
     }
 
     EXPECT_TRUE(saw_fail_closed) << "the concurrent fault never landed inside a scan window, so the incompleteness "
-                                   "gate was never exercised; raise the iteration budget or window size.";
+                                    "gate was never exercised; raise the iteration budget or window size.";
 }
 #endif // _MSC_VER || _WIN64
