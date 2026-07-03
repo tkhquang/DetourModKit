@@ -301,7 +301,10 @@ namespace DetourModKit
          *          Everything that could resolve but did not -- a Failed anchor, a QuorumNotIndependent one, or an
          *          untouched Unresolved slot -- stays in the denominator, so a partial resolve fails closed. A report
          *          with nothing to assess (empty, or every anchor unsupported) is @ref GateVerdict::Degraded rather than
-         *          a false Pass. Allocation-free and side-effect-free.
+         *          a false Pass. Because this overload is public, a hand-built @ref AnchorQuality whose status counts
+         *          exceed @ref AnchorQuality::total is rejected as internally inconsistent and fails closed to @ref
+         *          GateVerdict::Fail, so a caller assembling a summary directly cannot inflate the resolved count past a
+         *          threshold. Allocation-free and side-effect-free.
          */
         [[nodiscard]] GateVerdict evaluate_gate(const AnchorQuality &quality, const GatePolicy &policy = {}) noexcept;
 

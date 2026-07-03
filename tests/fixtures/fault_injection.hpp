@@ -14,6 +14,11 @@
 #include <cstdint>
 #include <cstring>
 
+// The whole fixture body is Windows-only (VirtualAlloc / VirtualProtect / VirtualQuery). The library targets Win64
+// only, so this header is only ever compiled on Windows, but per the header-cleanliness rule the Windows-only content
+// is still guarded so a non-Windows toolchain sees an empty header rather than a hard include error.
+#ifdef _WIN32
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -139,8 +144,10 @@ namespace dmk_test
         }
 
     private:
-        std::byte *m_base = nullptr;
+        std::byte *m_base{nullptr};
     };
 } // namespace dmk_test
+
+#endif // _WIN32
 
 #endif // DETOURMODKIT_TEST_FAULT_INJECTION_HPP
