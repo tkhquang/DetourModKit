@@ -27,32 +27,49 @@ namespace DetourModKit
 {
     namespace
     {
-        // Scan one protection-gated region for the next needed match, decrementing matches_remaining for each non-self
-        // match. Returns the resolved address (match + pattern.offset) when the Nth match lands in this region, or
+        // Scan one protection-gated region for the next needed match, decrementing matches_remaining for each counted,
+        // non-self match. Returns the resolved point (offset-applied) when the Nth match lands in this region, or
         // nullptr when the region is exhausted first. This is the body the TOCTOU fault guard wraps (see
         // scan_region_guarded): it performs the unguarded find_pattern_raw reads (memchr prefilter + SIMD verify)
         // across [region_start, +scan_size).
+        //
+        // count_floor is the address below which matches were already tallied by an earlier region in this contiguous
+        // accepted run. When a region is back-extended over a protection split, it re-reads the tail of the previous
+        // region to catch a match straddling the boundary; a match that ended inside that tail (end <= count_floor) was
+        // already counted there, so it is skipped here. A match reaching past count_floor (end > count_floor) either
+        // straddles into this region or lies in it, and is counted. For a non-overlapped region count_floor equals its
+        // start, so every match reaches past it and all are counted -- identical to a jump-free scan. Comparing
+        // the match's true end (RawMatch::end), not a fixed pattern length, is what keeps this correct for a
+        // variable-length bounded-jump match, where a fixed-length overlap would double-count a short match near the
+        // boundary.
         const std::byte *scan_region_for_match(const std::byte *region_start, std::size_t scan_size,
                                                const detail::EnginePattern &pattern, std::uintptr_t needle_lo,
-                                               std::uintptr_t needle_hi, std::size_t &matches_remaining) noexcept
+                                               std::uintptr_t needle_hi, std::uintptr_t count_floor,
+                                               std::size_t &matches_remaining) noexcept
         {
-            const std::byte *match = detail::find_pattern_raw(region_start, scan_size, pattern);
-            while (match != nullptr)
+            detail::RawMatch match = detail::find_pattern_raw(region_start, scan_size, pattern);
+            while (match.start != nullptr)
             {
-                const auto match_addr = reinterpret_cast<std::uintptr_t>(match);
-                const bool self_match = match_addr < needle_hi && (match_addr + pattern.size()) > needle_lo;
-                if (!self_match)
+                const auto match_addr = reinterpret_cast<std::uintptr_t>(match.start);
+                const auto match_end = reinterpret_cast<std::uintptr_t>(match.end);
+                // The match spans [match_addr, match_end); it overlaps the needle's own bytes buffer iff those ranges
+                // intersect. Using the true end (not a fixed pattern length) keeps this exact for a jump match.
+                const bool self_match = match_addr < needle_hi && match_end > needle_lo;
+                // A match ending at or before the count floor lay wholly in already-scanned bytes and was counted
+                // there.
+                const bool already_counted = match_end <= count_floor;
+                if (!self_match && !already_counted)
                 {
                     --matches_remaining;
                     if (matches_remaining == 0)
-                        return match + pattern.offset;
+                        return match.point;
                 }
 
-                // Continue scanning past the current match.
-                const std::size_t consumed = static_cast<std::size_t>(match - region_start) + 1;
+                // Continue scanning past the current match START (not its variable end).
+                const std::size_t consumed = static_cast<std::size_t>(match.start - region_start) + 1;
                 if (consumed >= scan_size)
                     break;
-                match = detail::find_pattern_raw(match + 1, scan_size - consumed, pattern);
+                match = detail::find_pattern_raw(match.start + 1, scan_size - consumed, pattern);
             }
             return nullptr;
         }
@@ -69,8 +86,8 @@ namespace DetourModKit
         // fault was swallowed.
         const std::byte *scan_region_guarded(const std::byte *region_start, std::size_t scan_size,
                                              const detail::EnginePattern &pattern, std::uintptr_t needle_lo,
-                                             std::uintptr_t needle_hi, std::size_t &matches_remaining,
-                                             bool &out_faulted) noexcept
+                                             std::uintptr_t needle_hi, std::uintptr_t count_floor,
+                                             std::size_t &matches_remaining, bool &out_faulted) noexcept
         {
             // A 64-bit target is guaranteed by the single architecture gate in defines.hpp (a 32-bit or non-x86
             // configure fails there with one clear #error), so this function carries only the two supported x64 arms:
@@ -81,7 +98,8 @@ namespace DetourModKit
             const std::size_t original_matches_remaining = matches_remaining;
             __try
             {
-                return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, matches_remaining);
+                return scan_region_for_match(region_start, scan_size, pattern, needle_lo, needle_hi, count_floor,
+                                             matches_remaining);
             }
             __except (detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
                                                                         : EXCEPTION_CONTINUE_SEARCH)
@@ -104,17 +122,19 @@ namespace DetourModKit
                 const detail::EnginePattern *pattern;
                 std::uintptr_t needle_lo;
                 std::uintptr_t needle_hi;
+                std::uintptr_t count_floor;
                 std::size_t *matches_remaining;
                 const std::byte *result;
-            } scan_ctx{region_start, scan_size, &pattern, needle_lo, needle_hi, &matches_remaining, nullptr};
+            } scan_ctx{region_start, scan_size,   &pattern,           needle_lo,
+                       needle_hi,    count_floor, &matches_remaining, nullptr};
 
             const std::size_t original_matches_remaining = matches_remaining;
             const auto run_scan = [](void *opaque) noexcept -> void
             {
                 auto *context = static_cast<ScanContext *>(opaque);
-                context->result =
-                    scan_region_for_match(context->region_start, context->scan_size, *context->pattern,
-                                          context->needle_lo, context->needle_hi, *context->matches_remaining);
+                context->result = scan_region_for_match(context->region_start, context->scan_size, *context->pattern,
+                                                        context->needle_lo, context->needle_hi, context->count_floor,
+                                                        *context->matches_remaining);
             };
 
             const auto span_lo = reinterpret_cast<std::uintptr_t>(region_start);
@@ -145,14 +165,17 @@ namespace DetourModKit
         // modifier bit OR-ed onto a base value (a guarded read-only page reads as PAGE_READONLY | PAGE_GUARD), so it
         // must be excluded separately or it would satisfy the mask and be scanned.
         //
-        // Each region is scanned through the raw helper so the final `+ pattern.offset` applies exactly once. To find a
-        // signature that straddles a protection split -- two adjacent accepted regions VirtualQuery reports separately
-        // because their base protections differ (a sibling VirtualProtect carving part of .text into
-        // PAGE_EXECUTE_READWRITE is the canonical case; VirtualQuery never coalesces regions with differing
-        // attributes) -- each accepted region's scan is extended back by up to pattern_size - 1 bytes into the
-        // contiguous run of already-accepted regions it abuts. The overlap is capped at pattern_size - 1 so a match
-        // lying wholly inside the previous region (already counted there) can never be re-counted here, and bounded by
-        // the run start so it never reads past the bytes the per-region gate proved readable.
+        // Each region is scanned through the raw helper, which bakes the `+ pattern.offset` into the returned point so
+        // it applies exactly once. To find a signature that straddles a protection split -- two adjacent accepted
+        // regions VirtualQuery reports separately because their base protections differ (a sibling VirtualProtect
+        // carving part of .text into PAGE_EXECUTE_READWRITE is the canonical case; VirtualQuery never coalesces regions
+        // with differing attributes) -- each accepted region's scan is extended back by up to max_match_length() - 1
+        // bytes (the longest span a match can occupy; for a plain pattern just its length) into the contiguous run of
+        // already-accepted regions it abuts, bounded by the run start so it never reads past the bytes the per-region
+        // gate proved readable. A match wholly inside the previous region (already counted there) is not re-counted:
+        // scan_region_for_match receives the region's true start as a count floor and counts only a match whose end
+        // reaches past it. The floor, not the carry width, is what prevents a double count, which is why a
+        // variable-length bounded-jump match stays correctly counted across the split.
         const std::byte *scan_regions_filtered(const detail::EnginePattern &pattern, std::size_t occurrence,
                                                DWORD accept_mask, std::uintptr_t window_lo, std::uintptr_t window_hi,
                                                bool &out_incomplete) noexcept
@@ -239,14 +262,19 @@ namespace DetourModKit
                         run_lo = scan_lo;
                     }
 
-                    // Extend the scan back by up to pattern_size - 1 bytes into the contiguous accepted run so a match
-                    // that begins in the previous region's tail and ends in this one is found. Bounded by run_lo so the
-                    // read stays inside already-gated bytes; capped at pattern_size - 1 so an interior match is not
-                    // re-counted.
+                    // Extend the scan back into the contiguous accepted run so a match that begins in the previous
+                    // region's tail and ends in this one is found. The carry is max_match_length() - 1, the longest
+                    // span a match can occupy minus one (for a plain pattern that is just size() - 1, so the common
+                    // case is unchanged; a bounded-jump match can span farther, so its carry is wider). Bounded by
+                    // run_lo so the read stays inside already-gated bytes. Re-counting an interior match that lies
+                    // wholly in the previous region is prevented by the count floor (scan_lo) passed below, not by the
+                    // carry width -- a variable-length match needs the explicit floor because a fixed carry cannot both
+                    // catch a long straddling match and exclude a short interior one.
                     std::uintptr_t effective_scan_lo = scan_lo;
-                    if (pattern.size() > 1 && scan_lo > run_lo)
+                    const std::size_t match_span = pattern.max_match_length();
+                    if (match_span > 1 && scan_lo > run_lo)
                     {
-                        const std::uintptr_t max_overlap = static_cast<std::uintptr_t>(pattern.size() - 1);
+                        const std::uintptr_t max_overlap = static_cast<std::uintptr_t>(match_span - 1);
                         const std::uintptr_t available = scan_lo - run_lo;
                         effective_scan_lo = scan_lo - ((max_overlap < available) ? max_overlap : available);
                     }
@@ -258,10 +286,12 @@ namespace DetourModKit
 
                         // The protection gate above proved the region readable at gate time; scan_region_guarded
                         // backstops a concurrent decommit / reprotect that could fault the read after the gate (a
-                        // TOCTOU the gate cannot close). A faulted region is skipped and counted, not fatal.
+                        // TOCTOU the gate cannot close). A faulted region is skipped and counted, not fatal. scan_lo is
+                        // the count floor: matches that ended before it were already tallied by the previous region.
                         bool region_faulted = false;
-                        const std::byte *result = scan_region_guarded(region_start, scan_size, pattern, needle_lo,
-                                                                      needle_hi, matches_remaining, region_faulted);
+                        const std::byte *result =
+                            scan_region_guarded(region_start, scan_size, pattern, needle_lo, needle_hi, scan_lo,
+                                                matches_remaining, region_faulted);
                         if (result != nullptr)
                         {
                             report_faulted_regions();
