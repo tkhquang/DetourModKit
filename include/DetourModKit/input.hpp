@@ -302,9 +302,12 @@ namespace DetourModKit
          * @class Input
          * @brief Process singleton that owns the poll thread, the binding set, and the interception layer.
          * @details Unifies the binding-management facade and the polling engine behind one entry point. Bindings may be
-         *          registered before or after start(); a post-start registration is appended to the live set and fires
-         *          on the next poll cycle. The interception layer (mouse-wheel capture and gamepad passthrough
-         *          suppression) is process-global and single-owner, which is why a single Input instance owns it.
+         *          registered before or after start(); a registration made while the engine is running is appended to
+         *          the live set and fires on the next poll cycle, while one made before the engine exists is staged.
+         *          A start() with no staged bindings builds no poll thread and stays not-running, so registrations made
+         *          after such an empty start() remain staged until the next start() builds the engine (see start()).
+         *          The interception layer (mouse-wheel capture and gamepad passthrough suppression) is process-global
+         *          and single-owner, which is why a single Input instance owns it.
          *
          * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. Joining the poll thread under the
          *          Windows loader lock would deadlock; shutdown() detects the loader lock and detaches against a pinned
@@ -340,9 +343,11 @@ namespace DetourModKit
 
             /**
              * @brief Registers one binding from a ComboBinding and returns a guard that owns its callback's lifetime.
-             * @details Materializes one engine entry per combo, all sharing binding.name (OR logic). Works before or
-             *          after start(); a post-start registration fires on the next cycle. An empty combos list registers
-             *          an inert but addressable binding (rebind can populate it later) and still returns a valid guard.
+             * @details Materializes one entry per combo, all sharing binding.name (OR logic). A registration made while
+             *          the engine is running is forwarded live and fires on the next cycle; one made before the engine
+             *          exists -- before the first start(), or after a start() that had nothing to seed and so built no
+             *          engine -- is staged and applies on the next start(). An empty combos list registers an inert but
+             *          addressable binding (rebind can populate it later) and still returns a valid guard.
              * @param binding The binding description (moved).
              * @return A BindingGuard on success, or ErrorCode::OutOfMemory if registration could not allocate. A null
              *         callback is accepted: the binding becomes inert but stays name-addressable (a common pattern for
@@ -353,8 +358,12 @@ namespace DetourModKit
 
             /**
              * @brief Builds the poll engine with the given settings and starts the poll thread.
-             * @details Bindings registered before start() seed the engine; later registrations are forwarded live.
-             *          Calling start() while already running is a no-op success.
+             * @details Bindings staged before start() seed the engine; once running, later registrations are forwarded
+             *          live. Calling start() while already running is a no-op success. A start() with nothing staged is
+             *          also a no-op success: it builds no poll thread and is_running() stays false, because there is
+             *          nothing to poll. The engine is constructed by the first start() that has at least one staged
+             *          binding, so a bindings-after-empty-start() sequence takes effect only on that later start(),
+             *          never retroactively on the empty one.
              * @param settings Poll cadence, focus gate, and gamepad tuning.
              * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed.
              */
