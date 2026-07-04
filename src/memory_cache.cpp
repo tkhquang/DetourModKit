@@ -43,8 +43,9 @@ namespace DetourModKit
 {
     namespace memory
     {
+        using DetourModKit::detail::acquire_module_ref;
         using DetourModKit::detail::is_loader_lock_held;
-        using DetourModKit::detail::pin_current_module;
+        using DetourModKit::detail::release_module_ref;
         using DetourModKit::detail::SrwSharedMutex;
 
         namespace
@@ -254,6 +255,10 @@ namespace DetourModKit
             // declaration order), causing UB. Manual join in shutdown_cache avoids this.
             std::atomic<bool> s_cleanup_thread_running{false};
             std::thread s_cleanup_thread;
+            // Counted reference on this module, taken before the cleanup thread is created while the module is fully
+            // mapped, so its code cannot be unmapped by a caller's FreeLibrary while it runs. Released after a clean
+            // join; leaked on the loader-lock detach path so the detached thread's code stays mapped.
+            HMODULE s_cleanup_self_ref{nullptr};
             std::mutex s_cleanup_mutex;
             std::condition_variable s_cleanup_cv;
             std::atomic<bool> s_cleanup_requested{false};
@@ -951,14 +956,29 @@ namespace DetourModKit
 #endif
 
                 s_cleanup_thread_running.store(true, std::memory_order_release);
-                try
-                {
-                    s_cleanup_thread = std::thread(cleanup_thread_func);
-                }
-                catch (const std::system_error &)
+                // Hold a counted reference before creating the cleanup thread; after std::thread returns the cleanup
+                // routine may already be executing library code. A creation failure releases this reference below.
+                s_cleanup_self_ref = acquire_module_ref();
+                if (s_cleanup_self_ref == nullptr)
                 {
                     s_cleanup_thread_running.store(false, std::memory_order_release);
-                    log().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
+                    log().debug(
+                        "MemoryCache: Module reference unavailable, using on-demand cleanup instead of background "
+                        "cleanup.");
+                }
+                else
+                {
+                    try
+                    {
+                        s_cleanup_thread = std::thread(cleanup_thread_func);
+                    }
+                    catch (...)
+                    {
+                        release_module_ref(s_cleanup_self_ref);
+                        s_cleanup_self_ref = nullptr;
+                        s_cleanup_thread_running.store(false, std::memory_order_release);
+                        log().debug("MemoryCache: Background cleanup thread unavailable, using on-demand cleanup.");
+                    }
                 }
 
                 // Last-resort safety net: clean up if the consumer forgets to call shutdown_cache. The handler detects
@@ -976,14 +996,15 @@ namespace DetourModKit
 #if !defined(_MSC_VER) && defined(_WIN64)
                                     // Remove the vectored fault handler before the module can unload: a list removal is
                                     // safe under loader lock, and leaving the handler registered against
-                                    // soon-to-be-freed code is worse than the pinned-thread leak below.
+                                    // soon-to-be-freed code is worse than the detached-thread leak below.
                                     detail::release_guarded_engine();
 #endif
                                     s_cleanup_thread_running.store(false, std::memory_order_release);
                                     s_cleanup_cv.notify_one();
                                     if (s_cleanup_thread.joinable())
                                     {
-                                        pin_current_module();
+                                        // Detach and LEAK the module reference taken at creation: the detached cleanup
+                                        // thread's code stays mapped for the rest of the process.
                                         s_cleanup_thread.detach();
                                         DetourModKit::diagnostics::record_intentional_leak(
                                             DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
@@ -1055,8 +1076,8 @@ namespace DetourModKit
                 if (is_loader_lock_held())
                 {
                     // Under loader lock (DllMain / FreeLibrary): a join would deadlock because the cleanup thread
-                    // cannot exit while the loader lock is held. Pin the module so its code stays valid, then detach.
-                    pin_current_module();
+                    // cannot exit while the loader lock is held. Detach it and LEAK the module reference taken at
+                    // creation, so its code stays mapped for the rest of the process.
                     s_cleanup_thread.detach();
                     DetourModKit::diagnostics::record_intentional_leak(
                         DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
@@ -1064,6 +1085,10 @@ namespace DetourModKit
                 else
                 {
                     s_cleanup_thread.join();
+                    // Joined off the loader lock: drop the reference taken at creation. Another reference on the module
+                    // still exists (the caller running this teardown), so this is never the terminal release.
+                    release_module_ref(s_cleanup_self_ref);
+                    s_cleanup_self_ref = nullptr;
                 }
             }
 

@@ -198,10 +198,10 @@ namespace DetourModKit
             {
                 // Under loader lock (FreeLibrary path): joining the watcher would deadlock against
                 // ReadDirectoryChangesW's I/O completion, and tearing down Impl would invalidate the worker_thread_id
-                // pointer the detached lambda still references. Pin the module so trampoline and worker code pages
-                // remain mapped, request stop, then leak the entire Impl onto the heap so it outlives the destructor.
-                // The same loader-lock leaf discipline used by the hook handle teardown and Logger::shutdown_internal.
-                pin_current_module();
+                // pointer the detached lambda still references. Request stop and leak the entire Impl onto the heap so
+                // it outlives the destructor. The owned StoppableWorker keeps the worker's code pages mapped by leaking
+                // its own module reference on its loader-lock detach branch, so no module reference is taken here. The
+                // same loader-lock leaf discipline is used by the hook handle teardown and Logger::shutdown_internal.
 
                 if (m_impl->worker)
                 {
@@ -304,318 +304,331 @@ namespace DetourModKit
             // joins first. The atomic slot is always valid for as long as the worker exists.
             auto *worker_id_slot = &m_impl->worker_thread_id;
 
-            m_impl->worker = std::make_unique<StoppableWorker>(
-                "ConfigWatcher",
-                [directory = std::move(directory), filename = std::move(filename), debounce_ms,
-                 callback = std::move(callback), label = std::move(label), open_result,
-                 worker_id_slot](const std::stop_token &st)
+            auto worker_body = [directory = std::move(directory), filename = std::move(filename), debounce_ms,
+                                callback = std::move(callback), label = std::move(label), open_result,
+                                worker_id_slot](const std::stop_token &st)
+            {
+                // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
+                // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush
+                // callback on every exit path, clears the slot again as the worker exits (see WorkerThreadIdGuard).
+                worker_id_slot->store(std::this_thread::get_id(), std::memory_order_release);
+                const WorkerThreadIdGuard worker_id_guard{*worker_id_slot};
+                auto io = std::make_unique<WatchIoState>();
+                io->buffer.resize(BUFFER_BYTES);
+
+                // Reference aliases keep the pump body below unchanged while the backing storage lives on the heap,
+                // so the stop-path drain can leak the whole bundle in one move if a notify IRP cannot be confirmed
+                // complete (see the drain at worker exit for why that matters). The references stay valid even
+                // after io.release(): the object is leaked, not destroyed.
+                OwnedHandle &dir_handle = io->dir_handle;
+                OwnedHandle &event_handle = io->event_handle;
+                std::vector<BYTE> &buffer = io->buffer;
+                OVERLAPPED &overlapped = io->overlapped;
+
+                dir_handle = OwnedHandle(::CreateFileW(
+                    directory.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
+
+                if (!dir_handle.valid())
                 {
-                    // Publish our thread id so is_worker_thread() can detect setter-invoked self-calls into
-                    // disable_auto_reload(). The guard, declared first so its destructor runs after the final flush
-                    // callback on every exit path, clears the slot again as the worker exits (see WorkerThreadIdGuard).
-                    worker_id_slot->store(std::this_thread::get_id(), std::memory_order_release);
-                    const WorkerThreadIdGuard worker_id_guard{*worker_id_slot};
-                    auto io = std::make_unique<WatchIoState>();
-                    io->buffer.resize(BUFFER_BYTES);
+                    log().error("ConfigWatcher '{}': CreateFileW failed (GLE={}).", label, ::GetLastError());
+                    open_result->set_value(false);
+                    return;
+                }
 
-                    // Reference aliases keep the pump body below unchanged while the backing storage lives on the heap,
-                    // so the stop-path drain can leak the whole bundle in one move if a notify IRP cannot be confirmed
-                    // complete (see the drain at worker exit for why that matters). The references stay valid even
-                    // after io.release(): the object is leaked, not destroyed.
-                    OwnedHandle &dir_handle = io->dir_handle;
-                    OwnedHandle &event_handle = io->event_handle;
-                    std::vector<BYTE> &buffer = io->buffer;
-                    OVERLAPPED &overlapped = io->overlapped;
+                event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
+                if (!event_handle.valid())
+                {
+                    log().error("ConfigWatcher '{}': CreateEventW failed (GLE={}).", label, ::GetLastError());
+                    open_result->set_value(false);
+                    return;
+                }
 
-                    dir_handle = OwnedHandle(::CreateFileW(
-                        directory.c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED, nullptr));
+                overlapped.hEvent = event_handle.h;
 
-                    if (!dir_handle.valid())
+                // Debounce bookkeeping: once we observe a matching change, mark it pending and defer the callback
+                // until no matching change has arrived for `debounce_ms`. Using steady_clock to survive wall-clock
+                // adjustments.
+                bool pending = false;
+                std::chrono::steady_clock::time_point last_event{};
+
+                // Track whether an overflow/coalesced-events completion has already been logged once per instance;
+                // subsequent hits stay silent at DEBUG level to avoid log spam.
+                bool overflow_logged = false;
+
+                auto issue_read = [&]() -> bool
+                {
+                    ::ResetEvent(event_handle.h);
+                    DWORD bytes_returned = 0;
+                    const BOOL ok =
+                        ::ReadDirectoryChangesW(dir_handle.h, buffer.data(), static_cast<DWORD>(buffer.size()),
+                                                FALSE, // no recursion
+                                                NOTIFY_FILTER, &bytes_returned, &overlapped, nullptr);
+                    if (!ok)
                     {
-                        log().error("ConfigWatcher '{}': CreateFileW failed (GLE={}).", label, ::GetLastError());
-                        open_result->set_value(false);
-                        return;
+                        log().error("ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).", label,
+                                    ::GetLastError());
+                        return false;
                     }
+                    return true;
+                };
 
-                    event_handle = OwnedHandle(::CreateEventW(nullptr, TRUE, FALSE, nullptr));
-                    if (!event_handle.valid())
+                if (!issue_read())
+                {
+                    open_result->set_value(false);
+                    return;
+                }
+
+                // First overlapped read is queued successfully; signal start() that the watcher is ready. From here
+                // on any failure is post-startup and reported only via the log.
+                open_result->set_value(true);
+
+                while (!st.stop_requested())
+                {
+                    DWORD bytes_transferred = 0;
+                    const BOOL overlapped_ok =
+                        ::GetOverlappedResultEx(dir_handle.h, &overlapped, &bytes_transferred, PUMP_TIMEOUT_MS, FALSE);
+
+                    if (!overlapped_ok)
                     {
-                        log().error("ConfigWatcher '{}': CreateEventW failed (GLE={}).", label, ::GetLastError());
-                        open_result->set_value(false);
-                        return;
-                    }
+                        const DWORD err = ::GetLastError();
 
-                    overlapped.hEvent = event_handle.h;
-
-                    // Debounce bookkeeping: once we observe a matching change, mark it pending and defer the callback
-                    // until no matching change has arrived for `debounce_ms`. Using steady_clock to survive wall-clock
-                    // adjustments.
-                    bool pending = false;
-                    std::chrono::steady_clock::time_point last_event{};
-
-                    // Track whether an overflow/coalesced-events completion has already been logged once per instance;
-                    // subsequent hits stay silent at DEBUG level to avoid log spam.
-                    bool overflow_logged = false;
-
-                    auto issue_read = [&]() -> bool
-                    {
-                        ::ResetEvent(event_handle.h);
-                        DWORD bytes_returned = 0;
-                        const BOOL ok =
-                            ::ReadDirectoryChangesW(dir_handle.h, buffer.data(), static_cast<DWORD>(buffer.size()),
-                                                    FALSE, // no recursion
-                                                    NOTIFY_FILTER, &bytes_returned, &overlapped, nullptr);
-                        if (!ok)
+                        if (err == WAIT_TIMEOUT || err == WAIT_IO_COMPLETION)
                         {
-                            log().error("ConfigWatcher '{}': ReadDirectoryChangesW failed (GLE={}).", label,
-                                        ::GetLastError());
-                            return false;
-                        }
-                        return true;
-                    };
-
-                    if (!issue_read())
-                    {
-                        open_result->set_value(false);
-                        return;
-                    }
-
-                    // First overlapped read is queued successfully; signal start() that the watcher is ready. From here
-                    // on any failure is post-startup and reported only via the log.
-                    open_result->set_value(true);
-
-                    while (!st.stop_requested())
-                    {
-                        DWORD bytes_transferred = 0;
-                        const BOOL overlapped_ok = ::GetOverlappedResultEx(dir_handle.h, &overlapped,
-                                                                           &bytes_transferred, PUMP_TIMEOUT_MS, FALSE);
-
-                        if (!overlapped_ok)
-                        {
-                            const DWORD err = ::GetLastError();
-
-                            if (err == WAIT_TIMEOUT || err == WAIT_IO_COMPLETION)
+                            // No I/O completed this tick. If a prior event is pending and the quiet window has
+                            // elapsed, fire the debounced callback.
+                            if (pending)
                             {
-                                // No I/O completed this tick. If a prior event is pending and the quiet window has
-                                // elapsed, fire the debounced callback.
-                                if (pending)
+                                const auto now = std::chrono::steady_clock::now();
+                                if (now - last_event >= debounce_ms)
                                 {
-                                    const auto now = std::chrono::steady_clock::now();
-                                    if (now - last_event >= debounce_ms)
+                                    pending = false;
+                                    if (callback)
                                     {
-                                        pending = false;
-                                        if (callback)
-                                        {
-                                            callback();
-                                        }
+                                        callback();
                                     }
                                 }
-                                continue;
                             }
+                            continue;
+                        }
 
-                            if (err == ERROR_OPERATION_ABORTED)
-                            {
-                                // Directory handle closed or I/O cancelled externally (e.g. the watched parent
-                                // directory was removed or renamed). We cannot recover a handle to a vanished directory
-                                // here; surface the event at warning level so users notice.
-                                log().warning("ConfigWatcher '{}': directory handle "
-                                              "invalidated (parent removed/renamed); "
-                                              "watcher thread exiting.",
-                                              label);
-                                break;
-                            }
-
-                            if (err == ERROR_NOTIFY_ENUM_DIR)
-                            {
-                                // Kernel/redirector path for buffer overflow:
-                                // events were dropped because they arrived faster than we could drain them. Treat as a
-                                // coalesced match, re-issue the read, and let debounce deduplicate.
-                                if (!overflow_logged)
-                                {
-                                    log().debug("ConfigWatcher '{}': notification "
-                                                "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
-                                                "coalescing dropped events.",
-                                                label);
-                                    overflow_logged = true;
-                                }
-                                pending = true;
-                                last_event = std::chrono::steady_clock::now();
-                                if (!issue_read())
-                                {
-                                    break;
-                                }
-                                // Some redirectors raise ERROR_NOTIFY_ENUM_DIR continuously under sustained event
-                                // storms. Without a sleep the worker would spin at 100% CPU re-issuing reads. Capping
-                                // at ~20 Hz keeps debounce semantics intact while bounding CPU.
-                                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                                continue;
-                            }
-
-                            log().error("ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).", label, err);
+                        if (err == ERROR_OPERATION_ABORTED)
+                        {
+                            // Directory handle closed or I/O cancelled externally (e.g. the watched parent
+                            // directory was removed or renamed). We cannot recover a handle to a vanished directory
+                            // here; surface the event at warning level so users notice.
+                            log().warning("ConfigWatcher '{}': directory handle "
+                                          "invalidated (parent removed/renamed); "
+                                          "watcher thread exiting.",
+                                          label);
                             break;
                         }
 
-                        bool matched = false;
-
-                        if (bytes_transferred == 0)
+                        if (err == ERROR_NOTIFY_ENUM_DIR)
                         {
-                            // Successful-completion path for buffer overflow:
-                            // the kernel signals "events coalesced" by returning zero bytes. Same handling as
-                            // ERROR_NOTIFY_ENUM_DIR above: mark pending, re-issue, let debounce deduplicate.
+                            // Kernel/redirector path for buffer overflow:
+                            // events were dropped because they arrived faster than we could drain them. Treat as a
+                            // coalesced match, re-issue the read, and let debounce deduplicate.
                             if (!overflow_logged)
                             {
-                                log().debug("ConfigWatcher '{}': notification buffer "
-                                            "overflowed (zero-byte completion); "
+                                log().debug("ConfigWatcher '{}': notification "
+                                            "buffer overflowed (ERROR_NOTIFY_ENUM_DIR); "
                                             "coalescing dropped events.",
                                             label);
                                 overflow_logged = true;
                             }
-                            matched = true;
-                        }
-                        else
-                        {
-                            // Real event batch received. Reset the overflow latch so a later recurrence logs again at
-                            // the DEBUG edge rather than staying silent forever.
-                            overflow_logged = false;
-
-                            // Walk the FILE_NOTIFY_INFORMATION chain. The kernel is trusted, but every kernel-supplied
-                            // length/offset is bounds-checked against the buffer before any read or advance: trusting
-                            // FileNameLength or NextEntryOffset blindly would turn a corrupt/malicious completion into
-                            // an out-of-bounds read of the worker's heap buffer. On any inconsistency the walk stops
-                            // (fails closed) rather than reading past the bytes the kernel actually returned.
-                            const BYTE *cursor = buffer.data();
-                            const BYTE *const end_ptr = cursor + bytes_transferred;
-
-                            // Offset of the variable-length FileName[] member; the fixed header occupies the bytes
-                            // before it. Used to bound both the header and the filename extent against end_ptr.
-                            constexpr size_t name_field_offset = offsetof(FILE_NOTIFY_INFORMATION, FileName);
-
-                            // (a) The entry header itself must fit before we dereference any of its fields. Compare on
-                            // the remaining span before forming cursor + name_field_offset, so malformed trailing bytes
-                            // cannot make the bounds check itself step outside the buffer.
-                            while (static_cast<size_t>(end_ptr - cursor) >= name_field_offset)
-                            {
-                                const auto *info = reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(cursor);
-
-                                const DWORD name_bytes = info->FileNameLength;
-
-                                // (c) FileNameLength must be a whole number of WCHARs; an odd byte count is malformed.
-                                if (name_bytes % sizeof(WCHAR) != 0)
-                                {
-                                    break;
-                                }
-
-                                // (b) FileName + FileNameLength must not run past the buffer end. Compare on the
-                                // available span (end_ptr - FileName) so the addition cannot overflow a pointer.
-                                const BYTE *const name_start = cursor + name_field_offset;
-                                if (name_bytes > static_cast<size_t>(end_ptr - name_start))
-                                {
-                                    break;
-                                }
-
-                                const size_t name_len = name_bytes / sizeof(WCHAR);
-                                const std::wstring_view changed_name(info->FileName, name_len);
-
-                                // Match against target filename (case-insensitive). Rename-swap-save (temp -> target)
-                                // surfaces the target filename in the RENAMED_NEW_NAME entry.
-                                if (iequals_w(changed_name, filename))
-                                {
-                                    matched = true;
-                                }
-
-                                // A zero NextEntryOffset terminates the walk (the spec's end-of-chain marker).
-                                const DWORD next = info->NextEntryOffset;
-                                if (next == 0)
-                                {
-                                    break;
-                                }
-
-                                // (d) NextEntryOffset must advance past at least this entry's header (forward progress,
-                                // so a bogus small value cannot loop or alias the current entry) and must keep the next
-                                // entry's start at or before the buffer end; the loop condition then re-validates that
-                                // the next entry's header fully fits. Compare on the available span to avoid pointer
-                                // overflow.
-                                if (next < name_field_offset || next > static_cast<size_t>(end_ptr - cursor))
-                                {
-                                    break;
-                                }
-                                cursor += next;
-                            }
-                        }
-
-                        if (matched)
-                        {
                             pending = true;
                             last_event = std::chrono::steady_clock::now();
+                            if (!issue_read())
+                            {
+                                break;
+                            }
+                            // Some redirectors raise ERROR_NOTIFY_ENUM_DIR continuously under sustained event
+                            // storms. Without a sleep the worker would spin at 100% CPU re-issuing reads. Capping
+                            // at ~20 Hz keeps debounce semantics intact while bounding CPU.
+                            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                            continue;
                         }
 
-                        if (!issue_read())
+                        log().error("ConfigWatcher '{}': GetOverlappedResultEx failed (GLE={}).", label, err);
+                        break;
+                    }
+
+                    bool matched = false;
+
+                    if (bytes_transferred == 0)
+                    {
+                        // Successful-completion path for buffer overflow:
+                        // the kernel signals "events coalesced" by returning zero bytes. Same handling as
+                        // ERROR_NOTIFY_ENUM_DIR above: mark pending, re-issue, let debounce deduplicate.
+                        if (!overflow_logged)
                         {
-                            break;
+                            log().debug("ConfigWatcher '{}': notification buffer "
+                                        "overflowed (zero-byte completion); "
+                                        "coalescing dropped events.",
+                                        label);
+                            overflow_logged = true;
+                        }
+                        matched = true;
+                    }
+                    else
+                    {
+                        // Real event batch received. Reset the overflow latch so a later recurrence logs again at
+                        // the DEBUG edge rather than staying silent forever.
+                        overflow_logged = false;
+
+                        // Walk the FILE_NOTIFY_INFORMATION chain. The kernel is trusted, but every kernel-supplied
+                        // length/offset is bounds-checked against the buffer before any read or advance: trusting
+                        // FileNameLength or NextEntryOffset blindly would turn a corrupt/malicious completion into
+                        // an out-of-bounds read of the worker's heap buffer. On any inconsistency the walk stops
+                        // (fails closed) rather than reading past the bytes the kernel actually returned.
+                        const BYTE *cursor = buffer.data();
+                        const BYTE *const end_ptr = cursor + bytes_transferred;
+
+                        // Offset of the variable-length FileName[] member; the fixed header occupies the bytes
+                        // before it. Used to bound both the header and the filename extent against end_ptr.
+                        constexpr size_t name_field_offset = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+
+                        // (a) The entry header itself must fit before we dereference any of its fields. Compare on
+                        // the remaining span before forming cursor + name_field_offset, so malformed trailing bytes
+                        // cannot make the bounds check itself step outside the buffer.
+                        while (static_cast<size_t>(end_ptr - cursor) >= name_field_offset)
+                        {
+                            const auto *info = reinterpret_cast<const FILE_NOTIFY_INFORMATION *>(cursor);
+
+                            const DWORD name_bytes = info->FileNameLength;
+
+                            // (c) FileNameLength must be a whole number of WCHARs; an odd byte count is malformed.
+                            if (name_bytes % sizeof(WCHAR) != 0)
+                            {
+                                break;
+                            }
+
+                            // (b) FileName + FileNameLength must not run past the buffer end. Compare on the
+                            // available span (end_ptr - FileName) so the addition cannot overflow a pointer.
+                            const BYTE *const name_start = cursor + name_field_offset;
+                            if (name_bytes > static_cast<size_t>(end_ptr - name_start))
+                            {
+                                break;
+                            }
+
+                            const size_t name_len = name_bytes / sizeof(WCHAR);
+                            const std::wstring_view changed_name(info->FileName, name_len);
+
+                            // Match against target filename (case-insensitive). Rename-swap-save (temp -> target)
+                            // surfaces the target filename in the RENAMED_NEW_NAME entry.
+                            if (iequals_w(changed_name, filename))
+                            {
+                                matched = true;
+                            }
+
+                            // A zero NextEntryOffset terminates the walk (the spec's end-of-chain marker).
+                            const DWORD next = info->NextEntryOffset;
+                            if (next == 0)
+                            {
+                                break;
+                            }
+
+                            // (d) NextEntryOffset must advance past at least this entry's header (forward progress,
+                            // so a bogus small value cannot loop or alias the current entry) and must keep the next
+                            // entry's start at or before the buffer end; the loop condition then re-validates that
+                            // the next entry's header fully fits. Compare on the available span to avoid pointer
+                            // overflow.
+                            if (next < name_field_offset || next > static_cast<size_t>(end_ptr - cursor))
+                            {
+                                break;
+                            }
+                            cursor += next;
                         }
                     }
 
-                    // Cancel any in-flight I/O, then wait for the kernel to finish with our OVERLAPPED and notification
-                    // buffer before they are freed. Per MSDN the OVERLAPPED and buffer must stay valid until the
-                    // cancelled I/O has actually completed; freeing them early would let the kernel write into released
-                    // memory.
-                    //
-                    // CancelIoEx normally drives the pending ReadDirectoryChangesW to completion, but if the watched
-                    // directory was deleted the notify IRP can be orphaned: CancelIoEx reports success yet no
-                    // completion is ever delivered. A blind GetOverlappedResult with bWait=TRUE would then wait forever
-                    // and hang StoppableWorker's join (stalling the whole teardown). So every wait here is bounded and
-                    // the drain escalates:
-                    //   1. cancel + bounded wait for the normal case;
-                    //   2. on timeout, close the directory handle -- dropping the
-                    //      last handle to the directory forces the I/O Manager to
-                    //      cancel and complete the outstanding IRP, signalling our
-                    //      event (the mechanism .NET FileSystemWatcher.Dispose uses);
-                    //   3. if the IRP STILL cannot be confirmed complete, leak the
-                    //      entire I/O bundle instead of freeing it, so a late
-                    //      completion can never write into freed memory. Bounded to
-                    //      this teardown path and mirrors the leak-on-teardown
-                    //      discipline in ~ConfigWatcher and Logger::shutdown_internal.
-                    ::CancelIoEx(dir_handle.h, &overlapped);
-
-                    DWORD drain_bytes = 0;
-                    const BOOL drain_ok =
-                        ::GetOverlappedResultEx(dir_handle.h, &overlapped, &drain_bytes, DRAIN_TIMEOUT_MS, FALSE);
-
-                    // Only WAIT_TIMEOUT / WAIT_IO_COMPLETION mean the IRP is still pending; any other status (including
-                    // ERROR_OPERATION_ABORTED) means the kernel is done with the OVERLAPPED and the buffer.
-                    bool drained = drain_ok != FALSE;
-                    if (!drained)
+                    if (matched)
                     {
-                        const DWORD drain_err = ::GetLastError();
-                        drained = drain_err != WAIT_TIMEOUT && drain_err != WAIT_IO_COMPLETION;
+                        pending = true;
+                        last_event = std::chrono::steady_clock::now();
                     }
 
-                    if (!drained)
+                    if (!issue_read())
                     {
-                        // Force completion by releasing the directory handle, then wait on the event the IRP signals on
-                        // its way out.
-                        dir_handle.reset();
-                        drained = ::WaitForSingleObject(event_handle.h, DRAIN_TIMEOUT_MS) == WAIT_OBJECT_0;
+                        break;
                     }
+                }
 
-                    if (!drained)
-                    {
-                        log().warning("ConfigWatcher '{}': pending directory notification did "
-                                      "not drain after cancel + handle close; leaking the watch "
-                                      "buffer to stay memory-safe.",
-                                      label);
-                        (void)io.release();
-                    }
+                // Cancel any in-flight I/O, then wait for the kernel to finish with our OVERLAPPED and notification
+                // buffer before they are freed. Per MSDN the OVERLAPPED and buffer must stay valid until the
+                // cancelled I/O has actually completed; freeing them early would let the kernel write into released
+                // memory.
+                //
+                // CancelIoEx normally drives the pending ReadDirectoryChangesW to completion, but if the watched
+                // directory was deleted the notify IRP can be orphaned: CancelIoEx reports success yet no
+                // completion is ever delivered. A blind GetOverlappedResult with bWait=TRUE would then wait forever
+                // and hang StoppableWorker's join (stalling the whole teardown). So every wait here is bounded and
+                // the drain escalates:
+                //   1. cancel + bounded wait for the normal case;
+                //   2. on timeout, close the directory handle -- dropping the
+                //      last handle to the directory forces the I/O Manager to
+                //      cancel and complete the outstanding IRP, signalling our
+                //      event (the mechanism .NET FileSystemWatcher.Dispose uses);
+                //   3. if the IRP STILL cannot be confirmed complete, leak the
+                //      entire I/O bundle instead of freeing it, so a late
+                //      completion can never write into freed memory. Bounded to
+                //      this teardown path and mirrors the leak-on-teardown
+                //      discipline in ~ConfigWatcher and Logger::shutdown_internal.
+                ::CancelIoEx(dir_handle.h, &overlapped);
 
-                    // Flush a final debounced callback if we are exiting with a pending change. This intentionally
-                    // fires during stop() as well -- an edit that arrived inside the debounce window would otherwise be
-                    // silently dropped.
-                    if (pending && callback)
-                    {
-                        callback();
-                    }
-                });
+                DWORD drain_bytes = 0;
+                const BOOL drain_ok =
+                    ::GetOverlappedResultEx(dir_handle.h, &overlapped, &drain_bytes, DRAIN_TIMEOUT_MS, FALSE);
+
+                // Only WAIT_TIMEOUT / WAIT_IO_COMPLETION mean the IRP is still pending; any other status (including
+                // ERROR_OPERATION_ABORTED) means the kernel is done with the OVERLAPPED and the buffer.
+                bool drained = drain_ok != FALSE;
+                if (!drained)
+                {
+                    const DWORD drain_err = ::GetLastError();
+                    drained = drain_err != WAIT_TIMEOUT && drain_err != WAIT_IO_COMPLETION;
+                }
+
+                if (!drained)
+                {
+                    // Force completion by releasing the directory handle, then wait on the event the IRP signals on
+                    // its way out.
+                    dir_handle.reset();
+                    drained = ::WaitForSingleObject(event_handle.h, DRAIN_TIMEOUT_MS) == WAIT_OBJECT_0;
+                }
+
+                if (!drained)
+                {
+                    log().warning("ConfigWatcher '{}': pending directory notification did "
+                                  "not drain after cancel + handle close; leaking the watch "
+                                  "buffer to stay memory-safe.",
+                                  label);
+                    (void)io.release();
+                }
+
+                // Flush a final debounced callback if we are exiting with a pending change. This intentionally
+                // fires during stop() as well -- an edit that arrived inside the debounce window would otherwise be
+                // silently dropped.
+                if (pending && callback)
+                {
+                    callback();
+                }
+            };
+
+            try
+            {
+                m_impl->worker = std::make_unique<StoppableWorker>("ConfigWatcher", std::move(worker_body));
+            }
+            catch (const std::exception &e)
+            {
+                log().error("ConfigWatcher '{}': failed to start worker: {}", m_impl->ini_path_utf8, e.what());
+                return false;
+            }
+            catch (...)
+            {
+                log().error("ConfigWatcher '{}': failed to start worker: unknown exception.", m_impl->ini_path_utf8);
+                return false;
+            }
 
             // Wait for the worker to finish its startup handshake with a bounded wait. Three failure modes to handle:
             //   1. Handshake timeout -- worker is stuck somewhere (hostile

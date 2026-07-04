@@ -3,6 +3,7 @@
 #include "DetourModKit/logger.hpp"
 #include "platform.hpp"
 
+#include <system_error>
 #include <utility>
 
 namespace DetourModKit
@@ -16,23 +17,44 @@ namespace DetourModKit
             return;
         }
 
-        m_thread = std::jthread(
-            [fn = std::move(body), label = m_name](const std::stop_token &st)
-            {
-                try
+        // Take the module reference before creating the thread. Once std::jthread returns, the new thread may already
+        // be executing library code, so the keepalive has to exist before the thread is published to the scheduler.
+        const HMODULE self_ref = detail::acquire_module_ref();
+        if (self_ref == nullptr)
+        {
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                    "StoppableWorker: acquire_module_ref failed");
+        }
+        try
+        {
+            m_thread = std::jthread(
+                [fn = std::move(body), label = m_name](const std::stop_token &st)
                 {
-                    fn(st);
-                }
-                catch (const std::exception &e)
-                {
-                    log().error("StoppableWorker '{}': unhandled exception: {}", label, e.what());
-                }
-                catch (...)
-                {
-                    log().error("StoppableWorker '{}': unknown exception escaped body.", label);
-                }
-            });
+                    try
+                    {
+                        fn(st);
+                    }
+                    catch (const std::exception &e)
+                    {
+                        // try_log, not error(): a throw from the logger here would escape the thread function and
+                        // terminate the process, defeating the very containment these handlers provide.
+                        (void)log().try_log(LogLevel::Error, "StoppableWorker '{}': unhandled exception: {}", label,
+                                            e.what());
+                    }
+                    catch (...)
+                    {
+                        (void)log().try_log(LogLevel::Error, "StoppableWorker '{}': unknown exception escaped body.",
+                                            label);
+                    }
+                });
+        }
+        catch (...)
+        {
+            detail::release_module_ref(self_ref);
+            throw;
+        }
 
+        m_self_ref = self_ref;
         m_stop_source = m_thread.get_stop_source();
 
         // Publish liveness through an atomic once both the thread handle and stop source are initialized.
@@ -80,12 +102,21 @@ namespace DetourModKit
 
         if (detail::is_loader_lock_held())
         {
-            detail::pin_current_module();
+            // Under the loader lock we cannot join without risking a deadlock. Detach the worker and leak its module
+            // reference (never released), so the module's code stays mapped for the rest of the process while the
+            // detached thread finishes.
             m_thread.detach();
             DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Worker);
             return;
         }
 
         m_thread.join();
+
+        // Joined off the loader lock: the worker's code has finished, so drop the reference taken before thread
+        // creation.
+        // Another reference on the module still exists (the caller is executing this module's code), so this release is
+        // never the terminal one that could unmap the module out from under us.
+        detail::release_module_ref(static_cast<HMODULE>(m_self_ref));
+        m_self_ref = nullptr;
     }
 } // namespace DetourModKit

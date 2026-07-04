@@ -292,7 +292,8 @@ namespace DetourModKit::detail
      *          The poll thread has to be joined first because it reads the XInput trampoline directly; game threads may
      *          still enter the detours until the hooks are removed, so uninstall retires the published trampoline
      *          pointers and drains in-flight detour bodies before destroying the hook objects. On the loader-lock
-     *          teardown path this is intentionally skipped (the detours stay installed against the pinned module).
+     *          teardown path this is intentionally skipped (the detours stay installed against the module, kept mapped
+     *          by the leaked poll-thread reference).
      *          Idempotent.
      */
     void uninstall() noexcept;

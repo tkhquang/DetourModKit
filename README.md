@@ -669,13 +669,15 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 > [!WARNING]
 > `DMK::bootstrap()` runs `InitializeMyMod` on a dedicated worker thread, so it
 > executes off the loader lock, and `~Session` runs the ordered teardown there too.
-> For a dynamic `FreeLibrary` unload, call `DMK::request_shutdown()` *before* issuing
-> `FreeLibrary` so the worker has time to drain (and drop your caller-owned `Hook`
-> handles to restore prologues). Each subsystem also detects the loader lock and will
-> detach background threads instead of joining them, but requesting shutdown early
-> ensures all log messages are flushed. See the
-> [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended two-DLL
-> architecture.
+> The worker holds a counted reference on your module while it runs, so a bare
+> `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a
+> dynamic unload, call `DMK::request_shutdown()` (off the loader lock) *before*
+> issuing `FreeLibrary`: the worker drains the ordered teardown, flushes logging,
+> releases its reference via `FreeLibraryAndExitThread`, and only then can the
+> `FreeLibrary` actually unmap the DLL. Drop your caller-owned `Hook` handles during
+> that teardown so prologues are restored while the code pages are still mapped. See
+> the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended
+> two-DLL architecture.
 
 ## Configuration File Example
 

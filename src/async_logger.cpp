@@ -12,13 +12,15 @@
 #include <iostream>
 #include <new>
 #include <span>
+#include <system_error>
 #include <type_traits>
 
 namespace DetourModKit
 {
+    using detail::acquire_module_ref;
     using detail::is_loader_lock_held;
     using detail::LogMessage;
-    using detail::pin_current_module;
+    using detail::release_module_ref;
 
     // The string pool, per-message record, and MPMC queue are implementation-only types that live in
     // DetourModKit::detail (see internal/async_logger_queue.hpp). Their out-of-line definitions are grouped in the
@@ -505,6 +507,11 @@ namespace DetourModKit
         std::shared_ptr<std::mutex> m_log_mutex;
 
         std::jthread m_writer_thread;
+        // Counted reference on the module the writer thread's code lives in, taken before the thread is created.
+        // shutdown() releases it after a clean join, or leaks it on the loader-lock detach path so the writer's code
+        // stays mapped. void* keeps the pimpl header-light; it holds an HMODULE in the implementation. See
+        // detail::acquire_module_ref.
+        void *m_writer_self_ref{nullptr};
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_shutdown_requested{false};
 
@@ -540,8 +547,28 @@ namespace DetourModKit
             throw std::invalid_argument("log_mutex cannot be null");
         }
 
+        // Hold a counted reference on this module before creating the writer thread. Once std::jthread returns, the
+        // writer may already be executing this TU's code, so the keepalive has to predate the thread start. shutdown()
+        // releases it after a clean join or leaks it on the loader-lock detach path.
+        const HMODULE writer_self_ref = acquire_module_ref();
+        if (writer_self_ref == nullptr)
+        {
+            throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                    "AsyncLogger: acquire_module_ref failed");
+        }
+
         m_running.store(true, std::memory_order_release);
-        m_writer_thread = std::jthread(&AsyncLogger::Impl::writer_thread_func, this);
+        try
+        {
+            m_writer_thread = std::jthread(&AsyncLogger::Impl::writer_thread_func, this);
+        }
+        catch (...)
+        {
+            m_running.store(false, std::memory_order_release);
+            release_module_ref(writer_self_ref);
+            throw;
+        }
+        m_writer_self_ref = writer_self_ref;
     }
 
     AsyncLogger::Impl::~Impl() noexcept
@@ -638,7 +665,9 @@ namespace DetourModKit
         {
             if (is_loader_lock_held())
             {
-                pin_current_module();
+                // Under the loader lock we cannot join. Detach the writer and leak its module reference (taken before
+                // thread creation), keeping the writer's code mapped for the rest of the process while it drains and
+                // exits.
                 m_writer_thread.detach();
                 DetourModKit::diagnostics::record_intentional_leak(
                     DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
@@ -646,6 +675,11 @@ namespace DetourModKit
             else
             {
                 m_writer_thread.join();
+                // Joined off the loader lock: the writer's code is done, so drop the reference taken before thread
+                // creation. Another reference on the module still exists (the caller running this teardown), so this is
+                // never terminal.
+                release_module_ref(static_cast<HMODULE>(m_writer_self_ref));
+                m_writer_self_ref = nullptr;
             }
         }
 

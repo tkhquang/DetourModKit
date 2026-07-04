@@ -67,10 +67,10 @@ namespace DetourModKit
          *          original it calls can itself be hooked). `callable` is the inline trampoline while the hook is armed
          *          and inline, and nullptr otherwise: a disabled hook, a mid hook, or a normally torn-down hook (~Hook
          *          nulls it under `mutex` before freeing the backend). The one exception is the loader-lock teardown
-         *          branch, which intentionally leaks the backend with the module pinned and LEAVES `callable` set, so a
-         *          late guarded @ref Hook::call through a still-pinned gate keeps dispatching to the leaked-but-live
-         *          trampoline. It is a plain pointer guarded by `mutex`, not an atomic, because every reader and writer
-         *          holds `mutex`.
+         *          branch, which intentionally leaks the backend -- its module reference was taken before publication
+         *          and keeps the code mapped -- and leaves `callable` set, so a late guarded @ref Hook::call through
+         *          the still-live gate keeps dispatching to the leaked-but-live trampoline. It is a plain pointer
+         *          guarded by `mutex`, not an atomic, because every reader and writer holds `mutex`.
          */
         struct Hook::CallGate
         {
@@ -95,6 +95,12 @@ namespace DetourModKit
             std::uintptr_t target{0};
             std::uint64_t ledger_id{0};
             bool is_inline{false};
+            // Counted reference on the module this hook's trampoline/detour code lives in, taken before the backend is
+            // published while the module is mapped. ~Hook releases it on the clean off-loader-lock teardown; on a leak
+            // branch it rides along with the leaked Impl (never released), keeping the trampoline mapped for a late
+            // foreign caller. Holds an HMODULE (kept as void* so the acquire/release stay in hook.cpp). See
+            // detail::acquire_module_ref.
+            void *self_ref{nullptr};
 
             Impl(safetyhook::InlineHook hook, std::string hook_name, std::uintptr_t hook_target, std::uint64_t ledger,
                  HookState initial_state)
@@ -140,6 +146,10 @@ namespace DetourModKit
             std::uintptr_t cloned_vptr_base{0};
             std::size_t method_count{0};
             std::uint64_t ledger_id{0};
+            // Counted reference on the module this clone's code lives in, taken before the clone is published;
+            // released on clean teardown, left outstanding with the leaked Impl on a leak branch. Holds an HMODULE;
+            // acquire/release live in hook.cpp.
+            void *self_ref{nullptr};
             mutable DetourModKit::detail::SrwSharedMutex method_mutex;
             std::unordered_map<std::size_t, safetyhook::VmHook> method_hooks;
 

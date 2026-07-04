@@ -207,6 +207,14 @@ A test that must observe a guarded primitive contain a real hardware fault needs
 
 `tests/fault/test_fault_containment.cpp` proves guarded read, pointer-chain walk, and `write_in_place` all fail closed against a no-access page, plus the deterministic escalating write slow-path protection restore.
 
+### Lifecycle proofs (`tests/lifecycle/`, standalone runner)
+
+A proof that needs a real loader transition (`LoadLibrary`/`FreeLibrary` reference-count behavior, `DLL_PROCESS_DETACH`) or a controlled static-teardown ordering cannot run inside the monolithic GoogleTest process, and one of them replaces the global allocation operators for its whole process. These live in `tests/lifecycle/` and are built + run by [`scripts/run_lifecycle_proofs.sh`](../../scripts/run_lifecycle_proofs.sh): `bash scripts/run_lifecycle_proofs.sh`. Each proof is a standalone artifact with the process exit code as the verdict (0 = pass, 1 = proof failure, 2 = setup failure):
+
+- `bootstrap_probe_dll.cpp` -- a minimal mod-shaped DLL whose `DllMain` forwards attach/detach into `bootstrap()`/`bootstrap_detach()`, linked against the prebuilt `libDetourModKit.a` (rebuild that target first after any `src/` change).
+- `test_bootstrap_module_ref.cpp` -- the loader host. Proves the bootstrap worker's counted module reference in both directions: the module stays mapped across a bare `FreeLibrary` ("mapped"), and a drained `request_shutdown()` releases the reference so a following `FreeLibrary` genuinely unloads it ("unload").
+- `test_profiler_late_uaf.cpp` -- compiles `src/profiler.cpp` directly and replaces global `operator new`/`delete` with a size-targeted poisoning allocator, so a `ScopedProfile` record that outlives ordinary static teardown faults deterministically if the profiler singleton were ever destroyed early.
+
 ## Test Naming Conventions
 
 ```cpp

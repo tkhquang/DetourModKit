@@ -229,9 +229,10 @@ namespace DetourModKit
         /**
          * @brief Disables asynchronous logging and returns to synchronous writes.
          * @details Flushes pending async messages first. If the writer thread is detached because this runs under the
-         *          Windows loader lock (e.g. during DLL unload), the AsyncLogger is intentionally leaked and the module
-         *          pinned so the detached thread never outlives the object's storage or code pages; the event is
-         *          recorded via diagnostics::record_intentional_leak.
+         *          Windows loader lock (e.g. during DLL unload), the AsyncLogger is intentionally leaked and the writer
+         *          thread's own counted module reference (taken before the thread was created) is left outstanding, so
+         *          the detached thread never outlives the object's storage or code pages; the event is recorded via
+         *          diagnostics::record_intentional_leak.
          * @note Setup/control-plane only: joins or detaches the writer thread and takes the async lifecycle mutex.
          */
         void disable_async_mode() noexcept;
