@@ -21,7 +21,7 @@ namespace DetourModKit
      * @details The body receives a std::stop_token and must poll it cooperatively. On destruction the worker requests
      *          stop and joins the thread, unless it detects that the current thread is executing under the Windows
      *          loader lock -- in which case the thread is detached to avoid deadlock. Callers that need to preempt the
-     *          loader-lock case should call request_stop() and join() from a thread outside DllMain prior to teardown.
+     *          loader-lock case should call shutdown() from a thread outside DllMain prior to teardown.
      *
      *          Non-copyable and non-movable: the name, stop state, and thread handle form a single invariant. Copying
      *          would duplicate the thread handle; moving would race with a running body.
@@ -63,9 +63,9 @@ namespace DetourModKit
 
         /**
          * @brief Requests stop and joins the worker thread.
-         * @details Safe to call multiple times. If invoked under the
-         *          Windows loader lock the thread is detached instead of joined (documented trade-off -- the pinned
-         *          module keeps code pages alive).
+         * @details Safe to call multiple times. If invoked under the Windows loader lock the thread is detached instead
+         *          of joined, and the module reference taken before thread creation is left outstanding so the detached
+         *          worker's code pages stay mapped (documented trade-off).
          */
         void shutdown() noexcept;
 
@@ -79,6 +79,11 @@ namespace DetourModKit
         // both initialized; m_joined is set when shutdown begins (or in the empty-body early return).
         std::atomic<bool> m_started{false};
         std::atomic<bool> m_joined{false};
+        // Counted reference on the module this worker's code lives in, taken before thread creation while the module is
+        // fully mapped. shutdown() releases it after a clean join, or leaks it on the loader-lock detach path so the
+        // module stays mapped for the detached thread. Stored as void* to keep this installed header free of
+        // <windows.h>; it holds an HMODULE in the implementation. See detail::acquire_module_ref.
+        void *m_self_ref{nullptr};
     };
 } // namespace DetourModKit
 

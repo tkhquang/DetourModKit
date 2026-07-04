@@ -42,14 +42,16 @@ namespace DetourModKit
          * @struct InputBinding
          * @brief Engine record for a single input-to-action binding (one combo).
          * @details Holds the action name, trigger and modifier codes, the trigger mode, the suppression opt-in, and the
-         *          callbacks. The keys vector is OR logic (any single trigger fires); the modifiers vector is AND logic
-         *          (all must be held). Modifier matching is strict across the whole binding set: any key used as a modifier
-         *          in any binding blocks bindings that do not list it, so "V" does not fire while "Shift+V" is pressed.
+         *          callbacks. The keys vector is OR logic (any single trigger fires); the modifiers vector is AND
+         *          logic (all must be held). Modifier matching is strict across the whole binding set: any key used as
+         *          a modifier in any binding blocks bindings that do not list it, so "V" does not fire while "Shift+V"
+         *          is pressed.
          *
-         *          For Trigger::Press the press callback fires on the key-down edge; for Trigger::Hold the state callback
-         *          fires true on press and false on release (including a synthesized false at shutdown for an active hold).
-         *          All codes in one binding should come from the same device group; mouse-wheel codes are trigger-only and
-         *          Press-mode (a notch reads as one Press edge). Callbacks run on the poll thread and must be quick.
+         *          For Trigger::Press the press callback fires on the key-down edge; for Trigger::Hold the state
+         *          callback fires true on press and false on release (including a synthesized false at shutdown for an
+         *          active hold). All codes in one binding should come from the same device group; mouse-wheel codes are
+         *          trigger-only and Press-mode (a notch reads as one Press edge). Callbacks run on the poll thread and
+         *          must be quick.
          */
         struct InputBinding
         {
@@ -73,16 +75,17 @@ namespace DetourModKit
          * @details Manages a dedicated poll thread that reads keyboard/mouse via GetAsyncKeyState, gamepad via XInput,
          * and
          *          the mouse wheel via the window-procedure subclass. Supports press (edge-triggered) and hold
-         *          (level-triggered) bindings with modifier combinations and optional foreground-focus gating. On shutdown,
-         *          active holds receive a final on_state_change(false).
+         *          (level-triggered) bindings with modifier combinations and optional foreground-focus gating. On
+         *          shutdown, active holds receive a final on_state_change(false).
          *
          * @note Non-copyable, non-movable. Callbacks run on the poll thread.
          * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH; joining the poll thread under the
-         * loader
-         *          lock would deadlock, so shutdown() detaches against a pinned module when the loader lock is held.
+         *          Windows loader lock would deadlock, so shutdown() detaches the poll thread and leaks its module
+         *          reference (keeping its code mapped) when the loader lock is held.
          * @warning The interception layer (mouse-wheel capture and gamepad passthrough suppression) is backed by
-         *          process-global state and a single set of hooks, so at most one poller may use those features at a time.
-         *          The Input singleton is the intended single-instance owner; purely observational pollers install nothing.
+         *          process-global state and a single set of hooks, so at most one poller may use those features at a
+         *          time. The Input singleton is the intended single-instance owner; purely observational pollers
+         *          install nothing.
          */
         class InputPoller
         {
@@ -162,8 +165,8 @@ namespace DetourModKit
              * @brief Stops the poll thread.
              * @details Joins and then fires on_state_change(false) for active holds, unless the loader lock is held --
              * in
-             *          which case the thread is detached against a pinned module and the interception detours are left
-             *          installed. Idempotent.
+             *          which case the thread is detached and its module reference leaked, and the interception detours
+             *          are left installed. Idempotent.
              */
             void shutdown() noexcept;
 
@@ -231,6 +234,12 @@ namespace DetourModKit
             std::atomic<bool> m_require_focus;
             std::atomic<bool> m_running{false};
             std::jthread m_poll_thread;
+            // Counted reference on the module the poll thread's code lives in, taken before the thread is created
+            // while the module is fully mapped. shutdown() releases it after a clean join, or leaks it on the
+            // loader-lock detach path so the poll-loop code and the detours left installed against this module stay
+            // mapped. void* keeps this header free of <windows.h>; it holds an HMODULE in the implementation. See
+            // detail::acquire_module_ref.
+            void *m_self_ref{nullptr};
             std::mutex m_cv_mutex;
             std::condition_variable_any m_cv;
 

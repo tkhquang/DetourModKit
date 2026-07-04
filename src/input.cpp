@@ -23,6 +23,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -294,6 +295,11 @@ namespace DetourModKit
                 m_impl->m_active.store(poller, std::memory_order_release);
                 m_impl->m_running.store(true, std::memory_order_release);
                 return {};
+            }
+            catch (const std::system_error &e)
+            {
+                return std::unexpected(
+                    Error{ErrorCode::SystemCallFailed, "input::start", static_cast<std::uintptr_t>(e.code().value())});
             }
             catch (...)
             {

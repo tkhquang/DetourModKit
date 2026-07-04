@@ -194,45 +194,67 @@ namespace DetourModKit
         // The bootstrap worker. Adopts the Session built under the loader lock, runs on_ready OFF the loader lock, then
         // blocks until detach signals it and lets the Session destruct (the ordered teardown) here, off the loader
         // lock, so every subsystem leaf JOINS cleanly.
-        DWORD WINAPI lifecycle_thread(LPVOID) noexcept
+        DWORD WINAPI lifecycle_thread(LPVOID param) noexcept
         {
+            const HMODULE self_ref = static_cast<HMODULE>(param);
             if (!s_pending_session)
             {
                 // Should never happen: the worker is spawned only after the Session is staged. Guard defensively rather
-                // than dereference an empty optional.
+                // than dereference an empty optional. If bootstrap_core handed this worker a module reference, release
+                // it with FreeLibraryAndExitThread so the thread never returns through code it may have unmapped.
+                if (self_ref != nullptr)
+                {
+                    FreeLibraryAndExitThread(self_ref, 0);
+                }
                 return 0;
             }
 
-            Session session = std::move(*s_pending_session);
-            s_pending_session.reset();
-
-            if (s_on_ready)
             {
-                try
+                Session session = std::move(*s_pending_session);
+                s_pending_session.reset();
+
+                if (s_on_ready)
                 {
-                    Result<void> ready = s_on_ready(session);
-                    if (!ready)
+                    try
                     {
-                        (void)log().try_log(LogLevel::Error, "bootstrap: on_ready reported failure: {}",
-                                            ready.error().message());
+                        Result<void> ready = s_on_ready(session);
+                        if (!ready)
+                        {
+                            (void)log().try_log(LogLevel::Error, "bootstrap: on_ready reported failure: {}",
+                                                ready.error().message());
+                        }
+                    }
+                    catch (const std::exception &e)
+                    {
+                        (void)log().try_log(LogLevel::Error, "bootstrap: on_ready threw: {}", e.what());
+                    }
+                    catch (...)
+                    {
+                        (void)log().try_log(LogLevel::Error, "bootstrap: on_ready threw an unknown exception.");
                     }
                 }
-                catch (const std::exception &e)
+
+                if (s_shutdown_event)
                 {
-                    (void)log().try_log(LogLevel::Error, "bootstrap: on_ready threw: {}", e.what());
+                    WaitForSingleObject(s_shutdown_event, INFINITE);
                 }
-                catch (...)
-                {
-                    (void)log().try_log(LogLevel::Error, "bootstrap: on_ready threw an unknown exception.");
-                }
+
+                // `session` destructs at the end of this inner scope -> ordered teardown off the loader lock -> leaves
+                // JOIN, all while self_ref keeps this module's code mapped through the teardown.
             }
 
-            if (s_shutdown_event)
+            if (self_ref != nullptr)
             {
-                WaitForSingleObject(s_shutdown_event, INFINITE);
+                // The worker is done. Drop its own reference and exit the thread atomically: FreeLibraryAndExitThread
+                // never returns, so the FreeLibrary's return address is never in code the release may unmap. This
+                // release may be the terminal one if the consumer already dropped its LoadLibrary reference after
+                // request_shutdown(), so the worker must not call plain FreeLibrary and then return through this
+                // module.
+                FreeLibraryAndExitThread(self_ref, 0);
             }
 
-            // `session` destructs at scope exit -> ordered teardown off the loader lock -> leaves JOIN.
+            // Defensive fallback for an invalid worker parameter. bootstrap_core never starts this thread without a
+            // module reference, but a plain return is the only valid path when there is no reference to release.
             return 0;
         }
 
@@ -248,10 +270,11 @@ namespace DetourModKit
             // Auto-capture the calling module. DetourModKit links statically into the mod DLL, so a DetourModKit code
             // address resolves to the mod's own HMODULE -- exactly the handle DllMain would receive -- letting the
             // consumer's DllMain forward attach without threading the handle through. UNCHANGED_REFCOUNT is required:
-            // this handle is for identity only (module_handle()), so it must not take a reference on the module. The
-            // default GetModuleHandleEx bumps the reference count like an implicit LoadLibrary, and that never-released
-            // reference would keep the DLL mapped past the consumer's FreeLibrary -- the count would never reach zero,
-            // so DLL_PROCESS_DETACH (and the bootstrap_detach teardown it drives) would never fire.
+            // this handle is for identity only (module_handle()), so it must NOT take a reference on the module. The
+            // keepalive that protects the worker's code from a premature FreeLibrary is a SEPARATE counted reference
+            // acquired immediately before CreateThread and handed to lifecycle_thread; keeping that concern out of
+            // s_module lets module_handle() name the module without holding it mapped, and confines the "the module
+            // stays mapped past a bare FreeLibrary" behavior to the worker's own lifetime.
             constexpr DWORD CAPTURE_FLAGS =
                 GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
             if (GetModuleHandleExW(CAPTURE_FLAGS, reinterpret_cast<LPCWSTR>(&bootstrap_core), &s_module))
@@ -280,10 +303,23 @@ namespace DetourModKit
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
             }
 
-            s_worker_thread = CreateThread(nullptr, 0, lifecycle_thread, nullptr, 0, nullptr);
+            // Acquire the worker's module reference BEFORE CreateThread. A thread created from DllMain may not execute
+            // its entry point until after the loader releases the attach notification, but the caller can FreeLibrary
+            // immediately after LoadLibrary returns. The reference therefore has to exist before the worker is
+            // scheduled, not at the top of the worker function.
+            const HMODULE worker_ref = detail::acquire_module_ref();
+            if (worker_ref == nullptr)
+            {
+                const DWORD err = GetLastError();
+                unwind_bootstrap();
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
+            }
+
+            s_worker_thread = CreateThread(nullptr, 0, lifecycle_thread, worker_ref, 0, nullptr);
             if (!s_worker_thread)
             {
                 const DWORD err = GetLastError();
+                detail::release_module_ref(worker_ref);
                 unwind_bootstrap();
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
             }
@@ -495,25 +531,20 @@ namespace DetourModKit
 
         if (detail::is_loader_lock_held())
         {
-            // Real DllMain FreeLibrary under the loader lock: never wait or join here -- blocking would deadlock any
-            // peer DllMain. The worker is leaked to finish its ~Session teardown asynchronously. Crucially, do NOT
-            // CloseHandle s_shutdown_event or s_worker_thread here: the process keeps running (only this DLL unloads)
-            // and the leaked worker is still reading and waiting on the event, so closing it would be an unsynchronized
-            // write racing the worker's read (UB) and a wait-on-a-closed/recycled-handle. Leak both handles instead --
-            // the OS reclaims them at process exit -- and record the intentional leak. A mod needing a drained unload
-            // calls request_shutdown() off the loader lock first (which routes to the join path below); DetourModKit
-            // does not guarantee graceful worker teardown for a bare FreeLibrary.
+            // Under the loader lock: never wait or join here -- blocking would deadlock any peer DllMain. Crucially, do
+            // NOT CloseHandle s_shutdown_event or s_worker_thread here: the process keeps running and, if the worker is
+            // still parked on the event, closing them would be an unsynchronized write racing the worker's read (UB)
+            // and a wait-on-a-closed/recycled-handle. Leak both handles instead -- the OS reclaims them at process exit
+            // -- and record the intentional leak.
             //
-            // Pin the module before leaking the worker. Clearing s_module (below) only stops module_handle() from
-            // naming the unloading DLL -- it says nothing about the code pages the leaked worker keeps executing. The
-            // worker's lifecycle_thread runs through run_subsystem_teardown into each leaf shutdown(), all of which
-            // lives in this DLL's .text; because the worker is OFF the loader lock, every leaf takes its JOIN branch
-            // rather than its own pin/detach branch, so nothing else pins. If the consumer's FreeLibrary drops the
-            // module refcount to zero, the DLL unmaps while that code is still running -- a use-after-unmap. A
-            // GET_MODULE_HANDLE_EX_FLAG_PIN reference holds the mapping alive for the rest of the process, matching
-            // every other detach-and-leak site (StoppableWorker::shutdown, ~ConfigWatcher, the logger, the memory
-            // cache). The pin must come first so the mapping is secured before the worker is observably leaked.
-            detail::pin_current_module();
+            // No module pin is taken here, and none is needed: the worker holds its own counted reference on this
+            // module, acquired before CreateThread and released only when the worker exits. That is what keeps the
+            // worker's code mapped. Because the worker holds that reference, a bare FreeLibrary of a bootstrapped mod
+            // does not drive the count to zero and so does not even reach this branch. After request_shutdown(), this
+            // branch can run either from the consumer's final FreeLibrary (if the worker has already released its
+            // reference) or from the worker's own FreeLibraryAndExitThread terminal release (if the consumer dropped
+            // its reference first). Both cases are loader-lock contexts, so this path only records the intentional
+            // handle leak.
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
             s_module = nullptr;
             return;
