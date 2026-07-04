@@ -24,6 +24,7 @@
 #include <exception>
 #include <new>
 #include <shared_mutex>
+#include <system_error>
 #include <type_traits>
 #include <unordered_set>
 
@@ -416,6 +417,15 @@ namespace DetourModKit
                 return;
             }
 
+            // Acquire before creating the poll thread. The thread owns the input detour lifecycle and may start
+            // executing immediately after std::jthread returns, so its module reference must already be counted.
+            const HMODULE self_ref = acquire_module_ref();
+            if (self_ref == nullptr)
+            {
+                throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                        "InputPoller: acquire_module_ref failed");
+            }
+
             m_running.store(true, std::memory_order_release);
             try
             {
@@ -424,8 +434,10 @@ namespace DetourModKit
             catch (...)
             {
                 m_running.store(false, std::memory_order_release);
+                release_module_ref(self_ref);
                 throw;
             }
+            m_self_ref = self_ref;
         }
 
         bool InputPoller::is_running() const noexcept
@@ -581,12 +593,12 @@ namespace DetourModKit
             if (is_loader_lock_held())
             {
                 // Under loader lock (FreeLibrary / process unload) the poll thread cannot be joined without deadlocking
-                // the loader, so it is detached after pinning the module. It is still running and will exit only once
-                // it observes the stop request, so we must NOT touch shared binding state or fire hold-release
+                // the loader, so it is detached and its module reference (taken before thread creation) is leaked,
+                // keeping the poll-loop code mapped for the rest of the process. It is still running and will exit only
+                // once it observes the stop request, so we must NOT touch shared binding state or fire hold-release
                 // callbacks here: that would race the detached thread and run user callbacks under the loader lock (a
                 // callback that enters the loader -- LoadLibrary family or a peer DllMain mutex -- would deadlock).
                 // Mirrors clear_bindings(invoke_callbacks=false).
-                pin_current_module();
                 m_poll_thread.detach();
                 DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
                 m_running.store(false, std::memory_order_release);
@@ -594,6 +606,13 @@ namespace DetourModKit
             }
 
             m_poll_thread.join();
+
+            // Joined off the loader lock: the poll thread's code has finished, so drop the reference taken before
+            // thread creation.
+            // Another reference on the module still exists (the caller running this teardown), so this is never the
+            // terminal release.
+            release_module_ref(static_cast<HMODULE>(m_self_ref));
+            m_self_ref = nullptr;
 
             // The poll thread is provably stopped here, so releasing active holds and firing their
             // on_state_change(false) callbacks is race-free.
@@ -603,7 +622,8 @@ namespace DetourModKit
             // trampoline, so tearing the interception hooks down now is race-free. This is skipped on the loader-lock
             // path above: safetyhook's hook removal VirtualProtects the patched code pages and registers a vectored
             // exception handler to fix up any in-flight thread, which must not run under the loader lock, so the
-            // detours are intentionally left installed against the pinned module instead.
+            // detours are intentionally left installed against the module, kept mapped by the leaked poll-thread
+            // reference, instead.
             uninstall();
 
             release_active_holds();

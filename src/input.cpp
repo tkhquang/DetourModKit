@@ -23,6 +23,7 @@
 #include <new>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -285,15 +286,26 @@ namespace DetourModKit
                                  to_string(binding.trigger), binding.name, binding.keys.size());
                 }
 
+                // Seed the engine with a COPY of the staged bindings and clear them only after start() succeeds.
+                // InputPoller::start() throws std::system_error when the poll thread or its module reference cannot be
+                // created, and the poller -- sole owner of a moved-in vector -- is destroyed during unwind; moving
+                // m_pending in before that point would destroy the staged set with it, so a later retry would hit the
+                // empty-pending no-op above and the bindings would be silently lost. The copy is confined to this cold
+                // path.
                 auto poller = std::make_shared<detail::InputPoller>(
-                    std::move(m_impl->m_pending), settings.poll_interval, settings.require_focus,
-                    settings.gamepad_index, settings.trigger_threshold, settings.stick_threshold);
-                m_impl->m_pending.clear();
+                    m_impl->m_pending, settings.poll_interval, settings.require_focus, settings.gamepad_index,
+                    settings.trigger_threshold, settings.stick_threshold);
                 poller->start();
+                m_impl->m_pending.clear();
                 m_impl->m_poller = poller;
                 m_impl->m_active.store(poller, std::memory_order_release);
                 m_impl->m_running.store(true, std::memory_order_release);
                 return {};
+            }
+            catch (const std::system_error &e)
+            {
+                return std::unexpected(
+                    Error{ErrorCode::SystemCallFailed, "input::start", static_cast<std::uintptr_t>(e.code().value())});
             }
             catch (...)
             {
@@ -327,9 +339,10 @@ namespace DetourModKit
                     // Under the loader lock InputPoller::shutdown() detaches its poll thread instead of joining it. The
                     // detached thread keeps reading InputPoller members until it observes the stop request, so
                     // destroying the poller now would free them mid-access. Move the last reference into a
-                    // nothrow-allocated heap cell that is never freed, so the object outlives the detached thread (the
-                    // module is already pinned). Mirrors the leak-on-loader-lock discipline used elsewhere; nothrow
-                    // keeps this noexcept path honest under OOM.
+                    // nothrow-allocated heap cell that is never freed, so the object outlives the detached thread; the
+                    // code pages that thread executes stay mapped because its own counted module reference
+                    // (InputPoller::m_self_ref, taken in start()) is leaked on this same detach branch. Mirrors the
+                    // leak-on-loader-lock discipline used elsewhere; nothrow keeps this noexcept path honest under OOM.
                     auto *leaked = new (std::nothrow) std::shared_ptr<detail::InputPoller>(std::move(local_poller));
                     (void)leaked;
                 }

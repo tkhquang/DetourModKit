@@ -48,8 +48,9 @@ namespace DetourModKit
                 return;
             }
 
-            detail::pin_current_module();
-
+            // No module reference is taken here: leaking the shared_ptr keeps the AsyncLogger and its writer thread
+            // alive, and that writer thread holds its own counted reference on this module (taken before thread
+            // creation, while the module was fully mapped), which is what keeps its code mapped.
             auto *leaked = new (std::nothrow) std::shared_ptr<AsyncLogger>(std::move(logger));
             if (leaked != nullptr)
             {
@@ -249,7 +250,8 @@ namespace DetourModKit
 
         // If the writer thread was detached under loader lock, it may still be accessing AsyncLogger members (m_queue,
         // m_flush_mutex, etc.). Transfer ownership to permanent heap storage so the object outlives the detached
-        // thread; pin the module so the code pages it executes from also remain mapped.
+        // thread; the writer thread holds its own module reference (taken before thread creation), which keeps the code
+        // pages it executes from mapped.
         //
         // The transfer is unconditional when loader lock is held: concurrent log() callers may still own temporary
         // shared_ptrs obtained from m_async_logger before exchange(), so use_count() is not a reliable proxy for "no
@@ -533,7 +535,8 @@ namespace DetourModKit
 
         // If the writer thread was detached under loader lock it may still be touching AsyncLogger members (m_queue,
         // m_flush_mutex, etc.). Mirror shutdown_internal's discipline: transfer ownership to permanent heap storage so
-        // the object outlives the detached thread, and pin the module so the code pages it runs from stay mapped.
+        // the object outlives the detached thread; the writer thread's own module reference (taken before thread
+        // creation) keeps the code pages it runs from mapped.
         // Dropping the last shared_ptr here instead would let the AsyncLogger destructor race the live writer -- a
         // use-after-free. The transfer is unconditional under loader lock since concurrent log() callers may still own
         // temporaries fetched before the exchange, so use_count() is an unreliable "no other owners" proxy. The leak is

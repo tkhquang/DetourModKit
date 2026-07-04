@@ -310,8 +310,17 @@ namespace DetourModKit
          *          and single-owner, which is why a single Input instance owns it.
          *
          * @warning Inside a DLL, shutdown() must run before DLL_PROCESS_DETACH. Joining the poll thread under the
-         *          Windows loader lock would deadlock; shutdown() detects the loader lock and detaches against a pinned
-         *          module instead of joining. Route teardown through the bootstrap shutdown ordering.
+         *          Windows loader lock would deadlock; shutdown() detects the loader lock and detaches the poll thread,
+         *          leaking its module reference to keep its code mapped instead of joining. Route teardown through the
+         *          bootstrap shutdown ordering.
+         *
+         * @note Binding a mouse-wheel trigger installs a window-procedure subclass, and once that subclass has been
+         *       live the module keeps a never-released reference on itself: restoring the original procedure only
+         *       redirects future dispatches and cannot synchronize with a window-thread frame already inside the
+         *       subclass procedure (a modal size/move loop holds one for as long as the user drags the title bar), so
+         *       the code pages must stay mapped for the rest of the process. A session that used wheel bindings
+         *       therefore keeps the host DLL mapped even after a drained shutdown; every other resource still tears
+         *       down normally.
          */
         class Input
         {
@@ -365,7 +374,10 @@ namespace DetourModKit
              *          binding, so a bindings-after-empty-start() sequence takes effect only on that later start(),
              *          never retroactively on the empty one.
              * @param settings Poll cadence, focus gate, and gamepad tuning.
-             * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed.
+             * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed, or
+             *         ErrorCode::SystemCallFailed if the poll thread could not be started safely.
+             * @note Failure is retryable: on error the staged bindings remain staged (nothing is consumed until the
+             *       engine has actually started), so a later start() attempts the same set again.
              */
             [[nodiscard]] Result<void> start(Settings settings) noexcept;
 
@@ -374,9 +386,9 @@ namespace DetourModKit
 
             /**
              * @brief Stops the poll thread and clears all bindings. Idempotent; the facade can be started again.
-             * @details Under the loader lock the poll thread is detached against a pinned module instead of joined, and
-             *          the still-installed detours are left in place; otherwise the thread is joined, the detours are
-             *          removed, and active holds receive a final on_state_change(false).
+             * @details Under the loader lock the poll thread is detached and its module reference leaked instead of
+             *          joined, and the still-installed detours are left in place; otherwise the thread is joined, the
+             *          detours are removed, and active holds receive a final on_state_change(false).
              */
             void shutdown() noexcept;
 

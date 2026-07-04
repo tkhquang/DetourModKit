@@ -61,6 +61,29 @@ namespace DetourModKit
         };
 
         /**
+         * @brief Releases a module reference automatically unless ownership is handed to a hook Impl.
+         */
+        class ModuleRefGuard
+        {
+        public:
+            explicit ModuleRefGuard(HMODULE module) noexcept : m_module(module) {}
+
+            ~ModuleRefGuard() noexcept { detail::release_module_ref(m_module); }
+
+            ModuleRefGuard(const ModuleRefGuard &) = delete;
+            ModuleRefGuard &operator=(const ModuleRefGuard &) = delete;
+            ModuleRefGuard(ModuleRefGuard &&) = delete;
+            ModuleRefGuard &operator=(ModuleRefGuard &&) = delete;
+
+            [[nodiscard]] HMODULE release() noexcept { return std::exchange(m_module, nullptr); }
+
+            [[nodiscard]] HMODULE get() const noexcept { return m_module; }
+
+        private:
+            HMODULE m_module{nullptr};
+        };
+
+        /**
          * @brief Decodes a leading inline-hook redirect at @p target_address and returns its destination.
          * @details Recognises the three redirect shapes a foreign hook plants over a prologue: E9 (jmp rel32), FF 25
          *          (jmp [rip+disp32]), and 48 B8 imm64; FF E0 (mov rax, imm64; jmp rax, the absolute-jump trampoline a
@@ -294,8 +317,9 @@ namespace DetourModKit
         /**
          * @brief Acquires the VMT object gate, returning an unowned lock if the OS mutex acquisition fails.
          * @details The VMT create/apply/remove paths return an Error on an unowned lock instead of throwing through a
-         *          Result-returning control-plane API. Teardown leaks with the module pinned if the gate cannot be
-         *          acquired, because restoring without the gate would race another object-vptr transition.
+         *          Result-returning control-plane API. Teardown leaks the backend (keeping its install-time module
+         *          reference) if the gate cannot be acquired, because restoring without the gate would race another
+         *          object-vptr transition.
          */
         [[nodiscard]] std::unique_lock<std::mutex> acquire_vmt_object_lock() noexcept
         {
@@ -704,13 +728,13 @@ namespace DetourModKit
             }
 
             // Loader-lock leaf discipline: under the OS loader lock (DllMain / FreeLibrary), restoring the prologue and
-            // freeing the trampoline can deadlock against another thread waiting on a loader callback. Pin the module
-            // so the code pages stay live, record the intentional leak, and leave the backend hook installed rather
-            // than tear it down here. The leaked backend keeps the trampoline mapped, so the gate's published callable
-            // stays valid and a late guarded call() through the pinned gate still dispatches correctly.
+            // freeing the trampoline can deadlock against another thread waiting on a loader callback. Leave the
+            // backend hook installed and leak the Impl rather than tear it down here. The Impl carries the module
+            // reference taken before the backend was published (self_ref), so leaking it keeps the trampoline's code
+            // pages mapped -- the gate's published callable stays valid and a late guarded call() through it still
+            // dispatches correctly.
             if (DetourModKit::detail::is_loader_lock_held())
             {
-                DetourModKit::detail::pin_current_module();
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 return;
@@ -746,8 +770,8 @@ namespace DetourModKit
                 if (!guard.owns_lock())
                 {
                     // If the guard itself cannot be acquired, restoring is no longer provably safe. Leak the backend
-                    // with the module pinned rather than risk freeing a trampoline that a guarded caller may still use.
-                    DetourModKit::detail::pin_current_module();
+                    // (and, with it, the install-time module reference in the Impl, which keeps the trampoline mapped)
+                    // rather than risk freeing a trampoline that a guarded caller may still use.
                     diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                     (void)m_impl.release();
                     return;
@@ -764,7 +788,14 @@ namespace DetourModKit
             // create still sees the target as hooked (the safe direction) right up until the ledger entry is dropped.
             // No call() can be dispatching through the trampoline here: the gate published a null callable under its
             // mutex, and any caller that had already locked was drained above.
+            //
+            // Grab the install-time module reference before reset() destroys the Impl, then release it after the
+            // backend is torn down and no lock is held (release_module_ref calls FreeLibrary, which takes the loader
+            // lock). The caller is still executing this module's code and the host holds its own load reference, so
+            // this release is never the terminal one that could unmap the module out from under us.
+            const HMODULE self_ref = static_cast<HMODULE>(m_impl->self_ref);
             m_impl.reset();
+            DetourModKit::detail::release_module_ref(self_ref);
 
             const std::size_t newer = DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
             if (newer > 0)
@@ -987,6 +1018,12 @@ namespace DetourModKit
                     (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                     return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::inline_at"});
                 }
+                ModuleRefGuard self_ref(DetourModKit::detail::acquire_module_ref());
+                if (self_ref.get() == nullptr)
+                {
+                    (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                    return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at"});
+                }
                 try
                 {
                     auto created = safetyhook::InlineHook::create(allocator, reinterpret_cast<void *>(target), detour,
@@ -1018,6 +1055,10 @@ namespace DetourModKit
                     DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id);
                     emit_lifecycle(created_name, ledger_id, diagnostics::HookKind::Inline,
                                    diagnostics::HookTransition::Created);
+                    // The module reference was taken before SafetyHook patched the target, because a detour can become
+                    // callable as soon as the backend create succeeds. Hand it to the Impl only after every fallible
+                    // setup step has completed; until then ModuleRefGuard releases it on rollback.
+                    impl->self_ref = self_ref.release();
                     return Hook(std::move(impl), std::move(gate));
                 }
                 catch (const std::bad_alloc &)
@@ -1060,6 +1101,12 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::mid_at"});
             }
+            ModuleRefGuard self_ref(DetourModKit::detail::acquire_module_ref());
+            if (self_ref.get() == nullptr)
+            {
+                (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at"});
+            }
             try
             {
                 auto created = safetyhook::MidHook::create(allocator, reinterpret_cast<void *>(target),
@@ -1086,6 +1133,9 @@ namespace DetourModKit
                 DetourModKit::detail::HookLedger::instance().commit_hook(target, ledger_id);
                 emit_lifecycle(created_name, ledger_id, diagnostics::HookKind::Mid,
                                diagnostics::HookTransition::Created);
+                // The module reference was taken before SafetyHook patched the target; hand it to the Impl only after
+                // every fallible setup step has completed.
+                impl->self_ref = self_ref.release();
                 return Hook(std::move(impl), std::move(gate));
             }
             catch (const std::bad_alloc &)
@@ -1192,11 +1242,12 @@ namespace DetourModKit
             {
                 return;
             }
-            // Loader-lock leaf discipline: under the loader lock, leave the cloned vtables installed (pinned) rather
-            // than restore vptrs, which is a bare write that could race a loader callback.
+            // Loader-lock leaf discipline: under the loader lock, leave the cloned vtables installed rather than
+            // restore vptrs, which is a bare write that could race a loader callback. Leak the Impl; it carries the
+            // module reference taken before the clone was published (self_ref), so leaking it keeps the clone's code
+            // pages mapped.
             if (DetourModKit::detail::is_loader_lock_held())
             {
-                DetourModKit::detail::pin_current_module();
                 diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                 (void)m_impl.release();
                 return;
@@ -1216,17 +1267,24 @@ namespace DetourModKit
             // Restore the original vptr on every applied object FIRST, while the ledger still records this clone, THEN
             // release the ledger entry -- the same ordering as Hook::~Hook, so a concurrent vmt_for/apply_to keeps
             // seeing the clone base as live until its restore completes instead of racing a half-removed clone.
+            HMODULE self_ref = nullptr;
             {
                 std::unique_lock<std::mutex> object_gate = acquire_vmt_object_lock();
                 if (!object_gate.owns_lock())
                 {
-                    DetourModKit::detail::pin_current_module();
+                    // Leak the Impl (with its install-time module reference, which keeps the clone mapped) rather than
+                    // restore vptrs without the gate.
                     diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::HookManager);
                     (void)m_impl.release();
                     return;
                 }
+                self_ref = static_cast<HMODULE>(m_impl->self_ref);
                 m_impl.reset();
             }
+            // Release outside the object gate: release_module_ref calls FreeLibrary, which takes the loader lock, and
+            // we must not hold the process-wide VMT gate while acquiring the loader lock. The host still holds its own
+            // load reference, so this is never the terminal release.
+            DetourModKit::detail::release_module_ref(self_ref);
             DetourModKit::detail::HookLedger::instance().release_vmt(ledger_id);
             emit_lifecycle(name, ledger_id, diagnostics::HookKind::Vmt, diagnostics::HookTransition::Removed);
         }
@@ -1475,6 +1533,19 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::InvalidObject, "hook::vmt_for"});
             }
+            // Take the module reference BEFORE the process-wide VMT object gate. On any rollback (a create/record/setup
+            // failure after this point) the ModuleRefGuard destructor calls release_module_ref -> FreeLibrary, which
+            // takes the OS loader lock; running that while holding the object gate would invert the lock order ~VmtHook
+            // is careful to avoid (it releases its reference OUTSIDE the gate for exactly this reason) and could
+            // deadlock a VMT op dispatched from a loader-lock context. Declaring the guard before the gate makes the
+            // gate (a later-declared local) unlock first, so the guard's FreeLibrary always runs outside the gate. The
+            // reference is object-independent and still precedes publication (the clone create and vptr swap below),
+            // and is handed to the Impl on success (self_ref.release()).
+            ModuleRefGuard self_ref(DetourModKit::detail::acquire_module_ref());
+            if (self_ref.get() == nullptr)
+            {
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::vmt_for"});
+            }
             std::unique_lock<std::mutex> object_gate = acquire_vmt_object_lock();
             if (!object_gate.owns_lock())
             {
@@ -1570,6 +1641,9 @@ namespace DetourModKit
                 }
                 emit_lifecycle(created_name, *recorded, diagnostics::HookKind::Vmt,
                                diagnostics::HookTransition::Created);
+                // The module reference was taken before the object vptr was swapped to the clone; hand it to the Impl
+                // only after every fallible setup step has completed.
+                impl->self_ref = self_ref.release();
                 return VmtHook(std::move(impl));
             }
             catch (const std::bad_alloc &)
