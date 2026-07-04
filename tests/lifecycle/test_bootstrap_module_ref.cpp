@@ -38,9 +38,17 @@ namespace
     using WorkerReadyFn = FARPROC;
     using RequestShutdownFn = FARPROC;
 
-    void *resolve_marker(HMODULE dll) noexcept
+    // Resolves a required probe export. On failure it logs the setup error, unloads the DLL, and returns nullptr so
+    // the caller can bail with the setup-failure code; every scenario shares this resolve/log/unload sequence.
+    FARPROC resolve_required(HMODULE dll, const char *symbol, const char *mode) noexcept
     {
-        return reinterpret_cast<void *>(GetProcAddress(dll, "dmk_probe_marker"));
+        const FARPROC fn = GetProcAddress(dll, symbol);
+        if (fn == nullptr)
+        {
+            std::fprintf(stderr, "FAIL[%s]: GetProcAddress('%s') failed (error %lu)\n", mode, symbol, GetLastError());
+            FreeLibrary(dll);
+        }
+        return fn;
     }
 
     bool wait_for_worker_ready(WorkerReadyFn worker_ready) noexcept
@@ -73,12 +81,9 @@ namespace
             std::fprintf(stderr, "FAIL[mapped]: LoadLibraryW failed (error %lu)\n", GetLastError());
             return 2;
         }
-        void *marker = resolve_marker(dll);
+        void *marker = reinterpret_cast<void *>(resolve_required(dll, "dmk_probe_marker", "mapped"));
         if (marker == nullptr)
         {
-            std::fprintf(stderr, "FAIL[mapped]: GetProcAddress('dmk_probe_marker') failed (error %lu)\n",
-                         GetLastError());
-            FreeLibrary(dll);
             return 2;
         }
 
@@ -110,28 +115,19 @@ namespace
             std::fprintf(stderr, "FAIL[unload]: LoadLibraryW failed (error %lu)\n", GetLastError());
             return 2;
         }
-        void *marker = resolve_marker(dll);
+        void *marker = reinterpret_cast<void *>(resolve_required(dll, "dmk_probe_marker", "unload"));
         if (marker == nullptr)
         {
-            std::fprintf(stderr, "FAIL[unload]: GetProcAddress('dmk_probe_marker') failed (error %lu)\n",
-                         GetLastError());
-            FreeLibrary(dll);
             return 2;
         }
-        WorkerReadyFn worker_ready = GetProcAddress(dll, "dmk_probe_worker_ready");
+        WorkerReadyFn worker_ready = resolve_required(dll, "dmk_probe_worker_ready", "unload");
         if (worker_ready == nullptr)
         {
-            std::fprintf(stderr, "FAIL[unload]: GetProcAddress('dmk_probe_worker_ready') failed (error %lu)\n",
-                         GetLastError());
-            FreeLibrary(dll);
             return 2;
         }
-        RequestShutdownFn request_shutdown = GetProcAddress(dll, "dmk_probe_request_shutdown");
+        RequestShutdownFn request_shutdown = resolve_required(dll, "dmk_probe_request_shutdown", "unload");
         if (request_shutdown == nullptr)
         {
-            std::fprintf(stderr, "FAIL[unload]: GetProcAddress('dmk_probe_request_shutdown') failed (error %lu)\n",
-                         GetLastError());
-            FreeLibrary(dll);
             return 2;
         }
 

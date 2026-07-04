@@ -33,6 +33,10 @@ namespace DetourModKit
          * @brief Starts a new worker thread running the supplied body.
          * @param name Descriptive name for logging. Copied into the worker.
          * @param body Invocable receiving a stop_token. Must return promptly when stop_requested() becomes true.
+         * @throws std::system_error if the worker's counted module reference cannot be taken (the keepalive must exist
+         *         before the thread can run library code) or if the thread itself cannot be created. Construction is
+         *         all-or-nothing: on throw no thread exists and the reference has been released, so callers may treat
+         *         a constructed worker as fully started.
          */
         StoppableWorker(std::string_view name, std::function<void(std::stop_token)> body);
 

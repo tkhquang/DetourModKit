@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -2071,7 +2072,11 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
     ASSERT_EQ(current_value.load(), 42);
 
-    // Collect (content_changed) booleans from watcher-driven reloads.
+    // Collect (content_changed) booleans from watcher-driven reloads. The watcher watches the whole temp directory,
+    // and on a notification-buffer overflow it must assume this file changed (the events were dropped), so parallel
+    // test processes churning the directory can inject extra reloads -- which hash-skip and emit content_changed=false
+    // -- at ANY point in this test's timeline. Every wait and assertion below therefore keys on hit VALUES, never on
+    // hit counts or positions.
     std::mutex hits_mutex;
     std::vector<bool> hits;
     ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
@@ -2081,24 +2086,32 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
                                              hits.push_back(content_changed);
                                          }),
               config::AutoReloadStatus::Started);
+    // No arming delay is needed: enable_auto_reload() returns Started only after the watcher has queued its first
+    // ReadDirectoryChangesW, so every directory change from here on is captured.
 
-    // Let the watcher finish its first ReadDirectoryChangesW call so subsequent writes are observed.
-    std::this_thread::sleep_for(std::chrono::milliseconds{200});
-
-    // Phase 1: rewrite with *different* bytes -- must deliver content_changed=true.
+    // Rewrites go through a write-then-rename swap so the watcher can never observe a half-written file. An in-place
+    // truncate+write opens a window in which a debounced reload reads EMPTY content: that poisons the stored hash and
+    // yields spurious content_changed=true hits once the write completes. The rename surfaces this filename in a
+    // RENAMED_NEW_NAME event, which the watcher matches exactly like a write.
+    const auto replace_atomically = [&](std::string_view content)
     {
-        std::ofstream f(m_test_ini_file);
-        f << "[S]\nK=43\n";
-    }
+        const std::filesystem::path staging{m_test_ini_file.string() + ".staging"};
+        {
+            std::ofstream f(staging, std::ios::binary);
+            f << content;
+        }
+        std::filesystem::rename(staging, m_test_ini_file);
+    };
 
-    const auto wait_for_hit_count = [&](std::size_t target, std::chrono::milliseconds timeout) -> bool
+    // Polls the hit list until the predicate (evaluated under the lock) holds or the timeout elapses.
+    const auto wait_for_hits = [&](std::chrono::milliseconds timeout, auto predicate) -> bool
     {
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (std::chrono::steady_clock::now() < deadline)
         {
             {
                 std::lock_guard<std::mutex> lock(hits_mutex);
-                if (hits.size() >= target)
+                if (predicate())
                 {
                     return true;
                 }
@@ -2108,25 +2121,39 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
         return false;
     };
 
-    ASSERT_TRUE(wait_for_hit_count(1, std::chrono::seconds{3}))
-        << "Watcher never observed the first (changed-bytes) write.";
+    // Phase 1: replace with *different* bytes -- a reload must eventually deliver content_changed=true. Waiting for
+    // the true VALUE (not the first hit) tolerates any spurious overflow-driven false hits landing first.
+    replace_atomically("[S]\nK=43\n");
+    ASSERT_TRUE(
+        wait_for_hits(std::chrono::seconds{3}, [&] { return std::find(hits.begin(), hits.end(), true) != hits.end(); }))
+        << "Watcher never reported content_changed=true for the changed-bytes replace.";
 
-    // Phase 2: rewrite with identical bytes to bump mtime without changing the content hash. on_reload must deliver
-    // content_changed = false.
+    // The true hit means the stored hash now matches the on-disk bytes, and the atomic replace guarantees no torn
+    // intermediate content was ever observable -- so every reload after this point, whether driven by the
+    // identical-bytes replace below or injected by foreign directory churn, must hash-skip and report false.
+    std::size_t settled_count = 0;
     {
-        std::ofstream f(m_test_ini_file);
-        f << "[S]\nK=43\n";
+        std::lock_guard<std::mutex> lock(hits_mutex);
+        settled_count = hits.size();
     }
 
-    ASSERT_TRUE(wait_for_hit_count(2, std::chrono::seconds{3}))
-        << "Watcher never observed the touch (identical-bytes) write.";
+    // Phase 2: replace with identical bytes to bump the directory state without changing the content hash. on_reload
+    // must deliver content_changed = false.
+    replace_atomically("[S]\nK=43\n");
+    ASSERT_TRUE(wait_for_hits(std::chrono::seconds{3}, [&] { return hits.size() > settled_count; }))
+        << "Watcher never reported a reload for the identical-bytes replace.";
 
+    // disable_auto_reload() joins the watcher (flushing at most one final pending callback first), so the hit list is
+    // complete and unsynchronized reads below are safe.
     config::disable_auto_reload();
 
     std::lock_guard<std::mutex> lock(hits_mutex);
-    ASSERT_GE(hits.size(), 2u);
-    EXPECT_TRUE(hits.front()) << "First watcher hit must report content_changed=true (bytes differed).";
-    EXPECT_FALSE(hits.back()) << "Final watcher hit must report content_changed=false (hash-skip suppressed setters).";
+    ASSERT_GT(hits.size(), settled_count);
+    for (std::size_t i = settled_count; i < hits.size(); ++i)
+    {
+        EXPECT_FALSE(hits[i]) << "Reload at index " << i
+                              << " reported content_changed=true after the hash had settled; the hash-skip failed.";
+    }
 }
 
 TEST_F(ConfigTest, Reload_EmptyFile_DoesNotCrash)

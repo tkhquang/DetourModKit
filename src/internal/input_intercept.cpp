@@ -131,10 +131,10 @@ namespace DetourModKit::detail
         std::atomic<HWND> s_hwnd{nullptr};
         std::atomic<LONG_PTR> s_prev_wndproc{0};
         std::atomic<bool> s_wndproc_installed{false};
-        // Set once the first successful install has taken the never-released module reference that keeps
-        // wndproc_detour's code mapped (see install_wndproc). WM_NCDESTROY re-arms installation for a re-created game
-        // window, so without this flag every window generation would take -- and leak -- another reference. Only the
-        // poll thread touches it; relaxed ordering suffices.
+        // Set once install_wndproc has taken the never-released module reference that keeps wndproc_detour's code
+        // mapped; the acquire precedes the subclass swap so the detour is never reachable without its keepalive.
+        // WM_NCDESTROY re-arms installation for a re-created game window, so without this flag every window generation
+        // would take -- and leak -- another reference. Only the poll thread touches it; relaxed ordering suffices.
         std::atomic<bool> s_wndproc_ref_taken{false};
 
         /**
@@ -682,6 +682,25 @@ namespace DetourModKit::detail
             return false; // window not available yet; the poll loop retries.
         }
 
+        // Take the permanent keepalive BEFORE the detour becomes reachable. Once SetWindowLongPtrW publishes
+        // wndproc_detour, no later restore can sever that reachability: a restore only redirects future dispatches, so
+        // a frame already inside the detour (a modal size/move loop holds one for as long as the user drags the title
+        // bar) survives it and eventually returns through this module's code. The module must therefore stay mapped
+        // for the rest of the process from the moment the subclass first goes live -- and if the reference cannot be
+        // taken, fail closed and let the poll loop retry rather than publish a detour whose code pages nothing keeps
+        // mapped. One reference covers every window generation (WM_NCDESTROY re-arms installation for a re-created
+        // window); the once-flag is set as soon as the acquire succeeds, so a failed swap below cannot double-acquire
+        // on its retry. This runs on the poll thread, off the loader lock, while the module is fully live.
+        if (!s_wndproc_ref_taken.load(std::memory_order_relaxed))
+        {
+            if (acquire_module_ref() == nullptr)
+            {
+                return false;
+            }
+            s_wndproc_ref_taken.store(true, std::memory_order_relaxed);
+            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
+        }
+
         // Publish the predecessor procedure and target window before the detour goes live. SetWindowLongPtrW makes
         // wndproc_detour reachable from the window's own message thread the instant it returns; if the predecessor were
         // stored only afterwards, a message dispatched in that gap would read a zero s_prev_wndproc and route to
@@ -718,21 +737,6 @@ namespace DetourModKit::detail
         if (prev != 0 && prev != current)
         {
             s_prev_wndproc.store(prev, std::memory_order_release);
-        }
-
-        // The detour is now reachable from the window's own message thread, and no later restore can sever that
-        // reachability: SetWindowLongPtrW only redirects future dispatches, so a frame already inside wndproc_detour
-        // survives any restore and eventually returns through this module's code. A modal size/move loop (the user
-        // dragging the title bar) keeps such a frame alive for as long as the drag lasts, far longer than any teardown
-        // window. Once the subclass has been live even once, the module must therefore stay mapped for the rest of the
-        // process: take one counted module reference here -- on the poll thread, off the loader lock, while the module
-        // is fully live -- and never release it. One reference covers every window generation (WM_NCDESTROY re-arms
-        // installation for a re-created window), so it is taken only on the first successful install. On acquire
-        // failure the flag stays clear and the next install retries.
-        if (!s_wndproc_ref_taken.load(std::memory_order_relaxed) && acquire_module_ref() != nullptr)
-        {
-            s_wndproc_ref_taken.store(true, std::memory_order_relaxed);
-            DetourModKit::diagnostics::record_intentional_leak(DetourModKit::diagnostics::LeakSubsystem::Input);
         }
 
         // Drain any notches the wndproc detour latched while no binding owned the wheel. uninstall() drops the consume

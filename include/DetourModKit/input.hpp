@@ -376,6 +376,8 @@ namespace DetourModKit
              * @param settings Poll cadence, focus gate, and gamepad tuning.
              * @return Result<void>; ErrorCode::OutOfMemory if the engine could not be constructed, or
              *         ErrorCode::SystemCallFailed if the poll thread could not be started safely.
+             * @note Failure is retryable: on error the staged bindings remain staged (nothing is consumed until the
+             *       engine has actually started), so a later start() attempts the same set again.
              */
             [[nodiscard]] Result<void> start(Settings settings) noexcept;
 

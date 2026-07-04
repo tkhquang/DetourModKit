@@ -36,11 +36,15 @@ namespace DetourModKit
                     }
                     catch (const std::exception &e)
                     {
-                        log().error("StoppableWorker '{}': unhandled exception: {}", label, e.what());
+                        // try_log, not error(): a throw from the logger here would escape the thread function and
+                        // terminate the process, defeating the very containment these handlers provide.
+                        (void)log().try_log(LogLevel::Error, "StoppableWorker '{}': unhandled exception: {}", label,
+                                            e.what());
                     }
                     catch (...)
                     {
-                        log().error("StoppableWorker '{}': unknown exception escaped body.", label);
+                        (void)log().try_log(LogLevel::Error, "StoppableWorker '{}': unknown exception escaped body.",
+                                            label);
                     }
                 });
         }
