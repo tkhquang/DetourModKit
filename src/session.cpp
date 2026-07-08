@@ -306,7 +306,11 @@ namespace DetourModKit
             s_on_ready = std::move(on_ready);
 
             // Create into a local first, then publish with a release store so the worker's / consumer's acquire load
-            // observes a fully-constructed handle. The guard above already proved s_shutdown_event was null.
+            // observes a fully-constructed handle. The guard above already proved s_shutdown_event was null. The TRUE
+            // second argument makes this a MANUAL-RESET event: a shutdown request is a one-way latch, so once
+            // request_shutdown() signals it the event stays signaled -- the worker observes it whether or not it was
+            // already waiting, and a repeated request_shutdown() is idempotent (an auto-reset event would clear itself
+            // after a single wait woke and could drop a later observer).
             const HANDLE shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             if (!shutdown_event)
             {
@@ -578,7 +582,7 @@ namespace DetourModKit
         // handshake or a test harness), so a consumer thread may call request_shutdown() -- documented safe from any
         // thread, even after teardown -- at any moment. Closing the handle would let a request_shutdown() that already
         // loaded it SetEvent a closed / recycled handle. Retire it to null (so a later load no-ops) and leak the one
-        // tiny auto-reset event object; the OS reclaims it at process exit. Leaking one kernel handle per off-loader
+        // tiny manual-reset event object; the OS reclaims it at process exit. Leaking one kernel handle per off-loader
         // unload is the accepted cost of an always-safe request_shutdown().
         s_shutdown_event.store(nullptr, std::memory_order_release);
         // The worker has joined, so the init callback is no longer in use. Off the loader lock its captured state's
