@@ -75,26 +75,27 @@ namespace DetourModKit
                 return gap <= static_cast<std::uint64_t>(tolerance);
             }
 
-            // The per-anchor evidence hash, defined below with the other fingerprint machinery. Declared here so the
+            // The independence evidence hash, defined below with the other fingerprint machinery. Declared here so the
             // independence gate can compare two members by CONTENT rather than by the storage identity of their views.
-            [[nodiscard]] std::uint64_t fingerprint_evidence(const Anchor &anchor) noexcept;
+            [[nodiscard]] std::uint64_t fingerprint_independence_evidence(const Anchor &anchor) noexcept;
 
             // True when two resolvable sub-anchors are the SAME evidence -- same backend fed the same inputs, so they
             // would decode the identical site/name/literal and therefore cannot corroborate each other. Compared by
             // CONTENT, not by view/span storage identity: two distinct candidate arrays that compile to byte-identical
             // patterns (or two copies of the same mangled name / literal in separate buffers) still decode one
-            // identical site, so they must count as dependent. Reusing fingerprint_evidence keeps this content compare
-            // in exact lock-step with the drift fingerprint -- a hash match is what "same evidence" means everywhere
-            // else in this file. It also folds the kind byte, so a cross-kind pair never collides; the fail-closed
-            // direction is a ~2^-64 hash collision rejecting a genuinely-independent pair (the quorum then fails
-            // closed, never open).
+            // identical site, so they must count as dependent. It uses fingerprint_INDEPENDENCE_evidence, whose ladder
+            // fold is order-INDEPENDENT: two members that list the same fallback rungs in a different order still decode
+            // the same site, so a reordered copy must not masquerade as independent corroboration (the drift
+            // fingerprint stays order-sensitive on purpose -- reordering a ladder IS a signature change). It folds the
+            // kind byte, so a cross-kind pair never collides; the fail-closed direction is a ~2^-64 hash collision
+            // rejecting a genuinely-independent pair (the quorum then fails closed, never open).
             [[nodiscard]] bool same_backend_config(const Anchor &a, const Anchor &b) noexcept
             {
                 if (a.kind != b.kind)
                 {
                     return false;
                 }
-                return fingerprint_evidence(a) == fingerprint_evidence(b);
+                return fingerprint_independence_evidence(a) == fingerprint_independence_evidence(b);
             }
 
             // Fail-closed independence gate run BEFORE agreement is considered. Two signals are not independent
@@ -307,6 +308,24 @@ namespace DetourModKit
                 return hash;
             }
 
+            // Order-INDEPENDENT cascade digest for the quorum independence gate: a fallback ladder's rungs all aim at
+            // the same target, so two members listing the same rungs in a different order decode the same site and are
+            // dependent evidence. Each candidate is hashed from a fixed seed, then the per-candidate hashes are combined
+            // COMMUTATIVELY (a sum, so reordering cannot change the result); the candidate count is folded so a subset
+            // never collides with a superset. Kept SEPARATE from fnv1a_cascade because the drift fingerprint stays
+            // order-sensitive on purpose (reordering a ladder is a signature change worth reporting as drift).
+            [[nodiscard]] std::uint64_t fnv1a_cascade_unordered(std::uint64_t hash,
+                                                                std::span<const scan::Candidate> site) noexcept
+            {
+                hash = fnv1a_int(hash, static_cast<std::uint64_t>(site.size()));
+                std::uint64_t combined = 0;
+                for (const scan::Candidate &candidate : site)
+                {
+                    combined += fnv1a_candidate(FNV1A64_OFFSET, candidate);
+                }
+                return fnv1a_int(hash, combined);
+            }
+
             // Hashes one anchor's own evidence with no quorum recursion. A Quorum reaching here -- which the public
             // entry point only allows for a malformed sub-anchor, since nesting is rejected at resolve time --
             // contributes only its kind, which bounds recursion to a single level.
@@ -342,6 +361,29 @@ namespace DetourModKit
                 case AnchorKind::Unset:
                     // No address-independent evidence beyond the kind byte already folded above.
                     break;
+                }
+                return hash;
+            }
+
+            // fingerprint_evidence with an order-INDEPENDENT ladder fold, used ONLY by the quorum independence gate.
+            // Every tier except the RipGlobal / CodeOperand ladder has no ordered component, so those delegate straight
+            // to fingerprint_evidence; only the two ladder tiers swap fnv1a_cascade for fnv1a_cascade_unordered so a
+            // reordered copy of the same rungs hashes identically. The drift fingerprint (anchor_fingerprint /
+            // fingerprint_evidence) is deliberately left untouched, so detection still reports a reordered ladder as a
+            // changed signature.
+            [[nodiscard]] std::uint64_t fingerprint_independence_evidence(const Anchor &anchor) noexcept
+            {
+                if (anchor.kind != AnchorKind::RipGlobal && anchor.kind != AnchorKind::CodeOperand)
+                {
+                    return fingerprint_evidence(anchor);
+                }
+                std::uint64_t hash = fnv1a_byte(FNV1A64_OFFSET, static_cast<std::uint8_t>(anchor.kind));
+                hash = fnv1a_cascade_unordered(hash, anchor.site);
+                if (anchor.kind == AnchorKind::CodeOperand)
+                {
+                    hash = fnv1a_byte(hash, static_cast<std::uint8_t>(anchor.operand_kind));
+                    hash = fnv1a_byte(hash, anchor.operand_index);
+                    hash = fnv1a_byte(hash, anchor.byte_width);
                 }
                 return hash;
             }

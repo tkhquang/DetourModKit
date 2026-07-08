@@ -497,6 +497,42 @@ TEST(ManifestCompileTest, StringXrefWithEmptyTextFailsClosed)
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 }
 
+TEST(ManifestCompileTest, RipRelativeRungWithUnsetDecodeFieldsFailsClosed)
+{
+    // A programmatic record whose RipRelative rung never set its decode offsets leaves both at 0, which would resolve
+    // to match + 0 + disp32 -- the R3.1 defect reached through the compile path instead of the file parser. compile
+    // must apply the same fail-closed decode-field constraint parse_rung does.
+    mf::SignatureRecord record;
+    record.label = "x";
+    record.kind = an::AnchorKind::RipGlobal;
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::RipRelative;
+    rung.pattern = "48 8B 05 ?? ?? ?? ??"; // a valid pattern, but displacement_at / instruction_length default to 0
+    record.ladder = {rung};
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+TEST(ManifestCompileTest, RipRelativeRungWithValidDecodeFieldsCompiles)
+{
+    // The gate is scoped to the decode values, so a rung with a well-formed offset pair (disp32 fits in the
+    // instruction) still compiles -- only unset/malformed decode fields fail closed.
+    mf::SignatureRecord record;
+    record.label = "x";
+    record.kind = an::AnchorKind::RipGlobal;
+    mf::CandidateSpec rung;
+    rung.mode = sc::Mode::RipRelative;
+    rung.pattern = "48 8B 05 ?? ?? ?? ??";
+    rung.displacement_at = 3;
+    rung.instruction_length = 7;
+    record.ladder = {rung};
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_TRUE(compiled.has_value()) << compiled.error().message();
+}
+
 namespace
 {
     // Post-resolve validators used to prove the manifest path can reach an Anchor::validator.

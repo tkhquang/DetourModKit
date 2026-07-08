@@ -853,6 +853,39 @@ TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
+TEST(AnchorTest, QuorumRejectsReorderedIdenticalLadders)
+{
+    ScratchPage page;
+    ASSERT_TRUE(page.ok());
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00});       // add rax, 0xF0
+    page.put(0x140, {0x48, 0x81, 0xC1, 0xF0, 0x00, 0x00, 0x00}); // add rcx, 0xF0
+    // Two ladders listing the SAME two rungs in DIFFERENT order. A fallback ladder's rungs all aim at one target, so a
+    // reordered copy decodes the same site and is dependent evidence, not corroboration -- the independence gate must
+    // be order-INDEPENDENT. (Here both rungs resolve to 0xF0, so a storage/order-sensitive gate would have let this
+    // pair falsely corroborate; the fix reports QuorumNotIndependent before any resolve.)
+    const sc::Candidate ladder_ab[] = {sc::Candidate::direct("a", aob("48 05 F0 00 00 00")),
+                                       sc::Candidate::direct("b", aob("48 81 C1 F0 00 00 00"))};
+    const sc::Candidate ladder_ba[] = {sc::Candidate::direct("b", aob("48 81 C1 F0 00 00 00")),
+                                       sc::Candidate::direct("a", aob("48 05 F0 00 00 00"))};
+
+    an::Anchor sub_ab{};
+    sub_ab.kind = an::AnchorKind::CodeOperand;
+    sub_ab.site = ladder_ab;
+    sub_ab.operand_index = 1;
+    an::Anchor sub_ba{};
+    sub_ba.kind = an::AnchorKind::CodeOperand;
+    sub_ba.site = ladder_ba;
+    sub_ba.operand_index = 1;
+
+    const an::Anchor *members[] = {&sub_ab, &sub_ba};
+    an::Anchor quorum{};
+    quorum.kind = an::AnchorKind::Quorum;
+    quorum.quorum_members = members;
+
+    const an::ResolvedAnchor result = an::resolve(quorum, page.range());
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
 TEST(AnchorTest, UnsetKindFailsClosed)
 {
     // A default-constructed Anchor whose kind was never set (e.g. a designated-initializer table entry that omits

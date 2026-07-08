@@ -826,6 +826,17 @@ namespace DetourModKit::manifest
                 {
                     return std::unexpected(pattern.error());
                 }
+                // A RipRelative rung resolves target = match + instruction_length + *(int32*)(match + displacement_at).
+                // A programmatic CandidateSpec that never set the decode offsets leaves both at 0, which would resolve
+                // to match + 0 + disp32 -- an in-module address wrong by the instruction length that resolve_and_gate
+                // then trusts. parse_rung guards the file path; enforce the same fail-closed constraint here so the
+                // programmatic Signature::compile path cannot smuggle an unset (or malformed) rung past the gate: the
+                // offset is non-negative and the disp32's four bytes fit inside the instruction.
+                if (spec.displacement_at < 0 || spec.instruction_length < static_cast<std::size_t>(spec.displacement_at) +
+                                                                               sizeof(std::int32_t))
+                {
+                    return fail(ErrorCode::InvalidArg, "manifest::compile");
+                }
                 return scan::Candidate::rip_relative(spec.name, *pattern, spec.displacement_at,
                                                      spec.instruction_length);
             }
