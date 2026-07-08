@@ -723,6 +723,22 @@ TEST(ScanResolve, PrologueFallbackShortTailIsNotApplicable)
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
 }
 
+TEST(ScanResolve, PrologueFallbackRejectsBoundedJumpPattern)
+{
+    // A Direct candidate that carries a bounded jump cannot be prologue-rebuilt: flat byte/mask concatenation would
+    // drop the variable gap and match a wrong, gap-collapsed shape. Even with a literal tail well above the ten-literal
+    // floor the fallback must fail closed as not-applicable (a clean miss), never a silently-wrong recovery. The
+    // jump-bearing tail still resolves through the normal direct scan when it is present.
+    ReadableBuffer buffer(0x400);
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("jumpy", scan::Pattern::literal("55 48 89 E5 90 [1-2] 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+    const auto hit =
+        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
+}
+
 TEST(ScanResolve, PrologueFallbackRecoversFf25IndirectPrologue)
 {
     ExecutableBuffer buffer(0x1000);

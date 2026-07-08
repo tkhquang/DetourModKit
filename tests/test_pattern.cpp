@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "DetourModKit/detail/pattern_core.hpp"
 #include "DetourModKit/scan.hpp"
@@ -281,6 +282,25 @@ TEST(PatternJumps, MatchesAtBacktracksStrandedSegment)
     EXPECT_TRUE(p->matches_at(window<5>({0xA0, 0xB0, 0x11, 0xB0, 0xC0})));
     // No C0 reachable after any B0 placement: no match.
     EXPECT_FALSE(p->matches_at(window<5>({0xA0, 0xB0, 0x11, 0xB0, 0x99})));
+}
+
+TEST(PatternJumps, MatchesAtWorkBudgetCapsPathologicalBacktracking)
+{
+    const auto p = scan::Pattern::compile("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+                                          "[0-255] ?? [0-255] FF");
+    ASSERT_TRUE(p.has_value());
+    EXPECT_EQ(p->segment_count(), detail::MAX_PATTERN_JUMPS + 1);
+
+    // This is the same pathological placement shape the runtime scanner guards: one literal leading segment, then the
+    // widest admitted set of wildcard gaps, and no terminal 0xFF anywhere. matches_at checks only this one start
+    // position, so the shared per-position budget must stop the otherwise product-sized search and return a clean miss.
+    // The asserted miss is the correct answer with OR without the cap (the region has no 0xFF), so this test proves the
+    // cap by TERMINATING quickly: with the budget removed the single-position search fans out toward the gap-span
+    // product and the case hangs until the ctest timeout fails it, rather than tripping the assertion below.
+    std::vector<std::byte> bytes(3072, std::byte{0x00});
+    bytes[0] = std::byte{0xA5};
+
+    EXPECT_FALSE(p->matches_at(bytes));
 }
 
 TEST(PatternJumps, RejectsMalformedAndIllegalJumps)

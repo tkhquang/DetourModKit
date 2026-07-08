@@ -68,12 +68,20 @@ namespace DetourModKit
              *        (N-of-M voting). Corroboration survives a patch that breaks some of the M signals as long as N of
              *        them still agree, which a single backend cannot.
              */
-            Quorum
+            Quorum,
+            /**
+             * @brief No backend: the fail-closed default for an anchor whose @ref Anchor::kind was never set. An
+             *        aggregate table authored with designated initializers that omits @ref Anchor::kind lands here
+             *        rather than on a resolvable kind, so a misdeclared entry reports @ref AnchorStatus::Failed instead
+             *        of resolving as a trusted address 0. Declaring it is always a mistake; it exists so the mistake
+             *        fails safe.
+             */
+            Unset
         };
 
         /// The number of @ref AnchorKind enumerators; sizes the per-kind deny-list in @ref ScanProfile.
-        inline constexpr std::size_t ANCHOR_KIND_COUNT = 7;
-        static_assert(static_cast<std::size_t>(AnchorKind::Quorum) + 1 == ANCHOR_KIND_COUNT,
+        inline constexpr std::size_t ANCHOR_KIND_COUNT = 8;
+        static_assert(static_cast<std::size_t>(AnchorKind::Unset) + 1 == ANCHOR_KIND_COUNT,
                       "ANCHOR_KIND_COUNT must track the AnchorKind enumerator count.");
 
         /**
@@ -141,8 +149,8 @@ namespace DetourModKit
         {
             /// Identifier echoed into the @ref ResolvedAnchor; excluded from @ref anchor_fingerprint.
             std::string_view label;
-            /// Which backend resolves this anchor.
-            AnchorKind kind = AnchorKind::Manual;
+            /// Which backend resolves this anchor. Defaults to @ref AnchorKind::Unset so an omitted kind fails closed.
+            AnchorKind kind = AnchorKind::Unset;
 
             /// VtableIdentity: the MSVC mangled type name, e.g. ".?AVGameAudioEffect@engine@@".
             std::string_view mangled;
@@ -223,7 +231,7 @@ namespace DetourModKit
             /// Copied from @ref Anchor::label.
             std::string_view label;
             /// Copied from @ref Anchor::kind.
-            AnchorKind kind = AnchorKind::Manual;
+            AnchorKind kind = AnchorKind::Unset;
             /// The resolution outcome.
             AnchorStatus status = AnchorStatus::Unresolved;
             /// The resolved quantity, meaningful only when @ref status is @ref AnchorStatus::Resolved.

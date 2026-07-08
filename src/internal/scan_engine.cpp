@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <optional>
 #include <vector>
 
@@ -382,15 +383,26 @@ namespace DetourModKit
     {
         // Parse through the shared grammar into a heap-backed sink so the runtime engine and scan::Pattern accept the
         // same DSL, while long runtime patterns keep using growable storage instead of the literal type's fixed cap.
-        EnginePatternSink sink;
-        if (detail::parse_pattern_into(aob_str, sink) != detail::PatternStatus::Ok)
+        // The heap-backed sink grows the pattern vectors as it parses, so an adversarial or very long AOB (a string of
+        // arbitrary length routed here by find_string_xref) can exhaust memory. Catch that here and fail closed to
+        // nullopt rather than letting bad_alloc escape -- parse_aob's callers already treat nullopt as an unusable
+        // pattern, so this degrades to a clean scan miss instead of terminating the host.
+        try
+        {
+            EnginePatternSink sink;
+            if (detail::parse_pattern_into(aob_str, sink) != detail::PatternStatus::Ok)
+            {
+                return std::nullopt;
+            }
+            // The anchor is storage-specific, so it is computed here rather than in the shared grammar: select it over
+            // segment 0 with the engine's size() "no fully-known byte" sentinel.
+            sink.pattern.compile_anchor();
+            return std::move(sink.pattern);
+        }
+        catch (const std::bad_alloc &)
         {
             return std::nullopt;
         }
-        // The anchor is storage-specific, so it is computed here rather than in the shared grammar: select it over
-        // segment 0 with the engine's size() "no fully-known byte" sentinel.
-        sink.pattern.compile_anchor();
-        return std::move(sink.pattern);
     }
 
     detail::EnginePattern detail::engine_pattern_from(const scan::Pattern &pattern, std::size_t anchor_index)
@@ -740,16 +752,22 @@ namespace DetourModKit
     // segment after it) starting at `addr`, staying within [.., region_end). On success it records each segment's
     // absolute start in segment_starts and returns true. Gap widths are tried in ascending order, so the first success
     // is the leftmost feasible placement; backtracking is required because a nearer gap position can strand a later
-    // segment a farther position would satisfy. Recursion DEPTH is bounded by the segment count (<= jumps + 1), but the
-    // total WORK is not memoized: on a miss it can explore every skip of every gap, so the worst case is the product of
-    // the gap spans. Each segment run fails fast on its first literal byte, so a real signature (few gaps,
-    // literal-anchored segments) prunes to near-linear; only a pathological all-wildcard, wide-gap pattern approaches
-    // the product bound, and patterns are author-written so such a cost is self-inflicted.
+    // segment a farther position would satisfy. Recursion DEPTH is bounded by the segment count (<= jumps + 1); total
+    // WORK is bounded by @p steps, a shared node-visit counter for this one extension tree that fails the whole tree
+    // closed once it passes detail::SEGMENT_MATCH_STEP_BUDGET. Each segment run fails fast on its first literal byte,
+    // so a real signature prunes to near-linear and never approaches the budget.
     DMK_NO_SANITIZE_ADDRESS
     static bool extend_segments(const detail::EnginePattern &pattern, const std::byte *addr,
                                 const std::byte *region_end, std::size_t segment_index,
-                                const std::byte **segment_starts) noexcept
+                                const std::byte **segment_starts, std::size_t &steps) noexcept
     {
+        // Count this node and fail the extension closed once the per-position budget is spent. Fail-closed is safe
+        // here: a truncated position reports no match, and the outer sweep continues to the next segment-0 candidate.
+        if (++steps > detail::SEGMENT_MATCH_STEP_BUDGET)
+        {
+            return false;
+        }
+
         const std::size_t jump_count = pattern.jumps.size();
         const std::size_t segment_begin = (segment_index == 0) ? 0 : pattern.jumps[segment_index - 1].position;
         const std::size_t segment_end =
@@ -783,9 +801,15 @@ namespace DetourModKit
             {
                 break;
             }
-            if (extend_segments(pattern, after + skip, region_end, segment_index + 1, segment_starts))
+            if (extend_segments(pattern, after + skip, region_end, segment_index + 1, segment_starts, steps))
             {
                 return true;
+            }
+            // Propagate a budget-exhausted verdict up the whole tree rather than trying wider skips: once the shared
+            // counter is spent, every further placement would immediately fail closed, so stop instead of spinning.
+            if (steps > detail::SEGMENT_MATCH_STEP_BUDGET)
+            {
+                return false;
             }
         }
         return false;
@@ -861,7 +885,10 @@ namespace DetourModKit
                     break;
                 }
                 const std::byte *const candidate = hit - anchor;
-                if (extend_segments(pattern, candidate, region_end, 0, segment_starts))
+                // The work budget is per segment-0 candidate: reset it at each start so one position's pathological
+                // backtracking can never starve a later, genuine match. The outer sweep stays region-linear.
+                std::size_t steps = 0;
+                if (extend_segments(pattern, candidate, region_end, 0, segment_starts, steps))
                 {
                     return segmented_result(pattern, segment_starts);
                 }
@@ -874,7 +901,9 @@ namespace DetourModKit
         // a real signature almost always carries a literal byte in its leading run.
         for (const std::byte *candidate = start_address; candidate <= last_candidate; ++candidate)
         {
-            if (extend_segments(pattern, candidate, region_end, 0, segment_starts))
+            // Per-candidate work budget (see the anchored sweep above): reset at each start position.
+            std::size_t steps = 0;
+            if (extend_segments(pattern, candidate, region_end, 0, segment_starts, steps))
             {
                 return segmented_result(pattern, segment_starts);
             }

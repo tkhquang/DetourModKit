@@ -64,6 +64,19 @@ namespace DetourModKit::detail
     inline constexpr std::size_t MAX_JUMP_SPAN = 256;
 
     /**
+     * @brief Per-start-position ceiling on bounded-jump backtracking node visits.
+     * @details The segmented matcher is deliberately simple and unmemoized: on a miss it may try every skip value of
+     *          every gap, so a pathological all-wildcard, wide-gap pattern can approach the product of the gap spans at
+     *          one start position. This budget converts that per-position product into a fixed ceiling while preserving
+     *          the region-level linear sweep. Exhausting the budget fails the current placement closed (no match) rather
+     *          than hanging. The assertion keeps the budget above the linear per-position work of a well-formed pattern,
+     *          so ordinary literal-anchored signatures finish before the cap.
+     */
+    inline constexpr std::size_t SEGMENT_MATCH_STEP_BUDGET = 1u << 16;
+    static_assert(SEGMENT_MATCH_STEP_BUDGET >= MAX_PATTERN_JUMPS * MAX_JUMP_SPAN,
+                  "The per-position work budget must exceed the linear per-position cost of a well-formed pattern.");
+
+    /**
      * @struct PatternJump
      * @brief One bounded gap between two fixed byte runs (segments) of a compiled pattern.
      * @details A jump lets a pattern tolerate a variable-length span between two stable anchors (an instruction whose
@@ -414,9 +427,13 @@ namespace DetourModKit::detail
      *          between gaps). A violation is InvalidJump. The `|` marker records a position in the fixed byte stream;
      *          when a pattern also carries jumps the resolver adds the actual gap bytes at match time, so the marker
      *          still points at the right run.
+     * @note Not noexcept: the compile-time fixed-array sink never allocates (so constexpr eligibility is unaffected and
+     *       the literal path can never throw), but a heap-backed runtime sink's add_byte / add_jump can throw bad_alloc
+     *       on an unbounded pattern (find_string_xref builds a byte pattern per string byte with no length cap). Marking
+     *       this noexcept would turn that OOM into a std::terminate; the runtime caller (parse_aob) instead catches it
+     *       and fails closed to nullopt.
      */
-    template <class Sink>
-    [[nodiscard]] constexpr PatternStatus parse_pattern_into(std::string_view dsl, Sink &sink) noexcept
+    template <class Sink> [[nodiscard]] constexpr PatternStatus parse_pattern_into(std::string_view dsl, Sink &sink)
     {
         bool offset_marked = false;
 
@@ -628,15 +645,20 @@ namespace DetourModKit::detail
      *          ascending order, recursing into the next segment. Ascending-skip order makes the overall match the
      *          leftmost feasible placement. Backtracking is required because a greedy choice for one segment can strand a
      *          later one: an earlier gap position that lets the tail match must be found even if a nearer position fails.
-     *          Recursion DEPTH is bounded by the segment count (<= MAX_PATTERN_JUMPS + 1), but the total WORK is not
-     *          memoized: on a miss the search can explore every skip of every gap, so the worst case is the product of
-     *          the gap spans. In practice each segment run fails fast on its first literal byte, so a real signature
-     *          (few gaps, literal-anchored segments) prunes to near-linear; only a pathological all-wildcard, wide-gap
-     *          pattern approaches the product bound, and patterns are author-written so such a cost is self-inflicted.
+     *          Recursion DEPTH is bounded by the segment count (<= MAX_PATTERN_JUMPS + 1), and total WORK is bounded by
+     *          @p steps, a shared node-visit counter for this one placement tree. On budget exhaustion the placement
+     *          fails closed. In practice each segment run fails fast on its first literal byte, so a real signature
+     *          (few gaps, literal-anchored segments) prunes to near-linear and never approaches the budget.
      */
     [[nodiscard]] constexpr bool try_segments_at(const PatternBuffer &buffer, std::span<const std::byte> window,
-                                                 std::size_t segment_index, std::size_t window_pos) noexcept
+                                                 std::size_t segment_index, std::size_t window_pos,
+                                                 std::size_t &steps) noexcept
     {
+        if (++steps > SEGMENT_MATCH_STEP_BUDGET)
+        {
+            return false;
+        }
+
         const std::size_t segment_begin = (segment_index == 0) ? 0 : buffer.jumps[segment_index - 1].position;
         const std::size_t segment_end =
             (segment_index < buffer.jump_count) ? buffer.jumps[segment_index].position : buffer.length;
@@ -651,11 +673,20 @@ namespace DetourModKit::detail
         }
         const std::size_t after = window_pos + (segment_end - segment_begin);
         const PatternJump &gap = buffer.jumps[segment_index];
+        const std::size_t available = window.size() - after;
         for (std::size_t skip = gap.min_skip; skip <= gap.max_skip; ++skip)
         {
-            if (try_segments_at(buffer, window, segment_index + 1, after + skip))
+            if (skip > available)
+            {
+                break;
+            }
+            if (try_segments_at(buffer, window, segment_index + 1, after + skip, steps))
             {
                 return true;
+            }
+            if (steps > SEGMENT_MATCH_STEP_BUDGET)
+            {
+                return false;
             }
         }
         return false;
@@ -675,7 +706,12 @@ namespace DetourModKit::detail
         {
             return false;
         }
-        return try_segments_at(buffer, window, 0, 0);
+        if (window.size() < min_match_length(buffer))
+        {
+            return false;
+        }
+        std::size_t steps = 0;
+        return try_segments_at(buffer, window, 0, 0, steps);
     }
 
 } // namespace DetourModKit::detail

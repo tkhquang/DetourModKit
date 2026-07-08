@@ -305,13 +305,39 @@ namespace DetourModKit
                               "instr_len must span scan_window_narrow_body's disp32 tail read at bytes[i+3..i+6]");
                 std::size_t faulted_windows = 0;
 
+                // Cross-window back-carry, mirroring the phase-1 scan_regions_filtered carry. A `.text` section split
+                // by a VirtualProtect into two abutting execute-readable regions yields two windows; an instruction
+                // that STARTS in the first window's tail and ENDS in the second fits in neither window's independent
+                // [0, span - instr_len] sweep and would be silently missed -- so with two real references the straddler
+                // is dropped and the survivor falsely certified unique (a wrong-site anchor). When this window abuts
+                // the previous one, extend its scan start back by instr_len - 1 so those straddlers are caught. The
+                // carry bytes lie inside the previous window (gated readable at collect time and abutting), so the
+                // guarded read stays over already-gated memory. No count floor is needed: a fixed-length instruction
+                // starting in the carry region [base - (instr_len-1), base) can never have fit in the previous window's
+                // own sweep (its starts end one byte earlier, at base - instr_len), so the carry region is disjoint and
+                // nothing is double-counted. The carry is bounded by the previous window's span so it never reads
+                // before it into a possible gap; page-granular regions make that bound a formality.
+                std::uintptr_t prev_end = 0;
+                std::size_t prev_span = 0;
+                bool have_prev = false;
                 for (const auto &window : detail::collect_executable_windows(range))
                 {
-                    if (window.span < instr_len)
+                    detail::ExecutableWindow effective = window;
+                    if (have_prev && window.base == prev_end)
+                    {
+                        const std::size_t carry = (instr_len - 1 < prev_span) ? instr_len - 1 : prev_span;
+                        effective.base = window.base - carry;
+                        effective.span = window.span + carry;
+                    }
+                    prev_end = window.base + window.span;
+                    prev_span = window.span;
+                    have_prev = true;
+
+                    if (effective.span < instr_len)
                     {
                         continue;
                     }
-                    if (scan_window_narrow_guarded(window, string_addr, instr_len, found_count, first_site, &info))
+                    if (scan_window_narrow_guarded(effective, string_addr, instr_len, found_count, first_site, &info))
                     {
                         ++faulted_windows;
                         continue;
@@ -442,8 +468,8 @@ namespace DetourModKit
             // first_site and returns once a second referencing site is seen. The decode/recovery contract is documented
             // on scan_string_ref_broad.
             void scan_window_broad_body(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
-                                        std::uintptr_t string_addr, std::size_t &found_count,
-                                        std::uintptr_t &first_site) noexcept
+                                        std::uintptr_t string_addr, std::uintptr_t count_floor,
+                                        std::size_t &found_count, std::uintptr_t &first_site) noexcept
             {
                 const auto *bytes = reinterpret_cast<const std::uint8_t *>(window.base);
                 std::size_t offset = 0;
@@ -459,6 +485,16 @@ namespace DetourModKit
                         ++offset;
                         continue;
                     }
+
+                    // Cross-window back-carry de-duplication: this window may have been extended backward into the
+                    // previous window's tail so a boundary-straddling instruction is decoded whole (see the loop in
+                    // scan_string_ref_broad). Any instruction that ENDS at or before count_floor lies wholly in the
+                    // previous window and was already counted by that window's own sweep, so skip counting it here
+                    // while still advancing past it. An instruction that ends past count_floor either straddles the
+                    // boundary or sits in this window proper; the previous window's decoder truncated at count_floor
+                    // and never counted it, so counting it here is exactly once. count_floor equals this window's real
+                    // base, so an un-extended window (count_floor == window.base) counts every instruction.
+                    const bool already_counted_by_previous_window = instr_addr + insn.length <= count_floor;
 
                     // A referencing instruction has a visible memory operand based on RIP whose absolute target is the
                     // string. Visible operands are ordered first in the array, so iterating the visible count covers
@@ -481,7 +517,7 @@ namespace DetourModKit
                         }
                     }
 
-                    if (references_string)
+                    if (references_string && !already_counted_by_previous_window)
                     {
                         ++found_count;
                         if (found_count == 1)
@@ -502,15 +538,15 @@ namespace DetourModKit
             // Window-granular TOCTOU fault guard around scan_window_broad_body; the narrow sibling
             // scan_window_narrow_guarded documents the rationale. Returns true when a fault was swallowed.
             bool scan_window_broad_guarded(const ZydisDecoder &decoder, const detail::ExecutableWindow &window,
-                                           std::uintptr_t string_addr, std::size_t &found_count,
-                                           std::uintptr_t &first_site) noexcept
+                                           std::uintptr_t string_addr, std::uintptr_t count_floor,
+                                           std::size_t &found_count, std::uintptr_t &first_site) noexcept
             {
 #ifdef _MSC_VER
                 const std::size_t original_found_count = found_count;
                 const std::uintptr_t original_first_site = first_site;
                 __try
                 {
-                    scan_window_broad_body(decoder, window, string_addr, found_count, first_site);
+                    scan_window_broad_body(decoder, window, string_addr, count_floor, found_count, first_site);
                     return false;
                 }
                 __except (detail::guarded_fault_filter(GetExceptionInformation()))
@@ -531,15 +567,16 @@ namespace DetourModKit
                     const ZydisDecoder *decoder;
                     const detail::ExecutableWindow *window;
                     std::uintptr_t string_addr;
+                    std::uintptr_t count_floor;
                     std::size_t *found_count;
                     std::uintptr_t *first_site;
-                } scan_ctx{&decoder, &window, string_addr, &found_count, &first_site};
+                } scan_ctx{&decoder, &window, string_addr, count_floor, &found_count, &first_site};
 
                 const auto run_scan = [](void *opaque) noexcept -> void
                 {
                     auto *context = static_cast<BroadScanContext *>(opaque);
                     scan_window_broad_body(*context->decoder, *context->window, context->string_addr,
-                                           *context->found_count, *context->first_site);
+                                           context->count_floor, *context->found_count, *context->first_site);
                 };
 
                 if (detail::run_guarded_region(window.base, window.base + window.span, run_scan, &scan_ctx))
@@ -580,9 +617,33 @@ namespace DetourModKit
                 }
 
                 std::size_t faulted_windows = 0;
+                // Cross-window back-carry, mirroring the narrow scan (and phase 1). A variable-length reference can
+                // straddle the split between two abutting execute-readable windows, decodable by neither window's own
+                // sweep (the previous window's decoder truncates at its end, and this window decodes from its base,
+                // mid-instruction). When this window abuts the previous, decode from ZYDIS_MAX_INSTRUCTION_LENGTH - 1
+                // bytes earlier so the straddler is decoded whole. A count floor at this window's real base then
+                // de-duplicates: an instruction ending at or before the base was already counted by the previous
+                // window, so scan_window_broad_body skips it (see there). The carry is bounded by the previous window's
+                // span so it never reads before it; page-granular regions make that bound a formality.
+                constexpr std::size_t broad_carry = ZYDIS_MAX_INSTRUCTION_LENGTH - 1;
+                std::uintptr_t prev_end = 0;
+                std::size_t prev_span = 0;
+                bool have_prev = false;
                 for (const auto &window : detail::collect_executable_windows(range))
                 {
-                    if (scan_window_broad_guarded(decoder, window, string_addr, found_count, first_site))
+                    detail::ExecutableWindow effective = window;
+                    if (have_prev && window.base == prev_end)
+                    {
+                        const std::size_t carry = (broad_carry < prev_span) ? broad_carry : prev_span;
+                        effective.base = window.base - carry;
+                        effective.span = window.span + carry;
+                    }
+                    prev_end = window.base + window.span;
+                    prev_span = window.span;
+                    have_prev = true;
+
+                    if (scan_window_broad_guarded(decoder, effective, string_addr, window.base, found_count,
+                                                  first_site))
                     {
                         ++faulted_windows;
                         continue;
