@@ -17,6 +17,16 @@
 #include <stdexcept>
 #include <type_traits>
 
+namespace DetourModKit::detail
+{
+    // Test-only probe fired from Logger::shutdown_internal() inside its dropped-mutex window -- async logging already
+    // disabled but the sink stream not yet closed. When non-null, a fixture uses it to prove that enable_async_mode()'s
+    // m_shutdown_called gate refuses to resurrect async logging in exactly that gap (the one interleaving a bare
+    // after-shutdown enable cannot reach, because by then the stream is also closed). Set / cleared on a single thread
+    // inside a test fixture; a plain function pointer, so it is null and branch-only in production.
+    void (*g_logger_shutdown_gap_probe)() noexcept = nullptr;
+} // namespace DetourModKit::detail
+
 namespace DetourModKit
 {
 
@@ -168,6 +178,21 @@ namespace DetourModKit
         m_timestamp_format = timestamp_fmt;
 
         open_sink(true);
+
+        // Push the new timestamp format into any live async writer. enable_async_mode snapshots the format into the
+        // AsyncLogger's private config at construction, and the async writer shares the very WinFileStream reopened
+        // above, so without this push a format change would leave every async line on the old format forever while the
+        // sync banner lines (open_sink) use the new one -- in the same file. This is safe under the scoped_lock held
+        // here: the setter assigns without locking, and the writer reads the format only under *m_log_mutex_ptr (the
+        // shared mutex this scope holds), so it cannot be mid-read. m_async_mutex (also held) keeps a concurrent
+        // enable/disable from swapping the logger under us.
+        if (m_async_mode_enabled.load(std::memory_order_acquire))
+        {
+            if (auto async_logger = m_async_logger.load(std::memory_order_acquire))
+            {
+                async_logger->set_timestamp_format(m_timestamp_format);
+            }
+        }
     }
 
     Logger::Logger()
@@ -246,6 +271,14 @@ namespace DetourModKit
                     local_logger->shutdown();
                 }
             }
+        }
+
+        // Test-only probe: fires in the dropped-mutex window opened above -- m_async_mode_enabled is now false but the
+        // sink stream is still open -- so a fixture can prove enable_async_mode()'s m_shutdown_called gate refuses to
+        // resurrect async logging in exactly this gap. Null and branch-only in production.
+        if (auto *gap_probe = detail::g_logger_shutdown_gap_probe)
+        {
+            gap_probe();
         }
 
         // If the writer thread was detached under loader lock, it may still be accessing AsyncLogger members (m_queue,
@@ -459,6 +492,17 @@ namespace DetourModKit
 
         {
             std::lock_guard<std::mutex> lock(m_async_mutex);
+
+            // Refuse to resurrect async logging after shutdown. shutdown()/~Logger set m_shutdown_called before
+            // shutdown_internal() clears m_async_mode_enabled, and shutdown_internal() drops m_async_mutex between that
+            // clear and the final stream close. Checking m_shutdown_called UNDER m_async_mutex (not before it, the way
+            // reconfigure does) closes that dropped-mutex window: a concurrent enable landing in the gap would
+            // otherwise see m_async_mode_enabled == false and a still-open stream and spin up a fresh writer thread
+            // that outlives teardown. configure() re-clears m_shutdown_called, so legitimate re-enable still works.
+            if (m_shutdown_called.load(std::memory_order_acquire))
+            {
+                return;
+            }
 
             if (m_async_mode_enabled.load(std::memory_order_acquire))
             {

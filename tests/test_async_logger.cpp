@@ -14,6 +14,7 @@
 #include <type_traits>
 
 #include "DetourModKit/async_logger.hpp"
+#include "DetourModKit/diagnostics.hpp"
 
 #include "internal/async_logger_queue.hpp"
 #include "internal/win_file_stream.hpp"
@@ -1900,4 +1901,59 @@ TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
         << "worst-case drain latency reached the flush interval, indicating a lost wakeup";
 
     logger->shutdown();
+}
+
+// The public AsyncLogger destructor must be self-safe under the loader lock. shutdown() detaches the
+// writer there (which keeps reading the queue / cv / file stream until it observes the stop), so ~AsyncLogger must leak
+// the Impl in place rather than destroy those members out from under the detached writer. The real loader lock cannot
+// be entered from user code, so async_logger.cpp exposes a test-only override.
+namespace DetourModKit::detail
+{
+    extern bool (*g_async_logger_loader_lock_override)() noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    bool al_always_true_loader_lock() noexcept
+    {
+        return true;
+    }
+} // namespace
+
+TEST_F(AsyncLoggerTest, DestructorUnderLoaderLockLeaksImplAndDoesNotHang)
+{
+    namespace diag = DetourModKit::diagnostics;
+    diag::reset_intentional_leaks();
+
+    AsyncLoggerConfig config;
+    config.batch_size = 10;
+    config.flush_interval = std::chrono::milliseconds{50};
+
+    auto file_stream = std::make_shared<WinFileStream>(m_test_log_file.string());
+    auto log_mutex = std::make_shared<std::mutex>();
+
+    const auto t_start = std::chrono::steady_clock::now();
+    {
+        auto logger = std::make_unique<AsyncLogger>(config, file_stream, log_mutex);
+        ASSERT_TRUE(logger->is_running());
+        // Force the loader-lock branch: shutdown() detaches the writer and ~AsyncLogger leaks the Impl in place.
+        DetourModKit::detail::g_async_logger_loader_lock_override = &al_always_true_loader_lock;
+    }
+    const auto elapsed = std::chrono::steady_clock::now() - t_start;
+    DetourModKit::detail::g_async_logger_loader_lock_override = nullptr;
+
+    EXPECT_LT(elapsed, std::chrono::seconds(2)) << "loader-lock detach branch must not join the writer";
+    EXPECT_GE(diag::intentional_leak_count(diag::LeakSubsystem::AsyncLogger), 1u)
+        << "the loader-lock detach must record an AsyncLogger intentional-leak event";
+
+    // Discriminating check for the ~AsyncLogger behaviour specifically. The leak counter above only proves shutdown()'s
+    // detach, which a defaulted destructor would also reach; it does NOT prove the destructor leaked the Impl instead
+    // of destroying it. Leaking the Impl in place keeps its shared_ptr to the file stream alive, so use_count stays at
+    // 2 (this local + the leaked Impl). Letting ~Impl run would drop the Impl's reference to 1 here, and the detached
+    // writer would be reading a freed WinFileStream. This is deterministic (no sanitizer needed): use_count reflects
+    // strong ownership, not the writer's raw access.
+    EXPECT_GE(file_stream.use_count(), 2L)
+        << "~AsyncLogger destroyed the Impl instead of leaking it; the detached writer's file stream was freed";
+    // The Impl (queue, cv, file stream) is intentionally leaked; the detached writer observes m_running == false and
+    // exits on its own. FILE_SHARE_DELETE lets TearDown still remove the log file even with the leaked handle open.
 }

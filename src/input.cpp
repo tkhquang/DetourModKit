@@ -9,6 +9,7 @@
  */
 
 #include "DetourModKit/input.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include "platform.hpp"
@@ -88,8 +89,8 @@ namespace DetourModKit
                 }
                 catch (...)
                 {
-                    (void)log().log_noexcept(
-                        LogLevel::Error, "BindingGuard: release action threw; suppressed in noexcept teardown");
+                    (void)log().log_noexcept(LogLevel::Error,
+                                             "BindingGuard: release action threw; suppressed in noexcept teardown");
                 }
             }
         }
@@ -167,7 +168,15 @@ namespace DetourModKit
 
         Input::Input() : m_impl(std::make_unique<Impl>()) {}
 
-        Input::~Input() noexcept = default;
+        Input::~Input() noexcept
+        {
+            // Input::instance() is a function-local static, so this runs at static-destruction time -- which, on a bare
+            // FreeLibrary with no Session teardown, is under the loader lock. A defaulted destructor would let ~Impl
+            // drop m_poller and free the InputPoller members a still-detached poll thread is reading (UAF). Route
+            // through shutdown() instead: it is idempotent (already-shut-down is a no-op because m_poller is null) and
+            // carries the loader-lock leak-cell that keeps the poller alive past the detached thread.
+            shutdown();
+        }
 
         Input &Input::instance() noexcept
         {
@@ -244,8 +253,8 @@ namespace DetourModKit
                 // BindingGuard::release()'s own catch still logs the callback failure.
                 if (consume_release)
                 {
-                    impl->on_release = [gate_release = std::move(gate_release),
-                                        consume_release = std::move(consume_release)]()
+                    impl->on_release =
+                        [gate_release = std::move(gate_release), consume_release = std::move(consume_release)]()
                     {
                         try
                         {
@@ -454,6 +463,9 @@ namespace DetourModKit
                             std::shared_ptr<detail::InputPoller>(std::move(local_poller));
                     }
                     (void)leaked;
+                    // Surface the loader-lock poller leak in the same telemetry every sibling teardown records, so a
+                    // consumer's diagnostics::collect() sees the Input detach event instead of a silent leak.
+                    diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Input);
                 }
             }
         }

@@ -10,7 +10,9 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <type_traits>
+#include <vector>
 
 #include <windows.h>
 
@@ -1125,4 +1127,70 @@ TEST(SessionHotReload, UnloadFixtureDllRoundTrip)
                                 .options = Options{.fail_if_already_hooked = true}},
                   &fixture_detour_compute_damage);
     EXPECT_TRUE(reload.has_value()) << "fresh strict hook on the reloaded fixture must succeed";
+}
+
+namespace DetourModKit
+{
+    // Defined in src/session.cpp; returns the current bootstrap shutdown event handle (the atomic load). Test-only, not
+    // in any public header.
+    extern HANDLE bootstrap_shutdown_event_for_test() noexcept;
+} // namespace DetourModKit
+
+// request_shutdown() may fire from any thread while an off-loader-lock bootstrap_detach retires the
+// shutdown event. The detach LEAKS the event instead of closing it, so a concurrent request_shutdown() can never
+// SetEvent a closed / recycled handle (s_shutdown_event is now std::atomic<HANDLE>). Placed after the other session
+// tests so their fixtures have already cleaned the bootstrap statics.
+TEST(SessionShutdownEventRace, RequestShutdownRacingOffLoaderLockDetachLeaksNotClosesEvent)
+{
+    Result<void> started = bootstrap(ModInfo{.name = "SESS_EVENT_RACE",
+                                             .log_file = "sess_shutdown_event_race.log",
+                                             .instance_mutex_prefix = "Sess_Shutdown_Event_Race_"},
+                                     [](Session &) -> Result<void> { return {}; });
+    ASSERT_TRUE(started.has_value()) << started.error().message();
+
+    // Capture the live event handle before detach. After an off-loader-lock detach this exact handle must remain a
+    // valid kernel object (leaked), never a closed one.
+    const HANDLE captured_event = bootstrap_shutdown_event_for_test();
+    ASSERT_NE(captured_event, nullptr) << "bootstrap must have created the shutdown event";
+
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> hammerers;
+    for (int t = 0; t < 4; ++t)
+    {
+        hammerers.emplace_back(
+            [&stop]()
+            {
+                while (!stop.load(std::memory_order_acquire))
+                {
+                    request_shutdown();
+                }
+            });
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds{5});
+
+    // Off the loader lock: bootstrap_detach joins the worker (which runs the ordered ~Session teardown), then retires
+    // the event by storing null and leaking the handle -- never CloseHandle while a request_shutdown() could hold it.
+    request_shutdown();
+    bootstrap_detach(nullptr);
+
+    stop.store(true, std::memory_order_release);
+    for (auto &t : hammerers)
+    {
+        t.join();
+    }
+
+    // Deterministic discriminator: the captured handle must still be a valid kernel object. A regression that restored
+    // CloseHandle on the off-loader path would have closed it here, so GetHandleInformation would fail with
+    // ERROR_INVALID_HANDLE. The handle stays valid and a late request_shutdown() can never SetEvent a closed / recycled
+    // handle. Checked immediately after join, before any handle creation could recycle a closed value, so a regression
+    // reliably fails.
+    DWORD handle_flags = 0;
+    EXPECT_TRUE(GetHandleInformation(captured_event, &handle_flags))
+        << "off-loader-lock detach closed the shutdown event instead of leaking it (GetLastError=" << GetLastError()
+        << ")";
+
+    // The atomic was retired to null, so request_shutdown() is now a safe no-op, and the module handle was cleared.
+    EXPECT_EQ(bootstrap_shutdown_event_for_test(), nullptr) << "detach must retire the event pointer to null";
+    EXPECT_EQ(module_handle(), nullptr) << "off-loader-lock detach must clear the module handle";
 }
