@@ -21,11 +21,9 @@
 #include "SimpleIni.h"
 
 #include <atomic>
-#include <cctype>
-#include <cerrno>
+#include <charconv>
 #include <condition_variable>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -113,15 +111,15 @@ namespace DetourModKit
                         continue;
                     }
 
-                    // Convert via strtoul -- no exception overhead on invalid input
-                    errno = 0;
-                    char *end_ptr = nullptr;
-                    const unsigned long value = std::strtoul(token.c_str() + hex_start, &end_ptr, 16);
-                    if (end_ptr == token.c_str() + hex_start || errno == ERANGE)
+                    unsigned int value = 0;
+                    const char *const hex_begin = hex_part.data();
+                    const char *const hex_end = hex_begin + hex_part.size();
+                    const auto [parsed_end, parse_ec] = std::from_chars(hex_begin, hex_end, value, 16);
+                    if (parse_ec != std::errc{} || parsed_end != hex_end)
                     {
                         continue;
                     }
-                    if (value > static_cast<unsigned long>(std::numeric_limits<int>::max()))
+                    if (value > static_cast<unsigned int>(std::numeric_limits<int>::max()))
                     {
                         continue;
                     }
@@ -201,8 +199,9 @@ namespace DetourModKit
                 constexpr char target[] = {'N', 'O', 'N', 'E'};
                 for (size_t i = 0; i < 4; ++i)
                 {
-                    const auto ch = static_cast<unsigned char>(text[i]);
-                    if (static_cast<char>(std::toupper(ch)) != target[i])
+                    const char ch = text[i];
+                    const char folded = (ch >= 'a' && ch <= 'z') ? static_cast<char>(ch - ('a' - 'A')) : ch;
+                    if (folded != target[i])
                     {
                         return false;
                     }
@@ -377,6 +376,34 @@ namespace DetourModKit
             };
 
             /**
+             * @brief Trims ASCII blanks from both ends of @p text and strips a single leading '+'.
+             * @details Shared by the int and float scalar binds so both normalize forms like " +50 " / "+1.5"
+             *          identically before handing the view to std::from_chars. from_chars rejects a leading '+' on the
+             *          mantissa (unlike the strtod/strtoll it replaced), so one is stripped to keep a signed-positive
+             *          value parsing; a lone "+" trims to an empty view and correctly falls back to the default. A
+             *          leading '-' is left in place because from_chars accepts it. Returns a view into @p text and
+             *          performs no allocation.
+             */
+            [[nodiscard]] std::string_view trim_blanks_and_leading_plus(std::string_view text) noexcept
+            {
+                constexpr auto is_blank = [](char c) noexcept
+                { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+                while (!text.empty() && is_blank(text.front()))
+                {
+                    text.remove_prefix(1);
+                }
+                while (!text.empty() && is_blank(text.back()))
+                {
+                    text.remove_suffix(1);
+                }
+                if (!text.empty() && text.front() == '+')
+                {
+                    text.remove_prefix(1);
+                }
+                return text;
+            }
+
+            /**
              * @brief Configuration item using a std::function callback for value setting.
              * @tparam T The data type of the configuration item (e.g., int, bool, std::string).
              * @note Setter callbacks are invoked outside the config mutex to prevent deadlocks. See the bind_* free
@@ -405,12 +432,10 @@ namespace DetourModKit
                     if constexpr (std::same_as<T, int>)
                     {
                         // SimpleIni's GetLongValue parses into a long, which is 32-bit on this LLP64 target, so a value
-                        // beyond int range is silently saturated by strtol (e.g. "5000000000" becomes INT_MAX) rather
-                        // than rejected. Read the raw string and parse it as a 64-bit integer instead, so an
-                        // out-of-range or non-numeric value falls back to the registered default with a Warning --
-                        // mirroring how parse_input_code_list rejects a bad token rather than wrapping it. Preserve
-                        // GetLongValue's base rules: 0x-prefixed values are hexadecimal and everything else is decimal
-                        // (including leading-zero values such as "010").
+                        // beyond int range can saturate before this bind sees it. Read the raw string and parse it with
+                        // std::from_chars instead, so an out-of-range or non-numeric value falls back to the registered
+                        // default with a Warning. Preserve the public base rule: 0x-prefixed values are hexadecimal and
+                        // everything else is decimal (including leading-zero values such as "010").
                         const char *raw = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
                         if (raw == nullptr)
                         {
@@ -418,20 +443,20 @@ namespace DetourModKit
                         }
                         else
                         {
-                            const char *parse_begin = raw;
+                            std::string_view text = trim_blanks_and_leading_plus(std::string_view{raw});
+
                             int base = 10;
-                            if (raw[0] == '0' && (raw[1] == 'x' || raw[1] == 'X'))
+                            if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
                             {
-                                parse_begin = raw + 2;
+                                text.remove_prefix(2);
                                 base = 16;
                             }
 
-                            errno = 0;
-                            char *end = nullptr;
-                            const long long parsed = std::strtoll(parse_begin, &end, base);
-                            const bool fully_consumed = (end != nullptr && end != parse_begin && *end == '\0');
-                            if (!fully_consumed || errno == ERANGE ||
-                                parsed < static_cast<long long>(std::numeric_limits<int>::min()) ||
+                            long long parsed = 0;
+                            const auto [end, ec] =
+                                std::from_chars(text.data(), text.data() + text.size(), parsed, base);
+                            const bool fully_consumed = (ec == std::errc{} && end == text.data() + text.size());
+                            if (!fully_consumed || parsed < static_cast<long long>(std::numeric_limits<int>::min()) ||
                                 parsed > static_cast<long long>(std::numeric_limits<int>::max()))
                             {
                                 logger.warning("Config: value '{}' for '{}' is not a valid int (non-numeric or out of "
@@ -447,8 +472,39 @@ namespace DetourModKit
                     }
                     else if constexpr (std::same_as<T, float>)
                     {
-                        current_value = static_cast<float>(
-                            ini.GetDoubleValue(section.c_str(), ini_key.c_str(), static_cast<double>(default_value)));
+                        // SimpleIni's GetDoubleValue routes through strtod, which is locale-dependent: on a host that
+                        // installed a comma-decimal locale (common in European game and middleware runtimes) it parses
+                        // "1.5" as 1, leaves ".5" unconsumed, and GetDoubleValue then silently returns the registered
+                        // default -- no truncation warning, no trace. The int branch above was already moved off the
+                        // locale-sensitive parser for the analogous saturation bug; do the same here. std::from_chars
+                        // is locale-independent by definition ('.' is the only accepted decimal separator), so read the
+                        // raw string and parse it directly, falling back to the default with a Warning on a non-numeric
+                        // or out-of-range value with the same warn-and-default discipline as the int path.
+                        const char *raw = ini.GetValue(section.c_str(), ini_key.c_str(), nullptr);
+                        if (raw == nullptr)
+                        {
+                            current_value = default_value;
+                        }
+                        else
+                        {
+                            std::string_view text = trim_blanks_and_leading_plus(std::string_view{raw});
+
+                            float parsed = default_value;
+                            const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+                            const bool fully_consumed = (ec == std::errc{} && end == text.data() + text.size());
+                            if (!fully_consumed)
+                            {
+                                logger.warning(
+                                    "Config: value '{}' for '{}' is not a valid float (non-numeric or out of "
+                                    "range); using default {}.",
+                                    raw, ini_key, default_value);
+                                current_value = default_value;
+                            }
+                            else
+                            {
+                                current_value = parsed;
+                            }
+                        }
                     }
                     else if constexpr (std::same_as<T, bool>)
                     {
@@ -589,8 +645,10 @@ namespace DetourModKit
             /**
              * @brief Reads all bytes of @p path into memory.
              * @details Returns std::nullopt when the file cannot be opened (e.g. mid-save by an editor that locks
-             *          exclusively). Callers should treat a nullopt return as "unable to verify content; proceed with a
-             *          full reload" -- erring on the side of reloading is safer than skipping a real change.
+             *          exclusively). The two callers diverge on nullopt: the initial load() proceeds with the bound
+             *          defaults (a first run legitimately has no file on disk yet), while reload() clears the cached
+             *          hash and returns before the setter pass so the last-applied values are retained rather than
+             *          snapped back to defaults.
              */
             [[nodiscard]] std::optional<std::vector<std::uint8_t>>
             read_ini_bytes(const std::filesystem::path &path) noexcept
@@ -1107,7 +1165,6 @@ namespace DetourModKit
                 // (TOCTOU-free vs. a separate LoadFile call).
                 IniLoadOutcome outcome = load_ini_into(ini_path, ini);
 
-                const bool load_succeeded = outcome.read_succeeded && outcome.parse_succeeded;
                 if (!outcome.read_succeeded)
                 {
                     logger.error("Config: Failed to open '{}'. Using defaults.", ini_path_str);
@@ -1140,14 +1197,15 @@ namespace DetourModKit
                     }
                 }
 
-                // Remember the INI path so reload() can re-run setters against the same file without the caller passing
-                // it again. Only update the stored path on success; a failed load must leave the previously remembered
-                // path (if any) untouched so subsequent reload() calls keep targeting the last good file rather than a
-                // missing or malformed one.
-                if (load_succeeded)
-                {
-                    get_last_loaded_ini_path() = std::string(ini_filename);
-                }
+                // Remember the INI path so reload() and enable_auto_reload() can target the same file without the
+                // caller passing it again. Store it on every outcome, not just success: the normal ship-with-defaults
+                // first run has no INI on disk yet, so the read fails, but the caller still intends that path to be the
+                // config. enable_auto_reload() needs the path recorded to start a watcher on the parent directory and
+                // pick the file up when it later appears. Remembering a path whose load failed is safe because reload()
+                // on an unreadable file retains the last in-memory values instead of snapping to defaults, and the
+                // cached hash was reset above on failure so a later successful read is never hash-skipped against stale
+                // state.
+                get_last_loaded_ini_path() = std::string(ini_filename);
 
                 logger.info("Config: Loaded {} items from {}", get_registered_config_items().size(), ini_path_str);
             }
@@ -1181,7 +1239,7 @@ namespace DetourModKit
             /**
              * @brief Internal reload implementation that also reports whether setters actually ran.
              * @param[out] out_setters_ran Set to true when setters were invoked. False when the content-hash
-             *                             short-circuit skipped the reload.
+             *                             short-circuit or a read failure skipped the setter pass.
              * @return true if a previous load() path was available and the reload proceeded; false if reload() was
              *         called before any load().
              */
@@ -1218,16 +1276,20 @@ namespace DetourModKit
 
                     if (!outcome.read_succeeded)
                     {
-                        // Read failure: clear the cached hash before falling through to run setters with defaults.
-                        // Leaving it in place would let a later reload find identical bytes (same as the last
-                        // successful load), match the stale hash, and hash-skip -- silently leaving in-memory state at
-                        // the defaults from this failed reload.
+                        // Read failure (e.g. the file is locked mid-save, exactly the transient the debounce window is
+                        // meant to ride out). Clear the cached hash so a later reload that happens to read bytes
+                        // identical to the last good load cannot match a stale hash and hash-skip. Then return before
+                        // the setter pass: the CSimpleIniA below was never populated, so running item->load against it
+                        // would read every bound value as its registered default and snap live state to defaults. The
+                        // reload path was still available and was handled, so this is not a NoPriorLoad case and no
+                        // setters ran (out_setters_ran stays false).
                         get_last_loaded_ini_hash() = std::nullopt;
-                        logger.warning(
-                            "Config: reload() could not open '{}'; retaining last values where setters keep state.",
-                            ini_path_str);
+                        logger.warning("Config: reload() could not open '{}'; retaining last values (setters not "
+                                       "re-run).",
+                                       ini_path_str);
+                        return true;
                     }
-                    else
+
                     {
                         // Content-hash skip: compare against the hash stored on the last successful load()/reload().
                         // Identical bytes -> no setters. Uses the hash we just computed in the pipeline; no second
@@ -1255,18 +1317,23 @@ namespace DetourModKit
 
                         if (!outcome.parse_succeeded)
                         {
-                            // Asymmetry with the read-failure branch above is intentional: we have already advanced the
-                            // cached hash to these new bytes, so a later reload with identical bytes correctly
-                            // short-circuits -- the partial state produced by re-parsing would be the same. The
-                            // read-failure branch cannot make that guarantee because it never observed the bytes.
-                            logger.warning("Config: reload() parse error on '{}' (error {}); "
-                                           "retaining last values where setters keep state.",
+                            // Parse failure. This is not a malformed-content case: CSimpleIniA::LoadData returns SI_OK
+                            // for any byte content (embedded nulls, unclosed sections, and binary junk all parse), so a
+                            // negative code here means an internal SimpleIni allocation failure, or a bad_alloc that
+                            // load_ini_into caught as SI_FAIL. Treat it like the read-failure branch above: return
+                            // before the setter pass so the last in-memory values are retained rather than snapped to
+                            // their defaults by item->load against a parser that failed to populate. The one asymmetry
+                            // that remains is the cached hash -- a read failure reset it (it never observed the bytes),
+                            // but a parse failure did read the bytes, so the hash was already advanced to them above; a
+                            // later reload of the same bytes then hash-skips and stays retained. No setters ran, so
+                            // out_setters_ran stays false and on_reload observes setters_ran == false.
+                            logger.warning("Config: reload() parse error on '{}' (error {}); retaining last values "
+                                           "(setters not re-run).",
                                            ini_path_str, static_cast<int>(outcome.parse_rc));
+                            return true;
                         }
-                        else
-                        {
-                            logger.debug("Config: Reloading from {}", ini_path_str);
-                        }
+
+                        logger.debug("Config: Reloading from {}", ini_path_str);
                     }
 
                     for (const auto &item : get_registered_config_items())
@@ -1357,9 +1424,11 @@ namespace DetourModKit
                                                                                     // The internal impl reports whether
                                                                                     // setters actually ran (false when
                                                                                     // the content-hash short-circuit
-                                                                                    // skipped the work) so the user
-                                                                                    // callback can distinguish a real
-                                                                                    // reload from a no-op touch.
+                                                                                    // found unchanged bytes or a read
+                                                                                    // failure retained the current
+                                                                                    // values) so the callback can
+                                                                                    // distinguish a real reload from a
+                                                                                    // skipped setter pass.
                                                                                     bool setters_ran = false;
                                                                                     (void)reload_impl(setters_ran);
                                                                                     if (user_cb)

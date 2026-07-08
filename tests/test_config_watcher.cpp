@@ -6,6 +6,7 @@
 #include <fstream>
 #include <memory>
 #include <process.h>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -429,6 +430,94 @@ namespace
         DetourModKit::detail::ConfigWatcher watcher((m_temp_dir / "nonexistent_subdir" / "file.ini").string(), 100ms,
                                                     []() {});
         EXPECT_FALSE(watcher.start());
+        EXPECT_FALSE(watcher.is_running());
+    }
+
+    // A reload callback that throws must be contained at the invocation site so the throw never unwinds the worker
+    // body. Otherwise WatchIoState's destructor would free the OVERLAPPED and notification buffer while the in-flight
+    // ReadDirectoryChangesW notify IRP still references them. The deterministic proof that the throw was caught rather
+    // than allowed to unwind the loop is that a second edit still fires the callback: had the exception escaped, it
+    // would have torn down the whole pump loop, so no further callback could arrive.
+    TEST_F(ConfigWatcherTest, ThrowingCallbackIsContainedAndWatcherKeepsPumping)
+    {
+        std::atomic<int> fires{0};
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms,
+                                                    [&fires]()
+                                                    {
+                                                        fires.fetch_add(1);
+                                                        throw std::runtime_error("reload callback boom");
+                                                    });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+
+        write_ini("[S]\nK=2\n");
+        ASSERT_TRUE(wait_until([&]() { return fires.load() >= 1; }, 2s)) << "first throwing fire never arrived";
+
+        // Reachable only if the first throw did not unwind (and thereby destroy) the pump loop.
+        write_ini("[S]\nK=3\n");
+        EXPECT_TRUE(wait_until([&]() { return fires.load() >= 2; }, 2s))
+            << "watcher stopped pumping after a throwing callback -- the exception escaped the invocation site";
+
+        // Still alive, and it tears down cleanly on scope exit (the drain runs; no crash from a skipped CancelIoEx).
+        EXPECT_TRUE(watcher.is_running());
+    }
+
+    // The worker invokes the callback from two sites: the debounce-timeout fire above, and the final flush when it
+    // exits with a pending change (stop() / destruction). This covers the flush site: a long debounce means the change
+    // is still pending when stop() drives the worker out, so the pending edit flushes through the same guarded
+    // fire_reload at the end of the worker body. A throw there must stay contained so stop() joins cleanly rather than
+    // letting the exception unwind past the IRP drain.
+    TEST_F(ConfigWatcherTest, ThrowingCallbackIsContainedOnStopTimeFlush)
+    {
+        std::atomic<int> fires{0};
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 2000ms,
+                                                    [&fires]()
+                                                    {
+                                                        fires.fetch_add(1);
+                                                        throw std::runtime_error("stop-flush boom");
+                                                    });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        std::this_thread::sleep_for(100ms);
+
+        // Mark a change pending; the 2 s debounce guarantees the timeout fire cannot run before stop().
+        write_ini("[S]\nK=9\n");
+        std::this_thread::sleep_for(200ms);
+
+        // stop() drives the worker's exit, which flushes the pending change through the guarded fire_reload and then
+        // joins. A contained throw means stop() returns without crashing or hanging.
+        watcher.stop();
+
+        EXPECT_EQ(fires.load(), 1) << "stop() must flush the pending change exactly once through the guarded callback";
+        EXPECT_FALSE(watcher.is_running());
+    }
+
+    // is_running() must not read the non-atomic m_impl->worker unique_ptr while start() assigns it and stop() moves it
+    // out under start_mutex. Hammer is_running() from one thread while another churns start()/stop(); the accessor uses
+    // the atomic worker-thread id, so this must neither crash nor hang.
+    TEST_F(ConfigWatcherTest, IsRunningConcurrentWithStartStopIsRaceFree)
+    {
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 50ms, []() {});
+
+        std::atomic<bool> stop_reader{false};
+        std::thread reader(
+            [&]()
+            {
+                while (!stop_reader.load(std::memory_order_relaxed))
+                {
+                    (void)watcher.is_running();
+                }
+            });
+
+        for (int i = 0; i < 20; ++i)
+        {
+            (void)watcher.start();
+            watcher.stop();
+        }
+
+        stop_reader.store(true, std::memory_order_relaxed);
+        reader.join();
+
         EXPECT_FALSE(watcher.is_running());
     }
 } // namespace

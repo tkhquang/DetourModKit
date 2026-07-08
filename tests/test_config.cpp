@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <cstdint>
 #include <fstream>
 #include <filesystem>
@@ -411,6 +412,114 @@ TEST_F(ConfigTest, LoadNonExistentFile)
     EXPECT_EQ(test_value, 999);
 }
 
+// A reload whose read fails (here: the file vanished after a good load, the same fail-to-open path a mid-save lock
+// takes) must retain the last good in-memory value instead of applying defaults from an unpopulated parser.
+TEST_F(ConfigTest, ReloadWhenFileDisappearsRetainsLastValues)
+{
+    {
+        std::ofstream ini(m_test_ini_file);
+        ini << "[S]\nSpeed=5\n";
+    }
+
+    int speed = 0;
+    config::bind_int("S", "Speed", "speed", [&speed](int v) { speed = v; }, 9);
+    EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
+    ASSERT_EQ(speed, 5) << "precondition: initial load must read 5";
+
+    // Remove the file so reload()'s read of the remembered path fails.
+    std::filesystem::remove(m_test_ini_file);
+
+    EXPECT_NO_THROW((void)config::reload());
+
+    // Retained: still 5, not the registered default 9.
+    EXPECT_EQ(speed, 5);
+}
+
+// The ship-with-defaults first run has no INI on disk yet. load() must still remember the path so enable_auto_reload()
+// can start a watcher on the existing parent directory and pick the file up when it later appears.
+TEST_F(ConfigTest, LoadMissingFileStoresPathSoAutoReloadCanStart)
+{
+    const auto missing =
+        std::filesystem::temp_directory_path() / ("test_config_missing_" + std::to_string(_getpid()) + ".ini");
+    std::filesystem::remove(missing);
+
+    EXPECT_NO_THROW(config::load(missing.string()));
+    const auto status = config::enable_auto_reload();
+
+    EXPECT_EQ(status, config::AutoReloadStatus::Started);
+    config::disable_auto_reload();
+}
+
+// Pins the float parse grammar: a leading '+' is honored, '-' parses directly, and a value with a trailing non-numeric
+// suffix warns and falls back to the default rather than partially parsing.
+TEST_F(ConfigTest, FloatBind_ParsesSignsAndRejectsTrailingJunk)
+{
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nPlus=+1.5\nMinus=-2.5\nBad=1.5x\n";
+    }
+    float plus = 0.0f;
+    float minus = 0.0f;
+    float bad = 0.0f;
+    config::bind_float("S", "Plus", "plus", [&plus](float v) { plus = v; }, 9.0f);
+    config::bind_float("S", "Minus", "minus", [&minus](float v) { minus = v; }, 9.0f);
+    config::bind_float("S", "Bad", "bad", [&bad](float v) { bad = v; }, 9.0f);
+    EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
+
+    EXPECT_FLOAT_EQ(plus, 1.5f);
+    EXPECT_FLOAT_EQ(minus, -2.5f);
+    EXPECT_FLOAT_EQ(bad, 9.0f);
+}
+
+// Regression teeth for locale-independent float parsing: the float bind must resolve a fractional value the same way
+// regardless of the host LC_NUMERIC. Under a comma-decimal locale the replaced strtod path read "1.5" as 1 and
+// SimpleIni::GetDoubleValue then silently returned the registered default; std::from_chars ignores the C locale, so
+// the value must still parse to 1.5. This assertion is the one that fails if the bind is reverted to GetDoubleValue.
+// Skips when no comma-decimal locale is installed.
+TEST_F(ConfigTest, FloatBind_IsLocaleIndependent)
+{
+    // Copy the active LC_NUMERIC name before mutating it; setlocale returns a pointer into a shared static buffer.
+    const std::string previous_numeric = []
+    {
+        const char *const current = std::setlocale(LC_NUMERIC, nullptr);
+        return current != nullptr ? std::string(current) : std::string("C");
+    }();
+
+    bool locale_applied = false;
+    for (const char *candidate : {"de-DE", "German_Germany.1252", "de_DE.UTF-8", "de_DE"})
+    {
+        if (std::setlocale(LC_NUMERIC, candidate) != nullptr)
+        {
+            locale_applied = true;
+            break;
+        }
+    }
+    if (!locale_applied)
+    {
+        // No candidate changed the locale, so nothing to restore.
+        GTEST_SKIP() << "no comma-decimal locale available on this host";
+    }
+
+    // Restore the original numeric locale however the assertions below exit, so the mutation cannot leak into a
+    // sibling test in the single-process run.
+    struct LocaleRestore
+    {
+        const std::string &name;
+        ~LocaleRestore() { std::setlocale(LC_NUMERIC, name.c_str()); }
+    } const restore{previous_numeric};
+
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nScale=1.5\n";
+    }
+    float scale = 0.0f;
+    config::bind_float("S", "Scale", "scale", [&scale](float v) { scale = v; }, 9.0f);
+    EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
+
+    // Comma-locale strtod would have yielded the registered default 9.0; from_chars yields the real value.
+    EXPECT_FLOAT_EQ(scale, 1.5f);
+}
+
 TEST_F(ConfigTest, MultipleLoads)
 {
     {
@@ -760,12 +869,27 @@ TEST_F(ConfigTest, NegativeIntValue)
     EXPECT_EQ(val, -50);
 }
 
+TEST_F(ConfigTest, PositiveIntValueWithExplicitSign)
+{
+    std::ofstream ini_file(m_test_ini_file);
+    ini_file << "[TestSection]\n";
+    ini_file << "TestInt=+50\n";
+    ini_file.close();
+
+    int val = 0;
+
+    config::bind_int("TestSection", "TestInt", "val", [&val](int v) { val = v; }, 7);
+
+    EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
+    EXPECT_EQ(val, 50);
+}
+
 TEST_F(ConfigTest, IntValueAboveIntMaxFallsBackToDefault)
 {
     std::ofstream ini_file(m_test_ini_file);
     ini_file << "[TestSection]\n";
-    // 5000000000 is larger than INT_MAX. The 64-bit parse can observe that instead of accepting the saturated 32-bit
-    // strtol value, so the range check must fall back to the registered default.
+    // 5000000000 is larger than INT_MAX. The 64-bit parse can observe that overflow and fall back to the registered
+    // default.
     ini_file << "TestInt=5000000000\n";
     ini_file.close();
 
@@ -813,8 +937,7 @@ TEST_F(ConfigTest, IntValueNonNumericFallsBackToDefault)
 {
     std::ofstream ini_file(m_test_ini_file);
     ini_file << "[TestSection]\n";
-    // A non-numeric value never fully consumes under strtoll (the end pointer stays at the start), so the parse must
-    // reject it and fall back to the registered default rather than committing strtoll's zero result.
+    // A non-numeric value must be rejected and fall back to the registered default rather than committing zero.
     ini_file << "TestInt=abc\n";
     ini_file.close();
 
@@ -1750,7 +1873,7 @@ TEST_F(ConfigTest, DisableAutoReload_FromReloadCallback_DoesNotDeadlock)
 
     std::atomic<int> on_reload_hits{0};
     ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool /*content_changed*/)
+                                         [&](bool /*setters_ran*/)
                                          {
                                              on_reload_hits.fetch_add(1, std::memory_order_relaxed);
                                              // Self-call must not deadlock the worker.
@@ -1806,7 +1929,7 @@ TEST_F(ConfigTest, AutoReload_EndToEnd)
 
     std::atomic<int> on_reload_hits{0};
     ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool /*content_changed*/) { on_reload_hits.fetch_add(1); }),
+                                         [&](bool /*setters_ran*/) { on_reload_hits.fetch_add(1); }),
               config::AutoReloadStatus::Started);
 
     // Give the watcher thread time to issue its first ReadDirectoryChangesW.
@@ -1988,11 +2111,12 @@ TEST_F(ConfigTest, Reload_ContentChanged_RunsSetters)
     EXPECT_GT(setter_hits.load(std::memory_order_relaxed), after_load) << "Changed content must re-invoke the setter.";
 }
 
-TEST_F(ConfigTest, Reload_FileUnreadable_FallsBackToReload)
+TEST_F(ConfigTest, Reload_FileUnreadable_RetainsWithoutRerunningSetters)
 {
-    // Prime: load once so a hash exists, then delete the file so
-    // read_ini_bytes() returns nullopt inside reload(). The expected behavior is that reload() still returns true
-    // (matching the existing contract when SimpleIni itself fails to open the file) and does not crash.
+    // Prime: load once so a value + hash exist, then delete the file so read_ini_bytes() returns nullopt inside
+    // reload(). reload() must still return true because the reload path existed and was handled, but a read failure
+    // retains the last values instead of running the setter pass against a never-populated INI object. The setter count
+    // therefore must not advance.
     std::atomic<int> setter_hits{0};
     config::bind_int("S", "K", "k", [&](int /*v*/) { setter_hits.fetch_add(1, std::memory_order_relaxed); }, 0);
 
@@ -2007,11 +2131,10 @@ TEST_F(ConfigTest, Reload_FileUnreadable_FallsBackToReload)
     std::filesystem::remove(m_test_ini_file, ec);
     ASSERT_FALSE(ec);
 
-    // reload() must still return true. Setters re-run with defaults because SimpleIni cannot open the missing file; the
-    // count must therefore have advanced (erring on the side of reloading).
+    // reload() still returns true, but no setters re-run: the read failed, so the values are retained untouched.
     EXPECT_TRUE(config::reload());
-    EXPECT_GT(setter_hits.load(std::memory_order_relaxed), after_load)
-        << "Unreadable file must fall back to a full reload rather than a hash-skip.";
+    EXPECT_EQ(setter_hits.load(std::memory_order_relaxed), after_load)
+        << "An unreadable-file reload must retain last values, not re-run setters against defaults.";
 }
 
 TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
@@ -2057,9 +2180,9 @@ TEST_F(ConfigTest, Servicer_RapidPresses_CoalesceToAtMostOneReloadPerBurst)
                         << delta << ").";
 }
 
-TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
+TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsSettersRanFalse)
 {
-    // After a watcher-driven hash-skip, the user-facing on_reload callback must deliver content_changed == false.
+    // After a watcher-driven hash-skip, the user-facing on_reload callback must report that no setters ran.
     config::disable_auto_reload();
 
     std::atomic<int> current_value{0};
@@ -2072,18 +2195,17 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
     ASSERT_NO_THROW(config::load(m_test_ini_file.string()));
     ASSERT_EQ(current_value.load(), 42);
 
-    // Collect (content_changed) booleans from watcher-driven reloads. The watcher watches the whole temp directory,
-    // and on a notification-buffer overflow it must assume this file changed (the events were dropped), so parallel
-    // test processes churning the directory can inject extra reloads -- which hash-skip and emit content_changed=false
-    // -- at ANY point in this test's timeline. Every wait and assertion below therefore keys on hit VALUES, never on
-    // hit counts or positions.
+    // Collect setter-pass booleans from watcher-driven reloads. The watcher watches the whole temp directory, and on a
+    // notification-buffer overflow it must assume this file changed because the events were dropped, so parallel test
+    // processes churning the directory can inject extra reloads that hash-skip and emit false at any point in this
+    // test's timeline. Every wait and assertion below therefore keys on hit values, never on hit counts or positions.
     std::mutex hits_mutex;
     std::vector<bool> hits;
     ASSERT_EQ(config::enable_auto_reload(std::chrono::milliseconds{100},
-                                         [&](bool content_changed)
+                                         [&](bool setters_ran)
                                          {
                                              std::lock_guard<std::mutex> lock(hits_mutex);
-                                             hits.push_back(content_changed);
+                                             hits.push_back(setters_ran);
                                          }),
               config::AutoReloadStatus::Started);
     // No arming delay is needed: enable_auto_reload() returns Started only after the watcher has queued its first
@@ -2091,7 +2213,7 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
 
     // Rewrites go through a write-then-rename swap so the watcher can never observe a half-written file. An in-place
     // truncate+write opens a window in which a debounced reload reads EMPTY content: that poisons the stored hash and
-    // yields spurious content_changed=true hits once the write completes. The rename surfaces this filename in a
+    // yields spurious setters_ran=true hits once the write completes. The rename surfaces this filename in a
     // RENAMED_NEW_NAME event, which the watcher matches exactly like a write.
     const auto replace_atomically = [&](std::string_view content)
     {
@@ -2121,12 +2243,12 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
         return false;
     };
 
-    // Phase 1: replace with *different* bytes -- a reload must eventually deliver content_changed=true. Waiting for
-    // the true VALUE (not the first hit) tolerates any spurious overflow-driven false hits landing first.
+    // Phase 1: replace with different bytes; a reload must eventually report that setters ran. Waiting for a true value
+    // instead of the first hit tolerates any spurious overflow-driven false hits landing first.
     replace_atomically("[S]\nK=43\n");
     ASSERT_TRUE(
         wait_for_hits(std::chrono::seconds{3}, [&] { return std::find(hits.begin(), hits.end(), true) != hits.end(); }))
-        << "Watcher never reported content_changed=true for the changed-bytes replace.";
+        << "Watcher never reported setters_ran=true for the changed-bytes replace.";
 
     // The true hit means the stored hash now matches the on-disk bytes, and the atomic replace guarantees no torn
     // intermediate content was ever observable -- so every reload after this point, whether driven by the
@@ -2138,7 +2260,7 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
     }
 
     // Phase 2: replace with identical bytes to bump the directory state without changing the content hash. on_reload
-    // must deliver content_changed = false.
+    // must report setters_ran=false.
     replace_atomically("[S]\nK=43\n");
     ASSERT_TRUE(wait_for_hits(std::chrono::seconds{3}, [&] { return hits.size() > settled_count; }))
         << "Watcher never reported a reload for the identical-bytes replace.";
@@ -2152,7 +2274,7 @@ TEST_F(ConfigTest, Reload_WatcherPath_HashSkip_EmitsOnReloadFalse)
     for (std::size_t i = settled_count; i < hits.size(); ++i)
     {
         EXPECT_FALSE(hits[i]) << "Reload at index " << i
-                              << " reported content_changed=true after the hash had settled; the hash-skip failed.";
+                              << " reported setters_ran=true after the hash had settled; the hash-skip failed.";
     }
 }
 
@@ -2234,8 +2356,8 @@ TEST_F(ConfigTest, Reload_HashResetOnReadFailure)
     ASSERT_FALSE(std::filesystem::exists(m_test_ini_file));
     EXPECT_TRUE(config::reload());
     const int after_failed_reload = setter_hits.load(std::memory_order_relaxed);
-    EXPECT_GT(after_failed_reload, after_load)
-        << "reload() on a disappeared file must still run setters with defaults.";
+    EXPECT_EQ(after_failed_reload, after_load)
+        << "reload() on a disappeared file retains last values and does not re-run setters.";
 
     {
         std::ofstream f(m_test_ini_file);
