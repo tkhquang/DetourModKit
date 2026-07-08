@@ -277,9 +277,9 @@ namespace DetourModKit
          * @brief Re-applies all bound setters against the last-loaded INI file.
          * @details Re-reads the file passed to the most recent load() and re-invokes every setter with the fresh value.
          *          If the file's bytes are unchanged since the last successful load (content-hash short-circuit), the
-         *          setters are skipped. If the file cannot be read (deleted, or locked mid-save), the setters are also
-         *          skipped and the last-applied values are retained rather than snapped back to their defaults; reload()
-         *          still returns true. Bindings persist across reloads.
+         *          setters are skipped. If the file cannot be read (deleted or locked mid-save) or fails to parse, the
+         *          setters are also skipped and the last-applied values are retained rather than snapped back to their
+         *          defaults; reload() still returns true. Bindings persist across reloads.
          * @return true if a previous load() path was available and the reload proceeded; false if reload() was called
          *         before any load().
          * @note Safe from any thread. Only C++ exceptions from setters are caught; a structured-exception fault or a

@@ -462,6 +462,36 @@ namespace
         EXPECT_TRUE(watcher.is_running());
     }
 
+    // The worker invokes the callback from two sites: the debounce-timeout fire above, and the final flush when it
+    // exits with a pending change (stop() / destruction). This covers the flush site: a long debounce means the change
+    // is still pending when stop() drives the worker out, so the pending edit flushes through the same guarded
+    // fire_reload at the end of the worker body. A throw there must stay contained so stop() joins cleanly rather than
+    // letting the exception unwind past the IRP drain.
+    TEST_F(ConfigWatcherTest, ThrowingCallbackIsContainedOnStopTimeFlush)
+    {
+        std::atomic<int> fires{0};
+        DetourModKit::detail::ConfigWatcher watcher(m_ini_path.string(), 2000ms,
+                                                    [&fires]()
+                                                    {
+                                                        fires.fetch_add(1);
+                                                        throw std::runtime_error("stop-flush boom");
+                                                    });
+        ASSERT_TRUE(watcher.start());
+        ASSERT_TRUE(wait_until([&]() { return watcher.is_running(); }, 1s));
+        std::this_thread::sleep_for(100ms);
+
+        // Mark a change pending; the 2 s debounce guarantees the timeout fire cannot run before stop().
+        write_ini("[S]\nK=9\n");
+        std::this_thread::sleep_for(200ms);
+
+        // stop() drives the worker's exit, which flushes the pending change through the guarded fire_reload and then
+        // joins. A contained throw means stop() returns without crashing or hanging.
+        watcher.stop();
+
+        EXPECT_EQ(fires.load(), 1) << "stop() must flush the pending change exactly once through the guarded callback";
+        EXPECT_FALSE(watcher.is_running());
+    }
+
     // is_running() must not read the non-atomic m_impl->worker unique_ptr while start() assigns it and stop() moves it
     // out under start_mutex. Hammer is_running() from one thread while another churns start()/stop(); the accessor uses
     // the atomic worker-thread id, so this must neither crash nor hang.

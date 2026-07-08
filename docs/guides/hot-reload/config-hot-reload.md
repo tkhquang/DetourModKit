@@ -90,9 +90,9 @@ The servicer is spun up lazily on the first `reload_hotkey` call and torn down i
 
 ### Content-hash skip
 
-`config::reload()` computes an FNV-1a 64 hash over the on-disk bytes before invoking any setter. If the hash matches the value stored at the last successful `load()` / `reload()`, no setters run and the call returns `true` with a DEBUG-level log line. This suppresses the common no-op cases: `touch`, editors that overwrite with identical content, hotkey presses on an unchanged file. When the file cannot be read (editor holds an exclusive handle mid-save), the cached hash is cleared and the setter pass is skipped so the current values are retained.
+`config::reload()` computes an FNV-1a 64 hash over the on-disk bytes before invoking any setter. If the hash matches the value stored at the last successful `load()` / `reload()`, no setters run and the call returns `true` with a DEBUG-level log line. This suppresses the common no-op cases: `touch`, editors that overwrite with identical content, hotkey presses on an unchanged file. When the file cannot be read (editor holds an exclusive handle mid-save) or fails to parse, the setter pass is skipped so the current values are retained rather than reset to their defaults.
 
-The `on_reload` callback passed to `enable_auto_reload` receives a `bool setters_ran` argument reflecting this: `true` when setters ran, `false` when the hash-skip or read-failure path skipped the setter pass.
+The `on_reload` callback passed to `enable_auto_reload` receives a `bool setters_ran` argument reflecting this: `true` when setters ran, `false` when the hash-skip, read-failure, or parse-failure path skipped the setter pass.
 
 ## What is safe to hot-reload
 

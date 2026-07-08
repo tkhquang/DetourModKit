@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <cstdint>
 #include <fstream>
 #include <filesystem>
@@ -468,6 +469,55 @@ TEST_F(ConfigTest, FloatBind_ParsesSignsAndRejectsTrailingJunk)
     EXPECT_FLOAT_EQ(plus, 1.5f);
     EXPECT_FLOAT_EQ(minus, -2.5f);
     EXPECT_FLOAT_EQ(bad, 9.0f);
+}
+
+// Regression teeth for locale-independent float parsing: the float bind must resolve a fractional value the same way
+// regardless of the host LC_NUMERIC. Under a comma-decimal locale the replaced strtod path read "1.5" as 1 and
+// SimpleIni::GetDoubleValue then silently returned the registered default; std::from_chars ignores the C locale, so
+// the value must still parse to 1.5. This assertion is the one that fails if the bind is reverted to GetDoubleValue.
+// Skips when no comma-decimal locale is installed.
+TEST_F(ConfigTest, FloatBind_IsLocaleIndependent)
+{
+    // Copy the active LC_NUMERIC name before mutating it; setlocale returns a pointer into a shared static buffer.
+    const std::string previous_numeric = []
+    {
+        const char *const current = std::setlocale(LC_NUMERIC, nullptr);
+        return current != nullptr ? std::string(current) : std::string("C");
+    }();
+
+    bool locale_applied = false;
+    for (const char *candidate : {"de-DE", "German_Germany.1252", "de_DE.UTF-8", "de_DE"})
+    {
+        if (std::setlocale(LC_NUMERIC, candidate) != nullptr)
+        {
+            locale_applied = true;
+            break;
+        }
+    }
+    if (!locale_applied)
+    {
+        // No candidate changed the locale, so nothing to restore.
+        GTEST_SKIP() << "no comma-decimal locale available on this host";
+    }
+
+    // Restore the original numeric locale however the assertions below exit, so the mutation cannot leak into a
+    // sibling test in the single-process run.
+    struct LocaleRestore
+    {
+        const std::string &name;
+        ~LocaleRestore() { std::setlocale(LC_NUMERIC, name.c_str()); }
+    } const restore{previous_numeric};
+
+    {
+        std::ofstream f(m_test_ini_file);
+        f << "[S]\nScale=1.5\n";
+    }
+    float scale = 0.0f;
+    config::bind_float("S", "Scale", "scale", [&scale](float v) { scale = v; }, 9.0f);
+    EXPECT_NO_THROW(config::load(m_test_ini_file.string()));
+
+    // Comma-locale strtod would have yielded the registered default 9.0; from_chars yields the real value.
+    EXPECT_FLOAT_EQ(scale, 1.5f);
 }
 
 TEST_F(ConfigTest, MultipleLoads)

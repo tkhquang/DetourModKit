@@ -376,6 +376,34 @@ namespace DetourModKit
             };
 
             /**
+             * @brief Trims ASCII blanks from both ends of @p text and strips a single leading '+'.
+             * @details Shared by the int and float scalar binds so both normalize forms like " +50 " / "+1.5"
+             *          identically before handing the view to std::from_chars. from_chars rejects a leading '+' on the
+             *          mantissa (unlike the strtod/strtoll it replaced), so one is stripped to keep a signed-positive
+             *          value parsing; a lone "+" trims to an empty view and correctly falls back to the default. A
+             *          leading '-' is left in place because from_chars accepts it. Returns a view into @p text and
+             *          performs no allocation.
+             */
+            [[nodiscard]] std::string_view trim_blanks_and_leading_plus(std::string_view text) noexcept
+            {
+                constexpr auto is_blank = [](char c) noexcept
+                { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+                while (!text.empty() && is_blank(text.front()))
+                {
+                    text.remove_prefix(1);
+                }
+                while (!text.empty() && is_blank(text.back()))
+                {
+                    text.remove_suffix(1);
+                }
+                if (!text.empty() && text.front() == '+')
+                {
+                    text.remove_prefix(1);
+                }
+                return text;
+            }
+
+            /**
              * @brief Configuration item using a std::function callback for value setting.
              * @tparam T The data type of the configuration item (e.g., int, bool, std::string).
              * @note Setter callbacks are invoked outside the config mutex to prevent deadlocks. See the bind_* free
@@ -415,22 +443,7 @@ namespace DetourModKit
                         }
                         else
                         {
-                            std::string_view text{raw};
-                            constexpr auto is_blank = [](char c)
-                            { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-                            while (!text.empty() && is_blank(text.front()))
-                            {
-                                text.remove_prefix(1);
-                            }
-                            while (!text.empty() && is_blank(text.back()))
-                            {
-                                text.remove_suffix(1);
-                            }
-
-                            if (!text.empty() && text.front() == '+')
-                            {
-                                text.remove_prefix(1);
-                            }
+                            std::string_view text = trim_blanks_and_leading_plus(std::string_view{raw});
 
                             int base = 10;
                             if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
@@ -474,29 +487,7 @@ namespace DetourModKit
                         }
                         else
                         {
-                            std::string_view text{raw};
-                            // std::from_chars does not skip leading whitespace the way strtod did; trim ASCII blanks on
-                            // both ends so a value like " 1.5" still parses. SimpleIni already trims surrounding
-                            // whitespace in practice, so this is a belt-and-braces guard rather than a hot path.
-                            constexpr auto is_blank = [](char c)
-                            { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-                            while (!text.empty() && is_blank(text.front()))
-                            {
-                                text.remove_prefix(1);
-                            }
-                            while (!text.empty() && is_blank(text.back()))
-                            {
-                                text.remove_suffix(1);
-                            }
-
-                            // std::from_chars does not accept a leading '+' on the mantissa. Strip one so a
-                            // signed-positive value such as "+1.5" keeps parsing to 1.5, consistent with the int bind.
-                            // A lone "+" then trims to an empty view and correctly falls back to the default; '-' is
-                            // left in place because from_chars accepts it.
-                            if (!text.empty() && text.front() == '+')
-                            {
-                                text.remove_prefix(1);
-                            }
+                            std::string_view text = trim_blanks_and_leading_plus(std::string_view{raw});
 
                             float parsed = default_value;
                             const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), parsed);
@@ -654,8 +645,10 @@ namespace DetourModKit
             /**
              * @brief Reads all bytes of @p path into memory.
              * @details Returns std::nullopt when the file cannot be opened (e.g. mid-save by an editor that locks
-             *          exclusively). Callers should treat a nullopt return as "unable to verify content; proceed with a
-             *          full reload" -- erring on the side of reloading is safer than skipping a real change.
+             *          exclusively). The two callers diverge on nullopt: the initial load() proceeds with the bound
+             *          defaults (a first run legitimately has no file on disk yet), while reload() clears the cached
+             *          hash and returns before the setter pass so the last-applied values are retained rather than
+             *          snapped back to defaults.
              */
             [[nodiscard]] std::optional<std::vector<std::uint8_t>>
             read_ini_bytes(const std::filesystem::path &path) noexcept
@@ -1324,18 +1317,23 @@ namespace DetourModKit
 
                         if (!outcome.parse_succeeded)
                         {
-                            // Asymmetry with the read-failure branch above is intentional: we have already advanced the
-                            // cached hash to these new bytes, so a later reload with identical bytes correctly
-                            // short-circuits -- the partial state produced by re-parsing would be the same. The
-                            // read-failure branch cannot make that guarantee because it never observed the bytes.
-                            logger.warning("Config: reload() parse error on '{}' (error {}); "
-                                           "retaining last values where setters keep state.",
+                            // Parse failure. This is not a malformed-content case: CSimpleIniA::LoadData returns SI_OK
+                            // for any byte content (embedded nulls, unclosed sections, and binary junk all parse), so a
+                            // negative code here means an internal SimpleIni allocation failure, or a bad_alloc that
+                            // load_ini_into caught as SI_FAIL. Treat it like the read-failure branch above: return
+                            // before the setter pass so the last in-memory values are retained rather than snapped to
+                            // their defaults by item->load against a parser that failed to populate. The one asymmetry
+                            // that remains is the cached hash -- a read failure reset it (it never observed the bytes),
+                            // but a parse failure did read the bytes, so the hash was already advanced to them above; a
+                            // later reload of the same bytes then hash-skips and stays retained. No setters ran, so
+                            // out_setters_ran stays false and on_reload observes setters_ran == false.
+                            logger.warning("Config: reload() parse error on '{}' (error {}); retaining last values "
+                                           "(setters not re-run).",
                                            ini_path_str, static_cast<int>(outcome.parse_rc));
+                            return true;
                         }
-                        else
-                        {
-                            logger.debug("Config: Reloading from {}", ini_path_str);
-                        }
+
+                        logger.debug("Config: Reloading from {}", ini_path_str);
                     }
 
                     for (const auto &item : get_registered_config_items())
@@ -1426,9 +1424,11 @@ namespace DetourModKit
                                                                                     // The internal impl reports whether
                                                                                     // setters actually ran (false when
                                                                                     // the content-hash short-circuit
-                                                                                    // skipped the work) so the user
-                                                                                    // callback can distinguish a real
-                                                                                    // reload from a no-op touch.
+                                                                                    // found unchanged bytes or a read
+                                                                                    // failure retained the current
+                                                                                    // values) so the callback can
+                                                                                    // distinguish a real reload from a
+                                                                                    // skipped setter pass.
                                                                                     bool setters_ran = false;
                                                                                     (void)reload_impl(setters_ran);
                                                                                     if (user_cb)
