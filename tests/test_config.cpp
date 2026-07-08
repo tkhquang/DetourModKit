@@ -18,7 +18,7 @@
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 
-#include "internal/input_hold_gate.hpp"
+#include "internal/input_binding_gate.hpp"
 #include "internal/input_intercept.hpp"
 
 using namespace DetourModKit;

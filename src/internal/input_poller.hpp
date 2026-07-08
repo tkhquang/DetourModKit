@@ -182,8 +182,18 @@ namespace DetourModKit
 
             /**
              * @brief Appends a binding to the running poller, carrying surviving entries' active state forward.
+             * @return true when the binding was appended; false when growing the engine failed under host OOM (the
+             *         poller is left exactly as it was). The caller surfaces the failure rather than silently
+             *         committing a subset of a multi-combo registration.
              */
-            void add_binding(InputBinding binding) noexcept;
+            [[nodiscard]] bool add_binding(InputBinding binding) noexcept;
+
+            /**
+             * @brief Appends a batch of bindings atomically, carrying surviving entries' active state forward.
+             * @return true when every binding was appended; false when growing the engine failed under host OOM (the
+             *         poller is left exactly as it was).
+             */
+            [[nodiscard]] bool add_bindings(std::vector<InputBinding> bindings) noexcept;
 
             /// Removes every binding sharing @p name (invoking hold-release callbacks). Returns the count removed.
             std::size_t remove_bindings_by_name(std::string_view name) noexcept

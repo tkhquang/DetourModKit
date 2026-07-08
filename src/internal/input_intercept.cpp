@@ -65,14 +65,24 @@ namespace DetourModKit::detail
 
         /**
          * @brief RAII marker for a game thread executing an XInput detour body.
-         * @details Increment-on-entry / decrement-on-exit so uninstall() can observe when no detour is in flight. The
-         *          acquire increment keeps the trampoline load inside the detour from moving before the counter becomes
-         *          non-zero, and the release decrement pairs with uninstall()'s acquire drain when it observes zero.
+         * @details Increment-on-entry / decrement-on-exit so uninstall() can observe when no detour is in flight. This
+         *          counter and the published trampoline pointer form a Dekker-style mutual-exclusion pair: the detour
+         *          increments the counter and then loads the trampoline, while uninstall() retires the trampoline
+         *          (stores null) and then drains the counter. That is a store-then-load-of-a-different-location pattern
+         *          on both sides, and the one reordering acquire/release does NOT forbid is exactly StoreLoad -- so with
+         *          acquire/release the CPU may let the detour observe the still-non-null trampoline before its increment
+         *          is visible to the drain, letting uninstall() see a zero count and free a trampoline the detour is
+         *          about to run through (a use-after-free the SafetyHook mid-prologue relocation does not cover). Only a
+         *          total order over the four operations forbids that interleaving, so the increment here, the detour's
+         *          trampoline load, uninstall()'s retire store, and its drain load are all seq_cst. On x86-64 (the sole
+         *          target) this costs nothing beyond the existing atomics: the increment is already a locked RMW (a full
+         *          barrier) and a seq_cst load is a plain MOV. The decrement stays release: it is not part of the
+         *          StoreLoad pair, it only has to publish the detour body's completion to the seq_cst drain load.
          *          Trivial and noexcept so it never perturbs the hot per-frame detour path.
          */
         struct InflightGuard
         {
-            InflightGuard() noexcept { s_xinput_inflight.fetch_add(1, std::memory_order_acquire); }
+            InflightGuard() noexcept { s_xinput_inflight.fetch_add(1, std::memory_order_seq_cst); }
             ~InflightGuard() noexcept { s_xinput_inflight.fetch_sub(1, std::memory_order_release); }
             InflightGuard(const InflightGuard &) = delete;
             InflightGuard &operator=(const InflightGuard &) = delete;
@@ -226,7 +236,10 @@ namespace DetourModKit::detail
         DWORD WINAPI xinput_get_state_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
             const InflightGuard inflight;
-            const XInputGetStateFn original = s_xinput_original.load(std::memory_order_acquire);
+            // seq_cst: this load and the InflightGuard increment above form the detour side of the Dekker drain pair
+            // (see InflightGuard). It must join the same total order as uninstall()'s retire store so a zeroed count
+            // over there implies a null trampoline over here.
+            const XInputGetStateFn original = s_xinput_original.load(std::memory_order_seq_cst);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
             if (result == ERROR_SUCCESS)
             {
@@ -238,7 +251,8 @@ namespace DetourModKit::detail
         DWORD WINAPI xinput_get_state_ex_detour(DWORD user_index, XINPUT_STATE *state) noexcept
         {
             const InflightGuard inflight;
-            const XInputGetStateFn original = s_xinput_ex_original.load(std::memory_order_acquire);
+            // seq_cst for the same Dekker-pair reason as xinput_get_state_detour above.
+            const XInputGetStateFn original = s_xinput_ex_original.load(std::memory_order_seq_cst);
             const DWORD result = (original != nullptr) ? original(user_index, state) : ERROR_DEVICE_NOT_CONNECTED;
             if (result == ERROR_SUCCESS)
             {
@@ -388,8 +402,13 @@ namespace DetourModKit::detail
                 // never released: that frame's return path stays mapped even if the host unloads this DLL right after
                 // this teardown.
                 SetWindowLongPtrW(hwnd, GWLP_WNDPROC, s_prev_wndproc.load(std::memory_order_acquire));
+                // Deliberately leave s_prev_wndproc pointing at the real procedure. An in-flight wndproc_detour frame
+                // on the window thread loads it at the top of the detour and forwards to it; zeroing it here would race
+                // that frame and make it route the message to DefWindowProcW instead of the game's own procedure,
+                // silently dropping e.g. WM_CLOSE / WM_ACTIVATE at every interception teardown. The detour is no longer
+                // in the chain after the restore above, so no NEW frame enters, and a later install_wndproc overwrites
+                // this value before re-subclassing -- so leaving it set is both safe and correct.
                 s_hwnd.store(nullptr, std::memory_order_release);
-                s_prev_wndproc.store(0, std::memory_order_release);
                 s_wndproc_installed.store(false, std::memory_order_release);
                 return;
             }
@@ -759,6 +778,11 @@ namespace DetourModKit::detail
         return s_wndproc_installed.load(std::memory_order_acquire);
     }
 
+    LONG_PTR wndproc_saved_procedure() noexcept
+    {
+        return s_prev_wndproc.load(std::memory_order_acquire);
+    }
+
     std::array<int, 4> take_wheel_counts() noexcept
     {
         std::array<int, 4> out{};
@@ -801,9 +825,12 @@ namespace DetourModKit::detail
 
         // Retire the published trampoline pointers before draining. A game thread that already copied one keeps the
         // in-flight counter non-zero until it leaves; a late entrant after this point sees nullptr and returns a closed
-        // result instead of taking a pointer into the hook object that teardown is about to destroy.
-        s_xinput_ex_original.store(nullptr, std::memory_order_release);
-        s_xinput_original.store(nullptr, std::memory_order_release);
+        // result instead of taking a pointer into the hook object that teardown is about to destroy. These retire
+        // stores are seq_cst so they and the drain load below join the same total order as the detour's increment and
+        // trampoline load: without that, StoreLoad reordering could let this thread read a zero count while a detour
+        // still holds a non-null trampoline (see InflightGuard).
+        s_xinput_ex_original.store(nullptr, std::memory_order_seq_cst);
+        s_xinput_original.store(nullptr, std::memory_order_seq_cst);
 
         // Quiesce XInput detours that might already have copied a trampoline before destroying the hook objects. The
         // poll thread is already joined, so the only remaining callers are the game's own XInput threads. SafetyHook
@@ -812,7 +839,7 @@ namespace DetourModKit::detail
         // keep entering the detour after the trampoline pointers are retired, and teardown must still make progress.
         constexpr uint64_t XINPUT_QUIESCE_TIMEOUT_MS = 10;
         const uint64_t quiesce_deadline_ms = GetTickCount64() + XINPUT_QUIESCE_TIMEOUT_MS;
-        while (s_xinput_inflight.load(std::memory_order_acquire) != 0 && GetTickCount64() < quiesce_deadline_ms)
+        while (s_xinput_inflight.load(std::memory_order_seq_cst) != 0 && GetTickCount64() < quiesce_deadline_ms)
         {
             std::this_thread::yield();
         }
