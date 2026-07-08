@@ -242,7 +242,11 @@ namespace DetourModKit
 
         bool ConfigWatcher::is_running() const noexcept
         {
-            return m_impl->worker && m_impl->worker->is_running();
+            // Avoid reading m_impl->worker here: start() assigns it and stop() moves it out under start_mutex, so an
+            // unlocked status query would race the unique_ptr. The worker publishes this atomic id before issuing the
+            // first overlapped read and clears it on exit, which gives this noexcept accessor a race-free running
+            // signal.
+            return m_impl->worker_thread_id.load(std::memory_order_acquire) != std::thread::id{};
         }
 
         const std::string &ConfigWatcher::ini_path() const noexcept
@@ -356,6 +360,36 @@ namespace DetourModKit
                 // subsequent hits stay silent at DEBUG level to avoid log spam.
                 bool overflow_logged = false;
 
+                // Invoke the user reload callback with exception containment. Honoring the header's "a throwing
+                // callback is caught and the watcher keeps running" promise here is a hard memory-safety requirement:
+                // if a throw were allowed to unwind out of this worker body it would run WatchIoState's destructor,
+                // freeing the OVERLAPPED and the notification buffer while the pending ReadDirectoryChangesW notify IRP
+                // may still reference them. That IRP is drained after the pump loop; an unwinding exception would skip
+                // that drain and could let the kernel complete the cancelled I/O into freed heap. try_log keeps the
+                // handlers non-throwing, and the noexcept marker turns "the drain is always reached" into a structural
+                // guarantee rather than a comment.
+                auto fire_reload = [&]() noexcept
+                {
+                    if (!callback)
+                    {
+                        return;
+                    }
+                    try
+                    {
+                        callback();
+                    }
+                    catch (const std::exception &e)
+                    {
+                        (void)log().try_log(LogLevel::Error, "ConfigWatcher '{}': reload callback threw: {}", label,
+                                            e.what());
+                    }
+                    catch (...)
+                    {
+                        (void)log().try_log(LogLevel::Error,
+                                            "ConfigWatcher '{}': reload callback threw a non-std exception.", label);
+                    }
+                };
+
                 auto issue_read = [&]() -> bool
                 {
                     ::ResetEvent(event_handle.h);
@@ -403,10 +437,7 @@ namespace DetourModKit
                                 if (now - last_event >= debounce_ms)
                                 {
                                     pending = false;
-                                    if (callback)
-                                    {
-                                        callback();
-                                    }
+                                    fire_reload();
                                 }
                             }
                             continue;
@@ -569,7 +600,7 @@ namespace DetourModKit
                 //      last handle to the directory forces the I/O Manager to
                 //      cancel and complete the outstanding IRP, signalling our
                 //      event (the mechanism .NET FileSystemWatcher.Dispose uses);
-                //   3. if the IRP STILL cannot be confirmed complete, leak the
+                //   3. if the IRP still cannot be confirmed complete, leak the
                 //      entire I/O bundle instead of freeing it, so a late
                 //      completion can never write into freed memory. Bounded to
                 //      this teardown path and mirrors the leak-on-teardown
@@ -608,10 +639,11 @@ namespace DetourModKit
 
                 // Flush a final debounced callback if we are exiting with a pending change. This intentionally
                 // fires during stop() as well -- an edit that arrived inside the debounce window would otherwise be
-                // silently dropped.
-                if (pending && callback)
+                // silently dropped. Routed through the same guarded fire_reload so a throw on this final edge cannot
+                // escape the worker body after the drain either.
+                if (pending)
                 {
-                    callback();
+                    fire_reload();
                 }
             };
 

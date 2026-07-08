@@ -43,8 +43,12 @@ namespace DetourModKit
          *
          * @warning The @p on_reload callback is invoked on the watcher's background thread. Callers must handle their
          * own
-         *          synchronization if the callback touches shared state. Exceptions escaping the callback are caught by the
-         *          underlying StoppableWorker and logged as errors; the watcher continues running.
+         *          synchronization if the callback touches shared state. An exception escaping the callback is caught at
+         *          the invocation site, logged as an error, and swallowed, so the watcher keeps pumping. This
+         *          containment is mandatory rather than cosmetic: letting a throw unwind the worker body would free the
+         *          in-flight ReadDirectoryChangesW OVERLAPPED and notification buffer before the kernel notify IRP is
+         *          drained. The StoppableWorker body handler remains only a last-resort backstop for a non-callback
+         *          throw.
          */
         class ConfigWatcher
         {
