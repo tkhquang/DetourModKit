@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <string_view>
 
 namespace DetourModKit
@@ -26,6 +27,10 @@ namespace DetourModKit
      *          src/internal/async_logger_queue.hpp), so this public header names none of it and a consumer compiles
      *          with the queue / pool / threading internals off its include path.
      * @note Uses shared_ptr<detail::WinFileStream> to safely handle Logger reconfiguration during runtime.
+     * @note The destructor is self-safe under the Windows loader lock: if teardown had to detach the writer thread
+     *       (because a join would deadlock under the loader lock), the destructor leaks the pimpl in place so the
+     *       queue / condition variable / file stream the detached writer still reads are never freed under it. An owner
+     *       therefore does not have to leak the handle itself to destroy an AsyncLogger safely from a loader-lock path.
      */
     class AsyncLogger
     {
@@ -39,6 +44,14 @@ namespace DetourModKit
         explicit AsyncLogger(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
                              std::shared_ptr<std::mutex> log_mutex);
 
+        /**
+         * @brief Stops the writer and destroys the logger, staying safe under the Windows loader lock.
+         * @details Runs shutdown() first. On a clean off-loader-lock teardown the writer is joined and the pimpl is
+         *          destroyed normally. If shutdown() had to DETACH the writer (loader-lock path), the pimpl is instead
+         *          leaked in place -- the already-heap-allocated implementation is abandoned rather than freed -- so the
+         *          detached writer keeps reading a live queue / condition variable / file stream until it observes the
+         *          stop and exits. The writer's own counted module reference keeps its code pages mapped.
+         */
         ~AsyncLogger() noexcept;
 
         AsyncLogger(const AsyncLogger &) = delete;
@@ -76,8 +89,11 @@ namespace DetourModKit
 
         /**
          * @brief Stops the writer thread and drains remaining queued messages.
-         * @details Signals shutdown, joins the writer thread, then drains any messages that arrived between the stop
-         *          signal and thread exit.
+         * @details Signals shutdown. Off the Windows loader lock, joins the writer thread, then drains any messages
+         * that
+         *          arrived between the stop signal and thread exit. Under the loader lock, detaches the writer instead
+         *          of joining; the destructor observes that detach and leaks the pimpl in place so the detached writer's
+         *          queue, condition variable, and file stream stay alive until the writer exits.
          * @note A producer that already passed the shutdown check but has not yet completed try_push() can enqueue at
          *       most one message after the final drain. This is an accepted trade-off to avoid adding atomic overhead
          *       (producers_in_flight counter) to every enqueue() call.
@@ -109,6 +125,13 @@ namespace DetourModKit
         void reset_dropped_count() noexcept;
 
     private:
+        friend class Logger;
+
+        // Logger::reconfigure holds the shared sink mutex while pushing a new timestamp format into the writer's
+        // private config snapshot. The setter takes no lock because taking that same non-recursive mutex here would
+        // self-deadlock the reconfigure path.
+        void set_timestamp_format(std::string timestamp_format) noexcept;
+
         // All implementation state and behaviour live behind this pimpl so the queue, string pool, per-message record,
         // writer thread, and flush synchronization stay off the public include path (their definitions live in the
         // non-installed src/internal/async_logger_queue.hpp, reached only by src/async_logger.cpp).

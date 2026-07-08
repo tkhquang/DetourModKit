@@ -25,7 +25,12 @@ namespace DetourModKit
         // Static bootstrap machinery (the async DllMain path only)
         // The synchronous Session::start path touches none of these: it returns a Session the caller holds directly.
         // These statics exist only to host a Session on a worker thread across a DllMain attach/detach pair.
-        HANDLE s_shutdown_event = nullptr;
+        // Atomic because request_shutdown() may SetEvent it from any consumer thread at any time (its documented
+        // contract), concurrently with a teardown path that retires the handle. A plain HANDLE would be a data race,
+        // and closing the handle while a request_shutdown() has already loaded it would SetEvent a closed / recycled
+        // handle. The teardown paths therefore exchange-to-null and, where a live thread could still race, LEAK the
+        // handle rather than close it (see bootstrap_detach).
+        std::atomic<HANDLE> s_shutdown_event{nullptr};
         HANDLE s_worker_thread = nullptr;
         HMODULE s_module = nullptr;
 
@@ -168,11 +173,16 @@ namespace DetourModKit
         // ~Session, which tears down whatever start() already configured.
         void unwind_bootstrap() noexcept
         {
-            if (s_shutdown_event)
-            {
-                CloseHandle(s_shutdown_event);
-                s_shutdown_event = nullptr;
-            }
+            // Setup-failure unwind. bootstrap_core publishes s_shutdown_event before the acquire_module_ref /
+            // CreateThread steps that fail into here, so the handle can already be visible to another thread. This runs
+            // while the process is live, and on a re-bootstrap the consumer has held control before (the prior session
+            // cleaned these statics for reuse), so a leftover consumer thread may call request_shutdown() -- documented
+            // safe from any thread at any time -- and load the handle concurrently. Closing it would then race a
+            // SetEvent onto a closed / recycled handle, the exact hazard the atomic keeps out. Retire it to null and
+            // LEAK the one small event object instead of closing it, matching the off-loader-lock detach path; the OS
+            // reclaims it at process exit. Closing is safe only where no live thread can race, which for the event is
+            // the process-death detach alone.
+            s_shutdown_event.store(nullptr, std::memory_order_release);
             if (s_worker_thread)
             {
                 CloseHandle(s_worker_thread);
@@ -234,9 +244,9 @@ namespace DetourModKit
                     }
                 }
 
-                if (s_shutdown_event)
+                if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
                 {
-                    WaitForSingleObject(s_shutdown_event, INFINITE);
+                    WaitForSingleObject(event, INFINITE);
                 }
 
                 // `session` destructs at the end of this inner scope -> ordered teardown off the loader lock -> leaves
@@ -262,7 +272,7 @@ namespace DetourModKit
         [[nodiscard]] Result<void> bootstrap_core(const ModInfo &info,
                                                   std::move_only_function<Result<void>(Session &)> on_ready)
         {
-            if (s_worker_thread || s_shutdown_event)
+            if (s_worker_thread || s_shutdown_event.load(std::memory_order_acquire))
             {
                 return std::unexpected(Error{ErrorCode::SessionAlreadyActive, "bootstrap"});
             }
@@ -295,13 +305,20 @@ namespace DetourModKit
             s_pending_session.emplace(std::move(*session));
             s_on_ready = std::move(on_ready);
 
-            s_shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-            if (!s_shutdown_event)
+            // Create into a local first, then publish with a release store so the worker's / consumer's acquire load
+            // observes a fully-constructed handle. The guard above already proved s_shutdown_event was null. The TRUE
+            // second argument makes this a MANUAL-RESET event: a shutdown request is a one-way latch, so once
+            // request_shutdown() signals it the event stays signaled -- the worker observes it whether or not it was
+            // already waiting, and a repeated request_shutdown() is idempotent (an auto-reset event would clear itself
+            // after a single wait woke and could drop a later observer).
+            const HANDLE shutdown_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            if (!shutdown_event)
             {
                 const DWORD err = GetLastError();
                 unwind_bootstrap();
                 return std::unexpected(Error{ErrorCode::SystemCallFailed, "bootstrap", err});
             }
+            s_shutdown_event.store(shutdown_event, std::memory_order_release);
 
             // Acquire the worker's module reference BEFORE CreateThread. A thread created from DllMain may not execute
             // its entry point until after the loader releases the attach notification, but the caller can FreeLibrary
@@ -513,10 +530,11 @@ namespace DetourModKit
                 CloseHandle(s_worker_thread);
                 s_worker_thread = nullptr;
             }
-            if (s_shutdown_event)
+            // Process termination: with reserved != nullptr the OS has already terminated every other thread before
+            // this DllMain notification, so no request_shutdown() can be in flight and closing the event is safe.
+            if (HANDLE event = s_shutdown_event.exchange(nullptr, std::memory_order_acq_rel))
             {
-                CloseHandle(s_shutdown_event);
-                s_shutdown_event = nullptr;
+                CloseHandle(event);
             }
             s_module = nullptr;
             diagnostics::record_intentional_leak(diagnostics::LeakSubsystem::Bootstrap);
@@ -524,9 +542,9 @@ namespace DetourModKit
         }
 
         // EXPLICIT FreeLibrary. Signal the worker so its ~Session teardown runs OFF the loader lock (leaves JOIN).
-        if (s_shutdown_event)
+        if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
         {
-            SetEvent(s_shutdown_event);
+            SetEvent(event);
         }
 
         if (detail::is_loader_lock_held())
@@ -560,11 +578,13 @@ namespace DetourModKit
             CloseHandle(s_worker_thread);
             s_worker_thread = nullptr;
         }
-        if (s_shutdown_event)
-        {
-            CloseHandle(s_shutdown_event);
-            s_shutdown_event = nullptr;
-        }
+        // Do NOT close the event here. This path runs while the process is still live (an off-loader-lock unload
+        // handshake or a test harness), so a consumer thread may call request_shutdown() -- documented safe from any
+        // thread, even after teardown -- at any moment. Closing the handle would let a request_shutdown() that already
+        // loaded it SetEvent a closed / recycled handle. Retire it to null (so a later load no-ops) and leak the one
+        // tiny manual-reset event object; the OS reclaims it at process exit. Leaking one kernel handle per off-loader
+        // unload is the accepted cost of an always-safe request_shutdown().
+        s_shutdown_event.store(nullptr, std::memory_order_release);
         // The worker has joined, so the init callback is no longer in use. Off the loader lock its captured state's
         // destructors are safe to run, so drop it here rather than leaking it until the next bootstrap overwrites it.
         s_on_ready = nullptr;
@@ -573,15 +593,29 @@ namespace DetourModKit
 
     void request_shutdown() noexcept
     {
-        if (s_shutdown_event)
+        // Safe from any thread at any time (including after teardown). The acquire load pairs with the release stores
+        // in bootstrap_core (publish) and the teardown paths (retire-to-null). Because the teardown paths that run
+        // while the process is live LEAK the handle instead of closing it, a non-null load here is always a still-valid
+        // event, so the SetEvent can never land on a closed / recycled handle. A null load means teardown already
+        // retired it, and the no-op is the documented "already torn down" behaviour.
+        if (HANDLE event = s_shutdown_event.load(std::memory_order_acquire))
         {
-            SetEvent(s_shutdown_event);
+            SetEvent(event);
         }
     }
 
     ModuleHandle module_handle() noexcept
     {
         return s_module;
+    }
+
+    // Test-only accessor for the bootstrap shutdown event handle (the atomic load). A test captures it before an
+    // off-loader-lock bootstrap_detach and then confirms that path LEAKED the handle (it stays a valid kernel object)
+    // rather than CloseHandle-ing it, which is the race request_shutdown() must never lose. Not declared in any public
+    // header; the test extern-declares it (the same discipline as the loader-lock override seams).
+    HANDLE bootstrap_shutdown_event_for_test() noexcept
+    {
+        return s_shutdown_event.load(std::memory_order_acquire);
     }
 
     // Hot-reload helpers

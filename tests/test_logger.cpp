@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <thread>
 #include <chrono>
 #include <type_traits>
@@ -1768,4 +1769,144 @@ TEST_F(LoggerTest, ToString_RoundTripsWithStringToLogLevel)
     {
         EXPECT_EQ(string_to_log_level(to_string(level)), level);
     }
+}
+
+// enable_async_mode() must not resurrect the logger after shutdown. The dangerous interleaving is a call landing in
+// shutdown_internal's dropped-mutex window -- async already disabled, the sink stream NOT yet closed -- which without
+// the m_shutdown_called gate would spin up a fresh writer thread that outlives teardown. A bare after-shutdown enable()
+// cannot reach that window (by then the stream is closed and the is_open() check independently refuses), so it does not
+// pin the gate. This drives the window directly through the shutdown-gap probe: the probe runs on the shutdown thread
+// at exactly that point and attempts the resurrection the gate must reject.
+namespace DetourModKit::detail
+{
+    extern void (*g_logger_shutdown_gap_probe)() noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    std::atomic<bool> g_gap_probe_ran{false};
+    std::atomic<bool> g_gap_probe_resurrected{false};
+} // namespace
+
+TEST_F(LoggerTest, EnableAsyncModeAfterShutdownDoesNotResurrect)
+{
+    Logger &lg = log();
+    lg.enable_async_mode();
+    EXPECT_TRUE(lg.is_async_mode_enabled());
+
+    g_gap_probe_ran.store(false, std::memory_order_release);
+    g_gap_probe_resurrected.store(false, std::memory_order_release);
+
+    // Inside the dropped-mutex window the stream is still open, so only the m_shutdown_called gate can refuse this
+    // enable. If that gate is reverted, the enable spins up a fresh writer and is_async_mode_enabled() flips true here
+    // -- deterministic teeth for the gate specifically.
+    DetourModKit::detail::g_logger_shutdown_gap_probe = []() noexcept
+    {
+        Logger &inner = log();
+        inner.enable_async_mode();
+        g_gap_probe_resurrected.store(inner.is_async_mode_enabled(), std::memory_order_release);
+        g_gap_probe_ran.store(true, std::memory_order_release);
+    };
+
+    lg.shutdown();
+    DetourModKit::detail::g_logger_shutdown_gap_probe = nullptr;
+
+    EXPECT_TRUE(g_gap_probe_ran.load(std::memory_order_acquire))
+        << "shutdown-gap probe never fired; the test would have no teeth";
+    EXPECT_FALSE(g_gap_probe_resurrected.load(std::memory_order_acquire))
+        << "enable_async_mode resurrected async logging inside the dropped-mutex window";
+
+    // The full-shutdown contract also holds: async stays disabled after shutdown returns. TearDown's configure() clears
+    // m_shutdown_called and revives the logger for later tests.
+    EXPECT_FALSE(lg.is_async_mode_enabled()) << "enable_async_mode after shutdown must not resurrect async logging";
+}
+
+// Concurrency: drives a racing enable against a shutdown to target the dropped-mutex window directly.
+// The gate is UNDER m_async_mutex, so a racing enable that lands in the window observes m_shutdown_called and refuses;
+// a resurrection would leave async enabled after shutdown returns.
+//
+// This is a best-effort stress check, not a deterministic discriminator: the incorrect interleaving requires the racer
+// to acquire m_async_mutex inside the narrow gap between shutdown_internal clearing m_async_mode_enabled and closing
+// the stream. Reliably forcing that would need a test hook that parks shutdown_internal mid-gap; the deterministic
+// guard above covers the contract directly, and this run exercises the lock boundary repeatedly.
+TEST_F(LoggerTest, EnableAsyncModeRacingShutdownNeverResurrects)
+{
+    for (int round = 0; round < 100; ++round)
+    {
+        // Revive the logger: stream open, m_shutdown_called cleared.
+        Logger::configure("TEST", m_test_log_file.string(), "%H:%M:%S");
+        Logger &lg = log();
+        lg.enable_async_mode();
+
+        std::thread racer(
+            [&lg]()
+            {
+                for (int k = 0; k < 40; ++k)
+                {
+                    lg.enable_async_mode();
+                }
+            });
+        lg.shutdown();
+        racer.join();
+
+        EXPECT_FALSE(lg.is_async_mode_enabled()) << "round " << round << ": async logging resurrected after shutdown";
+    }
+}
+
+// A reconfigure that changes the timestamp format must reach the live async writer, not just the
+// synchronous banner. enable_async_mode snapshots the format into the writer's private config; reconfigure now pushes
+// the new format so async lines pick it up instead of keeping the stale format for the life of the writer.
+TEST_F(LoggerTest, ReconfigureFormatReachesLiveAsyncWriter)
+{
+    const auto file_a = m_test_log_file; // cleaned by TearDown
+    const auto file_b = std::filesystem::temp_directory_path() /
+                        ("test_logger_reconfigure_format_" + std::to_string(GetCurrentProcessId()) + ".log");
+
+    // strftime passes literal (non-%) text through verbatim, so these format strings are deterministic markers.
+    Logger::configure("TEST", file_a.string(), "FMT_ALPHA");
+    Logger &lg = log();
+    lg.enable_async_mode();
+
+    lg.info("line-in-alpha");
+    lg.flush();
+
+    // Reconfigure to a new file AND a new format while async is live. The async writer shares the reopened stream and
+    // must have its format snapshot refreshed to FMT_BRAVO by the reconfigure push.
+    Logger::configure("TEST", file_b.string(), "FMT_BRAVO");
+    lg.info("line-in-bravo");
+    lg.flush();
+    lg.disable_async_mode();
+
+    const auto slurp = [](const std::filesystem::path &p)
+    {
+        std::ifstream ifs(p);
+        std::stringstream ss;
+        ss << ifs.rdbuf();
+        return ss.str();
+    };
+
+    const std::string a = slurp(file_a);
+    const std::string b = slurp(file_b);
+
+    std::error_code ec;
+    std::filesystem::remove(file_b, ec);
+
+    EXPECT_NE(a.find("line-in-alpha"), std::string::npos);
+    EXPECT_NE(a.find("[FMT_ALPHA"), std::string::npos);
+
+    // Inspect the async line in the reconfigured file directly: it must carry the NEW format, never the stale one.
+    bool bravo_line_seen = false;
+    std::istringstream iss(b);
+    for (std::string line; std::getline(iss, line);)
+    {
+        if (line.find("line-in-bravo") != std::string::npos)
+        {
+            bravo_line_seen = true;
+            EXPECT_NE(line.find("[FMT_BRAVO"), std::string::npos)
+                << "async writer kept the stale timestamp format after reconfigure: " << line;
+            EXPECT_EQ(line.find("FMT_ALPHA"), std::string::npos)
+                << "async line still stamped with the pre-reconfigure format: " << line;
+        }
+    }
+    EXPECT_TRUE(bravo_line_seen) << "async line missing from the reconfigured file";
 }

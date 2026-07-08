@@ -18,7 +18,6 @@
 namespace DetourModKit
 {
     using detail::acquire_module_ref;
-    using detail::is_loader_lock_held;
     using detail::LogMessage;
     using detail::release_module_ref;
 
@@ -28,6 +27,21 @@ namespace DetourModKit
     // above.
     namespace detail
     {
+        // Test-only override for is_loader_lock_held(), mirroring g_config_watcher_loader_lock_override. When non-null,
+        // AsyncLogger::Impl::shutdown() consults this instead of the real PEB-based detection, letting the suite drive
+        // the writer-detach-and-leak branch (and the public destructor's leak-the-Impl path) from user code off the
+        // real loader lock. Set / cleared on a single thread inside a test fixture.
+        bool (*g_async_logger_loader_lock_override)() noexcept = nullptr;
+
+        bool async_logger_loader_lock_held() noexcept
+        {
+            if (auto *override_fn = g_async_logger_loader_lock_override)
+            {
+                return override_fn();
+            }
+            return is_loader_lock_held();
+        }
+
         StringPool::StringPool() noexcept
         {
             std::lock_guard<std::mutex> lock(m_pool_mutex);
@@ -485,6 +499,11 @@ namespace DetourModKit
         [[nodiscard]] size_t queue_size() const noexcept;
         [[nodiscard]] size_t dropped_count() const noexcept;
         void reset_dropped_count() noexcept;
+        void set_timestamp_format(std::string timestamp_format) noexcept;
+        // True once shutdown() detached the writer under the loader lock instead of joining it. The public
+        // destructor reads this to decide whether the Impl (and the queue / cv / file stream the detached writer
+        // still touches) may be destroyed or must be leaked in place.
+        [[nodiscard]] bool writer_was_detached() const noexcept;
 
         void writer_thread_func() noexcept;
         // Drains any messages remaining in the queue after the writer thread exits (called during shutdown to flush
@@ -514,6 +533,10 @@ namespace DetourModKit
         void *m_writer_self_ref{nullptr};
         std::atomic<bool> m_running{false};
         std::atomic<bool> m_shutdown_requested{false};
+        // Latched by shutdown() when it detaches the writer on the loader-lock path. Read by ~AsyncLogger to keep the
+        // Impl alive past the detached writer. A latched flag (rather than re-querying is_loader_lock_held() in the
+        // destructor) avoids a TOCTOU where the loader-lock state differs between the detach decision and the free.
+        std::atomic<bool> m_writer_detached{false};
 
         std::mutex m_flush_mutex;
         std::condition_variable m_flush_cv;
@@ -663,12 +686,14 @@ namespace DetourModKit
 
         if (m_writer_thread.joinable())
         {
-            if (is_loader_lock_held())
+            if (detail::async_logger_loader_lock_held())
             {
                 // Under the loader lock we cannot join. Detach the writer and leak its module reference (taken before
                 // thread creation), keeping the writer's code mapped for the rest of the process while it drains and
-                // exits.
+                // exits. Latch that the writer is detached so ~AsyncLogger leaks this Impl in place instead of
+                // destroying the queue / cv / file stream out from under that still-running writer.
                 m_writer_thread.detach();
+                m_writer_detached.store(true, std::memory_order_release);
                 DetourModKit::diagnostics::record_intentional_leak(
                     DetourModKit::diagnostics::LeakSubsystem::AsyncLogger);
             }
@@ -723,6 +748,21 @@ namespace DetourModKit
     void AsyncLogger::Impl::reset_dropped_count() noexcept
     {
         m_dropped_messages.store(0, std::memory_order_release);
+    }
+
+    void AsyncLogger::Impl::set_timestamp_format(std::string timestamp_format) noexcept
+    {
+        // No lock taken here: the caller holds the shared log mutex (m_log_mutex), which is the same mutex the writer
+        // thread takes before it reads m_config.timestamp_format in write_batch / enqueue / handle_overflow. Because
+        // the caller holds it, the writer cannot be mid-read, so the assignment is race-free; taking the mutex here
+        // would self-deadlock the reconfigure path that already owns it. std::string move-assignment is noexcept, so
+        // the by-value parameter (copied in the caller's throwing context) makes this frame genuinely no-throw.
+        m_config.timestamp_format = std::move(timestamp_format);
+    }
+
+    bool AsyncLogger::Impl::writer_was_detached() const noexcept
+    {
+        return m_writer_detached.load(std::memory_order_acquire);
     }
 
     void AsyncLogger::Impl::notify_writer() noexcept
@@ -1000,7 +1040,40 @@ namespace DetourModKit
     {
     }
 
-    AsyncLogger::~AsyncLogger() noexcept = default;
+    AsyncLogger::~AsyncLogger() noexcept
+    {
+        if (!m_impl)
+        {
+            return;
+        }
+
+        // Drive the writer to a stop. Under the loader lock shutdown() cannot join, so it detaches the writer (which
+        // keeps reading m_queue / m_flush_cv / m_file_stream until it observes the stop) and latches m_writer_detached.
+        m_impl->shutdown();
+
+        if (m_impl->writer_was_detached())
+        {
+            // The writer is still running against this Impl's members, so ~Impl must NOT run: destroying the condition
+            // variable while the detached writer is parked on it (or the queue it is draining) is undefined behaviour.
+            // Abandon the already-heap-allocated Impl in place -- release() relinquishes the unique_ptr without
+            // freeing, so the members outlive the writer with zero further allocation (no tiered leak cell is needed
+            // the way the shared_ptr handle in Logger requires, because there is nothing new to allocate a home for).
+            // The detached writer's own counted module reference keeps the code pages it executes mapped. The
+            // intentional-leak event was already recorded inside shutdown()'s detach branch, so it is not recorded a
+            // second time here.
+            (void)m_impl.release();
+            return;
+        }
+
+        // Off the loader lock the writer was joined by shutdown(), so the unique_ptr destroys the Impl normally. ~Impl
+        // calls shutdown() again, but the m_shutdown_requested CAS makes that an idempotent no-op before the members
+        // are freed.
+    }
+
+    void AsyncLogger::set_timestamp_format(std::string timestamp_format) noexcept
+    {
+        m_impl->set_timestamp_format(std::move(timestamp_format));
+    }
 
     bool AsyncLogger::enqueue(LogLevel level, std::string_view message) noexcept
     {
