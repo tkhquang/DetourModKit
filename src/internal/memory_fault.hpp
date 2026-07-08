@@ -16,6 +16,14 @@
 
 #include <cstdint>
 
+#if defined(_MSC_VER)
+// Forward-declared at global scope so this header stays free of <windows.h>. ::_EXCEPTION_POINTERS is the Win32 SEH
+// structure GetExceptionInformation() yields; every translation unit that calls guarded_fault_filter includes
+// <windows.h>, which supplies the full definition. Declaring the tag at global scope (not inside a namespace) keeps
+// the parameter type identical to the pointer the __except call sites pass.
+struct _EXCEPTION_POINTERS;
+#endif
+
 namespace DetourModKit
 {
     namespace detail
@@ -42,6 +50,28 @@ namespace DetourModKit
                    || exception_code == 0x80000001ul  // STATUS_GUARD_PAGE_VIOLATION
                    || exception_code == 0xC0000006ul; // EXCEPTION_IN_PAGE_ERROR
         }
+
+#if defined(_MSC_VER)
+        /**
+         * @brief The complete __except filter for a frame-based guarded foreign read: claim exactly the guarded-read
+         *        fault set and re-arm a consumed PAGE_GUARD before the handler runs.
+         * @param info The EXCEPTION_POINTERS from GetExceptionInformation() (valid only inside a filter expression).
+         * @return EXCEPTION_EXECUTE_HANDLER to swallow and fail the read closed -- after re-arming the host's
+         *         guard-page fence if the OS cleared it on dispatch -- or EXCEPTION_CONTINUE_SEARCH when the fault is
+         *         not one a guarded read owns.
+         * @details One filter shared by every MSVC frame-based probe -- the memory engine's guarded read / write /
+         *          chain walk and the scanner's protection-gated region / window sweeps -- so both the claimed fault
+         *          set and the guard-page re-arm stay identical across them. A bare
+         *          `is_guarded_read_fault(GetExceptionCode())` predicate at a call site swallows a
+         *          STATUS_GUARD_PAGE_VIOLATION WITHOUT restoring the PAGE_GUARD the OS consumed on dispatch,
+         *          permanently disarming a foreign guard page the host meant to keep armed (a fail-open); routing
+         *          every filter through this one entry closes that gap everywhere. The value lives in the single SEH
+         *          engine translation unit (memory_guarded.cpp), so each __except stays a one-call filter
+         *          expression. Declared MSVC-only because MinGW has no frame-based SEH; its probes route through the
+         *          vectored handler, which re-arms on the same path.
+         */
+        long guarded_fault_filter(::_EXCEPTION_POINTERS *info) noexcept;
+#endif
 
 #if !defined(_MSC_VER) && defined(_WIN64)
         /**

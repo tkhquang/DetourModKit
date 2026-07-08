@@ -20,6 +20,7 @@
 #include <intrin.h> // __movsb -- ASan-safe copy in the SEH probe read
 #endif
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -40,7 +41,59 @@ namespace DetourModKit
         constexpr DWORD WRITE_PERMISSION_FLAGS =
             PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
         constexpr DWORD NOACCESS_GUARD_FLAGS = PAGE_NOACCESS | PAGE_GUARD;
+
+        // STATUS_GUARD_PAGE_VIOLATION, spelled as a literal (matching <winnt.h>) so it needs no ntstatus.h include and
+        // cannot collide with a platform macro of the same name.
+        constexpr unsigned long GUARD_PAGE_FAULT_CODE = 0x80000001ul;
+
+        // Re-arm a PAGE_GUARD page the OS consumed while dispatching a guarded read's fault. Touching a guard page
+        // raises STATUS_GUARD_PAGE_VIOLATION and the OS clears that page's PAGE_GUARD bit before dispatching the fault,
+        // so a guarded read that faults on a foreign guard page (for example another thread's stack guard) would leave
+        // the host's fence permanently disarmed and let an immediate second read succeed straight through it -- fail
+        // open on memory the host deliberately fenced. On a claimed guard-page fault this re-applies PAGE_GUARD over
+        // the faulting page's current protection so the fence is restored before the read is reported as failed; the
+        // read still fails closed, and the host's next access re-faults exactly as intended. Any non-guard fault, or a
+        // record that carries no faulting address, is left untouched. Callable from both the MinGW vectored handler and
+        // an MSVC __except filter: VirtualQuery / VirtualProtect neither allocate nor take a lock the
+        // exception-dispatch context forbids (unlike the __emutls thread-local path the handler must avoid).
+        void rearm_guard_page_if_consumed(const EXCEPTION_RECORD *record) noexcept
+        {
+            if (record->ExceptionCode != GUARD_PAGE_FAULT_CODE || record->NumberParameters < 2)
+            {
+                return;
+            }
+            const auto fault_address = reinterpret_cast<LPVOID>(record->ExceptionInformation[1]);
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(fault_address, &mbi, sizeof(mbi)) == 0 || mbi.State != MEM_COMMIT)
+            {
+                return;
+            }
+            // The OS already cleared PAGE_GUARD, so mbi.Protect reads back without it; OR it back on to restore the
+            // fence over the (page containing the) faulting address.
+            DWORD previous = 0;
+            VirtualProtect(fault_address, 1, mbi.Protect | PAGE_GUARD, &previous);
+        }
     } // namespace
+
+#ifdef _MSC_VER
+    // The shared frame-based SEH filter declared in memory_fault.hpp. Every MSVC guarded foreign read -- the memory
+    // engine's read / write / chain-walk paths below and the scanner's region / window sweeps -- routes its __except
+    // through here, so the claimed fault set AND the guard-page re-arm are identical across them. Re-arming a PAGE_GUARD
+    // the OS cleared on dispatch, before the read fails closed, is what stops a swallowed foreign guard-page fault from
+    // leaving the host's fence disarmed. GetExceptionInformation() is valid only inside a filter expression, so the
+    // call sites pass its EXCEPTION_POINTERS in rather than the bare code, which also makes the faulting address
+    // reachable for the re-arm.
+    long detail::guarded_fault_filter(EXCEPTION_POINTERS *info) noexcept
+    {
+        const EXCEPTION_RECORD *const record = info->ExceptionRecord;
+        if (!detail::is_guarded_read_fault(record->ExceptionCode))
+        {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        rearm_guard_page_if_consumed(record);
+        return EXCEPTION_EXECUTE_HANDLER;
+    }
+#endif
 
 #ifndef _MSC_VER
     // MinGW/GCC has no __try / __except, so the foreign-memory probes in this file cannot wrap their accesses in
@@ -146,9 +199,50 @@ namespace DetourModKit
         // Process-lifetime TLS index, allocated once and reused across install/remove cycles (never freed so a removal
         // can never invalidate an index a concurrent access still holds). The handler reads it with an acquire load.
         std::atomic<DWORD> s_veh_tls_index{TLS_OUT_OF_INDEXES};
-        // Count of accesses currently on the guarded path. release_guarded_engine drains this to zero before
-        // unregistering the handler so a fault can never arrive after the handler is gone.
-        std::atomic<int> s_veh_in_flight{0};
+
+        // Count of accesses currently on the guarded path, striped across cache-line-padded per-thread counters rather
+        // than one global atomic. Every guarded read/write bumps this counter twice (enter + leave), so on a busy
+        // multi-threaded workload a single global counter line would ping-pong across cores; striping lands each
+        // thread's increment on its own line. release_guarded_engine drains the SUM to zero before unregistering the
+        // handler, and the Dekker publish/drain protocol is preserved exactly: the handle-null store, the access-side
+        // stripe increment, and the drain's stripe loads are seq_cst, so an access that observed a live handle is
+        // counted before the drain can observe zero (see remove_veh_handler / veh_read_bytes).
+        constexpr std::size_t VEH_IN_FLIGHT_STRIPE_COUNT = 64;
+
+        // alignas(64) needs no MSVC C4324 warning suppression here: this whole region is compiled only under
+        // #ifndef _MSC_VER, so an MSVC build never sees the padded struct.
+        struct alignas(64) VehInFlightStripe
+        {
+            std::atomic<int> count{0};
+        };
+
+        std::array<VehInFlightStripe, VEH_IN_FLIGHT_STRIPE_COUNT> s_veh_in_flight_stripes{};
+
+        // This thread's in-flight stripe, derived from its Win32 thread id by golden-ratio bit-mixing. A guarded access
+        // is synchronous and nested-free on one thread, and a thread id is stable for the thread's life, so the same
+        // stripe carries both the enter increment and the leave decrement and a stripe never goes negative. A
+        // thread_local round-robin counter would be simpler, but its first touch lowers to __emutls_get_address on
+        // MinGW, which allocates and locks -- the exact hazard this file uses Win32 TLS (not thread_local) to keep off
+        // the guarded access path, which can run under loader lock when a hook is installed or a scan is driven from
+        // DllMain. GetCurrentThreadId is allocation-free and lock-free, so it is safe there; two thread ids colliding
+        // onto one stripe only adds minor contention on that line, never a miscount.
+        [[nodiscard]] inline std::size_t veh_in_flight_stripe_index() noexcept
+        {
+            const std::uint64_t mixed = static_cast<std::uint64_t>(GetCurrentThreadId()) * 0x9E3779B97F4A7C15ULL;
+            return static_cast<std::size_t>(mixed >> 48) % VEH_IN_FLIGHT_STRIPE_COUNT;
+        }
+
+        // Sum of every in-flight stripe: the number of guarded accesses currently on the handler path.
+        // remove_veh_handler spins on this reaching zero (under seq_cst) after publishing s_veh_handle = nullptr.
+        [[nodiscard]] inline int veh_in_flight_total() noexcept
+        {
+            int total = 0;
+            for (const VehInFlightStripe &stripe : s_veh_in_flight_stripes)
+            {
+                total += stripe.count.load(std::memory_order_seq_cst);
+            }
+            return total;
+        }
 
         // Recovery stub the handler redirects a faulting thread into. __builtin_longjmp restores the stack pointer,
         // frame pointer and program counter from the snapshot the matching __builtin_setjmp captured before the access,
@@ -196,6 +290,10 @@ namespace DetourModKit
             const std::uintptr_t fault_address = static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
             if (fault_address < guard->guard_lo || fault_address >= guard->guard_hi)
                 return EXCEPTION_CONTINUE_SEARCH;
+
+            // If this was a guard-page fault, re-arm the host's fence before failing the read closed: the OS cleared
+            // PAGE_GUARD when it dispatched, and leaving it cleared would let a retry read straight through the guard.
+            rearm_guard_page_if_consumed(record);
 
             // Disarm before resuming so a fault inside the longjmp stub would pass through rather than recurse.
             TlsSetValue(slot, nullptr);
@@ -247,12 +345,12 @@ namespace DetourModKit
                 return;
             // Stop new guarded accesses from taking the handler path, then wait for any access already committed to it
             // to finish before unregistering, so a fault cannot arrive after the handler is gone. The seq_cst store
-            // pairs with the seq_cst fetch_add / handle-load in the guarded access helpers (a Dekker protocol): an
-            // access that observed a live handle is necessarily counted in s_veh_in_flight before this store is
-            // observed.
+            // pairs with the seq_cst stripe fetch_add / handle-load in the guarded access helpers (a Dekker protocol):
+            // an access that observed a live handle is necessarily counted in its in-flight stripe before this store is
+            // observed, so the seq_cst sum below cannot read zero while that access is still on the handler path.
             s_veh_handle.store(nullptr, std::memory_order_seq_cst);
             int spins = 0;
-            while (s_veh_in_flight.load(std::memory_order_seq_cst) > 0)
+            while (veh_in_flight_total() > 0)
             {
                 if (spins < 4096)
                     std::this_thread::yield();
@@ -338,11 +436,12 @@ namespace DetourModKit
 
             ensure_veh_installed();
 
-            s_veh_in_flight.fetch_add(1, std::memory_order_seq_cst);
+            const std::size_t stripe = veh_in_flight_stripe_index();
+            s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
             const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
             const bool ok = armed ? veh_guarded_copy(out, reinterpret_cast<const void *>(addr), bytes)
                                   : virtualquery_validated_copy(addr, out, bytes);
-            s_veh_in_flight.fetch_sub(1, std::memory_order_release);
+            s_veh_in_flight_stripes[stripe].count.fetch_sub(1, std::memory_order_release);
             return ok;
         }
 
@@ -366,11 +465,12 @@ namespace DetourModKit
 
             ensure_veh_installed();
 
-            s_veh_in_flight.fetch_add(1, std::memory_order_seq_cst);
+            const std::size_t stripe = veh_in_flight_stripe_index();
+            s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
             const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
             const bool ok = armed ? veh_guarded_region(addr, addr + bytes, do_write, &ctx)
                                   : virtualquery_validated_write(addr, source, bytes);
-            s_veh_in_flight.fetch_sub(1, std::memory_order_release);
+            s_veh_in_flight_stripes[stripe].count.fetch_sub(1, std::memory_order_release);
             return ok;
         }
 #endif // _WIN64
@@ -403,7 +503,8 @@ namespace DetourModKit
 
         // Count the call in the drain epoch around the path decision (mirroring veh_read_bytes) so a guarded access is
         // always visible to release_guarded_engine's drain.
-        s_veh_in_flight.fetch_add(1, std::memory_order_seq_cst);
+        const std::size_t stripe = veh_in_flight_stripe_index();
+        s_veh_in_flight_stripes[stripe].count.fetch_add(1, std::memory_order_seq_cst);
         const bool armed = s_veh_handle.load(std::memory_order_seq_cst) != nullptr;
         bool completed = true;
         if (armed)
@@ -417,7 +518,7 @@ namespace DetourModKit
             // closed.
             completed = false;
         }
-        s_veh_in_flight.fetch_sub(1, std::memory_order_release);
+        s_veh_in_flight_stripes[stripe].count.fetch_sub(1, std::memory_order_release);
         return completed;
     }
 #endif // !_MSC_VER && _WIN64
@@ -447,7 +548,7 @@ namespace DetourModKit
 #endif
             return true;
         }
-        __except (is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        __except (guarded_fault_filter(GetExceptionInformation()))
         {
             return false;
         }
@@ -482,7 +583,7 @@ namespace DetourModKit
 #endif
             return true;
         }
-        __except (is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        __except (guarded_fault_filter(GetExceptionInformation()))
         {
             return false;
         }
@@ -539,7 +640,7 @@ namespace DetourModKit
             outcome.ok = true;
             return outcome;
         }
-        __except (is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        __except (guarded_fault_filter(GetExceptionInformation()))
         {
             outcome.fail_index = current_hop;
             outcome.ok = false;
@@ -576,37 +677,139 @@ namespace DetourModKit
 #endif
     }
 
+    bool detail::restore_across_regions(const ProtectionSegment *segments, std::size_t count,
+                                        std::uint32_t &os_error) noexcept
+    {
+        bool all_restored = true;
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            DWORD previous = 0;
+            if (!VirtualProtect(reinterpret_cast<LPVOID>(segments[i].base), segments[i].size,
+                                static_cast<DWORD>(segments[i].old_protection), &previous))
+            {
+                // Capture only the first failure's OS error; a later VirtualProtect (or the caller's
+                // FlushInstructionCache) would overwrite GetLastError. Keep restoring the remaining segments so a
+                // single failure cannot strand later regions in the changed protection.
+                if (all_restored)
+                {
+                    os_error = static_cast<std::uint32_t>(GetLastError());
+                }
+                all_restored = false;
+            }
+        }
+        return all_restored;
+    }
+
+    std::size_t detail::protect_across_regions(std::uintptr_t address, std::size_t bytes, std::uint32_t new_protection,
+                                               ProtectionSegment *out, std::size_t out_cap,
+                                               std::uint32_t &os_error) noexcept
+    {
+        os_error = 0;
+        if (bytes == 0 || out == nullptr || out_cap == 0)
+        {
+            os_error = ERROR_INVALID_PARAMETER;
+            return 0;
+        }
+
+        const std::uintptr_t span_end = address + bytes;
+        if (span_end < address)
+        {
+            os_error = ERROR_ARITHMETIC_OVERFLOW;
+            return 0;
+        }
+
+        std::size_t count = 0;
+        std::uintptr_t cur = address;
+        while (cur < span_end)
+        {
+            MEMORY_BASIC_INFORMATION mbi{};
+            if (VirtualQuery(reinterpret_cast<LPCVOID>(cur), &mbi, sizeof(mbi)) == 0)
+            {
+                os_error = static_cast<std::uint32_t>(GetLastError());
+                std::uint32_t rollback_error = 0;
+                (void)restore_across_regions(out, count, rollback_error);
+                return 0;
+            }
+
+            // Clip this VirtualQuery region to the requested span. A region is page-aligned, so consecutive segments
+            // meet exactly on a page boundary and VirtualProtect's page-rounding never pulls a neighbouring region's
+            // protection along. A region size that overflows the address space is treated as reaching the span end.
+            const std::uintptr_t region_base = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
+            const std::uintptr_t region_end = region_base + mbi.RegionSize;
+            const std::uintptr_t effective_region_end = (region_end < region_base) ? span_end : region_end;
+            const std::uintptr_t seg_end = (effective_region_end < span_end) ? effective_region_end : span_end;
+            if (seg_end <= cur)
+            {
+                // A non-advancing query result (wrapped or degenerate) would loop forever; fail closed.
+                os_error = ERROR_INVALID_ADDRESS;
+                std::uint32_t rollback_error = 0;
+                (void)restore_across_regions(out, count, rollback_error);
+                return 0;
+            }
+
+            if (count >= out_cap)
+            {
+                // The span crosses more distinct protection regions than the caller can record. Fail closed and roll
+                // back rather than leave a partially-changed span whose tail could never be restored per region.
+                os_error = ERROR_INSUFFICIENT_BUFFER;
+                std::uint32_t rollback_error = 0;
+                (void)restore_across_regions(out, count, rollback_error);
+                return 0;
+            }
+
+            const std::size_t seg_size = static_cast<std::size_t>(seg_end - cur);
+            DWORD old_protection = 0;
+            if (!VirtualProtect(reinterpret_cast<LPVOID>(cur), seg_size, new_protection, &old_protection))
+            {
+                os_error = static_cast<std::uint32_t>(GetLastError());
+                std::uint32_t rollback_error = 0;
+                (void)restore_across_regions(out, count, rollback_error);
+                return 0;
+            }
+
+            out[count].base = cur;
+            out[count].size = seg_size;
+            out[count].old_protection = static_cast<std::uint32_t>(old_protection);
+            ++count;
+            cur = seg_end;
+        }
+
+        return count;
+    }
+
     detail::PatchStatus detail::patch_bytes(std::uintptr_t address, const void *source, std::size_t bytes,
                                             std::uint32_t &os_error) noexcept
     {
         os_error = 0;
 
-        // Make the target writable. This is the slow path reached only after the no-reprotect guarded write faulted, so
-        // the page is read-only or executable: request PAGE_EXECUTE_READWRITE so a code page keeps its execute right.
-        DWORD old_protection = 0;
-        if (!VirtualProtect(reinterpret_cast<LPVOID>(address), bytes, PAGE_EXECUTE_READWRITE, &old_protection))
+        // Make the target writable one protection region at a time. This is the slow path reached only after the
+        // no-reprotect guarded write faulted, so the page is read-only or executable: request PAGE_EXECUTE_READWRITE so
+        // a code page keeps its execute right. The per-region walk is what keeps a write that straddles a protection
+        // seam (a .rdata/.text boundary) from being restored to a single flattened protection: VirtualProtect over the
+        // whole span reports only the first page's prior flags, so a whole-span restore would drop the executable side
+        // to PAGE_READONLY and AV under DEP on the next execution.
+        ProtectionSegment segments[MAX_PROTECTION_SEGMENTS];
+        const std::size_t segment_count =
+            protect_across_regions(address, bytes, PAGE_EXECUTE_READWRITE, segments, MAX_PROTECTION_SEGMENTS, os_error);
+        if (segment_count == 0)
         {
-            os_error = static_cast<std::uint32_t>(GetLastError());
             return PatchStatus::ProtectionChangeFailed;
         }
 
-        // Route the store through the fault-guarded writer rather than a bare memcpy. The page was just made writable,
-        // so on a quiescent target this takes guarded_write_bytes' no-reprotect fast path (a single guarded copy, no
-        // further syscall). The guard is what makes this noexcept host path survivable: if the page is reprotected or
+        // Route the store through the fault-guarded writer rather than a bare memcpy. The pages were just made
+        // writable, so on a quiescent target this takes guarded_write_bytes' no-reprotect fast path (a guarded copy, no
+        // further syscall). The guard is what makes this noexcept host path survivable: if a page is reprotected or
         // decommitted out from under the store (a concurrent unmap of a code region being patched), the fault is
         // contained and reported here instead of terminating the host, and the restore + flush below still run before
         // status is reported.
         const bool copied = guarded_write_bytes(address, source, bytes);
 
         // The protection was changed and the bytes may have been (partially) modified, so the instruction-cache flush
-        // and the protection restore must BOTH run on every exit from here -- including the copy-fault path. Restore
-        // first so its outcome is known, but keep the flush unconditional: a code patch that changed any byte must
-        // flush even if the restore fails, or a stale instruction stream could execute the old bytes.
-        DWORD restored_from = 0;
-        const bool restore_succeeded =
-            VirtualProtect(reinterpret_cast<LPVOID>(address), bytes, old_protection, &restored_from) != FALSE;
-        // Capture the restore's OS error BEFORE FlushInstructionCache, which would otherwise overwrite GetLastError().
-        const std::uint32_t restore_error = restore_succeeded ? 0u : static_cast<std::uint32_t>(GetLastError());
+        // and the per-region protection restore must BOTH run on every exit from here -- including the copy-fault path.
+        // Restore first so its outcome is known, but keep the flush unconditional: a code patch that changed any byte
+        // must flush even if the restore fails, or a stale instruction stream could execute the old bytes.
+        std::uint32_t restore_error = 0;
+        const bool restore_succeeded = restore_across_regions(segments, segment_count, restore_error);
 
         FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<LPCVOID>(address), bytes);
 

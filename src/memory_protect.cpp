@@ -10,9 +10,11 @@
  */
 
 #include "DetourModKit/memory.hpp"
+#include "internal/memory_guarded.hpp"
 
 #include <windows.h>
 
+#include <cstdint>
 #include <memory>
 #include <new>
 #include <utility>
@@ -21,6 +23,13 @@ namespace DetourModKit
 {
     namespace memory
     {
+        // The per-region protection helpers live in DetourModKit::detail; pull them in with using-declarations so the
+        // ProtectGuard::Impl definition and make()/restore paths can name them unqualified.
+        using DetourModKit::detail::MAX_PROTECTION_SEGMENTS;
+        using DetourModKit::detail::protect_across_regions;
+        using DetourModKit::detail::ProtectionSegment;
+        using DetourModKit::detail::restore_across_regions;
+
         namespace
         {
             /**
@@ -51,12 +60,18 @@ namespace DetourModKit
             }
         } // namespace
 
-        // The captured protection state. Kept in the .cpp so the installed header never names a Win32 type.
+        // The captured protection state. Kept in the .cpp so the installed header never names a Win32 type. The
+        // guarded span may cross a protection seam, so the original protection of each VirtualQuery region it covers is
+        // captured separately and restored per region -- restoring the whole span to one value would flatten an
+        // executable region adjacent to a read-only seam. The segment array is embedded (not heap-grown) so make() can
+        // keep its allocate-before-protect discipline: the storage exists before any VirtualProtect runs.
         struct ProtectGuard::Impl
         {
+            ProtectionSegment segments[MAX_PROTECTION_SEGMENTS];
+            std::size_t segment_count = 0;
+            // The whole guarded span, retained for the cache invalidation that follows every change / restore.
             std::uintptr_t base = 0;
             std::size_t size = 0;
-            DWORD old_protection = 0;
         };
 
         ProtectGuard::ProtectGuard() noexcept = default;
@@ -71,9 +86,8 @@ namespace DetourModKit
                 // protection change this guard still owned.
                 if (m_impl)
                 {
-                    DWORD restored_from = 0;
-                    VirtualProtect(reinterpret_cast<LPVOID>(m_impl->base), m_impl->size, m_impl->old_protection,
-                                   &restored_from);
+                    std::uint32_t restore_error = 0;
+                    (void)restore_across_regions(m_impl->segments, m_impl->segment_count, restore_error);
                     // The restore changed protection, so drop any cached snapshot of the range taken while the guard
                     // held it writable, matching the invalidation write_bytes and make() perform on a protection
                     // change.
@@ -92,9 +106,8 @@ namespace DetourModKit
             }
             // Best-effort restore: a destructor cannot report failure, and a guard whose restore fails leaves the page
             // in the changed protection, which a caller that needs the result should detect by re-applying explicitly.
-            DWORD restored_from = 0;
-            VirtualProtect(reinterpret_cast<LPVOID>(m_impl->base), m_impl->size, m_impl->old_protection,
-                           &restored_from);
+            std::uint32_t restore_error = 0;
+            (void)restore_across_regions(m_impl->segments, m_impl->segment_count, restore_error);
             // The protection just changed back, so a cached snapshot taken while the page was writable is now stale;
             // drop the range so a later is_readable / is_writable re-queries the restored protection.
             invalidate_range(Region{Address{m_impl->base}, m_impl->size});
@@ -121,10 +134,12 @@ namespace DetourModKit
                     Error{ErrorCode::ProtectionChangeFailed, "memory::ProtectGuard::make", region.base.raw(), 0});
             }
 
-            // Allocate the capture state BEFORE changing protection. If this throws (OOM), the guard fails with no
+            // Allocate the capture state before changing protection. If this throws (OOM), the guard fails with no
             // protection change to leak; the reverse order -- VirtualProtect then allocate -- would strand the region
             // in the changed protection with no guard to restore it if the allocation threw. make() is noexcept, so the
-            // bad_alloc is caught and reported as an error rather than propagating out of the factory.
+            // bad_alloc is caught and reported as an error rather than propagating out of the factory. The embedded
+            // segment array means the per-region walk below writes into already-allocated storage, so no allocation
+            // happens between the first VirtualProtect and the guard being armed.
             std::unique_ptr<Impl> impl;
             try
             {
@@ -136,16 +151,26 @@ namespace DetourModKit
                     Error{ErrorCode::OutOfMemory, "memory::ProtectGuard::make", region.base.raw(), 0});
             }
 
-            DWORD old_protection = 0;
-            if (!VirtualProtect(region.base.ptr<void>(), region.size, prot_to_win32(protection), &old_protection))
+            // Change every protection region the span covers, capturing each region's own prior protection so the
+            // restore is exact. A span crossing more than MAX_PROTECTION_SEGMENTS regions, or a VirtualQuery /
+            // VirtualProtect failure, fails closed here with everything already changed rolled back.
+            std::uint32_t os_error = 0;
+            const std::size_t segment_count = protect_across_regions(
+                region.base.raw(), region.size, prot_to_win32(protection), impl->segments, MAX_PROTECTION_SEGMENTS,
+                os_error);
+            if (segment_count == 0)
             {
+                // The walk changed and then rolled back one or more regions, so it TOUCHED protection even though the
+                // net result is the original protection. Invalidate the range so a snapshot a concurrent reader cached
+                // from the transient changed protection during the walk cannot survive, matching the success path.
+                invalidate_range(region);
                 return std::unexpected(Error{ErrorCode::ProtectionChangeFailed, "memory::ProtectGuard::make",
-                                             region.base.raw(), static_cast<std::uint32_t>(GetLastError())});
+                                             region.base.raw(), os_error});
             }
 
+            impl->segment_count = segment_count;
             impl->base = region.base.raw();
             impl->size = region.size;
-            impl->old_protection = old_protection;
 
             // The page protection just changed, so any cached snapshot for this range is stale; drop it so a later
             // is_readable / is_writable re-queries, mirroring write_bytes' invalidate on its protection-changing path.
