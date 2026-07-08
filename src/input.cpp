@@ -152,6 +152,16 @@ namespace DetourModKit
             // destroyed only at static-destruction time, so this guards the one hazardous ordering: a Hold/consume
             // guard parked in the process-default Scope whose static teardown runs AFTER the facade's. When that
             // happens the token is already gone, so the action no-ops instead of touching a destroyed Impl.
+            //
+            // This token is the COMPLETE mitigation, not a local patch: the consume clear is the ONLY guard-owned
+            // release action that reaches back into the facade. Every other release action -- a hold's balancing
+            // on_state_change(false) and a press/hold callback rundown -- runs entirely through the guard's own
+            // shared_ptr<HoldGate/PressGate>, which the guard keeps alive independent of Input, and touches only the
+            // user callback, never facade state. So the facade does not need never-destroyed storage the way the
+            // logger does (log() is callable from detached threads during teardown); no guard teardown path outlives
+            // this token unguarded. A consumer that instead calls the free input:: functions from its own static
+            // destructor is bound by the documented teardown ordering (route teardown through the bootstrap shutdown),
+            // the same contract every facade singleton carries.
             std::shared_ptr<char> m_liveness{std::make_shared<char>()};
         };
 
