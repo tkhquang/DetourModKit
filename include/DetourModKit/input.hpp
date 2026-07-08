@@ -141,7 +141,8 @@ namespace DetourModKit
              * it does not also act on it (for example an "LB + D-pad" zoom that must not move the menu cursor). Honored
              * only for digital gamepad buttons (via an XInputGetState hook) and the mouse wheel (via the
              * window-procedure hook). Analog triggers, stick directions, keyboard keys, and mouse buttons cannot be
-             * masked. Default off keeps the binding purely observational.
+             * masked. Default off keeps the binding purely observational. Releasing the binding's guard lifts the
+             * suppression (the game regains the chord), so suppression lasts exactly as long as the guard is held.
              */
             bool consume = false;
 
@@ -206,17 +207,28 @@ namespace DetourModKit
          *          remains registered in the engine; per-binding removal is not offered post-start, so the gating flag
          *          is how a callback is retired.
          *
-         *          A Hold guard additionally carries a one-shot release action. A hold callback has lingering state
-         *          (the consumer is told "held" until told "released"), so simply gating the callback off mid-hold
-         *          would strand the consumer in the held state. The release action synthesizes a single balancing
-         *          on_state_change(false) if a true edge was the last one forwarded, and never re-enters the callback
-         *          while it is on the stack. A Press guard carries no such action.
+         *          release() runs down any delivery in flight: it serializes against the poll thread so that once it
+         *          returns, no on_press / on_state_change for this binding is executing or will start. A caller is
+         *          therefore free to destroy state a callback captured the instant release() (or the destructor)
+         *          returns, without racing an in-progress invocation on the poll thread.
+         *
+         *          A Hold guard additionally carries a balancing edge. A hold callback has lingering state (the
+         *          consumer is told "held" until told "released"), so simply gating the callback off mid-hold would
+         *          strand the consumer in the held state. Release synthesizes a single on_state_change(false) if a true
+         *          edge was the last one forwarded, and never re-enters the callback while it is on the stack.
+         *
+         *          A consume binding's release additionally lifts its passthrough suppression. Suppression is enforced
+         *          off the engine entry's consume flag, not the gating flag, so releasing the guard also clears that
+         *          flag (as set_consume(name, false) would); otherwise the game would stay deprived of the chord for
+         *          the rest of the process.
          *
          *          Moving transfers ownership of the cancellation flag and the release action; the moved-from guard
          *          becomes inert.
-         * @note Setup/control-plane only for Hold guards: release (and therefore the destructor) may invoke the hold
-         *       release callback, so destroy a Hold guard from init / shutdown / a worker thread, never from inside an
-         *       input callback running on a game thread.
+         * @note Setup/control-plane only: release (and therefore the destructor) may invoke a Hold binding's balancing
+         *       callback, and it blocks until any in-flight delivery on the poll thread has finished. Destroy a guard
+         *       from init / shutdown / a worker thread. A guard destroyed from inside its own callback self-releases
+         *       safely (the balancing edge is deferred to the callback's unwind, not re-entered), but do not park the
+         *       teardown of one binding behind a long-running callback of another.
          */
         class BindingGuard
         {
@@ -232,7 +244,7 @@ namespace DetourModKit
             BindingGuard &operator=(const BindingGuard &) = delete;
 
             /**
-             * @brief Disables the binding's callback, then runs the Hold release action once if present. Idempotent.
+             * @brief Disables the binding's callback, then runs the binding teardown action once. Idempotent.
              */
             void release() noexcept;
 
@@ -250,8 +262,8 @@ namespace DetourModKit
         private:
             friend class Input;
 
-            // pimpl: the shared cancellation flag, the binding name, and the optional Hold release hookup. Defined in
-            // src/input.cpp so the OS-free header carries no engine type.
+            // pimpl: the shared cancellation flag, the binding name, and the teardown action. Defined in src/input.cpp
+            // so the OS-free header carries no engine type.
             struct Impl;
             explicit BindingGuard(std::unique_ptr<Impl> impl) noexcept;
             std::unique_ptr<Impl> m_impl;
@@ -264,8 +276,8 @@ namespace DetourModKit
          *          released last-registered-first (LIFO), mirroring stack-like teardown so a later binding that may
          *          depend on an earlier one unwinds first. Because a Hold guard can synthesize a balancing
          *          on_state_change(false) on release, the reverse order is a behavioral contract, not just member
-         *          cleanup.
-         * @note Move-only. Destroy a Scope holding Hold guards from setup/control-plane code (see BindingGuard).
+         *          cleanup. Guard release may also block behind an in-flight callback; see BindingGuard.
+         * @note Move-only. Destroy a Scope from setup/control-plane code (see BindingGuard).
          */
         class Scope
         {
@@ -402,7 +414,10 @@ namespace DetourModKit
              * @brief Queries whether any combo of a named binding is currently pressed.
              * @param name The binding name.
              * @return true if active; false if the engine is not running or the name is unknown.
-             * @note Thread-safe and callback-safe.
+             * @note Thread-safe and callback-safe. Each call takes an atomic<shared_ptr> snapshot of the live poller
+             *       (so it stays alive for the query even if shutdown() races), then hashes @p name under the engine's
+             *       shared binding lock. The snapshot load is a reference-count acquire that is not lock-free on the
+             *       shipped toolchains; for a per-frame query resolve a BindingToken once and use is_active(token).
              */
             [[nodiscard]] bool is_active(std::string_view name) const noexcept;
 
@@ -419,8 +434,11 @@ namespace DetourModKit
              * @param token A token from acquire_token.
              * @return true if the token's binding is currently pressed; false if inactive, stale, invalid, or not
              *         running.
-             * @note Callback-safe: a shared-lock acquire plus a relaxed atomic load per cached entry, no name hash and
-             *       no allocation.
+             * @note Callback-safe and allocation-free: an atomic<shared_ptr> snapshot of the live poller, then a
+             *       shared-lock acquire plus a relaxed atomic load per cached entry, with no name hash. The poller
+             *       snapshot is a reference-count acquire (not lock-free on the shipped toolchains) taken once per call
+             *       to keep the engine alive across the query; the token itself removes only the name-hash cost, not
+             *       that snapshot.
              */
             [[nodiscard]] bool is_active(const BindingToken &token) const noexcept;
 

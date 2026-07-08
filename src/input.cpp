@@ -4,15 +4,15 @@
  *
  * The facade owns the background poll engine (input_poller.hpp) and the process-global interception layer. It explodes
  * a public ComboBinding into one engine entry per combo (OR logic under a shared name), wraps the user callback behind
- * a guard-owned cancellation flag, and for a Hold binding routes delivery through a HoldGate so a cancelled hold emits
- * exactly one balancing on_state_change(false).
+ * a guard-owned cancellation flag, and routes delivery through a guard-owned teardown gate so release can run down any
+ * in-flight callback before returning.
  */
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 
 #include "platform.hpp"
-#include "internal/input_hold_gate.hpp"
+#include "internal/input_binding_gate.hpp"
 #include "internal/input_poller.hpp"
 
 #include <algorithm>
@@ -36,8 +36,8 @@ namespace DetourModKit
             // Shared cancellation flag the binding's callback wrapper gates on; release() clears it so subsequent
             // events become no-ops.
             std::shared_ptr<std::atomic<bool>> enabled;
-            // One-shot action run once by release(): for a Hold guard this fires the HoldGate's balancing
-            // on_state_change(false). Empty for a Press guard.
+            // One-shot action run once by release(): runs down the per-binding gate and, for a consume binding, lifts
+            // passthrough suppression.
             std::function<void()> on_release;
             std::string name;
         };
@@ -89,7 +89,7 @@ namespace DetourModKit
                 catch (...)
                 {
                     (void)log().log_noexcept(
-                        LogLevel::Error, "BindingGuard: hold release action threw; suppressed in noexcept teardown");
+                        LogLevel::Error, "BindingGuard: release action threw; suppressed in noexcept teardown");
                 }
             }
         }
@@ -136,12 +136,23 @@ namespace DetourModKit
             mutable std::mutex m_mutex;
             std::vector<detail::InputBinding> m_pending;
             std::shared_ptr<detail::InputPoller> m_poller;
-            // Lock-free read of the live poller for the hot-path queries (is_active / token), independent of m_mutex.
+            // Snapshot of the live poller for the hot-path queries (is_active / token), independent of m_mutex. The
+            // load takes a shared_ptr copy so the poller stays alive for the duration of the query even if shutdown()
+            // concurrently destroys it; that ref-count acquire is not lock-free on the shipped toolchains, so the
+            // per-call cost is documented on the query methods in input.hpp rather than optimized into a bare pointer
+            // (a raw atomic<InputPoller*> would reintroduce exactly the use-after-free this snapshot exists to
+            // prevent).
             std::atomic<std::shared_ptr<detail::InputPoller>> m_active{};
             std::atomic<bool> m_running{false};
             // Last-applied / pending engine settings. require_focus is live-mutable via set_require_focus; the gamepad
             // knobs and poll interval are consumed when start() builds the poller.
             Settings m_settings{};
+            // Liveness token for a consume binding's guard-release action. The action holds a weak_ptr to this and only
+            // reaches back into the facade (set_consume) if it can still lock it. Input is a strict process singleton
+            // destroyed only at static-destruction time, so this guards the one hazardous ordering: a Hold/consume
+            // guard parked in the process-default Scope whose static teardown runs AFTER the facade's. When that
+            // happens the token is already gone, so the action no-ops instead of touching a destroyed Impl.
+            std::shared_ptr<char> m_liveness{std::make_shared<char>()};
         };
 
         Input::Input() : m_impl(std::make_unique<Impl>()) {}
@@ -165,29 +176,82 @@ namespace DetourModKit
 
                 const bool is_hold = binding.trigger == Trigger::Hold;
 
-                // Wrap the user callback so the guard's flag gates it. A Hold binding additionally routes delivery
-                // through a HoldGate: all of its combos share one gate, so a guard release synthesizes exactly one
-                // balancing on_state_change(false) for a still-held binding and never re-enters the callback while it
-                // is on the stack.
+                // Wrap the user callback behind a per-binding teardown gate that all of the binding's exploded combos
+                // share. The gate's release() is the one-shot action the guard runs on teardown:
+                //   - HoldGate reference-counts the shared combos so a multi-combo hold forwards only the aggregate
+                //     held/released transitions, and it synthesizes exactly one balancing on_state_change(false) for a
+                //     still-held binding without re-entering the callback while it is on the stack.
+                //   - PressGate serializes delivery against release() so a caller can destroy state the press callback
+                //     captured the instant the guard is released, with no in-flight on_press still running through it.
                 std::function<void()> press_wrapper;
                 std::function<void(bool)> hold_wrapper;
+                std::function<void()> gate_release;
                 if (is_hold)
                 {
                     auto gate = std::make_shared<detail::HoldGate>();
                     gate->enabled = enabled;
                     gate->on_state_change = std::move(binding.on_state_change);
                     hold_wrapper = [gate](bool active) { gate->deliver(active); };
-                    impl->on_release = [gate]() { gate->release(); };
+                    gate_release = [gate]() { gate->release(); };
                 }
                 else
                 {
-                    press_wrapper = [enabled, cb = std::move(binding.on_press)]()
+                    auto gate = std::make_shared<detail::PressGate>();
+                    gate->enabled = enabled;
+                    gate->on_press = std::move(binding.on_press);
+                    press_wrapper = [gate]() { gate->deliver(); };
+                    gate_release = [gate]() { gate->release(); };
+                }
+
+                // A consume binding hides its trigger from the game via the interception layer, which keys off the
+                // engine entry's `consume` flag alone (the poll loop's gamepad_owned / wheel_owned pass and the
+                // detour-side rules never consult the guard's enabled flag). Gating the callback off on release
+                // therefore does NOT lift the suppression: the game stays deprived of that chord for the rest of the
+                // process. So the guard's teardown must also clear the consume bit, exactly as the public
+                // set_consume(name, false) does. Weak-token guarded so a guard released after this singleton facade's
+                // own static teardown safely no-ops instead of reaching into a destroyed Impl.
+                std::function<void()> consume_release;
+                if (binding.consume)
+                {
+                    std::weak_ptr<char> facade_alive = m_impl->m_liveness;
+                    Input *facade = this;
+                    consume_release = [facade_alive, facade, name = binding.name]()
                     {
-                        if (cb && enabled->load(std::memory_order_acquire))
+                        if (auto keep = facade_alive.lock())
                         {
-                            cb();
+                            facade->set_consume(name, false);
                         }
                     };
+                }
+
+                // Compose the guard's one-shot release action. Every binding has a gate release; a consume binding
+                // additionally lifts its suppression. Run the gate release first (it delivers a hold's balancing edge
+                // and runs down an in-flight press), then clear consume. Guarantee the clear runs even if the balancing
+                // on_state_change(false) throws: HoldGate::release() invokes that callback unwrapped, so a throw would
+                // otherwise skip consume_release, and suppression is enforced off the engine entry's consume flag (not
+                // the guard's enable flag), so the game would stay deprived of the chord for the rest of the process.
+                // The clear is effectively no-throw (a weak-token-guarded, noexcept set_consume); re-raise after it so
+                // BindingGuard::release()'s own catch still logs the callback failure.
+                if (consume_release)
+                {
+                    impl->on_release = [gate_release = std::move(gate_release),
+                                        consume_release = std::move(consume_release)]()
+                    {
+                        try
+                        {
+                            gate_release();
+                        }
+                        catch (...)
+                        {
+                            consume_release();
+                            throw;
+                        }
+                        consume_release();
+                    };
+                }
+                else
+                {
+                    impl->on_release = std::move(gate_release);
                 }
 
                 // Explode the combos into one engine entry per alternative, all sharing the name (OR logic). An empty
@@ -237,6 +301,11 @@ namespace DetourModKit
                     }
                     else
                     {
+                        // Stage all-or-nothing. Reserve the whole batch up front so a mid-loop bad_alloc cannot leave a
+                        // subset of a multi-combo registration staged (which would go live -- half-registered -- at the
+                        // next start()). The reserve is the only allocating step; InputBinding moves are noexcept, so
+                        // once capacity is secured the push_backs cannot throw.
+                        m_impl->m_pending.reserve(m_impl->m_pending.size() + entries.size());
                         for (auto &entry : entries)
                         {
                             m_impl->m_pending.push_back(std::move(entry));
@@ -244,9 +313,25 @@ namespace DetourModKit
                         return BindingGuard{std::move(impl)};
                     }
                 }
-                for (auto &entry : entries)
+                if (!m_impl->m_running.load(std::memory_order_acquire))
                 {
-                    live->add_binding(std::move(entry));
+                    // shutdown() flips m_running false (under m_mutex) before it tears the captured poller down, so
+                    // observing false here means a concurrent shutdown began after we captured the poller. Return a
+                    // valid but inert guard, the same observable outcome as registering after shutdown.
+                    enabled->store(false, std::memory_order_release);
+                    return BindingGuard{std::move(impl)};
+                }
+
+                // Add multi-combo bindings as one batch. A per-entry append can leave a partially-registered consume
+                // binding behind when a later append runs out of memory, and consume suppression is driven by the
+                // engine entry's consume flag rather than the guard's enabled flag. The single-entry path keeps the
+                // existing append primitive live; the multi-entry batch path either commits every combo or none.
+                const bool added = (entries.size() == 1) ? live->add_binding(std::move(entries.front()))
+                                                         : live->add_bindings(std::move(entries));
+                if (!added)
+                {
+                    enabled->store(false, std::memory_order_release);
+                    return std::unexpected(Error{ErrorCode::OutOfMemory, "input::register_combo"});
                 }
                 return BindingGuard{std::move(impl)};
             }
@@ -342,8 +427,22 @@ namespace DetourModKit
                     // nothrow-allocated heap cell that is never freed, so the object outlives the detached thread; the
                     // code pages that thread executes stay mapped because its own counted module reference
                     // (InputPoller::m_self_ref, taken in start()) is leaked on this same detach branch. Mirrors the
-                    // leak-on-loader-lock discipline used elsewhere; nothrow keeps this noexcept path honest under OOM.
+                    // leak-on-loader-lock discipline used elsewhere.
                     auto *leaked = new (std::nothrow) std::shared_ptr<detail::InputPoller>(std::move(local_poller));
+                    if (leaked == nullptr)
+                    {
+                        // The heap cell could not be allocated under host OOM. A failed nothrow new does not run the
+                        // constructor, so local_poller was NOT moved from and would destroy the poller -- freeing the
+                        // members the detached thread still reads -- at scope exit. Park the last reference in
+                        // never-destructed static storage via placement-new instead: no allocation can fail here, and
+                        // the storage's destructor never runs, so the poller still outlives the detached thread. The
+                        // loader-lock detach is process-terminal and taken at most once per module load, so one cell
+                        // suffices. Mirrors the non-CRT permanent-storage fallback the async logger uses.
+                        alignas(std::shared_ptr<detail::InputPoller>) static unsigned char
+                            fallback_cell[sizeof(std::shared_ptr<detail::InputPoller>)];
+                        ::new (static_cast<void *>(fallback_cell))
+                            std::shared_ptr<detail::InputPoller>(std::move(local_poller));
+                    }
                     (void)leaked;
                 }
             }
