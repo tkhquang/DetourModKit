@@ -228,6 +228,47 @@ TEST(HealSchedulerTest, AddGroupFromCallbackDefersToNextTick)
     EXPECT_TRUE(sched.all_resolved());
 }
 
+TEST(HealSchedulerTest, ManyGroupsAddedFromCallbackDeferWithoutInvalidatingIteration)
+{
+    // Hardens the defer contract against the re-entrant dangling-reference hazard: a work callback that registers MANY
+    // groups from inside tick's range-for. A naive push_back-during-iteration would reallocate the group vector and
+    // dangle the live `Group&` the loop holds (UB); the pending-staging must add every new group only after the scan
+    // loop. Registering far more than the initial capacity guarantees a reallocation would have occurred if the
+    // deferral were absent, so a clean run (no crash, correct counts) proves the loop reference stayed valid.
+    auto started = rtti::HealScheduler::start(rtti::HealConfig{.interval_frames = 1});
+    ASSERT_TRUE(started.has_value());
+    rtti::HealScheduler &sched = *started;
+
+    constexpr int deferred_count = 64;
+    std::atomic<int> spawned{0};
+    int ran = 0;
+
+    sched.add_group(
+        [&](rtti::HealRun &)
+        {
+            for (int i = 0; i < deferred_count; ++i)
+            {
+                sched.add_group(
+                    [&](rtti::HealRun &) noexcept
+                    {
+                        ++ran;
+                        return true;
+                    });
+                spawned.fetch_add(1, std::memory_order_relaxed);
+            }
+            return true; // the seed group latches on its first scan
+        });
+
+    sched.tick(); // the seed scans and defers all 64 groups; none has run yet
+    EXPECT_EQ(spawned.load(), deferred_count);
+    EXPECT_EQ(ran, 0);
+    EXPECT_FALSE(sched.all_resolved());
+
+    sched.tick(); // the deferred groups now scan and latch
+    EXPECT_EQ(ran, deferred_count);
+    EXPECT_TRUE(sched.all_resolved());
+}
+
 // heal_into behaviour (with synthetic RTTI)
 
 namespace

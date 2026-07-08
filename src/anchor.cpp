@@ -75,41 +75,26 @@ namespace DetourModKit
                 return gap <= static_cast<std::uint64_t>(tolerance);
             }
 
-            // True when two resolvable sub-anchors share the SAME backend AND the SAME backend inputs, so they would
-            // decode the identical site/name/literal and therefore cannot corroborate each other. Compared per kind so
-            // only the fields that kind actually consumes participate. View/span comparison is identity over the
-            // underlying storage (same data pointer and length), not a deep byte compare: two distinct candidate arrays
-            // expressing the same pattern are still two independent scan sites, so only literally-shared storage
-            // counts.
+            // The per-anchor evidence hash, defined below with the other fingerprint machinery. Declared here so the
+            // independence gate can compare two members by CONTENT rather than by the storage identity of their views.
+            [[nodiscard]] std::uint64_t fingerprint_evidence(const Anchor &anchor) noexcept;
+
+            // True when two resolvable sub-anchors are the SAME evidence -- same backend fed the same inputs, so they
+            // would decode the identical site/name/literal and therefore cannot corroborate each other. Compared by
+            // CONTENT, not by view/span storage identity: two distinct candidate arrays that compile to byte-identical
+            // patterns (or two copies of the same mangled name / literal in separate buffers) still decode one
+            // identical site, so they must count as dependent. Reusing fingerprint_evidence keeps this content compare
+            // in exact lock-step with the drift fingerprint -- a hash match is what "same evidence" means everywhere
+            // else in this file. It also folds the kind byte, so a cross-kind pair never collides; the fail-closed
+            // direction is a ~2^-64 hash collision rejecting a genuinely-independent pair (the quorum then fails
+            // closed, never open).
             [[nodiscard]] bool same_backend_config(const Anchor &a, const Anchor &b) noexcept
             {
                 if (a.kind != b.kind)
                 {
                     return false;
                 }
-                switch (a.kind)
-                {
-                case AnchorKind::VtableIdentity:
-                    return a.mangled.data() == b.mangled.data() && a.mangled.size() == b.mangled.size();
-                case AnchorKind::RipGlobal:
-                    return a.site.data() == b.site.data() && a.site.size() == b.site.size();
-                case AnchorKind::CodeOperand:
-                    return a.site.data() == b.site.data() && a.site.size() == b.site.size() &&
-                           a.operand_kind == b.operand_kind && a.operand_index == b.operand_index &&
-                           a.byte_width == b.byte_width;
-                case AnchorKind::StringXref:
-                    return a.xref_text.data() == b.xref_text.data() && a.xref_text.size() == b.xref_text.size() &&
-                           a.xref_encoding == b.xref_encoding && a.xref_return == b.xref_return &&
-                           a.xref_require_terminator == b.xref_require_terminator &&
-                           a.xref_broad_match == b.xref_broad_match;
-                case AnchorKind::Manual:
-                case AnchorKind::CallArgHome:
-                case AnchorKind::Quorum:
-                    // Handled by dedicated rules: a dual-Manual pair is rejected wholesale, CallArgHome cannot resolve,
-                    // and a nested Quorum is already rejected upstream. No config-identity verdict is needed here.
-                    return false;
-                }
-                return false;
+                return fingerprint_evidence(a) == fingerprint_evidence(b);
             }
 
             // Fail-closed independence gate run BEFORE agreement is considered. Two signals are not independent
@@ -266,10 +251,10 @@ namespace DetourModKit
                 return hash;
             }
 
-            // Hashes one candidate's address-independent CONTENT. v3 hashed the authored AOB text; v4 scan::Pattern is
-            // compiled and does not retain its source string, so the byte tiers hash the compiled bytes + wildcard mask
-            // + result-offset plus the decode parameters -- content that is equally stable across a diff and computable
-            // without re-parsing. The text tiers hash their owned name / literal and shape flags directly.
+            // Hashes one candidate's address-independent CONTENT. scan::Pattern is compiled and does not retain its
+            // source string, so the byte tiers hash the compiled bytes + wildcard mask + result-offset plus the decode
+            // parameters -- content that is stable across a diff and computable without re-parsing. The text tiers hash
+            // their owned name / literal and shape flags directly.
             [[nodiscard]] std::uint64_t fnv1a_candidate(std::uint64_t hash, const scan::Candidate &candidate) noexcept
             {
                 hash = fnv1a_byte(hash, static_cast<std::uint8_t>(candidate.mode()));
@@ -354,6 +339,7 @@ namespace DetourModKit
                     break;
                 case AnchorKind::CallArgHome:
                 case AnchorKind::Quorum:
+                case AnchorKind::Unset:
                     // No address-independent evidence beyond the kind byte already folded above.
                     break;
                 }
@@ -569,6 +555,11 @@ namespace DetourModKit
                 }
                 break;
             }
+            case AnchorKind::Unset:
+                // A default-constructed anchor whose kind was never set. There is no backend to resolve and no value to
+                // trust, so fail closed rather than invent one -- this is the whole reason Unset exists.
+                result.status = AnchorStatus::Failed;
+                break;
             }
 
             return result;

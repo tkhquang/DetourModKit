@@ -461,6 +461,215 @@ TEST(ManifestCompileTest, NonSerializableKindFailsClosed)
     EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
 }
 
+TEST(ManifestCompileTest, UnsetKindFailsClosed)
+{
+    // A record whose kind was never set must not compile into a Signature that would resolve to a trusted zero.
+    mf::SignatureRecord record;
+    record.label = "x";
+    record.kind = an::AnchorKind::Unset;
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+TEST(ManifestCompileTest, VtableIdentityWithEmptyMangledFailsClosed)
+{
+    // A VtableIdentity record with no mangled name has no evidence: rtti::vtable_for_type("") could only fail, so
+    // reject at compile rather than build a Signature that overlays an empty lookup over a working default.
+    mf::SignatureRecord record;
+    record.label = "x";
+    record.kind = an::AnchorKind::VtableIdentity; // mangled left empty
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+TEST(ManifestCompileTest, StringXrefWithEmptyTextFailsClosed)
+{
+    mf::SignatureRecord record;
+    record.label = "x";
+    record.kind = an::AnchorKind::StringXref; // xref_text left empty
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_FALSE(compiled.has_value());
+    EXPECT_EQ(compiled.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+namespace
+{
+    // Post-resolve validators used to prove the manifest path can reach an Anchor::validator.
+    bool reject_all_validator(std::int64_t, const void *) noexcept
+    {
+        return false;
+    }
+    bool accept_all_validator(std::int64_t, const void *) noexcept
+    {
+        return true;
+    }
+} // namespace
+
+TEST(ManifestCompileTest, CompiledSignatureThreadsValidatorToAnchor)
+{
+    // A Manual record with validate_manual routes the pinned literal through its validator. If make_anchor did not
+    // carry the validator across, the rejecting validator would be ignored and the Manual would resolve.
+    mf::SignatureRecord record;
+    record.label = "x";
+    record.kind = an::AnchorKind::Manual;
+    record.manual_value = 0x1234;
+    record.validate_manual = true;
+    record.validator = &reject_all_validator;
+
+    const auto compiled = mf::Signature::compile(std::move(record));
+    ASSERT_TRUE(compiled.has_value()) << compiled.error().message();
+    const an::ResolvedAnchor resolved = compiled->resolve(dmk::Region::host());
+    EXPECT_EQ(resolved.status, an::AnchorStatus::Failed) << "validator must be reachable from a compiled Signature";
+
+    // Control: the same record with an accepting validator resolves, so the Failed above is the validator's verdict.
+    mf::SignatureRecord ok_record;
+    ok_record.label = "x";
+    ok_record.kind = an::AnchorKind::Manual;
+    ok_record.manual_value = 0x1234;
+    ok_record.validate_manual = true;
+    ok_record.validator = &accept_all_validator;
+    const auto ok_compiled = mf::Signature::compile(std::move(ok_record));
+    ASSERT_TRUE(ok_compiled.has_value()) << ok_compiled.error().message();
+    const an::ResolvedAnchor ok_resolved = ok_compiled->resolve(dmk::Region::host());
+    EXPECT_EQ(ok_resolved.status, an::AnchorStatus::Resolved);
+    EXPECT_EQ(ok_resolved.value, 0x1234);
+}
+
+TEST(ManifestAdoptTest, PreservesSourceValidator)
+{
+    // Adopting an in-code Anchor into a Signature must not silently drop its validator (a fail-open regression).
+    an::Anchor source{};
+    source.label = "x";
+    source.kind = an::AnchorKind::Manual;
+    source.manual_value = 0x99;
+    source.validate_manual = true;
+    source.validator = &reject_all_validator;
+
+    const auto adopted = mf::Signature::adopt(source);
+    ASSERT_TRUE(adopted.has_value()) << adopted.error().message();
+    const an::ResolvedAnchor resolved = adopted->resolve(dmk::Region::host());
+    EXPECT_EQ(resolved.status, an::AnchorStatus::Failed) << "adopt must preserve the source validator";
+}
+
+TEST(ManifestAdoptTest, UnsetKindFailsClosed)
+{
+    an::Anchor source{}; // kind defaults to Unset
+    source.label = "x";
+
+    const auto adopted = mf::Signature::adopt(source);
+    ASSERT_FALSE(adopted.has_value());
+    EXPECT_EQ(adopted.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+TEST(ManifestAdoptTest, EmptyRequiredEvidenceFailsClosed)
+{
+    an::Anchor byte_source{};
+    byte_source.label = "byte";
+    byte_source.kind = an::AnchorKind::RipGlobal;
+    const auto byte_adopted = mf::Signature::adopt(byte_source);
+    ASSERT_FALSE(byte_adopted.has_value());
+    EXPECT_EQ(byte_adopted.error().code, dmk::ErrorCode::InvalidArg);
+
+    an::Anchor vtable_source{};
+    vtable_source.label = "vt";
+    vtable_source.kind = an::AnchorKind::VtableIdentity;
+    const auto vtable_adopted = mf::Signature::adopt(vtable_source);
+    ASSERT_FALSE(vtable_adopted.has_value());
+    EXPECT_EQ(vtable_adopted.error().code, dmk::ErrorCode::InvalidArg);
+
+    an::Anchor xref_source{};
+    xref_source.label = "xref";
+    xref_source.kind = an::AnchorKind::StringXref;
+    const auto xref_adopted = mf::Signature::adopt(xref_source);
+    ASSERT_FALSE(xref_adopted.has_value());
+    EXPECT_EQ(xref_adopted.error().code, dmk::ErrorCode::InvalidArg);
+}
+
+TEST(ManifestParseTest, RipRelativeRungMissingInstructionLengthIsMalformed)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+                                  "displacement_at = 3\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, RipRelativeRungMissingDisplacementIsMalformed)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+                                  "instruction_length = 7\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, RipRelativeRungWithBothDecodeFieldsParses)
+{
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+                                  "displacement_at = 3\ninstruction_length = 7\n");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    ASSERT_EQ(parsed->records[0].ladder.size(), 1u);
+    EXPECT_EQ(parsed->records[0].ladder[0].mode, sc::Mode::RipRelative);
+    EXPECT_EQ(parsed->records[0].ladder[0].displacement_at, 3);
+    EXPECT_EQ(parsed->records[0].ladder[0].instruction_length, 7u);
+}
+
+TEST(ManifestParseTest, RipRelativeRungWithDisplacementPastInstructionEndIsMalformed)
+{
+    // disp32 at offset 5 would occupy bytes [5, 9) but the instruction is only 7 bytes: the disp runs off the end.
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+                                  "displacement_at = 5\ninstruction_length = 7\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, RipRelativeRungWithNegativeDisplacementIsMalformed)
+{
+    // A negative displacement_at is rejected by its own guard, independent of the disp-fits-inside check. The two are
+    // not redundant: were the `< 0` guard dropped, -1 would cast to ~SIZE_MAX and (~SIZE_MAX + 4) wraps to 3, so the
+    // `instruction_length < displacement_at + 4` test reads `7 < 3` (false) and the malformed rung fails OPEN. This
+    // exercises the sign guard directly so a regression that reorders it past the cast cannot slip through.
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = rip_relative\npattern = 48 8B 05 ?? ?? ?? ??\n"
+                                  "displacement_at = -1\ninstruction_length = 7\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, DirectRungWithoutDecodeFieldsStaysValid)
+{
+    // The required-key gate must stay scoped to rip_relative; a Direct rung legitimately carries no decode offsets.
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = rip_global\n"
+                                  "[sig.x.rung.0]\nmode = direct\npattern = 90 90\n");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    ASSERT_EQ(parsed->records[0].ladder.size(), 1u);
+    EXPECT_EQ(parsed->records[0].ladder[0].mode, sc::Mode::Direct);
+}
+
+TEST(ManifestParseTest, ManualRecordMissingManualValueIsMalformed)
+{
+    // An omitted manual_value would default to a trusted Address{0}; require the key.
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = manual\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, dmk::ErrorCode::MalformedLine);
+}
+
+TEST(ManifestParseTest, ManualRecordWithExplicitZeroValueParses)
+{
+    // The presence of the key, not the value, is the gate: an author who genuinely pins zero writes it explicitly.
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = manual\nmanual_value = 0\n");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
+    ASSERT_EQ(parsed->records.size(), 1u);
+    EXPECT_EQ(parsed->records[0].manual_value, 0);
+}
+
 // Resolution: a compiled signature resolves through its anchor backend, honouring scope.
 
 TEST(ManifestResolveTest, RipGlobalDirectResolvesInScope)
@@ -888,7 +1097,9 @@ TEST(ManifestRevisionTest, RevisionRoundTripsAndOmitsWhenZero)
 
 TEST(ManifestRevisionTest, AbsentRevisionParsesAsZero)
 {
-    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = manual\n");
+    // A Manual record must carry an explicit manual_value (the fail-closed required-key gate); this test exercises
+    // revision defaulting, so the record just needs to be well-formed.
+    const auto parsed = mf::parse("[manifest]\nschema = 1\n[sig.x]\nkind = manual\nmanual_value = 0\n");
     ASSERT_TRUE(parsed.has_value()) << parsed.error().message();
     EXPECT_EQ(parsed->header.revision, 0u);
 }

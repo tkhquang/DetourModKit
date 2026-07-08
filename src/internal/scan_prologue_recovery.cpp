@@ -69,6 +69,18 @@ namespace DetourModKit
         std::optional<detail::EnginePattern> build_rebuilt_prologue(const scan::Pattern &original,
                                                                     const PrologueShape &shape)
         {
+            // A bounded-jump pattern cannot be rebuilt by a flat byte-and-mask concatenation: this rebuild drops the
+            // leading patch_bytes and prepends the jump prefix, but it copies only bytes/mask and never carries the
+            // original's `jumps` across (nor rebases their positions past the shifted prologue, nor re-splits a gap
+            // that straddled the patched bytes). Carrying no jumps would collapse every variable gap into a fixed run,
+            // so the rebuilt pattern would match a wrong, gap-collapsed shape. Fail closed on any jump-bearing pattern
+            // instead: the jump-bearing tail still resolves through the normal (non-fallback) scan path, so this only
+            // forgoes prologue RECOVERY for such a signature, never a correct direct match. Rebuilding the gaps is
+            // deferred until a real consumer needs hooked-prologue recovery of a bounded-jump signature.
+            if (original.has_jumps())
+            {
+                return std::nullopt;
+            }
             const std::size_t size = original.size();
             if (size < shape.patch_bytes)
             {

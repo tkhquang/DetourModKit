@@ -297,6 +297,100 @@ namespace
         std::size_t m_page = 0;
     };
 
+    // A three-page synthetic image whose executable region is split into two ABUTTING windows by a protection change
+    // (not a gap): pages 0 and 1 are committed contiguously, then page 1 is re-protected to PAGE_EXECUTE_READ so
+    // VirtualQuery reports two abutting execute-readable regions [page0][page1] instead of one coalesced region. Page 2
+    // is the readable data page holding the string. This is the layout a real VirtualProtect split of .text produces,
+    // and the only one that can host a reference instruction STRADDLING the window boundary -- the case phase 2's
+    // cross-window back-carry exists to catch. The bytes are planted while both code pages are writable; seal() then
+    // installs the protection split.
+    class AbuttingCodeImage
+    {
+    public:
+        AbuttingCodeImage()
+        {
+            SYSTEM_INFO si{};
+            GetSystemInfo(&si);
+            m_page = si.dwPageSize;
+            m_base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, m_page * 3, MEM_RESERVE, PAGE_NOACCESS));
+            if (m_base)
+            {
+                // Both code pages start execute-READWRITE so instruction bytes (including a boundary straddler) can be
+                // planted; seal() drops page 1 to execute-READ so the two pages become distinct abutting windows.
+                void *code0 = VirtualAlloc(m_base, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                void *code1 = VirtualAlloc(m_base + m_page, m_page, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+                void *data = VirtualAlloc(m_base + m_page * 2, m_page, MEM_COMMIT, PAGE_READWRITE);
+                if (code0 == nullptr || code1 == nullptr || data == nullptr)
+                {
+                    VirtualFree(m_base, 0, MEM_RELEASE);
+                    m_base = nullptr;
+                }
+            }
+        }
+
+        ~AbuttingCodeImage()
+        {
+            if (m_base)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        AbuttingCodeImage(const AbuttingCodeImage &) = delete;
+        AbuttingCodeImage &operator=(const AbuttingCodeImage &) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+        [[nodiscard]] std::size_t page_size() const noexcept { return m_page; }
+        [[nodiscard]] std::uintptr_t code_addr(std::size_t off) const noexcept
+        {
+            return reinterpret_cast<std::uintptr_t>(m_base + off);
+        }
+
+        void write_string(std::size_t off, const void *data, std::size_t n) noexcept
+        {
+            std::memcpy(m_base + m_page * 2 + off, data, n);
+        }
+
+        // Writes raw code bytes at code offset off (m_base + off), used to plant alignment filler (e.g. a NOP) so the
+        // broad linear-disassembly sweep lands on a following instruction. Both code pages are still writable when run.
+        void write_code(std::size_t off, const void *data, std::size_t n) noexcept
+        {
+            std::memcpy(m_base + off, data, n);
+        }
+
+        // Plants a REX.W lea rax, [rip+disp32] at code offset instr_off (which may straddle the page-0/page-1 boundary)
+        // whose target is the string at data offset target_off. Both code pages are still writable when this runs.
+        void plant_lea(std::size_t instr_off, std::size_t target_off) noexcept
+        {
+            std::uint8_t *instr = m_base + instr_off;
+            instr[0] = 0x48; // REX.W
+            instr[1] = 0x8D; // lea
+            instr[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
+            const auto next = static_cast<std::int64_t>(code_addr(instr_off) + 7);
+            const auto target =
+                static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(m_base + m_page * 2 + target_off));
+            const auto disp = static_cast<std::int32_t>(target - next);
+            std::memcpy(instr + 3, &disp, sizeof(disp));
+        }
+
+        // Installs the protection split: page 1 drops to execute-READ so it becomes a window distinct from the
+        // execute-READWRITE page 0. Returns false if the re-protect fails.
+        [[nodiscard]] bool seal() noexcept
+        {
+            DWORD old = 0;
+            return VirtualProtect(m_base + m_page, m_page, PAGE_EXECUTE_READ, &old) != 0;
+        }
+
+        [[nodiscard]] Region range() const noexcept
+        {
+            return Region{Address{reinterpret_cast<std::uintptr_t>(m_base)}, m_page * 3};
+        }
+
+    private:
+        std::uint8_t *m_base = nullptr;
+        std::size_t m_page = 0;
+    };
+
     constexpr std::uint8_t LEA = 0x8D;
     constexpr std::uint8_t MOV = 0x8B;
 
@@ -870,69 +964,104 @@ TEST(StringXrefTest, MultiWindowAmbiguousAcrossWindows)
     EXPECT_EQ(broad.error().code, ErrorCode::AmbiguousReference);
 }
 
-// Precondition regression: phase-2 reference scanning treats each execute-readable window independently and
-// carries no cross-window overlap (unlike find_pattern). A RIP-relative lea straddling a protection split inside .text
-// -- two adjacent execute-readable regions VirtualQuery reports separately because their base protections differ -- is
-// decoded in neither window, so find_string_xref reports NoReference (a fail-closed miss, never a wrong match). The
-// common case, one contiguous .text window, has no interior boundary and is unaffected.
-TEST(StringXrefTest, ReferenceStraddlingProtectionSplitReportsNoReference)
+// Phase-2 reference scanning carries overlap across abutting execute-readable windows (as phase 1 does), so a
+// RIP-relative lea straddling a protection split inside .text -- two adjacent execute-readable regions VirtualQuery
+// reports separately because their base protections differ -- is decoded whole by the second window's carry-extended
+// scan instead of being silently dropped. The common case, one contiguous .text window, has no interior boundary and
+// takes the same path as before.
+TEST(StringXrefTest, NarrowReferenceStraddlingProtectionSplitIsFound)
 {
-    SYSTEM_INFO si{};
-    GetSystemInfo(&si);
-    const std::size_t page = si.dwPageSize;
-
-    // Three contiguous pages from one reservation: page 0 RWX code, page 1 code flipped to a different executable
-    // protection (so VirtualQuery splits the two into separate windows), page 2 RW data holding the anchor string.
-    auto *base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, page * 3, MEM_RESERVE, PAGE_NOACCESS));
-    if (base == nullptr)
+    AbuttingCodeImage img;
+    if (!img.ok())
     {
-        GTEST_SKIP() << "could not reserve the protection-split fixture";
+        GTEST_SKIP() << "could not allocate the protection-split fixture";
     }
-    VirtualPagePtr owner(base);
-    ASSERT_NE(VirtualAlloc(base, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
-    ASSERT_NE(VirtualAlloc(base + page, page, MEM_COMMIT, PAGE_EXECUTE_READWRITE), nullptr);
-    ASSERT_NE(VirtualAlloc(base + page * 2, page, MEM_COMMIT, PAGE_READWRITE), nullptr);
-
     const char str[] = "StraddleAnchorString";
-    std::memcpy(base + page * 2, str, sizeof(str));
+    img.write_string(0, str, sizeof(str));
 
-    // Plant a 7-byte `lea rax, [rip+disp32]` straddling the page0/page1 boundary: its opcode bytes (48 8D 05) end page
-    // 0 and its disp32 begins page 1. Window 0's scan stops at span - instr_len so it never reaches the opcode; window
-    // 1's scan starts on the disp32, not the opcode. Neither window decodes the instruction.
-    const std::size_t straddle_off = page - 3;
-    const auto plant_lea = [&](std::size_t off)
+    // A 7-byte `lea rax, [rip+disp32]` straddling the page0/page1 boundary: its opcode bytes (48 8D 05) end page 0 and
+    // its disp32 begins page 1. Without cross-window carry it fits in neither independent window.
+    const std::size_t straddle_off = img.page_size() - 3;
+    img.plant_lea(straddle_off, 0);
+    ASSERT_TRUE(img.seal());
+
+    const auto straddled = scan::find_string_xref(utf8_query("StraddleAnchorString"), img.range());
+    ASSERT_TRUE(straddled.has_value()) << "the cross-window carry must decode the straddling reference";
+    EXPECT_EQ(straddled->raw(), img.code_addr(straddle_off));
+}
+
+TEST(StringXrefTest, NarrowTwoReferencesOneStraddlingSplitAreAmbiguous)
+{
+    AbuttingCodeImage img;
+    if (!img.ok())
     {
-        std::uint8_t *instr = base + off;
-        instr[0] = 0x48; // REX.W
-        instr[1] = 0x8D; // lea
-        instr[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
-        const auto next = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(instr) + 7);
-        const auto target = static_cast<std::int64_t>(reinterpret_cast<std::uintptr_t>(base + page * 2));
-        const auto disp = static_cast<std::int32_t>(target - next);
-        std::memcpy(instr + 3, &disp, sizeof(disp));
-    };
-    plant_lea(straddle_off);
+        GTEST_SKIP() << "could not allocate the protection-split fixture";
+    }
+    const char str[] = "StraddleAmbiguousString";
+    img.write_string(0, str, sizeof(str));
 
-    // Flip page 1 to a different executable protection so VirtualQuery reports it as a separate window from page 0.
-    // Done after planting so the disp32 bytes in page 1 were writable.
-    DWORD old_protect = 0;
-    ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old_protect));
+    // One straddling reference plus one wholly inside window 1: with the straddler visible the count reaches two, so
+    // the scan fails closed to AmbiguousReference instead of certifying the in-window one as unique. The straddler is
+    // counted exactly once (no double count), so this is genuinely two refs.
+    img.plant_lea(img.page_size() - 3, 0);
+    img.plant_lea(img.page_size() + 0x40, 0);
+    ASSERT_TRUE(img.seal());
 
-    const Region range{Address{reinterpret_cast<std::uintptr_t>(base)}, page * 3};
+    const auto result = scan::find_string_xref(utf8_query("StraddleAmbiguousString"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::AmbiguousReference);
+}
 
-    // The only reference straddles the window boundary, so phase 2 finds none: fail-closed NoReference, not a wrong
-    // hit.
-    const auto straddled = scan::find_string_xref(utf8_query("StraddleAnchorString"), range);
-    ASSERT_FALSE(straddled.has_value());
-    EXPECT_EQ(straddled.error().code, ErrorCode::NoReference);
+TEST(StringXrefTest, BroadReferenceStraddlingProtectionSplitIsFound)
+{
+    AbuttingCodeImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate the protection-split fixture";
+    }
+    const char str[] = "StraddleBroadString";
+    img.write_string(0, str, sizeof(str));
 
-    // Positive control: plant a second lea wholly inside window 0. It resolves uniquely, proving the string is findable
-    // and a normal reference decodes -- so the miss above is the straddle, not a broken fixture, and the straddling lea
-    // is not counted (otherwise this would report AmbiguousReference).
-    plant_lea(0x10);
-    const auto in_window = scan::find_string_xref(utf8_query("StraddleAnchorString"), range);
-    ASSERT_TRUE(in_window.has_value());
-    EXPECT_EQ(in_window->raw(), reinterpret_cast<std::uintptr_t>(base + 0x10));
+    // The broad (Zydis) phase-2 scan carries ZYDIS_MAX_INSTRUCTION_LENGTH-1 bytes back into the previous window and
+    // de-duplicates with a count floor, so a boundary straddler is decoded whole here too.
+    const std::size_t straddle_off = img.page_size() - 3;
+    img.plant_lea(straddle_off, 0);
+    ASSERT_TRUE(img.seal());
+
+    const auto straddled = scan::find_string_xref(broad_query("StraddleBroadString"), img.range());
+    ASSERT_TRUE(straddled.has_value()) << "the broad cross-window carry must decode the straddling reference";
+    EXPECT_EQ(straddled->raw(), img.code_addr(straddle_off));
+}
+
+TEST(StringXrefTest, BroadCountFloorDedupSkipsPrevWindowReference)
+{
+    // Exercises the broad-carry count floor's SKIP path: a reference that lies wholly inside the previous window but is
+    // re-decoded by the abutting window's back-carry must be counted exactly once. The straddler tests only cover the
+    // COUNT side (an instruction ending past the floor); this covers the skip side, so a regression that dropped the
+    // floor -- or flipped its `<=` to `<` -- would double-count the reference and wrongly report AmbiguousReference.
+    AbuttingCodeImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate the protection-split fixture";
+    }
+    const char str[] = "BroadFloorDedupString";
+    img.write_string(0, str, sizeof(str));
+
+    // One REX.W lea planted wholly inside window 0's tail, ending EXACTLY at the page-0/page-1 boundary: instr at
+    // page_size - 7, length 7, so its end == window 1's real base == the count floor. Window 0 counts it (its own floor
+    // is window 0's base); window 1's carry re-decodes it and must skip it because end <= floor. The broad sweep is a
+    // linear disassembly that walks the leading zero run two bytes at a time (`00 00` = `add [rax], al`); a single NOP
+    // at page_size - 8 shifts the parity so both window 0's sweep and window 1's carry land on the odd page_size - 7
+    // offset and decode the lea whole. Without the floor (or with `<`), window 1 counts the lea a second time and the
+    // resolve fails closed to AmbiguousReference instead of the unique site.
+    const std::uint8_t nop = 0x90;
+    img.write_code(img.page_size() - 8, &nop, sizeof(nop));
+    img.plant_lea(img.page_size() - 7, 0);
+    ASSERT_TRUE(img.seal());
+
+    const auto result = scan::find_string_xref(broad_query("BroadFloorDedupString"), img.range());
+    ASSERT_TRUE(result.has_value()) << "the count floor must skip window 1's re-decode of the prev-window reference";
+    EXPECT_EQ(result->raw(), img.code_addr(img.page_size() - 7));
 }
 
 TEST(StringXrefTest, StringPointerSlotResolvesStore)

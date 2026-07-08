@@ -196,6 +196,8 @@ namespace DetourModKit::manifest
                 return "call_arg_home";
             case anchor::AnchorKind::Quorum:
                 return "quorum";
+            case anchor::AnchorKind::Unset:
+                return "unset";
             }
             return "manual";
         }
@@ -478,6 +480,7 @@ namespace DetourModKit::manifest
                     }
                     spec.walk_back = static_cast<std::ptrdiff_t>(*value);
                 }
+                bool has_displacement = false;
                 if (const char *disp = ini.GetValue(section, "displacement_at", nullptr))
                 {
                     const std::optional<long long> value = parse_signed(disp);
@@ -486,7 +489,9 @@ namespace DetourModKit::manifest
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
                     spec.displacement_at = static_cast<std::ptrdiff_t>(*value);
+                    has_displacement = true;
                 }
+                bool has_instruction_length = false;
                 if (const char *len = ini.GetValue(section, "instruction_length", nullptr))
                 {
                     const std::optional<unsigned long long> value = parse_unsigned(len);
@@ -495,6 +500,27 @@ namespace DetourModKit::manifest
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
                     spec.instruction_length = static_cast<std::size_t>(*value);
+                    has_instruction_length = true;
+                }
+                // A RIP-relative repair rung resolves target = match + instruction_length + *(int32*)(match +
+                // displacement_at). If either decode offset silently defaults to 0 the rung resolves to match + 0 +
+                // disp32 -- an address wrong by exactly the instruction length but still in-module, which
+                // resolve_and_gate would then hand out as trusted (a hook placed there splits an instruction). Both
+                // offsets are therefore mandatory for RipRelative, and the disp32 must lie WITHIN the instruction: its
+                // four bytes have to fit before the instruction end (displacement_at + 4 <= instruction_length) and the
+                // offset itself cannot be negative. A plain Direct rung legitimately carries neither field, so this
+                // gate is scoped to RipRelative alone and never rejects a Direct rung.
+                if (*mode == scan::Mode::RipRelative)
+                {
+                    if (!has_instruction_length || !has_displacement)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    if (spec.displacement_at < 0 ||
+                        spec.instruction_length < static_cast<std::size_t>(spec.displacement_at) + sizeof(std::int32_t))
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
                 }
                 break;
             }
@@ -747,21 +773,31 @@ namespace DetourModKit::manifest
                 }
                 break;
             case anchor::AnchorKind::Manual:
-                if (const char *manual = ini.GetValue(section, "manual_value", nullptr))
+            {
+                // A Manual record pins a literal with no backend, so an omitted manual_value would silently default to
+                // 0 and overlay a trusted Address{0} over a working in-code default. Require the key: an author who
+                // genuinely means zero writes `manual_value = 0` explicitly (the presence check, not the value, is what
+                // distinguishes a deliberate pin from a forgotten field). Mirrors the RipRelative required-key gate.
+                const char *manual = ini.GetValue(section, "manual_value", nullptr);
+                if (manual == nullptr)
                 {
-                    const std::optional<long long> value = parse_signed(manual);
-                    if (!value)
-                    {
-                        return fail(ErrorCode::MalformedLine, "manifest::parse");
-                    }
-                    record.manual_value = static_cast<std::int64_t>(*value);
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
                 }
+                const std::optional<long long> value = parse_signed(manual);
+                if (!value)
+                {
+                    return fail(ErrorCode::MalformedLine, "manifest::parse");
+                }
+                record.manual_value = static_cast<std::int64_t>(*value);
                 break;
+            }
             case anchor::AnchorKind::RipGlobal:
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:
-                // RipGlobal carries only the ladder (attached by the caller). CallArgHome / Quorum are unreachable here
-                // because parse_anchor_kind rejects their tokens, but they are listed so the switch is exhaustive.
+            case anchor::AnchorKind::Unset:
+                // RipGlobal carries only the ladder (attached by the caller). CallArgHome / Quorum / Unset are
+                // unreachable here because parse_anchor_kind rejects their tokens, but they are listed so the switch is
+                // exhaustive.
                 break;
             }
             return record;
@@ -835,6 +871,13 @@ namespace DetourModKit::manifest
         anchor.xref_require_terminator = m_record.xref_require_terminator;
         anchor.xref_broad_match = m_record.xref_broad_match;
         anchor.manual_value = m_record.manual_value;
+        // Thread the post-resolve validator onto the borrowed view so a compiled (file-loaded or adopted) signature can
+        // assert a domain invariant, exactly as an in-code Anchor can. Without these the manifest path could never
+        // reach a validator, silently trusting whatever raw address the backend returned.
+        anchor.validator = m_record.validator;
+        anchor.validator_context = m_record.validator_context;
+        anchor.validate_manual = m_record.validate_manual;
+        anchor.require_validator = m_record.require_validator;
         return anchor;
     }
 
@@ -842,7 +885,23 @@ namespace DetourModKit::manifest
     {
         // The composite kinds have no flat record form: reject them here rather than build a Signature that can never
         // resolve. A mod using Quorum / CallArgHome keeps them as in-code anchors and gates them via evaluate_gate().
-        if (record.kind == anchor::AnchorKind::Quorum || record.kind == anchor::AnchorKind::CallArgHome)
+        // Unset is not a resolvable kind either -- a record whose kind was never set fails closed here rather than
+        // compiling into a Signature that would resolve to a trusted zero.
+        if (record.kind == anchor::AnchorKind::Quorum || record.kind == anchor::AnchorKind::CallArgHome ||
+            record.kind == anchor::AnchorKind::Unset)
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+
+        // Each resolvable kind fails closed when its mandatory evidence is empty, so a hand-built record cannot compile
+        // into a Signature that overlays a trusted zero over a working default. The ladder kinds require a non-empty
+        // ladder (checked below); the string-evidence kinds require their name / literal here. Manual has no "empty"
+        // evidence (any int64 is a valid pin, and the parse path already requires the key be present).
+        if (record.kind == anchor::AnchorKind::VtableIdentity && record.mangled.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+        if (record.kind == anchor::AnchorKind::StringXref && record.xref_text.empty())
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -872,7 +931,21 @@ namespace DetourModKit::manifest
 
     Result<Signature> Signature::adopt(const anchor::Anchor &source)
     {
-        if (source.kind == anchor::AnchorKind::Quorum || source.kind == anchor::AnchorKind::CallArgHome)
+        if (source.kind == anchor::AnchorKind::Quorum || source.kind == anchor::AnchorKind::CallArgHome ||
+            source.kind == anchor::AnchorKind::Unset)
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if ((source.kind == anchor::AnchorKind::RipGlobal || source.kind == anchor::AnchorKind::CodeOperand) &&
+            source.site.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if (source.kind == anchor::AnchorKind::VtableIdentity && source.mangled.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
+        if (source.kind == anchor::AnchorKind::StringXref && source.xref_text.empty())
         {
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
         }
@@ -890,6 +963,12 @@ namespace DetourModKit::manifest
         record.xref_require_terminator = source.xref_require_terminator;
         record.xref_broad_match = source.xref_broad_match;
         record.manual_value = source.manual_value;
+        // Preserve the source anchor's post-resolve validator across adoption. Dropping it would silently downgrade a
+        // validated in-code anchor into an unchecked one once it became a Signature -- a fail-open regression.
+        record.validator = source.validator;
+        record.validator_context = source.validator_context;
+        record.validate_manual = source.validate_manual;
+        record.require_validator = source.require_validator;
         // An adopted signature carries no captured baseline (an in-code default has no persisted fingerprint), so its
         // record.ladder text stays empty (a compiled Pattern cannot be turned back into source AOB) and the resolved
         // anchor view is fed from the copied site candidates below.
@@ -1150,6 +1229,7 @@ namespace DetourModKit::manifest
             case anchor::AnchorKind::RipGlobal:
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:
+            case anchor::AnchorKind::Unset:
                 break;
             }
 

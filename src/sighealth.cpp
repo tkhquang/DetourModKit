@@ -124,6 +124,8 @@ namespace DetourModKit
                     return "CallArgHome";
                 case anchor::AnchorKind::Quorum:
                     return "Quorum";
+                case anchor::AnchorKind::Unset:
+                    return "Unset";
                 }
                 return "Unknown";
             }
@@ -416,9 +418,12 @@ namespace DetourModKit
             }
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:
+            case anchor::AnchorKind::Unset:
             {
                 // A Quorum composes its M voting sub-anchors by pointer and CallArgHome has no resolver, so neither can
-                // be expressed as a flat file record; the compiler rejects both, and the linter names the same reason.
+                // be expressed as a flat file record; Unset is a record whose kind was never set. The compiler rejects
+                // all three, and the linter names the same reason (a record that can never resolve as a file
+                // signature).
                 add_finding(health.findings, FindingKind::NonSerializableKind, Severity::Critical);
                 health.grade = grade_from(health.findings);
                 break;
@@ -493,7 +498,7 @@ namespace DetourModKit
             case FindingKind::UnhealableManual:
                 return "a pinned Manual literal cannot self-heal across a patch";
             case FindingKind::NonSerializableKind:
-                return "the record kind is not file-serializable (Quorum / CallArgHome)";
+                return "the record kind is not file-serializable (Quorum / CallArgHome / Unset)";
             case FindingKind::NoRobustRung:
                 return "no candidate rung graded Robust";
             }

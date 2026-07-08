@@ -821,15 +821,19 @@ TEST(AnchorTest, QuorumRejectsSameBackendConfig)
     EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
 }
 
-TEST(AnchorTest, QuorumAcceptsDistinctCandidateArrays)
+TEST(AnchorTest, QuorumRejectsContentEqualCandidateArrays)
 {
     ScratchPage page;
     ASSERT_TRUE(page.ok());
-    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0
-    // Two SEPARATELY-authored candidate arrays encoding the same pattern: distinct storage, so the pair is independent
-    // (identity is over the storage, not the bytes).
+    page.put(0x100, {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}); // add rax, 0xF0 -- a single unique site
+    // Two SEPARATELY-authored candidate arrays encoding the SAME pattern with the SAME decode params. They compile to
+    // byte-identical patterns and therefore decode one identical site, so they are the same evidence and cannot
+    // corroborate each other. Independence is over the pattern CONTENT, not the storage: distinct arrays that express
+    // the same signature must NOT vote twice.
     const sc::Candidate site_a[] = {sc::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
     const sc::Candidate site_b[] = {sc::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    ASSERT_NE(static_cast<const void *>(site_a), static_cast<const void *>(site_b))
+        << "the two ladders must live in distinct storage for this test to have teeth";
 
     an::Anchor sub_a{};
     sub_a.kind = an::AnchorKind::CodeOperand;
@@ -846,8 +850,21 @@ TEST(AnchorTest, QuorumAcceptsDistinctCandidateArrays)
     quorum.quorum_members = members;
 
     const an::ResolvedAnchor result = an::resolve(quorum, page.range());
-    EXPECT_EQ(result.status, an::AnchorStatus::Resolved);
-    EXPECT_EQ(result.value, 0xF0);
+    EXPECT_EQ(result.status, an::AnchorStatus::QuorumNotIndependent);
+}
+
+TEST(AnchorTest, UnsetKindFailsClosed)
+{
+    // A default-constructed Anchor whose kind was never set (e.g. a designated-initializer table entry that omits
+    // `kind`) must fail closed, not resolve as a trusted address 0. Unset is the fail-safe default.
+    an::Anchor anchor{};
+    EXPECT_EQ(anchor.kind, an::AnchorKind::Unset) << "a default-constructed Anchor must default to Unset";
+    anchor.label = "forgot-the-kind";
+    anchor.manual_value = 0; // a populated-but-ignored field, as a real misdeclaration would carry
+
+    const an::ResolvedAnchor result = an::resolve(anchor);
+    EXPECT_EQ(result.status, an::AnchorStatus::Failed);
+    EXPECT_EQ(result.value, 0);
 }
 
 TEST(AnchorTest, QuorumExemptFromRequireValidator)
