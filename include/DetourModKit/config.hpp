@@ -277,7 +277,9 @@ namespace DetourModKit
          * @brief Re-applies all bound setters against the last-loaded INI file.
          * @details Re-reads the file passed to the most recent load() and re-invokes every setter with the fresh value.
          *          If the file's bytes are unchanged since the last successful load (content-hash short-circuit), the
-         *          setters are skipped. Bindings persist across reloads.
+         *          setters are skipped. If the file cannot be read (deleted, or locked mid-save), the setters are also
+         *          skipped and the last-applied values are retained rather than snapped back to their defaults; reload()
+         *          still returns true. Bindings persist across reloads.
          * @return true if a previous load() path was available and the reload proceeded; false if reload() was called
          *         before any load().
          * @note Safe from any thread. Only C++ exceptions from setters are caught; a structured-exception fault or a
@@ -289,8 +291,9 @@ namespace DetourModKit
          * @brief Starts a background watcher that calls reload() when the INI changes.
          * @details Watches the directory of the path last passed to load(), collapsing bursty editor saves into a
          *          single reload via the @p debounce quiet window. After each reload @p on_reload is invoked with a flag
-         *          that is true when setters ran and false when the content-hash skip short-circuited the reload. The
-         *          watcher and the callback run on the watcher's background thread.
+         *          that is true when setters ran and false when the setter pass was skipped (unchanged content or a read
+         *          failure that retained the current values). The watcher and the callback run on the watcher's
+         *          background thread.
          * @param debounce Quiet window between change detection and reload (default 250 ms).
          * @param on_reload Optional callback invoked after each reload attempt.
          * @return Started if the watcher is now running; AlreadyRunning if one was already installed; NoPriorLoad if

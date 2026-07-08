@@ -25,6 +25,8 @@ if (!config::reload())
 
 Starts the folded-in filesystem watcher on the last-loaded INI path. When the file changes, `reload()` is invoked after the debounce quiet-window has elapsed; the optional `on_reload` callback fires immediately after. Both callbacks run on the watcher thread.
 
+The path is remembered from the most recent `config::load()` call whether or not that load found the file, so a ship-with-defaults first run whose INI does not exist yet still arms the watcher: it monitors the parent directory and fires once the file is created. `NoPriorLoad` is returned only when `config::load()` was never called at all (there is no path to watch), not when the file was simply missing.
+
 Returns an `AutoReloadStatus` enum indicating the outcome (return value is `[[nodiscard]]`):
 
 | Value | Meaning |
@@ -34,15 +36,15 @@ Returns an `AutoReloadStatus` enum indicating the outcome (return value is `[[no
 | `NoPriorLoad` | `config::load()` was never called; no path to watch. |
 | `StartFailed` | Directory could not be opened or start handshake failed. |
 
-The `on_reload` callback receives a `bool content_changed` argument. When the file's bytes are identical to the last successfully loaded version (a `touch`, a no-op save, an editor that rewrites identical content), the content-hash skip short-circuits the reload and the flag is `false`; the callback still fires so derived state can observe the event without wasting work on setter re-invocation.
+The `on_reload` callback receives a `bool setters_ran` argument. The flag is `true` when bound setters were re-invoked. It is `false` when the setter pass was skipped, either because the file's bytes are identical to the last successfully loaded version (a `touch`, a no-op save, an editor that rewrites identical content), or because the file could not be read and the current values were retained. The callback still fires so derived state can observe the event without wasting work on setter re-invocation.
 
 ```cpp
 config::load("mymod.ini");
 const auto status = config::enable_auto_reload(
     std::chrono::milliseconds{250},
-    [](bool content_changed)
+    [](bool setters_ran)
     {
-        if (content_changed)
+        if (setters_ran)
         {
             log().info("Config reloaded");
         }
@@ -88,9 +90,9 @@ The servicer is spun up lazily on the first `reload_hotkey` call and torn down i
 
 ### Content-hash skip
 
-`config::reload()` computes an FNV-1a 64 hash over the on-disk bytes before invoking any setter. If the hash matches the value stored at the last successful `load()` / `reload()`, no setters run and the call returns `true` with a DEBUG-level log line. This suppresses the common no-op cases: `touch`, editors that overwrite with identical content, hotkey presses on an unchanged file. When the file cannot be read (editor holds an exclusive handle mid-save), the hash check is skipped and the reload proceeds as usual, erring on the side of reloading.
+`config::reload()` computes an FNV-1a 64 hash over the on-disk bytes before invoking any setter. If the hash matches the value stored at the last successful `load()` / `reload()`, no setters run and the call returns `true` with a DEBUG-level log line. This suppresses the common no-op cases: `touch`, editors that overwrite with identical content, hotkey presses on an unchanged file. When the file cannot be read (editor holds an exclusive handle mid-save), the cached hash is cleared and the setter pass is skipped so the current values are retained.
 
-The `on_reload` callback passed to `enable_auto_reload` receives a `bool content_changed` argument reflecting this: `true` when setters ran, `false` when the hash-skip short-circuited.
+The `on_reload` callback passed to `enable_auto_reload` receives a `bool setters_ran` argument reflecting this: `true` when setters ran, `false` when the hash-skip or read-failure path skipped the setter pass.
 
 ## What is safe to hot-reload
 
