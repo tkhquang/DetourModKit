@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "DetourModKit/config.hpp"
+#include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/logger.hpp"
 
@@ -3226,4 +3227,53 @@ TEST_F(ConfigTest, ConsumeFacet_IniOverrideAppliesThroughComboHelper)
     EXPECT_EQ(DetourModKit::detail::evaluate_published_consume_rules(button), button);
     guard.release();
     input::Input::instance().shutdown();
+}
+
+// ~ReloadServicer must survive a bare-FreeLibrary teardown, which runs under the loader lock at static
+// destruction. The real loader-lock branch cannot be entered from user code, so config.cpp exposes a test-only
+// override, mirroring g_config_watcher_loader_lock_override.
+namespace DetourModKit::detail
+{
+    extern bool (*g_config_reload_loader_lock_override)() noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    bool cfg_reload_always_true_loader_lock() noexcept
+    {
+        return true;
+    }
+} // namespace
+
+TEST_F(ConfigTest, ReloadServicerDetachAndLeakUnderLoaderLockDoesNotHang)
+{
+    namespace diag = DetourModKit::diagnostics;
+
+    // Clean slate + zero the leak tally.
+    input::Input::instance().shutdown();
+    diag::reset_intentional_leaks();
+
+    // Create the servicer and its reload-hotkey input binding. The binding's press callback captures a second strong
+    // reference to the servicer, so config::clear() alone cannot drop the last reference.
+    ASSERT_TRUE(config::reload_hotkey("ReloadConfig", "F5"));
+
+    // Force ~ReloadServicer down the loader-lock detach-and-leak branch.
+    DetourModKit::detail::g_config_reload_loader_lock_override = &cfg_reload_always_true_loader_lock;
+
+    const auto t_start = std::chrono::steady_clock::now();
+    // Drop the config slot reference, then the binding reference via input teardown. The last drop runs ~ReloadServicer
+    // down its loader-lock branch (selected by the override), which leaks the Channel and records the intentional leak
+    // rather than joining. The override drives ONLY ~ReloadServicer's own branch selection: the inner StoppableWorker
+    // consults the real (here unheld) loader lock and so JOINS, meaning this asserts the branch is taken and returns
+    // promptly, not the live-detached-reader case. That leak-in-place-vs-destroy property is teeth-proven by the
+    // AsyncLogger sibling (its use_count discriminator) and the committed ~ConfigWatcher parity.
+    config::clear();
+    input::Input::instance().shutdown();
+    const auto elapsed = std::chrono::steady_clock::now() - t_start;
+
+    DetourModKit::detail::g_config_reload_loader_lock_override = nullptr;
+
+    EXPECT_LT(elapsed, std::chrono::seconds(2)) << "ReloadServicer loader-lock teardown must return promptly";
+    EXPECT_GE(diag::intentional_leak_count(diag::LeakSubsystem::Worker), 1u)
+        << "the ReloadServicer loader-lock teardown must record a Worker intentional-leak event";
 }
