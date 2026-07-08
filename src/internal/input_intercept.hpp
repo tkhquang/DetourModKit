@@ -266,6 +266,15 @@ namespace DetourModKit::detail
     [[nodiscard]] bool wndproc_installed() noexcept;
 
     /**
+     * @brief Returns the saved predecessor window procedure the detour forwards to, as a raw value (0 if none).
+     * @details The detour reads this at the top of every frame and forwards the message to it. uninstall() must leave
+     *          it pointing at the real procedure after restoring the chain, so a frame already in flight when the
+     *          restore lands still forwards to the game's procedure rather than routing to DefWindowProcW. Exposed for
+     *          that teardown-correctness assertion (and diagnostics).
+     */
+    [[nodiscard]] LONG_PTR wndproc_saved_procedure() noexcept;
+
+    /**
      * @brief Atomically takes and clears the accumulated wheel notch counts.
      * @return Notch counts since the last call, indexed 0=Up, 1=Down, 2=Left, 3=Right.
      */

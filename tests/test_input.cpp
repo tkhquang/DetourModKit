@@ -10,10 +10,14 @@
 
 #include "DetourModKit/input.hpp"
 #include "DetourModKit/config.hpp"
+#include "DetourModKit/logger.hpp"
 
 #include "internal/input_poller.hpp"
 #include "internal/input_intercept.hpp"
+#include "internal/input_binding_gate.hpp"
 #include "internal/input_key_cache.hpp"
+
+#include "test_alloc_probe.hpp"
 
 using namespace DetourModKit;
 using DetourModKit::gamepad_button;
@@ -1913,6 +1917,9 @@ TEST(InputReshapeContract, MutatorsAreNoexcept)
                   "InputPoller::update_combos must stay noexcept (fail-closed)");
     static_assert(noexcept(std::declval<detail::InputPoller &>().add_binding(std::declval<detail::InputBinding>())),
                   "InputPoller::add_binding must stay noexcept (fail-closed)");
+    static_assert(noexcept(std::declval<detail::InputPoller &>().add_bindings(
+                      std::declval<std::vector<detail::InputBinding>>())),
+                  "InputPoller::add_bindings must stay noexcept (fail-closed)");
     static_assert(
         noexcept(std::declval<detail::InputPoller &>().remove_bindings_by_name(std::declval<std::string_view>())),
         "InputPoller::remove_bindings_by_name must stay noexcept (fail-closed)");
@@ -2726,7 +2733,7 @@ TEST_F(InputPollerTest, BindingTokenStaleAfterAddBinding)
     ASSERT_TRUE(poller.binding_token_current(token));
 
     // A reshape advances the generation, so the previously current token now fails closed.
-    poller.add_binding(make_token_test_binding("second", keyboard_key(0x42)));
+    ASSERT_TRUE(poller.add_binding(make_token_test_binding("second", keyboard_key(0x42))));
     EXPECT_FALSE(poller.binding_token_current(token));
     EXPECT_FALSE(poller.is_binding_active(token));
 
@@ -2902,4 +2909,383 @@ TEST_F(InputTest, BindingTokenFromPriorPollerNeverAliasesNewPoller)
     EXPECT_TRUE(mgr.token_current(new_token));
 
     mgr.set_require_focus(true);
+}
+
+// Binding teardown gates (input_binding_gate.hpp)
+
+// A multi-combo Hold shares one HoldGate across all its exploded engine entries. The gate reference-counts the active
+// entries so overlapping combos forward only the aggregate 0->1 and 1->0 transitions: no duplicate raise while a
+// second combo comes down, and no premature release while any combo is still held.
+TEST(BindingGateTest, HoldGateMultiComboForwardsOnlyAggregateEdges)
+{
+    std::vector<bool> seq;
+    detail::HoldGate gate;
+    gate.on_state_change = [&](bool active) { seq.push_back(active); };
+
+    gate.deliver(true);  // combo A pressed           -> 0->1: one held edge
+    gate.deliver(true);  // combo B pressed (A held)  -> 1->2: no forward (no duplicate raise)
+    gate.deliver(false); // combo A released (B held) -> 2->1: no forward (still held via B)
+    ASSERT_EQ(seq.size(), 1u);
+    EXPECT_TRUE(seq[0]);
+
+    gate.deliver(false); // combo B released          -> 1->0: one released edge
+    ASSERT_EQ(seq.size(), 2u);
+    EXPECT_FALSE(seq[1]);
+}
+
+// Control: a single-combo Hold still delivers exactly one true then one false, unchanged by the refcount.
+TEST(BindingGateTest, HoldGateSingleComboDeliversBalancedPair)
+{
+    std::vector<bool> seq;
+    detail::HoldGate gate;
+    gate.on_state_change = [&](bool active) { seq.push_back(active); };
+    gate.deliver(true);
+    gate.deliver(false);
+    ASSERT_EQ(seq.size(), 2u);
+    EXPECT_TRUE(seq[0]);
+    EXPECT_FALSE(seq[1]);
+}
+
+// A false edge while the active count is already zero (a re-balanced or duplicate release) is swallowed, keeping the
+// counter floored so it can never go negative and invert a later 0->1 raise.
+TEST(BindingGateTest, HoldGateSurplusFalseIsSwallowed)
+{
+    std::vector<bool> seq;
+    detail::HoldGate gate;
+    gate.on_state_change = [&](bool active) { seq.push_back(active); };
+    gate.deliver(false); // no outstanding true -> swallowed
+    EXPECT_TRUE(seq.empty());
+    gate.deliver(true);  // 0->1 still raises correctly
+    gate.deliver(false); // 1->0
+    ASSERT_EQ(seq.size(), 2u);
+    EXPECT_TRUE(seq[0]);
+    EXPECT_FALSE(seq[1]);
+}
+
+// A guard release on a still-held multi-combo hold synthesizes exactly one balancing false even though two entries
+// are physically down, and the released latch swallows every later edge so no stale true/false can land.
+TEST(BindingGateTest, HoldGateReleaseWhileMultiComboHeldSynthesizesOneFalse)
+{
+    std::vector<bool> seq;
+    detail::HoldGate gate;
+    gate.on_state_change = [&](bool active) { seq.push_back(active); };
+    gate.deliver(true); // A
+    gate.deliver(true); // B (no forward)
+    ASSERT_EQ(seq.size(), 1u);
+    gate.release(); // still held via both entries -> one balancing false
+    ASSERT_EQ(seq.size(), 2u);
+    EXPECT_FALSE(seq[1]);
+    gate.deliver(false); // post-release edges swallowed
+    gate.deliver(true);
+    EXPECT_EQ(seq.size(), 2u);
+}
+
+// PressGate::release() runs down any in-flight on_press before returning, so a caller can safely destroy state the
+// press callback captured the instant the guard is released. The releaser thread must not return while the callback
+// is parked.
+TEST(BindingGateTest, PressGateReleaseWaitsOutInFlightDelivery)
+{
+    detail::PressGate gate;
+    std::atomic<int> calls{0};
+    std::atomic<bool> in_callback{false};
+    std::atomic<bool> may_finish{false};
+    gate.on_press = [&]()
+    {
+        calls.fetch_add(1, std::memory_order_relaxed);
+        in_callback.store(true, std::memory_order_release);
+        while (!may_finish.load(std::memory_order_acquire))
+        {
+            std::this_thread::yield();
+        }
+    };
+
+    std::thread deliverer([&]() { gate.deliver(); });
+    while (!in_callback.load(std::memory_order_acquire))
+    {
+        std::this_thread::yield();
+    }
+
+    std::atomic<bool> release_returned{false};
+    std::thread releaser(
+        [&]()
+        {
+            gate.release();
+            release_returned.store(true, std::memory_order_release);
+        });
+
+    // While the callback is parked, release() must be blocked behind it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    EXPECT_FALSE(release_returned.load(std::memory_order_acquire))
+        << "release() must not return while on_press is still executing";
+
+    may_finish.store(true, std::memory_order_release);
+    releaser.join();
+    deliverer.join();
+    EXPECT_TRUE(release_returned.load(std::memory_order_acquire));
+    EXPECT_EQ(calls.load(std::memory_order_relaxed), 1);
+
+    gate.deliver(); // post-release: swallowed
+    EXPECT_EQ(calls.load(std::memory_order_relaxed), 1);
+}
+
+// A press callback that releases its own gate (a one-shot binding destroying its guard) must not deadlock: the
+// recursive mutex lets the self-release re-lock, and subsequent deliveries are swallowed.
+TEST(BindingGateTest, PressGateSelfReleaseFromCallbackDoesNotDeadlock)
+{
+    detail::PressGate gate;
+    int calls = 0;
+    gate.on_press = [&]()
+    {
+        ++calls;
+        gate.release(); // self-release on the delivering thread
+    };
+    gate.deliver(); // must return (no deadlock)
+    EXPECT_EQ(calls, 1);
+    gate.deliver(); // released -> swallowed
+    EXPECT_EQ(calls, 1);
+}
+
+// The shared enabled flag gates PressGate delivery, matching BindingGuard::is_active() (the guard clears it on
+// release).
+TEST(BindingGateTest, PressGateEnabledFlagGatesDelivery)
+{
+    detail::PressGate gate;
+    auto enabled = std::make_shared<std::atomic<bool>>(true);
+    gate.enabled = enabled;
+    int calls = 0;
+    gate.on_press = [&]() { ++calls; };
+    gate.deliver();
+    EXPECT_EQ(calls, 1);
+    enabled->store(false, std::memory_order_release);
+    gate.deliver();
+    EXPECT_EQ(calls, 1);
+}
+
+// A still-held hold torn down cross-thread invokes the balancing on_state_change(false) UNWRAPPED (unlike deliver(),
+// which wraps user callbacks), so a throwing release-edge callback propagates out of release(). The gate must stay
+// consistent regardless: forwarded_active is cleared before the call, so the throw cannot strand a stale true, a second
+// release() is an idempotent no-op that neither re-throws nor re-fires, and later edges are swallowed. BindingGuard's
+// composed teardown relies on this -- it runs the consume-suppression clear after the gate release even when that
+// release throws, so a thrown balancing edge cannot leave passthrough suppression armed for the rest of the process.
+TEST(BindingGateTest, HoldGateReleaseIsExceptionSafeWhenBalancingCallbackThrows)
+{
+    detail::HoldGate gate;
+    gate.enabled = std::make_shared<std::atomic<bool>>(true);
+    int falses = 0;
+    gate.on_state_change = [&falses](bool active)
+    {
+        if (!active)
+        {
+            ++falses;
+            throw std::runtime_error("release-edge callback");
+        }
+    };
+    gate.deliver(true); // held: a true edge is outstanding
+
+    EXPECT_THROW(gate.release(), std::runtime_error);
+    EXPECT_EQ(falses, 1); // the balancing false was attempted exactly once
+
+    // Consistent despite the throw: released is set and forwarded_active was cleared before the throwing call, so a
+    // second release() is a no-op and later edges are swallowed.
+    EXPECT_NO_THROW(gate.release());
+    gate.deliver(false);
+    gate.deliver(true);
+    EXPECT_EQ(falses, 1);
+}
+
+// Releasing a consume binding's guard must lift its passthrough suppression. Suppression is enforced off the engine
+// entry's consume flag, so the release clears it and republishes (mirroring set_consume(name, false)), which reshapes
+// the binding set. The reshape -- observable as an outstanding token going stale -- is the proof the consume-clear path
+// ran.
+TEST_F(InputTest, ReleasingConsumeGuardRepublishesToLiftSuppression)
+{
+    auto &mgr = input::Input::instance();
+
+    auto consume_guard = input::register_combo(input::ComboBinding{.name = "consume_zoom",
+                                                                   .trigger = input::Trigger::Press,
+                                                                   .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                                   .consume = true,
+                                                                   .on_press = []() {}});
+    ASSERT_TRUE(consume_guard.has_value());
+
+    (void)input::register_combo(input::ComboBinding{.name = "anchor",
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x70)}, {}}},
+                                                    .on_press = []() {}});
+
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const input::BindingToken token = mgr.acquire_token("anchor");
+    ASSERT_TRUE(mgr.token_current(token));
+
+    consume_guard->release();
+    EXPECT_FALSE(mgr.token_current(token))
+        << "consume-release must republish the binding set (as set_consume(false) does) to lift suppression";
+}
+
+// Control: a non-consume guard release only gates its callback; it must NOT reshape the binding set.
+TEST_F(InputTest, ReleasingPlainGuardDoesNotRepublish)
+{
+    auto &mgr = input::Input::instance();
+
+    auto plain_guard = input::register_combo(input::ComboBinding{.name = "plain",
+                                                                 .trigger = input::Trigger::Press,
+                                                                 .combos = {{{keyboard_key(0x71)}, {}}},
+                                                                 .on_press = []() {}});
+    ASSERT_TRUE(plain_guard.has_value());
+
+    (void)input::register_combo(input::ComboBinding{.name = "anchor",
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x70)}, {}}},
+                                                    .on_press = []() {}});
+
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const input::BindingToken token = mgr.acquire_token("anchor");
+    ASSERT_TRUE(mgr.token_current(token));
+
+    plain_guard->release();
+    EXPECT_TRUE(mgr.token_current(token)) << "a non-consume guard release must not reshape the binding set";
+}
+
+// Companion to ReleasingConsumeGuardRepublishesToLiftSuppression for the Hold trigger: a consume HOLD binding's guard
+// release must also lift its passthrough suppression. The composed release action runs the HoldGate teardown and then
+// the consume clear; releasing while not held takes the no-balancing-edge path, so this pins that the consume clear
+// (republish) is wired for hold bindings too, not only press.
+TEST_F(InputTest, ReleasingConsumeHoldGuardRepublishesToLiftSuppression)
+{
+    auto &mgr = input::Input::instance();
+
+    auto consume_guard = input::register_combo(input::ComboBinding{.name = "consume_hold_zoom",
+                                                                   .trigger = input::Trigger::Hold,
+                                                                   .combos = {{{gamepad_button(GamepadCode::A)}, {}}},
+                                                                   .consume = true,
+                                                                   .on_state_change = [](bool) {}});
+    ASSERT_TRUE(consume_guard.has_value());
+
+    (void)input::register_combo(input::ComboBinding{.name = "anchor",
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x70)}, {}}},
+                                                    .on_press = []() {}});
+
+    ASSERT_TRUE(mgr.start().has_value());
+
+    const input::BindingToken token = mgr.acquire_token("anchor");
+    ASSERT_TRUE(mgr.token_current(token));
+
+    consume_guard->release();
+    EXPECT_FALSE(mgr.token_current(token))
+        << "consume-hold release must republish the binding set (as set_consume(false) does) to lift suppression";
+}
+
+// A live multi-combo registration forwards every exploded combo entry; the common case commits the whole batch.
+TEST_F(InputTest, RegisterComboLiveForwardsEveryComboEntry)
+{
+    auto &mgr = input::Input::instance();
+    (void)input::register_combo(input::ComboBinding{.name = "seed",
+                                                    .trigger = input::Trigger::Press,
+                                                    .combos = {{{keyboard_key(0x70)}, {}}},
+                                                    .on_press = []() {}});
+    ASSERT_TRUE(mgr.start().has_value());
+    ASSERT_EQ(mgr.binding_count(), 1u);
+
+    auto guard = input::register_combo(
+        input::ComboBinding{.name = "multi",
+                            .trigger = input::Trigger::Press,
+                            .combos = {{{keyboard_key(0x71)}, {}}, {{keyboard_key(0x72)}, {}}},
+                            .on_press = []() {}});
+    ASSERT_TRUE(guard.has_value());
+    EXPECT_EQ(mgr.binding_count(), 3u); // seed + two combo entries
+}
+
+// add_binding fails closed and reports the failure (returns false) when growing the engine's state array runs out of
+// memory, so a caller can surface it instead of reporting success.
+TEST_F(InputPollerTest, AddBindingReturnsFalseWhenGrowthAllocationFails)
+{
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding seed;
+    seed.name = "seed";
+    seed.keys = {keyboard_key(0x70)};
+    bindings.push_back(seed);
+    detail::InputPoller poller(std::move(bindings));
+
+    detail::InputBinding extra;
+    extra.name = "extra";
+    extra.keys = {keyboard_key(0x71)};
+
+    // Force the process-default logger's one-time `new Logger()` to run BEFORE the allocator is armed. ctest runs each
+    // test in its own process, so this test can be the first log() call in it; add_binding's OOM catch logs, and the
+    // first-use logger construction deliberately terminates under OOM (a noexcept boundary). Warming it up here keeps
+    // that construction out of the armed window so the catch's guarded log is exercised on an already-built logger.
+    (void)DetourModKit::log();
+
+    bool added_under_oom = true;
+    {
+        dmk_test::AllocFailScope fail(0); // fail the replacement state-array allocation
+        added_under_oom = poller.add_binding(std::move(extra));
+    }
+    EXPECT_FALSE(added_under_oom);
+    EXPECT_EQ(poller.binding_count(), 1u); // poller left exactly as it was
+
+    detail::InputBinding extra2;
+    extra2.name = "extra2";
+    extra2.keys = {keyboard_key(0x72)};
+    EXPECT_TRUE(poller.add_binding(std::move(extra2)));
+    EXPECT_EQ(poller.binding_count(), 2u);
+}
+
+// add_bindings commits a batch atomically. If growth fails, no entry from the batch is published; this matters for
+// consume bindings because suppression is driven by the entry's consume flag and cannot be neutralized by only clearing
+// the guard's enabled flag.
+TEST_F(InputPollerTest, AddBindingsReturnsFalseWithoutPartialBatchWhenGrowthAllocationFails)
+{
+    std::vector<detail::InputBinding> bindings;
+    detail::InputBinding seed;
+    seed.name = "seed";
+    seed.keys = {keyboard_key(0x70)};
+    bindings.push_back(seed);
+    detail::InputPoller poller(std::move(bindings));
+
+    std::vector<detail::InputBinding> batch;
+    batch.reserve(2);
+
+    detail::InputBinding first;
+    first.name = "consume_batch";
+    first.keys = {gamepad_button(GamepadCode::A)};
+    first.consume = true;
+    batch.push_back(std::move(first));
+
+    detail::InputBinding second;
+    second.name = "consume_batch";
+    second.keys = {gamepad_button(GamepadCode::B)};
+    second.consume = true;
+    batch.push_back(std::move(second));
+
+    (void)DetourModKit::log();
+
+    bool added_under_oom = true;
+    {
+        dmk_test::AllocFailScope fail(0);
+        added_under_oom = poller.add_bindings(std::move(batch));
+    }
+    EXPECT_FALSE(added_under_oom);
+    EXPECT_EQ(poller.binding_count(), 1u);
+
+    std::vector<detail::InputBinding> retry;
+    retry.reserve(2);
+
+    detail::InputBinding retry_first;
+    retry_first.name = "consume_batch";
+    retry_first.keys = {gamepad_button(GamepadCode::A)};
+    retry_first.consume = true;
+    retry.push_back(std::move(retry_first));
+
+    detail::InputBinding retry_second;
+    retry_second.name = "consume_batch";
+    retry_second.keys = {gamepad_button(GamepadCode::B)};
+    retry_second.consume = true;
+    retry.push_back(std::move(retry_second));
+
+    EXPECT_TRUE(poller.add_bindings(std::move(retry)));
+    EXPECT_EQ(poller.binding_count(), 3u);
 }

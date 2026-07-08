@@ -37,6 +37,7 @@ using DetourModKit::detail::wheel_direction_bit;
 using DetourModKit::detail::WheelDirection;
 using DetourModKit::detail::WheelPulseState;
 using DetourModKit::detail::wndproc_installed;
+using DetourModKit::detail::wndproc_saved_procedure;
 using DetourModKit::detail::xinput_installed;
 using DetourModKit::detail::xinput_trampoline;
 using DetourModKit::detail::XInputGetStateFn;
@@ -685,6 +686,28 @@ TEST_F(InterceptWndProcTest, InstallCapturesWheelNotchesPerDirection)
     EXPECT_EQ(counts[1], 0);
     EXPECT_EQ(counts[2], 3); // Left
     EXPECT_EQ(counts[3], 1); // Right
+}
+
+// uninstall_wndproc()'s restore branch must leave s_prev_wndproc pointing at the real procedure rather than zeroing it.
+// A wndproc_detour frame already in flight when the restore lands loads this value at the top of the detour and
+// forwards the message there; a zeroed value would route that frame to DefWindowProcW and silently drop messages such
+// as WM_CLOSE or WM_ACTIVATE at every interception teardown.
+TEST_F(InterceptWndProcTest, UninstallLeavesSavedProcedureForInFlightFrames)
+{
+    // Make the window's own procedure the predecessor the detour will save and forward to.
+    SetWindowLongPtrW(m_hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&recording_wndproc));
+    if (!install_on_our_window())
+    {
+        GTEST_SKIP() << "install_wndproc subclassed a different process window";
+    }
+    // install_wndproc captured recording_wndproc as the predecessor.
+    ASSERT_EQ(wndproc_saved_procedure(), reinterpret_cast<LONG_PTR>(&recording_wndproc));
+
+    uninstall(); // restore branch: the detour is removed from the chain
+
+    EXPECT_FALSE(wndproc_installed());
+    EXPECT_EQ(wndproc_saved_procedure(), reinterpret_cast<LONG_PTR>(&recording_wndproc))
+        << "uninstall must not zero the saved predecessor; an in-flight detour frame would route to DefWindowProcW";
 }
 
 TEST_F(InterceptWndProcTest, ConsumeSwallowsOnlyTheOwnedWheelDirection)
