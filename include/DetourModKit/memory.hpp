@@ -58,7 +58,9 @@ namespace DetourModKit
          *          byte-span sink (`write_in_place`) or must go through `write_bytes` (`write`), and the typed form
          *          only ever binds a genuine value. Both extents (dynamic and static) are matched because a
          *          static-extent `std::span<std::byte, N>` is equally an exact match and equally convertible to the
-         *          dynamic sink.
+         *          dynamic sink. The trait matches only the bare specializations, so every constraint site inspects
+         *          `std::remove_cvref_t<T>` -- otherwise an explicit cv/ref-qualified argument type (e.g.
+         *          `write<const std::span<std::byte>>`) would slip past the plain trait and be bit-copied.
          *          Lives in DetourModKit::detail (not memory::detail) so it never shadows the engine's detail namespace
          *          that memory:: implementation TUs reference.
          */
@@ -202,7 +204,7 @@ namespace DetourModKit
          * @note Callback-safe on the fast path (see @ref write_bytes).
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<T>)
+            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<std::remove_cvref_t<T>>)
         [[nodiscard]] Result<void> write(Address address, const T &value) noexcept
         {
             const auto storage = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
@@ -243,7 +245,7 @@ namespace DetourModKit
          * @note Callback-safe (see @ref write_in_place).
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<T>)
+            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<std::remove_cvref_t<T>>)
         [[nodiscard]] Result<void> write_in_place(Address address, const T &value) noexcept
         {
             const auto storage = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);

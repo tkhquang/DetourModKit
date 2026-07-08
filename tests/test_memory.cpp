@@ -3209,6 +3209,17 @@ namespace
     static_assert(WriteInPlaceCallable<std::span<std::byte>>, "write_in_place(addr, span<byte>) must select the sink");
     static_assert(WriteInPlaceCallable<std::span<const std::byte>>);
     static_assert(WriteInPlaceCallable<int>, "write_in_place(addr, value) must remain valid");
+
+    // A cv/ref-qualified byte-span type (reachable only through an EXPLICIT template argument, since argument
+    // deduction never yields a cv/ref T) must not slip past the constraint. The bare trait matches only the
+    // unqualified span specializations, so the write / write_in_place constraints inspect std::remove_cvref_t<T>:
+    // these assert both halves of that reasoning so a future edit that drops the normalization is caught here.
+    static_assert(!detail::is_byte_span_v<const std::span<std::byte>>,
+                  "the bare trait does not see through const, so the constraint must normalize the type");
+    static_assert(detail::is_byte_span_v<std::remove_cvref_t<const std::span<std::byte>>>,
+                  "the normalization the constraints apply recognizes a const byte span");
+    static_assert(detail::is_byte_span_v<std::remove_cvref_t<std::span<std::byte> &>>,
+                  "the normalization also strips a reference qualifier");
 } // namespace
 
 TEST_F(MemoryTest, WriteInPlace_MutableByteSpanWritesViewedBytes)
@@ -3300,7 +3311,7 @@ TEST_F(MemoryTest, ShutdownCache_ConcurrentCallersJoinExactlyOnceNoTerminate)
     for (int i = 0; i < THREAD_COUNT; ++i)
     {
         callers.emplace_back(
-            [&]()
+            [&ready, &go]()
             {
                 ready.fetch_add(1, std::memory_order_relaxed);
                 while (!go.load(std::memory_order_acquire))

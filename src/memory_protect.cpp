@@ -160,6 +160,10 @@ namespace DetourModKit
                 os_error);
             if (segment_count == 0)
             {
+                // The walk changed and then rolled back one or more regions, so it TOUCHED protection even though the
+                // net result is the original protection. Invalidate the range so a snapshot a concurrent reader cached
+                // from the transient changed protection during the walk cannot survive, matching the success path.
+                invalidate_range(region);
                 return std::unexpected(Error{ErrorCode::ProtectionChangeFailed, "memory::ProtectGuard::make",
                                              region.base.raw(), os_error});
             }
