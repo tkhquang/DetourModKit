@@ -349,6 +349,15 @@ namespace DetourModKit::scan
      *          skipped after faulting mid-scan under the TOCTOU guard (a concurrent decommit/reprotect), the occurrence
      *          count is only a lower bound, so a would-be unique result is reported as StringAmbiguous (phase 1) or
      *          AmbiguousReference (phase 2) rather than a possibly-non-unique anchor.
+     * @note Phase-2 uniqueness is uniqueness AMONG THE SCANNED SHAPES, not global uniqueness. With @ref
+     *       StringRefQuery::broad_match false (the default) only the REX.W `lea`/`mov reg, [rip+disp32]` shape is
+     *       counted, so a second reference of an unmodeled shape (a `cmp [rip+d], imm`, a no-REX `lea`, ...) is invisible
+     *       and the narrow reference is still reported unique. That is safe for the default `ReferencingInstruction`
+     *       return (the returned narrow site genuinely references the string), but `EnclosingFunction` can then attribute
+     *       the string to the wrong function if the true sole caller uses an unmodeled shape. Set `broad_match` to widen
+     *       the uniqueness check across every RIP-relative shape when a globally-unique reference matters; string-xref
+     *       anchors expose the same knob through @ref anchor::Anchor::xref_broad_match and
+     *       @ref anchor::ScanProfile::default_broad_string_xref.
      * @note Not noexcept: the broad-match phase may allocate while decoding. Setup/control-plane only.
      */
     [[nodiscard]] Result<Address> find_string_xref(const StringRefQuery &query, Region scope = Region::host());
@@ -855,10 +864,13 @@ namespace DetourModKit::scan
      * @param opcode_prefix The opcode byte sequence to search for.
      * @param instruction_length Total length of the instruction in bytes.
      * @return The resolved absolute address, or an Error.
-     * @details Matching is first-prefix-wins. The prefix search reads @p search directly with no page filtering, so the
-     *          caller must guarantee the region is committed and readable (use it over a region already known readable,
-     *          such as a located function body); to resolve a single instruction whose address is uncertain, prefer
-     *          resolve_rip_relative, whose displacement read is fault-guarded. For indirect-call / indirect-jump forms
+     * @details Matching is first-resolvable-prefix-wins: an occurrence whose disp32 resolves to an implausible or
+     *          unreadable target is treated as a coincidental decoy and skipped, and the scan continues to the next
+     *          occurrence, failing only after the whole region is exhausted (the last decode failure is surfaced). The
+     *          prefix search reads @p search directly with no page filtering, so the caller must guarantee the region is
+     *          committed and readable (use it over a region already known readable, such as a located function body); to
+     *          resolve a single instruction whose address is uncertain, prefer resolve_rip_relative, whose displacement
+     *          read is fault-guarded. For indirect-call / indirect-jump forms
      *          (`FF 15`/`FF 25`) the returned address is the pointer slot, not the final target. The resolved target is
      *          gated by the same ImplausibleTarget check as resolve_rip_relative. When a signature may be ambiguous,
      *          anchor it through resolve() (which enforces per-candidate uniqueness) instead.

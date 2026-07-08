@@ -196,6 +196,24 @@ namespace DetourModKit
             /// Manual: the pinned literal value, taken as-is.
             std::int64_t manual_value = 0;
 
+            /**
+             * @brief Optional post-resolve validator threaded onto the compiled @ref anchor::Anchor, mirroring @ref
+             *        anchor::Anchor::validator. In-memory only: a function pointer cannot round-trip through an INI
+             *        file, so @ref parse never populates it and @ref serialize never writes it. A consumer attaches it
+             *        programmatically (after loading a manifest, or on a hand-built record) so a file-loaded or adopted
+             *        signature can still assert a domain invariant instead of trusting the raw resolved address.
+             */
+            anchor::AnchorValidator validator = nullptr;
+            /// Opaque pointer forwarded verbatim to @ref validator. In-memory only (see @ref validator).
+            const void *validator_context = nullptr;
+            /**
+             * @brief Run @ref validator on a Manual anchor too, instead of taking the pinned literal unchecked.
+             * @details In-memory only.
+             */
+            bool validate_manual = false;
+            /// Reject a backend-resolvable anchor that carries no @ref validator (fails closed). In-memory only.
+            bool require_validator = false;
+
             /// How the consumer interprets the resolved value.
             Binding binding{};
 
@@ -241,18 +259,19 @@ namespace DetourModKit
              * @param record The owning record (moved in; its strings back the resolved anchor view).
              * @return The compiled Signature, or an Error: BadPattern (a ladder rung's AOB failed to compile),
              *         EmptyCandidates (a RipGlobal / CodeOperand record with no ladder), or InvalidArg (a record whose
-             *         kind is the non-serializable Quorum / CallArgHome).
+             *         kind is the non-serializable Quorum / CallArgHome / Unset, or whose kind's required evidence is
+             *         empty).
              * @note Setup/control-plane only: compiling a ladder parses each rung's Pattern.
              */
             [[nodiscard]] static Result<Signature> compile(SignatureRecord record);
 
             /**
              * @brief Adopts an in-code @ref anchor::Anchor as a signature, deep-copying its evidence into owned
-             * storage.
+             *          storage.
              * @param source The in-code anchor (one of the five serializable kinds); its views are copied, not
-             * retained.
-             * @return The owning Signature, or an Error: InvalidArg (a Quorum or CallArgHome anchor, which composes or
-             *         lacks resolvable evidence and cannot be expressed as a flat record).
+             *        retained.
+             * @return The owning Signature, or an Error: InvalidArg (a Quorum, CallArgHome, or Unset anchor, or a
+             *         serializable anchor whose required evidence is empty).
              * @details The counterpart to @ref compile for a signature that originates in code rather than a file. It
              *          copies the anchor's borrowed site candidates and strings into this object so the adopted
              *          signature outlives the caller's anchor table. The resulting record carries no ladder text (a
@@ -434,8 +453,9 @@ namespace DetourModKit
          *            than dropped, so an override never makes things worse than not shipping the file.
          *          - An override whose label matches no default is inert (nothing in code queries it) and is not
          *            included: the file overrides labels the code already knows about.
-         *          A default whose kind is the non-serializable Quorum / CallArgHome cannot be adopted and is skipped;
-         *          resolve and gate those directly in code through @ref anchor::evaluate_gate.
+         *          A default whose kind is the non-serializable Quorum / CallArgHome / Unset, or whose required
+         *          evidence is empty, cannot be adopted and is skipped; resolve and gate non-serializable anchors
+         *          directly in code through @ref anchor::evaluate_gate.
          */
         [[nodiscard]] Result<std::vector<Signature>> overlay(std::span<const anchor::Anchor> defaults,
                                                              std::span<const SignatureRecord> overrides);

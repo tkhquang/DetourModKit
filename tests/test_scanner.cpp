@@ -19,6 +19,8 @@
 #include "DetourModKit/memory.hpp"
 #include "DetourModKit/diagnostics.hpp"
 
+#include "test_alloc_probe.hpp"
+
 // windows.h included after project headers to avoid macro conflicts (e.g., 'small')
 #include <windows.h>
 #ifdef small
@@ -291,6 +293,39 @@ TEST(ScannerJumpsTest, MultiGapExhaustiveBacktrackingTerminates)
     const std::byte *m = detail::find_pattern(hit.data(), hit.size(), *p);
     ASSERT_NE(m, nullptr);
     EXPECT_EQ(m - hit.data(), 0);
+}
+
+// The segmented matcher caps per-position backtracking with a work budget. Eight maximum-width gaps between
+// all-wildcard segments give a per-position worst case of roughly 256^8 combinations; without the budget a single
+// anchor position over a large enough region would hang. The literal segment-0 anchor appears exactly once, so exactly
+// one extension tree runs; the budget bounds it and the guaranteed miss returns promptly. The region carries no 0xFF,
+// so the correct answer is a clean no-match.
+TEST(ScannerJumpsTest, MultiGapWorkBudgetCapsPathologicalBacktracking)
+{
+    const auto p = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+                                     "[0-255] FF");
+    ASSERT_TRUE(p.has_value());
+    ASSERT_EQ(p->jumps.size(), 8u); // MAX_PATTERN_JUMPS: the widest gap count the grammar admits.
+
+    // 3 KiB of zeros with a lone anchor byte and no 0xFF anywhere: the extension from the single A5 must explore (and,
+    // absent the budget, exhaustively backtrack) the full gap product before failing. The region is large enough that
+    // the gaps can try their full 256-byte span, so the un-budgeted worst case is genuinely astronomical. The asserted
+    // no-match is the correct answer either way, so the cap is proven by TERMINATION: revert it and this case hangs
+    // until the ctest timeout fails it, rather than tripping the assertion below.
+    std::vector<std::byte> region(3072, std::byte{0x00});
+    region[0] = std::byte{0xA5};
+
+    EXPECT_EQ(detail::find_pattern(region.data(), region.size(), *p), nullptr);
+}
+
+// The runtime AOB parser grows a heap-backed pattern, so an allocation failure mid-parse must fail closed to nullopt
+// rather than terminate. parse_pattern_into is intentionally not noexcept, and parse_aob catches bad_alloc; without
+// that, the bad_alloc would cross a noexcept boundary and std::terminate would abort this process.
+TEST(ScannerTest, parse_aob_allocation_failure_fails_soft)
+{
+    dmk_test::AllocFailScope fail(0); // fail every allocation the parse attempts, starting with the first push_back
+    const auto result = detail::parse_aob("48 8B 05 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+    EXPECT_FALSE(result.has_value());
 }
 
 // The runtime engine parser and the compile-time value parser are one and the same, so both produce an identical
