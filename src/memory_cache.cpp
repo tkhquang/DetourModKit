@@ -115,6 +115,13 @@ namespace DetourModKit
                 // The first thread to CAS this 0 -> 1 becomes the VirtualQuery leader for the shard; the rest coalesce
                 // onto its result. Inline so it never shares a cache line with a neighbouring shard's flag.
                 std::atomic<char> in_flight{0};
+                // Per-shard hit / miss tallies. The hot is_readable / is_writable path bumps one of these on every
+                // query; keeping them in the shard (which the querying thread is already touching) rather than one
+                // process-global pair of counters keeps the increment on a line no other shard's readers contend for,
+                // so a busy multi-threaded workload does not ping-pong a single global counter line across every core.
+                // get_memory_stats sums them across shards under the same reader guard it uses for the entry totals.
+                std::atomic<std::uint64_t> hits{0};
+                std::atomic<std::uint64_t> misses{0};
                 std::uint64_t entry_counter{0};
                 std::size_t capacity;
                 std::size_t max_capacity;
@@ -191,16 +198,19 @@ namespace DetourModKit
             std::array<ReaderStripe, READER_STRIPE_COUNT> s_reader_stripes{};
 
             /**
-             * @brief Returns this thread's reader stripe, assigned round-robin on first use so concurrent readers
-             * spread
+             * @brief Returns this thread's reader stripe, derived from its Win32 thread id so concurrent readers spread
              *        across distinct cache lines instead of contending on one counter.
+             * @details Golden-ratio bit-mixing of GetCurrentThreadId gives a stable per-thread stripe with no allocation
+             *          and no lock, so it is safe on a readability check driven under loader lock (setup from DllMain),
+             *          unlike a thread_local round-robin counter whose MinGW first touch lowers to an allocating
+             *          __emutls_get_address. A thread id is stable for the thread's life, so the same stripe carries the
+             *          ActiveReaderGuard increment and its paired decrement; two ids colliding onto one stripe only add
+             *          minor contention, never a miscount of the drain.
              */
             [[nodiscard]] inline std::size_t reader_stripe_index() noexcept
             {
-                static std::atomic<std::size_t> s_next_stripe{0};
-                thread_local const std::size_t stripe =
-                    s_next_stripe.fetch_add(1, std::memory_order_relaxed) % READER_STRIPE_COUNT;
-                return stripe;
+                const std::uint64_t mixed = static_cast<std::uint64_t>(GetCurrentThreadId()) * 0x9E3779B97F4A7C15ULL;
+                return static_cast<std::size_t>(mixed >> 48) % READER_STRIPE_COUNT;
             }
 
             /**
@@ -262,16 +272,27 @@ namespace DetourModKit
             std::mutex s_cleanup_mutex;
             std::condition_variable s_cleanup_cv;
             std::atomic<bool> s_cleanup_requested{false};
+            // Serializes the join/detach decision so two concurrent shutdown_cache callers (an explicit teardown racing
+            // the atexit handler) cannot both pass s_cleanup_thread.joinable() and both join the same std::thread --
+            // the second join is a std::system_error thrown out of this noexcept function, terminating the host. The
+            // winner joins/detaches (which flips joinable() to false), and any loser that then takes this lock sees the
+            // thread already non-joinable and skips. Loader-lock teardown uses a try-lock variant so it never waits
+            // while a normal shutdown is already joining the thread; the cleanup thread's own exit may need the loader
+            // lock.
+            // The cleanup thread never takes this mutex, and it is released before s_cache_state_mutex, so it never
+            // nests with the state lock either.
+            std::mutex s_cleanup_join_mutex;
 
             // On-demand cleanup fallback timer (used when the background thread is disabled).
             std::atomic<std::uint64_t> s_last_cleanup_time_ns{0};
             constexpr std::uint64_t CLEANUP_INTERVAL_NS = 1'000'000'000ULL;
 
-            // Always-available cache statistics. Each counter is alignas(64) so it lands on its own cache line: the hot
-            // cache_hits / cache_misses counters are bumped by a fetch_add on every is_readable / is_writable, and
-            // packing all five into one or two lines would false-share -- two threads incrementing different counters
-            // would ping-pong the shared line's ownership even though the writes never conflict. Same
-            // cache-line-hygiene rationale as CacheShard and ReaderStripe above.
+            // Process-global cache statistics for the COLD counters. The hot hit / miss tallies live per-shard in
+            // CacheShard (summed at snapshot time), so a hot query bumps only the shard line it is already touching
+            // rather than one process-global counter line. The counters here are bumped only off the read hot path --
+            // invalidations after a write, coalesced queries on a stampede, on-demand cleanups periodically -- so a
+            // single line is fine. Each is alignas(64) so the three never false-share with one another. Same rationale
+            // as CacheShard / ReaderStripe.
 #if defined(_MSC_VER)
 #pragma warning(push)
 // C4324: each counter is intentionally padded to a full cache line by alignas(64) to prevent false sharing.
@@ -279,8 +300,6 @@ namespace DetourModKit
 #endif
             struct CacheStats
             {
-                alignas(64) std::atomic<std::uint64_t> cache_hits{0};
-                alignas(64) std::atomic<std::uint64_t> cache_misses{0};
                 alignas(64) std::atomic<std::uint64_t> invalidations{0};
                 alignas(64) std::atomic<std::uint64_t> coalesced_queries{0};
                 alignas(64) std::atomic<std::uint64_t> on_demand_cleanups{0};
@@ -332,8 +351,12 @@ namespace DetourModKit
             /**
              * @brief Inserts a range into the shard's sorted auxiliary container.
              * @note Must be called with the shard mutex held (exclusive).
+             * @note Deliberately NOT noexcept: the std::deque insert allocates and can throw std::bad_alloc when it
+             *       grows. Both callers run inside the throwing update_shard_with_region_impl, whose noexcept
+             *       update_shard_with_region wrapper catches that allocation failure and fails soft -- so this must let
+             *       bad_alloc propagate to that catch rather than terminate at its own noexcept frame.
              */
-            void insert_sorted_range(CacheShard &shard, std::uintptr_t base_addr, std::size_t region_size) noexcept
+            void insert_sorted_range(CacheShard &shard, std::uintptr_t base_addr, std::size_t region_size)
             {
                 auto range = std::make_pair(base_addr, base_addr + region_size);
                 auto pos = std::lower_bound(shard.sorted_ranges.begin(), shard.sorted_ranges.end(), range);
@@ -441,11 +464,12 @@ namespace DetourModKit
             }
 
             /**
-             * @brief Updates or inserts a cache entry in a specific shard.
-             * @note Must be called with the shard mutex held (exclusive).
+             * @brief Updates or inserts a cache entry in a specific shard (the throwing body).
+             * @note Must be called with the shard mutex held (exclusive). Inserts unordered_map / map / deque nodes, so
+             *       it can throw bad_alloc; the noexcept @ref update_shard_with_region wrapper fails soft on that.
              */
-            void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
-                                          std::uint64_t current_ns) noexcept
+            void update_shard_with_region_impl(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
+                                               std::uint64_t current_ns)
             {
                 const std::uintptr_t base_addr = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
 
@@ -502,6 +526,32 @@ namespace DetourModKit
                     shard.entries.insert_or_assign(base_addr, new_entry);
                     shard.lru_index.emplace(new_lru_key, base_addr);
                     insert_sorted_range(shard, base_addr, mbi.RegionSize);
+                }
+            }
+
+            /**
+             * @brief Updates or inserts a cache entry in a specific shard, failing soft on allocation failure.
+             * @note Must be called with the shard mutex held (exclusive).
+             * @details The cache is a performance hint layered over the authoritative VirtualQuery the caller already
+             *          holds, so a node-allocation failure must fail SOFT (skip the cache update) rather than escape
+             *          this noexcept path and terminate the host under the exact memory pressure the query must survive.
+             *          The shard containers give at least the basic guarantee on a single-element insert, and the
+             *          shard's lookups tolerate a cross-container inconsistency in either direction -- a stray lru /
+             *          sorted-range entry with no matching map entry, or a map entry whose lru / sorted-range mate was
+             *          dropped when a throwing insert abandoned the update mid-way -- because a lookup reconciles against
+             *          the map entry (a missing sorted-range only forces a re-query) and cleanup sweeps the survivor by
+             *          expiry, so an abandoned partial update leaves the shard valid. Mirrors the fail-soft caching in
+             *          detail::cached_module_image_region.
+             */
+            void update_shard_with_region(CacheShard &shard, const MEMORY_BASIC_INFORMATION &mbi,
+                                          std::uint64_t current_ns) noexcept
+            {
+                try
+                {
+                    update_shard_with_region_impl(shard, mbi, current_ns);
+                }
+                catch (const std::bad_alloc &)
+                {
                 }
             }
 
@@ -643,6 +693,71 @@ namespace DetourModKit
                 else
                 {
                     try_trigger_on_demand_cleanup();
+                }
+            }
+
+            /**
+             * @brief Detaches the cleanup thread under loader lock after the caller has claimed the join mutex.
+             */
+            void detach_cleanup_thread_under_loader_lock() noexcept
+            {
+                if (!s_cleanup_thread.joinable())
+                {
+                    return;
+                }
+
+                // Under loader lock (DllMain / FreeLibrary): a join would deadlock because the cleanup thread cannot
+                // exit while the loader lock is held. Detach it and leak the module reference taken at creation, so its
+                // code stays mapped for the rest of the process.
+                s_cleanup_thread.detach();
+                DetourModKit::diagnostics::record_intentional_leak(
+                    DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
+            }
+
+            /**
+             * @brief Tries to claim and detach the cleanup thread without blocking under loader lock.
+             * @return true if this caller claimed the join mutex and observed the thread state; false if another
+             *         shutdown is already joining or detaching the thread.
+             */
+            bool try_detach_cleanup_thread_under_loader_lock() noexcept
+            {
+                std::unique_lock<std::mutex> join_lock(s_cleanup_join_mutex, std::try_to_lock);
+                if (!join_lock.owns_lock())
+                {
+                    // Do not wait under the loader lock. The owner is already handling the join/detach decision; after
+                    // this thread returns from detach, the cleanup thread can finish its own loader notifications and
+                    // let that owner complete.
+                    return false;
+                }
+
+                detach_cleanup_thread_under_loader_lock();
+                return true;
+            }
+
+            /**
+             * @brief Claims the cleanup thread's final join/detach action exactly once.
+             */
+            void finish_cleanup_thread() noexcept
+            {
+                if (is_loader_lock_held())
+                {
+                    (void)try_detach_cleanup_thread_under_loader_lock();
+                    return;
+                }
+
+                std::lock_guard<std::mutex> join_lock(s_cleanup_join_mutex);
+                if (!s_cleanup_thread.joinable())
+                {
+                    return;
+                }
+
+                s_cleanup_thread.join();
+                // Joined off the loader lock: drop the reference taken at creation. Another reference on the module
+                // still exists (the caller running this teardown), so this is never the terminal release.
+                if (s_cleanup_self_ref != nullptr)
+                {
+                    release_module_ref(s_cleanup_self_ref);
+                    s_cleanup_self_ref = nullptr;
                 }
             }
 
@@ -869,7 +984,7 @@ namespace DetourModKit
                 if (address == 0 || size == 0)
                     return false;
 
-                // Construct the reader guard BEFORE loading s_cache_initialized so shutdown_cache cannot free the shard
+                // Construct the reader guard before loading s_cache_initialized so shutdown_cache cannot free the shard
                 // array between the check and the access.
                 ActiveReaderGuard reader_guard;
 
@@ -905,12 +1020,12 @@ namespace DetourModKit
                         find_in_shard(s_cache_shards[shard_idx], address, size, now_ns, expiry_ns);
                     if (cached_info)
                     {
-                        s_stats.cache_hits.fetch_add(1, std::memory_order_relaxed);
+                        s_cache_shards[shard_idx].hits.fetch_add(1, std::memory_order_relaxed);
                         return check_permission(cached_info->protection);
                     }
                 }
 
-                s_stats.cache_misses.fetch_add(1, std::memory_order_relaxed);
+                s_cache_shards[shard_idx].misses.fetch_add(1, std::memory_order_relaxed);
 
                 MEMORY_BASIC_INFORMATION mbi{};
                 if (!query_and_update_cache(shard_idx, reinterpret_cast<LPCVOID>(address), mbi))
@@ -1001,14 +1116,11 @@ namespace DetourModKit
 #endif
                                     s_cleanup_thread_running.store(false, std::memory_order_release);
                                     s_cleanup_cv.notify_one();
-                                    if (s_cleanup_thread.joinable())
-                                    {
-                                        // Detach and LEAK the module reference taken at creation: the detached cleanup
-                                        // thread's code stays mapped for the rest of the process.
-                                        s_cleanup_thread.detach();
-                                        DetourModKit::diagnostics::record_intentional_leak(
-                                            DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
-                                    }
+                                    // Serialize the detach with shutdown_cache's join/detach so an explicit teardown
+                                    // racing this atexit handler cannot touch the same std::thread twice. This is a
+                                    // try-lock under loader lock; if another shutdown is already joining, returning
+                                    // promptly lets the cleanup thread finish its own loader notifications.
+                                    (void)try_detach_cleanup_thread_under_loader_lock();
                                     s_cache_initialized.store(false, std::memory_order_release);
                                     return;
                                 }
@@ -1044,10 +1156,10 @@ namespace DetourModKit
                 s_cache_shards[i].lru_index.clear();
                 s_cache_shards[i].sorted_ranges.clear();
                 s_cache_shards[i].in_flight.store(0, std::memory_order_relaxed);
+                s_cache_shards[i].hits.store(0, std::memory_order_relaxed);
+                s_cache_shards[i].misses.store(0, std::memory_order_relaxed);
             }
 
-            s_stats.cache_hits.store(0, std::memory_order_relaxed);
-            s_stats.cache_misses.store(0, std::memory_order_relaxed);
             s_stats.invalidations.store(0, std::memory_order_relaxed);
             s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
             s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
@@ -1066,31 +1178,14 @@ namespace DetourModKit
 
         void shutdown_cache() noexcept
         {
-            // Signal and join the cleanup thread BEFORE acquiring the state mutex: the thread takes s_cache_state_mutex
+            // Signal and join the cleanup thread before acquiring the state mutex: the thread takes s_cache_state_mutex
             // in cleanup_expired_entries(force=true), so joining while holding it would deadlock.
             s_cleanup_thread_running.store(false, std::memory_order_release);
             s_cleanup_cv.notify_one();
 
-            if (s_cleanup_thread.joinable())
-            {
-                if (is_loader_lock_held())
-                {
-                    // Under loader lock (DllMain / FreeLibrary): a join would deadlock because the cleanup thread
-                    // cannot exit while the loader lock is held. Detach it and LEAK the module reference taken at
-                    // creation, so its code stays mapped for the rest of the process.
-                    s_cleanup_thread.detach();
-                    DetourModKit::diagnostics::record_intentional_leak(
-                        DetourModKit::diagnostics::LeakSubsystem::MemoryCache);
-                }
-                else
-                {
-                    s_cleanup_thread.join();
-                    // Joined off the loader lock: drop the reference taken at creation. Another reference on the module
-                    // still exists (the caller running this teardown), so this is never the terminal release.
-                    release_module_ref(s_cleanup_self_ref);
-                    s_cleanup_self_ref = nullptr;
-                }
-            }
+            // Claim the cleanup thread's final action before taking the state mutex; a loader-lock caller uses the
+            // helper's non-blocking detach path.
+            finish_cleanup_thread();
 
             std::lock_guard<std::mutex> state_lock(s_cache_state_mutex);
 
@@ -1130,8 +1225,8 @@ namespace DetourModKit
 
             s_cache_shards.reset();
 
-            s_stats.cache_hits.store(0, std::memory_order_relaxed);
-            s_stats.cache_misses.store(0, std::memory_order_relaxed);
+            // The per-shard hit / miss tallies were freed with the shard array above; only the global cold counters
+            // need an explicit reset here.
             s_stats.invalidations.store(0, std::memory_order_relaxed);
             s_stats.coalesced_queries.store(0, std::memory_order_relaxed);
             s_stats.on_demand_cleanups.store(0, std::memory_order_relaxed);
@@ -1159,20 +1254,20 @@ namespace DetourModKit
         MemoryStats get_memory_stats() noexcept
         {
             MemoryStats stats{};
-            // Cumulative counters live in the static CacheStats, independent of the shard-array lifetime, so a relaxed
-            // load outside the reader guard is safe.
-            stats.hits = s_stats.cache_hits.load(std::memory_order_relaxed);
-            stats.misses = s_stats.cache_misses.load(std::memory_order_relaxed);
+            // The COLD counters live in the static CacheStats, independent of the shard-array lifetime, so a relaxed
+            // load outside the reader guard is safe. The hot hits / misses tallies live per-shard and are summed under
+            // the reader guard below (alongside the entry totals), so while the cache is down -- no shard array to sum
+            // -- they read 0, the zero a fresh snapshot reports.
             stats.invalidations = s_stats.invalidations.load(std::memory_order_relaxed);
             stats.coalesced_queries = s_stats.coalesced_queries.load(std::memory_order_relaxed);
             stats.on_demand_cleanups = s_stats.on_demand_cleanups.load(std::memory_order_relaxed);
 
-            // Capture the configuration fields AND the live-entry totals as one coherent snapshot behind the reader
-            // guard and the SAME seq_cst s_cache_initialized gate the permission readers use (see
+            // Capture the configuration fields and the live-entry totals as one coherent snapshot behind the reader
+            // guard and the same seq_cst s_cache_initialized gate the permission readers use (see
             // check_memory_permission). The gate is what makes the shard-array access below safe: ActiveReaderGuard's
             // seq_cst increment, paired with an observed s_cache_initialized == true, forbids the store-buffering race
             // with shutdown_cache (which stores s_cache_initialized = false seq_cst, then drains readers before freeing
-            // s_cache_shards). Loading s_shard_count with a plain acquire alone does NOT establish that pairing, so a
+            // s_cache_shards). Loading s_shard_count with a plain acquire alone does not establish that pairing, so a
             // concurrent shutdown could free the array between a stale non-zero count and the loop (a use-after-free)
             // and could tear these config fields against its field-by-field zeroing.
             // Leaving every field at its zero default while the cache is down keeps the snapshot internally consistent.
@@ -1193,6 +1288,8 @@ namespace DetourModKit
                             std::shared_lock<SrwSharedMutex> shard_lock(s_cache_shards[i].mtx);
                             stats.total_entries += s_cache_shards[i].entries.size();
                             total_hard_max += s_cache_shards[i].max_capacity;
+                            stats.hits += s_cache_shards[i].hits.load(std::memory_order_relaxed);
+                            stats.misses += s_cache_shards[i].misses.load(std::memory_order_relaxed);
                         }
                         stats.hard_max_per_shard = total_hard_max / active_shard_count;
                     }
@@ -1233,7 +1330,7 @@ namespace DetourModKit
             if (!range.base || range.size == 0)
                 return;
 
-            // Construct the reader guard BEFORE checking s_cache_initialized so shutdown_cache cannot free the shard
+            // Construct the reader guard before checking s_cache_initialized so shutdown_cache cannot free the shard
             // array between the check and the access.
             ActiveReaderGuard reader_guard;
 
@@ -1306,7 +1403,7 @@ namespace DetourModKit
                 find_in_shard(s_cache_shards[shard_idx], address, size, now_ns, expiry_ns);
             if (cached_info)
             {
-                s_stats.cache_hits.fetch_add(1, std::memory_order_relaxed);
+                s_cache_shards[shard_idx].hits.fetch_add(1, std::memory_order_relaxed);
                 return check_read_permission(cached_info->protection) ? ReadableStatus::Readable
                                                                       : ReadableStatus::NotReadable;
             }

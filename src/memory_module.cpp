@@ -170,10 +170,20 @@ namespace DetourModKit
                 {
                     return std::wstring{};
                 }
-                std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
-                ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide_name.data(),
-                                      wide_length);
-                return wide_name;
+                // The wstring allocation can throw bad_alloc, but this helper is noexcept and feeds noexcept module
+                // queries. Fail soft to an empty name -- every caller reads that as "no such module" -- rather than let
+                // a bad_alloc escape and terminate the host under the exact memory pressure the query must survive.
+                try
+                {
+                    std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
+                    ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide_name.data(),
+                                          wide_length);
+                    return wide_name;
+                }
+                catch (const std::bad_alloc &)
+                {
+                    return std::wstring{};
+                }
             }
         } // namespace
 

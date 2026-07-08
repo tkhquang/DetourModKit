@@ -43,6 +43,35 @@
 
 namespace DetourModKit
 {
+    namespace detail
+    {
+        /**
+         * @brief Trait that is true only for a `std::span` whose element is `std::byte` or `const std::byte`.
+         * @details The typed `memory::write<T>` / `memory::write_in_place<T>` overloads share an overload set with the
+         *          byte-span sinks (`write_bytes`, `write_in_place(span)`). A `std::span` is trivially copyable, so a
+         *          mutable `std::span<std::byte>` argument is an exact match for the typed template `T`, while reaching
+         *          the byte-span sink needs a converting constructor to `std::span<const std::byte>`. Overload
+         *          resolution therefore prefers the typed template and bit-copies the 16-byte span object -- its data
+         *          pointer and length -- into the target rather than the bytes the span views: silent memory corruption
+         *          from a natural `write_in_place(addr, my_bytes)` call. Constraining the typed overloads with
+         *          `!is_byte_span_v` removes them from consideration for a byte span, so the argument routes to the
+         *          byte-span sink (`write_in_place`) or must go through `write_bytes` (`write`), and the typed form
+         *          only ever binds a genuine value. Both extents (dynamic and static) are matched because a
+         *          static-extent `std::span<std::byte, N>` is equally an exact match and equally convertible to the
+         *          dynamic sink. The trait matches only the bare specializations, so every constraint site inspects
+         *          `std::remove_cvref_t<T>` -- otherwise an explicit cv/ref-qualified argument type (e.g.
+         *          `write<const std::span<std::byte>>`) would slip past the plain trait and be bit-copied.
+         *          Lives in DetourModKit::detail (not memory::detail) so it never shadows the engine's detail namespace
+         *          that memory:: implementation TUs reference.
+         */
+        template <class T>
+        inline constexpr bool is_byte_span_v = false;
+        template <std::size_t Extent>
+        inline constexpr bool is_byte_span_v<std::span<std::byte, Extent>> = true;
+        template <std::size_t Extent>
+        inline constexpr bool is_byte_span_v<std::span<const std::byte, Extent>> = true;
+    } // namespace detail
+
     namespace memory
     {
         /**
@@ -153,6 +182,10 @@ namespace DetourModKit
          *          from under it mid-copy, the target may have been partially written, but the restore path and
          *          instruction-cache flush still run. If the restore succeeds the call fails with `WriteFaulted`; if the
          *          restore fails, `ProtectionRestoreFailed` takes priority.
+         * @note A slow-path write that straddles a protection seam is handled per region: each VirtualQuery region the
+         *       span covers is unprotected and restored to its own prior protection, so patching across a .rdata/.text
+         *       boundary never flattens the executable region to PAGE_READONLY. A span crossing an unrealistically
+         *       large number of distinct protection regions fails closed with `ProtectionChangeFailed`.
          * @note Callback-safe on the fast path; the slow (protection-changing) path is setup/control-plane work.
          */
         [[nodiscard]] Result<void> write_bytes(Address address, std::span<const std::byte> source) noexcept;
@@ -165,10 +198,13 @@ namespace DetourModKit
          * @param value Value whose object representation is written.
          * @return The propagated @ref write_bytes result.
          * @details Forwards to @ref write_bytes, so the same fast-path-then-unprotect policy and fault guard apply.
+         * @note Constrained against a byte span (@ref detail::is_byte_span_v): `write` has no byte-span overload, so a
+         *       `write(addr, span)` call is intentionally ill-formed and directs the caller to @ref write_bytes rather
+         *       than silently bit-copying the span object. The typed form only ever writes a genuine value.
          * @note Callback-safe on the fast path (see @ref write_bytes).
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T>
+            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<std::remove_cvref_t<T>>)
         [[nodiscard]] Result<void> write(Address address, const T &value) noexcept
         {
             const auto storage = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
@@ -203,10 +239,13 @@ namespace DetourModKit
          * @details Forwards to @ref write_in_place, so the same no-reprotect, fail-closed-if-not-writable contract
          *          applies. This is the typed per-frame store; see @ref write_in_place for when to prefer it over
          *          @ref write.
+         * @note Constrained against a byte span (@ref detail::is_byte_span_v) so a mutable `std::span<std::byte>`
+         *       argument routes to the byte-span overload above instead of exact-matching this template and copying the
+         *       span object into the target. The typed form only ever writes a genuine value.
          * @note Callback-safe (see @ref write_in_place).
          */
         template <class T>
-            requires std::is_trivially_copyable_v<T>
+            requires std::is_trivially_copyable_v<T> && (!detail::is_byte_span_v<std::remove_cvref_t<T>>)
         [[nodiscard]] Result<void> write_in_place(Address address, const T &value) noexcept
         {
             const auto storage = std::bit_cast<std::array<std::byte, sizeof(T)>>(value);
@@ -276,12 +315,13 @@ namespace DetourModKit
          *          window stays on its cheap no-reprotect fast path because the page is already writable. Restoration is
          *          best-effort (a destructor cannot report failure); a caller needing to observe the restore result
          *          should re-apply protection explicitly instead of relying on the destructor.
-         * @note Single-protection-region precondition: the guard captures ONE prior protection value (the first page's,
-         *       as `VirtualProtect` reports it) and restores the whole span to it. Applied to a range that spans pages
-         *       of DIFFERENT protection, the restore flattens them all to the first page's protection. Scope a guard to
-         *       a region that lies within a single protection block -- the normal case for a patch site or a field --
-         *       and split a mixed-protection range into one guard per block.
-         * @note Every protection-restoring path invalidates the cached span: @ref make, the destructor, AND
+         * @note Mixed-protection spans are handled correctly: the guard captures each VirtualQuery region's own prior
+         *       protection across the span and restores every region to its own value, so a guard laid over a
+         *       .rdata/.text seam does not flatten the executable region to PAGE_READONLY on restore. A span crossing
+         *       an (unrealistically large) number of distinct protection regions fails closed at @ref make rather than
+         *       leaving a partially-changed span. The common case -- a patch site or a field inside a single protection
+         *       block -- is one region and takes the simple path.
+         * @note Every protection-restoring path invalidates the cached span: @ref make, the destructor, and
          *       move-assignment (which restores the replaced guard's own region before adopting the source) each call
          *       @ref invalidate_range, so the protection cache never answers a later @ref is_readable / @ref is_writable
          *       from a snapshot taken before the guard changed (or restored) the protection.
@@ -291,16 +331,17 @@ namespace DetourModKit
         public:
             /**
              * @brief Changes @p region to @p protection and returns a guard that restores the prior protection.
-             * @param region The span whose protection is changed; an empty region fails closed. It should lie within a
-             *               single protection block (see the class note on the single-region precondition).
+             * @param region The span whose protection is changed; an empty region fails closed. It may cross protection
+             *               seams: each region within it is captured and restored separately (see the class notes).
              * @param protection The protection to apply for the guard's lifetime.
              * @return An armed guard on success; `ErrorCode::OutOfMemory` if the guard's capture state could not be
              *         allocated (no protection change is attempted, so nothing leaks), or
-             *         `ErrorCode::ProtectionChangeFailed` (with the OS error in `Error::extra`) if the protection could
-             *         not be changed.
-             * @details The capture state is allocated BEFORE the protection is changed, so a failed allocation cannot
-             *          strand the region in the new protection with no guard to restore it. On success the changed range
-             *          is dropped from the protection cache (@ref invalidate_range).
+             *         `ErrorCode::ProtectionChangeFailed` (with the OS error in `Error::extra`) if the protection
+             *         could not be changed for a region -- or the span crosses more distinct protection regions than
+             *         the guard can track -- in which case any region already changed is rolled back before returning.
+             * @details The capture state is allocated before any protection is changed, so a failed allocation cannot
+             *          strand the region in the new protection with no guard to restore it. On success the changed
+             *          range is dropped from the protection cache (@ref invalidate_range).
              */
             [[nodiscard]] static Result<ProtectGuard> make(Region region, Prot protection) noexcept;
 

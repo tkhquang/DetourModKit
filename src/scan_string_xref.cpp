@@ -199,9 +199,10 @@ namespace DetourModKit
 
             // Window-granular TOCTOU fault guard around scan_window_narrow_body. collect_executable_windows gated each
             // window with one VirtualQuery; a concurrent decommit / reprotect before these unguarded byte reads
-            // complete would otherwise fault the host. On MSVC the body runs inside a __try / __except that swallows
-            // exactly the foreign-read faults (detail::is_guarded_read_fault) and reports the window faulted so
-            // the sweep skips it. On MinGW x64 the body runs through the same process-wide vectored read guard the
+            // complete would otherwise fault the host. On MSVC the body runs inside a __try / __except whose filter is
+            // the shared detail::guarded_fault_filter: it swallows exactly the foreign-read fault set
+            // (detail::is_guarded_read_fault), re-arms a consumed PAGE_GUARD, and reports the window faulted so the
+            // sweep skips it. On MinGW x64 the body runs through the same process-wide vectored read guard the
             // guarded_read paths use (detail::run_guarded_region), so the fault is swallowed and the window skipped
             // + counted there too. A 32-bit build is rejected by the defines.hpp architecture gate, so only the two
             // x64 arms exist. Returns true when a fault was swallowed.
@@ -218,8 +219,7 @@ namespace DetourModKit
                     scan_window_narrow_body(window, string_addr, instr_len, found_count, first_site, info);
                     return false;
                 }
-                __except (detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
-                                                                            : EXCEPTION_CONTINUE_SEARCH)
+                __except (detail::guarded_fault_filter(GetExceptionInformation()))
                 {
                     // The caller skips faulted windows, so discard any reference count (and recovered lea info)
                     // collected before the fault, or a partially-scanned window could leak a stale site/register.
@@ -513,8 +513,7 @@ namespace DetourModKit
                     scan_window_broad_body(decoder, window, string_addr, found_count, first_site);
                     return false;
                 }
-                __except (detail::is_guarded_read_fault(GetExceptionCode()) ? EXCEPTION_EXECUTE_HANDLER
-                                                                            : EXCEPTION_CONTINUE_SEARCH)
+                __except (detail::guarded_fault_filter(GetExceptionInformation()))
                 {
                     // The caller skips faulted windows, so discard any reference count collected before the fault.
                     found_count = original_found_count;

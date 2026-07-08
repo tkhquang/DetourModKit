@@ -134,6 +134,68 @@ namespace DetourModKit
         [[nodiscard]] bool guarded_write_bytes(std::uintptr_t address, const void *source, std::size_t bytes) noexcept;
 
         /**
+         * @struct ProtectionSegment
+         * @brief One VirtualQuery region within a protection-changed span, plus the protection to restore it to.
+         * @details A write or a ProtectGuard may cover a span that crosses a `.rdata`/`.text` (or any) protection seam,
+         *          so it is not one uniform-protection block. VirtualProtect over the whole span reports only the
+         *          first page's prior protection, so restoring the whole span to that single value flattens an
+         *          executable page adjacent to a read-only seam down to PAGE_READONLY (its next execution then AVs
+         *          under DEP). The span is therefore changed and restored one VirtualQuery region at a time; each
+         *          region's own prior protection is captured here so the restore is exact per region.
+         */
+        struct ProtectionSegment
+        {
+            // First byte of the touched sub-span within this region.
+            std::uintptr_t base = 0;
+            // Length of the touched sub-span (VirtualProtect operates on whole pages).
+            std::size_t size = 0;
+            // The region's protection before the change, restored on unwind (a Win32 DWORD stored width-safely).
+            std::uint32_t old_protection = 0;
+        };
+
+        /**
+         * @brief Upper bound on distinct protection regions a single span may cross before @ref protect_across_regions
+         *        fails closed.
+         * @details A real write or guard site spans one to a few regions; a span crossing this many alternating
+         *          protection blocks is not a legitimate patch, so the cap is a defensive ceiling, not a functional
+         *          limit.
+         */
+        inline constexpr std::size_t MAX_PROTECTION_SEGMENTS = 64;
+
+        /**
+         * @brief Changes every VirtualQuery region overlapping [address, address + bytes) to @p new_protection,
+         *        capturing each region's prior protection so it can be restored exactly.
+         * @param address First byte of the span (caller has validated non-null / in-bounds).
+         * @param bytes Span length in bytes (caller has validated non-zero and non-wrapping).
+         * @param new_protection The Win32 PAGE_* value to apply to every region in the span.
+         * @param out Caller-owned buffer receiving one @ref ProtectionSegment per region changed.
+         * @param out_cap Capacity of @p out in elements.
+         * @param os_error Receives the OS error from the failing VirtualQuery / VirtualProtect on failure.
+         * @return The number of regions changed (written to @p out) on full success; 0 on failure, in which case every
+         *         region already changed has been rolled back to its captured protection before returning.
+         * @details Walks the span region by region (VirtualQuery to find each region's extent, VirtualProtect over the
+         *          sub-span within it) rather than one whole-span VirtualProtect, so a span crossing a protection seam
+         *          captures and later restores each region's own protection instead of the first region's flattened
+         *          over all of them. Fails closed (returns 0, rolling back) if a region cannot be queried or protected,
+         *          or if the span crosses more than @p out_cap regions.
+         */
+        [[nodiscard]] std::size_t protect_across_regions(std::uintptr_t address, std::size_t bytes,
+                                                         std::uint32_t new_protection, ProtectionSegment *out,
+                                                         std::size_t out_cap, std::uint32_t &os_error) noexcept;
+
+        /**
+         * @brief Restores every segment captured by @ref protect_across_regions to its recorded prior protection.
+         * @param segments The segments to restore (as filled by @ref protect_across_regions).
+         * @param count Number of valid entries in @p segments.
+         * @param os_error Receives the OS error from the first failing VirtualProtect (captured before any later call
+         *        or FlushInstructionCache can overwrite GetLastError).
+         * @return true if every segment restored; false if any VirtualProtect failed (best-effort: it still attempts
+         *         the remaining segments so a single failure does not strand the rest in the changed protection).
+         */
+        [[nodiscard]] bool restore_across_regions(const ProtectionSegment *segments, std::size_t count,
+                                                  std::uint32_t &os_error) noexcept;
+
+        /**
          * @enum PatchStatus
          * @brief Outcome of patch_bytes (the protection-changing slow path of memory::write_bytes).
          */

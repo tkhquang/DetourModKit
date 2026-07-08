@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <string>
 
 namespace DetourModKit
@@ -51,13 +52,25 @@ namespace DetourModKit
             return Region{};
         }
 
-        std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
-        ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide_name.data(), wide_length);
+        // The wstring allocation can throw bad_alloc, but module_named is noexcept. Fail soft to an empty Region -- the
+        // same fail-closed outcome as an unloaded module -- rather than let a bad_alloc escape and terminate the host.
+        HMODULE module_handle = nullptr;
+        try
+        {
+            std::wstring wide_name(static_cast<std::size_t>(wide_length), L'\0');
+            ::MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide_name.data(),
+                                  wide_length);
+            // GetModuleHandleW does not add a reference, so the returned handle is only valid while the module stays
+            // loaded. That is the correct contract here: a Region is a transient scan scope, not an ownership claim.
+            module_handle = ::GetModuleHandleW(wide_name.c_str());
+        }
+        catch (const std::bad_alloc &)
+        {
+            return Region{};
+        }
 
-        // GetModuleHandleW does not add a reference, so the returned handle is only valid while the module stays
-        // loaded. That is the correct contract here: a Region is a transient scan scope, not an ownership claim. The
-        // resolved span is cached per module handle (detail::cached_module_image_region).
-        return detail::cached_module_image_region(Address{::GetModuleHandleW(wide_name.c_str())});
+        // The resolved span is cached per module handle (detail::cached_module_image_region).
+        return detail::cached_module_image_region(Address{module_handle});
     }
 
     Region Region::whole_process() noexcept

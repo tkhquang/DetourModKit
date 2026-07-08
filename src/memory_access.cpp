@@ -65,8 +65,9 @@ namespace DetourModKit
             }
 
             // Slow path: the target was read-only or executable, so the engine changes protection, writes, flushes the
-            // instruction cache, and restores. A protection change can leave a cached entry describing the pre-change
-            // state, so invalidate the range whenever the patch actually ran (Ok or a restore failure).
+            // instruction cache, and restores. Every slow-path exit touched protection (a failed change still rolled
+            // back regions it had already flipped), so invalidate the range on all of them so a snapshot a concurrent
+            // reader cached from the transient protection cannot survive.
             std::uint32_t os_error = 0;
             const detail::PatchStatus status =
                 detail::patch_bytes(address.raw(), source.data(), source.size(), os_error);
@@ -87,6 +88,7 @@ namespace DetourModKit
                     Error{ErrorCode::ProtectionRestoreFailed, "memory::write_bytes", address.raw(), os_error});
             case detail::PatchStatus::ProtectionChangeFailed:
             default:
+                invalidate_range(Region{address, source.size()});
                 return std::unexpected(
                     Error{ErrorCode::ProtectionChangeFailed, "memory::write_bytes", address.raw(), os_error});
             }

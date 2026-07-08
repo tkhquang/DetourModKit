@@ -3188,3 +3188,276 @@ TEST_F(MemoryTest, GetMemoryStats_ConcurrentWithShutdownNoUseAfterFree)
     EXPECT_FALSE(torn.load());
     // The loop ended with the cache initialized (64, 10000); the fixture TearDown shuts it down.
 }
+
+// The typed write<T> / write_in_place<T> overloads are constrained against byte spans so a mutable
+// std::span<std::byte> cannot exact-match the typed template and bit-copy the span object into the target.
+namespace
+{
+    template <class Arg>
+    concept WriteCallable = requires(Address a, Arg v) { memory::write(a, v); };
+    template <class Arg>
+    concept WriteInPlaceCallable = requires(Address a, Arg v) { memory::write_in_place(a, v); };
+
+    // write has no byte-span overload, so a byte span is intentionally not callable through it (use write_bytes).
+    static_assert(!WriteCallable<std::span<std::byte>>, "write(addr, span<byte>) must be ill-formed; use write_bytes");
+    static_assert(!WriteCallable<std::span<const std::byte>>, "write(addr, span<const byte>) must be ill-formed");
+    // A genuine trivially-copyable value still binds the typed template.
+    static_assert(WriteCallable<int>, "write(addr, value) must remain valid");
+    static_assert(WriteCallable<std::array<std::byte, 4>>, "write(addr, array-of-bytes) is a value, not a span");
+
+    // write_in_place keeps its byte-span overload, so a byte span routes there rather than the hijacked typed template.
+    static_assert(WriteInPlaceCallable<std::span<std::byte>>, "write_in_place(addr, span<byte>) must select the sink");
+    static_assert(WriteInPlaceCallable<std::span<const std::byte>>);
+    static_assert(WriteInPlaceCallable<int>, "write_in_place(addr, value) must remain valid");
+
+    // A cv/ref-qualified byte-span type (reachable only through an EXPLICIT template argument, since argument
+    // deduction never yields a cv/ref T) must not slip past the constraint. The bare trait matches only the
+    // unqualified span specializations, so the write / write_in_place constraints inspect std::remove_cvref_t<T>:
+    // these assert both halves of that reasoning so a future edit that drops the normalization is caught here.
+    static_assert(!detail::is_byte_span_v<const std::span<std::byte>>,
+                  "the bare trait does not see through const, so the constraint must normalize the type");
+    static_assert(detail::is_byte_span_v<std::remove_cvref_t<const std::span<std::byte>>>,
+                  "the normalization the constraints apply recognizes a const byte span");
+    static_assert(detail::is_byte_span_v<std::remove_cvref_t<std::span<std::byte> &>>,
+                  "the normalization also strips a reference qualifier");
+} // namespace
+
+TEST_F(MemoryTest, WriteInPlace_MutableByteSpanWritesViewedBytes)
+{
+    std::array<std::byte, 8> target{};
+    std::array<std::byte, 4> source{std::byte{0x11}, std::byte{0x22}, std::byte{0x33}, std::byte{0x44}};
+
+    const auto result = memory::write_in_place(Address{target.data()}, std::span<std::byte>{source});
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(target[0], std::byte{0x11});
+    EXPECT_EQ(target[1], std::byte{0x22});
+    EXPECT_EQ(target[2], std::byte{0x33});
+    EXPECT_EQ(target[3], std::byte{0x44});
+    EXPECT_EQ(target[4], std::byte{0x00});
+}
+
+// A ProtectGuard laid over a span that crosses a protection seam restores each region to its own prior protection on
+// scope exit, so an executable region adjacent to a read-only one is not flattened to PAGE_READONLY.
+TEST_F(MemoryTest, ProtectGuard_MultiRegionRestoresEachRegionsOwnProtection)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const std::size_t page = si.dwPageSize;
+
+    auto *base = static_cast<std::byte *>(VirtualAlloc(nullptr, 2 * page, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+    DWORD old = 0;
+    ASSERT_TRUE(VirtualProtect(base, page, PAGE_READONLY, &old));
+    ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old));
+
+    {
+        // One guard spanning both differently-protected regions makes the whole span writable.
+        auto guard = memory::ProtectGuard::make(Region{Address{base}, 2 * page}, Prot::RW);
+        ASSERT_TRUE(guard.has_value());
+        EXPECT_EQ(current_page_protection(base), static_cast<DWORD>(PAGE_READWRITE));
+        EXPECT_EQ(current_page_protection(base + page), static_cast<DWORD>(PAGE_READWRITE));
+        // Both regions are writable while the guard is armed: a plain store faults neither.
+        base[0] = std::byte{0x5A};
+        base[page] = std::byte{0xA5};
+    } // guard destructor restores each region to its own captured protection
+
+    EXPECT_EQ(current_page_protection(base), static_cast<DWORD>(PAGE_READONLY));
+    EXPECT_EQ(current_page_protection(base + page), static_cast<DWORD>(PAGE_EXECUTE_READ));
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+// A guarded read of a PAGE_GUARD page fails closed and re-arms the guard the OS consumed on dispatch, so the host's
+// fence survives and a retry re-faults rather than reading straight through it.
+TEST_F(MemoryTest, GuardedRead_GuardPageRearmedFailsClosedOnRetry)
+{
+    void *mem = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(mem, nullptr);
+    *static_cast<uint32_t *>(mem) = 0xFEEDFACEu;
+    DWORD old = 0;
+    ASSERT_TRUE(VirtualProtect(mem, 4096, PAGE_READWRITE | PAGE_GUARD, &old));
+
+    const Address addr{mem};
+    // First guarded read faults on the guard page and fails closed; the handler re-armed the guard the OS cleared.
+    EXPECT_FALSE(memory::read<uint32_t>(addr).has_value());
+    EXPECT_NE(current_page_protection(mem) & PAGE_GUARD, 0u);
+    // The retry re-faults on the re-armed guard rather than reading through the fence.
+    EXPECT_FALSE(memory::read<uint32_t>(addr).has_value());
+    EXPECT_NE(current_page_protection(mem) & PAGE_GUARD, 0u);
+
+    // Clear the guard before freeing so nothing else faults on it.
+    DWORD cleared = 0;
+    VirtualProtect(mem, 4096, PAGE_READWRITE, &cleared);
+    VirtualFree(mem, 0, MEM_RELEASE);
+}
+
+// Several threads racing shutdown_cache must not both join the same cleanup std::thread (a std::system_error out of a
+// noexcept function -> std::terminate). The join mutex lets exactly one caller join; the rest skip.
+TEST_F(MemoryTest, ShutdownCache_ConcurrentCallersJoinExactlyOnceNoTerminate)
+{
+    // Start from a known-initialized state so a background cleanup thread exists and the join/detach path is exercised.
+    memory::shutdown_cache();
+    ASSERT_TRUE(memory::init_cache(32, 5000));
+
+    // Prime an entry so the cleanup thread has content and is definitely running.
+    int probe = 0;
+    (void)memory::is_readable(Region{Address{&probe}, sizeof(probe)});
+
+    constexpr int THREAD_COUNT = 8;
+    std::vector<std::thread> callers;
+    std::atomic<int> ready{0};
+    std::atomic<bool> go{false};
+    for (int i = 0; i < THREAD_COUNT; ++i)
+    {
+        callers.emplace_back(
+            [&ready, &go]()
+            {
+                ready.fetch_add(1, std::memory_order_relaxed);
+                while (!go.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+                memory::shutdown_cache();
+            });
+    }
+    while (ready.load(std::memory_order_relaxed) < THREAD_COUNT)
+    {
+        std::this_thread::yield();
+    }
+    go.store(true, std::memory_order_release);
+    for (auto &t : callers)
+    {
+        t.join();
+    }
+
+    // Reaching here without std::terminate is the proof; the cache is down and a fresh init still works.
+    EXPECT_TRUE(memory::init_cache(32, 5000));
+}
+
+// is_module_loaded widens the name into a std::wstring, which can throw bad_alloc. The noexcept query wraps that
+// allocation and fails soft under memory pressure rather than letting the throw terminate the host.
+TEST_F(MemoryTest, IsModuleLoaded_AllocFailureFailsSoftNoTerminate)
+{
+    // Control: kernel32 is always loaded, so the normal path is true.
+    EXPECT_TRUE(memory::is_module_loaded("kernel32.dll"));
+
+    bool under_oom = true;
+    {
+        // allow = 0 fails the first throwing operator new on this thread -- the widen_module_name wstring allocation
+        // (MultiByteToWideChar takes no C++ heap). No gtest macro runs inside the armed window (it would allocate).
+        dmk_test::AllocFailScope fail{0};
+        under_oom = memory::is_module_loaded("kernel32.dll");
+    }
+    // The widen allocation failed, so the query fails closed to false instead of terminating the noexcept host path.
+    EXPECT_FALSE(under_oom);
+}
+
+// write_bytes' slow path across a protection seam restores EACH region to its own prior protection: a patch straddling
+// a read-only / executable boundary leaves the executable side executable, never flattened to PAGE_READONLY (which
+// would access-violate under DEP on its next execution). This drives patch_bytes' multi-segment protect/restore, which
+// a single uniform-protection page cannot.
+TEST_F(MemoryTest, WriteBytes_AcrossProtectionSeamRestoresEachRegion)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const std::size_t page = si.dwPageSize;
+
+    auto *base = static_cast<std::byte *>(VirtualAlloc(nullptr, 2 * page, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+    DWORD old = 0;
+    ASSERT_TRUE(VirtualProtect(base, page, PAGE_READONLY, &old));
+    ASSERT_TRUE(VirtualProtect(base + page, page, PAGE_EXECUTE_READ, &old));
+
+    // Straddle the seam: two bytes in the read-only page's tail, two in the executable page's head.
+    const std::size_t split = page - 2;
+    const std::array<std::byte, 4> source{std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE}, std::byte{0xEF}};
+    const auto result = memory::write_bytes(Address{base + split}, std::span<const std::byte>{source});
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(base[split + 0], std::byte{0xDE});
+    EXPECT_EQ(base[split + 1], std::byte{0xAD}); // last byte of the read-only page
+    EXPECT_EQ(base[page + 0], std::byte{0xBE});  // first byte of the executable page
+    EXPECT_EQ(base[page + 1], std::byte{0xEF});
+
+    // Each region is restored to its OWN protection, not a single flattened value.
+    EXPECT_EQ(current_page_protection(base), static_cast<DWORD>(PAGE_READONLY));
+    EXPECT_EQ(current_page_protection(base + page), static_cast<DWORD>(PAGE_EXECUTE_READ));
+
+    DWORD cleared = 0;
+    VirtualProtect(base, 2 * page, PAGE_READWRITE, &cleared);
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+// A span crossing more distinct protection regions than protect_across_regions can track (MAX_PROTECTION_SEGMENTS) is
+// the security-critical fail-closed branch: ProtectGuard::make must return an error AND roll back, leaving no page
+// stranded in the changed (writable) protection. Alternating each page's protection makes every page its own
+// VirtualQuery region, so the span crosses far more than the 64-segment cap.
+TEST_F(MemoryTest, ProtectGuard_OverSegmentCapFailsClosedAndRollsBack)
+{
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    const std::size_t page = si.dwPageSize;
+    constexpr std::size_t page_count = 96; // comfortably past MAX_PROTECTION_SEGMENTS (64)
+
+    auto *base =
+        static_cast<std::byte *>(VirtualAlloc(nullptr, page_count * page, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+
+    // Alternate protections so no two adjacent pages coalesce into one region; the span then crosses page_count
+    // distinct regions.
+    const auto protection_of = [](std::size_t i) -> DWORD
+    { return (i % 2 == 0) ? static_cast<DWORD>(PAGE_READONLY) : static_cast<DWORD>(PAGE_EXECUTE_READ); };
+    for (std::size_t i = 0; i < page_count; ++i)
+    {
+        DWORD old = 0;
+        ASSERT_TRUE(VirtualProtect(base + i * page, page, protection_of(i), &old));
+    }
+
+    // One guard over the whole multi-region span exceeds the segment cap and must fail closed.
+    auto guard = memory::ProtectGuard::make(Region{Address{base}, page_count * page}, Prot::RW);
+    EXPECT_FALSE(guard.has_value());
+
+    // Rollback: every page kept its original protection; none was left PAGE_EXECUTE_READWRITE.
+    for (std::size_t i = 0; i < page_count; ++i)
+    {
+        EXPECT_EQ(current_page_protection(base + i * page), protection_of(i));
+    }
+
+    DWORD cleared = 0;
+    VirtualProtect(base, page_count * page, PAGE_READWRITE, &cleared);
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+// A bad_alloc anywhere in a cache-miss insert (the unordered_map node, the lru map node, or the sorted-range deque
+// chunk) must fail SOFT: update_shard_with_region catches it and is_readable still returns the authoritative
+// VirtualQuery answer, never terminating. This drives the failure across each successive insert allocation, so one
+// iteration lands on the deque insert -- the stage that terminated while insert_sorted_range was noexcept (a throw at
+// its own noexcept frame never reaching the wrapper's catch). Every iteration returning cleanly is the fix's proof.
+TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
+{
+    int probe = 7;
+
+    for (int allow = 0; allow <= 4; ++allow)
+    {
+        // Re-init a FRESH cache each iteration so the shard's sorted-range deque is truly empty -- no node retained by a
+        // prior clear (libstdc++ deque::clear keeps one 32-slot chunk, MSVC differs), so its first insert reliably
+        // allocates. That makes some `allow` land squarely on the insert_sorted_range deque allocation, the stage that
+        // terminated the host while it was noexcept (a throw at its own noexcept frame never reaches the wrapper catch).
+        // init_cache runs OUTSIDE the armed window, so the shard-array / handler-install allocations are not injected.
+        memory::shutdown_cache();
+        ASSERT_TRUE(memory::init_cache(16, 60000));
+
+        bool readable = false;
+        {
+            // Allow the first `allow` allocations of the cache-miss insert, fail the next: across the sweep the failing
+            // one is in turn the unordered_map node, the lru map node, and the deque chunk. No gtest macro runs inside
+            // the armed window (it would allocate).
+            dmk_test::AllocFailScope fail{allow};
+            readable = memory::is_readable(Region{Address{&probe}, sizeof(probe)});
+        }
+
+        // Reaching here without std::terminate is half the proof; the VirtualQuery answer must still be correct.
+        EXPECT_TRUE(readable) << "allow=" << allow;
+    }
+}
