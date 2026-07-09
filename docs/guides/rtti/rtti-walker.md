@@ -42,6 +42,7 @@ RVAs are 32-bit unsigned offsets relative to the **owning module's** image base,
 | `rtti::find_in_pointer_table(table, n, expected, vtable_cache?, stride?)` | You need the first object in a pointer table whose vtable matches a given mangled name. The optional caller-owned `std::atomic<Address>` cache slot reduces steady-state cost to a single qword compare per slot. |
 | `rtti::vtable_for_type(mangled, range?)` | You know a stable class name and want its primary (most-derived) vtable address, scoped to one module. The name-keyed inverse of `vtable_is_type`. |
 | `rtti::vtables_for_type(mangled, out, cap, range?)` | The class may be multiply/virtually inherited and you want every sub-object vtable that shares the name, not just the primary. |
+| `rtti::region_has_rtti(range?)` | You need to tell a type-name miss from a module that has no resolvable MSVC RTTI records at all. |
 | `rtti::TypeIdentity(mangled, range?)` | You want a cached, name-keyed identity handle: resolve the primary vtable once, then `matches(vtable)` is a single qword compare. |
 
 The forward entry points are noexcept and SEH-guarded; an unmapped page, missing COL, or zero RVA produces a failure return rather than a fault. The reverse resolvers (`vtable_for_type`, `vtables_for_type`) and `TypeIdentity` are SEH-guarded as well and return `std::nullopt` / a zero count on any failure.
@@ -152,6 +153,8 @@ The walker returns `std::nullopt` / `false` / `0` (depending on the call) for ev
 - The mangled-name buffer at the resolved address faults on the first page.
 
 None of these raise an exception; the caller can treat all failure modes uniformly through the optional / bool return.
+
+To tell a genuine miss from a module that simply has no MSVC RTTI to search (a `/GR-` host, a still-packed image, or a data-only module), call `rtti::region_has_rtti(range)`. A `false` there is the definite "there are no resolvable RTTI records in this scope, fall back to `scan::find_string_xref` / `scan::read_code_constant`" signal. A `true` only means the module carries at least one record, not that your specific type resolves: a `/GR-` executable that links a `/GR` CRT or middleware returns `true` off those library COLs while an executable-owned type still needs the raw-byte fallback. Act on a `false`; after any resolve miss the raw-byte fallback remains available. It is a setup/control-plane sweep like `vtable_for_type`, so call it once after a miss, never per frame.
 
 ## MinGW support
 

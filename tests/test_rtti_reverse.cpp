@@ -48,6 +48,7 @@ namespace
     void rev_reset() noexcept
     {
         s_rev_used = 0;
+        std::memset(s_rev_pool.data(), 0, s_rev_pool.size());
     }
 
     template <typename T> void rev_write(std::byte *buf, std::size_t off, const T &value) noexcept
@@ -106,6 +107,26 @@ namespace
     {
         const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
         return Region{Address{base}, s_rev_used};
+    }
+
+    // Writes a fresh pool slice whose only in-scope qword is a meta-slot pointing back into the slice, so the sweep's
+    // mod.contains() pre-filter accepts it, but the pointed-to location is not a signature-1 COL. This forces the
+    // shared resolve_col_site prelude to run and reject the candidate; an all-zero buffer would be dropped by the
+    // pre-filter before validation and would not prove the predicate uses the shared COL checks.
+    [[nodiscard]] Region build_in_range_decoy() noexcept
+    {
+        if (s_rev_used + REV_BUF_SIZE > s_rev_pool.size())
+        {
+            return Region{};
+        }
+        std::byte *buf = s_rev_pool.data() + s_rev_used;
+        s_rev_used += REV_BUF_SIZE;
+        std::memset(buf, 0, REV_BUF_SIZE);
+        const std::uintptr_t buf_base = reinterpret_cast<std::uintptr_t>(buf);
+        // The meta-slot points at an in-range, zeroed location. The pre-filter passes, then resolve_col_site rejects
+        // it at the x64 COL signature check.
+        rev_write<std::uintptr_t>(buf, REV_COL_PTR_OFFSET, buf_base + REV_COL_OFFSET);
+        return Region{Address{buf_base}, REV_BUF_SIZE};
     }
 
     // Controllable millisecond clock for the TypeIdentity re-sweep throttle. RttiClockScope points the rtti.cpp seam at
@@ -417,4 +438,47 @@ TEST_F(RttiReverseTest, VtablesForTypeOrdersByColOffset)
     EXPECT_EQ(all[0].raw(), vt00); // offset 0x00
     EXPECT_EQ(all[1].raw(), vt10); // offset 0x10
     EXPECT_EQ(all[2].raw(), vt20); // offset 0x20
+}
+
+TEST_F(RttiReverseTest, RegionHasRttiReportsTrueWhenColResolvesEvenIfNameMisses)
+{
+    // A resolvable COL is present under a different name than the query. vtable_for_type misses, but region_has_rtti
+    // reports that the scope still contains RTTI records.
+    ASSERT_NE(build_synth(".?AVRegionPresent@@", 0), 0u);
+
+    EXPECT_FALSE(rtti::vtable_for_type(".?AVRegionAbsent@@", pool_range()).has_value());
+    EXPECT_TRUE(rtti::region_has_rtti(pool_range()));
+}
+
+TEST_F(RttiReverseTest, RegionHasRttiRejectsInRangeNonColPointer)
+{
+    // The scope holds an in-range meta-slot that passes the sweep's mod.contains() pre-filter but does not address a
+    // signature-1 COL, so resolve_col_site runs and rejects it. A zeroed buffer would not exercise that validation
+    // path because mod.contains(0) would fail before resolve_col_site is called.
+    const Region decoy = build_in_range_decoy();
+    ASSERT_NE(decoy.size, 0u);
+
+    EXPECT_FALSE(rtti::region_has_rtti(decoy));
+}
+
+TEST_F(RttiReverseTest, RegionHasRttiReturnsFalseOnInvalidRegion)
+{
+    // An empty / unmapped Region yields an invalid ModuleSpan; region_has_rtti fails closed to false rather than
+    // sweeping a bogus range, so a caller that passes a range it could not resolve still gets the raw-byte fallback
+    // signal.
+    EXPECT_FALSE(rtti::region_has_rtti(Region{}));
+}
+
+TEST_F(RttiReverseTest, RegionHasRttiScansHostPeSections)
+{
+    // Exercises the real PE path (collect_rtti_scan_ranges header parse + section loop), not the pool fallback that
+    // every other case above takes. The verdict is ABI-correct on either toolchain: the MSVC C++ ABI lays down
+    // RTTICompleteObjectLocators the walker reads, so an MSVC-built test exe (its polymorphic gtest types) carries at
+    // least one; the Itanium ABI (MinGW/GCC) emits type_info instead, which is not a signature-1 COL, so a MinGW-built
+    // exe genuinely holds zero MSVC RTTI records. Both branches drive the PE parse and section sweep.
+#if defined(_MSC_VER)
+    EXPECT_TRUE(rtti::region_has_rtti(Region::host()));
+#else
+    EXPECT_FALSE(rtti::region_has_rtti(Region::host()));
+#endif
 }
