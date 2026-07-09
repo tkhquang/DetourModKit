@@ -288,7 +288,12 @@ namespace DetourModKit::scan
     {
         /// Exact address of the instruction that loads the string.
         ReferencingInstruction,
-        /// Best-effort prologue back-scan from the instruction (heuristic).
+        /**
+         * @brief Enclosing-function entry of the referencing instruction.
+         * @details Authoritative x64 `.pdata` bounds via RtlLookupFunctionEntry (following chained fragments to the
+         *          primary function), with a bounded RET/INT3 prologue back-scan as the fallback for leaf functions and
+         *          code regions with no registered exception table.
+         */
         EnclosingFunction,
         /**
          * @brief Address of the global data slot a `mov [rip+slot], reg` stores the loaded string pointer into.

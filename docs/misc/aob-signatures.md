@@ -440,9 +440,10 @@ if (!site)
     return false;
 }
 // site->value() is the address of the `lea`/`mov` that loads the string. With
-// XrefReturn::EnclosingFunction it is instead a best-effort prologue back-scan to
-// the function that uses it. With XrefReturn::StringPointerSlot it is the global
-// data slot that caches the loaded pointer (see below).
+// XrefReturn::EnclosingFunction it is instead the entry of the function that uses
+// it (authoritative .pdata bounds, with a heuristic back-scan fallback). With
+// XrefReturn::StringPointerSlot it is the global data slot that caches the loaded
+// pointer (see below).
 ```
 
 Why anchor on a string: a game patch reshuffles code bytes (breaking AOBs) and reorders globals, but a format string or assert message almost never changes. The reference is RIP-relative and resolved against the live image, so the result is ASLR-correct with no fixed address baked in.
@@ -454,7 +455,7 @@ Recognized forms. Phase 2 has two modes, both gated by the same exact-target and
 
 A shape the active mode does not model reports an error rather than a guess. One shape is out of scope for both modes: an indirect `call`/`jmp` through a `.data` pointer that itself holds the string address (a two-level indirection rather than a direct RIP reference to the string). Choose a string that is referenced exactly once; short, common strings are pooled and shared. This backend is also exposed declaratively as `AnchorKind::StringXref` in the [anchor registry](../guides/scanning/anchors.md).
 
-Return modes. `XrefReturn::ReferencingInstruction` (default) returns the load site; `XrefReturn::EnclosingFunction` back-scans to the function prologue that uses it. `XrefReturn::StringPointerSlot` is for the common pattern where a game caches the loaded string pointer into a global: when the unique reference is a `lea reg, [rip+string]` immediately (within a bounded forward window) followed by a `mov [rip+slot], reg` that stores the same register into a global slot, it returns the effective address of that slot rather than the load site. This resolves a cached global string pointer in one call. It applies only to the `lea` shape (a `mov reg, [rip+string]` load already delivered the value to a register); a register mismatch, an out-of-window store, a broad-only reference, or no matching store reports `ErrorCode::StoreNotFound`. The store match is first-within-window (compilers emit the cache next to the load), not uniqueness-checked, and an intervening reuse of the register is not modelled.
+Return modes. `XrefReturn::ReferencingInstruction` (default) returns the load site; `XrefReturn::EnclosingFunction` resolves the entry of the function that uses it -- the x64 `.pdata` exception table via `RtlLookupFunctionEntry`, following `UNW_FLAG_CHAININFO` chains to the primary function so a hot/cold-split fragment resolves to the true function, with a bounded RET/INT3 prologue back-scan as the fallback for leaf functions or code with no registered exception table. `XrefReturn::StringPointerSlot` is for the common pattern where a game caches the loaded string pointer into a global: when the unique reference is a `lea reg, [rip+string]` immediately (within a bounded forward window) followed by a `mov [rip+slot], reg` that stores the same register into a global slot, it returns the effective address of that slot rather than the load site. This resolves a cached global string pointer in one call. It applies only to the `lea` shape (a `mov reg, [rip+string]` load already delivered the value to a register); a register mismatch, an out-of-window store, a broad-only reference, or no matching store reports `ErrorCode::StoreNotFound`. The store match is first-within-window (compilers emit the cache next to the load), not uniqueness-checked, and an intervening reuse of the register is not modelled.
 
 ## 6. Cascading candidates
 

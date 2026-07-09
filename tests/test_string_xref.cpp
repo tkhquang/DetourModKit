@@ -4,8 +4,10 @@
 #include <cstring>
 #include <initializer_list>
 #include <memory>
+#include <new>
 #include <stop_token>
 #include <thread>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -417,6 +419,111 @@ namespace
         q.return_mode = scan::XrefReturn::StringPointerSlot;
         return q;
     }
+
+    // A committed RWX region with a caller-supplied x64 exception (.pdata) table registered through
+    // RtlAddFunctionTable, so RtlLookupFunctionEntry -- and therefore find_string_xref's authoritative
+    // EnclosingFunction path -- resolves addresses inside it exactly as inside a normally loaded module. The
+    // SyntheticImage fixtures above deliberately register no table (a raw VirtualAlloc buffer, which
+    // RtlLookupFunctionEntry returns nullptr for), exercising the heuristic fallback; this fixture is the complement
+    // that drives the .pdata path. All RUNTIME_FUNCTION / UNWIND_INFO RVAs are relative to the region base. The table
+    // storage outlives every lookup and is unregistered before the region is freed.
+    class PdataImage
+    {
+    public:
+        explicit PdataImage(std::size_t size) : m_size(size)
+        {
+            m_base = static_cast<std::uint8_t *>(
+                VirtualAlloc(nullptr, m_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE));
+        }
+
+        ~PdataImage()
+        {
+            if (m_registered)
+            {
+                RtlDeleteFunctionTable(m_functions.data());
+            }
+            if (m_base != nullptr)
+            {
+                VirtualFree(m_base, 0, MEM_RELEASE);
+            }
+        }
+
+        PdataImage(const PdataImage &) = delete;
+        PdataImage &operator=(const PdataImage &) = delete;
+        PdataImage(PdataImage &&) = delete;
+        PdataImage &operator=(PdataImage &&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept { return m_base != nullptr; }
+        [[nodiscard]] std::uintptr_t base() const noexcept { return reinterpret_cast<std::uintptr_t>(m_base); }
+        [[nodiscard]] std::uintptr_t addr(std::size_t off) const noexcept { return base() + off; }
+
+        void write(std::size_t off, const void *data, std::size_t n) noexcept { std::memcpy(m_base + off, data, n); }
+
+        // See SyntheticImage::plant_rip_load: a REX.W RIP-relative lea/mov at instr_off whose target is target_off.
+        void plant_rip_load(std::size_t instr_off, std::size_t target_off, std::uint8_t opcode) noexcept
+        {
+            std::uint8_t *p = m_base + instr_off;
+            p[0] = 0x48; // REX.W
+            p[1] = opcode;
+            p[2] = 0x05; // ModRM: mod=00, reg=rax, rm=101 (RIP-relative)
+            const auto next = static_cast<std::int64_t>(addr(instr_off) + 7);
+            const auto disp = static_cast<std::int32_t>(static_cast<std::int64_t>(addr(target_off)) - next);
+            std::memcpy(p + 3, &disp, sizeof(disp));
+        }
+
+        // Writes a minimal UNWIND_INFO (Version 1, zero unwind codes) at unwind_off. `chained` sets UNW_FLAG_CHAININFO
+        // in the Flags nibble (bits 3..7 of byte 0), marking the record as a fragment whose chained RUNTIME_FUNCTION
+        // follows the empty code array at unwind_off + 4.
+        void write_unwind_info(std::size_t unwind_off, bool chained) noexcept
+        {
+            const unsigned flags = chained ? static_cast<unsigned>(UNW_FLAG_CHAININFO) : 0u;
+            const std::uint8_t header[4] = {
+                static_cast<std::uint8_t>(0x01u | (flags << 3)), // Version:3 (=1) | Flags:5
+                0,                                               // SizeOfProlog
+                0,                                               // CountOfCodes
+                0                                                // FrameRegister:4 | FrameOffset:4
+            };
+            write(unwind_off, header, sizeof(header));
+        }
+
+        void write_runtime_function(std::size_t off, DWORD begin_rva, DWORD end_rva, DWORD unwind_rva) noexcept
+        {
+            RUNTIME_FUNCTION rf{};
+            rf.BeginAddress = begin_rva;
+            rf.EndAddress = end_rva;
+            rf.UnwindData = unwind_rva;
+            write(off, &rf, sizeof(rf));
+        }
+
+        // Copies `functions` (RVAs relative to base, sorted ascending by BeginAddress as RtlAddFunctionTable requires)
+        // into stable storage the registered table references for its whole lifetime, then registers it.
+        [[nodiscard]] bool register_table(std::initializer_list<RUNTIME_FUNCTION> functions) noexcept
+        {
+            if (m_base == nullptr || functions.size() == 0)
+            {
+                return false;
+            }
+            try
+            {
+                m_functions.assign(functions);
+            }
+            catch (const std::bad_alloc &)
+            {
+                return false;
+            }
+            m_registered =
+                RtlAddFunctionTable(m_functions.data(), static_cast<DWORD>(m_functions.size()), base()) != FALSE;
+            return m_registered;
+        }
+
+        [[nodiscard]] Region range() const noexcept { return Region{Address{base()}, m_size}; }
+
+    private:
+        std::uint8_t *m_base = nullptr;
+        std::size_t m_size = 0;
+        std::vector<RUNTIME_FUNCTION> m_functions;
+        bool m_registered = false;
+    };
 } // namespace
 
 TEST(StringXrefTest, ResolvesUniqueLeaReference)
@@ -700,6 +807,124 @@ TEST(StringXrefTest, EnclosingFunctionBackScanSkipsUnmappedLowerPage)
     EXPECT_EQ(result->raw(), reinterpret_cast<std::uintptr_t>(base) + page + 0x44);
 
     VirtualFree(base, 0, MEM_RELEASE);
+}
+
+TEST(StringXrefTest, EnclosingFunctionResolvesViaPdataBeyondHeuristicWindow)
+{
+    // One registered function spans the whole region. The referencing lea sits 12 KiB past the entry, beyond the 8 KiB
+    // heuristic back-scan window, and the region is otherwise zero-filled, so the RET/INT3 heuristic finds no boundary
+    // and fails closed. Only the authoritative .pdata lookup can return the true entry from here.
+    constexpr std::size_t REGION_SIZE = 0x6000; // 24 KiB.
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    constexpr DWORD UNWIND_RVA = 0x10;
+    img.write_unwind_info(UNWIND_RVA, /*chained=*/false);
+    RUNTIME_FUNCTION whole{};
+    whole.BeginAddress = 0x0;
+    whole.EndAddress = static_cast<DWORD>(REGION_SIZE);
+    whole.UnwindData = UNWIND_RVA;
+    if (!img.register_table({whole}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataFarAnchor";
+    img.write(0x4000, str, sizeof(str));
+    img.plant_rip_load(0x3000, 0x4000, LEA); // 12 KiB into the function, references the string
+
+    scan::StringRefQuery q = utf8_query("PdataFarAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), img.addr(0x0));
+}
+
+TEST(StringXrefTest, EnclosingFunctionFollowsChainInfoToPrimaryFunction)
+{
+    // Two registered records: a primary function [0x0, 0x1000) and a hot/cold-split fragment [0x2000, 0x3000) whose
+    // UNWIND_INFO carries UNW_FLAG_CHAININFO and chains back to the primary. A reference inside the fragment must
+    // resolve to the primary entry (0x0), not the fragment start (0x2000).
+    constexpr std::size_t REGION_SIZE = 0x4000; // 16 KiB.
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+    // Primary unwind info (non-chained) at 0x20; fragment unwind info (chained) at 0x30. Its chained RUNTIME_FUNCTION
+    // is packed right after the fragment header's empty code array, at 0x34, and points back at the primary.
+    constexpr DWORD PRIMARY_UNWIND_RVA = 0x20;
+    constexpr DWORD FRAGMENT_UNWIND_RVA = 0x30;
+    img.write_unwind_info(PRIMARY_UNWIND_RVA, /*chained=*/false);
+    img.write_unwind_info(FRAGMENT_UNWIND_RVA, /*chained=*/true);
+    img.write_runtime_function(FRAGMENT_UNWIND_RVA + 4, 0x0, 0x1000,
+                               PRIMARY_UNWIND_RVA); // chained entry -> the primary
+
+    RUNTIME_FUNCTION primary{};
+    primary.BeginAddress = 0x0;
+    primary.EndAddress = 0x1000;
+    primary.UnwindData = PRIMARY_UNWIND_RVA;
+    RUNTIME_FUNCTION fragment{};
+    fragment.BeginAddress = 0x2000;
+    fragment.EndAddress = 0x3000;
+    fragment.UnwindData = FRAGMENT_UNWIND_RVA;
+    if (!img.register_table({primary, fragment}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataChainAnchor";
+    img.write(0x2800, str, sizeof(str));
+    img.plant_rip_load(0x2400, 0x2800, LEA); // reference inside the split fragment
+
+    scan::StringRefQuery q = utf8_query("PdataChainAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), img.addr(0x0));
+}
+
+TEST(StringXrefTest, EnclosingFunctionFallsBackWhenChainInfoIsCyclic)
+{
+    // A malformed cyclic chained entry must not be treated as authoritative. The fallback back-scan has a real
+    // prologue at 0x1000, while the cyclic fragment begins at 0x1200; the expected result must come from the
+    // heuristic path after the chain walk fails closed.
+    constexpr std::size_t REGION_SIZE = 0x4000; // 16 KiB.
+    PdataImage img(REGION_SIZE);
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic .pdata image";
+    }
+
+    const std::uint8_t pad[] = {0xCC, 0xCC, 0xCC, 0xCC};
+    img.write(0x0FFC, pad, sizeof(pad));
+    const std::uint8_t prologue[] = {0x55, 0x48, 0x8B, 0xEC}; // push rbp; mov rbp, rsp
+    img.write(0x1000, prologue, sizeof(prologue));
+
+    constexpr DWORD CYCLIC_UNWIND_RVA = 0x3000;
+    img.write_unwind_info(CYCLIC_UNWIND_RVA, /*chained=*/true);
+    img.write_runtime_function(CYCLIC_UNWIND_RVA + 4, 0x1200, 0x1400, CYCLIC_UNWIND_RVA);
+
+    RUNTIME_FUNCTION fragment{};
+    fragment.BeginAddress = 0x1200;
+    fragment.EndAddress = 0x1400;
+    fragment.UnwindData = CYCLIC_UNWIND_RVA;
+    if (!img.register_table({fragment}))
+    {
+        GTEST_SKIP() << "RtlAddFunctionTable rejected the synthetic table";
+    }
+
+    const char str[] = "PdataCyclicChainAnchor";
+    img.write(0x1800, str, sizeof(str));
+    img.plant_rip_load(0x1300, 0x1800, LEA);
+
+    scan::StringRefQuery q = utf8_query("PdataCyclicChainAnchor");
+    q.return_mode = scan::XrefReturn::EnclosingFunction;
+    const auto result = scan::find_string_xref(q, img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), img.addr(0x1000));
 }
 
 TEST(StringXrefTest, EmptyQueryAndInvalidRange)
