@@ -17,6 +17,9 @@
  *          heap-backed runtime scan engine so every parser entry point resolves the same DSL identically; the engine's
  *          runtime haystack-frequency selection can override this compile-time anchor, which serves as the fallback when
  *          no haystack histogram is available.
+ * @note Unlike the other detail/ headers, both axes line up here: scan.hpp needs this implementation support at
+ *       compile time, so it sits in the detail/ directory and declares its types in the ::detail namespace. Directory
+ *       placement and namespace placement are independent.
  */
 
 #include <array>

@@ -668,6 +668,55 @@ namespace DetourModKit::scan
     };
 
     /**
+     * @enum FallbackPolicy
+     * @brief How strictly hooked-prologue recovery confirms the identity of a recovered target.
+     * @details Hooked-prologue recovery rebuilds a Direct candidate's prologue as an inline-hook jump shape and
+     *          resolves the single site that uniquely matches. That structural gate (a unique rebuilt match, a decoded
+     *          redirect into executable memory, an in-scope walk-back) is strong but address-blind: a game reshape can
+     *          leave a different function whose surviving literal tail coincidentally matches and which is itself
+     *          inline-hooked, so the rebuilt pattern resolves uniquely to the wrong near-twin. FallbackPolicy chooses
+     *          what happens after structural recovery, mirroring the anchor validator discipline
+     *          (@ref anchor::Anchor::require_validator): pair a @ref FallbackWitness with RequireIdentity to fail
+     *          closed on an unconfirmed site instead of trusting a possibly-wrong one.
+     */
+    enum class FallbackPolicy : std::uint8_t
+    {
+        /// Recovery disabled: a full direct miss stays a miss.
+        Off,
+        /// Recover structurally; log a rejecting @ref FallbackWitness but still return the address.
+        WarnOnly,
+        /// Recover structurally, then require a @ref FallbackWitness to confirm the recovered address.
+        RequireIdentity,
+    };
+
+    /**
+     * @brief A post-recovery identity check for hooked-prologue recovery.
+     * @details Signature-compatible with @ref anchor::AnchorValidator (a plain function pointer, so one predicate shape
+     *          serves the resolver), kept as its own alias because anchor.hpp already includes this header and the
+     *          dependency cannot run the other way without a cycle. The recovered absolute address is passed as @p
+     *          value; return false to reject it as a coincidental near-twin.
+     * @param value The recovered absolute address, as a signed integer (a hook target is a code address).
+     * @param context The opaque @ref FallbackWitness::context pointer, forwarded verbatim (nullptr if unused).
+     */
+    using FallbackValidator = bool (*)(std::int64_t value, const void *context) noexcept;
+
+    /**
+     * @struct FallbackWitness
+     * @brief The witness a @ref FallbackPolicy runs against a recovered prologue-fallback target.
+     * @details A null @ref predicate means "no witness": WarnOnly then behaves as a plain structural recovery, and
+     *          RequireIdentity fails closed (it has nothing to confirm the site with). A typical witness corroborates
+     *          the recovered address against an independently resolved landmark, or reads a distinguishing byte past
+     *          the overwritten prologue.
+     */
+    struct FallbackWitness
+    {
+        /// Predicate run on the recovered address; nullptr for no identity check.
+        FallbackValidator predicate = nullptr;
+        /// Opaque pointer forwarded verbatim to @ref predicate.
+        const void *context = nullptr;
+    };
+
+    /**
      * @struct ScanRequest
      * @brief A non-owning resolution request: a candidate ladder plus the scope and policy to resolve it under.
      * @details ladder and label are NON-owning views, so a ScanRequest is for a request built and consumed in one
@@ -683,8 +732,10 @@ namespace DetourModKit::scan
         std::string_view label{};
         /// The memory range to resolve within; defaults to the host process image.
         Region scope = Region::host();
-        /// When every direct candidate misses, rebuild each Direct prologue as a near/far JMP and retry.
-        bool prologue_fallback = false;
+        /// Hooked-prologue recovery mode for a full direct miss (see @ref FallbackPolicy).
+        FallbackPolicy fallback_policy = FallbackPolicy::Off;
+        /// The identity witness the fallback runs on a recovered site (see @ref FallbackPolicy). Unused when Off.
+        FallbackWitness fallback_witness{};
         /// Fail closed on an ambiguous byte match (a second occurrence in scope) rather than taking the first.
         bool require_unique = true;
         /// How the ladder is ordered before it is tried.
@@ -702,7 +753,8 @@ namespace DetourModKit::scan
      */
     [[nodiscard]] ScanRequest borrow(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                      std::string_view label DMK_LIFETIMEBOUND = {}, Region scope = Region::host(),
-                                     bool prologue_fallback = false, bool require_unique = true,
+                                     FallbackPolicy fallback_policy = FallbackPolicy::Off,
+                                     FallbackWitness fallback_witness = {}, bool require_unique = true,
                                      CandidateOrder order = CandidateOrder::AsDeclared,
                                      Pages pages = Pages::Readable) noexcept;
 
@@ -711,23 +763,29 @@ namespace DetourModKit::scan
      * @param ladder Candidates tried in order; borrowed for the call.
      * @param label Optional diagnostic label; borrowed.
      * @param scope Module image to resolve within; defaults to the host process image.
+     * @param fallback_policy Hooked-prologue recovery strictness (see @ref FallbackPolicy). Defaults to WarnOnly:
+     *        recover a target another mod inline-hooked, structurally. Pass RequireIdentity with @p fallback_witness to
+     *        fail closed on a recovered site the witness cannot confirm.
+     * @param fallback_witness The identity witness the fallback runs on a recovered site (see @ref FallbackWitness).
      * @return A ScanRequest carrying the code-target resolution policy.
      * @details A hook target must land on an instruction, so this preset differs from the default data-capable request
      *          in three deliberate ways: Pages::Executable (an instruction signature scans only committed code pages,
      *          so it cannot alias an identical byte run in .rdata / .data), CandidateOrder::UniqueFirst (promote the
-     *          unique-only text tiers and anchored byte patterns so a confident hit precedes a looser fallback), and
-     *          prologue_fallback (rebuild a Direct candidate's prologue as a near/far JMP to recover a target another
-     *          mod already inline-hooked). require_unique stays true. Pages::Executable narrows only the Direct /
-     *          RipRelative byte scans; the RTTI and string-xref tiers are unique-only by construction and resolve
+     *          unique-only text tiers and anchored byte patterns so a confident hit precedes a looser fallback), and an
+     *          enabled fallback_policy (rebuild a Direct candidate's prologue as a near/far JMP to recover a target
+     *          another mod already inline-hooked). require_unique stays true. Pages::Executable narrows only the Direct
+     *          / RipRelative byte scans; the RTTI and string-xref tiers are unique-only by construction and resolve
      *          through their own backends regardless, so a mixed ladder keeps its RTTI / string tiers intact. For a
      *          data / RTTI / string target, use the default ScanRequest (Pages::Readable) or borrow().
      * @note Callback-safe: packs the borrowed views into a ScanRequest; noexcept, no allocation. For a stored or
-     *       deferred request, copy the fields onto an OwnedScanRequest (Pages::Executable, UniqueFirst, prologue
-     *       fallback) so the ladder is owned.
+     *       deferred request, copy the fields onto an OwnedScanRequest (Pages::Executable, UniqueFirst, a WarnOnly
+     *       fallback policy) so the ladder is owned.
      */
     [[nodiscard]] ScanRequest borrow_code_target(std::span<const Candidate> ladder DMK_LIFETIMEBOUND,
                                                  std::string_view label DMK_LIFETIMEBOUND = {},
-                                                 Region scope = Region::host()) noexcept;
+                                                 Region scope = Region::host(),
+                                                 FallbackPolicy fallback_policy = FallbackPolicy::WarnOnly,
+                                                 FallbackWitness fallback_witness = {}) noexcept;
 
     /**
      * @struct OwnedScanRequest
@@ -745,8 +803,10 @@ namespace DetourModKit::scan
         std::string label;
         /// The resolution scope; defaults to the host image.
         Region scope = Region::host();
-        /// Enable hooked-prologue recovery on a full direct miss.
-        bool prologue_fallback = false;
+        /// Hooked-prologue recovery strictness on a full direct miss (see @ref FallbackPolicy).
+        FallbackPolicy fallback_policy = FallbackPolicy::Off;
+        /// The identity witness the fallback runs on a recovered site (see @ref FallbackPolicy). Unused when Off.
+        FallbackWitness fallback_witness{};
         /// Fail closed on an ambiguous byte match.
         bool require_unique = true;
         /// Ladder ordering policy.
@@ -764,7 +824,8 @@ namespace DetourModKit::scan
                 .ladder = ladder,
                 .label = label,
                 .scope = scope,
-                .prologue_fallback = prologue_fallback,
+                .fallback_policy = fallback_policy,
+                .fallback_witness = fallback_witness,
                 .require_unique = require_unique,
                 .order = order,
                 .pages = pages,
@@ -793,8 +854,9 @@ namespace DetourModKit::scan
      * @details The whole resolver surface in one call. Candidates are tried in @ref ScanRequest::order order; the first
      *          that (for a byte tier) matches in scope, passes the uniqueness gate when required, and resolves to an
      *          in-scope plausible address, or (for a text tier) resolves through its unique-only backend, wins. On a
-     *          full direct miss with prologue_fallback set, each Direct candidate's prologue is rebuilt as a near/far
-     *          JMP and retried to recover a target another mod already inline-hooked. May allocate, so it is NOT
+     *          full direct miss with a non-Off fallback_policy, each Direct candidate's prologue is rebuilt as a
+     *          near/far JMP and retried to recover a target another mod already inline-hooked, subject to the policy's
+     *          identity witness. May allocate, so it is NOT
      *          noexcept; the only throwing path is allocation failure.
      * @note Setup/control-plane only: a cascade resolve walks the image and is a startup-time operation.
      */

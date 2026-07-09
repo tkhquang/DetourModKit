@@ -5,11 +5,11 @@
  * @file internal/scan_prologue_recovery.hpp
  * @brief True-private hooked-prologue recovery: rebuild each Direct candidate's prologue as a recognised inline-hook
  *        jump shape and recover the single site a sibling mod already inline-hooked.
- * @details Never installed. The resolver runs this only when every direct candidate missed and the request opted into
- *          prologue_fallback. It is an implementation strategy of scan_resolution, not a public entry point: for each
- *          Direct candidate it tries each jump shape (E9 near jump, FF 25 indirect, FF 25 absolute, mov rax/jmp rax),
- *          requires the rebuilt pattern to match exactly once in the scope's executable pages, decodes the jump to
- *          confirm a real redirect, and resolves the anchored match.
+ * @details Never installed. The resolver runs this only when every direct candidate missed and the request enabled a
+ *          non-Off fallback policy. It is an implementation strategy of scan_resolution, not a public entry point: for
+ *          each Direct candidate it tries each jump shape (E9 near jump, FF 25 indirect, FF 25 absolute, mov rax/jmp
+ *          rax), requires the rebuilt pattern to match exactly once in the scope's executable pages, decodes the jump
+ *          to confirm a real redirect, and resolves the anchored match.
  */
 
 #include "DetourModKit/scan.hpp"
@@ -27,16 +27,22 @@ namespace DetourModKit
         /**
          * @struct FallbackOutcome
          * @brief The result of a prologue-recovery pass over a candidate ladder.
-         * @details @ref hit holds the recovered Hit when a shape uniquely recovered an executable target. @ref
-         *          not_applicable stays true until some Direct candidate yields a usable rebuilt pattern, so the
-         *          resolver can report PrologueFallbackNotApplicable only when a Direct row existed but its literal tail
-         *          was too short. @ref had_direct is true once any Direct candidate was a real rebuild target.
+         * @details @ref hit holds the recovered Hit when a shape uniquely recovered an executable target and that site
+         *          passed the request's identity gate (@ref scan::FallbackPolicy). @ref not_applicable stays true until
+         *          some Direct candidate yields a usable rebuilt pattern, so the resolver can report
+         *          PrologueFallbackNotApplicable only when a Direct row existed but its literal tail was too short.
+         *          @ref had_direct is true once any Direct candidate was a real rebuild target. @ref identity_rejected
+         *          is set when RequireIdentity refused a structurally-recovered site, so the resolver reports
+         *          PrologueIdentityRejected rather than a plain miss. @ref identity_warned is set when a WarnOnly
+         *          witness disagreed with the returned site, so the resolver can log the drift while still accepting.
          */
         struct FallbackOutcome
         {
             std::optional<scan::Hit> hit;
             bool not_applicable = true;
             bool had_direct = false;
+            bool identity_rejected = false;
+            bool identity_warned = false;
         };
 
         /**

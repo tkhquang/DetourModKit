@@ -4,6 +4,11 @@
 /**
  * @file worker.hpp
  * @brief RAII wrapper around std::jthread with a named stop signal.
+ * @note This header sits in the detail/ directory for compile visibility: the umbrella must include it. It declares
+ *       StoppableWorker at the module-root DetourModKit namespace because it is a public background-worker utility a
+ *       consumer reaches through the umbrella, not an implementation detail (no installed header names the type in a
+ *       signature). Directory placement and namespace placement are independent; the directory reflects compile
+ *       visibility, not privacy.
  */
 
 #include <atomic>

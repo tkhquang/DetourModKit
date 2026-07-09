@@ -6,8 +6,8 @@
  *          resolve(ScanRequest) carries scope, ordering, uniqueness, prologue fallback, and the ladder as fields. The
  *          byte tiers reuse the page-gated SIMD engine with the bounded
  *          haystack-frequency anchor override (sampled lazily on the first byte candidate, shared across the ladder);
- *          the text tiers resolve through their unique-only backends. On a full direct miss with prologue_fallback,
- *          hooked-prologue recovery is attempted.
+ *          the text tiers resolve through their unique-only backends. On a full direct miss with a non-Off
+ *          fallback_policy, hooked-prologue recovery is attempted under that policy's identity gate.
  */
 
 #include "DetourModKit/scan.hpp"
@@ -109,6 +109,24 @@ namespace DetourModKit
                     (void)DetourModKit::log().try_log(LogLevel::Warning,
                                                       "scan::resolve: '{}' matched no candidate across {} tried ({}).",
                                                       request.label, request.ladder.size(), reason);
+                }
+                catch (...)
+                {
+                }
+            }
+
+            // A WarnOnly recovery whose identity witness disagreed: surface the possible near-twin at Warning level
+            // while still returning the address. Formatting/allocation failures are swallowed like the other
+            // diagnostics so a log cannot turn an accepted recovery into a failure.
+            void log_identity_warning(const ScanRequest &request, const Hit &hit) noexcept
+            {
+                try
+                {
+                    (void)DetourModKit::log().try_log(
+                        LogLevel::Warning,
+                        "scan::resolve: '{}' recovered {} via hooked-prologue reconstruction, but its identity witness "
+                        "disagreed (WarnOnly); the site may be a near-twin.",
+                        request.label, format::format_address(hit.address.raw()));
                 }
                 catch (...)
                 {
@@ -226,14 +244,26 @@ namespace DetourModKit
                 return hit;
             }
 
-            if (request.prologue_fallback)
+            if (request.fallback_policy != FallbackPolicy::Off)
             {
                 const detail::FallbackOutcome fallback = detail::resolve_prologue_fallback(
                     request, std::span<const std::size_t>{order.data(), ordered_count}, range);
                 if (fallback.hit)
                 {
+                    if (fallback.identity_warned)
+                    {
+                        log_identity_warning(request, *fallback.hit);
+                    }
                     log_resolved(request, *fallback.hit, true);
                     return *fallback.hit;
+                }
+                if (fallback.identity_rejected)
+                {
+                    // RequireIdentity refused every structurally-recovered site: the rebuilt prologue matched uniquely,
+                    // but no recovered address passed the witness. Distinct from a plain miss so the caller learns that
+                    // a hooked near-twin exists and the signature needs a sharper witness or corroborating landmark.
+                    log_unresolved(request, "prologue recovery rejected by identity gate");
+                    return std::unexpected(Error{ErrorCode::PrologueIdentityRejected, "scan::resolve"});
                 }
                 if (fallback.had_direct && fallback.not_applicable)
                 {
