@@ -42,7 +42,10 @@ namespace DetourModKit
      *          cannot identify types.
      *
      *          The primary fallback for an RTTI-off consumer is @ref scan::find_string_xref or
-     *          @ref scan::read_code_constant, which operate on raw bytes and do not require RTTI records. The
+     *          @ref scan::read_code_constant, which operate on raw bytes and do not require RTTI records. A consumer
+     *          that cannot tell a genuine miss from an RTTI-less module can call @ref region_has_rtti first. A false
+     *          result is the definite "no records to search in this scope, go to the raw-byte fallback" signal; a true
+     *          result only proves the module carries some records, not that the caller's own type resolves. The
      *          long-form failure-mode discussion for each function is in docs/guides/rtti/rtti-walker.md and
      *          docs/guides/rtti/rtti-self-heal.md.
      */
@@ -194,6 +197,31 @@ namespace DetourModKit
          */
         [[nodiscard]] std::size_t vtables_for_type(std::string_view mangled, Address *out, std::size_t out_cap,
                                                    Region range = Region::host()) noexcept;
+
+        /**
+         * @brief Reports whether a module region currently contains any resolvable MSVC RTTI record.
+         * @details Sweeps @p range for any COL that passes the reverse resolver's x64 signature, pSelf/base, and
+         *          in-module bounds checks.
+         *
+         *          The predicate is region-level and its two answers are deliberately asymmetric:
+         *          - false is authoritative: this region, as currently mapped, holds zero resolvable RTTI records -- an
+         *            MSVC /GR- host with no /GR static libs, a still-packed or section-merged image, or a data-only
+         *            module. This is the definite "reverse RTTI is futile here, use the raw-byte fallback" signal.
+         *          - true is not conclusive for a specific type: it only proves at least one record exists somewhere in
+         *            the module, not that the caller's type resolves. A /GR- executable that links a /GR CRT or
+         *            middleware returns true off those library COLs while an executable-owned type still needs the
+         *            raw-byte fallback. Act on a false; a true still leaves that fallback available after any resolve
+         *            miss.
+         * @param range Module image to inspect. Defaults to the host EXE.
+         * @return true if @p range holds at least one resolvable RTTI record; false if it holds none or @p range is not
+         *         a valid mapped image.
+         * @note Setup/control-plane only: it sweeps the module's readable sections like @ref vtable_for_type, so run it
+         *       once after a resolve miss, never per-frame. It carries no re-sweep throttle, so a records-free scope
+         *       pays a full sweep on every call.
+         * @note An absent verdict on a still-packed image is a transient truth about the CURRENT mapping, not proof the
+         *       binary was built /GR-; re-inspect after the image unpacks rather than caching the result as permanent.
+         */
+        [[nodiscard]] bool region_has_rtti(Region range = Region::host()) noexcept;
 
         /**
          * @brief Cached, self-healing identity handle for a class vtable.
