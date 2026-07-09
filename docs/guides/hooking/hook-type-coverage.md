@@ -26,7 +26,7 @@ Together these cover the two dominant interception needs in game modding: redire
 
 ## 2. The install model and its one honest limitation
 
-The inline and mid paths run on the SafetyHook backend, which stops every other thread on create and delete and fixes up the instruction pointer of any thread caught inside the region being rewritten. This suspend-all-plus-IP-fixup model is the correct one for installing and removing inline patches in a live process, and follows the same live-patching discipline as Microsoft Detours and MinHook.
+The inline and mid paths run on the SafetyHook backend, which guards every create and delete by removing execute access from the pages holding the target and trampoline bytes and letting a process-global vectored exception handler (registered on first use) fix up the instruction pointer of any thread that faults inside the region being rewritten -- no thread is suspended. This trap-plus-IP-fixup model is a correct one for installing and removing inline patches in a live process, achieving the same safety goal as the suspend-and-fixup discipline of Microsoft Detours and MinHook without stopping the world.
 
 The honest limitation is worth stating so a consumer picks the right primitive for its threat model: an inline or mid hook writes a JMP into the target module's `.text`, which is a visible modification of the code section. A `.text`-integrity check (a checksum or CRC over the code pages, a common anti-cheat technique) can observe that change. A VMT hook touches no `.text` at all -- it changes only the object's vptr and a heap-allocated clone -- so it is invisible to a `.text` checksum, though a routine that validates an object's vptr or vtable contents can still see it. DMK does not attempt to hide either modification; anti-detection is out of scope (see section 3).
 
@@ -44,7 +44,7 @@ Excluded because both intercept only calls that travel through the table. An IAT
 
 Overwrite the target's first byte with `0xCC` (INT3). A vectored or structured exception handler catches the resulting breakpoint exception, runs the detour, restores the original byte, single-steps over it, and re-arms.
 
-Excluded because it still modifies `.text` (one byte), so it buys no stealth over the inline JMP against a `.text`-integrity check, while adding a process-wide exception-handler dependency, a single-step-then-re-arm race on every hit, and a direct conflict with any real debugger or anti-debug layer that owns the INT3 / `#BP` path. It trades the inline hook's clean trampoline for a slower, more fragile trap and adds no capability the inline path lacks.
+Excluded because it still modifies `.text` (one byte), so it buys no stealth over the inline JMP against a `.text`-integrity check, while adding an exception-handler round-trip and a single-step-then-re-arm race on every hit (the SafetyHook backend also registers a process-wide vectored handler, lazily on the first hook operation and left in place thereafter, but it is exercised only during install / teardown patch windows, never on a hit), and a direct conflict with any real debugger or anti-debug layer that owns the INT3 / `#BP` path. It trades the inline hook's clean trampoline for a slower, more fragile trap and adds no capability the inline path lacks.
 
 ### 3.3 Hardware breakpoint (debug registers + vectored exception handler)
 

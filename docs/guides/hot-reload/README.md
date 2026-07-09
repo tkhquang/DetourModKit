@@ -114,7 +114,11 @@ static HMODULE s_this_module = nullptr;
 
 // The live DMK Session. Its destructor runs the ordered teardown, so it is
 // the last thing standing and the first thing dropped in Shutdown().
-static std::optional<DMK::Session> s_session;
+static std::optional<dmk::Session> s_session;
+
+// Caller-owned Hook handles. Stored so Shutdown() can drop them before
+// FreeLibrary (each destructor unhooks under the loader-lock leaf discipline).
+static std::vector<DetourModKit::hook::Hook> s_hooks;
 
 // --- Exported functions ---
 
@@ -124,14 +128,14 @@ extern "C" __declspec(dllexport) bool Init()
     {
         // Session::start runs the synchronous gate + single-instance guard,
         // then configures the process-default logger.
-        auto session = DMK::Session::start(
+        auto session = dmk::Session::start(
             {.name = "MyMod", .log_file = "mod_logic.log"});
         if (!session)
             return false;
 
         s_session.emplace(std::move(*session));
         auto& logger = s_session->log();
-        logger.set_log_level(DMK::LogLevel::Debug);
+        logger.set_log_level(dmk::LogLevel::Debug);
         logger.info("mod_logic: Init() called");
 
         setup_config();
@@ -190,10 +194,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 
 // --- Setup functions ---
 
-// Caller-owned Hook handles. Stored so Shutdown() can drop them before
-// FreeLibrary (each destructor unhooks under the loader-lock leaf discipline).
-static std::vector<DetourModKit::hook::Hook> s_hooks;
-
 static bool setup_hooks()
 {
     // Example: hook a game function by AOB pattern. inline_at returns a
@@ -206,8 +206,9 @@ static bool setup_hooks()
     // auto result = DetourModKit::hook::inline_at(
     //     {.name = "camera_update",
     //      .target = DetourModKit::scan::OwnedScanRequest{
-    //          std::move(*pattern),
-    //          DetourModKit::Region::module_named(game_module)}},
+    //          .ladder = {DetourModKit::scan::Candidate::direct(
+    //              "camera_update", std::move(*pattern))},
+    //          .scope = DetourModKit::Region::module_named(game_module)}},
     //     &detour_camera_update);
     // if (!result) return false;
     // s_hooks.push_back(std::move(*result));
@@ -217,20 +218,20 @@ static bool setup_hooks()
 
 static void setup_config()
 {
-    // DMK::config::bind_float("Camera", "FOV", "Field of View",
+    // dmk::config::bind_float("Camera", "FOV", "Field of View",
     //     [](float val) { g_fov = val; }, 90.0f);
-    // DMK::config::load("mod_config.ini");
+    // dmk::config::load("mod_config.ini");
 }
 
 static void setup_input()
 {
-    // DMK::input::scope().add(*DMK::input::register_combo({...}));
-    // DMK::input::Input::instance().start();
+    // dmk::input::scope().add(*dmk::input::register_combo({...}));
+    // dmk::input::Input::instance().start();
 }
 ```
 
 > [!TIP]
-> Any background threads spawned from `Init()` (deferred scanning, periodic polling, async I/O, etc.) must be joined before the `Session` teardown runs -- otherwise `FreeLibrary` will unload code pages that the thread is still executing from. The easiest way to get this right is to wrap them in [`DMK::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) and reset the owning pointer at the top of `Shutdown()`, before destroying the `Session`. See [Section 9](#9-background-thread-lifecycle) below.
+> Any background threads spawned from `Init()` (deferred scanning, periodic polling, async I/O, etc.) must be joined before the `Session` teardown runs -- otherwise `FreeLibrary` will unload code pages that the thread is still executing from. The easiest way to get this right is to wrap them in [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) and reset the owning pointer at the top of `Shutdown()`, before destroying the `Session`. See [Section 9](#9-background-thread-lifecycle) below.
 
 ### Step 3: Implement the Loader ASI
 
@@ -692,7 +693,7 @@ With this setup, the workflow is always **build, then press reload key**. The po
 
 **DMK process state (Logger, config, memory cache, etc.):** the `~Session` teardown tears down live DMK state before `FreeLibrary`. The process-default logger is intentionally not reclaimed by CRT static destructors; the teardown flushes and closes its sink, while the logger storage may remain allocated so late teardown logging cannot touch freed storage. The next `Init()` builds a fresh `Session`, which re-configures logging and lets you re-register config/input state.
 
-**Hooks:** There is no hook singleton in v4. Each `hook::inline_at` / `mid_at` / `vmt_for` returns a caller-owned RAII `Hook` (or `VmtHook`) handle that lives in the logic DLL's memory. Drop those handles in `Shutdown()` *before* `FreeLibrary` so each destructor restores the original bytes while the code pages are still mapped. A handle that is leaked across `FreeLibrary` leaves the game running a detour into unmapped memory.
+**Hooks:** There is no hook singleton in v4. Each `hook::inline_at` / `mid_at` / `vmt_for` returns a caller-owned RAII `Hook` (or `VmtHook`) handle that lives in the logic DLL's memory. Drop those handles in `Shutdown()` *before* `FreeLibrary` so each destructor restores the original bytes while the code pages are still mapped. A handle leaked across `FreeLibrary` keeps the hook installed and -- because every hook holds a counted module reference taken at install on the DLL that hosts DMK (in this topology, the logic DLL itself) -- pins the old DLL image in memory, so the next `LoadLibrary` silently returns the stale, still-loaded image instead of your new build. Drop every handle in `Shutdown()` so the reference is released and the DLL can actually unload.
 
 **Game memory (patched bytes, written values):** **Persists** - the game doesn't know about reload. Dropping a `Hook` handle restores the original prologue bytes; direct `memory::write_bytes()` patches must be manually reverted in `Shutdown()`.
 
@@ -739,10 +740,10 @@ void apply_patch(std::byte* addr, const std::byte* new_bytes, size_t len)
     patch.original_bytes.resize(len);
     std::copy_n(addr, len, patch.original_bytes.data());
 
-    auto result = DMK::memory::write_bytes(
-        DMK::Address{addr}, std::span<const std::byte>{new_bytes, len});
+    auto result = dmk::memory::write_bytes(
+        dmk::Address{addr}, std::span<const std::byte>{new_bytes, len});
     if (!result) {
-        DMK::log().error("apply_patch: write_bytes failed");
+        dmk::log().error("apply_patch: write_bytes failed");
         return;
     }
     s_active_patches.push_back(std::move(patch));
@@ -752,10 +753,10 @@ void revert_all_patches()
 {
     for (auto it = s_active_patches.rbegin(); it != s_active_patches.rend(); ++it)
     {
-        auto result = DMK::memory::write_bytes(
-            DMK::Address{it->address}, std::span<const std::byte>{it->original_bytes});
+        auto result = dmk::memory::write_bytes(
+            dmk::Address{it->address}, std::span<const std::byte>{it->original_bytes});
         if (!result) {
-            DMK::log().error("revert_all_patches: write_bytes failed");
+            dmk::log().error("revert_all_patches: write_bytes failed");
         }
     }
     s_active_patches.clear();
@@ -766,7 +767,7 @@ void revert_all_patches()
 
 ### 4. Logger File Handles
 
-The DMK Logger opens a file handle when its sink is constructed (configured by `Session::start`). On reload, the `~Session` teardown closes the file, and the next `Init()` builds a fresh `Session` that reopens it. The process-default logger storage is intentionally process-lifetime, so skipping the `Session` teardown can leave the old sink and async writer alive after the logic DLL unloads. The logger appends by default via `WinFileStream`, so logs accumulate across reloads. If you need a clean log per session, delete the log file in `Init()` before starting the `Session`.
+The DMK Logger opens a file handle when its sink is constructed (configured by `Session::start`). On reload, the `~Session` teardown closes the file, and the next `Init()` builds a fresh `Session` that reopens it. The process-default logger storage is intentionally process-lifetime, so skipping the `Session` teardown can leave the old sink and async writer alive after the logic DLL unloads. The logger truncates its log file whenever it (re)opens its sink (`std::ios::trunc`), and `~Session` closes that sink, so every reload's fresh `Session` reopens it and starts a clean log -- the previous session's entries are lost. If you need log continuity across reloads, keep the sink open across cycles by using the persistent-host topology (DMK in the loader) described below.
 
 **AsyncLogger:** If you are using the async logging backend, destroy the `Session` to flush the async queue before `FreeLibrary` unloads the DLL. Failing to flush can lose buffered log entries or cause the background writer thread to access unmapped memory.
 
@@ -874,14 +875,14 @@ When debugging hot-reloaded DLLs with x64dbg or Visual Studio:
 
 If your logic DLL spawns background threads (e.g., for deferred scanning, periodic polling, or async I/O), you **must** join them in `Shutdown()` before destroying the `Session`. A thread that outlives `FreeLibrary` will execute unmapped code and crash.
 
-**Recommended:** use [`DMK::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`, requests stop on destruction, and falls back to `detach()` when it detects the Windows loader lock (leaving the counted module reference it took at thread start outstanding, so code pages stay mapped). This encapsulates the bounded-join pattern shown below and makes it a one-liner:
+**Recommended:** use [`dmk::StoppableWorker`](../../../include/DetourModKit/detail/worker.hpp) from `worker.hpp`. It is an RAII wrapper around `std::jthread` that owns a `std::stop_token`, requests stop on destruction, and falls back to `detach()` when it detects the Windows loader lock (leaving the counted module reference it took at thread start outstanding, so code pages stay mapped). This encapsulates the bounded-join pattern shown below and makes it a one-liner:
 
 ```cpp
 // At file scope in the logic DLL
-static std::unique_ptr<DMK::StoppableWorker> s_scan_worker;
+static std::unique_ptr<dmk::StoppableWorker> s_scan_worker;
 
 // In Init():
-s_scan_worker = std::make_unique<DMK::StoppableWorker>(
+s_scan_worker = std::make_unique<dmk::StoppableWorker>(
     "my_mod.scan",
     [](std::stop_token tok) {
         while (!tok.stop_requested())
@@ -1183,7 +1184,7 @@ The standard two-DLL pattern above static-links DMK into the *Logic DLL*: each r
 DMK also supports a second topology where DMK is static-linked into the **loader** (or a shared host module) and survives every Logic-DLL unload. This is the right choice when:
 
 - One host needs to load several Logic DLLs that all use DMK (a shared loader plus per-feature modules), or
-- A loader wants to keep `Logger`, the `config` registry, and its auto-reload watcher alive across reload cycles so log files and INI state are not torn down on every iteration, or
+- A loader wants to keep `Logger` and the warmed `Memory` cache alive across reload cycles so log files and cached scans are not torn down on every iteration (the unload helpers still stop the config auto-reload watcher and clear the config registry, so INI-bound state is re-registered on the next attach), or
 - The same Logic DLL is loaded, unloaded, and reloaded many times during a session and the host wants amortized cost on shared infrastructure.
 
 In this topology, the Logic DLL must **not** destroy the process-wide DMK state from `Shutdown()`, because doing so would tear down subsystems that other Logic DLLs (or the next reload of this one) still depend on. It also does not own a `Session` (the loader owns the process-lifetime one). Instead, it drops only the resources it owns:
@@ -1202,16 +1203,16 @@ extern "C" __declspec(dllexport) void Shutdown()
         "ShowEquip_Chest"sv,
     };
 
-    // Tears down only the named bindings and their config-bound setters.
-    DMK::on_logic_dll_unload(binding_names);
+    // Removes the named bindings, then stops the auto-reload watcher and clears the whole process config registry.
+    dmk::on_logic_dll_unload(binding_names);
 }
 ```
 
-`on_logic_dll_unload(binding_names)` clears the named input bindings via `input::Input::remove_bindings_by_name`. It is `noexcept`, idempotent, and safe to call multiple times: a second call with the same names is a no-op. Logger, the config registry, and the auto-reload watcher are intentionally left running.
+`on_logic_dll_unload(binding_names)` clears the named input bindings via `input::Input::remove_bindings_by_name`, then stops the auto-reload watcher and clears the process config registry (`config::disable_auto_reload()` then `config::clear()`). It is `noexcept`, idempotent, and safe to call multiple times: a second call with the same names is a no-op. Logger, the Memory cache, and the input poll thread are intentionally left running; the config registry and its watcher are not preserved, because the config-bound setters live in the unloading DLL's `.text` and would be use-after-unload hazards on the next load.
 
-> **Note:** Hooks are caller-owned. This helper tears down the named bindings and their config-bound setters only; it never touches hooks. A Logic DLL drops its own caller-owned `Hook` handles in `Shutdown()` (their destructors unhook) *before* it calls this helper.
+> **Note:** Hooks are caller-owned. This helper removes the named bindings, stops the auto-reload watcher, and clears the whole process config registry; it never touches hooks. A Logic DLL drops its own caller-owned `Hook` handles in `Shutdown()` (their destructors unhook) *before* it calls this helper.
 
-`on_logic_dll_unload_all()` is the catch-all variant for callers that do not maintain an explicit registry of binding names. It composes `input::Input::clear_bindings` under the same `noexcept`, idempotent, exception-swallowing contract; Logger, the config registry, and the auto-reload watcher are again left running. The binding teardown call is `clear_bindings()` rather than `input::Input::shutdown()` so the poll thread keeps running idle. It does not touch hooks (caller-owned). Use this overload when one Logic DLL owns the entire DMK binding/config surface and a single Logic DLL teardown should drain everything.
+`on_logic_dll_unload_all()` is the catch-all variant for callers that do not maintain an explicit registry of binding names. It composes `input::Input::clear_bindings` under the same `noexcept`, idempotent, exception-swallowing contract, then stops the auto-reload watcher and clears the config registry; Logger, the Memory cache, and the (now idle) input poll thread are again left running, but the config registry and its watcher are not preserved. The binding teardown call is `clear_bindings()` rather than `input::Input::shutdown()` so the poll thread keeps running idle. It does not touch hooks (caller-owned). Use this overload when one Logic DLL owns the entire DMK binding/config surface and a single Logic DLL teardown should drain everything.
 
 Prefer the named-list overload when the host loads several Logic DLLs that share one DMK instance: calling `on_logic_dll_unload_all()` from one Logic DLL's `Shutdown()` clears every other Logic DLL's bindings as well, because the binding registry is process-scoped. The named-list overload keeps each Logic DLL's binding teardown scoped to the names it registered. (Hooks are already scoped per Logic DLL because each owns its own `Hook` handles.)
 
@@ -1222,7 +1223,8 @@ When choosing between the two topologies:
 | Concern                     | DMK in Logic DLL (default)              | DMK in Loader (persistent host)               |
 |-----------------------------|-----------------------------------------|-----------------------------------------------|
 | Live DMK state lifetime     | One reload cycle                        | Process lifetime                              |
-| Logger / config / Watcher   | Shut down and configured each reload    | Outlive every Logic-DLL unload                |
+| Logger / Memory cache       | Shut down and rebuilt each reload       | Outlive every Logic-DLL unload                |
+| Config registry / Watcher   | Shut down each reload                   | Cleared on each unload, rebuilt on reattach   |
 | Logic-DLL `Shutdown()` does | Destroys the `Session`                  | `on_logic_dll_unload(...)`                    |
 | Process-exit cleanup        | `~Session` from final `Shutdown()`      | `~Session` (loader's) via `bootstrap_detach`  |
 | Multiple Logic DLLs         | Each ships its own DMK copy             | One DMK instance shared by all                |
@@ -1231,13 +1233,13 @@ Mixing the two in one process is not supported: pick one per host module and sta
 
 ### When to use `on_logic_dll_unload` vs destroying the `Session`
 
-Both approaches leave the unloading Logic DLL in a state where its bindings and config-bound setters are gone before `FreeLibrary` reclaims the code pages (hooks are dropped separately by releasing their caller-owned `Hook` handles in `Shutdown()`). The difference is what survives on the loader side: destroying the `Session` (the `~Session` teardown) tears down Logger, the config auto-reload watcher, and the Memory cache; `on_logic_dll_unload(_all)` keeps them running.
+Both approaches leave the unloading Logic DLL in a state where its bindings and config-bound setters are gone before `FreeLibrary` reclaims the code pages (hooks are dropped separately by releasing their caller-owned `Hook` handles in `Shutdown()`). The difference is what survives on the loader side: destroying the `Session` (the `~Session` teardown) tears down the config auto-reload watcher, the input poll thread, the Memory cache, the config registry, and Logger; `on_logic_dll_unload(_all)` also stops the watcher and clears the config registry, but keeps Logger, the Memory cache, and the input poll thread running.
 
 | Consumer shape                                         | Use                   | Why                                                                                                                                                    |
 |--------------------------------------------------------|-----------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Single Logic DLL, occasional reload (human hotkey)     | Destroy the `Session` | Functionally equivalent to the lighter unload in this topology; sub-100ms speedup is invisible at human-trigger frequency, so prefer the simpler path. |
-| Multi-Logic-DLL loader, only one reloads               | `on_logic_dll_unload` | The `~Session` teardown would tear down Logger, the config auto-reload watcher, and Memory cache that the still-loaded sibling DLLs depend on.         |
-| Tight dev iteration (sub-second file-save cadence)     | `on_logic_dll_unload` | Skips Logger writer-thread spin-up, config auto-reload watcher restart, and Memory cache rebuild on the next attach. Visible in fast inner-loop dev.   |
+| Multi-Logic-DLL loader, only one reloads               | `on_logic_dll_unload` | The `~Session` teardown would tear down Logger, the Memory cache, and the shared input poll thread that the still-loaded sibling DLLs depend on.       |
+| Tight dev iteration (sub-second file-save cadence)     | `on_logic_dll_unload` | Skips Logger writer-thread spin-up and Memory cache rebuild on the next attach. Visible in fast inner-loop dev.   |
 | Persistent loader-side UI or state (overlay, profiler) | `on_logic_dll_unload` | Lets the overlay window, profiler session, or other loader-side state survive the reload without flicker or re-init.                                   |
 | Log continuity required across reloads                 | `on_logic_dll_unload` | Same writer thread keeps appending; one open file handle; contiguous timestamps. The `~Session` teardown flushes, closes, and reopens.                |
 
@@ -1264,7 +1266,7 @@ extern "C" __declspec(dllexport) void Shutdown()
     //    rewrite, so they must be quiescent here. Drop the Hook handles
     //    (each destructor unhooks), then clear bindings and config.
     s_hooks.clear(); // std::vector<DetourModKit::hook::Hook>
-    DMK::on_logic_dll_unload(binding_names);
+    dmk::on_logic_dll_unload(binding_names);
 
     // 3. Return from Shutdown(). The loader's FreeLibrary call follows.
 }
@@ -1310,7 +1312,7 @@ DetourModKit's core systems are designed to be safe across DLL reload cycles:
 
 **Hooks:** v4 has no hook manager. Each hook is a caller-owned RAII handle (`Hook` from `inline_at` / `mid_at`, or `VmtHook` from `vmt_for`), and teardown is dropping the handle under the loader-lock leaf discipline (under the loader lock it leaks the backend -- keeping the counted module reference the hook took at install, which maps its trampoline/detour code -- and records an intentional leak instead of restoring, exactly the leak-on-purpose discipline used by `Logger` and the config auto-reload watcher). What the destructor restores depends on the handle type: an inline or mid `Hook` rewrites the original prologue bytes back over the target, while a `VmtHook` restores each applied object's vptr (newest-first across applied objects). Each `Hook::call<Ret>(Args...)` into the original (inline `Hook` only; `VmtHook` has no guarded `call`) pins a refcounted per-hook call gate (a DMK-owned `std::recursive_mutex` plus the callable trampoline, published under it) into a strong reference before locking, so an in-flight caller and a concurrent `enable` / `disable` / `~Hook` / move serialise rather than race: teardown work (restoring the prologue, freeing the trampoline) may run alongside a call, and a late caller that only pinned the gate before teardown reads a null callable and returns the inactive default instead of dispatching through a freed trampoline. The handle's own storage must still outlive a concurrent call -- co-own it, or order teardown after the last call. When several `Hook` handles target the same address, destroy them newest-first (or hold them in a `hook::HookStack`, which enforces that order by construction); the ledger detects out-of-order teardown. `VmtHook` serialises its own object-vptr create/apply/remove/teardown transitions through a setup-time object gate.
 
-`hook::is_target_hooked(Address)` reports whether this statically-linked DMK kit already has an inline or mid hook installed at the address. It is the programmatic counterpart to the install-time refusal that fires under `Prologue::Fail` when the prologue is already redirected, and it covers the common case of two cooperating modules wanting to coordinate hook ownership without grepping log output. Installs default to `Prologue::Fail` in v4 (safe-by-default), so a leading `call`/breakpoint prologue is refused with `ErrorCode::TargetPrologueUnsafe`.
+`hook::is_target_hooked(Address)` reports whether this statically-linked DMK kit already has an inline or mid hook installed at the address. It is the programmatic counterpart to the ledger half of the install-time `Options::fail_if_already_hooked` refusal (`ErrorCode::TargetAlreadyHookedInProcess`): it consults the same-kit ledger only, so hooks installed by other statically-linked DMK consumers in the same process are not visible. That makes it a tool for coordinating hook ownership between Logic DLLs sharing one host-linked DMK instance, not between modules that each ship their own kit; to also catch foreign hooks (the E9 / FF25 / mov-rax-jmp heuristic) at install time, set `Options::fail_if_already_hooked`. Installs default to `Prologue::Fail` in v4 (safe-by-default), so a leading `call`/breakpoint prologue is refused with `ErrorCode::TargetPrologueUnsafe`.
 
 **Input:** `input::register_combo` accepts new bindings whether the engine is stopped, starting, or running. Live registration takes the engine's exclusive lock, appends to the binding list, and rebuilds the parallel `m_active_states` array in one step, so there is no per-tick allocation in the hot loop. Surviving entries' atomic states are carried forward across every reshape (register, `remove_bindings_by_name`, `rebind`), so a held binding never flickers through one inactive tick when an unrelated binding is added or dropped. `clear_bindings()` empties the registry without stopping the engine, and `remove_bindings_by_name(name)` drops every binding sharing a name (used internally by `on_logic_dll_unload`). `Input::rebind(name, combos)` accepts cardinality changes (1 to N or N to 1) and replaces the registered combo list wholesale; an empty replacement is the explicit-unbound state and collapses the entry set to a single inert sentinel so the binding name remains addressable for a later non-empty update. When a cardinality change drops a held Hold entry, that entry's `on_state_change(false)` release callback fires before the rebuild completes so the consumer never latches in the held state.
 
@@ -1341,4 +1343,4 @@ The `NONE` sentinel is whole-string only by design: a `NONE` token nested inside
 - [Project README](../../../README.md) - Overview, build instructions, and API reference
 - [Test Coverage Guide](../../tests/README.md) - Testing strategy, coverage analysis, and test architecture
 - [`DetourModKit.hpp`](../../../include/DetourModKit.hpp) - `Session` / `bootstrap` / `bootstrap_detach` / `request_shutdown` - loader-lock-safe DllMain scaffolding used by the production ASI (not the two-DLL dev loader, which manages its own thread)
-- [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) - `DMK::StoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`
+- [`worker.hpp`](../../../include/DetourModKit/detail/worker.hpp) - `dmk::StoppableWorker` RAII `std::jthread` wrapper with loader-lock-safe teardown, recommended for all background threads spawned from a logic DLL's `Init()`

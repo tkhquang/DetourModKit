@@ -34,7 +34,7 @@ struct VmtOptions
 };
 ```
 
-Both fields default to `false` to keep the permissive baseline: no pre-flight checks, while pre-existing failures (null object, duplicate name, backend errors) still apply. Opt in to the safety net on mods that exclusively target well-formed C++ vtables. `vmt_for(name, object)` with the options argument omitted uses a default-constructed `VmtOptions{}` (both knobs off).
+Both fields default to `false` to keep the permissive baseline: no pre-flight checks, while pre-existing failures (null or unreadable object, empty name, backend errors) still apply. Opt in to the safety net on mods that exclusively target well-formed C++ vtables. `vmt_for(name, object)` with the options argument omitted uses a default-constructed `VmtOptions{}` (both knobs off).
 
 ## 3. `fail_if_already_hooked` semantics
 
@@ -176,8 +176,7 @@ for (auto *obj : candidate_objects)
 {
     if (!vh.apply_to(obj, opts))
     {
-        // either already on the clone (no-op success would not reach here)
-        // or its vtable is pathological; skip it.
+        // unreadable vptr/slot or a non-function first slot (InvalidObject), or a backend error; skip it.
     }
 }
 ```

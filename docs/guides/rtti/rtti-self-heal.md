@@ -8,9 +8,9 @@ The [RTTI walker](rtti-walker.md) answers the forward question: *given a vtable,
 - **Several fields co-moved; what single shift fits them all?** (`solve_fingerprint`)
 - **Run those heals on a frame cadence, latch each group once it resolves, and warn once when the layout actually drifted.** (`HealScheduler`)
 
-It reuses the walker's verified COL prelude (module-bound-checked, SEH-guarded) rather than duplicating it, so every guarantee the walker makes carries over: every entry point is `noexcept`, every derived address is range-checked against its owning module before a read, and matching compares MSVC mangled bytes exactly (no `UnDecorateSymbolName`). Scope is x64 MSVC.
+It reuses the walker's verified COL prelude (module-bound-checked, SEH-guarded) rather than duplicating it, so every guarantee the walker makes carries over: every non-scheduler entry point is `noexcept` (of the scheduler surface, only the setup call `add_group` may allocate and throw), every derived address is range-checked against its owning module before a read, and matching compares MSVC mangled bytes exactly (no `UnDecorateSymbolName`). Scope is x64 MSVC.
 
-Everything here fails **closed**. Zero matches, an irreducible ambiguity, a forged COL, or an unmapped page is a clean error return -- never a fault, and never a silently-wrong offset.
+Everything here fails **closed** on zero matches, an irreducible ambiguity, a forged COL, or an unmapped page -- a clean error return, never a fault. One documented fail-wrong hazard remains: a single-landmark heal resolves to the uniquely *nearest* type+shape match, so a strictly-nearer same-typed decoy field (or, under `ObjectBase` / `Any`, a nearer multiple-inheritance secondary base) wins silently and returns a confidently-wrong offset; `HealAmbiguous` fires only for an exact `+d` / `-d` distance tie. When the window may hold more than one field of the landmark type, prefer `solve_fingerprint` (one uniform delta must fit every field), narrow the `window`, or tighten the type.
 
 ## Why a mod wants this
 
@@ -36,7 +36,7 @@ All addresses on this surface are the value-typed `Address` (from `address.hpp`)
 | L4 | `solve_fingerprint` | Rigid multi-field drift recovery | no | init-time |
 | L5 | `HealScheduler` | Drive the heals on a frame cadence, latch per group, warn once | no | per-frame `tick()` (gated) |
 
-L3 is the primary deliverable. L4 degenerates exactly to L3 when given a single landmark. L5 is the render-loop driver that ties them into a fixed-cadence, fail-closed retry loop.
+L3 is the primary deliverable. L4 degenerates to a single-field solve when given one landmark -- stricter than L3: there is no nominal short-circuit, and any second matching delta in the window (not just an equidistant pair) fails `HealAmbiguous`. L5 is the render-loop driver that ties them into a fixed-cadence, fail-closed retry loop.
 
 ## L1 -- `identify_pointee_type`
 
@@ -134,7 +134,7 @@ This mirrors the scan resolver's `require_unique` philosophy (`ScanRequest::requ
 2. On a widened scan, matches are probed nearest-to-nominal first; a uniquely nearest match heals, so a single far-away same-typed neighbour does not produce a dead mod.
 3. Only an equidistant `+d` / `-d` pair latches `Ambiguous`.
 
-Consumers see one consistent failure story: `ErrorCode::NoMatch` (from a `scan::resolve` cascade) and `ErrorCode::HealNoMatch` / `HealAmbiguous` (from a heal) all mean "the binary changed too much, re-author the landmark," never a silent wrong heal.
+Consumers see one consistent failure story: `ErrorCode::NoMatch` (from a `scan::resolve` cascade) and `ErrorCode::HealNoMatch` / `HealAmbiguous` (from a heal) all mean "the binary changed too much, re-author the landmark." Refinement 2 is also the residual fail-wrong hazard: a strictly-nearer same-typed decoy wins silently over the intended field, and `HealAmbiguous` fires only for the exact equidistant tie -- a window that may hold several fields of the landmark type belongs to `solve_fingerprint`.
 
 ## L4 -- `solve_fingerprint`
 
@@ -156,7 +156,7 @@ if (const auto fit = rtti::solve_fingerprint(player_base, k_player_fp, 0x40))
 }
 ```
 
-It searches deltas in `[-window, +window]` stepping by pointer size, requires **every** landmark whose `required` flag is set (the default) to match at the shifted offset, and uses optional landmarks only to break ties. It fails closed: `HealNoMatch` when no delta fits, `HealAmbiguous` when two deltas tie for the most optional matches. `delta` is the drift to add to each landmark's `nominal_offset`. Given a single landmark it degenerates to `heal_landmark`.
+It searches deltas in `[-window, +window]` stepping by pointer size, requires **every** landmark whose `required` flag is set (the default) to match at the shifted offset, and uses optional landmarks only to break ties. It fails closed: `HealNoMatch` when no delta fits, `HealAmbiguous` when two deltas tie for the most optional matches. `delta` is the drift to add to each landmark's `nominal_offset`. Given a single landmark it degenerates to a single-field solve that is stricter than `heal_landmark`: there is no nominal short-circuit, and any second matching delta in the window (not just an equidistant `+d` / `-d` pair) fails `HealAmbiguous`.
 
 ## L5 -- `HealScheduler` (the render-loop driver)
 
@@ -202,9 +202,9 @@ for (std::size_t i = 0; i < n; ++i)
 {
     const auto &e = report[i];
     if (!e.ok)
-        log.warning("{}: heal failed ({})", e.name, DetourModKit::to_string(e.error));
+        log().warning("{}: heal failed ({})", e.name, DetourModKit::to_string(e.error));
     else if (e.delta != 0)
-        log.info("{}: moved {:+#x} ({:#x} -> {:#x})", e.name, e.delta, e.nominal_offset, e.healed_offset);
+        log().info("{}: moved {:+#x} ({:#x} -> {:#x})", e.name, e.delta, e.nominal_offset, e.healed_offset);
 }
 ```
 

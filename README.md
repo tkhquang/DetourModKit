@@ -8,33 +8,191 @@ DetourModKit is a full-featured C++23 toolkit designed to simplify common tasks 
 
 ## Features
 
-DetourModKit is organized into focused modules. Each module's full API is documented in its own header's Doxygen comments (the source of truth); the table below is a capability map, and task-oriented guides live in the [documentation index](docs/README.md).
+DetourModKit is organized into focused modules. Each module's full API is documented in its own header's Doxygen comments (the source of truth); expand any module below for a capability summary and its header, and task-oriented guides live in the [documentation index](docs/README.md).
 
-| Module | Description | Header |
-|--------|-------------|--------|
-| Core Vocabulary | Strongly-typed `Address` and `Region` value types (constexpr arithmetic, one audited cast surface, scope factories), `Prot` flags, and the unified `ErrorCode` + `Result<T>` error idiom with the `DMK_TRY` / `DMK_TRY_VOID` macros | [`address.hpp`](include/DetourModKit/address.hpp), [`region.hpp`](include/DetourModKit/region.hpp), [`error.hpp`](include/DetourModKit/error.hpp), [`defines.hpp`](include/DetourModKit/defines.hpp) |
-| AOB Scanner | Value-semantic `Pattern` (wildcards, per-nibble masks, and bounded jumps `[X-Y]` for a gap whose size shifts between builds), factory-only `Candidate` ladders, `resolve` / `resolve_batch`, page-gated `scan` and `unchecked::find_pattern` over a SIMD engine (RIP, string-xref, code-constant, and hooked-prologue recovery with an optional fail-closed identity gate) | [`scan.hpp`](include/DetourModKit/scan.hpp) |
-| Hook | Free verbs `inline_at` / `mid_at` / `install_all` / `vmt_for` returning move-only RAII `Hook` / `VmtHook` handles, plus `HookStack` for guaranteed newest-first teardown of layered hooks; the SafetyHook backend hidden behind an opaque `MidContext` | [`hook.hpp`](include/DetourModKit/hook.hpp) |
-| Configuration | INI binding registry with key-combo fusions and hot-reload (folded-in file watcher plus reload hotkey) | [`config.hpp`](include/DetourModKit/config.hpp) |
-| Logger | Process logger value facade with format strings and `[file:line]` source stamping, plus an opt-in lock-free bounded-queue async mode (`Logger::enable_async_mode`, batched writes, configured with `AsyncLoggerConfig`) | [`logger.hpp`](include/DetourModKit/logger.hpp) |
-| Memory Utilities | Readability checks, sharded region cache, fault-guarded typed reads/writes (`Result<T>`), pointer-chain `walk`, page-protection guards, and PE module-range queries | [`memory.hpp`](include/DetourModKit/memory.hpp) |
-| MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver, RTTI-presence probe, and cached identity handle | [`rtti.hpp`](include/DetourModKit/rtti.hpp) |
-| RTTI Self-Heal | Reverse-identify the object behind a pointer slot and self-heal a field offset after a patch; multi-field drift solver, a frame-driven `HealScheduler`, and a diffable drift manifest | [`rtti_dissect.hpp`](include/DetourModKit/rtti_dissect.hpp), [`detail/drift_manifest.hpp`](include/DetourModKit/detail/drift_manifest.hpp) |
-| Anchor Registry | One declarative table over the self-healing backends (vtable-by-name, AOB/RIP cascade, code constant, string xref, pinned literal) with quorum corroboration, optional validators, address-independent evidence fingerprints, and a startup drift gate (`evaluate_gate`) that safe-disables a feature when anchor quality drops below a threshold | [`anchor.hpp`](include/DetourModKit/anchor.hpp) |
-| Signature Manifest | The resolved contract as editable data: an owning, serializable superset of an anchor plus a consumer binding (register / offset chain / vtable slot), round-tripped through a versioned INI, overlaid on in-code defaults by label, and gated into trusted vs safe-disabled at resolve time so a game-patch repair is a text edit instead of a recompiled DLL | [`manifest.hpp`](include/DetourModKit/manifest.hpp) |
-| Offline Signature Health | Grade a pattern / signature / manifest from its declarative bytes alone (no game running) on atom rarity, byte entropy, and an expected-ambiguity estimate, yielding a Robust / Fragile / Unusable verdict and per-finding diagnostics so a brittle anchor is caught at authoring time or in CI, not in a bug report | [`sighealth.hpp`](include/DetourModKit/sighealth.hpp) |
-| Event Dispatcher | Typed pub/sub with RAII subscriptions | [`detail/event_dispatcher.hpp`](include/DetourModKit/detail/event_dispatcher.hpp) |
-| Profiler | Scoped timing with Chrome Tracing export (zero-cost when disabled) | [`profiler.hpp`](include/DetourModKit/profiler.hpp) |
-| Format Utilities | `std::format` helpers for addresses, bytes, and VK codes; string trim | [`format.hpp`](include/DetourModKit/format.hpp) |
-| Filesystem Utilities | Module directory resolution (wide-string and UTF-8 APIs) | [`filesystem.hpp`](include/DetourModKit/filesystem.hpp) |
-| Math Utilities | Angle conversions (header-only) | [`math.hpp`](include/DetourModKit/math.hpp) |
-| Version Macros | Compile-time version checking generated from CMake | [`version.hpp`](include/DetourModKit/version.hpp.in) |
-| Input System | Hotkey monitoring with background polling (keyboard, mouse, gamepad), press and hold combos, and opt-in consume suppression | [`input.hpp`](include/DetourModKit/input.hpp), [`input_codes.hpp`](include/DetourModKit/input_codes.hpp) |
-| Session and Bootstrap | RAII process lifetime with ordered teardown, DllMain scaffolding, instance mutex, process gate, and a lifecycle worker | [`DetourModKit.hpp`](include/DetourModKit.hpp) |
-| Diagnostics | Per-subsystem loader-lock leak counters, a typed scanner-fault and hook-lifecycle event bus, and a one-call snapshot aggregator | [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp) |
-| Stoppable Worker | RAII named `std::jthread` wrapper with loader-lock-safe teardown | [`detail/worker.hpp`](include/DetourModKit/detail/worker.hpp) |
+### Foundation
 
-## Testing
+<details>
+<summary><b>Core Vocabulary</b> - typed `Address` / `Region` values, `Prot` flags, and the `Result<T>` error idiom</summary>
+
+The shared value vocabulary every other DetourModKit module speaks, so a location, span, or failure is never a bare integer or a per-subsystem enum. `Address` is a pointer-wide strong type with constexpr `offset` / `align_up` arithmetic and the `rip` displacement resolver plus the audited `as<T>` / `ptr<T>` casts; `Region` folds a base and size into scope factories (`host`, `own`, `module_named`, `whole_process`) and offers `contains` and `sub`. `Prot` composes read/write/execute flags (`RW`, `RWX`), and every fallible call returns `Result<T>` carrying an `ErrorCode`-tagged `Error`, propagated with `DMK_TRY` / `DMK_TRY_VOID`.
+
+Header: [`address.hpp`](include/DetourModKit/address.hpp), [`region.hpp`](include/DetourModKit/region.hpp), [`error.hpp`](include/DetourModKit/error.hpp), [`defines.hpp`](include/DetourModKit/defines.hpp)
+</details>
+
+### Find, read & patch game code
+
+<details>
+<summary><b>AOB Scanner</b> - pattern matching and candidate ladders that resolve signatures to live addresses</summary>
+
+Locates a target in process memory from an update-resilient byte signature and turns that evidence into a confident absolute address. A value-semantic `Pattern` (built by `compile` or `literal`, with wildcards, per-nibble masks, and bounded jumps `[X-Y]`) feeds a `Candidate` ladder assembled from the `direct`, `rip_relative`, `rtti_vtable`, and `string_xref` factories; `resolve` and `resolve_batch` try each tier until one resolves uniquely, with an optional fail-closed `FallbackPolicy` identity gate for hooked-prologue recovery. Page-gated `scan`, the standalone `find_string_xref` / `read_code_constant` / `resolve_rip_relative` resolvers, and raw `unchecked::find_pattern` round out the surface over a runtime-selected SIMD engine.
+
+Header: [`scan.hpp`](include/DetourModKit/scan.hpp)
+</details>
+
+<details>
+<summary><b>Memory Utilities</b> - fault-guarded reads/writes, pointer-chain walks, and page-protection guards</summary>
+
+Touches live process memory without crashing the host: a faulting access -- an unmapped page, a guard page, or a pointer reprotected out from under you -- becomes a `Result` error instead of terminating. Guarded `read` / `read_into` and `write` / `write_bytes` / `write_in_place` do typed and byte-span transfers, `walk` resolves multi-level pointer chains (one `ChainStep` per hop) capturing every intermediate, and the RAII `ProtectGuard` holds a `Region` writable so repeated patches stay on the cheap path. `is_plausible_ptr`, the sharded-cache `is_readable` / `is_writable` predicates, and `module_of` / `is_module_loaded` answer setup-time validation questions, with `unchecked::read` as the raw fast path.
+
+Header: [`memory.hpp`](include/DetourModKit/memory.hpp)
+</details>
+
+<details>
+<summary><b>Hook</b> - free verbs returning move-only RAII `Hook` / `VmtHook` handles, backend hidden</summary>
+
+Installs and owns inline, mid-function, and vtable detours whose lifetime is bound to the RAII handle you hold rather than to a hidden registry. The free verbs `inline_at`, `mid_at`, the declarative `install_all`, and `vmt_for` return move-only `Hook` / `VmtHook` handles; a `Hook` exposes `enable`, `disable`, the typed `original` trampoline and its guarded `call` twin, while `VmtHook` adds `apply_to`, `hook_method`, and `remove_method`. `HookStack` guarantees newest-first teardown of layered hooks, and a mid-hook detour reads the captured register file through an opaque `MidContext`, so the SafetyHook backend never leaks into your headers.
+
+Header: [`hook.hpp`](include/DetourModKit/hook.hpp)
+</details>
+
+<details>
+<summary><b>MSVC RTTI Walker</b> - recover mangled type names from live vtables without `typeid`</summary>
+
+Recovers the MSVC RTTI mangled type name for the object behind a runtime vtable, walking the COL/TypeDescriptor ABI directly without `typeid` or `dynamic_cast` so it works across DLL boundaries. Forward calls -- `type_name_of`, the zero-allocation `type_name_into`, the exact-match `vtable_is_type`, and the `find_in_pointer_table` slot scan -- take a caller-owned vtable cache; `vtable_for_type` and `vtables_for_type` run the reverse name-to-vtable resolve. `region_has_rtti` probes whether a module carries any records at all, and `TypeIdentity::matches` caches a per-frame identity check that survives a patch relocating the vtable.
+
+Header: [`rtti.hpp`](include/DetourModKit/rtti.hpp)
+</details>
+
+<details>
+<summary><b>RTTI Self-Heal</b> - reverse-identify a pointer's object and self-heal field offsets after a patch</summary>
+
+Reverse-resolves the RTTI type of the object a pointer slot refers to, then recovers a struct field's offset after a game patch shifts the layout. `identify_pointee_type` is the per-slot primitive and `reverse_scan_block` RTTI-labels a whole struct; `heal_landmark` finds where one typed field moved, while `solve_fingerprint` recovers the single uniform delta that fits several co-moved fields at once. A frame-driven `HealScheduler` (drive `add_group` then `tick`) latches each group once it resolves, and `serialize_drift_report` / `parse_drift_report` persist a diffable drift manifest across game versions.
+
+Header: [`rtti_dissect.hpp`](include/DetourModKit/rtti_dissect.hpp), [`detail/drift_manifest.hpp`](include/DetourModKit/detail/drift_manifest.hpp)
+</details>
+
+### Keep signatures alive across patches
+
+<details>
+<summary><b>Anchor Registry</b> - one declarative table over the self-healing backends with a startup drift gate</summary>
+
+Collapses a mod's wall of patch-fragile constants -- vtable literals, AOB/RIP globals, code operands, string xrefs, pinned values -- into one declarative `Anchor` table, each entry tagged with an `AnchorKind` and resolved through the self-healing backend that fits. `resolve_all` (or `resolve_all_parallel`) writes a `ResolvedAnchor` drift report; `AnchorKind::Quorum` corroborates a target by N-of-M voting, an optional `AnchorValidator` fails a suspect value closed, and `anchor_fingerprint` yields an address-independent diff key. `assess_quality` and `evaluate_gate` roll the report into a `GateVerdict` that safe-disables a feature when anchor quality drops below threshold.
+
+Header: [`anchor.hpp`](include/DetourModKit/anchor.hpp)
+</details>
+
+<details>
+<summary><b>Signature Manifest</b> - the resolved contract as serializable data, gated trusted vs safe-disabled</summary>
+
+Turns a mod's patch-fragile signature contracts into editable, serializable data, so a game update is repaired by a text edit instead of a recompiled DLL. A `SignatureRecord` bundles an anchor's locate half with a consumer `Binding` (`BindingKind::Address`, `PointerChain`, `MidHookRegister`, or `VmtMethod`); `parse` / `serialize` and `load` / `save` round-trip it through a versioned INI, and `overlay` merges file overrides onto in-code defaults by label. `Signature::compile` and `resolve_and_gate` then resolve each contract and partition it into trusted `GatedSignature`s versus safe-disabled ones, so a drifted signature disables its feature rather than acting on a wrong address.
+
+Header: [`manifest.hpp`](include/DetourModKit/manifest.hpp)
+</details>
+
+<details>
+<summary><b>Offline Signature Health</b> - statically grade a pattern, record, or manifest with no game running</summary>
+
+Grades a signature's robustness statically, from its declarative bytes alone, so a brittle anchor is caught at authoring time or in a CI lane rather than in a bug report after the next game patch. `analyze_pattern`, `analyze_candidate`, `analyze_record`, and `analyze_manifest` score atom rarity, byte entropy, and expected ambiguity against a tunable `HealthPolicy`, yielding a `Grade` (`Robust` / `Fragile` / `Unusable`) plus a list of `Finding` values (`FindingKind`, `Severity`) naming exactly what is weak. `format_report` renders any level as a human-readable lint report. Everything is side-effect-free: it touches no process memory and needs no game running.
+
+Header: [`sighealth.hpp`](include/DetourModKit/sighealth.hpp)
+</details>
+
+### Runtime subsystems
+
+<details>
+<summary><b>Input System</b> - background-polled hotkey and gamepad combos with opt-in suppression</summary>
+
+Monitors keyboard, mouse, gamepad, and mouse-wheel combos on a single background poll thread owned by `Input::instance()`. Describe a binding with a `ComboBinding` (its `Trigger::Press` or `Trigger::Hold` edge model and `consume` suppression opt-in), register it through `register_combo` (or the free `input::register_combo`) to receive a move-only `BindingGuard`, batch guards in a `Scope`, and launch polling with `Input::instance().start()`. Query state with `is_active`, or resolve an `acquire_token` `BindingToken` for a per-frame hot path; `rebind`, `set_consume`, and `set_require_focus` reshape live bindings, while `parse_input_name` / `format_input_code` map names to codes.
+
+Header: [`input.hpp`](include/DetourModKit/input.hpp), [`input_codes.hpp`](include/DetourModKit/input_codes.hpp)
+</details>
+
+<details>
+<summary><b>Configuration</b> - INI binding registry with key-combo fusions and fail-soft hot-reload</summary>
+
+Binds INI keys to atomics, callbacks, and the logger, then loads and hot-reloads the file, all fail-soft: a missing or malformed key falls back to its registered default and is logged, never surfaced as an error. Register scalars and lists with `bind` / `bind_int` / `bind_bool` / `bind_string` / `bind_combos` / `bind_parsed`, fuse an INI key straight to a live input binding via `press_combo` / `hold_combo` / `consume_flag`, and add a reload key with `reload_hotkey`. `load` applies the file, `reload` re-applies it, and `enable_auto_reload` / `disable_auto_reload` drive the folded-in watcher; `SectionBinder` and the `Ini` handle drop the repeated section argument.
+
+Header: [`config.hpp`](include/DetourModKit/config.hpp)
+</details>
+
+<details>
+<summary><b>Logger</b> - value-facade logger with compile-checked format strings and opt-in async writes</summary>
+
+A constructible value facade rather than a singleton: the free `log()` returns the process-default `Logger`, so the common path reads `log().info(...)`, with `trace` / `debug` / `warning` / `error` and the variadic `log` / `try_log` forms all taking a `LocatedFormat` that auto-stamps `[file:line]` and validates the format string at compile time. `Logger::configure` publishes the process default, `set_log_level` and the `LogLevel` enum filter records before formatting, and `enable_async_mode` (tuned by `AsyncLoggerConfig` and its `OverflowPolicy`) hands writes to a lock-free bounded queue drained by a batched writer thread. `log_noexcept` and `try_log` are the fail-soft, noexcept-boundary forms for hook callbacks.
+
+Header: [`logger.hpp`](include/DetourModKit/logger.hpp)
+</details>
+
+### Process lifecycle
+
+<details>
+<summary><b>Session and Bootstrap</b> - RAII process lifetime with ordered teardown and DllMain scaffolding</summary>
+
+Owns a mod's entire process lifetime and its correctly ordered teardown from one place. `Session::start(ModInfo)` is the synchronous path (running the process gate, single-instance mutex, and logger configuration named in `ModInfo`), while `bootstrap(info, on_ready)` is the DllMain path that hands the `Session` to a worker thread running off the loader lock; pair it with `bootstrap_detach` in `DLL_PROCESS_DETACH` and `request_shutdown` to drain cleanly before `FreeLibrary`. Reach subsystems through `session.ini()`, `.log()`, `.input()`, and `.scope()`; `abandon`, `module_handle`, and `on_logic_dll_unload` handle the process-termination and hot-reload edge cases.
+
+Header: [`DetourModKit.hpp`](include/DetourModKit.hpp)
+</details>
+
+<details>
+<summary><b>Stoppable Worker</b> - RAII named `std::jthread` wrapper with loader-lock-safe teardown</summary>
+
+An RAII-owned, named background thread built on `std::jthread` for polling or watcher loops that must shut down cleanly. Construct a `StoppableWorker` with a name and a body invocable that receives a `std::stop_token` and polls it cooperatively; the destructor requests stop and joins automatically. Call `request_stop()` to signal, `shutdown()` to stop and join eagerly, and query `is_running()` or `name()`. Under the Windows loader lock, teardown detaches instead of joining to avoid deadlock. The type is non-copyable and non-movable.
+
+Header: [`detail/worker.hpp`](include/DetourModKit/detail/worker.hpp)
+</details>
+
+### Observability & messaging
+
+<details>
+<summary><b>Diagnostics</b> - leak counters, scanner-fault and hook-lifecycle event buses, and a Snapshot</summary>
+
+Surfaces DMK's internal health without scraping logs. `record_intentional_leak` and `intentional_leak_count` tally the loader-lock-safe leak/detach paths per `LeakSubsystem`, while `scanner_faults()` and `hook_lifecycle()` return process-wide `EventDispatcher`s streaming `ScannerFaultEvent` (regions skipped mid-scan) and `HookLifecycleEvent` (`HookKind`, `HookTransition`) transitions. `collect` rolls all of it -- plus a caller-supplied drift report and anchor report -- into one plain-value `Snapshot` (leak counts, live hook population, drift healed/failed, anchor quality) that re-resolves nothing, so you run it from init, a worker, or a diagnostics command.
+
+Header: [`diagnostics.hpp`](include/DetourModKit/diagnostics.hpp)
+</details>
+
+<details>
+<summary><b>Profiler</b> - scoped timing to a lock-free ring buffer, Chrome-Tracing export, zero-cost when off</summary>
+
+Measures hook and subsystem timing with zero overhead when disabled: the `DMK_PROFILE_SCOPE` and `DMK_PROFILE_FUNCTION` macros compile to nothing unless `DMK_ENABLE_PROFILING` is defined. When enabled, each `ScopedProfile` records a sample into the singleton `Profiler`'s lock-free ring buffer on scope exit (no allocation, safe from any thread). Retrieve results through `Profiler::get_instance()` and `export_to_file` or `export_chrome_json`, producing Chrome Trace Event JSON you open in chrome://tracing or Perfetto. `total_samples_recorded` and `available_samples` report buffer state, and `reset` clears it between sessions.
+
+Header: [`profiler.hpp`](include/DetourModKit/profiler.hpp)
+</details>
+
+<details>
+<summary><b>Event Dispatcher</b> - typed pub/sub with RAII auto-unsubscribe and a callback-safe emit path</summary>
+
+A typed publish/subscribe channel for decoupling subsystems: one `EventDispatcher<Event>` per event type, emitted to from hook callbacks and other threads. `subscribe` returns a move-only RAII `Subscription` that auto-unsubscribes on destruction; `emit` invokes every handler synchronously, and `emit_safe` swallows handler exceptions so an unhandled throw cannot crash the host. The read path takes no reader lock of yours -- a zero-subscriber emit is wait-free, and subscribers are held in a copy-on-write snapshot -- so emitting stays callback-safe. `subscriber_count`, `empty`, and `clear` round out the surface.
+
+Header: [`detail/event_dispatcher.hpp`](include/DetourModKit/detail/event_dispatcher.hpp)
+</details>
+
+### Small utilities
+
+<details>
+<summary><b>Format Utilities</b> - header-only `std::format` helpers for addresses, bytes, and VK codes</summary>
+
+Turns raw modding values into readable, log-friendly hex strings. The `format` namespace offers `format_address` for pointers, overloaded `format_hex` for signed, unsigned, and `ptrdiff_t` inputs, `format_byte` for single bytes, and `format_vkcode` / `format_vkcode_list` / `format_int_vector` for key codes and integer lists. The separate `string::trim` strips leading and trailing whitespace. Every function is header-only and `[[nodiscard]]`, built on `std::format`.
+
+Header: [`format.hpp`](include/DetourModKit/format.hpp)
+</details>
+
+<details>
+<summary><b>Filesystem Utilities</b> - cached module-directory resolution with wide-string and UTF-8 APIs</summary>
+
+Resolves the on-disk directory of the currently loaded module (DLL or EXE) so a mod can locate its own config and asset files regardless of the game's working directory. Call `get_runtime_directory()` for a wide-string path that preserves full Unicode fidelity, or `get_runtime_directory_utf8()` for a UTF-8 encoding of the same path. Both results are cached after first resolution, making repeat calls allocation-free, and both fall back gracefully if module detection fails.
+
+Header: [`filesystem.hpp`](include/DetourModKit/filesystem.hpp)
+</details>
+
+<details>
+<summary><b>Math Utilities</b> - header-only `constexpr` `noexcept` angle conversions</summary>
+
+A minimal, header-only pair of angle conversions for camera, FOV, and rotation math. `degrees_to_radians` and `radians_to_degrees` are both `constexpr` and `noexcept`, operating on `float` and backed by `std::numbers::pi_v`, so they fold to constants at compile time when given constant inputs and add no runtime cost when they cannot.
+
+Header: [`math.hpp`](include/DetourModKit/math.hpp)
+</details>
+
+<details>
+<summary><b>Version Macros</b> - compile-time version macros generated from CMake</summary>
+
+Lets a mod assert the DetourModKit version it was built against at compile time. CMake generates `version.hpp` from the template, defining `DMK_VERSION_MAJOR`, `DMK_VERSION_MINOR`, `DMK_VERSION_PATCH`, and the human-readable `DMK_VERSION_STRING`. `DMK_MAKE_VERSION` packs a major.minor.patch triple into one comparable integer (also exposed as `DMK_VERSION`), and `DMK_VERSION_AT_LEAST(major, minor, patch)` guards feature use behind an `#if` for a minimum required version.
+
+Header: [`version.hpp`](include/DetourModKit/version.hpp.in)
+</details>
+
+## Test Suite
 
 - **Comprehensive Test Suite:** Full unit test coverage for all modules using GoogleTest.
 - **Code Coverage:** Automated coverage analysis with 80% minimum line coverage gate in CI.
@@ -132,20 +290,10 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     ```
 
     The package smoke project includes the installed headers, links the
-    installed `DetourModKit::DetourModKit` target, and touches `hook::inline_at`
-    so the static dependency chain is pulled into the consumer link.
+    installed `DetourModKit::DetourModKit` target, touches `hook::is_target_hooked`, and runs a full `Session::start` / `~Session` cycle so the static dependency chain is pulled into the consumer link.
 
 > [!NOTE]
-> Release builds enable Link-Time Optimization (LTO) when supported by the compiler,
-> along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections`
-> with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE
-> linkage so unused DetourModKit symbols are stripped at final link time. LTO is suppressed on
-> GCC 15+ (MinGW): its `lto1` mis-links an LTO-built static archive at the consumer's final link
-> (`two or more sections for .gnu.lto_*`), so on that toolchain DetourModKit ships plain object
-> code to keep the archive linkable by any consumer; GCC 13.x and MSVC are unaffected. MinGW Release builds
-> use `-O2` (overriding CMake's default `-O3`) for a better code-size/performance tradeoff.
-> MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility;
-> Release builds omit debug info entirely to minimize binary size.
+> Release builds enable Link-Time Optimization (LTO) when supported by the compiler, along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections` with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE linkage so unused DetourModKit symbols are stripped at final link time. LTO is suppressed on GCC 15+ (MinGW): its `lto1` mis-links an LTO-built static archive at the consumer's final link (`two or more sections for .gnu.lto_*`), so on that toolchain DetourModKit ships plain object code to keep the archive linkable by any consumer; GCC 13.x and MSVC are unaffected. MinGW Release builds keep CMake's default `-O3`; only the hand-tuned SIMD scan engine TU is downgraded per-source to `-O2`, because `-O3`'s aggressive unrolling regresses its hand-optimized verifier. MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility; Release builds omit debug info entirely to minimize binary size.
 
 ---
 
@@ -157,46 +305,18 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     ```text
     <install_prefix>/
     ├── include/
-    │   ├── DetourModKit.hpp          <-- Umbrella + Session / bootstrap / bootstrap_detach / ModInfo (DllMain lifecycle)
-    │   ├── DetourModKit/             <-- DetourModKit public headers
-    │   │   ├── defines.hpp           <-- v4 portability macros + `dmk`/`DMK` aliases
-    │   │   ├── address.hpp           <-- v4 Address value type
-    │   │   ├── region.hpp            <-- v4 Region + Prot flags
-    │   │   ├── error.hpp             <-- v4 ErrorCode / Error / Result<T> / DMK_TRY
-    │   │   ├── scan.hpp              <-- v4 scanning surface (scan::Pattern + resolve / Candidate / ScanRequest)
-    │   │   ├── anchor.hpp            <-- Declarative anchor registry (namespace anchor): AnchorKind / Anchor / ResolvedAnchor / AnchorQuality / ScanProfile / resolve_all / anchor_fingerprint / evaluate_gate
-    │   │   ├── manifest.hpp          <-- Signature manifest (namespace manifest): SignatureRecord / Binding / Signature / parse-serialize-load-save / overlay / resolve_and_gate over anchor
-    │   │   ├── sighealth.hpp         <-- Offline signature health (namespace sighealth): analyze_pattern/candidate/record/manifest -> Grade + Findings, HealthPolicy, format_report (atom rarity / entropy / expected ambiguity)
-    │   │   ├── async_logger_config.hpp <-- Async logging config (OverflowPolicy + AsyncLoggerConfig); enable via Logger::enable_async_mode, writer is internal (src/internal/async_logger.hpp)
-    │   │   ├── detail/               <-- Installed compile-visible support (pattern_core.hpp + demoted headers: event_dispatcher.hpp, worker.hpp, drift_manifest.hpp; private impl lives in src/internal/)
-    │   │   ├── config.hpp
-    │   │   ├── diagnostics.hpp       <-- Per-subsystem intentional-leak counters + process-wide event bus + one-call Snapshot aggregator (hooks_total/active/disabled, anchor quality, drift report)
-    │   │   ├── format.hpp            <-- String & format utilities
-    │   │   ├── math.hpp              <-- Math utilities (angle conversions)
-    │   │   ├── memory.hpp            <-- Memory utilities
-    │   │   ├── profiler.hpp          <-- Scoped timing (zero-cost when disabled)
-    │   │   ├── filesystem.hpp        <-- Filesystem utilities
-    │   │   ├── hook.hpp              <-- v4 hooking surface (inline_at / mid_at / install_all / vmt_for -> RAII Hook)
-    │   │   ├── input.hpp             <-- Input/hotkey system
-    │   │   ├── input_codes.hpp       <-- Unified input codes (keyboard/mouse/gamepad)
-    │   │   ├── logger.hpp            <-- Synchronous logger
-    │   │   ├── version.hpp           <-- Version macros (generated by CMake)
-    │   │   └── ...
-    │   └── DirectXMath/              <-- DirectXMath headers (re-exported by default; -DDMK_INSTALL_DIRECTXMATH=OFF omits them)
-    │       ├── DirectXMath.h
-    │       ├── DirectXMathVector.inl
-    │       └── ...
-    │                                 (no safetyhook headers: the backend is confined, so its headers are not installed)
+    │   ├── DetourModKit.hpp       <-- Umbrella header; include this for the whole kit
+    │   ├── DetourModKit/          <-- Public module headers (one per module in the Features list above)
+    │   │   └── detail/            <-- Installed compile-visible support; never included directly
+    │   └── DirectXMath/           <-- Re-exported by default (-DDMK_INSTALL_DIRECTXMATH=OFF omits); no safetyhook headers
     ├── lib/
-    │   ├── libDetourModKit.a         <-- Static libraries (.a for MinGW, .lib for MSVC)
-    │   ├── libsafetyhook.a           <-- Backend archives ship for the transitive link only; their headers are not installed
-    │   ├── libZydis.a
-    │   └── libZycore.a
-    └── lib/cmake/DetourModKit/       <-- CMake config files
-        ├── DetourModKitConfig.cmake
-        ├── DetourModKitConfigVersion.cmake
-        └── DetourModKitTargets.cmake
+    │   ├── libDetourModKit.a      <-- Static library (.a for MinGW, .lib for MSVC)
+    │   └── libsafetyhook.a, ...   <-- Backend archives (Zydis, Zycore) for the transitive link only; headers not installed
+    └── lib/cmake/DetourModKit/    <-- find_package(DetourModKit) config files
     ```
+
+    Every public header maps to an entry in the [Features](#features) list above, which carries the per-module
+    description and a link to the header itself (whose Doxygen comments are the source of truth).
 
 ## Running Unit Tests
 
@@ -279,13 +399,7 @@ ctest --preset msvc-debug-asan
 ```
 
 > [!NOTE]
-> MSVC ASan needs `clang_rt.asan_dynamic-x86_64.dll` on `PATH` at run time; a
-> Developer Command Prompt (or `Enter-VsDevShell`) provides it. ASan only -- there
-> is no UBSan or LeakSanitizer on MSVC. The GCC/Clang `-fsanitize=address,undefined`
-> path only links where the runtimes exist (a Linux toolchain), which does not
-> apply to this Windows-only library. Setting `DMK_ENABLE_SANITIZERS=ON` under a
-> non-MSVC Windows toolchain (e.g. MinGW) fails fast at configure time with a
-> `FATAL_ERROR` pointing to the MSVC route.
+> MSVC ASan needs `clang_rt.asan_dynamic-x86_64.dll` on `PATH` at run time; a Developer Command Prompt (or `Enter-VsDevShell`) provides it. ASan only -- there is no UBSan or LeakSanitizer on MSVC. The GCC/Clang `-fsanitize=address,undefined` path only links where the runtimes exist (a Linux toolchain), which does not apply to this Windows-only library. Setting `DMK_ENABLE_SANITIZERS=ON` under a non-MSVC Windows toolchain (e.g. MinGW) fails fast at configure time with a `FATAL_ERROR` pointing to the MSVC route.
 
 ### Enabling Code Coverage
 
@@ -302,21 +416,11 @@ All pull requests to `main` are automatically tested via CI with an **80% minimu
 
 There are two main approaches to integrate DetourModKit into your project:
 
-> **ABI / toolchain compatibility (read this first).** DetourModKit is a C++23 **static** library whose entire
-> public surface is C++ -- there is no `extern "C"` boundary anywhere. The archive bakes in the compiler's name
-> mangling, its exception model, and the exact layout of every standard-library type that crosses the API
-> (`std::string`, `std::vector`, `std::expected`, `std::move_only_function`, and the containers inside
-> `Result<T>`). None of that is stable across toolchains, so link DetourModKit only from a build that matches on
-> every axis:
+> **ABI / toolchain compatibility (read this first).** DetourModKit is a C++23 **static** library whose entire public surface is C++ -- there is no `extern "C"` boundary anywhere. The archive bakes in the compiler's name mangling, its exception model, and the exact layout of every standard-library type that crosses the API (`std::string`, `std::vector`, `std::expected`, `std::move_only_function`, and the containers inside `Result<T>`). None of that is stable across toolchains, so link DetourModKit only from a build that matches on every axis:
 >
-> - **Same compiler family and ABI.** MinGW-GCC and MSVC archives are not interchangeable; a release is
->   compiler-specific by construction. Rebuild from source (Method 1) if you switch compilers.
-> - **Same C++ standard library, at C++23 or newer.** The library requires `<expected>`,
->   `std::move_only_function`, and `<format>`; the CMake configure step probes for these and fails early with a
->   clear message if the standard library is too old.
-> - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime
->   must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent
->   ODR undefined behaviour at worst. (This is why the shipped Debug preset pins `_ITERATOR_DEBUG_LEVEL=0`.)
+> - **Same compiler family and ABI.** MinGW-GCC and MSVC archives are not interchangeable; a release is compiler-specific by construction. Rebuild from source (Method 1) if you switch compilers.
+> - **Same C++ standard library, at C++23 or newer.** The library requires `<expected>`, `std::move_only_function`, and `<format>`; the CMake configure step probes for these and fails early with a clear message if the standard library is too old.
+> - **Matching CRT / iterator-debug settings on MSVC.** `_ITERATOR_DEBUG_LEVEL` and the `/MD` vs `/MDd` runtime must agree with the archive. A mismatch changes container layout and shows up as `LNK2038` at best, or silent ODR undefined behaviour at worst. (This is why the shipped Debug preset pins `_ITERATOR_DEBUG_LEVEL=0`.)
 >
 > There is no ABI shim: consume the package from the same toolchain that produced it.
 
@@ -336,10 +440,10 @@ This method is ideal for active development and ensures you always have the late
 
     ```bash
     cd external/DetourModKit
-    git checkout v2.0.0          # or v1.0.1, v1.0.0, etc.
+    git checkout v4.0.0          # or an earlier release tag, e.g. v3.9.0
     cd ../..
     git add external/DetourModKit
-    git commit -m "pin DetourModKit to v2.0.0"
+    git commit -m "pin DetourModKit to v4.0.0"
     ```
 
     To upgrade to a newer version later:
@@ -347,10 +451,10 @@ This method is ideal for active development and ensures you always have the late
     ```bash
     cd external/DetourModKit
     git fetch --tags
-    git checkout v2.1.0          # desired version
+    git checkout v4.1.0          # desired version
     cd ../..
     git add external/DetourModKit
-    git commit -m "upgrade DetourModKit to v2.1.0"
+    git commit -m "upgrade DetourModKit to v4.1.0"
     ```
 
 2. **Configure your CMakeLists.txt:**
@@ -407,7 +511,7 @@ This method uses a pre-built and installed version of DetourModKit.
 
 1. **Download a release package:**
 
-    Pre-built packages for MinGW and MSVC are available on the [Releases](https://github.com/tkhquang/DetourModKit/releases) page. Download the zip matching your toolchain and version (e.g., `DetourModKit_MinGW_v2.0.0.zip` or `DetourModKit_MSVC_v2.0.0.zip`).
+    Pre-built packages for MinGW and MSVC are available on the [Releases](https://github.com/tkhquang/DetourModKit/releases) page. Download the zip matching your toolchain and version (e.g., `DetourModKit_MinGW_v4.0.0.zip` or `DetourModKit_MSVC_v4.0.0.zip`).
 
     To upgrade, download the newer release zip and replace the contents of your `external/DetourModKit/` directory.
 
@@ -421,10 +525,11 @@ This method uses a pre-built and installed version of DetourModKit.
 
     ```cmake
     # In your mod's CMakeLists.txt
-    cmake_minimum_required(VERSION 3.25)
+    cmake_minimum_required(VERSION 3.28)
     project(MyMod)
 
     set(CMAKE_CXX_STANDARD 23)
+    set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
     # Find DetourModKit
     set(DetourModKit_DIR "external/DetourModKit/lib/cmake/DetourModKit")
@@ -464,7 +569,10 @@ This method uses a pre-built and installed version of DetourModKit.
 
 ## Code Example
 
-> **The `dmk` / `DMK` namespace aliases:** every DetourModKit header pulls in both `namespace dmk = DetourModKit` and `namespace DMK = DetourModKit` (defined in `defines.hpp`), so mod code can write `DMK::hook`, `DMK::scan`, `DMK::config`, `DMK::Logger`, and so on in place of the fully spelled `DetourModKit::`. They are the same alias in two casings; the examples below use `DMK`. Pick one and stay consistent, or ignore both and use the fully qualified `DetourModKit::` names. There is no flat `DMKConfig` / `DMKSession` alias set and nothing is injected into the global namespace, so the aliases cannot collide with your own symbols.
+> **The `dmk` / `DMK` namespace aliases:** the umbrella `<DetourModKit.hpp>` and most module headers pull in both `namespace dmk = DetourModKit` and `namespace DMK = DetourModKit` (defined in `defines.hpp`), so mod code can write `dmk::hook`, `dmk::scan`, `dmk::config`, `dmk::Logger`, and so on in place of the fully spelled `DetourModKit::`. A few self-contained headers (`logger.hpp`, `format.hpp`, `filesystem.hpp`, `math.hpp`, `input_codes.hpp`, `profiler.hpp`, `async_logger_config.hpp`) do not include `defines.hpp`, so include it (or the umbrella) yourself if you use the aliases with only those. They are the same alias in two casings; the examples below use `dmk`. Pick one and stay consistent, or ignore both and use the fully qualified `DetourModKit::` names. There is no flat `DMKConfig` / `DMKSession` alias set and nothing is injected into the global namespace, so the aliases cannot collide with your own symbols.
+
+<details>
+<summary>Show the full example mod (<code>MyMod/src/main.cpp</code>)</summary>
 
 ```cpp
 // MyMod/src/main.cpp
@@ -489,8 +597,8 @@ struct ModConfiguration
 {
     bool enable_greeting_hook = true;
     std::string log_level_setting = "INFO";
-    DMK::input::KeyComboList toggle_combo;
-    DMK::input::KeyComboList hold_scroll_combo;
+    dmk::input::KeyComboList toggle_combo;
+    dmk::input::KeyComboList hold_scroll_combo;
 } g_mod_config;
 
 // Example Hook: Target function signature
@@ -499,12 +607,12 @@ using OriginalGameFunction_PrintMessage_t = void (__stdcall *)(const char *messa
 // The hook is owned by its RAII handle. Hook is move-only with no default constructor, so a global one lives in an
 // std::optional that InitializeMyMod engages via std::optional::emplace; dropping it (or letting it leave scope)
 // restores the original prologue.
-std::optional<DMK::hook::Hook> g_print_hook;
+std::optional<dmk::hook::Hook> g_print_hook;
 
 // Detour function
 void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
 {
-    auto &logger = DMK::log();
+    auto &logger = dmk::log();
     logger.info("Detour_GameFunction_PrintMessage CALLED! Original message: \"{}\", type: {}", message, type);
 
     // original<Fn>() is the typed trampoline to the un-hooked function (UNGUARDED fast path). It is non-null only
@@ -528,16 +636,16 @@ void __stdcall Detour_GameFunction_PrintMessage(const char *message, int type)
 
 // Mod init callback (runs on the bootstrap worker thread, off the loader lock). It receives the live Session and
 // returns a Result<void>, so an init failure is a value logged on the worker, never a throw across the loader lock.
-DMK::Result<void> InitializeMyMod(DMK::Session &session)
+dmk::Result<void> InitializeMyMod(dmk::Session &session)
 {
     // Logger + async mode are already configured by bootstrap() using the ModInfo passed into the attach call below.
-    // session.log() is the same process-default logger DMK::log() returns.
+    // session.log() is the same process-default logger dmk::log() returns.
     auto &logger = session.log();
 
     // Bind your configuration variables (callback-store API; config::bind<T> is the atomic hot path)
-    DMK::config::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
+    dmk::config::bind_bool("Hooks", "EnableGreetingHook", "Enable Greeting Hook",
         [](bool v) { g_mod_config.enable_greeting_hook = v; }, true);
-    DMK::config::bind_string("Debug", "LogLevel", "Log Level",
+    dmk::config::bind_string("Debug", "LogLevel", "Log Level",
         [](std::string_view v) { g_mod_config.log_level_setting = std::string{v}; }, "INFO");
 
     // Bind hotkey combos from INI (modifier+trigger format)
@@ -546,40 +654,40 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
     // Hex VK codes still work: "0x72", "0x11+0x72"
     // Mouse: "Mouse4", "Ctrl+Mouse1"
     // Gamepad: "Gamepad_A", "Gamepad_LB+Gamepad_A"
-    DMK::config::bind_combos("Hotkeys", "ToggleKey", "Toggle Keys",
-        [](const DMK::input::KeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
-    DMK::config::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
-        [](const DMK::input::KeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
+    dmk::config::bind_combos("Hotkeys", "ToggleKey", "Toggle Keys",
+        [](const dmk::input::KeyComboList &c) { g_mod_config.toggle_combo = c; }, "F3");
+    dmk::config::bind_combos("Hotkeys", "HoldScrollKey", "Hold Scroll Keys",
+        [](const dmk::input::KeyComboList &c) { g_mod_config.hold_scroll_combo = c; }, "");
 
     // Load configuration from INI file (after the binds above, so load() applies file values to them). session.ini()
     // is a thin handle to the same process config registry the free config:: functions act on.
     session.ini().load("MyMod.ini");
 
     // Apply LogLevel from loaded configuration
-    logger.set_log_level(DMK::string_to_log_level(g_mod_config.log_level_setting));
+    logger.set_log_level(dmk::string_to_log_level(g_mod_config.log_level_setting));
 
     // Log the loaded configuration
     logger.info("MyMod configuration loaded and applied.");
-    DMK::config::log_all();
+    dmk::config::log_all();
 
     // Initialize Hooks (v4: free verbs returning a move-only RAII Hook handle).
-    // DMK::scan is the alias for DetourModKit::scan (from scan.hpp); DMK::hook for DetourModKit::hook.
+    // dmk::scan is the alias for DetourModKit::scan (from scan.hpp); dmk::hook for DetourModKit::hook.
 
     // The hook target is a scan::OwnedScanRequest: hook::inline_at resolves it at install time (resolve-on-install)
     // and never carries a dangling pattern span. A one-candidate ladder is the simplest form; ship a fallback
     // ladder for a long-lived mod (see the AOB Signature Scanning Guide).
-    DMK::scan::OwnedScanRequest target{
-        .ladder = {DMK::scan::Candidate::direct("GameFunction_PrintMessage",
-                                              DMK::scan::Pattern::literal("48 89 ?? ?? 57"))},
+    dmk::scan::OwnedScanRequest target{
+        .ladder = {dmk::scan::Candidate::direct("GameFunction_PrintMessage",
+                                              dmk::scan::Pattern::literal("48 89 ?? ?? 57"))},
         .label = "GameFunction_PrintMessage",
         .scope = DetourModKit::Region::host(),   // the host EXE; defaults here too
     };
 
     // inline_at performs the single audited function-to-void* cast for you; the call site writes no reinterpret_cast.
     // Options::prologue defaults to Prologue::Fail (v4 safe-by-default: an E8/CC/CD prologue is refused with
-    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = DMK::hook::Prologue::Relocate} for the old install-anyway.
-    auto result = DMK::hook::inline_at(
-        DMK::hook::InlineRequest{
+    // ErrorCode::TargetPrologueUnsafe). Pass Options{.prologue = dmk::hook::Prologue::Relocate} for the old install-anyway.
+    auto result = dmk::hook::inline_at(
+        dmk::hook::InlineRequest{
             .name = "GameFunction_PrintMessage_Hook",
             .target = std::move(target),
         },
@@ -595,7 +703,7 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
     else
     {
         logger.error("Failed to install hook: {}", result.error().message());
-        return false;
+        return std::unexpected(result.error());
     }
 
     // Register hotkey bindings with the input system (after hooks are ready).
@@ -605,30 +713,30 @@ DMK::Result<void> InitializeMyMod(DMK::Session &session)
     // park the move-only guard in the process-default scope so it lives for the
     // process. (config::press_combo / hold_combo wrap this with INI parsing and
     // hand back the guard directly, no Result to unwrap.)
-    if (auto toggle = DMK::input::register_combo({
+    if (auto toggle = dmk::input::register_combo({
             .name = "toggle_view",
-            .trigger = DMK::input::Trigger::Press,
+            .trigger = dmk::input::Trigger::Press,
             .combos = g_mod_config.toggle_combo,
-            .on_press = []() { DMK::log().info("Toggle key pressed!"); },
+            .on_press = []() { dmk::log().info("Toggle key pressed!"); },
         }))
     {
         // Park the guard in the Session's scope: ~Session clears it first, in reverse insertion order.
         session.scope().add(std::move(*toggle));
     }
 
-    if (auto scroll = DMK::input::register_combo({
+    if (auto scroll = dmk::input::register_combo({
             .name = "hold_scroll",
-            .trigger = DMK::input::Trigger::Hold,
+            .trigger = dmk::input::Trigger::Hold,
             .combos = g_mod_config.hold_scroll_combo,
             .on_state_change = [](bool held)
-            { DMK::log().info("Hold scroll: {}", held ? "active" : "released"); },
+            { dmk::log().info("Hold scroll: {}", held ? "active" : "released"); },
         }))
     {
         session.scope().add(std::move(*scroll));
     }
 
     // Start the input polling thread (focus-aware by default)
-    (void)DMK::input::Input::instance().start();
+    (void)dmk::input::Input::instance().start();
 
     logger.info("MyMod Initialized using DetourModKit!");
     return {}; // success
@@ -638,7 +746,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH)
     {
-        DMK::ModInfo info{
+        dmk::ModInfo info{
             .name = "MyMod",                            // logger prefix + mod identity
             .log_file = "MyMod.log",
             .game_process_name = "MyGame.exe",          // optional -- set "" to disable
@@ -649,7 +757,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
         // bootstrap() spawns the worker, runs InitializeMyMod(session) off the loader lock, and hosts the Session until
         // detach. It returns Result<void>; a failure (process gate / instance mutex / worker spawn) declines the load.
-        return DMK::bootstrap(info, &InitializeMyMod).has_value() ? TRUE : FALSE;
+        return dmk::bootstrap(info, &InitializeMyMod).has_value() ? TRUE : FALSE;
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH)
     {
@@ -660,28 +768,23 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             g_print_hook.reset();
         }
         // NULL -> the ordered ~Session teardown; non-NULL -> abandon (do nothing).
-        DMK::bootstrap_detach(lpReserved);
+        dmk::bootstrap_detach(lpReserved);
     }
     return TRUE;
 }
 ```
 
+</details>
+
 > [!WARNING]
-> `DMK::bootstrap()` runs `InitializeMyMod` on a dedicated worker thread, so it
-> executes off the loader lock, and `~Session` runs the ordered teardown there too.
-> The worker holds a counted reference on your module while it runs, so a bare
-> `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a
-> dynamic unload, call `DMK::request_shutdown()` (off the loader lock) *before*
-> issuing `FreeLibrary`: the worker drains the ordered teardown, flushes logging,
-> releases its reference via `FreeLibraryAndExitThread`, and only then can the
-> `FreeLibrary` actually unmap the DLL. Drop your caller-owned `Hook` handles during
-> that teardown so prologues are restored while the code pages are still mapped. See
-> the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended
-> two-DLL architecture.
+> `dmk::bootstrap()` runs your init callback on a dedicated worker thread, so it executes off the loader lock, and `~Session` runs the ordered teardown there too. The worker holds a counted reference on your module while it runs, so a bare `FreeLibrary` will **not** unload the DLL or fire `DLL_PROCESS_DETACH`. For a dynamic unload, call `dmk::request_shutdown()` (off the loader lock) *before* issuing `FreeLibrary`: the worker drains the ordered teardown, flushes logging, releases its reference via `FreeLibraryAndExitThread`, and only then can the `FreeLibrary` actually unmap the DLL. Drop your caller-owned `Hook` handles during that teardown so prologues are restored while the code pages are still mapped. See the [Hot-Reload Guide](docs/guides/hot-reload/README.md) for the recommended two-DLL architecture.
 
 ## Configuration File Example
 
 Create a `MyMod.ini` file alongside your DLL:
+
+<details>
+<summary>Show the example <code>MyMod.ini</code></summary>
 
 ```ini
 [Hooks]
@@ -717,6 +820,8 @@ LegacyCombo=0x11+0x10+0x44   ; Ctrl+Shift+D by hex codes
 DisabledHotkey=               ; empty value -> binding registered but unbound
 AlsoDisabled=NONE             ; literal NONE (case-insensitive) -> same effect
 ```
+
+</details>
 
 ## Supported Input Names
 

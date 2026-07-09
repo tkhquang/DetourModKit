@@ -57,16 +57,19 @@ if (status != config::AutoReloadStatus::Started)
 
 ### `config::disable_auto_reload()`
 
-Stops the watcher and joins its worker thread. Idempotent. `noexcept`.
+Stops the watcher and joins its worker thread. Idempotent. `noexcept`. Exception: calling it from the watcher thread itself (e.g. from inside `on_reload` or a setter fired by the watcher) is a logged no-op that leaves the watcher running, since joining the worker from itself would deadlock.
 
 ### `config::reload_hotkey(ini_key, default_combo)`
 
-Wires a key combo to `reload()` via `config::press_combo`. Must be called before `input::Input::instance().start()`. The combo is sourced from the INI key at load time and re-applied on every subsequent `reload()`. Returns `false` if `default_combo` is empty or the literal `NONE` sentinel (which would otherwise register an inert binding).
+Wires a key combo to `reload()` via `config::press_combo`. May be called before or after `input::Input::instance().start()`; a hotkey registered while the poll engine is running goes live on the next poll cycle. One caveat: a `start()` with no staged bindings builds no engine, so a hotkey registered after such an empty `start()` stays staged until the next `start()`. The combo is sourced from `ini_key` in the `[Input]` section of the INI at load time and re-applied on every subsequent `reload()`. Returns `false` if `default_combo` is empty, is the literal `NONE` sentinel, or fails to parse into any valid combo (a typo default emits a WARNING first); all three would otherwise register an inert binding.
 
 ```cpp
 config::load("mymod.ini");
 (void)config::reload_hotkey("ReloadConfig", "Ctrl+F5");
-input::Input::instance().start();
+if (!input::Input::instance().start())
+{
+    log().warning("Input engine failed to start");
+}
 ```
 
 ## Thread-safety contract
