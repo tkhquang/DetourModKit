@@ -84,8 +84,8 @@ namespace DetourModKit
             // CONTENT, not by view/span storage identity: two distinct candidate arrays that compile to byte-identical
             // patterns (or two copies of the same mangled name / literal in separate buffers) still decode one
             // identical site, so they must count as dependent. It uses fingerprint_INDEPENDENCE_evidence, whose ladder
-            // fold is order-INDEPENDENT: two members that list the same fallback rungs in a different order still decode
-            // the same site, so a reordered copy must not masquerade as independent corroboration (the drift
+            // fold is order-INDEPENDENT: two members that list the same fallback rungs in a different order still
+            // decode the same site, so a reordered copy must not masquerade as independent corroboration (the drift
             // fingerprint stays order-sensitive on purpose -- reordering a ladder IS a signature change). It folds the
             // kind byte, so a cross-kind pair never collides; the fail-closed direction is a ~2^-64 hash collision
             // rejecting a genuinely-independent pair (the quorum then fails closed, never open).
@@ -310,10 +310,10 @@ namespace DetourModKit
 
             // Order-INDEPENDENT cascade digest for the quorum independence gate: a fallback ladder's rungs all aim at
             // the same target, so two members listing the same rungs in a different order decode the same site and are
-            // dependent evidence. Each candidate is hashed from a fixed seed, then the per-candidate hashes are combined
-            // COMMUTATIVELY (a sum, so reordering cannot change the result); the candidate count is folded so a subset
-            // never collides with a superset. Kept SEPARATE from fnv1a_cascade because the drift fingerprint stays
-            // order-sensitive on purpose (reordering a ladder is a signature change worth reporting as drift).
+            // dependent evidence. Each candidate is hashed from a fixed seed, then the per-candidate hashes are
+            // combined COMMUTATIVELY (a sum, so reordering cannot change the result); the candidate count is folded so
+            // a subset never collides with a superset. Kept SEPARATE from fnv1a_cascade because the drift fingerprint
+            // stays order-sensitive on purpose (reordering a ladder is a signature change worth reporting as drift).
             [[nodiscard]] std::uint64_t fnv1a_cascade_unordered(std::uint64_t hash,
                                                                 std::span<const scan::Candidate> site) noexcept
             {

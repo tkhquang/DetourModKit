@@ -123,6 +123,29 @@ if(DMK_BUILD_TESTS)
       target_link_options(DetourModKit_tests PRIVATE --coverage)
     endif()
   endif()
+
+  # Standalone host-safety harnesses, registered as ctest tests. The fault-containment and lifecycle fixtures cannot
+  # share a process with the rest of the suite: the fault fixtures hold a leaked PAGE_NOACCESS page, and the lifecycle
+  # fixtures replace global operator new / delete and drive real DLL-loader and static-teardown events. Each is built
+  # and run by its own standalone-link script against the prebuilt archive. Registering those scripts as ctest tests
+  # lets `ctest` drive them in the normal flow rather than a bespoke workflow. Gated to a MinGW Debug tree: the scripts
+  # compile with g++, exercise the MinGW vectored-handler paths, need a POSIX shell, and link the Debug archive (a
+  # Release ctest leg would mix a -O0 fixture TU against the -O2 archive). They compile at test time, so they depend on
+  # the archive already being built, which the normal build-then-test order guarantees.
+  if(MINGW AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    find_program(DMK_BASH_EXECUTABLE NAMES bash)
+
+    if(DMK_BASH_EXECUTABLE)
+      add_test(NAME FaultContainmentStandalone
+        COMMAND "${DMK_BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/run_fault_tests.sh" "${CMAKE_BINARY_DIR}")
+      add_test(NAME LifecycleHostSafetyStandalone
+        COMMAND "${DMK_BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/run_lifecycle_proofs.sh" "${CMAKE_BINARY_DIR}")
+      # A shared label so a run can include or exclude the compile-at-test-time harnesses (ctest -L / -LE standalone-harness).
+      set_tests_properties(FaultContainmentStandalone LifecycleHostSafetyStandalone PROPERTIES LABELS "standalone-harness")
+    else()
+      message(STATUS "bash not found; the fault / lifecycle standalone harnesses will not be registered with ctest.")
+    endif()
+  endif()
 endif()
 
 if(DMK_BUILD_BENCHMARKS)

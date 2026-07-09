@@ -1230,8 +1230,7 @@ namespace DetourModKit
             {
                 // Out of memory preparing the replacement. All allocation happens before moving from m_bindings, so the
                 // live poller is left unchanged and no partial consume / callback state is published.
-                (void)log().try_log(LogLevel::Error,
-                                    "InputPoller: out of memory in add_bindings; bindings not added");
+                (void)log().try_log(LogLevel::Error, "InputPoller: out of memory in add_bindings; bindings not added");
                 return false;
             }
         }

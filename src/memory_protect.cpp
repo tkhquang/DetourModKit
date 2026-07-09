@@ -155,9 +155,9 @@ namespace DetourModKit
             // restore is exact. A span crossing more than MAX_PROTECTION_SEGMENTS regions, or a VirtualQuery /
             // VirtualProtect failure, fails closed here with everything already changed rolled back.
             std::uint32_t os_error = 0;
-            const std::size_t segment_count = protect_across_regions(
-                region.base.raw(), region.size, prot_to_win32(protection), impl->segments, MAX_PROTECTION_SEGMENTS,
-                os_error);
+            const std::size_t segment_count =
+                protect_across_regions(region.base.raw(), region.size, prot_to_win32(protection), impl->segments,
+                                       MAX_PROTECTION_SEGMENTS, os_error);
             if (segment_count == 0)
             {
                 // The walk changed and then rolled back one or more regions, so it TOUCHED protection even though the

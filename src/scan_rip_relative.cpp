@@ -102,13 +102,13 @@ namespace DetourModKit
                 {
                     return resolved;
                 }
-                last_resolve_error = std::move(resolved.error());
+                last_resolve_error = resolved.error();
             }
 
             // A prefix was found but no occurrence resolved: surface the concrete decode failure.
             if (last_resolve_error)
             {
-                return std::unexpected(std::move(*last_resolve_error));
+                return std::unexpected(*last_resolve_error);
             }
             return std::unexpected(Error{ErrorCode::PrefixNotFound, "scan::find_and_resolve_rip_relative"});
         }

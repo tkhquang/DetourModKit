@@ -436,7 +436,9 @@ This method uses a pre-built and installed version of DetourModKit.
     add_library(MyMod SHARED src/main.cpp)
 
     # Link against DetourModKit.
-    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage.
+    # user32 and xinput1_4 propagate automatically via DetourModKit's INTERFACE linkage. An MSVC Debug consumer also
+    # inherits the _ITERATOR_DEBUG_LEVEL=0 pin the library is built with, so a /MDd Debug build links without the
+    # _ITERATOR_DEBUG_LEVEL LNK2038 mismatch -- no manual definition required.
     target_link_libraries(MyMod PRIVATE DetourModKit::DetourModKit)
 
     # Add any extra system libraries your own mod code needs (Windows)

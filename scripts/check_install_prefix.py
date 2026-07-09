@@ -18,7 +18,8 @@ Invariants enforced against the prefix (argv[1]):
     * include/DetourModKit/internal/ (the true-private engine is never installed)
 
   REQUIRED (must be present) -- the package must actually be usable by a find_package consumer:
-    * the DetourModKit archive (lib*/libDetourModKit.a or lib*/libDetourModKit.lib)
+    * the DetourModKit archive (lib*/libDetourModKit[<debug-postfix>].a or
+      lib*/libDetourModKit[<debug-postfix>].lib)
     * the three dependency archives shipped for DetourModKit::deps (safetyhook, Zydis, Zycore), in either the MinGW
       (lib<name>.a) or MSVC (<name>.lib) spelling
     * the package config trio (DetourModKitConfig.cmake / DetourModKitConfigVersion.cmake / DetourModKitTargets.cmake)
@@ -61,8 +62,21 @@ def lib_dir(prefix):
 
 
 def archive_present(libdir, stem):
-    """True if a static archive for `stem` exists in either the MinGW (lib<stem>.a) or MSVC (<stem>.lib) spelling."""
-    return (libdir / f"lib{stem}.a").is_file() or (libdir / f"{stem}.lib").is_file()
+    """True if a static archive for `stem` exists in either release or debug-postfix spelling.
+
+    Four real spellings: MinGW static (lib<stem>.a, and lib<stem>d.a from DEBUG_POSTFIX) and MSVC static (<stem>.lib,
+    <stem>d.lib). No toolchain emits a lib-prefixed .lib (MSVC's static-library prefix is empty), so that combination
+    is deliberately absent rather than defended against.
+    """
+    return any(
+        (libdir / name).is_file()
+        for name in (
+            f"lib{stem}.a",
+            f"lib{stem}d.a",
+            f"{stem}.lib",
+            f"{stem}d.lib",
+        )
+    )
 
 
 def main():
@@ -105,7 +119,9 @@ def main():
 
     # --- REQUIRED: the package must be complete enough to consume via find_package. ---
     if not archive_present(libdir, "DetourModKit"):
-        violations.append(f"missing the DetourModKit archive in {libdir.name}/ (lib*DetourModKit.a|.lib)")
+        violations.append(
+            f"missing the DetourModKit archive in {libdir.name}/ "
+            "(libDetourModKit[<debug-postfix>].a|libDetourModKit[<debug-postfix>].lib)")
     for dep in ("safetyhook", "Zydis", "Zycore"):
         if not archive_present(libdir, dep):
             violations.append(
