@@ -126,16 +126,25 @@ namespace DetourModKit
 
         /**
          * @brief Reinterprets the address as a value of type @p T.
-         * @tparam T The destination type. Intended for a pointer / function-pointer @p T or a pointer-width integer
-         *          (`std::uintptr_t`).
-         * @details Integral @p T takes the `static_cast` path, which preserves the value only when @p T is wide enough
-         *          to hold a pointer (`std::uintptr_t`); a narrower integral such as `int` truncates the address.
-         *          Non-integral @p T takes the `reinterpret_cast` path and is intended only for pointer or
-         *          function-pointer types. Reference and non-pointer object targets are outside this accessor's
-         *          contract. This is how a resolved address is turned back into a typed function pointer to call or a
-         *          typed data pointer to read, with the pun confined to here rather than the call site.
+         * @tparam T A pointer / function-pointer type, or a pointer-width integer (`std::uintptr_t`, `std::intptr_t`,
+         *          and same-width aliases such as `std::size_t`). Narrower integrals, references, and non-pointer
+         *          object types are rejected by the constraint below.
+         * @details The `requires` clause matches the two casts this accessor performs:
+         *          - A pointer or function-pointer @p T takes the `reinterpret_cast` path -- the pointer pun that turns
+         *            a resolved address back into a typed function pointer to call or a typed data pointer to read,
+         *            kept confined to this one member instead of scattered across call sites.
+         *          - An integral @p T takes the `static_cast` path. The width constraint prevents truncating the
+         *            pointer-sized representation; a narrower integral such as `int` is a compile error here instead
+         *            of a lossy conversion that reads like a safe address cast.
+         *          A reference @p T is excluded on purpose: it would reinterpret this Address object's own storage (a
+         *          pun on the handle, never on the memory it names), which is a bug at every call site. A caller that
+         *          deliberately wants a narrowed integer takes it explicitly from @ref raw(); a caller that wants a
+         *          typed view of the addressed bytes uses @ref ptr() (or `as<T*>()`) and dereferences.
+         * @note Callback-safe: a pure cast, no allocation, locking, or I/O.
          */
-        template <class T> [[nodiscard]] T as() const noexcept
+        template <class T>
+            requires(std::is_pointer_v<T> || (std::is_integral_v<T> && sizeof(T) >= sizeof(std::uintptr_t)))
+        [[nodiscard]] T as() const noexcept
         {
             if constexpr (std::is_integral_v<T>)
             {

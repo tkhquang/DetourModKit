@@ -191,6 +191,49 @@ TEST(FoundationAddress, PointerRoundTripThroughAuditedCasts)
     EXPECT_EQ(address.as<std::uintptr_t>(), address.raw());
 }
 
+// Detection over the constrained member keeps the accepted cast surface explicit: pointers and pointer-width integers
+// compile, while narrower integers, references, and non-pointer object types do not.
+namespace
+{
+    template <class T>
+    concept AddressAsAccepts = requires(const Address a) { a.template as<T>(); };
+
+    struct NotAPointer
+    {
+        int field;
+    };
+} // namespace
+
+// Accepted: object pointer, const pointer, function pointer, and pointer-width integers (unsigned, signed, size_t).
+static_assert(AddressAsAccepts<int *>);
+static_assert(AddressAsAccepts<const void *>);
+static_assert(AddressAsAccepts<void (*)()>);
+static_assert(AddressAsAccepts<std::uintptr_t>);
+static_assert(AddressAsAccepts<std::intptr_t>);
+static_assert(AddressAsAccepts<std::size_t>);
+// Rejected: integrals narrower than a pointer (a static_cast to them would drop the high address bits).
+static_assert(!AddressAsAccepts<int>);
+static_assert(!AddressAsAccepts<short>);
+static_assert(!AddressAsAccepts<char>);
+static_assert(!AddressAsAccepts<bool>);
+// Rejected: references and non-pointer object types (reinterpreting the Address handle, never the addressed memory).
+static_assert(!AddressAsAccepts<const int &>);
+static_assert(!AddressAsAccepts<int &>);
+static_assert(!AddressAsAccepts<NotAPointer>);
+
+TEST(FoundationAddress, AsPreservesValueForPointerWidthIntegral)
+{
+    constexpr std::uintptr_t raw = static_cast<std::uintptr_t>(0x00007EEFCAFEF00DULL);
+    const Address address{raw};
+
+    EXPECT_EQ(address.as<std::uintptr_t>(), raw);
+    EXPECT_EQ(address.as<std::intptr_t>(), static_cast<std::intptr_t>(raw));
+    EXPECT_EQ(address.as<std::size_t>(), static_cast<std::size_t>(raw));
+
+    constexpr std::uintptr_t high_raw = static_cast<std::uintptr_t>(0xDEADBEEFCAFEF00DULL);
+    EXPECT_EQ(Address{high_raw}.as<std::uintptr_t>(), high_raw);
+}
+
 TEST(FoundationAddress, OrderingIsByRawValue)
 {
     EXPECT_LT(Address{1}, Address{2});
