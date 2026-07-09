@@ -744,6 +744,8 @@ TEST_F(MemoryTest, IsMemoryReadable_SpansAdjacentReadableRegions)
     EXPECT_TRUE(is_readable(base, 2 * page_size));
     EXPECT_EQ(is_readable_nonblocking(base, 2 * page_size), memory::ReadableStatus::Readable);
 
+    // Re-init for TearDown so the cache-dependent paths are restored for later tests.
+    (void)memory::init_cache();
     VirtualFree(base, 0, MEM_RELEASE);
 }
 
@@ -776,6 +778,8 @@ TEST_F(MemoryTest, IsMemoryReadable_SpanFailsClosedOnUnreadableTail)
     EXPECT_FALSE(is_readable(base, 2 * page_size));
     EXPECT_EQ(is_readable_nonblocking(base, 2 * page_size), memory::ReadableStatus::NotReadable);
 
+    // Re-init for TearDown so the cache-dependent paths are restored for later tests.
+    (void)memory::init_cache();
     VirtualFree(base, 0, MEM_RELEASE);
 }
 

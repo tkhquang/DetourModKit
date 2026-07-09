@@ -140,6 +140,7 @@ namespace DetourModKit
          *          pun on the handle, never on the memory it names), which is a bug at every call site. A caller that
          *          deliberately wants a narrowed integer takes it explicitly from @ref raw(); a caller that wants a
          *          typed view of the addressed bytes uses @ref ptr() (or `as<T*>()`) and dereferences.
+         * @note Callback-safe: a pure cast, no allocation, locking, or I/O.
          */
         template <class T>
             requires(std::is_pointer_v<T> || (std::is_integral_v<T> && sizeof(T) >= sizeof(std::uintptr_t)))
