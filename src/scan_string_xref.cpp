@@ -663,13 +663,89 @@ namespace DetourModKit
                 return (found_count == 1) ? first_site : 0;
             }
 
-            // Best-effort enclosing-function entry for a referencing instruction. Walks backward for the nearest
-            // function boundary -- a terminal RET (0xC3) or a run of INT3 (0xCC) alignment padding -- and returns the
-            // first byte after it that passes is_likely_function_prologue, skipping any further INT3 padding. The
-            // back-scan is bounded so a pathological region cannot scan unboundedly, and it fails closed (returns 0)
-            // when no boundary is found in the window. This is a heuristic, not control-flow analysis.
+            // Authoritative x64 function-boundary lookup through the exception directory (.pdata). Every function that
+            // touches the stack or calls another function must register a RUNTIME_FUNCTION in its module's .pdata, so
+            // the OS-maintained function table yields the exact [BeginAddress, EndAddress) bounds. This is strictly
+            // better than the byte back-scan below: it is exact rather than heuristic, carries no distance bound (a
+            // reference far into a large function still resolves, where the fixed back-scan window would give up), and
+            // cannot be fooled by a 0xC3/0xCC byte that is really part of an instruction's immediate or displacement.
+            // RtlLookupFunctionEntry resolves instr_addr against whichever loaded module -- or dynamically registered
+            // table -- covers it and reports that module's image base plus the innermost RUNTIME_FUNCTION. It returns
+            // nullptr for a leaf function (one with no unwind data) or an address in a region with no registered table
+            // (a raw code buffer), which is the caller's signal to fall back to the heuristic.
+            //
+            // A funclet (a catch/finally handler) or a hot/cold-split fragment carries its own RUNTIME_FUNCTION whose
+            // UNWIND_INFO sets UNW_FLAG_CHAININFO and chains back to the primary function. The enclosing function is
+            // the root of that chain, not the fragment -- retail game builds routinely split cold paths out via PGO, so
+            // a string reference on a cold path resolves to a fragment start unless the chain is followed. The chained
+            // RUNTIME_FUNCTION sits immediately after the even-count-padded unwind-code array (each code is two bytes),
+            // at UnwindData + 4 + 2 * ((CountOfCodes + 1) & ~1). Every module read is fault-guarded: .pdata /
+            // .xdata is normally resident, but a partially unmapped or corrupt module must degrade to the fallback
+            // rather than fault the host, and the hop count is bounded against a malformed self-referential chain.
+            std::uintptr_t function_entry_via_pdata(std::uintptr_t instr_addr) noexcept
+            {
+                DWORD64 image_base = 0;
+                PRUNTIME_FUNCTION entry = RtlLookupFunctionEntry(instr_addr, &image_base, nullptr);
+                if (entry == nullptr || image_base == 0)
+                {
+                    return 0;
+                }
+
+                // Copy the resolved record under the guard before walking .xdata by hand. RtlLookupFunctionEntry may
+                // return a module .pdata record or a dynamically registered table record; both are still process memory
+                // that must fail closed on an unexpected fault.
+                RUNTIME_FUNCTION current{};
+                if (!detail::guarded_read_bytes(reinterpret_cast<std::uintptr_t>(entry), &current, sizeof(current)))
+                {
+                    return 0;
+                }
+
+                constexpr int MAX_CHAIN_HOPS = 16;
+                for (int hop = 0; hop < MAX_CHAIN_HOPS; ++hop)
+                {
+                    // UNWIND_INFO fixed header: byte 0 packs Version:3 | Flags:5 (so Flags = byte0 >> 3) and byte 2 is
+                    // CountOfCodes. Only these two fields drive chain traversal, so read the 4-byte header instead of
+                    // modelling the whole variable-length structure.
+                    std::uint8_t unwind_header[4] = {};
+                    const std::uintptr_t unwind_addr = static_cast<std::uintptr_t>(image_base) + current.UnwindData;
+                    if (!detail::guarded_read_bytes(unwind_addr, unwind_header, sizeof(unwind_header)))
+                    {
+                        return 0;
+                    }
+                    if (((unwind_header[0] >> 3) & UNW_FLAG_CHAININFO) == 0)
+                    {
+                        return static_cast<std::uintptr_t>(image_base) + current.BeginAddress;
+                    }
+                    // The chained RUNTIME_FUNCTION follows the unwind-code array, padded up to an even entry count;
+                    // UnwindData is that structure's own RVA.
+                    const std::uint32_t count_of_codes = unwind_header[2];
+                    const std::uint32_t chained_rva = current.UnwindData + 4u + 2u * ((count_of_codes + 1u) & ~1u);
+                    RUNTIME_FUNCTION chained{};
+                    if (!detail::guarded_read_bytes(static_cast<std::uintptr_t>(image_base) + chained_rva, &chained,
+                                                    sizeof(chained)))
+                    {
+                        return 0;
+                    }
+                    current = chained;
+                }
+
+                return 0;
+            }
+
+            // Enclosing-function entry for a referencing instruction. The authoritative .pdata lookup above is tried
+            // first; it resolves any function with unwind data exactly. Only a leaf function (no unwind data) or an
+            // address in a region with no registered exception table (a raw code buffer) falls through to this bounded
+            // heuristic, which walks backward for the nearest function boundary -- a terminal RET (0xC3) or a run of
+            // INT3 (0xCC) alignment padding -- and returns the first byte after it that passes
+            // is_likely_function_prologue, skipping further INT3 padding. The back-scan is bounded so a pathological
+            // region cannot scan unboundedly, and it fails closed (returns 0) when no boundary is found in the window.
             std::uintptr_t enclosing_function_start(std::uintptr_t instr_addr, std::uintptr_t window_lo) noexcept
             {
+                if (const std::uintptr_t via_pdata = function_entry_via_pdata(instr_addr); via_pdata != 0)
+                {
+                    return via_pdata;
+                }
+
                 constexpr std::uintptr_t back_scan_window = 0x2000; // 8 KiB.
                 const std::uintptr_t floor =
                     (instr_addr - window_lo > back_scan_window) ? instr_addr - back_scan_window : window_lo;
