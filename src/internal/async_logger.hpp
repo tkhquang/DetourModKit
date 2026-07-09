@@ -1,5 +1,5 @@
-#ifndef DETOURMODKIT_ASYNC_LOGGER_HPP
-#define DETOURMODKIT_ASYNC_LOGGER_HPP
+#ifndef DETOURMODKIT_INTERNAL_ASYNC_LOGGER_HPP
+#define DETOURMODKIT_INTERNAL_ASYNC_LOGGER_HPP
 
 #include "DetourModKit/async_logger_config.hpp"
 #include "DetourModKit/logger.hpp"
@@ -21,16 +21,19 @@ namespace DetourModKit
      * @brief Asynchronous logger that decouples log production from file I/O.
      * @details Uses a lock-free queue to accept log messages from multiple threads and a dedicated writer thread to
      *          perform batched file writes. This significantly reduces latency on the producer side. The configuration
-     *          type (AsyncLoggerConfig) lives in async_logger_config.hpp. All implementation state -- the MPMC queue,
-     *          the overflow string pool, the per-message record, the writer thread, and the flush synchronization --
-     *          lives behind a pimpl (Impl, defined in src/async_logger.cpp over the non-installed
-     *          src/internal/async_logger_queue.hpp), so this public header names none of it and a consumer compiles
-     *          with the queue / pool / threading internals off its include path.
+     *          type (AsyncLoggerConfig) lives in the public async_logger_config.hpp. All implementation state -- the
+     *          MPMC queue, the overflow string pool, the per-message record, the writer thread, and the flush
+     *          synchronization -- lives behind a pimpl (Impl, defined in src/async_logger.cpp over
+     *          src/internal/async_logger_queue.hpp), so this header names none of it and the one translation unit that
+     *          includes it to drive the writer (src/logger.cpp) compiles with the queue / pool / threading internals
+     *          off its include path.
      * @note Internal transport, not a consumer-constructible type: its only constructor takes a
      *       `detail::WinFileStream` (a private, never-installed sink) plus the Logger's file mutex, so only `Logger`
      *       -- which owns both -- builds one, driven by `Logger::enable_async_mode()`. A consumer logs through the
-     *       `Logger` value facade or the free `log()`, never by constructing an `AsyncLogger` directly; the class is
-     *       named on the public surface only because `Logger` holds it behind an `atomic<shared_ptr<AsyncLogger>>`.
+     *       `Logger` value facade or the free `log()`, never by constructing an `AsyncLogger` directly. That is why
+     *       this definition lives in src/internal and is never installed: `logger.hpp` needs only a forward
+     *       declaration to hold the writer behind an `atomic<shared_ptr<AsyncLogger>>`, so the full type reaches no
+     *       consumer include path.
      * @note Uses shared_ptr<detail::WinFileStream> to safely handle Logger reconfiguration during runtime.
      * @note The destructor is self-safe under the Windows loader lock: if teardown had to detach the writer thread
      *       (because a join would deadlock under the loader lock), the destructor leaks the pimpl in place so the
@@ -146,4 +149,4 @@ namespace DetourModKit
 
 } // namespace DetourModKit
 
-#endif // DETOURMODKIT_ASYNC_LOGGER_HPP
+#endif // DETOURMODKIT_INTERNAL_ASYNC_LOGGER_HPP

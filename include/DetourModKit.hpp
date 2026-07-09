@@ -19,7 +19,6 @@
 // Foundation vocabulary and every public module. The Session / bootstrap / ModInfo process-lifecycle surface is
 // declared directly in this umbrella header rather than in a separate module header.
 #include "DetourModKit/anchor.hpp"
-#include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/async_logger_config.hpp"
 #include "DetourModKit/config.hpp"
 #include "DetourModKit/diagnostics.hpp"
