@@ -1234,12 +1234,12 @@ namespace DetourModKit
 
         Result<std::vector<InstallOutcome>> install_all(std::span<const HookSpec> table) noexcept
         {
-            // Roll back a partially-built install NEWEST-FIRST. A std::vector<InstallOutcome> destroys its elements
-            // oldest-first (forward element destruction), which for hooks layered on one target restores an older
-            // hook's prologue over a newer hook's live trampoline (a use-after-free). This guard owns the teardown
-            // order for BOTH failure paths -- the mandatory-miss early return and an exception (a bad_alloc copying a
-            // row's scan request or growing the vector) unwinding the loop -- by popping from the back in its
-            // destructor, unless the rows were committed out to the caller on success.
+            // Roll back a partially-built install newest-first. A std::vector<InstallOutcome> does not provide that
+            // teardown contract, which matters when hooks are layered on one target: restoring an older hook before a
+            // newer hook can rewrite the prologue underneath the newer hook's live trampoline. This guard owns the
+            // teardown order for both failure paths -- the mandatory-miss early return and an exception (a bad_alloc
+            // copying a row's scan request or growing the vector) unwinding the loop -- by popping from the back in
+            // its destructor, unless the rows were committed out to the caller on success.
             class InstallRollback
             {
             public:

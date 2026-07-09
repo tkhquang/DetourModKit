@@ -906,10 +906,9 @@ TEST(HookInstallAll, AllocFailureReturnsOutOfMemoryWithoutEscaping)
     EXPECT_FALSE(is_target_hooked(addr_of(&install_target_one)));
 }
 
-// On a mandatory miss, install_all rolls the already-installed rows back NEWEST-FIRST. A std::vector<InstallOutcome>
-// unwind would destroy them oldest-first (forward), which for hooks layered on one target restores an older hook's
-// prologue over a newer hook's live trampoline (a use-after-free); install_all's InstallRollback guard pops back-to-
-// front instead. The Removed lifecycle events make the teardown order observable without forcing a faulting repro.
+// On a mandatory miss, install_all rolls the already-installed rows back newest-first. A std::vector<InstallOutcome>
+// unwind does not provide that teardown contract; install_all's InstallRollback guard pops back-to-front instead. The
+// Removed lifecycle events make the teardown order observable without forcing a faulting repro.
 TEST(HookInstallAll, MandatoryMissRollsBackNewestFirst)
 {
     std::vector<std::string> removed;
@@ -1800,6 +1799,204 @@ TEST(HookLifecycle, NotEmittedForNoOpTransition)
     ASSERT_TRUE(h.enable().has_value());
     EXPECT_EQ(events.size(), 1u);
     h.release(); // detach without a Removed transition path through teardown
+}
+
+namespace
+{
+    // Dedicated targets for the HookStack ordering tests. HookStack always restores newest-first (the safe order), so
+    // these are left cleanly unhooked after every test; giving the ordering cases their own functions still keeps them
+    // isolated from the shared real_hook_target_* functions other tests call.
+    DMK_TEST_NOINLINE int stack_target_primary(int a, int b)
+    {
+        volatile int r = a + b;
+        return r;
+    }
+
+    DMK_TEST_NOINLINE int stack_target_secondary(int a, int b)
+    {
+        volatile int r = a + b;
+        return r;
+    }
+
+    // A trivial layering detour: the ordering tests never call the target while it is hooked (they only observe
+    // teardown order), so the detour body is immaterial; it just has to be a valid int(int, int) to patch in.
+    DMK_TEST_NOINLINE int stack_detour(int a, int b)
+    {
+        return a + b + 1;
+    }
+} // namespace
+
+// A HookStack owning two hooks layered on one target restores them newest-first, the only safe order: the newer
+// layer's trampoline chains through the base hook's jump, so the base must be restored last. The Removed lifecycle
+// events make the teardown order observable without forcing a faulting repro; if teardown_newest_first() ever became a
+// forward loop, removed would flip to {StackBase, StackLayer} and this fails.
+TEST(HookStackTest, TearsDownLayeredHooksNewestFirst)
+{
+    std::vector<std::string> removed;
+    auto sub = diagnostics::hook_lifecycle().subscribe(
+        [&removed](const diagnostics::HookLifecycleEvent &e)
+        {
+            if (e.transition == diagnostics::HookTransition::Removed)
+            {
+                removed.emplace_back(e.name);
+            }
+        });
+
+    {
+        HookStack stack;
+        Result<Hook> base =
+            inline_at(InlineRequest{.name = "StackBase", .target = addr_of(&stack_target_primary)}, &stack_detour);
+        ASSERT_TRUE(base.has_value()) << base.error().message();
+        stack.push(std::move(*base));
+
+        Result<Hook> layer =
+            inline_at(InlineRequest{.name = "StackLayer", .target = addr_of(&stack_target_primary)}, &stack_detour);
+        ASSERT_TRUE(layer.has_value()) << layer.error().message();
+        stack.push(std::move(*layer));
+
+        EXPECT_EQ(stack.size(), 2u);
+        EXPECT_TRUE(is_target_hooked(addr_of(&stack_target_primary)));
+        // Scope exit destroys the HookStack, which tears the two hooks down newest-first.
+    }
+
+    ASSERT_EQ(removed.size(), 2u);
+    EXPECT_EQ(removed[0], "StackLayer"); // pushed second, restored first
+    EXPECT_EQ(removed[1], "StackBase");  // pushed first, restored last
+    // Both released and the prologue cleanly restored, which only holds because teardown ran in the safe order.
+    EXPECT_FALSE(is_target_hooked(addr_of(&stack_target_primary)));
+    EXPECT_EQ(stack_target_primary(5, 3), 8);
+}
+
+TEST(HookStackTest, MoveConstructTransfersOwnershipAndLeavesSourceEmpty)
+{
+    HookStack source;
+    Result<Hook> r =
+        inline_at(InlineRequest{.name = "MoveCtorHook", .target = addr_of(&stack_target_secondary)}, &stack_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    source.push(std::move(*r));
+
+    HookStack moved(std::move(source));
+
+    EXPECT_TRUE(source.empty());
+    EXPECT_EQ(source.size(), 0u);
+    EXPECT_EQ(moved.size(), 1u);
+    EXPECT_FALSE(moved.empty());
+    EXPECT_TRUE(is_target_hooked(addr_of(&stack_target_secondary)));
+    EXPECT_EQ(stack_target_secondary(2, 6), 9);
+}
+
+// Move-assignment must also drain the overwritten stack newest-first. Defaulted move-assignment would destroy or
+// overwrite the replaced hooks in a container-defined order, reopening the layered-hook use-after-free; the
+// hand-written operator= drains newest-first before adopting the source. A defaulted operator= flips removed to
+// {MoveBase, MoveLayer}.
+TEST(HookStackTest, MoveAssignDrainsOverwrittenHooksNewestFirst)
+{
+    std::vector<std::string> removed;
+    auto sub = diagnostics::hook_lifecycle().subscribe(
+        [&removed](const diagnostics::HookLifecycleEvent &e)
+        {
+            if (e.transition == diagnostics::HookTransition::Removed)
+            {
+                removed.emplace_back(e.name);
+            }
+        });
+
+    HookStack dest;
+    {
+        Result<Hook> base =
+            inline_at(InlineRequest{.name = "MoveBase", .target = addr_of(&stack_target_secondary)}, &stack_detour);
+        ASSERT_TRUE(base.has_value()) << base.error().message();
+        dest.push(std::move(*base));
+
+        Result<Hook> layer =
+            inline_at(InlineRequest{.name = "MoveLayer", .target = addr_of(&stack_target_secondary)}, &stack_detour);
+        ASSERT_TRUE(layer.has_value()) << layer.error().message();
+        dest.push(std::move(*layer));
+    }
+    ASSERT_EQ(dest.size(), 2u);
+    ASSERT_TRUE(removed.empty()); // nothing torn down yet (setup only emits Created)
+
+    HookStack replacement;
+    Result<Hook> adopted =
+        inline_at(InlineRequest{.name = "MoveAdopted", .target = addr_of(&stack_target_primary)}, &stack_detour);
+    ASSERT_TRUE(adopted.has_value()) << adopted.error().message();
+    replacement.push(std::move(*adopted));
+
+    // Overwrite the live stack: dest's two layered hooks must be released newest-first here.
+    dest = std::move(replacement);
+
+    ASSERT_EQ(removed.size(), 2u);
+    EXPECT_EQ(removed[0], "MoveLayer");
+    EXPECT_EQ(removed[1], "MoveBase");
+    EXPECT_TRUE(replacement.empty());
+    EXPECT_EQ(replacement.size(), 0u);
+    EXPECT_EQ(dest.size(), 1u);
+    EXPECT_FALSE(is_target_hooked(addr_of(&stack_target_secondary)));
+    EXPECT_EQ(stack_target_secondary(9, 4), 13);
+    EXPECT_TRUE(is_target_hooked(addr_of(&stack_target_primary)));
+    EXPECT_EQ(stack_target_primary(9, 4), 14);
+
+    dest.clear();
+    ASSERT_EQ(removed.size(), 3u);
+    EXPECT_EQ(removed[2], "MoveAdopted");
+}
+
+// clear() releases every owned hook newest-first and leaves the stack empty and reusable.
+TEST(HookStackTest, ClearTearsDownNewestFirstAndEmpties)
+{
+    std::vector<std::string> removed;
+    auto sub = diagnostics::hook_lifecycle().subscribe(
+        [&removed](const diagnostics::HookLifecycleEvent &e)
+        {
+            if (e.transition == diagnostics::HookTransition::Removed)
+            {
+                removed.emplace_back(e.name);
+            }
+        });
+
+    HookStack stack;
+    Result<Hook> base =
+        inline_at(InlineRequest{.name = "ClearBase", .target = addr_of(&stack_target_primary)}, &stack_detour);
+    ASSERT_TRUE(base.has_value()) << base.error().message();
+    stack.push(std::move(*base));
+
+    Result<Hook> layer =
+        inline_at(InlineRequest{.name = "ClearLayer", .target = addr_of(&stack_target_primary)}, &stack_detour);
+    ASSERT_TRUE(layer.has_value()) << layer.error().message();
+    stack.push(std::move(*layer));
+
+    stack.clear();
+
+    EXPECT_TRUE(stack.empty());
+    EXPECT_EQ(stack.size(), 0u);
+    ASSERT_EQ(removed.size(), 2u);
+    EXPECT_EQ(removed[0], "ClearLayer");
+    EXPECT_EQ(removed[1], "ClearBase");
+    EXPECT_FALSE(is_target_hooked(addr_of(&stack_target_primary)));
+}
+
+// The reference push() returns reaches the live hook, so a caller can capture the trampoline right after pushing.
+TEST(HookStackTest, PushReturnsUsableHandleAndReportsSize)
+{
+    HookStack stack;
+    EXPECT_TRUE(stack.empty());
+    EXPECT_EQ(stack.size(), 0u);
+
+    Result<Hook> r = inline_at(InlineRequest{.name = "StackEcho", .target = addr_of(&echo)}, &echo_detour);
+    ASSERT_TRUE(r.has_value()) << r.error().message();
+    Hook &stored = stack.push(std::move(*r));
+
+    EXPECT_EQ(stack.size(), 1u);
+    EXPECT_FALSE(stack.empty());
+    EXPECT_TRUE(static_cast<bool>(stored));
+    EXPECT_EQ(stored.name(), "StackEcho");
+
+    // The returned reference reaches the live trampoline (the capture-now pattern) and the detour is armed.
+    auto *orig = stored.original<EchoFn>();
+    ASSERT_NE(orig, nullptr);
+    EXPECT_EQ(orig(7), 7);   // trampoline yields the original body
+    EXPECT_EQ(echo(7), 107); // detour active while the stack owns the hook
+    // Scope exit restores echo cleanly (single hook, so order is moot but the stack still owns the teardown).
 }
 
 // Concurrency + reentrancy: the per-hook status machine and the call() guard under thread stress and self-reentry. The
