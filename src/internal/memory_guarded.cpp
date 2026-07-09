@@ -78,10 +78,10 @@ namespace DetourModKit
 #ifdef _MSC_VER
     // The shared frame-based SEH filter declared in memory_fault.hpp. Every MSVC guarded foreign read -- the memory
     // engine's read / write / chain-walk paths below and the scanner's region / window sweeps -- routes its __except
-    // through here, so the claimed fault set AND the guard-page re-arm are identical across them. Re-arming a PAGE_GUARD
-    // the OS cleared on dispatch, before the read fails closed, is what stops a swallowed foreign guard-page fault from
-    // leaving the host's fence disarmed. GetExceptionInformation() is valid only inside a filter expression, so the
-    // call sites pass its EXCEPTION_POINTERS in rather than the bare code, which also makes the faulting address
+    // through here, so the claimed fault set AND the guard-page re-arm are identical across them. Re-arming a
+    // PAGE_GUARD the OS cleared on dispatch, before the read fails closed, is what stops a swallowed foreign guard-page
+    // fault from leaving the host's fence disarmed. GetExceptionInformation() is valid only inside a filter expression,
+    // so the call sites pass its EXCEPTION_POINTERS in rather than the bare code, which also makes the faulting address
     // reachable for the re-arm.
     long detail::guarded_fault_filter(EXCEPTION_POINTERS *info) noexcept
     {

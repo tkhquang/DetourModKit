@@ -832,8 +832,8 @@ namespace DetourModKit::manifest
                 // then trusts. parse_rung guards the file path; enforce the same fail-closed constraint here so the
                 // programmatic Signature::compile path cannot smuggle an unset (or malformed) rung past the gate: the
                 // offset is non-negative and the disp32's four bytes fit inside the instruction.
-                if (spec.displacement_at < 0 || spec.instruction_length < static_cast<std::size_t>(spec.displacement_at) +
-                                                                               sizeof(std::int32_t))
+                if (spec.displacement_at < 0 ||
+                    spec.instruction_length < static_cast<std::size_t>(spec.displacement_at) + sizeof(std::int32_t))
                 {
                     return fail(ErrorCode::InvalidArg, "manifest::compile");
                 }

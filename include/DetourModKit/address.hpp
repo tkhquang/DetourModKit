@@ -126,11 +126,14 @@ namespace DetourModKit
 
         /**
          * @brief Reinterprets the address as a value of type @p T.
-         * @tparam T The destination type: an integral type, or any pointer / function-pointer type.
-         * @details One of the four audited cast sites. An integral @p T takes the value-preserving `static_cast`
-         *          path; any other @p T (pointer or function pointer) takes the single `reinterpret_cast`. This is how
-         *          a resolved address is turned back into a typed function pointer to call or a typed data pointer to
-         *          read, with the pun confined to here rather than the call site.
+         * @tparam T The destination type. Intended for a pointer / function-pointer @p T or a pointer-width integer
+         *          (`std::uintptr_t`).
+         * @details Integral @p T takes the `static_cast` path, which preserves the value only when @p T is wide enough
+         *          to hold a pointer (`std::uintptr_t`); a narrower integral such as `int` truncates the address.
+         *          Non-integral @p T takes the `reinterpret_cast` path and is intended only for pointer or
+         *          function-pointer types. Reference and non-pointer object targets are outside this accessor's
+         *          contract. This is how a resolved address is turned back into a typed function pointer to call or a
+         *          typed data pointer to read, with the pun confined to here rather than the call site.
          */
         template <class T> [[nodiscard]] T as() const noexcept
         {

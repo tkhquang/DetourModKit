@@ -76,11 +76,11 @@ namespace DetourModKit
 
         // Region-granular TOCTOU fault guard around scan_region_for_match. The caller's per-region VirtualQuery only
         // proves the region was committed and readable at gate time; a concurrent decommit / reprotect before these
-        // unguarded reads complete would otherwise fault the host. On MSVC the body runs inside a __try / __except whose
-        // filter is the shared detail::guarded_fault_filter: it swallows exactly the foreign-read fault set
+        // unguarded reads complete would otherwise fault the host. On MSVC the body runs inside a __try / __except
+        // whose filter is the shared detail::guarded_fault_filter: it swallows exactly the foreign-read fault set
         // (detail::is_guarded_read_fault) and re-arms a consumed PAGE_GUARD before reporting the region faulted, so the
-        // sweep skips it and continues -- the same skip-the-region-and-keep-the-fence contract guarded_read_bytes follows.
-        // On MinGW x64 the same scan runs through the process-wide vectored read guard
+        // sweep skips it and continues -- the same skip-the-region-and-keep-the-fence contract guarded_read_bytes
+        // follows. On MinGW x64 the same scan runs through the process-wide vectored read guard
         // (detail::run_guarded_region) that the guarded_read paths use, so a fault inside the scanned span is
         // swallowed and the region is skipped + counted there too. A 32-bit build is rejected outright by the
         // architecture gate in defines.hpp, so only these two x64 arms exist. *out_faulted is set true only when a

@@ -12,10 +12,11 @@
  *          - `emit()` / `emit_safe()` avoid any `shared_mutex` / reader lock.
  *            The zero-subscriber fast path is wait-free: a single `memory_order_acquire` load of an atomic counter.
  *            When subscribers exist, an atomic acquire-load of a `std::shared_ptr<const std::vector<Entry>>` snapshot
- *            is performed, then the contiguous handler vector is iterated. The snapshot load is genuinely lock-free on
- *            toolchains that provide a DWCAS-backed `std::atomic<std::shared_ptr<T>>` (for example libstdc++ on
- *            x86_64), and may use an implementation-internal short-critical-section bit lock on toolchains that do not
- *            (notably MSVC's STL).
+ *            is performed, then the contiguous handler vector is iterated. `std::atomic<std::shared_ptr<T>>` is NOT
+ *            lock-free on either shipped toolchain: libstdc++ (MinGW) and the MSVC STL both back it with an
+ *            implementation-internal lock table / bit lock, so the snapshot load takes one bounded internal critical
+ *            section rather than being lock-free. It still needs no reader lock of ours and no allocation, so it stays
+ *            callback-safe; only the zero-subscriber fast path above is genuinely wait-free.
  *          - `subscribe()` / manual `unsubscribe()` serialize writers through
  *            a small `std::mutex` and publish a new immutable snapshot via copy-on-write. Mutation paths allocate; see
  *            the `subscribe()`, `unsubscribe()`, and `clear()` method docs for the OOM contract.
@@ -185,9 +186,10 @@ namespace DetourModKit
      * **Thread safety:**
      * - `emit()` / `emit_safe()`: the zero-subscriber fast path is wait-free
      *   (single atomic counter load). Otherwise acquires a `shared_ptr` snapshot of the immutable handler list and
-     *   iterates it. The snapshot load avoids any reader lock; it is lock-free on toolchains with a
-     *   DWCAS-backed `std::atomic<std::shared_ptr<T>>` and may use an implementation-internal bit lock on toolchains
-     *   that do not.
+     *   iterates it. `std::atomic<std::shared_ptr<T>>` is NOT lock-free on either shipped toolchain (libstdc++
+     *   on MinGW and the MSVC STL both back it with an implementation-internal lock), so the snapshot load takes
+     *   one bounded internal critical section rather than being lock-free. It takes no reader lock of ours and no
+     *   allocation, so it stays callback-safe.
      * - `subscribe()` / `unsubscribe()`: copy-on-write under a small writer
      *   mutex. Each mutation allocates a new handler vector, appends or removes the entry, and publishes the new
      *   snapshot atomically. See the method docs for the OOM contract.

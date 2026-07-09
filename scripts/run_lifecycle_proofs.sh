@@ -22,13 +22,24 @@
 
 set -euo pipefail
 
-export PATH="/c/msys64/mingw64/bin:$PATH"
+# Local dev shells do not always carry the MSYS2 MinGW bin on PATH, so add it when g++ is not already resolvable. CI
+# prepends its own pinned MinGW to PATH before invoking this script, so g++ resolves there and this no-ops -- the
+# pinned toolchain is used unchanged rather than being shadowed by a runner-image MSYS2 install.
+if ! command -v g++ >/dev/null 2>&1; then
+  export PATH="/c/msys64/mingw64/bin:$PATH"
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 BUILD_DIR="${1:-build/mingw-debug}"
-ARCHIVE="$BUILD_DIR/libDetourModKit.a"
+# A Debug build tree carries DEBUG_POSTFIX ("d"), so its archive is libDetourModKitd.a; a Release tree keeps
+# libDetourModKit.a. Prefer the suffixed Debug archive when it exists so an old unsuffixed archive left by a prior
+# Debug build cannot be linked by mistake.
+ARCHIVE="$BUILD_DIR/libDetourModKitd.a"
+if [[ ! -f "$ARCHIVE" ]]; then
+  ARCHIVE="$BUILD_DIR/libDetourModKit.a"
+fi
 CXX="${CXX:-g++}"
 
 if [[ ! -f "$ARCHIVE" ]]; then
@@ -47,6 +58,18 @@ for required_archive in "$SAFETYHOOK_A" "$ZYDIS_A" "$ZYCORE_A"; do
     exit 1
   fi
 done
+
+# Mirror the archive's coverage instrumentation onto the probe DLL link. Only the probe DLL links the DetourModKit
+# archive; when the tree was configured with DMK_ENABLE_COVERAGE those objects carry --coverage and reference the gcov
+# runtime (__gcov_*), which a bare g++ link leaves undefined. Read the tree's own setting from CMakeCache and pass
+# --coverage through on that one link, exactly as the library's own build links it. The host driver links no library,
+# and the profiler driver compiles src/profiler.cpp fresh under a size-targeted poisoning operator new/delete -- both
+# stay uninstrumented, so gcov's atexit .gcda flush cannot allocate into the poisoned path. A non-coverage tree leaves
+# the array empty and every link stays plain.
+COVERAGE_FLAGS=()
+if [[ -f "$BUILD_DIR/CMakeCache.txt" ]] && grep -q '^DMK_ENABLE_COVERAGE:BOOL=ON' "$BUILD_DIR/CMakeCache.txt"; then
+  COVERAGE_FLAGS+=(--coverage)
+fi
 
 PROBE_DLL="$BUILD_DIR/bootstrap_probe.dll"
 MODULE_REF_EXE="$BUILD_DIR/test_bootstrap_module_ref.exe"
@@ -72,6 +95,7 @@ echo "== [1/3] building bootstrap_probe.dll (bootstrap worker probe, linked agai
   tests/lifecycle/bootstrap_probe_dll.cpp \
   -Wl,--start-group "$ARCHIVE" "$SAFETYHOOK_A" "$ZYDIS_A" "$ZYCORE_A" -Wl,--end-group \
   "${RUNTIME_FLAGS[@]}" "${WIN_LIBS[@]}" \
+  "${COVERAGE_FLAGS[@]}" \
   -o "$PROBE_DLL"
 
 echo "== [2/3] building test_bootstrap_module_ref.exe (bootstrap worker host) =="

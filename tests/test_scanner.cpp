@@ -1636,6 +1636,61 @@ TEST_F(ScannerRipTest, find_and_resolve_first_match_wins)
     EXPECT_EQ(result->raw(), expected);
 }
 
+TEST_F(ScannerRipTest, find_and_resolve_skips_implausible_decoy_and_finds_genuine_site)
+{
+    // find_and_resolve_rip_relative scans left to right for the opcode prefix, resolves each occurrence, and returns
+    // the FIRST one whose displacement yields a plausible target -- it does NOT abort on the first prefix that
+    // resolves implausibly. Plant a decoy prefix whose disp32 lands the target below USERSPACE_PTR_MIN (must be
+    // skipped) followed by a genuine prefix whose disp32 stays inside the page (must be found), so a decoy in front of
+    // a real site cannot hide it. A sub-0x10000 decoy target is only reachable when the code lives at the lowest
+    // user-allocatable page, so request 0x10000 explicitly and skip when the slot is already taken in this process
+    // (environment dependent, never flaky-failing) -- the same low-allocation idiom as the implausible-target test.
+    SYSTEM_INFO si{};
+    GetSystemInfo(&si);
+    constexpr uintptr_t LOW_BASE = 0x10000; // USERSPACE_PTR_MIN, the allocation granularity.
+    const auto release_region = [](void *ptr) noexcept -> void
+    {
+        if (ptr != nullptr)
+        {
+            VirtualFree(ptr, 0, MEM_RELEASE);
+        }
+    };
+    void *const raw_region =
+        VirtualAlloc(reinterpret_cast<LPVOID>(LOW_BASE), si.dwPageSize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    std::unique_ptr<void, decltype(release_region)> region(raw_region, release_region);
+    if (region.get() != reinterpret_cast<LPVOID>(LOW_BASE))
+    {
+        GTEST_SKIP() << "low-address page at 0x10000 unavailable in this process";
+    }
+
+    auto *bytes = static_cast<std::uint8_t *>(region.get());
+    std::memset(bytes, 0x90, si.dwPageSize); // NOP fill so no stray prefix matches between the two planted sites.
+
+    // Decoy at offset 0: MOV RAX, [RIP+disp32], disp = -0x100. target = 0x10000 + 7 - 0x100 = 0xFF07, below
+    // USERSPACE_PTR_MIN -> ImplausibleTarget, so the scanner must skip it and keep scanning.
+    bytes[0] = 0x48;
+    bytes[1] = 0x8B;
+    bytes[2] = 0x05;
+    const std::int32_t decoy_disp = -0x100;
+    std::memcpy(bytes + 3, &decoy_disp, sizeof(decoy_disp));
+
+    // Genuine site at offset 16: MOV RAX, [RIP+disp32], disp = +0x10. target = (0x10000 + 16) + 7 + 0x10 = 0x10027,
+    // inside the committed page -> plausible, so this is the occurrence that resolves and is returned.
+    constexpr std::size_t genuine_off = 16;
+    bytes[genuine_off + 0] = 0x48;
+    bytes[genuine_off + 1] = 0x8B;
+    bytes[genuine_off + 2] = 0x05;
+    const std::int32_t genuine_disp = 0x10;
+    std::memcpy(bytes + genuine_off + 3, &genuine_disp, sizeof(genuine_disp));
+
+    const auto result = find_and_resolve_rip(reinterpret_cast<const std::byte *>(region.get()), si.dwPageSize,
+                                             scan::PREFIX_MOV_RAX_RIP, 7);
+
+    // The decoy resolved implausibly and was skipped; the genuine site at +16 resolves to base + 16 + 7 + 0x10.
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), LOW_BASE + genuine_off + 7 + 0x10);
+}
+
 TEST_F(ScannerRipTest, find_and_resolve_partial_prefix_no_false_match)
 {
     // 48 8B followed by wrong third byte, then the real prefix

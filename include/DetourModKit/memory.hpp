@@ -64,12 +64,9 @@ namespace DetourModKit
          *          Lives in DetourModKit::detail (not memory::detail) so it never shadows the engine's detail namespace
          *          that memory:: implementation TUs reference.
          */
-        template <class T>
-        inline constexpr bool is_byte_span_v = false;
-        template <std::size_t Extent>
-        inline constexpr bool is_byte_span_v<std::span<std::byte, Extent>> = true;
-        template <std::size_t Extent>
-        inline constexpr bool is_byte_span_v<std::span<const std::byte, Extent>> = true;
+        template <class T> inline constexpr bool is_byte_span_v = false;
+        template <std::size_t Extent> inline constexpr bool is_byte_span_v<std::span<std::byte, Extent>> = true;
+        template <std::size_t Extent> inline constexpr bool is_byte_span_v<std::span<const std::byte, Extent>> = true;
     } // namespace detail
 
     namespace memory

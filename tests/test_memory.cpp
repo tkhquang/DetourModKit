@@ -3440,11 +3440,12 @@ TEST_F(MemoryTest, IsReadable_CacheInsertAllocFailureFailsSoftAtEveryStage)
 
     for (int allow = 0; allow <= 4; ++allow)
     {
-        // Re-init a FRESH cache each iteration so the shard's sorted-range deque is truly empty -- no node retained by a
-        // prior clear (libstdc++ deque::clear keeps one 32-slot chunk, MSVC differs), so its first insert reliably
+        // Re-init a FRESH cache each iteration so the shard's sorted-range deque is truly empty -- no node retained by
+        // a prior clear (libstdc++ deque::clear keeps one 32-slot chunk, MSVC differs), so its first insert reliably
         // allocates. That makes some `allow` land squarely on the insert_sorted_range deque allocation, the stage that
-        // terminated the host while it was noexcept (a throw at its own noexcept frame never reaches the wrapper catch).
-        // init_cache runs OUTSIDE the armed window, so the shard-array / handler-install allocations are not injected.
+        // terminated the host while it was noexcept (a throw at its own noexcept frame never reaches the wrapper
+        // catch). init_cache runs OUTSIDE the armed window, so the shard-array / handler-install allocations are not
+        // injected.
         memory::shutdown_cache();
         ASSERT_TRUE(memory::init_cache(16, 60000));
 

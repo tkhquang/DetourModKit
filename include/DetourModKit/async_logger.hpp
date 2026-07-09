@@ -26,6 +26,11 @@ namespace DetourModKit
      *          lives behind a pimpl (Impl, defined in src/async_logger.cpp over the non-installed
      *          src/internal/async_logger_queue.hpp), so this public header names none of it and a consumer compiles
      *          with the queue / pool / threading internals off its include path.
+     * @note Internal transport, not a consumer-constructible type: its only constructor takes a
+     *       `detail::WinFileStream` (a private, never-installed sink) plus the Logger's file mutex, so only `Logger`
+     *       -- which owns both -- builds one, driven by `Logger::enable_async_mode()`. A consumer logs through the
+     *       `Logger` value facade or the free `log()`, never by constructing an `AsyncLogger` directly; the class is
+     *       named on the public surface only because `Logger` holds it behind an `atomic<shared_ptr<AsyncLogger>>`.
      * @note Uses shared_ptr<detail::WinFileStream> to safely handle Logger reconfiguration during runtime.
      * @note The destructor is self-safe under the Windows loader lock: if teardown had to detach the writer thread
      *       (because a join would deadlock under the loader lock), the destructor leaks the pimpl in place so the

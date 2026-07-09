@@ -790,3 +790,15 @@ TEST(EventDispatcherTest, SnapshotReclamation_NoLeak)
         << "Dispatcher should hold exactly one reference to its snapshot "
            "after all subscriptions are released";
 }
+
+// std::atomic<std::shared_ptr<T>> is NOT lock-free on either shipped toolchain: libstdc++ (MinGW) and the MSVC STL
+// both back it with an internal lock. The dispatcher's emit snapshot, the async-logger writer handle, and the
+// Hook::call gate all read such an atomic, so any "lock-free" claim about those reads would be wrong. This test pins
+// the property empirically so a future doc or code change that assumes lock-freedom is caught by a red test rather
+// than surviving as a stale comment.
+TEST(EventDispatcherTest, AtomicSharedPtrIsNotLockFree)
+{
+    std::atomic<std::shared_ptr<int>> probe{};
+    EXPECT_FALSE(probe.is_lock_free());
+    EXPECT_FALSE(std::atomic<std::shared_ptr<int>>::is_always_lock_free);
+}

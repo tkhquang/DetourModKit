@@ -200,12 +200,12 @@ namespace DetourModKit
             /**
              * @brief Returns this thread's reader stripe, derived from its Win32 thread id so concurrent readers spread
              *        across distinct cache lines instead of contending on one counter.
-             * @details Golden-ratio bit-mixing of GetCurrentThreadId gives a stable per-thread stripe with no allocation
-             *          and no lock, so it is safe on a readability check driven under loader lock (setup from DllMain),
-             *          unlike a thread_local round-robin counter whose MinGW first touch lowers to an allocating
-             *          __emutls_get_address. A thread id is stable for the thread's life, so the same stripe carries the
-             *          ActiveReaderGuard increment and its paired decrement; two ids colliding onto one stripe only add
-             *          minor contention, never a miscount of the drain.
+             * @details Golden-ratio bit-mixing of GetCurrentThreadId gives a stable per-thread stripe with no
+             *          allocation and no lock, so it is safe on a readability check driven under loader lock (setup
+             *          from DllMain), unlike a thread_local round-robin counter whose MinGW first touch lowers to an
+             *          allocating __emutls_get_address. A thread id is stable for the thread's life, so the same stripe
+             *          carries the ActiveReaderGuard increment and its paired decrement; two ids colliding onto one
+             *          stripe only add minor contention, never a miscount of the drain.
              */
             [[nodiscard]] inline std::size_t reader_stripe_index() noexcept
             {
