@@ -50,8 +50,9 @@ namespace DetourModKit
         // within rel32 reach; the rest are the far-jump shapes emitted when the trampoline is beyond rel32 reach (an
         // FF 25 RIP-relative indirect jump through a pointer slot, the fourteen-byte FF 25 absolute form whose disp32
         // is zero so the 8-byte target is inlined after the instruction, and the twelve-byte `mov rax, imm64; jmp
-        // rax`). The literal opcode bytes make the shapes mutually exclusive at a real hook site, so the try order only
-        // affects which is attempted first, never correctness; E9 leads because it is by far the common case.
+        // rax`). The opcode groups differ and the two FF 25 forms differ only by overwrite length, so the shapes are
+        // mutually exclusive at a real hook site and the try order only affects which is attempted first, never
+        // correctness; E9 leads because it is by far the common case.
         constexpr std::array<PrologueShape, 4> PROLOGUE_SHAPES = {{
             {5, std::string_view{"E9 ?? ?? ?? ??"}, &detail::decode_e9_rel32},
             {6, std::string_view{"FF 25 ?? ?? ?? ??"}, &detail::decode_ff25_indirect},
@@ -182,6 +183,8 @@ namespace DetourModKit
                                                               std::span<const std::size_t> order, ModuleSpan range)
     {
         FallbackOutcome outcome;
+        const scan::FallbackPolicy policy = request.fallback_policy;
+        const scan::FallbackWitness witness = request.fallback_witness;
         for (const std::size_t index : order)
         {
             const scan::Candidate &candidate = request.ladder[index];
@@ -199,11 +202,38 @@ namespace DetourModKit
                 {
                     outcome.not_applicable = false;
                 }
-                if (recovered)
+                if (!recovered)
                 {
-                    outcome.hit = scan::Hit{Address{*recovered}, candidate.name()};
-                    return outcome;
+                    continue;
                 }
+
+                // Structural recovery succeeded (unique rebuilt match, decoded redirect into executable memory,
+                // in-scope walk-back). Apply the caller's identity gate before trusting the address: the structural
+                // gate is address-blind, so a reshaped near-twin whose surviving tail matches and which is itself
+                // hooked would resolve here uniformly. The witness is the only thing that can tell the intended
+                // function from a coincidental twin.
+                const std::int64_t recovered_value = static_cast<std::int64_t>(*recovered);
+                if (policy == scan::FallbackPolicy::RequireIdentity)
+                {
+                    // Fail closed on an unconfirmed site: a missing witness cannot confirm identity, and a witness that
+                    // rejects the site marks it a twin. Record the rejection so the resolver reports it distinctly, and
+                    // keep trying other shapes / candidates for one that does pass identity rather than stopping here.
+                    if (witness.predicate == nullptr || !witness.predicate(recovered_value, witness.context))
+                    {
+                        outcome.identity_rejected = true;
+                        continue;
+                    }
+                }
+                else if (witness.predicate != nullptr && !witness.predicate(recovered_value, witness.context))
+                {
+                    // WarnOnly: a supplied witness that disagrees does not veto the recovery, but it is surfaced so the
+                    // resolver logs the disagreement. A consumer can observe near-twin drift in this mode before
+                    // switching to RequireIdentity and failing closed on it.
+                    outcome.identity_warned = true;
+                }
+
+                outcome.hit = scan::Hit{Address{*recovered}, candidate.name()};
+                return outcome;
             }
         }
         return outcome;

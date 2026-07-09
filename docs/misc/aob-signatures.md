@@ -242,7 +242,7 @@ This pairs with the `rtti` walker's opposite direction (vtable to name): one fin
 
 Set `ScanRequest::scope` to `Region::module_named(L"game.exe")` (or `Region::host()`) and leave `pages` at its default (`Pages::Readable`) to resolve a candidate whose signature lives in a data section. `Candidate::direct` with `walk_back = 0` returns the match address directly, which is exactly the data address for a data-section scan.
 
-`prologue_fallback = true` is intentionally a code-path concern: its recovery path rebuilds a hooked near-JMP prologue, which is meaningless for a data match.
+A non-`Off` `fallback_policy` is intentionally a code-path concern: its recovery path rebuilds a hooked near-JMP prologue, which is meaningless for a data match.
 
 #### Module-scoped scan (single unpacked PE)
 
@@ -257,9 +257,9 @@ const sc::ScanRequest req{
 const auto hit = sc::resolve(req);
 ```
 
-One scope covers both `.text` and `.rdata` / `.data` candidates via the `Pages::Readable` default. `ErrorCode::NoMatch` is returned when no candidate resolves; the resolver never falls back to a whole-process scan (which would re-introduce the cross-module shadowing the scoped request exists to prevent). With `prologue_fallback = true`, the rewritten near-JMP must be found inside the scope, but its jump destination may still point at a sibling mod's trampoline outside the module.
+One scope covers both `.text` and `.rdata` / `.data` candidates via the `Pages::Readable` default. `ErrorCode::NoMatch` is returned when no candidate resolves; the resolver never falls back to a whole-process scan (which would re-introduce the cross-module shadowing the scoped request exists to prevent). With a non-`Off` `fallback_policy`, the rewritten near-JMP must be found inside the scope, but its jump destination may still point at a sibling mod's trampoline outside the module.
 
-For a hook target -- a signature that must land on an instruction, not data -- prefer `scan::borrow_code_target(ladder, label, scope)` over a hand-built request. It presets the code-target policy in one place: `Pages::Executable` (so an instruction signature cannot alias an identical byte run in `.rdata` / `.data`), `CandidateOrder::UniqueFirst`, and `prologue_fallback`, with `require_unique` kept true. `Pages::Executable` narrows only the byte tiers; a mixed ladder's RTTI and string-xref tiers still resolve through their own backends. Keep the default `Pages::Readable` (or `borrow()`) for a data / RTTI / string target.
+For a hook target -- a signature that must land on an instruction, not data -- prefer `scan::borrow_code_target(ladder, label, scope)` over a hand-built request. It presets the code-target policy in one place: `Pages::Executable` (so an instruction signature cannot alias an identical byte run in `.rdata` / `.data`), `CandidateOrder::UniqueFirst`, and a `WarnOnly` fallback policy (pass `RequireIdentity` plus a `fallback_witness` to fail closed on a recovered near-twin), with `require_unique` kept true. `Pages::Executable` narrows only the byte tiers; a mixed ladder's RTTI and string-xref tiers still resolve through their own backends. Keep the default `Pages::Readable` (or `borrow()`) for a data / RTTI / string target.
 
 ```cpp
 const auto hit = sc::resolve(
@@ -314,7 +314,7 @@ owned.push_back(sc::OwnedScanRequest{
     .ladder = {sc::Candidate::direct("camera_update_v1",
                    sc::Pattern::literal("48 89 6C 24 ?? 56 57 41 54"))},
     .label = "camera_update",
-    .prologue_fallback = true,
+    .fallback_policy = sc::FallbackPolicy::WarnOnly,
 });
 
 // Build borrowed views for the call (views alias the owned storage above).
@@ -475,13 +475,19 @@ Candidate::rtti_vtable(name, mangled)
 Candidate::string_xref(name, literal)
 Candidate::string_xref(name, StringRefQuery{...})  // explicit facets
 
+// Hooked-prologue recovery strictness, and the identity check it runs on a recovered site:
+enum class FallbackPolicy { Off, WarnOnly, RequireIdentity };
+using FallbackValidator = bool (*)(std::int64_t recovered_address, const void* context) noexcept;
+struct FallbackWitness { FallbackValidator predicate = nullptr; const void* context = nullptr; };
+
 // A resolution request (non-owning) and its owning twin:
 struct ScanRequest
 {
     std::span<const Candidate> ladder;
     std::string_view label{};
     Region scope = Region::host();
-    bool prologue_fallback = false;
+    FallbackPolicy fallback_policy = FallbackPolicy::Off;  // Off = no hooked-prologue recovery
+    FallbackWitness fallback_witness{};                    // identity check for RequireIdentity / WarnOnly
     bool require_unique = true;
     CandidateOrder order = CandidateOrder::AsDeclared;
     Pages pages = Pages::Readable;  // byte tiers scan this page class; Executable narrows to code
@@ -492,7 +498,8 @@ struct OwnedScanRequest  // for stored / deferred resolution
     std::vector<Candidate> ladder;
     std::string label;
     Region scope = Region::host();
-    bool prologue_fallback = false;
+    FallbackPolicy fallback_policy = FallbackPolicy::Off;
+    FallbackWitness fallback_witness{};
     bool require_unique = true;
     CandidateOrder order = CandidateOrder::AsDeclared;
     Pages pages = Pages::Readable;
@@ -502,9 +509,17 @@ struct OwnedScanRequest  // for stored / deferred resolution
 // build a borrowed request with lifetime-bound diagnostic:
 ScanRequest borrow(span<const Candidate> ladder, string_view label = {},
                    Region scope = Region::host(),
-                   bool prologue_fallback = false, bool require_unique = true,
+                   FallbackPolicy fallback_policy = FallbackPolicy::Off,
+                   FallbackWitness fallback_witness = {}, bool require_unique = true,
                    CandidateOrder order = CandidateOrder::AsDeclared,
                    Pages pages = Pages::Readable) noexcept;
+
+// code/hook-target preset: Pages::Executable + UniqueFirst + a WarnOnly fallback by default.
+// Pass RequireIdentity + a witness to fail closed on a recovered site the witness cannot confirm.
+ScanRequest borrow_code_target(span<const Candidate> ladder, string_view label = {},
+                               Region scope = Region::host(),
+                               FallbackPolicy fallback_policy = FallbackPolicy::WarnOnly,
+                               FallbackWitness fallback_witness = {}) noexcept;
 
 struct Hit
 {
@@ -521,7 +536,7 @@ struct Hit
 resolve_batch(std::span<const ScanRequest> requests, std::size_t max_workers = 0) noexcept;
 ```
 
-`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named(L"game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages. `prologue_fallback = true` selects the hooked-prologue recovery path. `pages` selects which page class the byte tiers scan: `Pages::Readable` (default) covers code and data, `Pages::Executable` narrows to code so a byte signature that must land on an instruction cannot alias an identical run in a data section. `resolve_batch` dispatches each request to the resolver concurrently; unwrap the outer `Result` (a whole-batch OOM failure lands there, mirroring `hook::install_all`), then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
+`resolve` takes a `ScanRequest` so you can pass a borrowed view (`borrow(...)`) or an `OwnedScanRequest::view()`. Scope the scan to a single module with `Region::module_named(L"game.exe")` or `Region::host()` for the host EXE; `Region::whole_process()` searches all committed pages. `fallback_policy` selects hooked-prologue recovery: `Off` (the default) disables it so a full-ladder miss is a hard miss, `WarnOnly` recovers structurally, and `RequireIdentity` (paired with a `fallback_witness`) additionally fails the recovery closed with `ErrorCode::PrologueIdentityRejected` when the witness cannot confirm the recovered site (see 6.4). `pages` selects which page class the byte tiers scan: `Pages::Readable` (default) covers code and data, `Pages::Executable` narrows to code so a byte signature that must land on an instruction cannot alias an identical run in a data section. `resolve_batch` dispatches each request to the resolver concurrently; unwrap the outer `Result` (a whole-batch OOM failure lands there, mirroring `hook::install_all`), then read one `Result<Hit>` per request from the inner vector in input order. `Hit::winning_name` is an owned `std::string` copied from the winning candidate, so it does not alias caller storage. `Hit::address` is the post-resolution absolute address: for `direct` candidates it equals `match + walk_back`, and for `rip_relative` candidates it is the target of the displacement already resolved, so callers can hook or call it directly. Use `scan::or_null(result)` or `scan::address_or(result, fallback)` to flatten a `Result<Hit>` to an address when error detail is not needed. Errors are unified `ErrorCode` values on `result.error().code`; call `to_string(result.error().code)` for a diagnostic string.
 
 ### 6.3 Basic usage
 
@@ -560,13 +575,28 @@ DetourModKit::log().info(
 
 `scan::resolve` is fine when the target function still looks the way your signature remembers it. It stops working as soon as another mod, loaded earlier in the process, inline-hooks the same function: SafetyHook, MinHook, and most hand-rolled detour libraries overwrite the first five bytes with a near-JMP (`E9 ?? ?? ?? ??`) to their trampoline. Your Direct-mode candidate that matches on a prologue byte sequence now sees `E9` instead of `48 89 5C 24 ...`, and the scan misses even though the function itself is still present.
 
-`resolve` with `ScanRequest::prologue_fallback = true` handles that exact scenario. On the happy path it is identical to a plain `resolve`. If every candidate misses, it walks the list again and, for each `direct`-tier candidate, rebuilds the pattern with the patched prologue tokens replaced by a jump prefix while preserving the literal tail, then scans with the rewritten pattern. Four inline-hook prologue shapes are tried in order: the five-byte `E9 ?? ?? ?? ??` near jump (SafetyHook / MinHook for an in-range trampoline); the six-byte `FF 25 ?? ?? ?? ??` RIP-relative indirect jump a hook emits when its trampoline is beyond rel32 reach with the absolute target in a separate slot the displacement points at (a Detours-style far jump); the 14-byte `FF 25 00 00 00 00 <abs64>` absolute form whose displacement is zero so the 8-byte target is inlined immediately after the instruction; and the 12-byte `mov rax, imm64; jmp rax` (`48 B8 <imm64> FF E0`) absolute jump some libraries emit instead. The shapes are mutually exclusive at a real hook site -- their leading opcode bytes (`E9` vs `FF 25` vs `48 B8`) differ, and a 14-byte overwrite leaves a different surviving tail than a six-byte one -- so the try order only affects which is attempted first, never correctness. Whichever shape uniquely recovers an executable target wins. Two guardrails apply before accepting a hit: the rewritten pattern must resolve to exactly one location in scope (a unique jump into the sibling mod's trampoline, not an arbitrary jump that happens to share a tail shape), and the decoded jump destination must resolve to a committed, execute-readable page. The destination is deliberately *not* required to lie inside a loaded module: SafetyHook trampolines and relay-style detours can live outside every image, so an in-module requirement would reject the precise recovery this path exists for. The recovered address honors the candidate's `|` anchor offset exactly as the direct pass would, so a `|`-anchored direct candidate resolves to the same byte whether it matched directly or through the fallback. `rip_relative` candidates are skipped in the fallback phase since they target instructions deeper than the patched prologue and are unaffected by the overwrite.
+`resolve` with a non-`Off` `ScanRequest::fallback_policy` handles that exact scenario. On the happy path it is identical to a plain `resolve`. If every candidate misses, it walks the list again and, for each `direct`-tier candidate, rebuilds the pattern with the patched prologue tokens replaced by a jump prefix while preserving the literal tail, then scans with the rewritten pattern. Four inline-hook prologue shapes are tried in order: the five-byte `E9 ?? ?? ?? ??` near jump (SafetyHook / MinHook for an in-range trampoline); the six-byte `FF 25 ?? ?? ?? ??` RIP-relative indirect jump a hook emits when its trampoline is beyond rel32 reach with the absolute target in a separate slot the displacement points at (a Detours-style far jump); the 14-byte `FF 25 00 00 00 00 <abs64>` absolute form whose displacement is zero so the 8-byte target is inlined immediately after the instruction; and the 12-byte `mov rax, imm64; jmp rax` (`48 B8 <imm64> FF E0`) absolute jump some libraries emit instead. The shapes are mutually exclusive at a real hook site. The `E9`, `FF 25`, and `48 B8` opcode groups differ, and the two `FF 25` forms share that opcode but are told apart by overwrite length: the six-byte form points its disp32 at a separate target slot, while the fourteen-byte form zeroes the disp32 and inlines the 64-bit target, so the two leave different surviving tails. The try order therefore only affects which shape is attempted first, never correctness. Whichever shape uniquely recovers an executable target wins. Two guardrails apply before accepting a hit: the rewritten pattern must resolve to exactly one location in scope (a unique jump into the sibling mod's trampoline, not an arbitrary jump that happens to share a tail shape), and the decoded jump destination must resolve to a committed, execute-readable page. The destination is deliberately *not* required to lie inside a loaded module: SafetyHook trampolines and relay-style detours can live outside every image, so an in-module requirement would reject the precise recovery this path exists for. The recovered address honors the candidate's `|` anchor offset exactly as the direct pass would, so a `|`-anchored direct candidate resolves to the same byte whether it matched directly or through the fallback. `rip_relative` candidates are skipped in the fallback phase since they target instructions deeper than the patched prologue and are unaffected by the overwrite.
+
+Those two guardrails prove a hooked site exists and is unique; they do not prove it is the function you meant. A game reshape can leave a different function whose surviving literal tail happens to match your candidate and which is itself inline-hooked, so the rebuilt pattern resolves uniquely to a near-twin at the wrong address. `fallback_policy` chooses how strictly the recovered site is confirmed. `WarnOnly` (the `borrow_code_target` default) returns the structural recovery and, when a `fallback_witness` is supplied, logs a Warning if the witness disagrees, an observe-before-enforce mode to surface near-twin drift in your logs without changing behavior. `RequireIdentity` runs the witness and fails the recovery closed with `ErrorCode::PrologueIdentityRejected` when it rejects the site (or when no witness was supplied to confirm it), so a caller can distinguish "a hooked near-twin was found but refused" from a plain `NoMatch`. The witness is a `FallbackValidator` (`bool(std::int64_t recovered_address, const void* context) noexcept`, signature-identical to `anchor::AnchorValidator`): corroborate the recovered address against an independently resolved landmark, or read a distinguishing byte past the overwritten prologue, and return false to reject a coincidental twin.
+
+```cpp
+// Fail closed unless the recovered site is corroborated against a landmark resolved elsewhere.
+static std::uintptr_t g_expected = /* an address resolved by an independent anchor */ 0;
+const auto hit = sc::resolve(sc::borrow_code_target(
+    k_weapon_fire_candidates, "weapon_fire", DetourModKit::Region::module_named(L"game.exe"),
+    sc::FallbackPolicy::RequireIdentity,
+    sc::FallbackWitness{
+        .predicate = +[](std::int64_t addr, const void* ctx) noexcept
+        { return static_cast<std::uintptr_t>(addr) == *static_cast<const std::uintptr_t*>(ctx); },
+        .context = &g_expected}));
+// hit.error().code == ErrorCode::PrologueIdentityRejected when a near-twin was recovered but not confirmed.
+```
 
 ```cpp
 const sc::ScanRequest req{
     .ladder = k_weapon_fire_candidates,
     .label = "weapon_fire",
-    .prologue_fallback = true,
+    .fallback_policy = sc::FallbackPolicy::WarnOnly,
 };
 const auto hit = sc::resolve(req);
 ```
@@ -575,7 +605,7 @@ There is one guardrail callers must be aware of. The fallback refuses to scan an
 
 > **Safety note.** The fallback is a recovery path for the specific case where another inline-hooking mod loaded earlier in the process has already patched the same function's prologue. It is **not** a recovery path for game patches that remove or reshape the target function: a cascade miss followed by a fallback hit on the wrong site can produce a non-zero resolved address that points into an unrelated function, which the consumer will then hook and corrupt. The tightened guardrails (one allowed match, ten literal tail bytes) make this outcome structurally improbable on a well-formed cascade, but they do not eliminate every degenerate signature shape.
 >
-> If your anchor family covers a function that may have been removed or reshaped by a future patch (rather than just inline-hooked by a sibling), use `scan::resolve` with `prologue_fallback = false` (the default) as the strict variant; it treats a full-ladder miss as a hard `ErrorCode::NoMatch` without engaging the rewritten-prologue path at all. As a defense in depth, ensure at least one `Candidate` in the ladder anchors **past** the SafetyHook 5-byte displacement window (a mid-body literal-byte landmark in the function), which lets the regular resolver match a sibling-patched site without the fallback ever being needed.
+> If your anchor family covers a function that may have been removed or reshaped by a future patch (rather than just inline-hooked by a sibling), use `scan::resolve` with `fallback_policy = FallbackPolicy::Off` (the default) as the strict variant; it treats a full-ladder miss as a hard `ErrorCode::NoMatch` without engaging the rewritten-prologue path at all. As a defense in depth, ensure at least one `Candidate` in the ladder anchors **past** the SafetyHook 5-byte displacement window (a mid-body literal-byte landmark in the function), which lets the regular resolver match a sibling-patched site without the fallback ever being needed.
 
 ### 6.5 Name and string resilience tiers
 

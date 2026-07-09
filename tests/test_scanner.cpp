@@ -3072,7 +3072,7 @@ TEST(ScannerPrologueTest, UnreadableAddrReturnsFalse)
     VirtualFree(na, 0, MEM_RELEASE);
 }
 
-// Tests for host-module-scoped resolve() and prologue_fallback
+// Tests for host-module-scoped resolve() and prologue-fallback recovery
 
 // A unique 16-byte signature compiled into the test executable's own image so a host-module-scoped ladder has a real
 // in-host target to resolve. volatile const keeps the linker from folding the bytes or discarding them as unused (the
