@@ -696,6 +696,8 @@ TEST_F(MemoryTest, IsMemoryWritable_PageGuard)
     VirtualFree(mem, 0, MEM_RELEASE);
 }
 
+// A range that starts in a committed region but extends past its end into non-committed space must fail closed. The
+// byte one past a standalone 4096-byte commit is reserved-or-free (not MEM_COMMIT), so the range walk stops there.
 TEST_F(MemoryTest, IsMemoryReadable_CrossRegionBoundary)
 {
     void *region1 = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -709,6 +711,72 @@ TEST_F(MemoryTest, IsMemoryReadable_CrossRegionBoundary)
 
     VirtualFree(region1, 0, MEM_RELEASE);
     VirtualFree(region2, 0, MEM_RELEASE);
+}
+
+// A two-page reservation keeps the pages contiguous. Re-protecting the second page as read-only splits the reservation
+// into two VirtualQuery regions, both readable, so a range spanning the full reservation must be readable.
+TEST_F(MemoryTest, IsMemoryReadable_SpansAdjacentReadableRegions)
+{
+    const SIZE_T page_size = 4096;
+    uint8_t *base =
+        static_cast<uint8_t *>(VirtualAlloc(nullptr, 2 * page_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(base + page_size, page_size, PAGE_READONLY, &old_protect));
+
+    // Cache-miss path: the first query caches the first region and walks the readable tail.
+    memory::clear_cache();
+    EXPECT_TRUE(is_readable(base, 2 * page_size));
+
+    // A cached first page must not answer the larger span by itself; the tail still has to be walked.
+    memory::clear_cache();
+    EXPECT_TRUE(is_readable(base, page_size));
+    EXPECT_TRUE(is_readable(base, 2 * page_size));
+
+    memory::clear_cache();
+    EXPECT_TRUE(is_readable(base + page_size, page_size));
+    memory::clear_cache();
+    EXPECT_FALSE(is_writable(base, 2 * page_size));
+
+    // No-cache cold fallback: check_memory_permission and is_readable_nonblocking both perform the same range walk.
+    memory::shutdown_cache();
+    EXPECT_TRUE(is_readable(base, 2 * page_size));
+    EXPECT_EQ(is_readable_nonblocking(base, 2 * page_size), memory::ReadableStatus::Readable);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+// A readable first page followed by a no-access second page is not readable across the boundary, even though the first
+// page alone is readable.
+TEST_F(MemoryTest, IsMemoryReadable_SpanFailsClosedOnUnreadableTail)
+{
+    const SIZE_T page_size = 4096;
+    uint8_t *base =
+        static_cast<uint8_t *>(VirtualAlloc(nullptr, 2 * page_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+
+    DWORD old_protect = 0;
+    ASSERT_TRUE(VirtualProtect(base + page_size, page_size, PAGE_NOACCESS, &old_protect));
+
+    memory::clear_cache();
+    EXPECT_TRUE(is_readable(base, page_size));
+
+    // Cache-hit exemption teeth: with the readable first region now cached and NOT cleared, a spanning query must
+    // still fail closed on the NOACCESS tail. is_entry_valid_and_covers requires one cached region to fully cover the
+    // span, so the cached first page cannot short-circuit the answer; the query falls through to the range walk, which
+    // rejects the tail. Were that containment check ever weakened to accept partial coverage, this spanning read would
+    // be wrongly reported readable from the first region's protection alone.
+    EXPECT_FALSE(is_readable(base, 2 * page_size));
+
+    memory::clear_cache();
+    EXPECT_FALSE(is_readable(base, 2 * page_size));
+
+    memory::shutdown_cache();
+    EXPECT_FALSE(is_readable(base, 2 * page_size));
+    EXPECT_EQ(is_readable_nonblocking(base, 2 * page_size), memory::ReadableStatus::NotReadable);
+
+    VirtualFree(base, 0, MEM_RELEASE);
 }
 
 TEST_F(MemoryTest, InitCacheWithShards)

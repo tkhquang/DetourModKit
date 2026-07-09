@@ -973,6 +973,57 @@ namespace DetourModKit
             }
 
             /**
+             * @brief Range-spanning permission walk via VirtualQuery, with no cache involvement.
+             * @param address Start of the range; callers screen a zero address before calling.
+             * @param size Byte length of the range; callers screen a zero size before calling.
+             * @param check_permission Predicate over one region's protection flags.
+             * @return true only when every region the range touches is committed and satisfies @p check_permission,
+             *         with no unmapped gap between them.
+             * @details A single VirtualQuery describes only the region that contains its argument, so a range that
+             *          legitimately crosses a protection boundary -- for example a large allocation whose interior page
+             *          was re-protected, which splits one reservation into several MEMORY_BASIC_INFORMATION regions --
+             *          would fail closed against the first region's end even when every byte it spans is readable.
+             *          Adjacent regions that share protection, state, and type are already coalesced by VirtualQuery
+             *          into one region, so this loop iterates more than once only when the range genuinely crosses
+             *          differing protections; the common single-region case runs exactly one query, the same cost as a
+             *          direct single-region permission check. Fail-closed throughout: an address-space wrap, an
+             *          unmapped or non-committed sub-region, a disallowed protection, or a VirtualQuery that fails or
+             *          does not advance the cursor all return false. Forward progress is guaranteed because
+             *          VirtualQuery returns a region that contains `cursor`, whose end is strictly greater than
+             *          `cursor`, so each iteration jumps the cursor to the next region base and the loop is bounded by
+             *          the region count of the range.
+             */
+            bool range_permission_uncached(std::uintptr_t address, std::size_t size,
+                                           bool (*check_permission)(DWORD) noexcept) noexcept
+            {
+                const std::uintptr_t query_end = address + size;
+                if (query_end < address)
+                    return false;
+
+                std::uintptr_t cursor = address;
+                while (cursor < query_end)
+                {
+                    MEMORY_BASIC_INFORMATION mbi{};
+                    if (VirtualQuery(reinterpret_cast<LPCVOID>(cursor), &mbi, sizeof(mbi)) == 0)
+                        return false;
+                    if (mbi.State != MEM_COMMIT)
+                        return false;
+                    if (!check_permission(mbi.Protect))
+                        return false;
+
+                    const std::uintptr_t region_end =
+                        reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+                    // VirtualQuery's region always contains `cursor`, so region_end > cursor. The guard is a defensive
+                    // backstop: a pathological zero-size or wrapped region that did not advance the cursor fails closed
+                    // rather than spinning.
+                    if (region_end <= cursor)
+                        return false;
+                    cursor = region_end;
+                }
+                return true;
+            }
+
+            /**
              * @brief Unified permission check shared by is_readable and is_writable.
              * @param address Start address of the query (0 fails closed).
              * @param size Number of bytes to check (0 fails closed).
@@ -996,18 +1047,10 @@ namespace DetourModKit
                 // zeroed the count.
                 if (shard_count == 0)
                 {
-                    MEMORY_BASIC_INFORMATION mbi{};
-                    if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi)))
-                        return false;
-                    if (mbi.State != MEM_COMMIT)
-                        return false;
-                    if (!check_permission(mbi.Protect))
-                        return false;
-                    const std::uintptr_t region_start = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
-                    const std::uintptr_t query_end = address + size;
-                    if (query_end < address)
-                        return false;
-                    return address >= region_start && query_end <= region_start + mbi.RegionSize;
+                    // No cache to consult: walk the range directly. The walk spans protection boundaries, so a range
+                    // that crosses a re-protected interior page is answered correctly instead of failing closed on the
+                    // first region's end.
+                    return range_permission_uncached(address, size, check_permission);
                 }
 
                 const std::size_t shard_idx = compute_shard_index(address, shard_count);
@@ -1037,14 +1080,25 @@ namespace DetourModKit
                 if (!check_permission(mbi.Protect))
                     return false;
 
-                const std::uintptr_t region_start_addr = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
-                const std::uintptr_t region_end_addr = region_start_addr + mbi.RegionSize;
+                const std::uintptr_t region_end_addr =
+                    reinterpret_cast<std::uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
                 const std::uintptr_t query_end_addr = address + size;
 
                 if (query_end_addr < address)
                     return false;
+                if (region_end_addr <= address)
+                    return false;
 
-                return address >= region_start_addr && query_end_addr <= region_end_addr;
+                // The query landed inside the region just cached by query_and_update_cache (VirtualQuery always returns
+                // the region that contains `address`, so the range starts at or after its base). The common case is
+                // that the whole range fits within this one region -- answer directly and keep the region cached for
+                // the next probe. When the range extends past this region it crosses into an adjacent protection
+                // region, which a single cache entry can never cover, so walk the remainder uncached: fail closed if
+                // any sub-region is uncommitted, disallowed, or separated by an unmapped gap.
+                if (query_end_addr <= region_end_addr)
+                    return true;
+
+                return range_permission_uncached(region_end_addr, query_end_addr - region_end_addr, check_permission);
             }
         } // namespace
 
@@ -1369,21 +1423,12 @@ namespace DetourModKit
 
             if (!s_cache_initialized.load(std::memory_order_seq_cst))
             {
-                // No cache to consult: fall back to a single blocking VirtualQuery and return a definite answer.
-                MEMORY_BASIC_INFORMATION mbi{};
-                if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi)))
-                    return ReadableStatus::NotReadable;
-                if (mbi.State != MEM_COMMIT)
-                    return ReadableStatus::NotReadable;
-                if (!check_read_permission(mbi.Protect))
-                    return ReadableStatus::NotReadable;
-                const std::uintptr_t region_start = reinterpret_cast<std::uintptr_t>(mbi.BaseAddress);
-                const std::uintptr_t query_end = address + size;
-                if (query_end < address)
-                    return ReadableStatus::NotReadable;
-                if (address >= region_start && query_end <= region_start + mbi.RegionSize)
-                    return ReadableStatus::Readable;
-                return ReadableStatus::NotReadable;
+                // No cache to consult: fall back to a blocking range walk and return a definite answer. The walk spans
+                // protection boundaries, so a range that crosses a re-protected page is not reported as a false
+                // NotReadable. This is the no-cache path only; the non-blocking (cache-present) path below never issues
+                // a VirtualQuery and returns Unknown on a miss.
+                return range_permission_uncached(address, size, check_read_permission) ? ReadableStatus::Readable
+                                                                                       : ReadableStatus::NotReadable;
             }
 
             const std::size_t shard_count = s_shard_count.load(std::memory_order_acquire);
