@@ -713,7 +713,8 @@ TEST(ScanResolve, PrologueFallbackRecoversAnE9HookedFunction)
 // exists, not that it is the intended function. A game reshape can leave a coincidental near-twin whose surviving tail
 // matches and which is itself inline-hooked, so the rebuilt pattern resolves uniquely to the wrong address. The
 // FallbackPolicy + FallbackWitness gate turns that fail-open into a fail-closed. These tests drive the gate through the
-// same E9-hooked fixture as the recovery test, varying only the policy and witness.
+// same E9-hooked fixture as the recovery test, varying only the policy and witness. Each keeps that fixture inline on
+// purpose: the exact hooked bytes a test asserts on sit next to the assertion, so it stays auditable in isolation.
 
 TEST(ScanResolve, PrologueFallbackRequireIdentityRejectsAWitnessMismatch)
 {
@@ -792,6 +793,52 @@ TEST(ScanResolve, PrologueFallbackRequireIdentityAcceptsAConfirmingWitness)
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
     EXPECT_EQ(hit->winning_name, "hooked");
+}
+
+TEST(ScanResolve, PrologueFallbackRequireIdentityKeepsTryingUntilAWitnessConfirms)
+{
+    // Two independently E9-hooked functions in one image, each with its own distinctive literal tail. The ladder lists
+    // the near-twin (candidate 0) ahead of the intended function (candidate 1). Under RequireIdentity the witness
+    // rejects the twin's recovered site and confirms only the intended one, so the gate must reject candidate 0's
+    // structural recovery, keep walking the ladder, and accept candidate 1. A gate that returned on the first rejection
+    // instead of continuing would fail the whole request closed and never reach the intended function, so this pins the
+    // multi-candidate keep-trying behavior the single-candidate tests above cannot exercise.
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+
+    const std::size_t twin = 0x100;
+    const std::size_t twin_trampoline = 0x800;
+    buffer.put_e9_jump(twin, twin_trampoline);
+    buffer.put(twin + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(twin_trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+
+    const std::size_t intended = 0x300;
+    const std::size_t intended_trampoline = 0x900;
+    buffer.put_e9_jump(intended, intended_trampoline);
+    buffer.put(intended + 5, {0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x17, 0x28, 0x39, 0x4A, 0x5B, 0x6C});
+    buffer.put(intended_trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+
+    // Each candidate's signature is its own function's UNHOOKED prologue plus that function's distinctive tail, so the
+    // rebuilt E9 pattern for candidate 0 matches uniquely at the twin and the one for candidate 1 uniquely at the
+    // intended function.
+    const std::array<Candidate, 2> ladder = {
+        Candidate::direct("twin", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD")),
+        Candidate::direct("intended", scan::Pattern::literal("55 48 89 E5 90 A1 B2 C3 D4 E5 F6 17 28 39 4A 5B 6C"))};
+
+    // The witness confirms only the intended function's address (passed through context), so it rejects the twin.
+    const std::uintptr_t expected = buffer.address_of(intended);
+    const scan::FallbackWitness witness{
+        .predicate = +[](std::int64_t addr, const void *ctx) noexcept
+                     { return static_cast<std::uintptr_t>(addr) == *static_cast<const std::uintptr_t *>(ctx); },
+        .context = &expected};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder,
+                                                     .scope = buffer.region(),
+                                                     .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+                                                     .fallback_witness = witness});
+
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(intended));
+    EXPECT_EQ(hit->winning_name, "intended");
 }
 
 TEST(ScanResolve, PrologueFallbackWarnOnlyRecoversDespiteAWitnessMismatch)

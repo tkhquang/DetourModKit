@@ -50,8 +50,9 @@ namespace DetourModKit
         // within rel32 reach; the rest are the far-jump shapes emitted when the trampoline is beyond rel32 reach (an
         // FF 25 RIP-relative indirect jump through a pointer slot, the fourteen-byte FF 25 absolute form whose disp32
         // is zero so the 8-byte target is inlined after the instruction, and the twelve-byte `mov rax, imm64; jmp
-        // rax`). The literal opcode bytes make the shapes mutually exclusive at a real hook site, so the try order only
-        // affects which is attempted first, never correctness; E9 leads because it is by far the common case.
+        // rax`). The opcode groups differ and the two FF 25 forms differ only by overwrite length, so the shapes are
+        // mutually exclusive at a real hook site and the try order only affects which is attempted first, never
+        // correctness; E9 leads because it is by far the common case.
         constexpr std::array<PrologueShape, 4> PROLOGUE_SHAPES = {{
             {5, std::string_view{"E9 ?? ?? ?? ??"}, &detail::decode_e9_rel32},
             {6, std::string_view{"FF 25 ?? ?? ?? ??"}, &detail::decode_ff25_indirect},
