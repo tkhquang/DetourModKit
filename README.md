@@ -350,7 +350,11 @@ ctest --preset msvc-debug
 ```
 
 > [!TIP]
-> If the MSVC build is failing due to a PDB file locking issue, kill stale compiler processes: `taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found`.
+> If the MSVC build is failing due to a PDB file locking issue, kill stale compiler processes:
+>
+> ```bash
+> taskkill /F /IM cl.exe 2>nul || echo No cl.exe processes found
+> ```
 
 ### Warnings as Errors
 
