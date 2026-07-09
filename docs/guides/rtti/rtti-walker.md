@@ -132,6 +132,8 @@ bool is_combat_camera(DMK::Address obj) noexcept
 
 Scoping to one `Region` (the default is the host EXE) is load-bearing for correctness, not just ergonomics: the same mangled name can appear in several loaded modules. Pass the game module's range explicitly when the target type lives in a separate DLL.
 
+A successful resolve is cached permanently, so the warm path is a relaxed atomic load and a qword compare. A resolve that misses is deliberately not cached: the owning module may map the type later (a DLL loads, or a game patch finishes relocating the vtable), so `matches()` keeps retrying rather than latching a stale miss. To keep a per-frame `matches()` on an absent type from re-sweeping the whole module every frame, the miss-path re-sweep is throttled to at most once per internal cooldown; the type is still picked up within that cooldown once it appears, so the retry capability is preserved without the per-frame scan cost.
+
 ## Performance notes
 
 - The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall; the batched ColHead read still matters because it keeps the walker to two guarded calls instead of four.

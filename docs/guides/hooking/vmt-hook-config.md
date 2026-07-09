@@ -22,6 +22,8 @@ The inline hook path accepts an `Options` that exposes `fail_if_already_hooked`.
 
 A second motivation is a defensive pre-flight against pathological VMT slot contents: an `int3` padding byte, a `__debugbreak` left by a debugging session, or a same-module jump stub. The pre-flight catches these at create/apply time instead of at the first dispatch through the cloned vtable.
 
+Independently of the opt-in `VmtOptions`, `vmt_for` always guard-reads the object's vtable region before handing it to the backend. It validates the forward slots (the callable method pointers) and the ABI RTTI header prefix that sits immediately *below* the vptr -- the Itanium offset-to-top + typeinfo pointer, or the MSVC RTTI locator -- because the backend clones the vtable by copying from that header, not from the vptr. A malformed object whose header prefix lands on an unmapped page therefore fails closed with `InvalidObject` rather than faulting the host inside the backend's copy (an access violation the C++ exception machinery around the backend cannot catch). This guard is unconditional; the `VmtOptions` knobs only add the extra slot-0 content checks above.
+
 ## 2. `VmtOptions` fields
 
 ```cpp
