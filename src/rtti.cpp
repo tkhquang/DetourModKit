@@ -571,6 +571,93 @@ namespace DetourModKit
             }
             return count;
         }
+
+        /**
+         * @brief Sweeps one [begin,end) window and returns true when it finds any validated COL.
+         * @details Mirrors the name sweep's page-bounded read, meta-slot pre-filter, and resolve_col_site validation.
+         * @param mod The scan SCOPE, used for the in-scope meta-slot pre-filter.
+         * @param owning The vtables' OWNING-MODULE span used for validation; may be invalid, in which case each
+         *        candidate resolves its own module (mirrors @ref sweep_range_for_name).
+         */
+        bool sweep_range_for_first_col(DetourModKit::detail::ModuleSpan mod, DetourModKit::detail::ModuleSpan owning,
+                                       std::uintptr_t begin, std::uintptr_t end) noexcept
+        {
+            std::uintptr_t addr = (begin + 7) & ~static_cast<std::uintptr_t>(7);
+
+            while (addr + sizeof(std::uintptr_t) <= end)
+            {
+                // One guarded read per page: an unmapped page then fails only its own chunk, not the whole window.
+                const std::uintptr_t page_end = (addr | rtti::detail::PAGE_MASK) + 1;
+                const std::uintptr_t chunk_end = (page_end < end) ? page_end : end;
+                const std::size_t qwords = static_cast<std::size_t>(chunk_end - addr) / sizeof(std::uintptr_t);
+                if (qwords == 0)
+                {
+                    addr = chunk_end;
+                    continue;
+                }
+
+                // A 4 KiB page holds at most 512 qwords.
+                std::uintptr_t buf[512];
+                const std::size_t want = (qwords < 512) ? qwords : 512;
+                if (DetourModKit::detail::guarded_read_bytes(addr, buf, want * sizeof(std::uintptr_t)))
+                {
+                    for (std::size_t j = 0; j < want; ++j)
+                    {
+                        // A meta-slot holds a pointer to a COL inside this module; most qwords fail this cheap
+                        // in-scope pre-filter without a second read.
+                        if (!mod.contains(buf[j]))
+                            continue;
+
+                        const std::uintptr_t slot_addr = addr + j * sizeof(std::uintptr_t);
+                        const std::uintptr_t candidate_vtable = slot_addr + sizeof(std::uintptr_t);
+
+                        // resolve_col_site is the shared definition of "resolvable", so this predicate and the name
+                        // resolver accept the same COL shapes.
+                        rtti::detail::ColSite site;
+                        const bool resolved_ok = owning.valid()
+                                                     ? rtti::detail::resolve_col_site(candidate_vtable, owning, site)
+                                                     : rtti::detail::resolve_col_site(candidate_vtable, site);
+                        if (resolved_ok)
+                            return true;
+                    }
+                }
+
+                addr += want * sizeof(std::uintptr_t);
+            }
+            return false;
+        }
+
+        /**
+         * @brief Reports whether @p mod holds any resolvable RTTI record, mirroring @ref scan_vtables_for_name's range
+         *        selection but short-circuiting on the first validated COL.
+         * @details Resolves the vtables' owning-module span once (exactly as @ref scan_vtables_for_name does at its
+         *          scope base) so every candidate is validated against the true image base, then sweeps the same
+         *          readable non-executable sections, with the identical whole-image fallback when the PE headers do not
+         *          parse -- a packed or section-merged image, or a tight non-PE scope window. The caller
+         *          (@ref rtti::region_has_rtti) has already proven @p mod valid.
+         */
+        bool scope_has_rtti(DetourModKit::detail::ModuleSpan mod) noexcept
+        {
+            const DetourModKit::detail::ModuleSpan owning =
+                DetourModKit::detail::module_span(memory::module_of(Address{mod.base}));
+
+            ScanRange ranges[32];
+            const std::size_t range_count = collect_rtti_scan_ranges(mod, ranges, 32);
+
+            if (range_count == 0)
+            {
+                // No parseable section table (packed / section-merged / a non-PE scope window): sweep the whole image
+                // as a strict superset, exactly as scan_vtables_for_name does on the same condition.
+                return sweep_range_for_first_col(mod, owning, mod.base, mod.end);
+            }
+
+            for (std::size_t i = 0; i < range_count; ++i)
+            {
+                if (sweep_range_for_first_col(mod, owning, ranges[i].begin, ranges[i].end))
+                    return true;
+            }
+            return false;
+        }
     } // anonymous namespace
 
     std::optional<Address> rtti::vtable_for_type(std::string_view mangled, Region range) noexcept
@@ -633,6 +720,15 @@ namespace DetourModKit
         for (std::size_t i = 0; i < to_write; ++i)
             out[i] = Address{matches[i].vtable};
         return match_count;
+    }
+
+    bool rtti::region_has_rtti(Region range) noexcept
+    {
+        const auto mod = DetourModKit::detail::module_span(range);
+        // An empty or malformed Region yields an invalid span; report "no records" so a caller that passes an
+        // unmapped range receives the same fail-closed "use the raw-byte fallback" answer as a genuinely records-free
+        // module, never a false positive that would steer it away from string-xref.
+        return mod.valid() && scope_has_rtti(mod);
     }
 
     rtti::TypeIdentity::TypeIdentity(std::string_view mangled, Region range) : m_mangled(mangled), m_range(range) {}
