@@ -209,7 +209,7 @@ namespace DetourModKit
          *            module. This is the definite "reverse RTTI is futile here, use the raw-byte fallback" signal.
          *          - true is not conclusive for a specific type: it only proves at least one record exists somewhere in
          *            the module, not that the caller's type resolves. A /GR- executable that links a /GR CRT or
-         *            middleware returns true off those library COLs while an executable-own type still needs the
+         *            middleware returns true off those library COLs while an executable-owned type still needs the
          *            raw-byte fallback. Act on a false; a true still leaves that fallback available after any resolve
          *            miss.
          * @param range Module image to inspect. Defaults to the host EXE.

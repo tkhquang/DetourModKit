@@ -574,7 +574,14 @@ namespace DetourModKit
 
         /**
          * @brief Sweeps one [begin,end) window and returns true when it finds any validated COL.
-         * @details Mirrors the name sweep's page-bounded read, meta-slot pre-filter, and resolve_col_site validation.
+         * @details Mirrors the name sweep's page-bounded read, meta-slot pre-filter, and resolve_col_site validation,
+         *          but returns on the first hit instead of collecting and deduping matches. The page-walk is duplicated
+         *          from @ref sweep_range_for_name rather than factored into a shared callback-driven core: sharing one
+         *          would re-open the audited name-resolve sweep (the security-critical COL-validation path) purely to
+         *          save the mechanical loop, and the two sweeps terminate differently (collect-to-cap versus first-hit
+         *          exit). The validation authority, @ref resolve_col_site, IS shared, so the two paths cannot diverge
+         *          on what counts as a resolvable COL; only the copied loop could drift, and a drift there is
+         *          fail-safe (a missed COL yields a false negative that routes the caller to the raw-byte fallback).
          * @param mod The scan SCOPE, used for the in-scope meta-slot pre-filter.
          * @param owning The vtables' OWNING-MODULE span used for validation; may be invalid, in which case each
          *        candidate resolves its own module (mirrors @ref sweep_range_for_name).
