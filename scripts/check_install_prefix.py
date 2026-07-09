@@ -14,7 +14,8 @@ Invariants enforced against the prefix (argv[1]):
     * lib*/cmake/safetyhook, lib*/cmake/Zydis, lib*/cmake/Zycore (backend package configs; a find_package(safetyhook)
       must NOT be satisfiable from a DetourModKit prefix)
     * the deleted v4 legacy public headers under include/DetourModKit/ (scanner/anchors/profile/hook_manager/
-      config_watcher/bootstrap/diagnostics_dump) and the interim in-directory umbrella include/DetourModKit/dmk.hpp
+      config_watcher/bootstrap/diagnostics_dump), the interim in-directory umbrella include/DetourModKit/dmk.hpp,
+      and old top-level paths for headers that were demoted to detail/ or src/internal/
     * include/DetourModKit/internal/ (the true-private engine is never installed)
 
   REQUIRED (must be present) -- the package must actually be usable by a find_package consumer:
@@ -49,6 +50,18 @@ LEGACY_INSTALLED_HEADERS = (
     "include/DetourModKit/diagnostics_dump.hpp",
     "include/DetourModKit/dmk.hpp",
 )
+
+# Public headers demoted out of the old top-level public include set. A detail/ destination remains installed through
+# its new path because a public header or the umbrella still needs it; a src/internal/ destination must not ship at all.
+# In either case, the old top-level spelling must not reappear in the installed prefix.
+DEMOTED_INSTALLED_HEADERS = {
+    "include/DetourModKit/async_logger.hpp": "src/internal/async_logger.hpp",
+    "include/DetourModKit/worker.hpp": "include/DetourModKit/detail/worker.hpp",
+    "include/DetourModKit/win_file_stream.hpp": "src/internal/win_file_stream.hpp",
+    "include/DetourModKit/event_dispatcher.hpp": "include/DetourModKit/detail/event_dispatcher.hpp",
+    "include/DetourModKit/drift_manifest.hpp": "include/DetourModKit/detail/drift_manifest.hpp",
+    "include/DetourModKit/srw_shared_mutex.hpp": "src/internal/srw_shared_mutex.hpp",
+}
 
 
 def lib_dir(prefix):
@@ -114,6 +127,9 @@ def main():
     for legacy in LEGACY_INSTALLED_HEADERS:
         if (prefix / legacy).is_file():
             violations.append(f"{legacy} ships: a v4-deleted legacy public header is present in the prefix")
+    for old_path, new_home in DEMOTED_INSTALLED_HEADERS.items():
+        if (prefix / old_path).is_file():
+            violations.append(f"{old_path} ships: demoted header now lives at {new_home}")
     if (include / "DetourModKit" / "internal").is_dir():
         violations.append("include/DetourModKit/internal/ ships: the true-private engine must never be installed")
 

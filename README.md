@@ -16,8 +16,7 @@ DetourModKit is organized into focused modules. Each module's full API is docume
 | AOB Scanner | Value-semantic `Pattern` (wildcards, per-nibble masks, and bounded jumps `[X-Y]` for a gap whose size shifts between builds), factory-only `Candidate` ladders, `resolve` / `resolve_batch`, page-gated `scan` and `unchecked::find_pattern` over a SIMD engine (RIP, string-xref, code-constant, and hooked-prologue recovery) | [`scan.hpp`](include/DetourModKit/scan.hpp) |
 | Hook | Free verbs `inline_at` / `mid_at` / `install_all` / `vmt_for` returning move-only RAII `Hook` / `VmtHook` handles, plus `HookStack` for guaranteed newest-first teardown of layered hooks; the SafetyHook backend hidden behind an opaque `MidContext` | [`hook.hpp`](include/DetourModKit/hook.hpp) |
 | Configuration | INI binding registry with key-combo fusions and hot-reload (folded-in file watcher plus reload hotkey) | [`config.hpp`](include/DetourModKit/config.hpp) |
-| Logger | Process logger value facade with format strings and `[file:line]` source stamping | [`logger.hpp`](include/DetourModKit/logger.hpp) |
-| Async Logger | Lock-free bounded-queue logger with batched writes | [`async_logger.hpp`](include/DetourModKit/async_logger.hpp) |
+| Logger | Process logger value facade with format strings and `[file:line]` source stamping, plus an opt-in lock-free bounded-queue async mode (`Logger::enable_async_mode`, batched writes, configured with `AsyncLoggerConfig`) | [`logger.hpp`](include/DetourModKit/logger.hpp) |
 | Memory Utilities | Readability checks, sharded region cache, fault-guarded typed reads/writes (`Result<T>`), pointer-chain `walk`, page-protection guards, and PE module-range queries | [`memory.hpp`](include/DetourModKit/memory.hpp) |
 | MSVC RTTI Walker | Recover mangled type names from runtime vtables; pointer-table scan with caller-owned cache; reverse name-to-vtable resolver and cached identity handle | [`rtti.hpp`](include/DetourModKit/rtti.hpp) |
 | RTTI Self-Heal | Reverse-identify the object behind a pointer slot and self-heal a field offset after a patch; multi-field drift solver, a frame-driven `HealScheduler`, and a diffable drift manifest | [`rtti_dissect.hpp`](include/DetourModKit/rtti_dissect.hpp), [`detail/drift_manifest.hpp`](include/DetourModKit/detail/drift_manifest.hpp) |
@@ -168,8 +167,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     │   │   ├── anchor.hpp            <-- Declarative anchor registry (namespace anchor): AnchorKind / Anchor / ResolvedAnchor / AnchorQuality / ScanProfile / resolve_all / anchor_fingerprint / evaluate_gate
     │   │   ├── manifest.hpp          <-- Signature manifest (namespace manifest): SignatureRecord / Binding / Signature / parse-serialize-load-save / overlay / resolve_and_gate over anchor
     │   │   ├── sighealth.hpp         <-- Offline signature health (namespace sighealth): analyze_pattern/candidate/record/manifest -> Grade + Findings, HealthPolicy, format_report (atom rarity / entropy / expected ambiguity)
-    │   │   ├── async_logger.hpp      <-- Async logging system (AsyncLogger)
-    │   │   ├── async_logger_config.hpp <-- Lightweight OverflowPolicy + AsyncLoggerConfig (logger.hpp / DetourModKit.hpp stay light)
+    │   │   ├── async_logger_config.hpp <-- Async logging config (OverflowPolicy + AsyncLoggerConfig); enable via Logger::enable_async_mode, writer is internal (src/internal/async_logger.hpp)
     │   │   ├── detail/               <-- Installed compile-visible support (pattern_core.hpp + demoted headers: event_dispatcher.hpp, worker.hpp, drift_manifest.hpp; private impl lives in src/internal/)
     │   │   ├── config.hpp
     │   │   ├── diagnostics.hpp       <-- Per-subsystem intentional-leak counters + process-wide event bus + one-call Snapshot aggregator (hooks_total/active/disabled, anchor quality, drift report)

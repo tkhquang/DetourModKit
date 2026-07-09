@@ -21,7 +21,8 @@
  *          Logging is deliberately FAIL-SOFT, like config: a dropped or filtered line is a best-effort outcome reported
  *          as a bool, never an error value, so the surface speaks void / bool rather than Result. The async transport
  *          (the lock-free MPMC queue and string pool) stays behind the AsyncLogger pimpl and is never named here; this
- *          header pulls only the lightweight AsyncLoggerConfig and the shared WinFileStream the sink writes through.
+ *          header pulls only the lightweight AsyncLoggerConfig plus a forward declaration of the private WinFileStream
+ *          sink.
  */
 
 #include "DetourModKit/async_logger_config.hpp"
@@ -116,8 +117,8 @@ namespace DetourModKit
 
     // Forward declaration only. AsyncLoggerConfig is a complete type via async_logger_config.hpp (included above);
     // AsyncLogger stays forward-declared so the lock-free queue and string pool never reach a consumer translation
-    // unit. Logger holds it behind an atomic<shared_ptr<AsyncLogger>> whose full definition lives in async_logger.hpp,
-    // included only by logger.cpp.
+    // unit. Logger holds it behind an atomic<shared_ptr<AsyncLogger>>; the complete type lives in
+    // src/internal/async_logger.hpp and is included only by the implementation that constructs and drives the writer.
     class AsyncLogger;
 
     /**
