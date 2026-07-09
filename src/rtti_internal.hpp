@@ -20,6 +20,14 @@
 
 namespace DetourModKit
 {
+    // Forward declaration so the ModuleSpan overload of resolve_col_site can be declared here without pulling the
+    // guarded-memory engine header into this internal header. Both TUs that define or call the overload
+    // (rtti.cpp, rtti_dissect.cpp) already include the full definition via internal/memory_guarded.hpp.
+    namespace detail
+    {
+        struct ModuleSpan;
+    }
+
     namespace rtti
     {
         namespace detail
@@ -89,6 +97,26 @@ namespace DetourModKit
              *         base, zero TypeDescriptor RVA, name address escaping the module range).
              */
             [[nodiscard]] bool resolve_col_site(std::uintptr_t vtable, ColSite &out) noexcept;
+
+            /**
+             * @brief resolve_col_site variant that reuses a caller-held owning-module span.
+             * @details Identical validation to the single-argument overload, but the caller supplies @p mod_range (the
+             *          span of the module that owns @p vtable) instead of this function resolving it via
+             *          memory::module_of. The reverse sweep already holds the module span for every candidate it tests,
+             *          so routing through this overload removes a per-candidate GetModuleHandleExW loader lookup from
+             *          the hot RTTI scan -- the per-frame cliff a TypeIdentity polled for an absent type would hit. The
+             *          overload requires @p vtable to lie inside @p mod_range (the same invariant module_of grants
+             *          implicitly: the loader only resolves a module that contains the address), so a candidate one
+             *          past the module end still fails closed.
+             * @param vtable Runtime vtable pointer (first qword of the object).
+             * @param mod_range Pre-resolved span of the module that owns @p vtable.
+             * @param out Receives the resolved coordinates on success only.
+             * @return true on a fully validated walk; false for every failure mode the single-argument overload
+             *         rejects, plus a @p vtable outside @p mod_range.
+             */
+            [[nodiscard]] bool resolve_col_site(std::uintptr_t vtable,
+                                                const DetourModKit::detail::ModuleSpan &mod_range,
+                                                ColSite &out) noexcept;
 
             /**
              * @brief Page-bounded NUL-terminated copy from @p addr into @p out.

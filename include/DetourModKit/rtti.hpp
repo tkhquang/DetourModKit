@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -239,8 +240,11 @@ namespace DetourModKit
             /**
              * @brief Returns the resolved primary vtable, resolving on first use.
              * @return The vtable address, or std::nullopt if it cannot be resolved in the configured module range.
-             * @note The first call resolves (a setup-cost module sweep); the result is cached, so a later call is a
-             *       relaxed atomic load.
+             * @note Callback-safe once warm: the first call resolves (a setup-cost module sweep), a successful
+             *       result is cached, so a later call is a relaxed atomic load. An unresolved result is not
+             *       cached (the owning module may map the type later), but the re-sweep is throttled to at most
+             *       once per internal cooldown, so polling this every frame for a type that is not present does
+             *       not re-scan the whole module each frame.
              */
             [[nodiscard]] std::optional<Address> vtable() const noexcept;
 
@@ -255,6 +259,12 @@ namespace DetourModKit
             // permanent.
             mutable std::atomic<Address> m_cached{Address{}};
             mutable std::atomic<bool> m_resolved{false};
+
+            // Millisecond timestamp of the last unresolved re-sweep attempt (0 = never attempted). Because a miss is
+            // never latched, a per-frame identity check for an absent type would re-sweep the whole module every frame;
+            // vtable() throttles that by skipping the sweep until a cooldown elapses. Only the miss path reads or
+            // writes this; a resolved identity returns from the m_resolved fast path and never touches it again.
+            mutable std::atomic<std::uint64_t> m_last_attempt_ms{0};
         };
     } // namespace rtti
 } // namespace DetourModKit

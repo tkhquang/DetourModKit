@@ -219,10 +219,15 @@ TEST(EventDispatcherTest, EmitSafe_CatchesHandlerExceptions)
     EXPECT_EQ(count, 1);
 }
 
-// Dispatcher destruction before Subscription
+// Dispatcher destruction before Subscription -- the ordered-teardown case the weak_ptr guard covers.
 
 TEST(EventDispatcherTest, DispatcherDestroyedBeforeSubscription_SafeReset)
 {
+    // This is the supported lifetime overlap in the Subscription contract: the dispatcher is destroyed FIRST, on this
+    // thread (the closing brace below is the happens-before edge), and only then is the Subscription reset. reset()
+    // observes the weak_ptr expired and no-ops. The concurrent case -- a ~EventDispatcher racing a reset() on another
+    // thread -- is explicitly a caller lifetime violation the guard does not cover, so there is nothing safe to assert
+    // for it here; the dispatcher must outlive concurrent subscription operations.
     Subscription sub;
     {
         EventDispatcher<SimpleEvent> dispatcher;
