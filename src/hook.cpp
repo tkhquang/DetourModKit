@@ -39,6 +39,18 @@
 #include <variant>
 #include <vector>
 
+namespace DetourModKit::detail
+{
+    // Test-only override for the self-reference acquire the three hook install paths perform before handing the target
+    // to the backend. When non-null, acquire_hook_self_ref() consults this instead of the real acquire_module_ref, so
+    // the suite can drive the otherwise-unreachable acquire failure branch (a genuine acquire_module_ref failure needs
+    // this DLL's own code to be unmapped, which never happens in a loaded process) and assert each site populates
+    // Error::detail from GetLastError(). The override is expected to SetLastError before returning nullptr so the
+    // captured detail matches error.hpp's `detail = GetLastError()` contract. Plain function pointer because it is set
+    // and cleared on a single thread inside a test fixture; null in production, so zero behaviour change there.
+    HMODULE (*g_hook_module_ref_override)() noexcept = nullptr;
+} // namespace DetourModKit::detail
+
 namespace DetourModKit
 {
     // File-local helpers. These live at DetourModKit scope (not inside namespace hook) so a bare `detail::` resolves to
@@ -46,6 +58,22 @@ namespace DetourModKit
     // shadow it and break the unqualified lookup.
     namespace
     {
+        /**
+         * @brief Takes a counted reference on this module for an install path, honouring the test override.
+         * @details Routes every hook install's self-reference acquire through one seam so the three install paths
+         *          (inline_at / mid_at / vmt_for) share both the production primitive and the test override. In
+         *          production this is exactly detail::acquire_module_ref(); a test installs g_hook_module_ref_override
+         *          to force the null-return failure branch. On failure the underlying primitive restores the thread's
+         *          last-error, so a caller may read GetLastError() immediately after a null return.
+         */
+        [[nodiscard]] HMODULE acquire_hook_self_ref() noexcept
+        {
+            if (auto *override_fn = DetourModKit::detail::g_hook_module_ref_override)
+            {
+                return override_fn();
+            }
+            return DetourModKit::detail::acquire_module_ref();
+        }
         /// Result of the foreign-inline-hook pre-flight: whether the target already redirects, and to where.
         enum class PrehookState : std::uint8_t
         {
@@ -440,6 +468,53 @@ namespace DetourModKit
                     return count;
                 }
                 ++count;
+            }
+        }
+
+        /**
+         * @brief Guard-reads the RTTI header qword(s) that sit immediately below the object's vptr.
+         * @details count_vmt_method_slots proves only the forward span [vptr, vptr + N*8) is mapped, but the backend's
+         *          safetyhook::VmtHook::create clones the vtable with a memcpy that starts at `original_vmt -
+         *          VMT_HEADER` -- the ABI's RTTI header prefix living below the vptr (an RTTICompleteObjectLocator* on
+         *          the MSVC ABI; offset-to-top + typeinfo* on the Itanium ABI). A malformed object whose header prefix
+         *          straddles an unmapped page therefore passes the forward slot walk and then faults the host inside
+         *          that backward memcpy -- an SEH access violation the C++ try/catch around create() cannot catch.
+         *          Guard-read the VMT_HEADER qword(s) here so vmt_for fails closed before the backend can touch them.
+         *          VMT_HEADER is 0 on an ABI with no prefix, where there is nothing below the vptr and this trivially
+         *          succeeds.
+         * @return true when the header prefix is fully readable (or absent); false when the vptr itself is unreadable,
+         *         sits too low to hold the prefix, or any header qword faults.
+         */
+        [[nodiscard]] bool vmt_header_readable(void *object) noexcept
+        {
+            if constexpr (safetyhook::VMT_HEADER == 0)
+            {
+                return true;
+            }
+            else
+            {
+                const std::optional<std::uintptr_t> vptr =
+                    detail::guarded_read<std::uintptr_t>(reinterpret_cast<std::uintptr_t>(object));
+                if (!vptr)
+                {
+                    return false;
+                }
+                // The prefix occupies [vptr - VMT_HEADER*8, vptr). A vptr numerically below that span cannot be a real
+                // vtable pointer with a header beneath it; reject rather than let the address computation underflow.
+                constexpr std::uintptr_t prefix_bytes = safetyhook::VMT_HEADER * sizeof(std::uintptr_t);
+                if (*vptr < prefix_bytes)
+                {
+                    return false;
+                }
+                for (std::size_t i = 1; i <= safetyhook::VMT_HEADER; ++i)
+                {
+                    const std::uintptr_t header_slot = *vptr - (i * sizeof(std::uintptr_t));
+                    if (!detail::guarded_read<std::uintptr_t>(header_slot))
+                    {
+                        return false;
+                    }
+                }
+                return true;
             }
         }
 
@@ -1018,11 +1093,15 @@ namespace DetourModKit
                     (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                     return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::inline_at"});
                 }
-                ModuleRefGuard self_ref(DetourModKit::detail::acquire_module_ref());
+                ModuleRefGuard self_ref(acquire_hook_self_ref());
                 if (self_ref.get() == nullptr)
                 {
+                    // Capture the acquire's last-error before release_hook, whose ledger bookkeeping could otherwise
+                    // clobber it. acquire_module_ref restores GetLastError() on failure precisely so this Error carries
+                    // the OS reason (error.hpp documents SystemCallFailed's detail = GetLastError()).
+                    const DWORD acquire_error = ::GetLastError();
                     (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                    return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at"});
+                    return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::inline_at", acquire_error});
                 }
                 try
                 {
@@ -1101,11 +1180,14 @@ namespace DetourModKit
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
                 return std::unexpected(Error{ErrorCode::AllocatorNotAvailable, "hook::mid_at"});
             }
-            ModuleRefGuard self_ref(DetourModKit::detail::acquire_module_ref());
+            ModuleRefGuard self_ref(acquire_hook_self_ref());
             if (self_ref.get() == nullptr)
             {
+                // Capture the acquire's last-error before release_hook (see the matching note in inline_at): the
+                // primitive restores GetLastError() on failure so SystemCallFailed carries the OS reason.
+                const DWORD acquire_error = ::GetLastError();
                 (void)DetourModKit::detail::HookLedger::instance().release_hook(target, ledger_id);
-                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at"});
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::mid_at", acquire_error});
             }
             try
             {
@@ -1541,10 +1623,12 @@ namespace DetourModKit
             // gate (a later-declared local) unlock first, so the guard's FreeLibrary always runs outside the gate. The
             // reference is object-independent and still precedes publication (the clone create and vptr swap below),
             // and is handed to the Impl on success (self_ref.release()).
-            ModuleRefGuard self_ref(DetourModKit::detail::acquire_module_ref());
+            ModuleRefGuard self_ref(acquire_hook_self_ref());
             if (self_ref.get() == nullptr)
             {
-                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::vmt_for"});
+                // acquire_module_ref restores GetLastError() on failure so SystemCallFailed carries the OS reason
+                // (error.hpp documents this detail contract). No intervening call here can clobber it.
+                return std::unexpected(Error{ErrorCode::SystemCallFailed, "hook::vmt_for", ::GetLastError()});
             }
             std::unique_lock<std::mutex> object_gate = acquire_vmt_object_lock();
             if (!object_gate.owns_lock())
@@ -1581,6 +1665,15 @@ namespace DetourModKit
             }
             const std::optional<std::size_t> method_count = count_vmt_method_slots(object);
             if (!method_count)
+            {
+                return std::unexpected(
+                    Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});
+            }
+            // The slot walk above proved the forward vtable is mapped, but the backend clone also memcpys the RTTI
+            // header prefix that sits immediately below the vptr (original_vmt - VMT_HEADER). Guard that prefix here so
+            // a malformed object whose header straddles an unmapped page fails closed instead of faulting the host
+            // inside the backend's memcpy -- an SEH access violation the try/catch around create() below cannot catch.
+            if (!vmt_header_readable(object))
             {
                 return std::unexpected(
                     Error{ErrorCode::InvalidObject, "hook::vmt_for", reinterpret_cast<std::uintptr_t>(object)});

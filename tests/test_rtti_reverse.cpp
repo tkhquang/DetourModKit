@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -18,6 +19,13 @@ namespace memory = DetourModKit::memory;
 namespace rtti = DetourModKit::rtti;
 using DetourModKit::Address;
 using DetourModKit::Region;
+
+namespace DetourModKit::detail
+{
+    // Defined in rtti.cpp. RttiClockScope installs this so the TypeIdentity unresolved re-sweep throttle can be driven
+    // deterministically (advance a counter) instead of sleeping on wall-clock time.
+    extern std::uint64_t (*g_rtti_resolve_clock_override)() noexcept;
+} // namespace DetourModKit::detail
 
 namespace
 {
@@ -99,6 +107,24 @@ namespace
         const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
         return Region{Address{base}, s_rev_used};
     }
+
+    // Controllable millisecond clock for the TypeIdentity re-sweep throttle. RttiClockScope points the rtti.cpp seam at
+    // fake_clock, so a test advances time by storing into g_fake_clock_ms rather than sleeping on the real clock. The
+    // seam function pointer cannot capture, hence the file-scope counter.
+    std::atomic<std::uint64_t> g_fake_clock_ms{0};
+
+    std::uint64_t fake_clock() noexcept
+    {
+        return g_fake_clock_ms.load(std::memory_order_relaxed);
+    }
+
+    struct RttiClockScope
+    {
+        RttiClockScope() noexcept { DetourModKit::detail::g_rtti_resolve_clock_override = &fake_clock; }
+        ~RttiClockScope() noexcept { DetourModKit::detail::g_rtti_resolve_clock_override = nullptr; }
+        RttiClockScope(const RttiClockScope &) = delete;
+        RttiClockScope &operator=(const RttiClockScope &) = delete;
+    };
 } // anonymous namespace
 
 class RttiReverseTest : public ::testing::Test
@@ -246,9 +272,14 @@ TEST_F(RttiReverseTest, TypeIdentityUnresolvedNeverMatches)
 
 TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
 {
-    // A failed resolve must NOT latch permanently: the owning module may map the type later (a DLL loads, or a patch
+    // A failed resolve must not latch permanently: the owning module may map the type later (a DLL loads, or a patch
     // finishes relocating the vtable). Scope the identity to the whole pool, miss while the type is absent, then build
-    // the synth and confirm the next call resolves rather than staying wedged on the earlier miss.
+    // the synth and confirm a later call resolves rather than staying wedged on the earlier miss. The re-sweep is
+    // throttled, so advance the controllable clock past the cooldown before the retry: the retry capability is
+    // preserved, it is just rate-limited rather than every-frame.
+    RttiClockScope clock_scope;
+    g_fake_clock_ms.store(1000);
+
     const std::uintptr_t pool_base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
     const Region full_pool{Address{pool_base}, s_rev_pool.size()};
 
@@ -258,12 +289,45 @@ TEST_F(RttiReverseTest, TypeIdentityFailedResolveRetriesWhenTypeAppearsLater)
     const std::uintptr_t vt = build_synth(".?AVRevLateBind@@", 0);
     ASSERT_NE(vt, 0u);
 
+    // Advance well past any reasonable cooldown so the next call re-sweeps instead of skipping. A large jump keeps this
+    // test independent of the exact internal cooldown constant.
+    g_fake_clock_ms.store(1000 + 1'000'000);
+
     const auto resolved = id.vtable();
     ASSERT_TRUE(resolved.has_value());
     EXPECT_EQ(resolved->raw(), vt);
 
-    // The successful resolve now latches: the warm path returns the same value.
+    // The successful resolve now latches: the warm path returns the same value (and no longer consults the clock).
     EXPECT_EQ(id.vtable(), resolved);
+}
+
+TEST_F(RttiReverseTest, TypeIdentityUnresolvedReSweepThrottledWithinCooldown)
+{
+    // The re-sweep throttle removes the per-frame cliff of a TypeIdentity polled for an absent type: after a miss the
+    // whole-module sweep is skipped until a cooldown elapses. Prove the sweep is actually skipped -- make the type
+    // present after the miss without advancing the clock, and confirm the next call still reports unresolved. Without
+    // the throttle that call would resolve the now-present type. Advancing past the cooldown then resolves it,
+    // confirming the retry capability survives the throttle.
+    RttiClockScope clock_scope;
+    g_fake_clock_ms.store(5000);
+
+    const std::uintptr_t pool_base = reinterpret_cast<std::uintptr_t>(s_rev_pool.data());
+    const Region full_pool{Address{pool_base}, s_rev_pool.size()};
+
+    rtti::TypeIdentity id(".?AVRevThrottle@@", full_pool);
+    EXPECT_FALSE(id.vtable().has_value()); // miss at t=5000, records the attempt time
+
+    const std::uintptr_t vt = build_synth(".?AVRevThrottle@@", 0);
+    ASSERT_NE(vt, 0u);
+
+    // Same clock reading: the re-sweep is throttled, so the now-present type is not observed yet.
+    EXPECT_FALSE(id.vtable().has_value());
+
+    // Past the cooldown: the sweep runs again and finds it.
+    g_fake_clock_ms.store(5000 + 1'000'000);
+    const auto resolved = id.vtable();
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_EQ(resolved->raw(), vt);
 }
 
 TEST_F(RttiReverseTest, FindsFixtureViaHostModuleSectionWalk)

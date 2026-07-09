@@ -27,20 +27,54 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <cstring>
+
+namespace DetourModKit::detail
+{
+    // Test-only override for the monotonic millisecond clock TypeIdentity's unresolved re-sweep throttle reads. Null in
+    // production, where the throttle uses GetTickCount64(); a test installs a controllable source to drive the cooldown
+    // deterministically instead of sleeping on wall-clock time. Mirrors the g_*_loader_lock_override seams; set and
+    // cleared on a single thread inside a test fixture, so a plain function pointer suffices.
+    std::uint64_t (*g_rtti_resolve_clock_override)() noexcept = nullptr;
+} // namespace DetourModKit::detail
 
 namespace DetourModKit
 {
-    bool rtti::detail::resolve_col_site(std::uintptr_t vtable, ColSite &out) noexcept
+    namespace
+    {
+        // Monotonic millisecond clock for the TypeIdentity re-sweep throttle. GetTickCount64 reads KUSER_SHARED_DATA
+        // (no syscall), so gating the per-frame miss path on it is essentially free. Routed through the test override
+        // so the suite can advance time deterministically without a real sleep.
+        [[nodiscard]] std::uint64_t rtti_now_ms() noexcept
+        {
+            if (auto *override_fn = DetourModKit::detail::g_rtti_resolve_clock_override)
+            {
+                return override_fn();
+            }
+            return ::GetTickCount64();
+        }
+
+        // After an unresolved TypeIdentity miss, skip re-sweeping the whole module until this many milliseconds have
+        // elapsed. A miss is never latched permanently (the owning module may map the type later -- a DLL loads, or a
+        // patch finishes relocating the vtable), so without a throttle a per-frame identity check for an absent type
+        // would re-sweep the entire module every frame, the one genuine per-frame cliff. 250 ms bounds that to at most
+        // ~4 module sweeps per second while keeping the eventual resolve latency sub-second once the type appears.
+        constexpr std::uint64_t RESOLVE_RETRY_COOLDOWN_MS = 250;
+    } // namespace
+
+    bool rtti::detail::resolve_col_site(std::uintptr_t vtable, const DetourModKit::detail::ModuleSpan &mod_range,
+                                        ColSite &out) noexcept
     {
         if (vtable < MIN_VALID_PTR)
             return false;
 
-        // Anchor every subsequent bound check against the vtable's owning module. Heap pointers and addresses inside
-        // unmapped ranges fail here without ever touching memory.
-        const DetourModKit::detail::ModuleSpan mod_range =
-            DetourModKit::detail::module_span(memory::module_of(Address{vtable}));
-        if (!mod_range.valid())
+        // The caller supplies the vtable's owning-module span, so this overload skips the per-candidate
+        // memory::module_of loader lookup. Require the vtable to lie inside the supplied span so every bound check
+        // below anchors on the module that actually owns it -- the invariant the module_of-resolving overload gets
+        // implicitly (the loader only resolves a module that contains the address). A candidate one past the module
+        // end fails closed here rather than validating against a foreign module.
+        if (!mod_range.valid() || !mod_range.contains(vtable))
             return false;
 
         // vtable[-1] holds a pointer to the RTTICompleteObjectLocator. The COL must live in the same module as the
@@ -92,6 +126,18 @@ namespace DetourModKit
         out.name_addr = name_addr;
         out.col_offset = head_opt->offset;
         return true;
+    }
+
+    bool rtti::detail::resolve_col_site(std::uintptr_t vtable, ColSite &out) noexcept
+    {
+        // Reject obviously-invalid pointers before the loader lookup so a heap or tiny address never pays for a
+        // GetModuleHandleExW that would only fail. A valid vtable resolves its owning module, then the shared walk runs
+        // through the span overload; an unmapped or unowned address yields an invalid span the overload rejects.
+        if (vtable < MIN_VALID_PTR)
+            return false;
+        const DetourModKit::detail::ModuleSpan mod_range =
+            DetourModKit::detail::module_span(memory::module_of(Address{vtable}));
+        return resolve_col_site(vtable, mod_range, out);
     }
 
     std::size_t rtti::detail::read_name_seh(std::uintptr_t addr, char *out, std::size_t out_len) noexcept
@@ -402,12 +448,16 @@ namespace DetourModKit
          * @details The window is read in page-bounded chunks (one guarded read per page) and scanned in-process, so the
          *          guarded-read count is per-page rather than per-qword -- the difference between a few hundred and a
          *          few hundred thousand guarded transitions over a multi-megabyte section. A meta-slot is a qword that
-         *          points to an in-module COL; the vtable that owns it is slot + 8, validated by the same COL prelude
+         *          points to an in-scope COL; the vtable that owns it is slot + 8, validated by the same COL prelude
          *          the forward walker uses, so the in-range pre-filter only spares a deeper read and never decides
          *          correctness.
+         * @param mod The scan SCOPE, used for the meta-slot pre-filter (a candidate's COL pointer must land in it).
+         * @param owning The vtables' OWNING-MODULE span, used to validate each candidate (see the resolve_col_site
+         *        call below). May be an invalid span, in which case each candidate resolves its own module.
          */
-        void sweep_range_for_name(DetourModKit::detail::ModuleSpan mod, std::uintptr_t begin, std::uintptr_t end,
-                                  std::string_view mangled, VtMatch *out, std::size_t cap, std::size_t &count) noexcept
+        void sweep_range_for_name(DetourModKit::detail::ModuleSpan mod, DetourModKit::detail::ModuleSpan owning,
+                                  std::uintptr_t begin, std::uintptr_t end, std::string_view mangled, VtMatch *out,
+                                  std::size_t cap, std::size_t &count) noexcept
         {
             // Image-resident pointer storage is 8-byte aligned, so only qword-aligned slots can hold a vtable
             // meta-pointer.
@@ -441,8 +491,18 @@ namespace DetourModKit
                         const std::uintptr_t slot_addr = addr + j * sizeof(std::uintptr_t);
                         const std::uintptr_t candidate_vtable = slot_addr + sizeof(std::uintptr_t);
 
+                        // Validate against the owning-module span the caller resolved once, not the scan scope `mod`:
+                        // resolve_col_site cross-checks the recovered image base (col_addr - pSelf) against the module
+                        // base and computes the TypeDescriptor / name addresses from module-base + RVA, so it needs the
+                        // true module extent -- which a sub-range scope (a tight fixture window whose base is not the
+                        // image base) is not. Passing the pre-resolved owning span hoists the per-candidate
+                        // memory::module_of loader lookup out of the hot sweep; if that one-time resolve failed (owning
+                        // invalid), fall back to the self-resolving overload so behaviour is unchanged.
                         rtti::detail::ColSite site;
-                        if (!rtti::detail::resolve_col_site(candidate_vtable, site))
+                        const bool resolved_ok = owning.valid()
+                                                     ? rtti::detail::resolve_col_site(candidate_vtable, owning, site)
+                                                     : rtti::detail::resolve_col_site(candidate_vtable, site);
+                        if (!resolved_ok)
                             continue;
                         if (!name_equals(site.name_addr, mangled))
                             continue;
@@ -482,6 +542,15 @@ namespace DetourModKit
             if (!mod.valid() || mangled.empty() || mangled.size() >= rtti::MAX_TYPE_NAME_LEN)
                 return 0;
 
+            // Resolve the vtables' owning module once for the whole sweep. resolve_col_site needs the true module base
+            // and extent (for the pSelf/base cross-check and RVA->VA), which is not the scan scope `mod`: a caller may
+            // scope the sweep to a sub-range of the module (a tight fixture window), whose base is not the image base.
+            // module_of at the scope base recovers the real owning module, shared by every candidate in the scope, so
+            // the per-candidate loader lookup is hoisted here. An invalid result (the scope base is not in a loaded
+            // module) leaves each candidate to resolve its own module in sweep_range_for_name, preserving behaviour.
+            const DetourModKit::detail::ModuleSpan owning =
+                DetourModKit::detail::module_span(memory::module_of(Address{mod.base}));
+
             ScanRange ranges[32];
             const std::size_t range_count = collect_rtti_scan_ranges(mod, ranges, 32);
 
@@ -492,13 +561,13 @@ namespace DetourModKit
                 // qualified): sweep the whole image rather than report a confident-but-wrong "not found" for a packed
                 // or section-merged binary. The whole-image sweep is a strict superset, and resolve_col_site still
                 // validates every candidate.
-                sweep_range_for_name(mod, mod.base, mod.end, mangled, out, cap, count);
+                sweep_range_for_name(mod, owning, mod.base, mod.end, mangled, out, cap, count);
                 return count;
             }
 
             for (std::size_t i = 0; i < range_count && count < cap; ++i)
             {
-                sweep_range_for_name(mod, ranges[i].begin, ranges[i].end, mangled, out, cap, count);
+                sweep_range_for_name(mod, owning, ranges[i].begin, ranges[i].end, mangled, out, cap, count);
             }
             return count;
         }
@@ -579,7 +648,24 @@ namespace DetourModKit
         }
 
         // First use (or a retry after an earlier miss): resolve and cache. Concurrent first-callers converge on the
-        // same vtable, so a benign double-resolve needs no lock.
+        // same vtable, so a benign double-resolve needs no lock. vtable_for_type sweeps every RTTI-bearing section of
+        // the scope module -- a heavy walk. Because a miss is deliberately NOT latched (the owning module may map the
+        // type later), a TypeIdentity polled every frame for an absent type would otherwise re-sweep the whole module
+        // every frame. Throttle the re-sweep: after a miss, skip the sweep until RESOLVE_RETRY_COOLDOWN_MS has elapsed,
+        // turning a per-frame full-module scan into at most one scan per cooldown while still eventually retrying.
+        const std::uint64_t now = rtti_now_ms();
+        const std::uint64_t last = m_last_attempt_ms.load(std::memory_order_acquire);
+        // last == 0 is the never-attempted sentinel (the first call always sweeps). The now >= last guard keeps a
+        // non-monotonic clock (or a test clock reset) from underflowing the subtraction into a spurious skip.
+        if (last != 0 && now >= last && (now - last) < RESOLVE_RETRY_COOLDOWN_MS)
+        {
+            return std::nullopt;
+        }
+        // Record this attempt before sweeping so a concurrent caller inside the cooldown also skips. Clamp to >= 1 so a
+        // clock reading of 0 is never mistaken for the never-attempted sentinel. The release store is conservative for
+        // a performance throttle; at worst a lost update allows one extra sweep.
+        m_last_attempt_ms.store(now == 0 ? 1 : now, std::memory_order_release);
+
         const auto resolved = vtable_for_type(m_mangled, m_range);
 
         // Latch only a SUCCESSFUL resolve as permanent. A failed resolve is not cached: the vtable may simply not be

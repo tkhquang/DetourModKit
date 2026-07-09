@@ -1091,6 +1091,107 @@ TEST(HookVmt, SlotWalkHardCapRejectsMalformedVtable)
     EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
 }
 
+// The VMT pre-flight (count_vmt_method_slots) proves only the forward slots are mapped, but the backend clone also
+// memcpys the RTTI header prefix immediately below the vptr (original_vmt - VMT_HEADER). An object whose header prefix
+// straddles an unmapped page must fail closed in vmt_for rather than fault the host inside the backend memcpy -- an SEH
+// access violation the C++ try/catch around create() cannot catch. This builds exactly that geometry: two contiguous
+// committed pages with the fake vtable at the base of the readable second page, so the forward slots read fine while
+// vptr - N*8 lands in the first page after it is flipped to PAGE_NOACCESS. The expected result is a guarded-read
+// failure surfaced as InvalidObject before the backend clone runs.
+TEST(HookVmt, PreflightGuardsHeaderPrefixBelowVptr)
+{
+    SYSTEM_INFO si{};
+    ::GetSystemInfo(&si);
+    const SIZE_T page = si.dwPageSize;
+
+    // Two contiguous pages, intentionally leaked: the no-access page must never be released so a recycled VA cannot let
+    // a later unrelated read succeed and flake the test (the fault-fixture leak-on-purpose discipline).
+    auto *region =
+        static_cast<std::uint8_t *>(::VirtualAlloc(nullptr, page * 2, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    ASSERT_NE(region, nullptr);
+
+    // Fake vtable at the base of the SECOND page: slot 0 executable so the forward walk counts it, slot 1
+    // non-executable as the walk's terminator. vptr is the second-page base, so vptr - 8 / vptr - 16 fall in the first
+    // page, which becomes unreadable below.
+    auto *vtable = reinterpret_cast<std::uintptr_t *>(region + page);
+    vtable[0] = reinterpret_cast<std::uintptr_t>(&echo); // executable slot
+    vtable[1] = 0;                                       // non-executable terminator
+
+    struct FakeObject
+    {
+        std::uintptr_t vptr;
+    } object{reinterpret_cast<std::uintptr_t>(vtable)};
+
+    DWORD old_protect = 0;
+    ASSERT_NE(::VirtualProtect(region, page, PAGE_NOACCESS, &old_protect), 0);
+
+    Result<VmtHook> r = vmt_for("HeaderPrefixOnUnmappedPage", &object);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().code, ErrorCode::InvalidObject);
+    // region is deliberately not freed (see the leak note above): the no-access page stays reserved for process life.
+}
+
+// Force the self-reference acquire to fail with a known last-error so each install path's SystemCallFailed carries
+// Error::detail = GetLastError(). A genuine acquire_module_ref failure is unreachable in a loaded process, so this
+// override (defined in hook.cpp) drives the branch deterministically.
+namespace DetourModKit::detail
+{
+    extern HMODULE (*g_hook_module_ref_override)() noexcept;
+} // namespace DetourModKit::detail
+
+namespace
+{
+    constexpr DWORD kInjectedAcquireError = 0x00C0FFEE;
+
+    HMODULE force_module_ref_failure() noexcept
+    {
+        ::SetLastError(kInjectedAcquireError);
+        return nullptr;
+    }
+
+    // RAII installer so a failed assertion still clears the override before the next test runs.
+    struct HookModuleRefFailureScope
+    {
+        HookModuleRefFailureScope() noexcept
+        {
+            DetourModKit::detail::g_hook_module_ref_override = &force_module_ref_failure;
+        }
+        ~HookModuleRefFailureScope() noexcept { DetourModKit::detail::g_hook_module_ref_override = nullptr; }
+        HookModuleRefFailureScope(const HookModuleRefFailureScope &) = delete;
+        HookModuleRefFailureScope &operator=(const HookModuleRefFailureScope &) = delete;
+    };
+} // namespace
+
+TEST(HookModuleRef, InlineAtAcquireFailurePopulatesErrorDetail)
+{
+    HookModuleRefFailureScope fail_scope;
+    Result<Hook> r = inline_at(InlineRequest{.name = "InlineAcquireFail", .target = addr_of(&real_hook_target_add)},
+                               &real_hook_detour_add);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
+    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(kInjectedAcquireError));
+}
+
+TEST(HookModuleRef, MidAtAcquireFailurePopulatesErrorDetail)
+{
+    auto detour = [](MidContext &) {};
+    HookModuleRefFailureScope fail_scope;
+    Result<Hook> r = mid_at(MidRequest{.name = "MidAcquireFail", .target = addr_of(&real_hook_target_mul)}, detour);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
+    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(kInjectedAcquireError));
+}
+
+TEST(HookModuleRef, VmtForAcquireFailurePopulatesErrorDetail)
+{
+    auto target = std::make_unique<VmtTestTarget>();
+    HookModuleRefFailureScope fail_scope;
+    Result<VmtHook> r = vmt_for("VmtAcquireFail", target.get());
+    ASSERT_FALSE(r.has_value());
+    EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
+    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(kInjectedAcquireError));
+}
+
 // vmt_for must RELEASE the process-wide object gate BEFORE dispatching its Created lifecycle event: emit_lifecycle
 // runs arbitrary subscriber code (CP.22 -- never call unknown code under a lock), and holding the non-recursive
 // object mutex across it would let a subscriber that re-enters a VMT operation deadlock. This confirms the gate is

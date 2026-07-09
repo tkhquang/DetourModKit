@@ -20,7 +20,10 @@
  *            a small `std::mutex` and publish a new immutable snapshot via copy-on-write. Mutation paths allocate; see
  *            the `subscribe()`, `unsubscribe()`, and `clear()` method docs for the OOM contract.
  *          - Safe to emit from multiple threads concurrently (e.g., hook callbacks).
- *          - Safe to subscribe/unsubscribe from any thread.
+ *          - Safe to subscribe/unsubscribe from any thread while the dispatcher is alive. The dispatcher must outlive
+ *            every concurrent subscription operation; the Subscription weak_ptr guard only makes an unsubscribe safe
+ *            after a happens-before ordered dispatcher destruction, not one racing on another thread. See the
+ *            Subscription lifetime contract.
  *
  *          **Performance characteristics:**
  *          - `emit()`: atomic acquire-load of a `shared_ptr` snapshot, then
@@ -75,7 +78,17 @@ namespace DetourModKit
      * @brief RAII subscription guard that unsubscribes on destruction.
      *
      * @details Move-only. When the guard is destroyed or reset, the associated handler is removed from the dispatcher.
-     *          If the dispatcher has already been destroyed, the unsubscribe is silently skipped (weak_ptr safety).
+     *
+     *          **Lifetime contract (read before using across threads):** if the dispatcher was destroyed before this
+     *          operation with a happens-before edge -- ordered teardown, e.g. the dispatcher's scope closed on this
+     *          thread first, or another thread's `~EventDispatcher` synchronizes-with this reset() -- the unsubscribe
+     *          is silently skipped: the weak_ptr is observed expired and reset() no-ops. That ordered case is the only
+     *          lifetime overlap the weak_ptr guard covers. It does not make a Subscription operation safe against a
+     *          dispatcher destroyed concurrently on another thread: reset() tests the weak_ptr and then, as a separate
+     *          step, calls into the dispatcher, so a `~EventDispatcher` racing between those two steps is a
+     *          use-after-free (the token is a distinct control block, so keeping it alive would not keep the dispatcher
+     *          alive either). The caller must therefore ensure the dispatcher outlives every concurrent Subscription
+     *          operation; the weak_ptr guard is an ordered-teardown convenience, not a substitute for that rule.
      */
     class Subscription
     {
@@ -123,6 +136,11 @@ namespace DetourModKit
          */
         void reset() noexcept
         {
+            // The expired() check and the m_unsubscribe() call are two separate steps: this guards ordered teardown
+            // (a dispatcher destroyed with a happens-before edge is observed expired here and skipped), not a
+            // concurrent ~EventDispatcher on another thread, which could destroy the dispatcher between the check and
+            // the call. The caller contract (see the class doc) is that the dispatcher outlives concurrent Subscription
+            // operations; within that contract this ordering is safe.
             if (m_unsubscribe && !m_alive.expired())
             {
                 if (!m_unsubscribe())
