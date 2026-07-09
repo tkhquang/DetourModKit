@@ -25,13 +25,24 @@
 
 set -euo pipefail
 
-export PATH="/c/msys64/mingw64/bin:$PATH"
+# Local dev shells do not always carry the MSYS2 MinGW bin on PATH, so add it when g++ is not already resolvable. CI
+# prepends its own pinned MinGW to PATH before invoking this script, so g++ resolves there and this no-ops -- the
+# pinned toolchain is used unchanged rather than being shadowed by a runner-image MSYS2 install.
+if ! command -v g++ >/dev/null 2>&1; then
+  export PATH="/c/msys64/mingw64/bin:$PATH"
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 BUILD_DIR="${1:-build/mingw-debug}"
-ARCHIVE="$BUILD_DIR/libDetourModKit.a"
+# A Debug build tree carries DEBUG_POSTFIX ("d"), so its archive is libDetourModKitd.a; a Release tree keeps
+# libDetourModKit.a. Prefer the suffixed Debug archive when it exists so an old unsuffixed archive left by a prior
+# Debug build cannot be linked by mistake.
+ARCHIVE="$BUILD_DIR/libDetourModKitd.a"
+if [[ ! -f "$ARCHIVE" ]]; then
+  ARCHIVE="$BUILD_DIR/libDetourModKit.a"
+fi
 CXX="${CXX:-g++}"
 
 if [[ ! -f "$ARCHIVE" ]]; then
@@ -55,6 +66,17 @@ for required_archive in "${REQUIRED_ARCHIVES[@]}"; do
     exit 1
   fi
 done
+
+# Mirror the archive's coverage instrumentation onto this standalone link. When the build tree was configured with
+# DMK_ENABLE_COVERAGE, the DetourModKit objects were compiled with --coverage and reference the gcov runtime
+# (__gcov_init and the profile-arc constructors); linking them with a bare g++ leaves those symbols undefined and the
+# standalone executable fails to link. Read the tree's own setting from CMakeCache and pass --coverage through so the
+# gcov runtime is linked in, exactly as the library's own build links it. A non-coverage tree leaves the array empty
+# and this stays a plain link.
+COVERAGE_FLAGS=()
+if [[ -f "$BUILD_DIR/CMakeCache.txt" ]] && grep -q '^DMK_ENABLE_COVERAGE:BOOL=ON' "$BUILD_DIR/CMakeCache.txt"; then
+  COVERAGE_FLAGS+=(--coverage)
+fi
 
 # Collect every fault TU. A new tests/fault/test_*.cpp is picked up automatically -- no CMake reconfigure.
 mapfile -t FAULT_SOURCES < <(find tests/fault -name 'test_*.cpp' | sort)
@@ -88,6 +110,7 @@ done
     "$BUILD_DIR/_deps/zydis-build/zycore/libZycore.a" \
   -Wl,--end-group \
   -static -static-libgcc -static-libstdc++ \
+  "${COVERAGE_FLAGS[@]}" \
   -luser32 -lxinput1_4 -lpsapi -ldbghelp -lntdll \
   -o "$OUT_EXE"
 

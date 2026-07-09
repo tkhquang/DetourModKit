@@ -1917,9 +1917,9 @@ TEST(InputReshapeContract, MutatorsAreNoexcept)
                   "InputPoller::update_combos must stay noexcept (fail-closed)");
     static_assert(noexcept(std::declval<detail::InputPoller &>().add_binding(std::declval<detail::InputBinding>())),
                   "InputPoller::add_binding must stay noexcept (fail-closed)");
-    static_assert(noexcept(std::declval<detail::InputPoller &>().add_bindings(
-                      std::declval<std::vector<detail::InputBinding>>())),
-                  "InputPoller::add_bindings must stay noexcept (fail-closed)");
+    static_assert(
+        noexcept(std::declval<detail::InputPoller &>().add_bindings(std::declval<std::vector<detail::InputBinding>>())),
+        "InputPoller::add_bindings must stay noexcept (fail-closed)");
     static_assert(
         noexcept(std::declval<detail::InputPoller &>().remove_bindings_by_name(std::declval<std::string_view>())),
         "InputPoller::remove_bindings_by_name must stay noexcept (fail-closed)");
@@ -3182,18 +3182,16 @@ TEST_F(InputTest, ReleasingConsumeHoldGuardRepublishesToLiftSuppression)
 TEST_F(InputTest, RegisterComboLiveForwardsEveryComboEntry)
 {
     auto &mgr = input::Input::instance();
-    (void)input::register_combo(input::ComboBinding{.name = "seed",
-                                                    .trigger = input::Trigger::Press,
-                                                    .combos = {{{keyboard_key(0x70)}, {}}},
-                                                    .on_press = []() {}});
+    (void)input::register_combo(input::ComboBinding{
+        .name = "seed", .trigger = input::Trigger::Press, .combos = {{{keyboard_key(0x70)}, {}}}, .on_press = []() {}});
     ASSERT_TRUE(mgr.start().has_value());
     ASSERT_EQ(mgr.binding_count(), 1u);
 
-    auto guard = input::register_combo(
-        input::ComboBinding{.name = "multi",
-                            .trigger = input::Trigger::Press,
-                            .combos = {{{keyboard_key(0x71)}, {}}, {{keyboard_key(0x72)}, {}}},
-                            .on_press = []() {}});
+    auto guard =
+        input::register_combo(input::ComboBinding{.name = "multi",
+                                                  .trigger = input::Trigger::Press,
+                                                  .combos = {{{keyboard_key(0x71)}, {}}, {{keyboard_key(0x72)}, {}}},
+                                                  .on_press = []() {}});
     ASSERT_TRUE(guard.has_value());
     EXPECT_EQ(mgr.binding_count(), 3u); // seed + two combo entries
 }

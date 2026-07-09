@@ -33,7 +33,11 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Read-only checkout: this job only greps the sources, so the token must not persist in .git/config after
+          # checkout. Only create-release keeps credentials (it pushes the release tag).
+          persist-credentials: false
 
       - name: Compare release input against project(VERSION) in CMakeLists.txt
         run: |
@@ -89,13 +93,15 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: "recursive"
+          # Build-only checkout: no authenticated git operation runs here, so do not persist the token in .git/config.
+          persist-credentials: false
 
       - name: Cache MinGW
         id: cache-mingw
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: C:\ProgramData\chocolatey\lib\mingw
           key: ${{ runner.os }}-mingw-13.2.0-v2
@@ -133,11 +139,18 @@ jobs:
         shell: bash
 
       - name: Configure DetourModKit (MinGW Release)
-        run: cmake --preset mingw-release -DDMK_WARNINGS_AS_ERRORS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/mingw"
+        run: cmake --preset mingw-release -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/mingw"
         shell: bash
 
       - name: Build DetourModKit (MinGW Release)
         run: cmake --build --preset mingw-release --parallel
+        shell: bash
+
+      - name: Run DetourModKit Tests (MinGW Release)
+        # Exercise the Release binaries -- the exact objects that produce the shipped archive -- before packaging, not
+        # only the Debug config above. The test target is not part of the install set, so building it into this tree
+        # does not change the installed prefix (asserted by the install-prefix hygiene step below).
+        run: ctest --test-dir build/mingw-release --output-on-failure
         shell: bash
 
       - name: Install DetourModKit (MinGW Release)
@@ -191,7 +204,7 @@ jobs:
         shell: pwsh
 
       - name: Upload MinGW Artifact for Release
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mingw-package
           path: ${{ steps.determine-artifact-name-mingw.outputs.ARTIFACT_NAME }}
@@ -206,16 +219,18 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: "recursive"
+          # Build-only checkout: no authenticated git operation runs here, so do not persist the token in .git/config.
+          persist-credentials: false
 
       - name: Install Ninja and CMake
         run: choco install ninja cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
         shell: powershell
 
       - name: Setup MSVC Developer Environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
 
@@ -242,11 +257,17 @@ jobs:
         shell: cmd
 
       - name: Configure DetourModKit (MSVC Release)
-        run: cmake --preset msvc-release -DDMK_WARNINGS_AS_ERRORS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/msvc"
+        run: cmake --preset msvc-release -DDMK_WARNINGS_AS_ERRORS=ON -DDMK_BUILD_TESTS=ON -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install_package/msvc"
         shell: cmd
 
       - name: Build DetourModKit (MSVC Release)
         run: cmake --build --preset msvc-release --parallel 2
+        shell: cmd
+
+      - name: Run DetourModKit Tests (MSVC Release)
+        # Exercise the Release binaries before packaging, mirroring the MinGW Release leg. Tests are not installed, so
+        # this does not change the packaged prefix.
+        run: ctest --test-dir build/msvc-release --output-on-failure
         shell: cmd
 
       - name: Install DetourModKit (MSVC Release)
@@ -296,7 +317,7 @@ jobs:
         shell: pwsh
 
       - name: Upload MSVC Artifact for Release
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: msvc-package
           path: ${{ steps.determine-artifact-name-msvc.outputs.ARTIFACT_NAME }}
@@ -308,8 +329,11 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          # This job pushes the annotated release tag, so it DELIBERATELY persists RELEASE_TOKEN (the other three
+          # checkouts set persist-credentials: false). Do not add persist-credentials: false here, or the
+          # `git push origin <tag>` step below fails to authenticate.
           token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Create annotated tag
@@ -323,13 +347,13 @@ jobs:
           git push origin "$VERSION"
 
       - name: Download MinGW artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: mingw-package
           path: mingw_package_dir
 
       - name: Download MSVC artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: msvc-package
           path: msvc_package_dir
@@ -354,7 +378,10 @@ jobs:
         shell: bash
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        # SHA-pinned (supply-chain risk mitigated). Retained over a `gh release create` run-block because it passes the
+        # untrusted, user-supplied `changelog` workflow input as a parameter rather than interpolating it into a shell
+        # command, so there is no shell-injection surface a run-block would have to hand-guard.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: ${{ steps.file_list.outputs.FILES_TO_RELEASE }}
           tag_name: v${{ github.event.inputs.version }}

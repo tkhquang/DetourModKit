@@ -14,6 +14,12 @@ on:
 
   workflow_dispatch:
 
+# Least-privilege token: this workflow only builds, tests, and uploads a coverage artifact. Artifact upload uses the
+# Actions runtime token, not the GITHUB_TOKEN contents scope, so read-only contents is sufficient and no job needs
+# write. Declaring the block also drops every other default scope to none.
+permissions:
+  contents: read
+
 env:
   # Pin the exact GCC the release workflow ships with (Chocolatey MinGW 13.2.0) so the coverage/PR gate and the
   # released artifact compile with one toolchain instead of the runner's unversioned C:\mingw64.
@@ -26,13 +32,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: "recursive"
 
       - name: Cache MinGW
         id: cache-mingw
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: C:\ProgramData\chocolatey\lib\mingw
           key: ${{ runner.os }}-mingw-13.2.0-v2
@@ -47,7 +53,7 @@ jobs:
         shell: powershell
 
       - name: Cache pip packages
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~\AppData\Local\pip\Cache
           key: pip-gcovr-${{ runner.os }}
@@ -58,7 +64,7 @@ jobs:
         shell: powershell
 
       - name: Cache CMake build
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: build/mingw-debug
           # Exact-key only -- deliberately NO restore-keys. The key hashes every source file, so a cache hit means the
@@ -160,7 +166,7 @@ jobs:
 
       - name: Upload Coverage Report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-report
           path: coverage.xml

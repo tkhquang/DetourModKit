@@ -313,6 +313,22 @@ if(WIN32)
   target_compile_definitions(DetourModKit PUBLIC NOMINMAX)
 endif()
 
+# Export the MSVC Debug _ITERATOR_DEBUG_LEVEL=0 pin to consumers as an INTERFACE usage requirement. The global
+# add_compile_definitions above only reaches targets configured in THIS directory (DetourModKit itself, the vendored
+# SafetyHook/Zydis/Zycore backends, and the tests), so it keeps DMK's own link internally consistent but does not
+# propagate. A find_package or add_subdirectory consumer that links DetourModKit into an MSVC /MDd Debug binary would
+# otherwise compile its own objects at the default debug-iterator level (>= 1) and hit a deterministic
+# LNK2038 ("mismatch detected for '_ITERATOR_DEBUG_LEVEL'") against the library's level-0 objects. Attaching it
+# INTERFACE (not PUBLIC -- the target's own translation units already carry the pin from the global definition, so
+# PUBLIC would only duplicate the flag on DMK's compile line) bakes it into INTERFACE_COMPILE_DEFINITIONS, which
+# survives install(EXPORT), so an installed Debug consumer inherits it and an add_subdirectory parent's own targets do
+# too. The $<CONFIG:Debug> generator expression is re-evaluated in the consumer's build tree, so a Release consumer
+# receives nothing. Guarded on MSVC because the pin is meaningless to libstdc++/MinGW, whose debug STL never allocates
+# the hidden container proxies this works around.
+if(MSVC)
+  target_compile_definitions(DetourModKit INTERFACE $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+endif()
+
 # --- Target-Scoped Release Optimizations ---
 # Applied per-target so they do not leak into external subdirectory targets.
 if(MSVC)
@@ -358,6 +374,12 @@ endif()
 # And "libDetourModKit.a" on MinGW (which is the default).
 set_target_properties(DetourModKit PROPERTIES
   OUTPUT_NAME "DetourModKit"
+  # Debug artifacts get a 'd' suffix (libDetourModKitd.a / libDetourModKitd.lib) so a prefix that installs both a Debug
+  # and a Release configuration does not have the two archives collide on one file name. install(EXPORT) records the
+  # per-config artifact name, so a find_package consumer resolves the archive matching its own configuration. The
+  # standalone-link harness scripts prefer the suffixed Debug archive when present and fall back to the legacy
+  # unsuffixed name for older or Release build trees.
+  DEBUG_POSTFIX "d"
 )
 
 if(MSVC)

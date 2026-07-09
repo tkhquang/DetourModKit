@@ -503,11 +503,12 @@ namespace DetourModKit
         std::atomic<LogLevel> m_current_log_level{LogLevel::Info};
         std::atomic<bool> m_shutdown_called{false};
 
-        // m_async_logger is atomic for lock-free reads on the log() hot path; m_async_mutex serializes lifecycle
-        // operations (enable/disable/shutdown). On MSVC x64, std::atomic<std::shared_ptr<T>> is lock-free (128-bit
-        // compare-exchange); on MinGW/GCC it may fall back to a global mutex, which is still correct but serializes the
-        // hot-path load. The fallback is bounded to one mutex acquisition per log() call, comparable to the mutex
-        // synchronous mode already takes.
+        // m_async_logger is held in an atomic so the log() hot path snapshots the writer without taking m_async_mutex
+        // (which serializes lifecycle operations: enable/disable/shutdown). std::atomic<std::shared_ptr<T>> is NOT
+        // lock-free on either shipped toolchain: libstdc++ (MinGW) and the MSVC STL both back it with an internal lock
+        // table / bit-spinlock, so is_lock_free() is false on both shipped toolchains. The load therefore takes one
+        // bounded internal critical section per log() call, comparable to the single mutex acquisition synchronous
+        // mode already takes; it stays correct and callback-safe, just not a wait-free read.
         std::atomic<std::shared_ptr<AsyncLogger>> m_async_logger{};
         std::atomic<bool> m_async_mode_enabled{false};
         std::mutex m_async_mutex;
