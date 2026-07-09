@@ -1141,11 +1141,11 @@ namespace DetourModKit::detail
 
 namespace
 {
-    constexpr DWORD kInjectedAcquireError = 0x00C0FFEE;
+    constexpr DWORD INJECTED_ACQUIRE_ERROR = 0x00C0FFEE;
 
     HMODULE force_module_ref_failure() noexcept
     {
-        ::SetLastError(kInjectedAcquireError);
+        ::SetLastError(INJECTED_ACQUIRE_ERROR);
         return nullptr;
     }
 
@@ -1169,7 +1169,7 @@ TEST(HookModuleRef, InlineAtAcquireFailurePopulatesErrorDetail)
                                &real_hook_detour_add);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
-    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(kInjectedAcquireError));
+    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(INJECTED_ACQUIRE_ERROR));
 }
 
 TEST(HookModuleRef, MidAtAcquireFailurePopulatesErrorDetail)
@@ -1179,7 +1179,7 @@ TEST(HookModuleRef, MidAtAcquireFailurePopulatesErrorDetail)
     Result<Hook> r = mid_at(MidRequest{.name = "MidAcquireFail", .target = addr_of(&real_hook_target_mul)}, detour);
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
-    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(kInjectedAcquireError));
+    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(INJECTED_ACQUIRE_ERROR));
 }
 
 TEST(HookModuleRef, VmtForAcquireFailurePopulatesErrorDetail)
@@ -1189,7 +1189,7 @@ TEST(HookModuleRef, VmtForAcquireFailurePopulatesErrorDetail)
     Result<VmtHook> r = vmt_for("VmtAcquireFail", target.get());
     ASSERT_FALSE(r.has_value());
     EXPECT_EQ(r.error().code, ErrorCode::SystemCallFailed);
-    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(kInjectedAcquireError));
+    EXPECT_EQ(r.error().detail, static_cast<std::uintptr_t>(INJECTED_ACQUIRE_ERROR));
 }
 
 // vmt_for must RELEASE the process-wide object gate BEFORE dispatching its Created lifecycle event: emit_lifecycle

@@ -240,10 +240,11 @@ namespace DetourModKit
             /**
              * @brief Returns the resolved primary vtable, resolving on first use.
              * @return The vtable address, or std::nullopt if it cannot be resolved in the configured module range.
-             * @note The first call resolves (a setup-cost module sweep); a successful result is cached, so a later call
-             *       is a relaxed atomic load. An unresolved result is not cached (the owning module may map the type
-             *       later), but the re-sweep is throttled to at most once per internal cooldown, so polling this every
-             *       frame for a type that is not present does not re-scan the whole module each frame.
+             * @note Callback-safe once warm: the first call resolves (a setup-cost module sweep), a successful
+             *       result is cached, so a later call is a relaxed atomic load. An unresolved result is not
+             *       cached (the owning module may map the type later), but the re-sweep is throttled to at most
+             *       once per internal cooldown, so polling this every frame for a type that is not present does
+             *       not re-scan the whole module each frame.
              */
             [[nodiscard]] std::optional<Address> vtable() const noexcept;
 
