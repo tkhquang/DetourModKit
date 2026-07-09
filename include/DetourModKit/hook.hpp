@@ -36,6 +36,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -276,11 +277,12 @@ namespace DetourModKit
          *          `std::recursive_mutex` call guard, the atomic enable/disable status machine, and the ledger token
          *          all live behind the pimpl, so this header never names SafetyHook. Dropping the handle (or letting
          *          it go out of scope) unhooks; @ref release detaches the hook for the process lifetime instead.
-         * @note Teardown ordering: when two hooks are layered on the SAME target address, the newer one must be
+         * @note Teardown ordering: when two hooks are layered on the same target address, the newer one must be
          *       destroyed first (it saved the older hook's jump as its own original bytes). Natural reverse-order
          *       destruction of stack/member handles satisfies this automatically; if you store layered same-target
          *       handles in a container whose destruction order is not creation-reverse, destroy them newest-first.
-         *       The ledger detects and warns on a violation.
+         *       The ledger detects and warns on a violation. To make the order correct by construction rather than by
+         *       discipline, hold the handles in a @ref HookStack, which owns them and always tears down newest-first.
          */
         class Hook
         {
@@ -479,6 +481,148 @@ namespace DetourModKit
 
             friend Result<Hook> mid_at(MidRequest request, MidHookFn detour);
             friend Result<Hook> detail::inline_at_raw(InlineRequest request, void *detour);
+        };
+
+        /**
+         * @class HookStack
+         * @brief Move-only owner of a set of Hook handles that guarantees newest-first (LIFO) teardown.
+         * @details Layering two inline/mid hooks on the same target address chains their trampolines: the newer hook
+         *          patches the prologue that already holds the older hook's jump, so the newer trampoline resumes into
+         *          the older hook's body. Restoring the older hook first therefore writes the pristine prologue back
+         *          over a site the newer hook's live trampoline still chains through -- a use-after-free the moment the
+         *          newer hook is next called or itself torn down. The only safe unwind is strictly newest-first.
+         *
+         *          A bare `std::vector<Hook>` has no newest-first teardown contract. A container that destroys or
+         *          overwrites layered hooks in storage order restores the older layer while the newer layer is still
+         *          live. The process-wide ledger detects that inversion and logs a warning (see the teardown-ordering
+         *          note on @ref Hook), but it never reorders anything, so the warning rides on top of a real
+         *          corruption. HookStack closes that gap at the type level: it always restores its hooks back-to-front,
+         *          so a newer layer owned by the stack is unhooked before the one beneath it. When the stack owns the
+         *          complete same-target layer set and hooks were pushed in creation order, the ledger warning cannot
+         *          fire for those hooks. Reach for it whenever several hooks are kept alive together -- especially any
+         *          layered on one address, or the successful hooks returned by @ref install_all (push them in table
+         *          order) -- instead of a bare vector, so the destroy order is correct by construction rather than by
+         *          caller discipline.
+         *
+         *          Scope is inline/mid @ref Hook handles only. @ref VmtHook already restores its applied objects
+         *          newest-first inside its own destructor and is not order-tracked by the ledger, so it needs no
+         *          external ordering wrapper.
+         * @note Move-only, mirroring @ref Hook: a stack cannot be copied, and moving one leaves the source empty. Not
+         *       internally synchronized: build and tear it down on the setup thread, exactly like the hooks it holds.
+         */
+        class HookStack
+        {
+        public:
+            /**
+             * @brief Constructs an empty hook stack.
+             * @note Setup/control-plane only: build hook ownership during init/shutdown or worker setup, not from a
+             *       hook callback.
+             */
+            HookStack() noexcept = default;
+
+            /**
+             * @brief Move-constructs by adopting @p other's hooks without tearing them down.
+             * @note Setup/control-plane only: moving a stack transfers ownership and is not internally synchronized
+             *       with concurrent reads or teardown.
+             */
+            HookStack(HookStack &&other) noexcept : m_hooks(std::move(other.m_hooks)) { other.m_hooks.clear(); }
+
+            /**
+             * @brief Move-assigns by tearing down this stack's current hooks newest-first, then adopting @p other's.
+             * @details Deliberately not defaulted. A defaulted move-assignment would let the underlying vector destroy
+             *          or overwrite the replaced hooks in a container-defined order, reopening the layered-hook
+             *          use-after-free this type exists to prevent. Draining newest-first here keeps the LIFO guarantee
+             *          even when a live stack is overwritten. The moved-from source is explicitly cleared afterward so
+             *          empty() remains a stable post-move query.
+             * @note Setup/control-plane only: move-assignment may restore existing hooks and is not synchronized with
+             *       hook callbacks or concurrent stack access.
+             */
+            HookStack &operator=(HookStack &&other) noexcept
+            {
+                if (this != &other)
+                {
+                    teardown_newest_first();
+                    m_hooks = std::move(other.m_hooks);
+                    other.m_hooks.clear();
+                }
+                return *this;
+            }
+
+            HookStack(const HookStack &) = delete;
+            HookStack &operator=(const HookStack &) = delete;
+
+            /**
+             * @brief Restores every owned hook's prologue, newest-first.
+             * @note Setup/control-plane only: destroy the stack after detour entry points and worker calls that might
+             *       use its hooks are quiescent.
+             * @note Explicitly noexcept: like @ref Hook::~Hook this can run from DLL_PROCESS_DETACH / loader-lock
+             *       teardown, where an escaping exception terminates the host. Every ~Hook it invokes already fails
+             *       closed, so no exception escapes.
+             */
+            ~HookStack() noexcept { teardown_newest_first(); }
+
+            /**
+             * @brief Moves @p hook onto the top of the stack and returns a reference to the stored handle.
+             * @return A reference to the just-stored @ref Hook, valid until the next @ref push / @ref clear / move
+             *         (the standard vector-reference invalidation contract). Use it to capture the trampoline right
+             *         after pushing, e.g. `stack.push(std::move(h)).original<Fn>()`; call @ref reserve up front to keep
+             *         earlier references stable across a batch of pushes.
+             * @details Push order IS layer order: push the base hook first and each hook layered on top of it after, so
+             *          the newest-first destructor restores them in the safe order. A `std::bad_alloc` from growing the
+             *          storage unwinds @p hook (restoring its own prologue) and leaves the already-stored hooks intact
+             *          -- a clean partial state, never a half-owned live hook.
+             * @note Setup/control-plane only: may allocate and may publish a new hook owner; do not call from a hook
+             *       callback.
+             */
+            Hook &push(Hook hook)
+            {
+                m_hooks.push_back(std::move(hook));
+                return m_hooks.back();
+            }
+
+            /**
+             * @brief Reserves storage for @p capacity hooks so a batch of @ref push calls does not reallocate.
+             * @note Setup/control-plane only: may allocate.
+             */
+            void reserve(std::size_t capacity) { m_hooks.reserve(capacity); }
+
+            /**
+             * @brief Returns the number of hooks currently owned.
+             * @note Callback-safe: non-blocking and non-allocating when no thread mutates or destroys this stack
+             *       concurrently.
+             */
+            [[nodiscard]] std::size_t size() const noexcept { return m_hooks.size(); }
+
+            /**
+             * @brief Reports whether the stack owns no hooks.
+             * @note Callback-safe: non-blocking and non-allocating when no thread mutates or destroys this stack
+             *       concurrently.
+             */
+            [[nodiscard]] bool empty() const noexcept { return m_hooks.empty(); }
+
+            /**
+             * @brief Tears down every owned hook newest-first, leaving the stack empty and retaining capacity.
+             * @note Setup/control-plane only: restores hooks and is not synchronized with callbacks or concurrent
+             *       stack access.
+             */
+            void clear() noexcept { teardown_newest_first(); }
+
+        private:
+            /**
+             * @brief Restores the owned hooks strictly back-to-front (newest layer first).
+             * @details pop_back destroys the last (newest) element before the ones beneath it, which is the exact order
+             *          the trampoline-chaining hazard demands; relying on the raw vector destructor or move-assignment
+             *          would not provide this ownership contract.
+             */
+            void teardown_newest_first() noexcept
+            {
+                while (!m_hooks.empty())
+                {
+                    m_hooks.pop_back();
+                }
+            }
+
+            std::vector<Hook> m_hooks;
         };
 
         /**
