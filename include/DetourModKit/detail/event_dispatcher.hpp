@@ -4,6 +4,10 @@
 /**
  * @file event_dispatcher.hpp
  * @brief Typed event dispatcher with RAII subscription management.
+ * @note This header sits in the detail/ directory for compile visibility: diagnostics.hpp returns
+ *       EventDispatcher<T>& and must include the template. It declares EventDispatcher at the module-root
+ *       DetourModKit namespace because installed headers name the type directly. Directory placement and namespace
+ *       placement are independent; the directory reflects compile visibility, not privacy.
  *
  * @details Provides a per-event-type pub/sub dispatcher. Subscribers receive events by const reference. Subscriptions
  *          are RAII objects that automatically unsubscribe on destruction.

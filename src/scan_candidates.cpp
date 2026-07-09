@@ -71,26 +71,30 @@ namespace DetourModKit
         }
 
         ScanRequest borrow(std::span<const Candidate> ladder, std::string_view label, Region scope,
-                           bool prologue_fallback, bool require_unique, CandidateOrder order, Pages pages) noexcept
+                           FallbackPolicy fallback_policy, FallbackWitness fallback_witness, bool require_unique,
+                           CandidateOrder order, Pages pages) noexcept
         {
             return ScanRequest{
                 .ladder = ladder,
                 .label = label,
                 .scope = scope,
-                .prologue_fallback = prologue_fallback,
+                .fallback_policy = fallback_policy,
+                .fallback_witness = fallback_witness,
                 .require_unique = require_unique,
                 .order = order,
                 .pages = pages,
             };
         }
 
-        ScanRequest borrow_code_target(std::span<const Candidate> ladder, std::string_view label, Region scope) noexcept
+        ScanRequest borrow_code_target(std::span<const Candidate> ladder, std::string_view label, Region scope,
+                                       FallbackPolicy fallback_policy, FallbackWitness fallback_witness) noexcept
         {
             // The code-target policy: scan only executable pages (an instruction signature must not alias a byte run in
             // data), promote the unique-only / anchored tiers first, and enable hooked-prologue recovery so a target
-            // another mod already inline-hooked is still resolved. require_unique stays true. Routed through borrow()
-            // so the ScanRequest field set is defined in exactly one place.
-            return borrow(ladder, label, scope, /*prologue_fallback=*/true, /*require_unique=*/true,
+            // another mod already inline-hooked is still resolved. The recovery strictness comes from the caller
+            // (WarnOnly by default, RequireIdentity + a witness to fail closed on an unconfirmed near-twin).
+            // require_unique stays true. Routed through borrow() so the ScanRequest field set is defined in one place.
+            return borrow(ladder, label, scope, fallback_policy, fallback_witness, /*require_unique=*/true,
                           CandidateOrder::UniqueFirst, Pages::Executable);
         }
     } // namespace scan

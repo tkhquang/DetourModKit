@@ -701,12 +701,191 @@ TEST(ScanResolve, PrologueFallbackRecoversAnE9HookedFunction)
     // not match the E9 now present, so the direct pass misses and the fallback must rebuild the prologue as the JMP.
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
     EXPECT_EQ(hit->winning_name, "hooked");
+}
+
+// The structural recovery above is address-blind: a unique rebuilt match plus a valid redirect proves a hooked site
+// exists, not that it is the intended function. A game reshape can leave a coincidental near-twin whose surviving tail
+// matches and which is itself inline-hooked, so the rebuilt pattern resolves uniquely to the wrong address. The
+// FallbackPolicy + FallbackWitness gate turns that fail-open into a fail-closed. These tests drive the gate through the
+// same E9-hooked fixture as the recovery test, varying only the policy and witness. Each keeps that fixture inline on
+// purpose: the exact hooked bytes a test asserts on sit next to the assertion, so it stays auditable in isolation.
+
+TEST(ScanResolve, PrologueFallbackRequireIdentityRejectsAWitnessMismatch)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+
+    // A witness that always rejects the recovered site models a near-twin: structural recovery still finds the unique
+    // hooked match, but the site is not the intended function. RequireIdentity must fail closed with a distinct code
+    // rather than return the possibly-wrong address, so a caller can tell "hooked near-twin found" from "nothing
+    // matched at all".
+    const scan::FallbackWitness witness{.predicate = +[](std::int64_t, const void *) noexcept { return false; },
+                                        .context = nullptr};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder,
+                                                     .scope = buffer.region(),
+                                                     .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+                                                     .fallback_witness = witness});
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::PrologueIdentityRejected);
+}
+
+TEST(ScanResolve, PrologueFallbackRequireIdentityWithoutWitnessFailsClosed)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+
+    // RequireIdentity with no witness has nothing to confirm the recovered site with, so it must refuse it. This
+    // mirrors anchor::Anchor::require_validator rejecting a resolvable anchor that carries no validator: the strict
+    // policy never trusts an unverifiable recovery.
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::RequireIdentity});
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::PrologueIdentityRejected);
+}
+
+TEST(ScanResolve, PrologueFallbackRequireIdentityAcceptsAConfirmingWitness)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+
+    // A realistic witness corroborates the recovered address against an independently known landmark (here the true
+    // function address, passed through context). It confirms the site, so RequireIdentity recovers exactly as the
+    // structural path would, proving the gate does not reject a genuine recovery.
+    const std::uintptr_t expected = buffer.address_of(function);
+    const scan::FallbackWitness witness{
+        .predicate = +[](std::int64_t addr, const void *ctx) noexcept
+                     { return static_cast<std::uintptr_t>(addr) == *static_cast<const std::uintptr_t *>(ctx); },
+        .context = &expected};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder,
+                                                     .scope = buffer.region(),
+                                                     .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+                                                     .fallback_witness = witness});
+
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
+    EXPECT_EQ(hit->winning_name, "hooked");
+}
+
+TEST(ScanResolve, PrologueFallbackRequireIdentityKeepsTryingUntilAWitnessConfirms)
+{
+    // Two independently E9-hooked functions in one image, each with its own distinctive literal tail. The ladder lists
+    // the near-twin (candidate 0) ahead of the intended function (candidate 1). Under RequireIdentity the witness
+    // rejects the twin's recovered site and confirms only the intended one, so the gate must reject candidate 0's
+    // structural recovery, keep walking the ladder, and accept candidate 1. A gate that returned on the first rejection
+    // instead of continuing would fail the whole request closed and never reach the intended function, so this pins the
+    // multi-candidate keep-trying behavior the single-candidate tests above cannot exercise.
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+
+    const std::size_t twin = 0x100;
+    const std::size_t twin_trampoline = 0x800;
+    buffer.put_e9_jump(twin, twin_trampoline);
+    buffer.put(twin + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(twin_trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+
+    const std::size_t intended = 0x300;
+    const std::size_t intended_trampoline = 0x900;
+    buffer.put_e9_jump(intended, intended_trampoline);
+    buffer.put(intended + 5, {0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x17, 0x28, 0x39, 0x4A, 0x5B, 0x6C});
+    buffer.put(intended_trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+
+    // Each candidate's signature is its own function's UNHOOKED prologue plus that function's distinctive tail, so the
+    // rebuilt E9 pattern for candidate 0 matches uniquely at the twin and the one for candidate 1 uniquely at the
+    // intended function.
+    const std::array<Candidate, 2> ladder = {
+        Candidate::direct("twin", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD")),
+        Candidate::direct("intended", scan::Pattern::literal("55 48 89 E5 90 A1 B2 C3 D4 E5 F6 17 28 39 4A 5B 6C"))};
+
+    // The witness confirms only the intended function's address (passed through context), so it rejects the twin.
+    const std::uintptr_t expected = buffer.address_of(intended);
+    const scan::FallbackWitness witness{
+        .predicate = +[](std::int64_t addr, const void *ctx) noexcept
+                     { return static_cast<std::uintptr_t>(addr) == *static_cast<const std::uintptr_t *>(ctx); },
+        .context = &expected};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder,
+                                                     .scope = buffer.region(),
+                                                     .fallback_policy = scan::FallbackPolicy::RequireIdentity,
+                                                     .fallback_witness = witness});
+
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(intended));
+    EXPECT_EQ(hit->winning_name, "intended");
+}
+
+TEST(ScanResolve, PrologueFallbackWarnOnlyRecoversDespiteAWitnessMismatch)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+
+    // WarnOnly surfaces a witness disagreement as a log line but does not veto the recovery, so a rejecting witness
+    // must leave the resolved address unchanged. This is the observe-before-enforce mode: a consumer wires the witness
+    // to detect near-twin drift in logs first, then promotes the policy to RequireIdentity once confident.
+    const scan::FallbackWitness witness{.predicate = +[](std::int64_t, const void *) noexcept { return false; },
+                                        .context = nullptr};
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder,
+                                                     .scope = buffer.region(),
+                                                     .fallback_policy = scan::FallbackPolicy::WarnOnly,
+                                                     .fallback_witness = witness});
+
+    ASSERT_TRUE(hit.has_value());
+    EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
+    EXPECT_EQ(hit->winning_name, "hooked");
+}
+
+TEST(ScanResolve, PrologueFallbackOffAttemptsNoRecovery)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+
+    // The default Off policy attempts no prologue reconstruction, so a function only reachable through the fallback
+    // (its direct prologue is overwritten by the E9) stays a clean miss rather than resolving to its hooked site.
+    const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region()});
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
 }
 
 TEST(ScanResolve, PrologueFallbackShortTailIsNotApplicable)
@@ -716,8 +895,8 @@ TEST(ScanResolve, PrologueFallbackShortTailIsNotApplicable)
     // literals, below the ten-literal floor, so no shape is applicable.
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("short", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
@@ -732,8 +911,8 @@ TEST(ScanResolve, PrologueFallbackRejectsBoundedJumpPattern)
     ReadableBuffer buffer(0x400);
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("jumpy", scan::Pattern::literal("55 48 89 E5 90 [1-2] 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
@@ -758,8 +937,8 @@ TEST(ScanResolve, PrologueFallbackRecoversFf25IndirectPrologue)
     // now present, so the direct pass misses and the fallback rebuilds the prologue as the indirect-JMP shape.
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -782,8 +961,8 @@ TEST(ScanResolve, PrologueFallbackRecoversFf25Abs64InlineTarget)
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 90 90 90 90 90 90 90 90 11 22 33 44 "
                                                            "55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -807,8 +986,8 @@ TEST(ScanResolve, PrologueFallbackRecoversMovRaxJmpRax)
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 90 90 90 90 90 90 11 22 33 44 55 66 "
                                                            "77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function));
@@ -829,8 +1008,8 @@ TEST(ScanResolve, PrologueFallbackHonorsAnchorOffsetMarker)
     // must honor the same marker, so the recovered address is function + 7, not the bare match site.
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 | 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), buffer.address_of(function + 7));
@@ -852,8 +1031,8 @@ TEST(ScanResolve, PrologueFallbackRejectsDataOnlyDestination)
 
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -878,8 +1057,8 @@ TEST(ScanResolve, PrologueFallbackAllowsTrampolineOutsideScope)
 
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = scope.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = scope.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_TRUE(hit.has_value());
     EXPECT_EQ(hit->address.raw(), scope.address_of(function));
@@ -904,8 +1083,8 @@ TEST(ScanResolve, PrologueFallbackRejectsAmbiguousRebuiltPattern)
 
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::NoMatch);
@@ -919,8 +1098,8 @@ TEST(ScanResolve, PrologueFallbackNineByteTailIsNotApplicable)
     // reject side of the floor (the recovery tests above pin the accept side at twelve).
     const std::array<Candidate, 1> ladder = {
         Candidate::direct("nine", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99"))};
-    const auto hit =
-        scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = buffer.region(), .prologue_fallback = true});
+    const auto hit = scan::resolve(scan::ScanRequest{
+        .ladder = ladder, .scope = buffer.region(), .fallback_policy = scan::FallbackPolicy::WarnOnly});
 
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::PrologueFallbackNotApplicable);
@@ -1143,9 +1322,9 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
 }
 
 // borrow_code_target packs the code/hook-target resolution policy into a borrowed ScanRequest: Pages::Executable so an
-// instruction signature cannot alias a data-section run, UniqueFirst so the unique-only tiers lead, prologue_fallback
-// so a target another mod already inline-hooked is recovered, and require_unique kept true. The default request keeps
-// Pages::Readable for the data / RTTI / string tiers.
+// instruction signature cannot alias a data-section run, UniqueFirst so the unique-only tiers lead, a WarnOnly fallback
+// policy so a target another mod already inline-hooked is recovered, and require_unique kept true. The default request
+// keeps Pages::Readable for the data / RTTI / string tiers.
 TEST(ScanResolve, BorrowCodeTargetPresetsTheCodeTargetPolicy)
 {
     ReadableBuffer buffer(0x400);
@@ -1155,12 +1334,36 @@ TEST(ScanResolve, BorrowCodeTargetPresetsTheCodeTargetPolicy)
 
     EXPECT_EQ(request.pages, scan::Pages::Executable);
     EXPECT_EQ(request.order, scan::CandidateOrder::UniqueFirst);
-    EXPECT_TRUE(request.prologue_fallback);
+    EXPECT_EQ(request.fallback_policy, scan::FallbackPolicy::WarnOnly);
     EXPECT_TRUE(request.require_unique);
     EXPECT_EQ(request.label, "hook-target");
     EXPECT_EQ(request.scope.base.raw(), buffer.region().base.raw());
     ASSERT_EQ(request.ladder.size(), 1U);
     EXPECT_EQ(request.ladder[0].name(), "code-sig");
+}
+
+TEST(ScanResolve, BorrowCodeTargetForwardsRequireIdentityAndWitness)
+{
+    ExecutableBuffer buffer(0x1000);
+    ASSERT_TRUE(buffer.valid());
+    const std::size_t function = 0x100;
+    const std::size_t trampoline = 0x800;
+    buffer.put_e9_jump(function, trampoline);
+    buffer.put(function + 5, {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xDD});
+    buffer.put(trampoline, {0x48, 0x89, 0x5C, 0x24, 0x08});
+    const std::array<Candidate, 1> ladder = {
+        Candidate::direct("hooked", scan::Pattern::literal("55 48 89 E5 90 11 22 33 44 55 66 77 88 99 AA BB DD"))};
+
+    // borrow_code_target must forward the RequireIdentity policy AND the witness into the request, not merely set its
+    // own WarnOnly default. A rejecting witness proves the whole preset path fails closed end-to-end: a mis-forward
+    // that dropped the witness would recover the hooked site instead of refusing it.
+    const scan::FallbackWitness witness{.predicate = +[](std::int64_t, const void *) noexcept { return false; },
+                                        .context = nullptr};
+    const auto hit = scan::resolve(scan::borrow_code_target(ladder, "hook-target", buffer.region(),
+                                                            scan::FallbackPolicy::RequireIdentity, witness));
+
+    ASSERT_FALSE(hit.has_value());
+    EXPECT_EQ(hit.error().code, ErrorCode::PrologueIdentityRejected);
 }
 
 // End-to-end: a request built by borrow_code_target resolves a genuine code match (the Executable narrowing it presets

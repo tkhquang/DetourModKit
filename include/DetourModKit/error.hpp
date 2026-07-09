@@ -164,6 +164,8 @@ namespace DetourModKit
         FunctionNotFound,
         /// String xref: no pointer-slot store of the loaded pointer follows the reference.
         StoreNotFound,
+        /// Prologue recovery found a unique site, but identity confirmation rejected it or was missing.
+        PrologueIdentityRejected,
 
         // Memory (0x03xx): the former MemoryError plus the guarded-read and guarded-write fault codes
         /// The write target address was null.
@@ -355,6 +357,8 @@ namespace DetourModKit
             return "FunctionNotFound";
         case ErrorCode::StoreNotFound:
             return "StoreNotFound";
+        case ErrorCode::PrologueIdentityRejected:
+            return "PrologueIdentityRejected";
         case ErrorCode::NullTargetAddress:
             return "NullTargetAddress";
         case ErrorCode::NullSourceBytes:

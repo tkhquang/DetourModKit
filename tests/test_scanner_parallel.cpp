@@ -414,8 +414,10 @@ TEST(ScannerBatchTest, ResolveBatchMatchesSerialResolve)
     const Region range{Address{base}, code_page.size};
 
     const scan::ScanRequest module_request{.ladder = cands_a, .label = "module-a", .scope = range};
-    const scan::ScanRequest fallback_request{
-        .ladder = cands_b, .label = "module-b-fallback", .scope = range, .prologue_fallback = true};
+    const scan::ScanRequest fallback_request{.ladder = cands_b,
+                                             .label = "module-b-fallback",
+                                             .scope = range,
+                                             .fallback_policy = scan::FallbackPolicy::WarnOnly};
     // Whole-process scope exercises the range-less resolution path (no module bound on the sweep).
     const scan::ScanRequest whole_process_request{
         .ladder = cands_b, .label = "whole-process-b", .scope = Region::whole_process()};
