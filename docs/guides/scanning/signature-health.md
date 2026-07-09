@@ -37,9 +37,10 @@ The analysis layers over the manifest surface the same way the manifest layers o
 ```cpp
 #include "DetourModKit/sighealth.hpp"
 namespace sh = DetourModKit::sighealth;
+namespace sc = DetourModKit::scan;
 
 // One compiled pattern.
-sh::PatternHealth  p = sh::analyze_pattern(*scan::Pattern::compile("F3 0F 11 8D ?? ?? ?? ?? 48 8B"));
+sh::PatternHealth  p = sh::analyze_pattern(*sc::Pattern::compile("F3 0F 11 8D ?? ?? ?? ?? 48 8B"));
 
 // One candidate-ladder rung (compiles the AOB, or measures the text anchor by tier).
 sh::CandidateHealth c = sh::analyze_candidate(rung_spec);
@@ -51,7 +52,7 @@ sh::RecordHealth   r = sh::analyze_record(record);
 sh::ManifestHealth m = sh::analyze_manifest(manifest);
 ```
 
-Each report carries a `grade`, a `findings` list, and the measured quantities (`length`, `fixed_bytes`, `longest_atom`, `byte_entropy_bits`, `selectivity_bits`, `expected_matches`, ...). The `format_report` overloads render any of them as a human-readable lint report:
+Every report carries a `grade`; every level except the manifest roll-up also carries a `findings` list, and the pattern-level `PatternHealth` additionally carries the measured quantities (`length`, `fixed_bytes`, `longest_atom`, `byte_entropy_bits`, `selectivity_bits`, `expected_matches`, ...). The `format_report` overloads render a `PatternHealth`, `RecordHealth`, or `ManifestHealth` as a human-readable lint report:
 
 ```cpp
 DetourModKit::log().info("{}", sh::format_report(m));
@@ -101,7 +102,7 @@ These are the common resolver shapes and the selectivity each should aim for. Th
 
 The two text tiers (string-xref, vtable) are graded by anchor-text length rather than a byte estimate, because their uniqueness is guaranteed by the backend (a pooled literal or a second reference fails closed) rather than by byte selectivity. A mangled type name is unique by construction, so only an empty name is a defect; a string literal can genuinely collide when short (the linker pools identical literals), so a length floor applies to strings but not to type names.
 
-The lesson the "under-anchored RIP read" row makes concrete: a signature is only as unique as its fully-known bytes, weighted by their rarity. `48 8B 05` reads well but is three common bytes; the four wildcards that follow are the `disp32` and constrain nothing, so the shape matches thousands of RIP-relative loads. Extend the pattern with the surrounding instructions (a distinctive prologue before it, or a following opcode) until the estimate drops below one.
+The lesson the "under-anchored RIP read" row makes concrete: a signature is only as unique as its fully-known bytes, weighted by their rarity. `48 8B 05` reads well but is only three fixed bytes, two of them common (`48`, `8B`); the four wildcards that follow are the `disp32` and constrain nothing, so the shape matches thousands of RIP-relative loads. Extend the pattern with the surrounding instructions (a distinctive prologue before it, or a following opcode) until the estimate drops below one.
 
 ## Tuning the policy
 

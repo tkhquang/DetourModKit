@@ -172,7 +172,7 @@ const auto found = DetourModKit::scan::scan(
     1, DetourModKit::scan::Pages::Executable);
 
 // Verify it found the exact export address, then hook it
-EXPECT_EQ(found->value(), reinterpret_cast<uintptr_t>(fn));
+EXPECT_EQ(found->raw(), reinterpret_cast<uintptr_t>(fn));
 ```
 
 ### What Can Be Tested
@@ -364,7 +364,7 @@ The release workflow runs this smoke project for both MinGW and MSVC after insta
 Test files are named by the surface they verify and live under `tests/`; that directory is the authoritative list. Most modules have one `test_<module>.cpp`, while large modules split by API surface, fault-frame state, or integration boundary. The files worth calling out, because their role is not obvious from the name:
 
 - **Deliberate same-module splits** -- `test_memory_chain.cpp` (pointer-chain and plausibility primitives) is split from `test_memory.cpp`, and `test_string.cpp` (the `string::trim` cases) shares `format.hpp` with `test_format.cpp`; scanner and RTTI have several focused suites for resolver tiers, string xrefs, parallel scanning, reverse dissection, and heal scheduling.
-- **Internal white-box tests** -- `test_input_intercept.cpp` and `test_x86_decode.cpp` add `src/` to their include path to drive non-installed `src/internal/` headers directly.
+- **Internal white-box tests** -- `test_input_intercept.cpp` and `test_x86_decode.cpp` add `src/` to their include path to drive non-installed headers directly (`src/x86_decode.hpp` and `src/internal/input_intercept.hpp`).
 - **Integration and lifecycle** -- `test_hook_integration.cpp` (cross-module hooking against the fixture DLL), `test_session.cpp` (`Session` / bootstrap / ordered `~Session` teardown), and `test_mid_hook_context.cpp` (`hook::MidContext` accessors).
 - **Non-`test_*` support** -- `main.cpp` (GoogleTest entry point), `CMakeLists.txt` (test discovery, fixture DLL build, bench wiring), `fixtures/hook_target_lib.cpp` (the exported-function fixture DLL), `package_smoke/` (the installed-package consumer), and the `bench_*.cpp` microbenches (built under `DMK_BUILD_BENCHMARKS`).
 

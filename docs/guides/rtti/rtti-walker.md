@@ -30,7 +30,7 @@ td  + 0x08  : void* spare               (always 0 in practice)
 td  + 0x10  : char  name[]              (NUL-terminated mangled name)
 ```
 
-RVAs are 32-bit unsigned offsets relative to the **owning module's** image base, not the calling DLL. For DetourModKit this distinction matters because consumer mods are usually statically linked into a mod DLL while game vtables live in the host EXE, so `GetModuleHandleW(nullptr)` would be wrong on principle. The walker recovers the image base from `col.pSelf` whenever the x64 signature is set (the canonical IDA/Ghidra approach); only the x86 signature path falls back to `GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, vtable)`.
+RVAs are 32-bit unsigned offsets relative to the **owning module's** image base, not the calling DLL. For DetourModKit this distinction matters because consumer mods are usually statically linked into a mod DLL while game vtables live in the host EXE, so `GetModuleHandleW(nullptr)` would be wrong on principle. The walker takes the image base from the loader-reported range of the module that owns the vtable (`memory::module_of`), then on x64 cross-checks it against the COL's `pSelf` RVA: the canonical IDA/Ghidra computation `col_addr - pSelf` must reconstruct that same loader base, or the structure is treated as forged or relocated and rejected. Any COL signature other than the x64 value (`1`) is rejected outright -- it carries no `pSelf` to cross-check -- so there is no x86 signature path and no `GetModuleHandleExW` fallback.
 
 ## API at a glance
 
@@ -57,12 +57,12 @@ The forward entry points are noexcept and SEH-guarded; an unmapped page, missing
 
 constexpr std::string_view k_actor_rtti = ".?AVActorComponent@engine@@";
 
-bool actor_is_ready(DMK::Address actor_ptr) noexcept
+bool actor_is_ready(dmk::Address actor_ptr) noexcept
 {
-    const auto vt_opt = DMK::memory::read<DMK::Address>(actor_ptr);
+    const auto vt_opt = dmk::memory::read<dmk::Address>(actor_ptr);
     if (!vt_opt)
         return false;
-    return DMK::rtti::vtable_is_type(*vt_opt, k_actor_rtti);
+    return dmk::rtti::vtable_is_type(*vt_opt, k_actor_rtti);
 }
 ```
 
@@ -71,15 +71,15 @@ bool actor_is_ready(DMK::Address actor_ptr) noexcept
 ```cpp
 namespace
 {
-    std::atomic<DMK::Address> g_camera_vt_cache{DMK::Address{}};
+    std::atomic<dmk::Address> g_camera_vt_cache{dmk::Address{}};
 }
 
-std::optional<DMK::Address> find_camera_component(DMK::Address table) noexcept
+std::optional<dmk::Address> find_camera_component(dmk::Address table) noexcept
 {
     constexpr std::size_t k_component_slots = 64;
     constexpr std::string_view k_camera_rtti = ".?AVCameraComponent@engine@@";
 
-    return DMK::rtti::find_in_pointer_table(
+    return dmk::rtti::find_in_pointer_table(
         table, k_component_slots, k_camera_rtti, &g_camera_vt_cache);
 }
 ```
@@ -92,12 +92,12 @@ To disable caching, pass `nullptr` for `vtable_cache`. To support tables that in
 
 ```cpp
 char rtti_buf[128];
-const std::size_t n = DMK::rtti::type_name_into(vt, rtti_buf, sizeof(rtti_buf));
+const std::size_t n = dmk::rtti::type_name_into(vt, rtti_buf, sizeof(rtti_buf));
 if (n > 0)
-    DMK::log().log(DMK::LogLevel::Debug, "vtable type = {}", rtti_buf);
+    dmk::log().log(dmk::LogLevel::Debug, "vtable type = {}", rtti_buf);
 ```
 
-`type_name_into` is the right choice for per-frame probes or diagnostic captures that must not allocate. The buffer is always NUL-terminated when `out_len > 0`, and the failure path sets `out[0] = '\0'` so misuse cannot leak stale stack contents.
+`type_name_into` is the right choice for diagnostic captures that must not allocate. It still pays the loader-querying COL prelude on every call, so for a per-frame identity check on a known type cache a `rtti::TypeIdentity` instead. The buffer is always NUL-terminated when `out_len > 0`, and the failure path sets `out[0] = '\0'` so misuse cannot leak stale stack contents.
 
 ### Resolving a vtable from a type name (reverse direction)
 
@@ -105,7 +105,7 @@ The walker runs vtable to name. The inverse, name to vtable, is the natural way 
 
 ```cpp
 // Resolve once at init; key on the stable class name, not a vtable literal.
-const auto vt = DMK::rtti::vtable_for_type(".?AVGameAudioEffect@engine@@");
+const auto vt = dmk::rtti::vtable_for_type(".?AVGameAudioEffect@engine@@");
 if (vt)
     g_audio_effect_vtable = *vt;
 ```
@@ -122,11 +122,11 @@ Multiple inheritance and `/OPT:ICF`:
 For a cached per-frame identity check, wrap it in `rtti::TypeIdentity`. `TypeIdentity` owns its mangled name (it copies the `std::string_view` into an internal `std::string`), so the handle is self-contained and any string source -- including a temporary -- is safe to pass:
 
 ```cpp
-namespace { DMK::rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
+namespace { dmk::rtti::TypeIdentity g_camera_id{".?AVCameraCombat@engine@@"}; }
 
-bool is_combat_camera(DMK::Address obj) noexcept
+bool is_combat_camera(dmk::Address obj) noexcept
 {
-    const auto vt = DMK::memory::read<DMK::Address>(obj);
+    const auto vt = dmk::memory::read<dmk::Address>(obj);
     return vt && g_camera_id.matches(*vt); // resolves once, then a qword compare
 }
 ```
@@ -139,7 +139,7 @@ A successful resolve is cached permanently, so the warm path is a relaxed atomic
 
 - The walker issues two SEH-guarded reads per call on the cold path: one for the COL pointer at `vtable - 8`, one batched read of the 24-byte `ColHead`. On MSVC each `__try` frame is essentially free on the success path. On MinGW each read uses the vectored fault guard, so the success path avoids the per-read `VirtualQuery` syscall; the batched ColHead read still matters because it keeps the walker to two guarded calls instead of four.
 - `vtable_is_type` reads `expected.size() + 1` name bytes in a single SEH frame and compares with `memcmp`. There is no heap allocation, no string construction, and no demangle pass.
-- `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` on hot paths.
+- `type_name_of` allocates one `std::string` per call. Prefer `type_name_into` or `vtable_is_type` when the allocation matters; on genuinely hot paths cache a `rtti::TypeIdentity`, since every walker call still runs the loader-querying COL prelude.
 - `find_in_pointer_table` on a cold cache scans every non-null slot with the full walker. With a warm cache it touches each slot exactly once with a qword compare. For a sparse table of 256 slots and a unique target, the warm-path cost is dominated by the slot dereference, not the RTTI machinery.
 
 ## When the walker returns nothing
@@ -149,7 +149,7 @@ The walker returns `std::nullopt` / `false` / `0` (depending on the call) for ev
 - The vtable pointer is null or in the Windows reserved low-address range (`< 0x10000`).
 - The vtable's COL pointer at `vtable - 8` is null, low, or unreadable.
 - The COL's `pTypeDescriptor` RVA is zero.
-- Image-base recovery from `pSelf` underflows AND `GetModuleHandleExW` fails (only possible when the vtable address does not fall inside any loaded module).
+- The vtable does not fall inside any loaded module (the loader lookup yields an invalid range), or the image base recovered from the COL (`col_addr - pSelf`) disagrees with the loader-reported module base -- the signature of a forged or relocated structure.
 - The mangled-name buffer at the resolved address faults on the first page.
 
 None of these raise an exception; the caller can treat all failure modes uniformly through the optional / bool return.

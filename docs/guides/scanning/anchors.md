@@ -88,7 +88,7 @@ an::ResolvedAnchor report[std::size(k_anchors)];
 const std::size_t n = an::resolve_all(k_anchors, report);
 ```
 
-`resolve_all` writes one `ResolvedAnchor` per input (`{label, kind, status, value}`) and returns the count written. `value` carries the resolved quantity interpreted per kind (a vtable or global address cast to `std::int64_t`, an in-code constant, or the manual literal) and is meaningful only when `status == AnchorStatus::Resolved`. The scope defaults to `Region::host()`; pass an explicit `Region` (for example `Region::module_named(L"engine.dll")`) when the targets live in a separate module.
+`resolve_all` writes one `ResolvedAnchor` per input (`{label, kind, status, value}`) and returns the count written. `value` carries the resolved quantity interpreted per kind (a vtable or global address cast to `std::int64_t`, an in-code constant, or the manual literal) and is meaningful only when `status == AnchorStatus::Resolved`. The scope defaults to `Region::host()`; pass an explicit `Region` (for example `Region::module_named("engine.dll")`) when the targets live in a separate module.
 
 For startup tables whose anchors are independent, `resolve_all_parallel` resolves the same report through a fork-join worker pool:
 
