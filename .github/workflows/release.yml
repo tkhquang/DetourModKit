@@ -34,6 +34,10 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Read-only checkout: this job only greps the sources, so the token must not persist in .git/config after
+          # checkout. Only create-release keeps credentials (it pushes the release tag).
+          persist-credentials: false
 
       - name: Compare release input against project(VERSION) in CMakeLists.txt
         run: |
@@ -92,6 +96,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: "recursive"
+          # Build-only checkout: no authenticated git operation runs here, so do not persist the token in .git/config.
+          persist-credentials: false
 
       - name: Cache MinGW
         id: cache-mingw
@@ -216,6 +222,8 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: "recursive"
+          # Build-only checkout: no authenticated git operation runs here, so do not persist the token in .git/config.
+          persist-credentials: false
 
       - name: Install Ninja and CMake
         run: choco install ninja cmake --installargs 'ADD_CMAKE_TO_PATH=System' --yes --force --no-progress
@@ -323,6 +331,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          # This job pushes the annotated release tag, so it DELIBERATELY persists RELEASE_TOKEN (the other three
+          # checkouts set persist-credentials: false). Do not add persist-credentials: false here, or the
+          # `git push origin <tag>` step below fails to authenticate.
           token: ${{ secrets.RELEASE_TOKEN }}
 
       - name: Create annotated tag
@@ -367,6 +378,9 @@ jobs:
         shell: bash
 
       - name: Create GitHub Release
+        # SHA-pinned (supply-chain risk mitigated). Retained over a `gh release create` run-block because it passes the
+        # untrusted, user-supplied `changelog` workflow input as a parameter rather than interpolating it into a shell
+        # command, so there is no shell-injection surface a run-block would have to hand-guard.
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: ${{ steps.file_list.outputs.FILES_TO_RELEASE }}
