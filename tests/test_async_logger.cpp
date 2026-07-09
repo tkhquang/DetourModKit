@@ -13,9 +13,9 @@
 #include <cstdint>
 #include <type_traits>
 
-#include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/diagnostics.hpp"
 
+#include "internal/async_logger.hpp"
 #include "internal/async_logger_queue.hpp"
 #include "internal/win_file_stream.hpp"
 #include "test_alloc_probe.hpp"
@@ -1903,10 +1903,10 @@ TEST_F(AsyncLoggerTest, ParkedWriterNeverStallsToFlushInterval)
     logger->shutdown();
 }
 
-// The public AsyncLogger destructor must be self-safe under the loader lock. shutdown() detaches the
-// writer there (which keeps reading the queue / cv / file stream until it observes the stop), so ~AsyncLogger must leak
-// the Impl in place rather than destroy those members out from under the detached writer. The real loader lock cannot
-// be entered from user code, so async_logger.cpp exposes a test-only override.
+// The AsyncLogger destructor must be self-safe under the loader lock. shutdown() detaches the writer there (which keeps
+// reading the queue / cv / file stream until it observes the stop), so ~AsyncLogger must leak the Impl in place rather
+// than destroy those members out from under the detached writer. The real loader lock cannot be entered from user code,
+// so async_logger.cpp exposes a test-only override.
 namespace DetourModKit::detail
 {
     extern bool (*g_async_logger_loader_lock_override)() noexcept;

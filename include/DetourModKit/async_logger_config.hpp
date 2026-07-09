@@ -8,8 +8,8 @@
  *          the default constants the configuration references. It deliberately pulls none of the async-logger plumbing
  *          (no MPMC queue, no string pool, no <atomic> machinery), so a DllMain-entry header such as bootstrap.hpp can
  *          embed an AsyncLoggerConfig by value without forcing every consumer translation unit to compile the queue and
- *          pool. async_logger.hpp re-includes this header, so any existing include of the full async logger still sees
- *          these configuration types unchanged.
+ *          pool. The internal writer header includes this header too, so the public Logger facade and private async
+ *          transport share one configuration type.
  */
 
 #include <chrono>

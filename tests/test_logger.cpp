@@ -11,8 +11,9 @@
 #include <atomic>
 
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/diagnostics.hpp"
+
+#include "internal/async_logger.hpp"
 
 #include "test_alloc_probe.hpp"
 

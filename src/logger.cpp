@@ -1,9 +1,10 @@
 #include "DetourModKit/logger.hpp"
-#include "DetourModKit/async_logger.hpp"
 #include "DetourModKit/diagnostics.hpp"
 #include "DetourModKit/filesystem.hpp"
-#include "platform.hpp"
+
+#include "internal/async_logger.hpp"
 #include "internal/win_file_stream.hpp"
+#include "platform.hpp"
 
 #include <algorithm>
 #include <cctype>

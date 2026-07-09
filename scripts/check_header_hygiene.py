@@ -84,6 +84,7 @@ LEGACY_HEADERS = (
 # re-expand the first-class public surface the demotion trimmed. A detail/ home keeps the header installed (a public
 # header or the umbrella still includes it); a src/internal/ home makes it truly private (no public includer).
 DEMOTED_HEADERS = {
+    "include/DetourModKit/async_logger.hpp": "src/internal/async_logger.hpp",
     "include/DetourModKit/worker.hpp": "include/DetourModKit/detail/worker.hpp",
     "include/DetourModKit/win_file_stream.hpp": "src/internal/win_file_stream.hpp",
     "include/DetourModKit/event_dispatcher.hpp": "include/DetourModKit/detail/event_dispatcher.hpp",

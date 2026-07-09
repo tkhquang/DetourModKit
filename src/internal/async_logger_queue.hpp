@@ -6,10 +6,9 @@
  * @brief True-private async-logger transport: the overflow string pool, the per-message record, and the MPMC queue.
  * @details Houses the overflow string pool (StringPool), the per-message transport record (LogMessage), and the
  *          bounded Vyukov MPMC ring buffer (DynamicMPMCQueue), all in namespace DetourModKit::detail. It is never
- *          installed: AsyncLogger holds these behind its pimpl (see src/async_logger.cpp), so the public
- *          async_logger.hpp names none of them and a consumer compiles without the queue/pool/threading internals on
- *          its include path. Only the AsyncLogger pimpl translation unit and the async-logger white-box tests reach in
- *          here.
+ *          installed: AsyncLogger holds these behind its pimpl (see src/async_logger.cpp), so no installed header names
+ *          them and a consumer compiles without the queue/pool/threading internals on its include path. Only the
+ *          AsyncLogger pimpl translation unit and the async-logger white-box tests reach in here.
  */
 
 #include "DetourModKit/logger.hpp"

@@ -1,4 +1,5 @@
-#include "DetourModKit/async_logger.hpp"
+#include "internal/async_logger.hpp"
+
 #include "DetourModKit/diagnostics.hpp"
 
 #include "internal/async_logger_queue.hpp"
@@ -477,8 +478,8 @@ namespace DetourModKit
     } // namespace detail
 
     // The AsyncLogger pimpl: every member and method that touches the queue, string pool, writer thread, or flush
-    // synchronization lives here, so the public header (async_logger.hpp) names none of it. AsyncLogger forwards each
-    // public call to the matching Impl method.
+    // synchronization lives here, so the header (internal/async_logger.hpp) names none of it. AsyncLogger forwards
+    // each public call to the matching Impl method.
     struct AsyncLogger::Impl
     {
         Impl(const AsyncLoggerConfig &config, std::shared_ptr<detail::WinFileStream> file_stream,
