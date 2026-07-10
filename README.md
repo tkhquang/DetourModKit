@@ -13,7 +13,7 @@ DetourModKit is organized into focused modules. Each module's full API is docume
 ### Foundation
 
 <details>
-<summary><b>Core Vocabulary</b> - typed `Address` / `Region` values, `Prot` flags, and the `Result<T>` error idiom</summary>
+<summary><b>Core Vocabulary</b> - typed <strong>Address</strong> / <strong>Region</strong> values, <strong>Prot</strong> flags, and the <strong>Result&lt;T&gt;</strong> error idiom</summary>
 
 The shared value vocabulary every other DetourModKit module speaks, so a location, span, or failure is never a bare integer or a per-subsystem enum. `Address` is a pointer-wide strong type with constexpr `offset` / `align_up` arithmetic and the `rip` displacement resolver plus the audited `as<T>` / `ptr<T>` casts; `Region` folds a base and size into scope factories (`host`, `own`, `module_named`, `whole_process`) and offers `contains` and `sub`. `Prot` composes read/write/execute flags (`RW`, `RWX`), and every fallible call returns `Result<T>` carrying an `ErrorCode`-tagged `Error`, propagated with `DMK_TRY` / `DMK_TRY_VOID`.
 
@@ -39,7 +39,7 @@ Header: [`memory.hpp`](include/DetourModKit/memory.hpp)
 </details>
 
 <details>
-<summary><b>Hook</b> - free verbs returning move-only RAII `Hook` / `VmtHook` handles, backend hidden</summary>
+<summary><b>Hook</b> - free verbs returning move-only RAII <strong>Hook</strong> / <strong>VmtHook</strong> handles, backend hidden</summary>
 
 Installs and owns inline, mid-function, and vtable detours whose lifetime is bound to the RAII handle you hold rather than to a hidden registry. The free verbs `inline_at`, `mid_at`, the declarative `install_all`, and `vmt_for` return move-only `Hook` / `VmtHook` handles; a `Hook` exposes `enable`, `disable`, the typed `original` trampoline and its guarded `call` twin, while `VmtHook` adds `apply_to`, `hook_method`, and `remove_method`. `HookStack` guarantees newest-first teardown of layered hooks, and a mid-hook detour reads the captured register file through an opaque `MidContext`, so the SafetyHook backend never leaks into your headers.
 
@@ -47,7 +47,7 @@ Header: [`hook.hpp`](include/DetourModKit/hook.hpp)
 </details>
 
 <details>
-<summary><b>MSVC RTTI Walker</b> - recover mangled type names from live vtables without `typeid`</summary>
+<summary><b>MSVC RTTI Walker</b> - recover mangled type names from live vtables without <strong>typeid</strong></summary>
 
 Recovers the MSVC RTTI mangled type name for the object behind a runtime vtable, walking the COL/TypeDescriptor ABI directly without `typeid` or `dynamic_cast` so it works across DLL boundaries. Forward calls -- `type_name_of`, the zero-allocation `type_name_into`, the exact-match `vtable_is_type`, and the `find_in_pointer_table` slot scan -- take a caller-owned vtable cache; `vtable_for_type` and `vtables_for_type` run the reverse name-to-vtable resolve. `region_has_rtti` probes whether a module carries any records at all, and `TypeIdentity::matches` caches a per-frame identity check that survives a patch relocating the vtable.
 
@@ -125,7 +125,7 @@ Header: [`DetourModKit.hpp`](include/DetourModKit.hpp)
 </details>
 
 <details>
-<summary><b>Stoppable Worker</b> - RAII named `std::jthread` wrapper with loader-lock-safe teardown</summary>
+<summary><b>Stoppable Worker</b> - RAII named <strong>std::jthread</strong> wrapper with loader-lock-safe teardown</summary>
 
 An RAII-owned, named background thread built on `std::jthread` for polling or watcher loops that must shut down cleanly. Construct a `StoppableWorker` with a name and a body invocable that receives a `std::stop_token` and polls it cooperatively; the destructor requests stop and joins automatically. Call `request_stop()` to signal, `shutdown()` to stop and join eagerly, and query `is_running()` or `name()`. Under the Windows loader lock, teardown detaches instead of joining to avoid deadlock. The type is non-copyable and non-movable.
 
@@ -161,7 +161,7 @@ Header: [`detail/event_dispatcher.hpp`](include/DetourModKit/detail/event_dispat
 ### Small utilities
 
 <details>
-<summary><b>Format Utilities</b> - header-only `std::format` helpers for addresses, bytes, and VK codes</summary>
+<summary><b>Format Utilities</b> - header-only <strong>std::format</strong> helpers for addresses, bytes, and VK codes</summary>
 
 Turns raw modding values into readable, log-friendly hex strings. The `format` namespace offers `format_address` for pointers, overloaded `format_hex` for signed, unsigned, and `ptrdiff_t` inputs, `format_byte` for single bytes, and `format_vkcode` / `format_vkcode_list` / `format_int_vector` for key codes and integer lists. The separate `string::trim` strips leading and trailing whitespace. Every function is header-only and `[[nodiscard]]`, built on `std::format`.
 
@@ -177,7 +177,7 @@ Header: [`filesystem.hpp`](include/DetourModKit/filesystem.hpp)
 </details>
 
 <details>
-<summary><b>Math Utilities</b> - header-only `constexpr` `noexcept` angle conversions</summary>
+<summary><b>Math Utilities</b> - header-only <strong>constexpr</strong> <strong>noexcept</strong> angle conversions</summary>
 
 A minimal, header-only pair of angle conversions for camera, FOV, and rotation math. `degrees_to_radians` and `radians_to_degrees` are both `constexpr` and `noexcept`, operating on `float` and backed by `std::numbers::pi_v`, so they fold to constants at compile time when given constant inputs and add no runtime cost when they cannot.
 
@@ -572,7 +572,7 @@ This method uses a pre-built and installed version of DetourModKit.
 > **The `dmk` / `DMK` namespace aliases:** the umbrella `<DetourModKit.hpp>` and most module headers pull in both `namespace dmk = DetourModKit` and `namespace DMK = DetourModKit` (defined in `defines.hpp`), so mod code can write `dmk::hook`, `dmk::scan`, `dmk::config`, `dmk::Logger`, and so on in place of the fully spelled `DetourModKit::`. A few self-contained headers (`logger.hpp`, `format.hpp`, `filesystem.hpp`, `math.hpp`, `input_codes.hpp`, `profiler.hpp`, `async_logger_config.hpp`) do not include `defines.hpp`, so include it (or the umbrella) yourself if you use the aliases with only those. They are the same alias in two casings; the examples below use `dmk`. Pick one and stay consistent, or ignore both and use the fully qualified `DetourModKit::` names. There is no flat `DMKConfig` / `DMKSession` alias set and nothing is injected into the global namespace, so the aliases cannot collide with your own symbols.
 
 <details>
-<summary>Show the full example mod (<code>MyMod/src/main.cpp</code>)</summary>
+<summary>Show the full example mod (<strong>MyMod/src/main.cpp</strong>)</summary>
 
 ```cpp
 // MyMod/src/main.cpp
@@ -784,7 +784,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 Create a `MyMod.ini` file alongside your DLL:
 
 <details>
-<summary>Show the example <code>MyMod.ini</code></summary>
+<summary>Show the example <strong>MyMod.ini</strong></summary>
 
 ```ini
 [Hooks]
