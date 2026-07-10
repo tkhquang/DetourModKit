@@ -34,8 +34,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 # The non-installed private header that carries the public hook:: surface's pimpl bodies; only src/hook.cpp includes
-# it. It lives under src/internal/ (not a public header), so the public-surface backend check below already skips it;
-# the constant is kept for documentation and to localize the primary sanctioned coupling point.
+# it. It lives under src/internal/ (not a public header), so the public-surface backend check below skips it
+# structurally (an src/internal/ path can never satisfy is_public_header). It is a sanctioned backend island listed in
+# BACKEND_SOURCE_ISLANDS and the primary sanctioned coupling point.
 BACKEND_BRIDGE_HEADER = "src/internal/hook_backend.hpp"
 # The sanctioned SafetyHook backend islands: the ONLY repository sources permitted to include the backend header or
 # name a safetyhook:: symbol (rule 1b). Everything else must reach hooking through the public hook:: surface, so the
@@ -202,6 +203,18 @@ ALLOWED_DETAIL_HEADERS = {
 }
 
 
+HEX_DIGITS = "0123456789abcdefABCDEF"
+
+
+def is_cpp_digit_separator(text, i):
+    """True when the apostrophe at text[i] is a C++14 numeric digit separator (1'000'000, 0xFF'FF) rather than a
+    char-literal delimiter. A separator sits between two hex digits inside a numeric literal, and a char literal can
+    never legally open immediately after a digit, so a hex digit on both sides is unambiguously a separator. Without
+    this, an odd number of separators in one literal (1'000'000'000ULL) would leave the scanner stuck in char state
+    and stop stripping comments for the rest of the file."""
+    return 0 < i < len(text) - 1 and text[i - 1] in HEX_DIGITS and text[i + 1] in HEX_DIGITS
+
+
 def strip_comments(text):
     """Blank out // and /* */ comments while preserving newlines (so line numbers stay accurate) and
     string/char literals (so an `#include "safetyhook.hpp"` is still detectable). This keeps a doc comment
@@ -226,7 +239,7 @@ def strip_comments(text):
                 continue
             if c == '"':
                 state = "string"
-            elif c == "'":
+            elif c == "'" and not is_cpp_digit_separator(text, i):
                 state = "char"
             out.append(c)
             i += 1
@@ -264,7 +277,7 @@ def iter_sources():
             if path.suffix not in CPP_SUFFIXES or not path.is_file():
                 continue
             rel = path.relative_to(REPO).as_posix()
-            if "/external/" in f"/{rel}" or rel.startswith("external/") or "/build/" in f"/{rel}":
+            if "/external/" in f"/{rel}" or "/build/" in f"/{rel}":
                 continue
             yield rel, path
 
@@ -304,10 +317,18 @@ def main():
         raw = path.read_text(encoding="utf-8", errors="replace")
         text = strip_comments(raw)
         lines = text.splitlines()
-        is_public_header = rel.startswith("include/DetourModKit/") and rel.endswith(".hpp")
+        # The root-level umbrella include/DetourModKit.hpp is a public header too -- the FIRST one most consumers include
+        # -- but it lives one directory above include/DetourModKit/ (the Boost.Asio umbrella-beside-the-parts shape), so a
+        # bare startswith("include/DetourModKit/") prefix test misses it and would exempt it from the public-surface
+        # backend-confinement rule and the private-engine-include check below. Match it explicitly so a regression that
+        # made the umbrella pull in the SafetyHook backend, <psapi.h>, Zydis/Zycore, or a src/internal/ header fails the
+        # gate exactly as it would for any header under include/DetourModKit/.
+        is_public_header = rel.endswith(".hpp") and (
+            rel.startswith("include/DetourModKit/") or rel == "include/DetourModKit.hpp"
+        )
 
         # Rule 1: backend confinement on the public surface.
-        if is_public_header and rel != BACKEND_BRIDGE_HEADER:
+        if is_public_header:
             for n, line in enumerate(lines, 1):
                 if SAFETYHOOK_INCLUDE.search(line):
                     violations.append(f"{rel}:{n}: public header includes the SafetyHook backend")

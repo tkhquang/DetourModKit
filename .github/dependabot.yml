@@ -1,0 +1,19 @@
+# Dependabot configuration for this repository.
+#
+# Only the config at this repo-root path is read by Dependabot. The vendored submodules under external/ carry their
+# own .github/dependabot.yml (for example external/DirectXMath), which Dependabot does NOT consume for this repository
+# and which is not ours to edit; those upstreams manage their own action pins.
+version: 2
+updates:
+  # Advance the SHA-pinned GitHub Actions used across .github/workflows/ (for example actions/checkout, actions/cache,
+  # actions/upload-artifact, and ilammy/msvc-dev-cmd). Pinning actions by commit SHA is the supply-chain baseline;
+  # this entry is what raises those pins as upstream publishes new releases so they do not silently go stale.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      # One combined PR per week for all action bumps rather than a separate PR per action.
+      github-actions:
+        patterns:
+          - "*"

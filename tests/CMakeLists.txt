@@ -81,13 +81,13 @@ if(DMK_BUILD_TESTS)
 
   # Include directories
   target_include_directories(DetourModKit_tests PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
   )
 
   # External dependency headers as SYSTEM to suppress their warnings
   target_include_directories(DetourModKit_tests SYSTEM PRIVATE
-    ${CMAKE_SOURCE_DIR}/external/simpleini
+    ${PROJECT_SOURCE_DIR}/external/simpleini
     ${DIRECTXMATH_INCLUDE_DIR}
   )
 
@@ -137,14 +137,30 @@ if(DMK_BUILD_TESTS)
 
     if(DMK_BASH_EXECUTABLE)
       add_test(NAME FaultContainmentStandalone
-        COMMAND "${DMK_BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/run_fault_tests.sh" "${CMAKE_BINARY_DIR}")
+        COMMAND "${DMK_BASH_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/run_fault_tests.sh" "${CMAKE_BINARY_DIR}")
       add_test(NAME LifecycleHostSafetyStandalone
-        COMMAND "${DMK_BASH_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/scripts/run_lifecycle_proofs.sh" "${CMAKE_BINARY_DIR}")
+        COMMAND "${DMK_BASH_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/run_lifecycle_proofs.sh" "${CMAKE_BINARY_DIR}")
       # A shared label so a run can include or exclude the compile-at-test-time harnesses (ctest -L / -LE standalone-harness).
       set_tests_properties(FaultContainmentStandalone LifecycleHostSafetyStandalone PROPERTIES LABELS "standalone-harness")
     else()
       message(STATUS "bash not found; the fault / lifecycle standalone harnesses will not be registered with ctest.")
     endif()
+  endif()
+
+  # Register the header-hygiene script's comment-stripper self-test as a ctest. The gate's legacy-token and backend
+  # checks only inspect real code because check_header_hygiene.py blanks comments before scanning, so a regression in
+  # its stripper (for example mistracking a C++14 digit separator as a char literal) would silently feed unstripped
+  # prose to those checks and could fail a PR on a legacy spelling that appears only in a comment. This standalone
+  # Python test pins the stripper behavior. Gated on a discovered interpreter so a machine without Python simply skips
+  # it, mirroring the bash-gated standalone harnesses above.
+  find_program(DMK_PYTHON_EXECUTABLE NAMES python3 python)
+
+  if(DMK_PYTHON_EXECUTABLE)
+    add_test(NAME HeaderHygieneStripperSelfTest
+      COMMAND "${DMK_PYTHON_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/scripts/test_check_header_hygiene.py")
+    set_tests_properties(HeaderHygieneStripperSelfTest PROPERTIES LABELS "script-lint")
+  else()
+    message(STATUS "python not found; the header-hygiene stripper self-test will not be registered with ctest.")
   endif()
 endif()
 
@@ -159,7 +175,7 @@ if(DMK_BUILD_BENCHMARKS)
   target_link_libraries(DetourModKit_bench PRIVATE DetourModKit)
 
   target_include_directories(DetourModKit_bench PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
   )
 
   add_executable(DetourModKit_bench_scanner
@@ -169,8 +185,8 @@ if(DMK_BUILD_BENCHMARKS)
   target_link_libraries(DetourModKit_bench_scanner PRIVATE DetourModKit)
 
   target_include_directories(DetourModKit_bench_scanner PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/src
   )
 
   add_executable(DetourModKit_bench_memory
@@ -180,16 +196,17 @@ if(DMK_BUILD_BENCHMARKS)
   target_link_libraries(DetourModKit_bench_memory PRIVATE DetourModKit)
 
   target_include_directories(DetourModKit_bench_memory PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
   )
 
-  # Build the benchmarks with the same Release LTO as the library so each bench
-  # and the library archive it links form one LTO unit. The default mixed link
-  # (a non-LTO bench object against the LTO-only Release archive) makes GCC's
-  # linker plugin re-emit libstdc++'s C++20-constrained std::thread/std::tuple
-  # linkonce symbol twice and fail with a spurious multiple-definition; keeping
-  # the benchmarks inside the same LTO unit avoids that path.
-  if(_ipo_supported)
+  # Match each bench's LTO state to the library's so a bench and the archive it links form ONE LTO unit -- never a mixed
+  # link. A mixed link fails both ways: a non-LTO bench object against an LTO-only archive makes GCC's linker plugin
+  # re-emit libstdc++'s C++20-constrained std::thread/std::tuple linkonce symbol twice (spurious multiple-definition),
+  # and an LTO bench against a non-LTO archive is the symmetric hazard. Read the library's single LTO decision
+  # (_dmk_apply_lto, resolved once in the top-level CMakeLists.txt before this subdirectory is added) rather than
+  # re-deriving the condition here, so the bench and the archive can never drift out of one LTO state on any toolchain --
+  # including the GCC major where the library forces LTO off because that lto1 mis-links LTO archives.
+  if(_dmk_apply_lto)
     set_target_properties(DetourModKit_bench DetourModKit_bench_scanner DetourModKit_bench_memory
       PROPERTIES INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
   endif()

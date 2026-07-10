@@ -293,7 +293,7 @@ This project uses CMake with [CMake Presets](https://cmake.org/cmake/help/latest
     installed `DetourModKit::DetourModKit` target, touches `hook::is_target_hooked`, and runs a full `Session::start` / `~Session` cycle so the static dependency chain is pulled into the consumer link.
 
 > [!NOTE]
-> Release builds enable Link-Time Optimization (LTO) when supported by the compiler, along with dead code elimination (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections` with `--gc-sections` on GCC/Clang). `--gc-sections` propagates to consumers via INTERFACE linkage so unused DetourModKit symbols are stripped at final link time. LTO is suppressed on GCC 15+ (MinGW): its `lto1` mis-links an LTO-built static archive at the consumer's final link (`two or more sections for .gnu.lto_*`), so on that toolchain DetourModKit ships plain object code to keep the archive linkable by any consumer; GCC 13.x and MSVC are unaffected. MinGW Release builds keep CMake's default `-O3`; only the hand-tuned SIMD scan engine TU is downgraded per-source to `-O2`, because `-O3`'s aggressive unrolling regresses its hand-optimized verifier. MSVC Debug builds embed CodeView debug info (`/Z7`) for parallel build compatibility; Release builds omit debug info entirely to minimize binary size.
+> Standalone Release builds default to portable, non-LTO archives. Dead code elimination still applies (`/Gy /Gw` on MSVC, `-ffunction-sections -fdata-sections` with `--gc-sections` on GCC/Clang), and `--gc-sections` propagates to consumers via INTERFACE linkage so unused DetourModKit symbols are stripped at final link time. `DMK_ENABLE_LTO` defaults ON only when DetourModKit is pulled in with `add_subdirectory`, where the consumer recompiles the library with the same toolchain; a standalone installed archive should keep it OFF unless the package deliberately documents the exact toolchain match. MinGW Release builds keep CMake's default `-O3`; only the hand-tuned SIMD scan engine TU is downgraded per-source to `-O2`, because `-O3`'s aggressive unrolling regresses its hand-optimized verifier. MSVC builds embed CodeView debug info (`/Z7`) in every config so a static archive carries its own symbols.
 
 ---
 
@@ -512,6 +512,13 @@ This method uses a pre-built and installed version of DetourModKit.
 1. **Download a release package:**
 
     Pre-built packages for MinGW and MSVC are available on the [Releases](https://github.com/tkhquang/DetourModKit/releases) page. Download the zip matching your toolchain and version (e.g., `DetourModKit_MinGW_v4.0.0.zip` or `DetourModKit_MSVC_v4.0.0.zip`).
+
+    > **Toolchain match.** A pre-built static archive is compiled objects, so its toolchain must be compatible with yours. The release archives are built **without** link-time optimization (no MSVC `/GL` LTCG IL, no GCC LTO GIMPLE), so they are portable within each toolchain family rather than pinned to one exact toolset:
+    >
+    > - **MSVC zip:** linkable by any Visual Studio 2015--2022 toolset (v140--v143). Shipping non-LTO objects is what keeps this true -- an LTCG (`/GL`) archive would be excluded from that binary-compatibility guarantee and fail a differing toolset with `C1047`/`LNK1257`. Match the CRT (`/MD` Release, `/MDd` Debug), which DetourModKit's exported target already drives.
+    > - **MinGW zip:** built with a specific GCC major (the release toolchain, currently GCC 13.x). Link it with a **compatible GCC major**; libstdc++ ABI can differ across majors, so a far-newer or far-older g++ may not link cleanly. If your GCC major differs, build DetourModKit from source instead (Method 1).
+    >
+    > If you build DetourModKit yourself and want cross-translation-unit optimization in a from-source consumer build, opt in with `-DDMK_ENABLE_LTO=ON` (default OFF for a standalone/installed build so the archive stays portable; default ON when DetourModKit is pulled in via `add_subdirectory`, where the consumer recompiles it anyway).
 
     To upgrade, download the newer release zip and replace the contents of your `external/DetourModKit/` directory.
 

@@ -215,6 +215,10 @@ A proof that needs a real loader transition (`LoadLibrary`/`FreeLibrary` referen
 - `test_bootstrap_module_ref.cpp` -- the loader host. Proves the bootstrap worker's counted module reference in both directions: the module stays mapped across a bare `FreeLibrary` ("mapped"), and a drained `request_shutdown()` releases the reference so a following `FreeLibrary` genuinely unloads it ("unload").
 - `test_profiler_late_uaf.cpp` -- compiles `src/profiler.cpp` directly and replaces global `operator new`/`delete` with a size-targeted poisoning allocator, so a `ScopedProfile` record that outlives ordinary static teardown faults deterministically if the profiler singleton were ever destroyed early.
 
+### Header-hygiene stripper self-test (`scripts/`, Python)
+
+`scripts/check_header_hygiene.py`'s legacy-token and backend-confinement gates only inspect real code because the script blanks comments before scanning. A regression in that comment stripper -- for example mistracking a C++14 digit separator such as `1'000'000'000ULL` as a char literal, which would leave the scanner stuck in char state and pass later comments through unstripped -- could fail a PR on a legacy spelling that appears only in prose. [`scripts/test_check_header_hygiene.py`](../../scripts/test_check_header_hygiene.py) pins the stripper behavior and is registered as the `HeaderHygieneStripperSelfTest` ctest (label `script-lint`) whenever a Python interpreter is found, so `ctest` runs it alongside the C++ suite on both toolchains.
+
 ## Test Naming Conventions
 
 ```cpp

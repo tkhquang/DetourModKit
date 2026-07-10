@@ -1,0 +1,53 @@
+# DetourModKit library source manifest.
+#
+# The authoritative, reviewable list of every translation unit compiled into the DetourModKit static library. The
+# CMakeLists.txt build globs src/*.cpp and src/internal/*.cpp with file(GLOB CONFIGURE_DEPENDS), then cross-checks the
+# glob result against this file and fails the configure closed on any mismatch. The point is reviewability and
+# fail-closed completeness: a bare glob is invisible in review (a new .cpp changes no tracked CMake text) and a stale
+# CONFIGURE_DEPENDS cache -- or a generator that ignores it -- can silently drop a new unit, which then surfaces only
+# as a consumer-side LNK2019 against the missing symbol. Pinning the set here makes every add/remove a reviewable diff.
+#
+# Format: one repo-relative path per line, forward slashes. Blank lines and lines beginning with '#' are ignored.
+# Ordering does not matter (both sides are sorted before comparison). When you add or delete a library source file,
+# update this manifest in the same commit, or the next configure will FATAL_ERROR naming exactly what drifted.
+
+src/anchor.cpp
+src/config.cpp
+src/diagnostics.cpp
+src/drift_manifest.cpp
+src/event_dispatcher.cpp
+src/filesystem.cpp
+src/hook.cpp
+src/input.cpp
+src/input_codes.cpp
+src/logger.cpp
+src/manifest.cpp
+src/memory_access.cpp
+src/memory_cache.cpp
+src/memory_module.cpp
+src/memory_protect.cpp
+src/profiler.cpp
+src/region.cpp
+src/rtti.cpp
+src/rtti_dissect.cpp
+src/scan_candidates.cpp
+src/scan_code_constant.cpp
+src/scan_matching.cpp
+src/scan_resolution.cpp
+src/scan_rip_relative.cpp
+src/scan_string_xref.cpp
+src/session.cpp
+src/sighealth.cpp
+src/worker.cpp
+
+src/internal/async_logger.cpp
+src/internal/config_watcher.cpp
+src/internal/input_intercept.cpp
+src/internal/input_poller.cpp
+src/internal/memory_guarded.cpp
+src/internal/scan_batch.cpp
+src/internal/scan_engine.cpp
+src/internal/scan_pages.cpp
+src/internal/scan_prologue_recovery.cpp
+src/internal/srw_shared_mutex.cpp
+src/internal/win_file_stream.cpp
