@@ -240,7 +240,7 @@ namespace DetourModKit
          * @warning Same READABLE-RANGE PRECONDITION as the single-occurrence overload.
          */
         [[nodiscard]] const std::byte *find_pattern(const std::byte *start_address, std::size_t region_size,
-                                                     const EnginePattern &pattern, std::size_t occurrence);
+                                                    const EnginePattern &pattern, std::size_t occurrence);
 
         /**
          * @brief Implements an Nth-occurrence scan with caller-owned bounded-jump work state.
@@ -256,8 +256,8 @@ namespace DetourModKit
          * @warning Same READABLE-RANGE PRECONDITION as the single-occurrence overload.
          */
         [[nodiscard]] const std::byte *find_pattern_nth(const std::byte *start_address, std::size_t region_size,
-                                                         const EnginePattern &pattern, std::size_t occurrence,
-                                                         SegmentedScanBudget &segmented_budget);
+                                                        const EnginePattern &pattern, std::size_t occurrence,
+                                                        SegmentedScanBudget &segmented_budget);
 
         /// Span convenience over the pointer+size single-occurrence matcher (same READABLE-RANGE precondition).
         [[nodiscard]] inline const std::byte *find_pattern(std::span<const std::byte> region,
@@ -286,8 +286,8 @@ namespace DetourModKit
          * @param segmented_budget Optional shared state for bounded-jump suffix continuations of one region.
          */
         [[nodiscard]] RawMatch find_pattern_raw(const std::byte *start_address, std::size_t region_size,
-                                                 const EnginePattern &pattern,
-                                                 SegmentedScanBudget *segmented_budget = nullptr) noexcept;
+                                                const EnginePattern &pattern,
+                                                SegmentedScanBudget *segmented_budget = nullptr) noexcept;
 
         /**
          * @brief True when @p pattern carries at least one literal (non-wildcard) byte.

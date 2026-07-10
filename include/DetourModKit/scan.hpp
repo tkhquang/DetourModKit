@@ -241,7 +241,7 @@ namespace DetourModKit::scan
      * @note Callback-safe: pure constexpr arithmetic.
      */
     [[nodiscard]] constexpr bool is_valid_rip_relative_layout(std::size_t displacement_offset,
-                                                               std::size_t instruction_length) noexcept
+                                                              std::size_t instruction_length) noexcept
     {
         return instruction_length <= MAX_X86_INSTRUCTION_LENGTH && displacement_offset <= instruction_length &&
                instruction_length - displacement_offset >= sizeof(std::int32_t);

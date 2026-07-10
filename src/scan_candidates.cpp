@@ -96,9 +96,8 @@ namespace DetourModKit
             // require_unique stays true. Route through borrow() so the common ScanRequest fields are defined in one
             // place, then require its final address to be execute-readable too: a RipRelative candidate can match code
             // bytes but resolve its disp32 to data, and text tiers do not use the byte-page filter at all.
-            ScanRequest request =
-                borrow(ladder, label, scope, fallback_policy, fallback_witness, /*require_unique=*/true,
-                       CandidateOrder::UniqueFirst, Pages::Executable);
+            ScanRequest request = borrow(ladder, label, scope, fallback_policy, fallback_witness,
+                                         /*require_unique=*/true, CandidateOrder::UniqueFirst, Pages::Executable);
             request.require_executable_result = true;
             return request;
         }

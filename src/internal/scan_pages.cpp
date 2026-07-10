@@ -140,8 +140,9 @@ namespace DetourModKit
                 std::size_t *matches_remaining;
                 bool *budget_exhausted;
                 const std::byte *result;
-            } scan_ctx{region_start, scan_size,   &pattern,           needle_lo,          needle_hi,
-                       count_floor,  &matches_remaining, &out_budget_exhausted, nullptr};
+            } scan_ctx{region_start, scan_size,   &pattern,           needle_lo,
+                       needle_hi,    count_floor, &matches_remaining, &out_budget_exhausted,
+                       nullptr};
 
             const std::size_t original_matches_remaining = matches_remaining;
             const auto run_scan = [](void *opaque) noexcept -> void
@@ -311,9 +312,9 @@ namespace DetourModKit
                         // the count floor: matches that ended before it were already tallied by the previous region.
                         bool region_faulted = false;
                         bool region_budget_exhausted = false;
-                        const std::byte *result = scan_region_guarded(region_start, scan_size, pattern, needle_lo,
-                                                                      needle_hi, scan_lo, matches_remaining,
-                                                                      region_faulted, region_budget_exhausted);
+                        const std::byte *result =
+                            scan_region_guarded(region_start, scan_size, pattern, needle_lo, needle_hi, scan_lo,
+                                                matches_remaining, region_faulted, region_budget_exhausted);
                         // A spent bounded-jump backtracking budget makes any occurrence count a lower bound, exactly
                         // like a skipped faulted region, so it feeds the same incomplete signal. Accumulated before the
                         // match-found return so a match resolved in a truncated region is still reported incomplete.

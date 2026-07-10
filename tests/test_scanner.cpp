@@ -460,8 +460,7 @@ TEST(ScannerJumpsTest, SharedRegionBudgetPersistsAcrossNthSuffixScan)
     ASSERT_TRUE(pattern.has_value());
 
     detail::SegmentedScanBudget budget{.node_visits = detail::SEGMENT_MATCH_REGION_STEP_BUDGET - 2};
-    const std::array<std::byte, 4> two_matches = {std::byte{0xA5}, std::byte{0xFF}, std::byte{0xA5},
-                                                  std::byte{0xFF}};
+    const std::array<std::byte, 4> two_matches = {std::byte{0xA5}, std::byte{0xFF}, std::byte{0xA5}, std::byte{0xFF}};
     const std::byte *const second =
         detail::find_pattern_nth(two_matches.data(), two_matches.size(), *pattern, /*occurrence=*/2, budget);
     EXPECT_EQ(second, nullptr);

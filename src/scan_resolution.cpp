@@ -243,8 +243,7 @@ namespace DetourModKit
                 }
                 const std::optional<std::uintptr_t> resolved =
                     resolve_byte_candidate(reinterpret_cast<std::uintptr_t>(first.match), candidate);
-                if (!resolved || !range.contains(*resolved) ||
-                    !accepts_resolved_address(request, Address{*resolved}))
+                if (!resolved || !range.contains(*resolved) || !accepts_resolved_address(request, Address{*resolved}))
                 {
                     // A RipRelative displacement can resolve outside the scanned scope (e.g. an import thunk in another
                     // module); reject it here so the ladder falls through instead of committing out of scope.
