@@ -6,10 +6,13 @@ on:
     paths:
       - 'CMakeLists.txt'
       - 'CMakePresets.json'
+      - 'cmake/**'
       - 'external/**'
       - 'include/**'
+      - 'scripts/**'
       - 'src/**'
       - 'tests/**'
+      - 'Makefile'
       - '.github/workflows/pr-check.yml'
 
   workflow_dispatch:
@@ -35,6 +38,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           submodules: "recursive"
+          persist-credentials: false
 
       - name: Cache MinGW
         id: cache-mingw
@@ -170,3 +174,46 @@ jobs:
         with:
           name: coverage-report
           path: coverage.xml
+
+  # MSVC is the primary shipping toolchain and differs from MinGW in exception handling, /W4 diagnostics, and STL
+  # internals. Keep the pull-request gate symmetric so both toolchains compile and run the same debug test preset.
+  msvc-build-test:
+    name: MSVC Build & Test
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: "recursive"
+          persist-credentials: false
+
+      - name: Set up MSVC developer environment
+        # SHA-pinned action that puts cl and the MSVC toolchain on PATH. windows-latest already provides Ninja and
+        # CMake.
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Verify Tools
+        run: |
+          echo "--- cl ---" && cl 2>&1 | head -1
+          echo "--- cmake ---" && cmake --version
+          echo "--- ninja ---" && ninja --version
+        shell: bash
+
+      - name: Configure (MSVC Debug + Tests, warnings as errors)
+        # /WX is part of the blocking gate, and configure runs the source-manifest cross-check.
+        run: cmake --preset msvc-debug -DDMK_WARNINGS_AS_ERRORS=ON
+        shell: cmd
+
+      - name: Build
+        # Cap cl fan-out to avoid C1060 heap exhaustion on the hosted runner.
+        run: cmake --build --preset msvc-debug --parallel 2
+        shell: cmd
+
+      - name: Run Tests
+        # Per-process isolation via CTest, same rationale as the MinGW leg above.
+        timeout-minutes: 15
+        run: ctest --preset msvc-debug
+        shell: cmd

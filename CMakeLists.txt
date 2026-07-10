@@ -26,6 +26,15 @@ endif()
 # --- Compiler Flags ---
 option(DMK_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
+# The build-toggle options are declared here, ahead of the compiler-flag blocks, because the MSVC Debug STL
+# configuration below keys on DMK_BUILD_TESTS. The _ITERATOR_DEBUG_LEVEL=0 pin exists only to make the out-of-memory
+# contract tests injectable, so both that pin and the INTERFACE export that keeps a consumer's link consistent with it
+# must be conditioned on whether the tests are actually being built. An option() has to be visible before its first
+# reader, so the two toggles that gate optional build components live up here; their test/benchmark wiring stays lower
+# down next to add_subdirectory(tests).
+option(DMK_BUILD_TESTS "Build unit tests" OFF)
+option(DMK_BUILD_BENCHMARKS "Build benchmark executables" OFF)
+
 if(MSVC)
   add_compile_options(/W4)
 
@@ -53,13 +62,27 @@ if(MSVC)
   # one binary; a per-target mismatch is an LNK2038 at link time. The rest of the Debug diagnostics are untouched:
   # NDEBUG stays unset so assert() still fires, and the debug CRT heap checks, /RTC runtime checks, and
   # AddressSanitizer all keep working.
-  add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+  #
+  # Scoped to DMK_BUILD_TESTS. The pin exists solely for the OOM contract tests, so a pure consumer build (tests off)
+  # has no reason to carry it -- and forcing it there would be actively harmful: it would compile DMK's Debug objects at
+  # level 0 while the consumer's own Debug objects stay at the /MDd default (>= 1), an LNK2038 across the link boundary,
+  # and the matching INTERFACE export below would propagate level 0 into the consumer's own translation units. With the
+  # pin off, DMK's Debug build and the consumer's are both at the STL default, so they agree with no export needed. When
+  # tests ARE built, DMK, the vendored backends, and the tests are all in this directory scope and all take the pin, so
+  # the one-binary uniformity the pin needs still holds.
+  if(DMK_BUILD_TESTS)
+    add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
+  endif()
 
-  # Debug builds: embed CodeView debug info directly into .obj files (/Z7)
-  # to avoid PDB file locking issues during parallel builds.
-  # Release builds: no debug info to minimize binary size.
-  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
-    "$<$<CONFIG:Debug>:Embedded>$<$<NOT:$<CONFIG:Debug>>:>")
+  # Embed CodeView debug info directly into the .obj files (/Z7) for every config, Debug and Release alike. Embedding
+  # (rather than a separate .pdb) avoids PDB file-locking contention during parallel builds, and it is the only scheme
+  # that actually ships symbols in a STATIC library: an archive has no linker step, so a separate-PDB build would leave
+  # the CodeView data in a compiler-side .pdb the .lib does not carry, and the shipped archive would symbolize to bare
+  # addresses in a consumer's crash frames. With /Z7 the line and symbol info travels inside the shipped .lib, so a
+  # crash in DMK code resolves to file:line for the consumer. The cost is a larger Release archive; the debug info is
+  # CodeView, not toolset-locked LTCG IL, so it does not reintroduce the cross-toolset link failure the LTO gate below
+  # guards against. RelWithDebInfo/MinSizeRel inherit the same embedded format, which is what a symbolizable build wants.
+  set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded")
   set(CMAKE_COMPILE_PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/pdb")
 
 # Suppress noisy MSVC warnings:
@@ -281,8 +304,9 @@ if(DMK_ENABLE_CLANG_TIDY)
 endif()
 
 # --- DetourModKit Library Target Definition ---
-# Glob source files. CONFIGURE_DEPENDS helps CMake re-glob on CMakeLists changes.
-# For brand new files, a manual CMake re-run might still be needed.
+# Glob source files. CONFIGURE_DEPENDS re-globs on CMakeLists changes so a newly added src/*.cpp is picked up without a
+# manual re-run on the generators that honour it (Ninja, Makefiles). The glob result is then cross-checked against a
+# checked-in manifest below so the source set can never silently drift.
 file(GLOB DETOURMODKIT_SOURCE_FILES
   CONFIGURE_DEPENDS
   "src/*.cpp"
@@ -290,10 +314,53 @@ file(GLOB DETOURMODKIT_SOURCE_FILES
 )
 
 if(NOT DETOURMODKIT_SOURCE_FILES)
-  message(WARNING "No C++ source files found in 'src/*.cpp' for the DetourModKit library. "
-    "The library will be built empty if no sources are listed.")
-else()
-  # message(STATUS "DetourModKit sources: ${DETOURMODKIT_SOURCE_FILES}") # Uncomment for debugging
+  message(FATAL_ERROR "No C++ source files found in 'src/*.cpp' / 'src/internal/*.cpp' for the DetourModKit library.")
+endif()
+
+# Cross-check the globbed source set against the reviewed manifest and fail the configure closed on any drift. A bare
+# file(GLOB) is invisible in review -- a new translation unit changes no tracked CMake text, so a reviewer never sees it
+# was added, and a stale CONFIGURE_DEPENDS cache (or a generator that ignores it) can silently drop it, surfacing only
+# as a consumer-side LNK2019 against the missing symbol. Pinning the set to cmake/source_manifest.txt makes every
+# add/remove a reviewable diff. The manifest is authored repo-relative with forward slashes; normalize the glob the same
+# way and compare as sorted lists so ordering never matters.
+set(_dmk_globbed_sources "")
+foreach(_src IN LISTS DETOURMODKIT_SOURCE_FILES)
+  file(RELATIVE_PATH _rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_src}")
+  list(APPEND _dmk_globbed_sources "${_rel}")
+endforeach()
+list(SORT _dmk_globbed_sources)
+
+set(_dmk_manifest_file "${CMAKE_CURRENT_SOURCE_DIR}/cmake/source_manifest.txt")
+if(NOT EXISTS "${_dmk_manifest_file}")
+  message(FATAL_ERROR "Source manifest '${_dmk_manifest_file}' is missing; it must list every library source file.")
+endif()
+file(STRINGS "${_dmk_manifest_file}" _dmk_manifest_lines)
+set(_dmk_manifest_sources "")
+foreach(_line IN LISTS _dmk_manifest_lines)
+  string(STRIP "${_line}" _line)
+  if(_line STREQUAL "" OR _line MATCHES "^#")
+    continue()
+  endif()
+  list(APPEND _dmk_manifest_sources "${_line}")
+endforeach()
+list(SORT _dmk_manifest_sources)
+
+if(NOT _dmk_globbed_sources STREQUAL _dmk_manifest_sources)
+  # Compute the two-way difference so the diagnostic names exactly what to add or remove. The manifest side is guarded
+  # because a manifest of only comments/blank lines parses to an empty list, and list(REMOVE_ITEM) with no value
+  # arguments is a hard error; the glob side needs no such guard because the fail-closed check above already halts
+  # configure on an empty glob, so _dmk_globbed_sources is always non-empty here.
+  set(_dmk_missing_from_manifest ${_dmk_globbed_sources})
+  if(_dmk_manifest_sources)
+    list(REMOVE_ITEM _dmk_missing_from_manifest ${_dmk_manifest_sources})
+  endif()
+  set(_dmk_missing_from_disk ${_dmk_manifest_sources})
+  list(REMOVE_ITEM _dmk_missing_from_disk ${_dmk_globbed_sources})
+  message(FATAL_ERROR
+    "DetourModKit source-set drift: the glob of src/ does not match cmake/source_manifest.txt.\n"
+    "  On disk but NOT in the manifest (add these): ${_dmk_missing_from_manifest}\n"
+    "  In the manifest but NOT on disk (remove these): ${_dmk_missing_from_disk}\n"
+    "Update cmake/source_manifest.txt to match, then reconfigure.")
 endif()
 
 # Define the DetourModKit static library target
@@ -313,19 +380,22 @@ if(WIN32)
   target_compile_definitions(DetourModKit PUBLIC NOMINMAX)
 endif()
 
-# Export the MSVC Debug _ITERATOR_DEBUG_LEVEL=0 pin to consumers as an INTERFACE usage requirement. The global
-# add_compile_definitions above only reaches targets configured in THIS directory (DetourModKit itself, the vendored
-# SafetyHook/Zydis/Zycore backends, and the tests), so it keeps DMK's own link internally consistent but does not
-# propagate. A find_package or add_subdirectory consumer that links DetourModKit into an MSVC /MDd Debug binary would
-# otherwise compile its own objects at the default debug-iterator level (>= 1) and hit a deterministic
-# LNK2038 ("mismatch detected for '_ITERATOR_DEBUG_LEVEL'") against the library's level-0 objects. Attaching it
-# INTERFACE (not PUBLIC -- the target's own translation units already carry the pin from the global definition, so
+# Export the MSVC Debug _ITERATOR_DEBUG_LEVEL=0 pin to consumers as an INTERFACE usage requirement, but ONLY when the
+# tests are built. The global add_compile_definitions above only reaches targets configured in THIS directory
+# (DetourModKit itself, the vendored SafetyHook/Zydis/Zycore backends, and the tests), so it keeps DMK's own link
+# internally consistent but does not propagate. When the pin is present, a find_package or add_subdirectory consumer
+# that links DetourModKit into an MSVC /MDd Debug binary would otherwise compile its own objects at the default
+# debug-iterator level (>= 1) and hit a deterministic LNK2038 ("mismatch detected for '_ITERATOR_DEBUG_LEVEL'") against
+# the library's level-0 objects, so the export exists to keep the consumer consistent with the pinned library. Attaching
+# it INTERFACE (not PUBLIC -- the target's own translation units already carry the pin from the global definition, so
 # PUBLIC would only duplicate the flag on DMK's compile line) bakes it into INTERFACE_COMPILE_DEFINITIONS, which
 # survives install(EXPORT), so an installed Debug consumer inherits it and an add_subdirectory parent's own targets do
 # too. The $<CONFIG:Debug> generator expression is re-evaluated in the consumer's build tree, so a Release consumer
-# receives nothing. Guarded on MSVC because the pin is meaningless to libstdc++/MinGW, whose debug STL never allocates
-# the hidden container proxies this works around.
-if(MSVC)
+# receives nothing. Guarded on DMK_BUILD_TESTS so the export tracks the pin one-for-one: a tests-off build never sets
+# the pin, so it must never export it either, or every MSVC Debug consumer of a stock library install would be
+# force-lowered to level 0 (an ABI contaminant they did not ask for). Guarded on MSVC because the pin is meaningless to
+# libstdc++/MinGW, whose debug STL never allocates the hidden container proxies this works around.
+if(MSVC AND DMK_BUILD_TESTS)
   target_compile_definitions(DetourModKit INTERFACE $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>)
 endif()
 
@@ -642,10 +712,15 @@ include(CMakePackageConfigHelpers) # Provides helper macros (GNUInstallDirs is i
 set(DETOURMODKIT_CMAKE_CONFIG_INSTALL_DIR "${CMAKE_INSTALL_LIBDIR}/cmake/DetourModKit")
 
 # Create DetourModKitConfigVersion.cmake (records the version of the installed package)
+# SameMajorVersion, not AnyNewerVersion. DetourModKit ships clean-break major versions: v4 deleted the entire v3 public
+# surface (namespaces, headers, enums), so a v4 consumer's find_package(DetourModKit 4) must NOT be satisfied by a
+# future v5 install whose API it cannot compile against. SameMajorVersion accepts an equal-or-newer version within the
+# same major (a 4.0 consumer is happy with 4.1) and rejects a cross-major swap, which is exactly the compatibility the
+# clean-break policy guarantees. AnyNewerVersion would silently declare a v5 prefix compatible with a v4 request.
 write_basic_package_version_file(
   "${CMAKE_CURRENT_BINARY_DIR}/DetourModKitConfigVersion.cmake"
   VERSION ${PROJECT_VERSION}
-  COMPATIBILITY AnyNewerVersion # Consumers can use this or newer compatible versions
+  COMPATIBILITY SameMajorVersion
 )
 
 # Create DetourModKitTargets.cmake for the *installed* package.
@@ -778,47 +853,73 @@ if(DMK_ENABLE_SANITIZERS)
 endif()
 
 # --- Link-Time Optimization ---
-# LTO enables cross-translation-unit optimization and dead code elimination
-# in Release builds. Applied per-target to avoid inflating build times for
-# external subdirectory targets (SafetyHook, Zydis, Zycore).
+# LTO enables cross-translation-unit optimization and dead code elimination in Release builds. Applied per-target to
+# avoid inflating build times for external subdirectory targets (SafetyHook, Zydis, Zycore).
 include(CheckIPOSupported)
 check_ipo_supported(RESULT _ipo_supported LANGUAGES CXX OUTPUT _ipo_error)
 
-# DetourModKit ships as a static archive that the consumer links into the final mod DLL, so enabling LTO here bakes
-# GIMPLE bytecode into the archive that the CONSUMER's linker must recompile (lto1) at its own final link. GCC 15's
-# lto1 has a defect that aborts that consumer link with "two or more sections for .gnu.lto_*" on the duplicate COMDAT
-# sections of weak template instantiations (std::atomic / std::vector specializations, etc.) pulled from the archive.
-# It is not fixable from the consumer side without every consumer passing -fno-lto, and slim vs fat LTO objects makes
-# no difference (the driver still invokes lto1 on the bytecode). GCC 13.x and MSVC's /GL LTCG are unaffected, so LTO
-# stays enabled there and is suppressed only on the broken GCC major version, keeping the shipped archive linkable by
-# any consumer regardless of their toolchain. Narrow the version guard once a fixed GCC 15.x is confirmed upstream.
+# LTO bakes TOOLSET-LOCKED intermediate code into the archive -- MSVC /GL LTCG IL, GCC GIMPLE bytecode -- that the
+# CONSUMER's linker must recompile at its own final link. That IL is excluded from MSVC's v140..v143 binary-compatibility
+# guarantee, so an installed DetourModKit.lib built with /GL fails a consumer whose Visual Studio toolset differs from
+# the one that built it (even a 17.x point update) with C1047 / LNK1257; on GCC it forces every consumer to run a
+# matching lto1. A shipped BINARY archive must therefore be plain objects, not IL. An in-tree consumer that pulls DMK in
+# via add_subdirectory, by contrast, recompiles it from source with their OWN toolchain, so there is no cross-toolset
+# archive to mismatch and LTO is a safe win there. Split the default on exactly that axis: LTO defaults OFF when DMK is
+# the top-level project (a standalone build -- what gets installed and packaged, so it must stay portable) and ON when
+# DMK is a subproject (add_subdirectory -- recompiled by the consumer, so the lock hazard cannot arise). A consumer can
+# override the default explicitly either way.
+if(PROJECT_IS_TOP_LEVEL)
+  set(_dmk_lto_default OFF)
+else()
+  set(_dmk_lto_default ON)
+endif()
+option(DMK_ENABLE_LTO
+  "Enable Link-Time Optimization for DetourModKit Release builds. Produces toolset-locked objects, so keep OFF for any archive installed/shipped as a binary; ON is safe only when the consumer recompiles DetourModKit from source."
+  ${_dmk_lto_default})
+
+# GCC 15's lto1 has a defect that aborts the consumer's final link with "two or more sections for .gnu.lto_*" on the
+# duplicate COMDAT sections of weak template instantiations (std::atomic / std::vector specializations, etc.) pulled from
+# an LTO archive. It is not fixable from the consumer side without every consumer passing -fno-lto, and slim vs fat LTO
+# objects make no difference (the driver still invokes lto1 on the bytecode). GCC 13.x and MSVC's /GL LTCG are
+# unaffected. So even when LTO is explicitly requested, suppress it on the broken GCC major version. Narrow the version
+# guard once a fixed GCC 15.x is confirmed upstream.
 set(_dmk_lto_broken OFF)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 15)
   set(_dmk_lto_broken ON)
 endif()
 
-if(_ipo_supported AND NOT _dmk_lto_broken)
+# Resolve the one LTO decision here, once, into a single variable that every target sharing an LTO state reads instead
+# of re-spelling the condition. The benchmarks link the DetourModKit archive and must be in the identical LTO state as
+# it: a mixed LTO/non-LTO link fails both ways (a non-LTO object against an LTO archive double-emits libstdc++'s
+# constrained linkonce symbols; an LTO object against a non-LTO archive is the symmetric hazard). A second,
+# independently spelled gate is exactly what drifts -- so the library target and the bench targets both key off
+# _dmk_apply_lto rather than each restating "DMK_ENABLE_LTO AND _ipo_supported AND NOT _dmk_lto_broken". Enable only
+# when the option is on, the toolchain supports IPO, and the compiler is not a known-broken LTO toolchain.
+set(_dmk_apply_lto OFF)
+if(DMK_ENABLE_LTO AND _ipo_supported AND NOT _dmk_lto_broken)
+  set(_dmk_apply_lto ON)
+endif()
+
+if(_dmk_apply_lto)
   set_target_properties(DetourModKit PROPERTIES
     INTERPROCEDURAL_OPTIMIZATION_RELEASE ON
   )
-  message(STATUS "LTO enabled for DetourModKit Release builds")
-elseif(_dmk_lto_broken)
+  message(STATUS "LTO enabled for DetourModKit Release builds (DMK_ENABLE_LTO=ON); the resulting archive is toolset-locked")
+elseif(DMK_ENABLE_LTO AND _dmk_lto_broken)
   message(STATUS
-    "LTO disabled: GCC ${CMAKE_CXX_COMPILER_VERSION} lto1 mis-links LTO static archives at the consumer's final link; "
-    "shipping non-LTO objects for a portable archive")
+    "LTO requested (DMK_ENABLE_LTO=ON) but disabled: GCC ${CMAKE_CXX_COMPILER_VERSION} lto1 mis-links LTO static "
+    "archives at the consumer's final link; shipping non-LTO objects")
+elseif(DMK_ENABLE_LTO)
+  message(STATUS "LTO requested (DMK_ENABLE_LTO=ON) but not supported: ${_ipo_error}")
 else()
-  message(STATUS "LTO not supported: ${_ipo_error}")
+  message(STATUS "LTO disabled (DMK_ENABLE_LTO=OFF); shipping portable, toolset-agnostic objects")
 endif()
 
-# --- Unit Tests ---
-option(DMK_BUILD_TESTS "Build unit tests" OFF)
-
-# --- Benchmarks ---
-# Opt-in microbenchmark executables (e.g. DetourModKit_bench). Gated so that
-# normal consumer builds do not produce extra targets. The bench sources live
-# alongside tests/ and are wired up in tests/CMakeLists.txt.
-option(DMK_BUILD_BENCHMARKS "Build benchmark executables" OFF)
-
+# --- Unit Tests and Benchmarks ---
+# DMK_BUILD_TESTS and DMK_BUILD_BENCHMARKS are declared near the top of this file (the Debug STL configuration keys on
+# DMK_BUILD_TESTS, so the option must exist before that block). DMK_BUILD_BENCHMARKS is the opt-in for the microbenchmark
+# executables (e.g. DetourModKit_bench), gated so a normal consumer build produces no extra targets; the bench sources
+# live alongside tests/ and are wired up in tests/CMakeLists.txt.
 if(DMK_BUILD_TESTS OR DMK_BUILD_BENCHMARKS)
   if(DMK_BUILD_TESTS)
     message(STATUS "Building unit tests...")
