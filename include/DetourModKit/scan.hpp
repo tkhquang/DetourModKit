@@ -573,6 +573,13 @@ namespace DetourModKit::scan
          *          fully within
          *          [0, instruction_length) and the instruction is at most 15 bytes, so no legitimate candidate is
          *          rejected.
+         * @note Throwing rather than returning a Result is deliberate and consistent with the library's error model,
+         *       which reserves exceptions for construction failures: a malformed literal pairing is a setup-time
+         *       programming error, so it fails fast here, while fallible runtime resolution stays on the Result path.
+         *       This also keeps every Candidate factory returning a value, so a static ladder can stay a plain
+         *       aggregate. The data-driven manifest loader validates the same bound through Result
+         *       (@ref is_valid_rip_relative_layout) before it ever reaches this factory, so a bad manifest fails
+         *       closed with an error value, never a throw.
          */
         [[nodiscard]] static Candidate rip_relative(std::string name, Pattern pattern, std::ptrdiff_t displacement_at,
                                                     std::size_t instruction_length)
