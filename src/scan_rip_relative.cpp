@@ -29,6 +29,10 @@ namespace DetourModKit
             {
                 return std::unexpected(Error{ErrorCode::NullInput, "scan::resolve_rip_relative"});
             }
+            if (!is_valid_rip_relative_layout(displacement_offset, instruction_length))
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "scan::resolve_rip_relative"});
+            }
 
             const std::uintptr_t base = instruction.raw();
             const std::uintptr_t disp_addr = base + static_cast<std::uintptr_t>(displacement_offset);
@@ -68,6 +72,10 @@ namespace DetourModKit
             }
 
             const std::size_t prefix_len = opcode_prefix.size();
+            if (!is_valid_rip_relative_layout(prefix_len, instruction_length))
+            {
+                return std::unexpected(Error{ErrorCode::InvalidArg, "scan::find_and_resolve_rip_relative"});
+            }
             const std::size_t min_bytes = prefix_len + sizeof(std::int32_t);
             if (search.size < min_bytes)
             {

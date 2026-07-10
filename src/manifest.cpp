@@ -307,6 +307,32 @@ namespace DetourModKit::manifest
             return std::nullopt;
         }
 
+        [[nodiscard]] std::string_view pages_token(scan::Pages pages) noexcept
+        {
+            switch (pages)
+            {
+            case scan::Pages::Readable:
+                return "readable";
+            case scan::Pages::Executable:
+                return "executable";
+            }
+            return "invalid";
+        }
+
+        [[nodiscard]] std::optional<scan::Pages> parse_pages(std::string_view token)
+        {
+            const std::string lowered = to_lower(trim(token));
+            if (lowered == "readable")
+            {
+                return scan::Pages::Readable;
+            }
+            if (lowered == "executable")
+            {
+                return scan::Pages::Executable;
+            }
+            return std::nullopt;
+        }
+
         [[nodiscard]] std::string_view xref_return_token(scan::XrefReturn mode) noexcept
         {
             switch (mode)
@@ -506,10 +532,11 @@ namespace DetourModKit::manifest
                 // displacement_at). If either decode offset silently defaults to 0 the rung resolves to match + 0 +
                 // disp32 -- an address wrong by exactly the instruction length but still in-module, which
                 // resolve_and_gate would then hand out as trusted (a hook placed there splits an instruction). Both
-                // offsets are therefore mandatory for RipRelative, and the disp32 must lie WITHIN the instruction: its
-                // four bytes have to fit before the instruction end (displacement_at + 4 <= instruction_length) and the
-                // offset itself cannot be negative. A plain Direct rung legitimately carries neither field, so this
-                // gate is scoped to RipRelative alone and never rejects a Direct rung.
+                // offsets are therefore mandatory for RipRelative, and the disp32 must lie WITHIN an architecturally
+                // valid x86-64 instruction: its four bytes have to fit before the instruction end
+                // (displacement_at + 4 <= instruction_length), the offset itself cannot be negative, and the length
+                // cannot exceed 15 bytes. A plain Direct rung legitimately carries neither field, so this gate is
+                // scoped to RipRelative alone and never rejects a Direct rung.
                 if (*mode == scan::Mode::RipRelative)
                 {
                     if (!has_instruction_length || !has_displacement)
@@ -517,7 +544,8 @@ namespace DetourModKit::manifest
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
                     if (spec.displacement_at < 0 ||
-                        spec.instruction_length < static_cast<std::size_t>(spec.displacement_at) + sizeof(std::int32_t))
+                        !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
+                                                            spec.instruction_length))
                     {
                         return fail(ErrorCode::MalformedLine, "manifest::parse");
                     }
@@ -792,12 +820,21 @@ namespace DetourModKit::manifest
                 break;
             }
             case anchor::AnchorKind::RipGlobal:
+                if (const char *pages = ini.GetValue(section, "pages", nullptr))
+                {
+                    const std::optional<scan::Pages> value = parse_pages(pages);
+                    if (!value)
+                    {
+                        return fail(ErrorCode::MalformedLine, "manifest::parse");
+                    }
+                    record.pages = *value;
+                }
+                break;
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:
             case anchor::AnchorKind::Unset:
-                // RipGlobal carries only the ladder (attached by the caller). CallArgHome / Quorum / Unset are
-                // unreachable here because parse_anchor_kind rejects their tokens, but they are listed so the switch is
-                // exhaustive.
+                // CallArgHome / Quorum / Unset are unreachable here because parse_anchor_kind rejects their tokens,
+                // but they are listed so the switch is exhaustive.
                 break;
             }
             return record;
@@ -831,9 +868,11 @@ namespace DetourModKit::manifest
                 // to match + 0 + disp32 -- an in-module address wrong by the instruction length that resolve_and_gate
                 // then trusts. parse_rung guards the file path; enforce the same fail-closed constraint here so the
                 // programmatic Signature::compile path cannot smuggle an unset (or malformed) rung past the gate: the
-                // offset is non-negative and the disp32's four bytes fit inside the instruction.
+                // offset is non-negative, the disp32's four bytes fit inside the instruction, and the instruction is
+                // no longer than the architectural 15-byte maximum.
                 if (spec.displacement_at < 0 ||
-                    spec.instruction_length < static_cast<std::size_t>(spec.displacement_at) + sizeof(std::int32_t))
+                    !scan::is_valid_rip_relative_layout(static_cast<std::size_t>(spec.displacement_at),
+                                                        spec.instruction_length))
                 {
                     return fail(ErrorCode::InvalidArg, "manifest::compile");
                 }
@@ -876,6 +915,7 @@ namespace DetourModKit::manifest
         anchor.operand_kind = m_record.operand_kind;
         anchor.operand_index = m_record.operand_index;
         anchor.byte_width = m_record.byte_width;
+        anchor.pages = m_record.pages;
         anchor.xref_text = m_record.xref_text;
         anchor.xref_encoding = m_record.xref_encoding;
         anchor.xref_return = m_record.xref_return;
@@ -913,6 +953,11 @@ namespace DetourModKit::manifest
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
         if (record.kind == anchor::AnchorKind::StringXref && record.xref_text.empty())
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::compile");
+        }
+        if (record.kind == anchor::AnchorKind::RipGlobal && record.pages != scan::Pages::Readable &&
+            record.pages != scan::Pages::Executable)
         {
             return fail(ErrorCode::InvalidArg, "manifest::compile");
         }
@@ -960,6 +1005,11 @@ namespace DetourModKit::manifest
         {
             return fail(ErrorCode::InvalidArg, "manifest::adopt");
         }
+        if (source.kind == anchor::AnchorKind::RipGlobal && source.pages != scan::Pages::Readable &&
+            source.pages != scan::Pages::Executable)
+        {
+            return fail(ErrorCode::InvalidArg, "manifest::adopt");
+        }
 
         SignatureRecord record;
         record.label = std::string(source.label);
@@ -968,6 +1018,7 @@ namespace DetourModKit::manifest
         record.operand_kind = source.operand_kind;
         record.operand_index = source.operand_index;
         record.byte_width = source.byte_width;
+        record.pages = source.pages;
         record.xref_text = std::string(source.xref_text);
         record.xref_encoding = source.xref_encoding;
         record.xref_return = source.xref_return;
@@ -1238,6 +1289,11 @@ namespace DetourModKit::manifest
                              format_signed_hex(static_cast<long long>(record.manual_value)).c_str());
                 break;
             case anchor::AnchorKind::RipGlobal:
+                if (record.pages != scan::Pages::Readable)
+                {
+                    ini.SetValue(sec, "pages", std::string(pages_token(record.pages)).c_str());
+                }
+                break;
             case anchor::AnchorKind::CallArgHome:
             case anchor::AnchorKind::Quorum:
             case anchor::AnchorKind::Unset:

@@ -9,9 +9,9 @@
  *          module memory reads only committed pages of the requested protection class and skips unmapped / guard /
  *          no-access pages instead of faulting the host. The Windows page-protection masks (PAGE_EXECUTE_READ, ...)
  *          stay private to scan_pages.cpp; callers select a class through the Pages mapping or the named module/process
- *          scans. A page-gated scan returns a MatchResult so the caller learns whether a region faulted mid-scan (the
- *          occurrence count is then only a lower bound), so the fault state rides on the return value rather than a
- *          thread-local side channel.
+ *          scans. A page-gated scan returns a MatchResult so the caller learns whether a region faulted mid-scan or its
+ *          bounded-jump matcher exhausted a work budget; either condition leaves the occurrence count as only a lower
+ *          bound, so incomplete state rides on the return value rather than a thread-local side channel.
  */
 
 #include "internal/memory_guarded.hpp"
@@ -30,18 +30,18 @@ namespace DetourModKit
     {
         /**
          * @struct MatchResult
-         * @brief A page-gated scan result: the match pointer plus whether the sweep skipped a faulted region.
+         * @brief A page-gated scan result: the match pointer plus whether the sweep was incomplete.
          * @details @ref match is the Nth match (adjusted by pattern.offset) or nullptr when not found. @ref incomplete
-         *          is true when the sweep skipped a region that faulted mid-scan under the TOCTOU guard: the occurrence
-         *          count is then only a lower bound (a hidden match could live in the skipped bytes), so a caller doing
-         *          a uniqueness check must fail closed. The fault state rides on the return value rather than a
+         *          is true when the sweep skipped a region that faulted under the TOCTOU guard or a bounded-jump
+         *          matcher exhausted its work budget. Either condition makes the occurrence count a lower bound, so a
+         *          caller doing a uniqueness check must fail closed. The state rides on the return value rather than a
          *          thread-local side channel, so concurrent scans cannot clobber each other's incomplete state.
          */
         struct MatchResult
         {
             /// The Nth match (offset-applied) or nullptr.
             const std::byte *match = nullptr;
-            /// True when a region faulted mid-scan and was skipped, making any occurrence count a lower bound.
+            /// True when a faulted region was skipped or bounded-jump work was truncated.
             bool incomplete = false;
         };
 
@@ -120,6 +120,15 @@ namespace DetourModKit
          *          outside every loaded module), while this still rejects a jump into unmapped or data-only memory.
          */
         [[nodiscard]] bool is_executable_address(std::uintptr_t address) noexcept;
+
+        /**
+         * @brief True when every byte in [@p address, @p address + @p size) is committed and execute-readable.
+         * @details Walks every VirtualQuery region the range crosses using the same protection mask as
+         *          @ref is_executable_address. This is stricter than testing its first byte: a decoded x86 instruction
+         *          can straddle a protection boundary, and a code-only decoder must not consume a readable data-page
+         *          tail as instruction bytes.
+         */
+        [[nodiscard]] bool is_executable_range(std::uintptr_t address, std::size_t size) noexcept;
     } // namespace detail
 } // namespace DetourModKit
 

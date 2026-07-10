@@ -32,9 +32,16 @@ namespace DetourModKit
                 {
                     return nullptr;
                 }
-                return (kind == detail::ScannerKind::Readable)
-                           ? detail::scan_readable_regions(*item.pattern, item.occurrence).match
-                           : detail::scan_executable_regions(*item.pattern, item.occurrence).match;
+                // Fail closed on an incomplete sweep, mirroring scan::scan(): a region may fault under the TOCTOU guard
+                // or a bounded-jump matcher may exhaust its work budget. Either makes the occurrence count a lower
+                // bound, so a returned pointer could be the wrong occurrence. Map that to nullptr rather than hand back
+                // a confident-but-possibly-wrong result. nullptr is already the batch's fail-closed idiom (a null
+                // pattern resolves to a nullptr slot), so this needs no return-type change.
+                const detail::MatchResult result =
+                    (kind == detail::ScannerKind::Readable)
+                        ? detail::scan_readable_regions(*item.pattern, item.occurrence)
+                        : detail::scan_executable_regions(*item.pattern, item.occurrence);
+                return result.incomplete ? nullptr : result.match;
             },
             [](const detail::BatchScanItem &) noexcept -> const std::byte * { return nullptr; });
     }
@@ -53,9 +60,14 @@ namespace DetourModKit
                 {
                     return nullptr;
                 }
-                return (kind == detail::ScannerKind::Readable)
-                           ? detail::scan_module_readable(*item.pattern, range, item.occurrence).match
-                           : detail::scan_module_executable(*item.pattern, range, item.occurrence).match;
+                // Fail closed on an incomplete sweep exactly as scan_regions_batch does above: a skipped faulted region
+                // or a bounded-jump budget exhaustion makes the occurrence count a lower bound, so surface nullptr
+                // rather than a possibly-wrong occurrence.
+                const detail::MatchResult result =
+                    (kind == detail::ScannerKind::Readable)
+                        ? detail::scan_module_readable(*item.pattern, range, item.occurrence)
+                        : detail::scan_module_executable(*item.pattern, range, item.occurrence);
+                return result.incomplete ? nullptr : result.match;
             },
             [](const detail::BatchScanItem &) noexcept -> const std::byte * { return nullptr; });
     }

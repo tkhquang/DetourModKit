@@ -3,10 +3,10 @@
  * @brief String-reference (xref) anchor resolver: locate an immutable string literal in a module image, then resolve
  *        the unique instruction that references it.
  * @details Two fail-closed phases. Phase 1 locates the single occurrence of the query string in the image's readable
- *          pages (the page-gated readable scan). Phase 2 finds the single RIP-relative reference to that string: a fast,
- *          desync-immune shape scan for the dominant lea/mov forms by default, plus an optional Zydis-verified linear
- *          sweep (broad_match) for the rarer shapes. Both phases resolve through the private engine page primitives.
- *          Zydis is confined to this TU: no public header exposes a Zydis type.
+ *          pages (the page-gated readable scan). Phase 2 finds the single RIP-relative reference to that string: a
+ *          fast, desync-immune shape scan for the dominant lea/mov forms by default, plus an optional
+ *          Zydis-verified linear sweep (broad_match) for the rarer shapes. Both phases resolve through the private
+ *          engine page primitives. Zydis is confined to this TU: no public header exposes a Zydis type.
  */
 
 #include "DetourModKit/scan.hpp"
@@ -363,8 +363,24 @@ namespace DetourModKit
             // byte sweep keeps the match instruction-aligned and lets the scan stop the moment the loaded register is
             // overwritten. The store shape is REX.W MOV [rip+disp32], reg64. The match is first-within-window, not
             // uniqueness-checked, so the window is kept tight. Returns 0 (the caller maps it to StoreNotFound) on no
-            // store, a write to the loaded register, a CALL, a decode failure, an unreadable byte, or the bound being
-            // hit. Reads go through detail::guarded_read_bytes so a truncated or unmapped tail cannot fault the host.
+            // store, a write to the loaded register, a CALL, an unconditional control transfer (JMP / RET), UD2, or an
+            // INT3, a decode failure, an unreadable byte, or the bound being hit. Reads go through
+            // detail::guarded_read_bytes so a truncated or unmapped tail cannot fault the host.
+            //
+            // The scan must be control-flow-aware: the linear byte window can run past the end of this function into
+            // the next one, and a store there caches an UNRELATED pointer. A `ret`, an unconditional `jmp` (a tail
+            // call), UD2, or an `int3` alignment pad each ends this function's straight-line flow, so any store decoded
+            // after one of them is not on the lea's execution path. Crucially, INT3 (0xCC) decodes as a valid
+            // one-byte instruction and UD2 (0F 0B) as a valid two-byte instruction, neither of which clobbers the
+            // loaded register, is a CALL, or carries a RET / unconditional-branch category, so a category-only check
+            // would miss them: without an explicit mnemonic stop the cursor would walk straight through the INT3
+            // padding between functions into the next one and return its store -- a wrong slot the mod would then
+            // write through, strictly worse than a fail-closed StoreNotFound. A NOP (0x90) is deliberately NOT a stop
+            // even though it can also pad, because unlike an INT3 run it legitimately appears as intra-function
+            // alignment; the common-case RET / JMP / CALL stops already end the scan at the true function boundary
+            // before any inter-function padding is reached. A CONDITIONAL branch (Jcc) is deliberately NOT a stop:
+            // its fall-through path can legitimately reach the caching store, so stopping there would drop a real
+            // capability.
             std::uintptr_t scan_store_slot_after_lea(std::uintptr_t lea_site, std::size_t lea_len,
                                                      std::uintptr_t window_end, std::uint8_t lea_reg,
                                                      detail::ModuleSpan range) noexcept
@@ -441,6 +457,17 @@ namespace DetourModKit
                     // A CALL clobbers the caller-saved registers; a store after it cannot be trusted to cache this
                     // lea's pointer, so stop conservatively rather than attribute a post-call store to the wrong value.
                     if (insn.meta.category == ZYDIS_CATEGORY_CALL)
+                    {
+                        return 0;
+                    }
+                    // A RET, an unconditional JMP (a tail call), or UD2 ends this function's straight-line flow. INT3
+                    // padding also marks an inter-function boundary. Any store past one of them belongs to a different
+                    // function, so fail closed rather than walk into the next function's store. A conditional branch
+                    // (ZYDIS_CATEGORY_COND_BR) is intentionally excluded -- its fall-through can still reach the
+                    // caching store. INT3 and UD2 are checked explicitly because they decode as valid instructions
+                    // that neither category check catches.
+                    if (insn.meta.category == ZYDIS_CATEGORY_RET || insn.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
+                        insn.mnemonic == ZYDIS_MNEMONIC_INT3 || insn.mnemonic == ZYDIS_MNEMONIC_UD2)
                     {
                         return 0;
                     }

@@ -27,10 +27,11 @@ kind = rip_global
 binding = mid_hook_register
 read_register = rcx                  ; the callback reads gpr(ctx, rcx); edit to rax after a rebuild
 fingerprint = 0x41BB02C9DE7715A0     ; captured from a known-good build; the gate distrusts a changed shape
+pages = executable                   ; every rung matches a code instruction, not a data global
 
 [sig.camera.fov_write.rung.0]
 mode = rip_relative
-pattern = F3 0F 11 8D ?? ?? ?? ?? 48 8B
+pattern = F3 0F 11 05 ?? ?? ?? ?? 48 8B
 displacement_at = 0x4
 instruction_length = 8
 
@@ -56,9 +57,9 @@ binding = vmt_method
 vmt_index = 7
 ```
 
-The `kind` token is one of the five serializable anchor kinds (`rip_global`, `code_operand`, `vtable_identity`, `string_xref`, `manual`); the composite `quorum` / `call_arg_home` kinds compose or lack a resolver and stay in-code (see [Boundaries](#boundaries)). The `binding` token is `address` (the resolved value IS the address), `pointer_chain`, `mid_hook_register`, or `vmt_method`. Tokens are accepted case-insensitively; integers accept `0x`-prefixed hex or decimal with an optional sign. A `module = engine.dll` key resolves the signature within a named module instead of the host EXE.
+The `kind` token is one of the five serializable anchor kinds (`rip_global`, `code_operand`, `vtable_identity`, `string_xref`, `manual`); the composite `quorum` / `call_arg_home` kinds compose or lack a resolver and stay in-code (see [Boundaries](#boundaries)). The `binding` token is `address` (the resolved value IS the address), `pointer_chain`, `mid_hook_register`, or `vmt_method`. Tokens are accepted case-insensitively; integers accept `0x`-prefixed hex or decimal with an optional sign. A `module = engine.dll` key resolves the signature within a named module instead of the host EXE. A `rip_global` record may set `pages = executable` when all of its byte rungs identify code; an omitted key uses the compatibility default, `readable`.
 
-Each kind's evidence keys are mandatory, not silently defaulted -- an omitted key that resolved to a trusted zero would be worse than a clean parse failure. A `rip_relative` rung must carry both `displacement_at` and `instruction_length` (and the disp32 must fit inside the instruction: `displacement_at >= 0` and `instruction_length >= displacement_at + 4`), or the rung would resolve to `match + 0 + disp32`, an in-module address wrong by the instruction length that the gate would trust. A `manual` record must carry `manual_value` (an omitted value would overlay a trusted `Address{0}` over your working in-code default); the presence of the key is the gate, so `manual_value = 0` is accepted if you genuinely mean it. A `direct` rung legitimately omits the decode keys. `Signature::compile` likewise fails closed on an empty `mangled` (VtableIdentity) or empty `xref_text` (StringXref). A post-resolve `validator` cannot be serialized (a function pointer has no INI form), but `SignatureRecord` carries `validator` / `validator_context` / `validate_manual` / `require_validator` as in-memory fields you can attach programmatically after loading a manifest (or on a hand-built record); `Signature::compile` and `adopt` thread them onto the resolved anchor, so a file-loaded or adopted signature can still assert a domain invariant.
+Each kind's evidence keys are mandatory, not silently defaulted -- an omitted key that resolved to a trusted zero would be worse than a clean parse failure. A `rip_relative` rung must carry both `displacement_at` and `instruction_length`; the field offset must be non-negative, its four-byte disp32 must fit inside the instruction, and the instruction cannot exceed x86-64's 15-byte maximum. Otherwise the rung could resolve to `match + 0 + disp32`, an in-module address wrong by the instruction length that the gate would trust. A `manual` record must carry `manual_value` (an omitted value would overlay a trusted `Address{0}` over your working in-code default); the presence of the key is the gate, so `manual_value = 0` is accepted if you genuinely mean it. A `direct` rung legitimately omits the decode keys. `Signature::compile` likewise fails closed on an empty `mangled` (VtableIdentity) or empty `xref_text` (StringXref). A post-resolve `validator` cannot be serialized (a function pointer has no INI form), but `SignatureRecord` carries `validator` / `validator_context` / `validate_manual` / `require_validator` as in-memory fields you can attach programmatically after loading a manifest (or on a hand-built record); `Signature::compile` and `adopt` thread them onto the resolved anchor, so a file-loaded or adopted signature can still assert a domain invariant.
 
 ### Casing and naming conventions
 

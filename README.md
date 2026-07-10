@@ -681,13 +681,16 @@ dmk::Result<void> InitializeMyMod(dmk::Session &session)
     // dmk::scan is the alias for DetourModKit::scan (from scan.hpp); dmk::hook for DetourModKit::hook.
 
     // The hook target is a scan::OwnedScanRequest: hook::inline_at resolves it at install time (resolve-on-install)
-    // and never carries a dangling pattern span. A one-candidate ladder is the simplest form; ship a fallback
-    // ladder for a long-lived mod (see the AOB Signature Scanning Guide).
+    // and never carries a dangling pattern span. The executable page and final-address checks keep the hook target
+    // in code even if a byte match or another resolver backend transforms to data. A one-candidate ladder is the
+    // simplest form; ship a fallback ladder for a long-lived mod (see the AOB Signature Scanning Guide).
     dmk::scan::OwnedScanRequest target{
         .ladder = {dmk::scan::Candidate::direct("GameFunction_PrintMessage",
                                               dmk::scan::Pattern::literal("48 89 ?? ?? 57"))},
         .label = "GameFunction_PrintMessage",
         .scope = DetourModKit::Region::host(),   // the host EXE; defaults here too
+        .pages = dmk::scan::Pages::Executable,
+        .require_executable_result = true,
     };
 
     // inline_at performs the single audited function-to-void* cast for you; the call site writes no reinterpret_cast.

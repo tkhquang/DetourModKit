@@ -1388,6 +1388,118 @@ TEST(StringXrefTest, StringPointerSlotStopsAtRegisterClobber)
     EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
 }
 
+// The forward store scan is control-flow-aware. A `ret` ends this function's straight-line flow, so a same-register
+// store decoded past it belongs to a DIFFERENT function and must not be attributed to this lea. Without the RET stop
+// the scan would walk into the next function and return its slot -- a wrong address the mod writes through.
+TEST(StringXrefTest, StringPointerSlotStopsAtReturn)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotRetAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA); // lea rax, [rip+string]
+    const std::uint8_t ret[] = {0xC3};    // ret: end of this function
+    img.write(0x17, ret, sizeof(ret));
+    img.plant_rip_store(0x18, 0x200, 0); // mov [rip+slot], rax -- the next function's store
+
+    const auto result = scan::find_string_xref(slot_query("SlotRetAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
+}
+
+// An unconditional `jmp` (a tail call) likewise ends straight-line flow. A store after the jmp target bytes is
+// unreachable by falling through, so it must not be attributed to this lea.
+TEST(StringXrefTest, StringPointerSlotStopsAtUnconditionalJump)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotJmpAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);                     // lea rax, [rip+string]
+    const std::uint8_t jmp[] = {0xE9, 0x07, 0x00, 0x00, 0x00}; // jmp rel32 past the planted store
+    img.write(0x17, jmp, sizeof(jmp));
+    img.plant_rip_store(0x1C, 0x200, 0); // mov [rip+slot], rax past the jmp
+    const std::uint8_t jump_target[] = {0x90};
+    img.write(0x23, jump_target, sizeof(jump_target)); // nop at the jmp target
+
+    const auto result = scan::find_string_xref(slot_query("SlotJmpAnchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
+}
+
+// 0xCC (INT3) decodes as a valid one-byte instruction that neither clobbers the register nor is a CALL, so without an
+// explicit INT3 stop the scan walks straight through inter-function alignment padding into the next function and
+// returns its store. The mnemonic stop must fail closed at the padding.
+TEST(StringXrefTest, StringPointerSlotStopsAtInt3Padding)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotInt3Anchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);                          // lea rax, [rip+string]
+    const std::uint8_t int3_pad[] = {0xCC, 0xCC, 0xCC, 0xCC};      // inter-function INT3 padding
+    img.write(0x17, int3_pad, sizeof(int3_pad));
+    img.plant_rip_store(0x1B, 0x200, 0); // mov [rip+slot], rax in the "next function" past the padding
+
+    const auto result = scan::find_string_xref(slot_query("SlotInt3Anchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
+}
+
+// UD2 has no fall-through path. A store in the bytes after it cannot cache the pointer loaded by this function's lea,
+// so the forward scan must stop before it attributes that store to the earlier instruction.
+TEST(StringXrefTest, StringPointerSlotStopsAtUd2)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotUd2Anchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA); // lea rax, [rip+string]
+    const std::uint8_t ud2[] = {0x0F, 0x0B};
+    img.write(0x17, ud2, sizeof(ud2));
+    img.plant_rip_store(0x19, 0x200, 0); // mov [rip+slot], rax after UD2
+
+    const auto result = scan::find_string_xref(slot_query("SlotUd2Anchor"), img.range());
+    ASSERT_FALSE(result.has_value());
+    EXPECT_EQ(result.error().code, ErrorCode::StoreNotFound);
+}
+
+// A CONDITIONAL branch (Jcc) is NOT a control-flow stop -- its fall-through path can legitimately reach the caching
+// store. The scan must continue past it and still resolve the slot, so the scan distinguishes an unconditional transfer
+// (stop) from a conditional one (continue) and drops no capability.
+TEST(StringXrefTest, StringPointerSlotContinuesPastConditionalBranch)
+{
+    SyntheticImage img;
+    if (!img.ok())
+    {
+        GTEST_SKIP() << "could not allocate a synthetic image page";
+    }
+    const char str[] = "SlotJccAnchor";
+    img.write(0x100, str, sizeof(str));
+    img.plant_rip_load(0x10, 0x100, LEA);       // lea rax, [rip+string]
+    const std::uint8_t jcc[] = {0x74, 0x07};    // jz rel8: conditional, does not end straight-line flow
+    img.write(0x17, jcc, sizeof(jcc));
+    img.plant_rip_store(0x19, 0x200, 0); // mov [rip+slot], rax on the fall-through path
+    const std::uint8_t branch_target[] = {0x90};
+    img.write(0x20, branch_target, sizeof(branch_target)); // nop at the conditional-branch target
+
+    const auto result = scan::find_string_xref(slot_query("SlotJccAnchor"), img.range());
+    ASSERT_TRUE(result.has_value());
+    EXPECT_EQ(result->raw(), img.addr(0x200));
+}
+
 TEST(StringXrefTest, StringPointerSlotDoesNotDecodeDataPageStore)
 {
     SplitImage img;

@@ -225,6 +225,15 @@ namespace DetourModKit
              *          "drifted", so an author who has not captured a baseline is not falsely rejected.
              */
             std::uint64_t expected_fingerprint = 0;
+
+            /**
+             * @brief RipGlobal: page-protection class for byte-tier candidates. Defaults to @ref scan::Pages::Readable
+             *        for backward-compatible data-global resolution; set @ref scan::Pages::Executable when every rung
+             *        anchors on an instruction. Serialized as the optional `pages` key for RipGlobal records only.
+             * @details Ignored by other kinds. Appended to preserve positional aggregate initialization of the
+             *          established record fields.
+             */
+            scan::Pages pages = scan::Pages::Readable;
         };
 
         /**

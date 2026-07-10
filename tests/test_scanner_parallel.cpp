@@ -385,6 +385,41 @@ TEST(ScannerBatchTest, ModuleBatchInvalidRangeFailsClosed)
     EXPECT_EQ(results[1], nullptr);
 }
 
+// The batch scanners must fail closed on an incomplete sweep, exactly as scan::scan() does -- a skipped faulted region
+// OR a spent bounded-jump backtracking budget leaves the occurrence count a lower bound, so a returned pointer could be
+// the wrong occurrence. A fault is not deterministically reproducible, but a spent budget is: a first anchor whose
+// extension exhausts the budget flips MatchResult::incomplete while a second anchor still yields a genuine match, so
+// the serial scan reports {match != null, incomplete}. The batch worker must map that to nullptr rather than surface
+// the possibly-wrong-occurrence pointer.
+TEST(ScannerBatchTest, ModuleBatchFailsClosedOnIncompleteSweep)
+{
+    CommittedPage page(0x1000, PAGE_READWRITE);
+    ASSERT_NE(page.base, nullptr);
+    std::memset(page.bytes(), 0x00, page.size);
+    auto *bytes = reinterpret_cast<std::uint8_t *>(page.bytes());
+    bytes[0] = 0xA5;    // first anchor: its 8-gap reach (<= offset 2049) holds no 0xFF, so the extension exhausts
+    bytes[2600] = 0xA5; // second anchor, past the first anchor's reach
+    bytes[2608] = 0xFF; // reachable from the second anchor with all-minimum gaps -> a genuine match
+
+    auto pattern = detail::parse_aob("A5 [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? [0-255] ?? "
+                                     "[0-255] FF");
+    ASSERT_TRUE(pattern.has_value());
+
+    const auto base = reinterpret_cast<std::uintptr_t>(page.base);
+    const detail::ModuleSpan range{base, base + page.size};
+
+    // Precondition: the serial scan finds a real match but flags it incomplete because an earlier start was truncated.
+    const detail::MatchResult serial = detail::scan_module_readable(*pattern, range, 1);
+    ASSERT_NE(serial.match, nullptr);
+    ASSERT_TRUE(serial.incomplete);
+
+    // The batch worker must not surface that possibly-wrong match: incomplete maps to nullptr (fail closed).
+    const detail::BatchScanItem items[] = {detail::BatchScanItem{&*pattern, 1}};
+    const auto results = detail::scan_module_batch(items, range, detail::ScannerKind::Readable);
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0], nullptr);
+}
+
 TEST(ScannerBatchTest, ResolveBatchEmptyReturnsEmpty)
 {
     const std::vector<scan::ScanRequest> requests;

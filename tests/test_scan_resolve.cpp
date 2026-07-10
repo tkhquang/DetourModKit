@@ -103,6 +103,15 @@ namespace
                 ++offset;
             }
         }
+        void put_disp32(std::size_t offset, std::int32_t value) noexcept
+        {
+            std::memcpy(m_base + offset, &value, sizeof(value));
+        }
+        [[nodiscard]] bool protect(std::size_t offset, std::size_t size, DWORD protection) noexcept
+        {
+            DWORD previous = 0;
+            return ::VirtualProtect(m_base + offset, size, protection, &previous) != 0;
+        }
         // Writes an E9 rel32 near JMP at function_offset whose absolute destination is destination_offset.
         void put_e9_jump(std::size_t function_offset, std::size_t destination_offset)
         {
@@ -369,6 +378,31 @@ TEST(ScanResolve, EmptyScopeReturnsInvalidRange)
     const auto hit = scan::resolve(scan::ScanRequest{.ladder = ladder, .scope = Region{}});
     ASSERT_FALSE(hit.has_value());
     EXPECT_EQ(hit.error().code, ErrorCode::InvalidRange);
+}
+
+// The rip_relative factory rejects a malformed disp32 layout at construction instead of silently resolving to a
+// wrong-but-plausible address at scan time. A field offset must be non-negative, the four-byte field must fit, and an
+// x86-64 instruction cannot exceed 15 bytes.
+TEST(ScanResolve, RipRelativeFactoryEnforcesDisplacementInvariant)
+{
+    // The canonical valid form (disp32 at [3, 7) inside a 7-byte instruction) constructs.
+    EXPECT_NO_THROW((void)Candidate::rip_relative("ok", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7));
+
+    // disp32 overruns the instruction end: 5 + 4 > 7.
+    EXPECT_THROW((void)Candidate::rip_relative("overrun", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 5, 7),
+                 std::invalid_argument);
+    // A negative displacement-field offset cannot describe an instruction layout.
+    EXPECT_THROW((void)Candidate::rip_relative("negative", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), -1, 7),
+                 std::invalid_argument);
+    // An all-zero mis-set (0 + 4 > 0) is rejected.
+    EXPECT_THROW((void)Candidate::rip_relative("zero", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 0, 0),
+                 std::invalid_argument);
+    // x86-64 instructions are at most 15 bytes long.
+    EXPECT_THROW((void)Candidate::rip_relative("too-long", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 16),
+                 std::invalid_argument);
+
+    // The invariant is scoped to RipRelative: a Direct candidate with an arbitrary signed walk_back still constructs.
+    EXPECT_NO_THROW((void)Candidate::direct("direct", scan::Pattern::literal("DE AD"), -0x100));
 }
 
 TEST(ScanResolve, CandidateFactoriesExposeCoherentPayloads)
@@ -1322,9 +1356,9 @@ TEST(ScanResolve, ResolveErrorCodesHaveNonEmptyStrings)
 }
 
 // borrow_code_target packs the code/hook-target resolution policy into a borrowed ScanRequest: Pages::Executable so an
-// instruction signature cannot alias a data-section run, UniqueFirst so the unique-only tiers lead, a WarnOnly fallback
-// policy so a target another mod already inline-hooked is recovered, and require_unique kept true. The default request
-// keeps Pages::Readable for the data / RTTI / string tiers.
+// instruction signature cannot alias a data-section run, a final executable-address gate for every backend, UniqueFirst
+// so the unique-only tiers lead, a WarnOnly fallback policy so a target another mod already inline-hooked is recovered,
+// and require_unique kept true. The default request keeps Pages::Readable for the data / RTTI / string tiers.
 TEST(ScanResolve, BorrowCodeTargetPresetsTheCodeTargetPolicy)
 {
     ReadableBuffer buffer(0x400);
@@ -1336,6 +1370,7 @@ TEST(ScanResolve, BorrowCodeTargetPresetsTheCodeTargetPolicy)
     EXPECT_EQ(request.order, scan::CandidateOrder::UniqueFirst);
     EXPECT_EQ(request.fallback_policy, scan::FallbackPolicy::WarnOnly);
     EXPECT_TRUE(request.require_unique);
+    EXPECT_TRUE(request.require_executable_result);
     EXPECT_EQ(request.label, "hook-target");
     EXPECT_EQ(request.scope.base.raw(), buffer.region().base.raw());
     ASSERT_EQ(request.ladder.size(), 1U);
@@ -1393,4 +1428,62 @@ TEST(ScanResolve, BorrowCodeTargetResolvesCodeAndExcludesDataMatch)
     // resolve fails closed. The exact failure code depends on the preset's prologue fallback (which then also finds no
     // executable prologue to rebuild), so assert the fail-closed outcome rather than a specific enum.
     ASSERT_FALSE(data_hit.has_value());
+}
+
+// Pages::Executable filters only the byte-match location. A RIP-relative candidate can match an instruction then
+// resolve its displacement into a data page, so borrow_code_target must apply its final-address gate after resolution.
+TEST(ScanResolve, BorrowCodeTargetRejectsCodeMatchThatResolvesToData)
+{
+    ExecutableBuffer image(0x2000);
+    if (!image.valid())
+    {
+        GTEST_SKIP() << "could not allocate a split-protection image";
+    }
+    ASSERT_TRUE(image.protect(0x1000, 0x1000, PAGE_READWRITE));
+
+    constexpr std::size_t code_offset = 0x100;
+    constexpr std::size_t data_offset = 0x1100;
+    image.put(code_offset, {0x48, 0x8B, 0x05, 0x00, 0x00, 0x00, 0x00}); // mov rax, [rip+disp32]
+    const auto next_ip = static_cast<std::int64_t>(image.address_of(code_offset) + 7);
+    const auto displacement =
+        static_cast<std::int32_t>(static_cast<std::int64_t>(image.address_of(data_offset)) - next_ip);
+    image.put_disp32(code_offset + 3, displacement);
+    image.put(data_offset, {0x11, 0x22, 0x33, 0x44});
+
+    const std::array<Candidate, 1> ladder = {
+        Candidate::rip_relative("code-to-data", scan::Pattern::literal("48 8B 05 ?? ?? ?? ??"), 3, 7)};
+    const scan::ScanRequest byte_filtered{
+        .ladder = ladder,
+        .label = "code-to-data",
+        .scope = image.region(),
+        .pages = scan::Pages::Executable,
+    };
+    const auto unconstrained = scan::resolve(byte_filtered);
+    ASSERT_TRUE(unconstrained.has_value()) << unconstrained.error().message();
+    EXPECT_EQ(unconstrained->address.raw(), image.address_of(data_offset));
+
+    const auto code_target = scan::resolve(scan::borrow_code_target(ladder, "code-to-data", image.region()));
+    ASSERT_FALSE(code_target.has_value());
+    EXPECT_EQ(code_target.error().code, ErrorCode::NoMatch);
+}
+
+TEST(ScanResolve, InvalidPageClassFailsClosed)
+{
+    ReadableBuffer buffer(0x400);
+    buffer.put(0x80, {0xDE, 0xAD, 0xBE, 0xEF});
+    const std::array<Candidate, 1> ladder = {Candidate::direct("invalid-pages", scan::Pattern::literal("DE AD BE EF"))};
+    constexpr auto invalid_pages = static_cast<scan::Pages>(0xFFU);
+
+    const scan::ScanRequest request{
+        .ladder = ladder,
+        .scope = buffer.region(),
+        .pages = invalid_pages,
+    };
+    const auto resolved = scan::resolve(request);
+    ASSERT_FALSE(resolved.has_value());
+    EXPECT_EQ(resolved.error().code, ErrorCode::InvalidArg);
+
+    const auto matched = scan::scan(scan::Pattern::literal("DE AD BE EF"), buffer.region(), 1, invalid_pages);
+    ASSERT_FALSE(matched.has_value());
+    EXPECT_EQ(matched.error().code, ErrorCode::InvalidArg);
 }

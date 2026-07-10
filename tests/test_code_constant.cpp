@@ -23,14 +23,16 @@ namespace
     }
 
     // A committed page filled with 0xCC into which a test plants a known x86-64 instruction, so read_code_constant has
-    // a real, uniquely-matchable site to resolve and decode. PAGE_READWRITE is enough: the bytes are decoded as data,
-    // never executed.
+    // a real, uniquely-matchable site to resolve and decode. PAGE_EXECUTE_READWRITE, not PAGE_READWRITE: a code
+    // constant is contractually encoded in executable machine code, and read_code_constant scans Pages::Executable for
+    // the instruction site. The bytes are still only decoded, never executed; the execute bit is what the page-class
+    // gate checks.
     class CodeRegion
     {
     public:
         CodeRegion()
         {
-            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            m_base = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
             if (m_base)
             {
                 std::memset(m_base, 0xCC, 0x1000);
@@ -314,4 +316,146 @@ TEST(CodeConstantTest, InvalidRangeForwardsError)
     const auto value = scan::read_code_constant(cc, Region{});
     ASSERT_FALSE(value.has_value());
     EXPECT_EQ(value.error().code, ErrorCode::InvalidRange);
+}
+
+// A byte run that only exists on a readable, NON-executable page must not be resolved as a code constant.
+// read_code_constant scans Pages::Executable, so an instruction-shaped pattern planted in PAGE_READWRITE data is
+// invisible to the site scan and the resolve fails closed (NoMatch) rather than decoding the data twin into a confident
+// wrong value. Staging the identical bytes on an executable page (every other test above) resolves; staging them on a
+// data page here does not.
+TEST(CodeConstantTest, DataPageSiteYieldsNoMatch)
+{
+    void *data = VirtualAlloc(nullptr, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    ASSERT_NE(data, nullptr);
+    std::memset(data, 0xCC, 0x1000);
+    auto *bytes = static_cast<std::uint8_t *>(data);
+    const std::uint8_t insn[] = {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}; // add rax, 0xF0
+    std::memcpy(bytes + 0x100, insn, sizeof(insn));
+
+    const scan::Candidate cands[] = {scan::Candidate::direct("add-imm", aob("48 05 F0 00 00 00"))};
+    scan::CodeConstant cc{};
+    cc.site = cands;
+    cc.kind = scan::OperandKind::Immediate;
+    cc.operand_index = 1;
+
+    const Region scope{Address{reinterpret_cast<std::uintptr_t>(data)}, 0x1000};
+    const auto value = scan::read_code_constant(cc, scope);
+    EXPECT_FALSE(value.has_value());
+    if (!value.has_value())
+    {
+        EXPECT_EQ(value.error().code, ErrorCode::NoMatch);
+    }
+
+    VirtualFree(data, 0, MEM_RELEASE);
+}
+
+// Byte-tier filtering alone is not enough: a RIP-relative candidate can match code and resolve its Hit to data. The
+// final-address gate rejects that rung as a candidate miss, so a data address is never handed to the decoder.
+TEST(CodeConstantTest, ResolvedDataAddressYieldsNoMatch)
+{
+    auto *base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+    std::memset(base, 0xCC, 0x2000);
+
+    DWORD old_protection = 0;
+    ASSERT_NE(VirtualProtect(base, 0x1000, PAGE_EXECUTE_READWRITE, &old_protection), 0);
+
+    constexpr std::size_t CODE_OFFSET = 0x100;
+    constexpr std::size_t DATA_OFFSET = 0x1100;
+    const std::uintptr_t code_site = reinterpret_cast<std::uintptr_t>(base + CODE_OFFSET);
+    const std::uintptr_t data_site = reinterpret_cast<std::uintptr_t>(base + DATA_OFFSET);
+    const std::int32_t displacement = static_cast<std::int32_t>(data_site - (code_site + 7));
+
+    const std::uint8_t lea[] = {0x48, 0x8D, 0x05}; // lea rax, [rip+disp32]
+    std::memcpy(base + CODE_OFFSET, lea, sizeof(lea));
+    std::memcpy(base + CODE_OFFSET + sizeof(lea), &displacement, sizeof(displacement));
+    const std::uint8_t data_instruction[] = {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}; // add rax, 0xF0
+    std::memcpy(base + DATA_OFFSET, data_instruction, sizeof(data_instruction));
+
+    const scan::Candidate candidates[] = {
+        scan::Candidate::rip_relative("lea-to-data", aob("48 8D 05 ?? ?? ?? ??"), 3, 7)};
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::Immediate;
+    code_constant.operand_index = 1;
+
+    const Region scope{Address{reinterpret_cast<std::uintptr_t>(base)}, 0x2000};
+    const auto value = scan::read_code_constant(code_constant, scope);
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(value.error().code, ErrorCode::NoMatch);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+// A rejected code-to-data rung must not end the cascade. The later Direct rung still names an executable instruction,
+// so read_code_constant must decode it rather than returning an error from the earlier transformed candidate.
+TEST(CodeConstantTest, ResolvedDataAddressFallsThroughToExecutableRung)
+{
+    auto *base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+    std::memset(base, 0xCC, 0x2000);
+
+    DWORD old_protection = 0;
+    ASSERT_NE(VirtualProtect(base, 0x1000, PAGE_EXECUTE_READWRITE, &old_protection), 0);
+
+    constexpr std::size_t CODE_OFFSET = 0x100;
+    constexpr std::size_t FALLBACK_OFFSET = 0x200;
+    constexpr std::size_t DATA_OFFSET = 0x1100;
+    const std::uintptr_t code_site = reinterpret_cast<std::uintptr_t>(base + CODE_OFFSET);
+    const std::uintptr_t data_site = reinterpret_cast<std::uintptr_t>(base + DATA_OFFSET);
+    const std::int32_t displacement = static_cast<std::int32_t>(data_site - (code_site + 7));
+
+    const std::uint8_t lea[] = {0x48, 0x8D, 0x05}; // lea rax, [rip+disp32]
+    std::memcpy(base + CODE_OFFSET, lea, sizeof(lea));
+    std::memcpy(base + CODE_OFFSET + sizeof(lea), &displacement, sizeof(displacement));
+    const std::uint8_t data_instruction[] = {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00};
+    std::memcpy(base + DATA_OFFSET, data_instruction, sizeof(data_instruction));
+    const std::uint8_t fallback_instruction[] = {0x48, 0x05, 0x2A, 0x00, 0x00, 0x00}; // add rax, 0x2A
+    std::memcpy(base + FALLBACK_OFFSET, fallback_instruction, sizeof(fallback_instruction));
+
+    const scan::Candidate candidates[] = {
+        scan::Candidate::rip_relative("lea-to-data", aob("48 8D 05 ?? ?? ?? ??"), 3, 7),
+        scan::Candidate::direct("fallback-add", aob("48 05 2A 00 00 00")),
+    };
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::Immediate;
+    code_constant.operand_index = 1;
+
+    const Region scope{Address{reinterpret_cast<std::uintptr_t>(base)}, 0x2000};
+    const auto value = scan::read_code_constant(code_constant, scope);
+    ASSERT_TRUE(value.has_value()) << value.error().message();
+    EXPECT_EQ(*value, 0x2A);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
+// A two-byte pattern can land at the end of an executable page while the decoded instruction continues into readable
+// data. The byte-tier gate and the first-byte result gate both pass, so the decoder must validate the full instruction
+// span after Zydis reports its length.
+TEST(CodeConstantTest, InstructionCrossingIntoDataPageYieldsDecodeFailed)
+{
+    auto *base = static_cast<std::uint8_t *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ASSERT_NE(base, nullptr);
+    std::memset(base, 0xCC, 0x2000);
+
+    DWORD old_protection = 0;
+    ASSERT_NE(VirtualProtect(base, 0x1000, PAGE_EXECUTE_READWRITE, &old_protection), 0);
+
+    constexpr std::size_t INSTRUCTION_OFFSET = 0xFFE;
+    const std::uint8_t instruction[] = {0x48, 0x05, 0xF0, 0x00, 0x00, 0x00}; // add rax, 0xF0
+    std::memcpy(base + INSTRUCTION_OFFSET, instruction, sizeof(instruction));
+
+    const scan::Candidate candidates[] = {scan::Candidate::direct("boundary-add", aob("48 05"))};
+    scan::CodeConstant code_constant{};
+    code_constant.site = candidates;
+    code_constant.kind = scan::OperandKind::Immediate;
+    code_constant.operand_index = 1;
+
+    const Region scope{Address{reinterpret_cast<std::uintptr_t>(base)}, 0x2000};
+    const auto value = scan::read_code_constant(code_constant, scope);
+    ASSERT_FALSE(value.has_value());
+    EXPECT_EQ(value.error().code, ErrorCode::DecodeFailed);
+
+    VirtualFree(base, 0, MEM_RELEASE);
 }
